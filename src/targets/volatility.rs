@@ -69,8 +69,8 @@ pub fn generate_volatility_targets(
 /// Calculate volatility targets for a specific horizon
 fn calculate_volatility_targets(
     close_prices: &[f64],
-    _high_prices: &[f64],
-    _low_prices: &[f64],
+    high_prices: &[f64],
+    low_prices: &[f64],
     horizon_steps: usize,
     config: &VolatilityConfig,
 ) -> Result<Vec<i32>> {
@@ -80,8 +80,19 @@ fn calculate_volatility_targets(
         ));
     }
 
-    // Calculate realized volatility
-    let realized_vol = calculate_realized_volatility(close_prices, config.volatility_periods[0])?;
+    // Calculate realized volatility using range-based estimators for better accuracy
+    let realized_vol = if config.use_garch_features {
+        // Use range-based volatility for higher precision with GARCH features
+        calculate_range_based_volatility(
+            close_prices,
+            high_prices,
+            low_prices,
+            config.volatility_periods[0],
+        )?
+    } else {
+        // Standard close-to-close volatility
+        calculate_realized_volatility(close_prices, config.volatility_periods[0])?
+    };
 
     // Calculate forward-looking volatility
     let forward_vol =
@@ -288,7 +299,7 @@ fn extract_low_prices(df: &DataFrame) -> Result<Vec<f64>> {
 }
 
 /// Parse horizon string to number of steps
-fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
+pub fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
     match horizon {
         "1h" => Ok(1),
         "4h" => Ok(4),
@@ -317,4 +328,49 @@ fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
             }
         }
     }
+}
+
+/// Calculate range-based volatility using Yang-Zhang estimator
+/// More accurate than close-to-close for cryptocurrency markets with high intraday volatility
+fn calculate_range_based_volatility(
+    close_prices: &[f64],
+    high_prices: &[f64],
+    low_prices: &[f64],
+    window: usize,
+) -> Result<Vec<f64>> {
+    if close_prices.len() != high_prices.len() || close_prices.len() != low_prices.len() {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Price arrays must have equal length for range-based volatility".to_string(),
+        ));
+    }
+
+    if close_prices.len() < window + 1 {
+        return Err(crate::utils::error::VangaError::DataError(format!(
+            "Insufficient data for range-based volatility calculation: need {}, got {}",
+            window + 1,
+            close_prices.len()
+        )));
+    }
+
+    let mut volatility = Vec::new();
+
+    for i in window..close_prices.len() {
+        let mut range_variance = 0.0;
+
+        for j in (i - window)..i {
+            // Yang-Zhang range-based volatility estimator
+            if high_prices[j] > 0.0 && low_prices[j] > 0.0 && close_prices[j] > 0.0 {
+                let log_hl = (high_prices[j] / low_prices[j]).ln();
+                range_variance += log_hl * log_hl;
+            }
+        }
+
+        // Calculate range-based volatility
+        let range_vol = (range_variance / window as f64).sqrt();
+
+        // Annualize for 24/7 crypto trading (8760 hours per year)
+        volatility.push(range_vol * (8760.0_f64).sqrt());
+    }
+
+    Ok(volatility)
 }

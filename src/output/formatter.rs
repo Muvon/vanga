@@ -79,9 +79,16 @@ impl OutputFormatter {
         symbol: &str,
         horizon: &str,
         current_price: f64,
-        _targets_config: Option<&PreparedTargets>,
+        targets_config: Option<&PreparedTargets>,
     ) -> Result<Vec<PredictionResult>> {
         let mut results = Vec::new();
+
+        // Calculate confidence based on target distribution balance if available
+        let _base_confidence = if let Some(targets) = targets_config {
+            calculate_target_based_confidence(targets, horizon)
+        } else {
+            0.7 // Default confidence when no target statistics available
+        };
 
         // For now, create one prediction result per batch
         for batch_idx in 0..raw_predictions.nrows() {
@@ -368,4 +375,77 @@ pub fn predictions_to_csv(predictions: &[PredictionResult]) -> Result<String> {
     }
 
     Ok(csv)
+}
+
+/// Calculate confidence based on target distribution balance and data quality
+/// Uses PreparedTargets statistics to assess prediction reliability
+fn calculate_target_based_confidence(targets: &PreparedTargets, horizon: &str) -> f64 {
+    let mut confidence_factors = Vec::new();
+
+    // Check price level distribution balance
+    if let Some(price_levels) = targets.price_levels.get(horizon) {
+        let balance = calculate_class_balance(price_levels);
+        confidence_factors.push(balance);
+    }
+
+    // Check direction distribution balance
+    if let Some(directions) = targets.directions.get(horizon) {
+        let balance = calculate_class_balance(directions);
+        confidence_factors.push(balance);
+    }
+
+    // Check volatility regime distribution
+    if let Some(volatility) = targets.volatility.get(horizon) {
+        let balance = calculate_class_balance(volatility);
+        confidence_factors.push(balance);
+    }
+
+    // Data quality factor based on valid indices ratio
+    let data_quality = targets.valid_indices.len() as f64 / targets.data_length as f64;
+    confidence_factors.push(data_quality);
+
+    // Calculate overall confidence as weighted average
+    if confidence_factors.is_empty() {
+        0.5 // Neutral confidence when no data available
+    } else {
+        let sum: f64 = confidence_factors.iter().sum();
+        (sum / confidence_factors.len() as f64).clamp(0.1, 0.95)
+    }
+}
+
+/// Calculate class balance score for target distribution
+/// Returns higher scores for more balanced distributions
+fn calculate_class_balance(targets: &[i32]) -> f64 {
+    if targets.is_empty() {
+        return 0.0;
+    }
+
+    // Count class frequencies
+    let mut class_counts = std::collections::HashMap::new();
+    for &target in targets {
+        *class_counts.entry(target).or_insert(0) += 1;
+    }
+
+    if class_counts.len() <= 1 {
+        return 0.1; // Low confidence for single class
+    }
+
+    // Calculate entropy-based balance score
+    let total = targets.len() as f64;
+    let mut entropy = 0.0;
+
+    for count in class_counts.values() {
+        let prob = *count as f64 / total;
+        if prob > 0.0 {
+            entropy -= prob * prob.log2();
+        }
+    }
+
+    // Normalize entropy to [0, 1] range
+    let max_entropy = (class_counts.len() as f64).log2();
+    if max_entropy > 0.0 {
+        entropy / max_entropy
+    } else {
+        0.0
+    }
 }

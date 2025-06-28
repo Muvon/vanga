@@ -19,12 +19,31 @@ impl DataPreprocessor {
     pub async fn process_for_training(
         &self,
         mut df: DataFrame,
-        _config: &DataConfig,
+        config: &DataConfig,
         features_config_path: Option<&std::path::PathBuf>,
     ) -> Result<DataFrame> {
-        // Apply data cleaning based on config (simplified)
-        df = self.remove_outliers(df)?;
-        df = self.fill_missing_values(df)?;
+        // Apply config-driven data cleaning strategies
+        df = match config.missing_data_strategy {
+            crate::config::training::MissingDataStrategy::ForwardFill
+            | crate::config::training::MissingDataStrategy::Interpolate
+            | crate::config::training::MissingDataStrategy::BackwardFill => {
+                self.fill_missing_values(df)? // Reuse existing method
+            }
+            crate::config::training::MissingDataStrategy::Drop => {
+                df.drop_nulls::<&str>(None).map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to drop missing values: {}",
+                        e
+                    ))
+                })?
+            }
+        };
+
+        df = if config.outlier_handling.enabled {
+            self.remove_outliers(df)? // Reuse existing method
+        } else {
+            df
+        };
 
         // Apply feature engineering if config path provided
         if let Some(config_path) = features_config_path {

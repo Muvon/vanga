@@ -1,7 +1,5 @@
 // Sequence generator for LSTM training and prediction
-use crate::data::{
-    DataMetadata, NormalizationStats, PreparedData, PreparedPredictionData,
-};
+use crate::data::{DataMetadata, NormalizationStats, PreparedData, PreparedPredictionData};
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use chrono::Utc;
@@ -27,7 +25,13 @@ impl SequenceGenerator {
         horizons: &[String],
         model_config: &crate::config::ModelConfig,
     ) -> Result<PreparedData> {
-        log::info!("Generating training sequences for LSTM...");
+        log::info!(
+            "Generating training sequences for LSTM with {} horizons...",
+            horizons.len()
+        );
+
+        // Validate DataFrame for multi-horizon processing
+        self.validate_dataframe_for_horizons(&df, horizons)?;
 
         // Get basic info
         let total_records = df.height();
@@ -352,5 +356,68 @@ impl SequenceGenerator {
         }
 
         Ok(sequences)
+    }
+
+    /// Validate DataFrame structure for multi-horizon processing
+    fn validate_dataframe_for_horizons(&self, df: &DataFrame, horizons: &[String]) -> Result<()> {
+        // Check minimum data requirements for all horizons
+        let min_required_rows = horizons
+            .iter()
+            .map(|h| self.parse_horizon_to_steps(h).unwrap_or(1))
+            .max()
+            .unwrap_or(1)
+            * 2; // At least 2x the largest horizon for reliable training
+
+        if df.height() < min_required_rows {
+            return Err(crate::utils::error::VangaError::DataError(
+                format!(
+                    "Insufficient data for multi-horizon processing: need {} rows, got {}. Largest horizon requires {} steps.",
+                    min_required_rows, df.height(), min_required_rows / 2
+                )
+            ));
+        }
+
+        // Validate required columns exist
+        let required_columns = ["close", "high", "low", "volume"];
+        for col in required_columns {
+            if df.column(col).is_err() {
+                return Err(crate::utils::error::VangaError::DataError(format!(
+                    "Missing required column '{}' for multi-horizon sequence generation",
+                    col
+                )));
+            }
+        }
+
+        // Check for excessive missing values that could affect horizon alignment
+        for column in df.get_column_names() {
+            if let Ok(series) = df.column(column) {
+                let null_count = series.null_count();
+                let null_ratio = null_count as f64 / df.height() as f64;
+
+                if null_ratio > 0.1 {
+                    // More than 10% missing values
+                    log::warn!(
+                        "Column '{}' has {:.1}% missing values, may affect multi-horizon alignment",
+                        column,
+                        null_ratio * 100.0
+                    );
+                }
+            }
+        }
+
+        log::info!(
+            "DataFrame validation passed: {} rows, {} horizons, {} columns",
+            df.height(),
+            horizons.len(),
+            df.width()
+        );
+
+        Ok(())
+    }
+
+    /// Parse horizon string to steps (reuses existing volatility module function)
+    fn parse_horizon_to_steps(&self, horizon: &str) -> Result<usize> {
+        // Reuse the existing function from volatility module
+        crate::targets::volatility::parse_horizon_to_steps(horizon)
     }
 }

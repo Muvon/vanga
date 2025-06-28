@@ -22,7 +22,7 @@ impl TargetConverter {
     pub fn new(output_heads: OutputHeadsConfig) -> Self {
         let segments = output_heads.get_output_segments();
         let total_output_size = output_heads.calculate_total_output_size();
-        
+
         Self {
             output_heads,
             segments,
@@ -31,11 +31,11 @@ impl TargetConverter {
     }
 
     /// Convert prepared targets to training array format
-    /// 
+    ///
     /// # Arguments
     /// * `targets` - Prepared targets from target generation
     /// * `valid_indices` - Indices of valid samples for training
-    /// 
+    ///
     /// # Returns
     /// Array2<f64> with shape [samples, total_output_size] for LSTM training
     pub fn convert_to_training_array(
@@ -44,10 +44,10 @@ impl TargetConverter {
         valid_indices: &[usize],
     ) -> Result<Array2<f64>> {
         let num_samples = valid_indices.len();
-        
+
         if num_samples == 0 {
             return Err(VangaError::DataError(
-                "No valid indices provided for target conversion".to_string()
+                "No valid indices provided for target conversion".to_string(),
             ));
         }
 
@@ -64,9 +64,9 @@ impl TargetConverter {
                     &targets.price_levels,
                     "1h", // Use default horizon for price levels
                     data_idx,
-                    "price_levels"
+                    "price_levels",
                 )?;
-                
+
                 // Convert to one-hot encoding
                 let num_bins = self.output_heads.price_levels.bins as usize;
                 if price_target < num_bins {
@@ -81,9 +81,9 @@ impl TargetConverter {
                     &targets.directions,
                     "1h", // Use default horizon for directions
                     data_idx,
-                    "directions"
+                    "directions",
                 )?;
-                
+
                 // Convert to one-hot encoding (0=DOWN, 1=SIDEWAYS, 2=UP)
                 if direction_target < 3 {
                     training_array[[sample_idx, output_idx + direction_target]] = 1.0;
@@ -98,13 +98,14 @@ impl TargetConverter {
                         &targets.volatility,
                         horizon,
                         data_idx,
-                        "volatility"
+                        "volatility",
                     )?;
-                    
+
                     // Convert to normalized volatility value (0-1 range)
                     // Assuming volatility classes 0-4 map to 0.0-1.0
                     let normalized_volatility = volatility_target as f64 / 4.0;
-                    training_array[[sample_idx, output_idx]] = normalized_volatility.clamp(0.0, 1.0);
+                    training_array[[sample_idx, output_idx]] =
+                        normalized_volatility.clamp(0.0, 1.0);
                     output_idx += 1;
                 }
             }
@@ -137,7 +138,9 @@ impl TargetConverter {
         if data_idx >= target_vec.len() {
             return Err(VangaError::DataError(format!(
                 "Data index {} out of bounds for {} targets (length: {})",
-                data_idx, target_type, target_vec.len()
+                data_idx,
+                target_type,
+                target_vec.len()
             )));
         }
 
@@ -157,14 +160,14 @@ impl TargetConverter {
         // Check price levels if enabled
         if self.output_heads.price_levels.enabled && !targets.price_levels.contains_key("1h") {
             return Err(VangaError::ConfigError(
-                "Missing price level targets for default horizon: 1h".to_string()
+                "Missing price level targets for default horizon: 1h".to_string(),
             ));
         }
 
         // Check directions if enabled
         if self.output_heads.direction.enabled && !targets.directions.contains_key("1h") {
             return Err(VangaError::ConfigError(
-                "Missing direction targets for default horizon: 1h".to_string()
+                "Missing direction targets for default horizon: 1h".to_string(),
             ));
         }
 
@@ -188,7 +191,7 @@ impl TargetConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::model::{PriceLevelHead, DirectionHead, VolatilityHead};
+    use crate::config::model::{DirectionHead, PriceLevelHead, VolatilityHead};
 
     fn create_test_output_heads() -> OutputHeadsConfig {
         OutputHeadsConfig {
@@ -213,9 +216,15 @@ mod tests {
 
     fn create_test_targets() -> PreparedTargets {
         let mut targets = PreparedTargets::new(100);
-        targets.price_levels.insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
-        targets.directions.insert("1h".to_string(), vec![0, 1, 2, 0, 1]);
-        targets.volatility.insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
+        targets
+            .price_levels
+            .insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
+        targets
+            .directions
+            .insert("1h".to_string(), vec![0, 1, 2, 0, 1]);
+        targets
+            .volatility
+            .insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
         targets.valid_indices = vec![0, 1, 2, 3, 4];
         targets
     }
@@ -225,10 +234,10 @@ mod tests {
         let output_heads = create_test_output_heads();
         let converter = TargetConverter::new(output_heads);
         let targets = create_test_targets();
-        
+
         let result = converter.convert_to_training_array(&targets, &targets.valid_indices);
         assert!(result.is_ok());
-        
+
         let training_array = result.unwrap();
         assert_eq!(training_array.shape()[0], 5); // 5 samples
         assert_eq!(training_array.shape()[1], 9); // 5 + 3 + 1 outputs
@@ -239,7 +248,7 @@ mod tests {
         let output_heads = create_test_output_heads();
         let converter = TargetConverter::new(output_heads);
         let targets = create_test_targets();
-        
+
         let result = converter.validate_targets(&targets);
         assert!(result.is_ok());
     }

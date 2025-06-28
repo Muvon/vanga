@@ -253,21 +253,24 @@ impl TargetGenerator {
         let first_horizon = self.config.horizons.first().ok_or_else(|| {
             crate::utils::error::VangaError::DataError("No horizons configured".to_string())
         })?;
-        
+
         // Validate that the first horizon exists in all target types
         if !targets.price_levels.contains_key(first_horizon) {
             return Err(crate::utils::error::VangaError::DataError(format!(
-                "First horizon '{}' missing from price level targets", first_horizon
+                "First horizon '{}' missing from price level targets",
+                first_horizon
             )));
         }
         if !targets.directions.contains_key(first_horizon) {
             return Err(crate::utils::error::VangaError::DataError(format!(
-                "First horizon '{}' missing from direction targets", first_horizon
+                "First horizon '{}' missing from direction targets",
+                first_horizon
             )));
         }
         if !targets.volatility.contains_key(first_horizon) {
             return Err(crate::utils::error::VangaError::DataError(format!(
-                "First horizon '{}' missing from volatility targets", first_horizon
+                "First horizon '{}' missing from volatility targets",
+                first_horizon
             )));
         }
 

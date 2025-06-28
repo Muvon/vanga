@@ -274,11 +274,15 @@ impl LSTMModel {
                     target_timestep[[target_idx, 0]] = targets[[batch_idx, target_idx]];
                 }
                 target_sequence.push(target_timestep);
-                
+
                 // Log progress for debugging sequence processing
                 if seq_idx % 10 == 0 {
-                    log::debug!("Processing sequence {} of {} for batch {}", 
-                               seq_idx, sequences.shape()[1], batch_idx);
+                    log::debug!(
+                        "Processing sequence {} of {} for batch {}",
+                        seq_idx,
+                        sequences.shape()[1],
+                        batch_idx
+                    );
                 }
             }
 

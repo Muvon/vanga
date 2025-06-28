@@ -741,13 +741,13 @@ fn add_crypto_specific_indicators(
             vwap[i] = cum_price_volume / cum_volume;
         }
     }
-    
+
     // Price gaps (difference between current open and previous close)
     let mut price_gaps = vec![0.0; close.len()];
     for i in 1..close.len() {
         price_gaps[i] = (open[i] - close[i - 1]) / close[i - 1] * 100.0;
     }
-    
+
     // Intraday range (high - low) as percentage of close
     let mut intraday_range = vec![0.0; close.len()];
     for i in 0..close.len() {
@@ -764,12 +764,12 @@ fn add_crypto_specific_indicators(
         .with_column(Series::new("vwap", vwap))
         .map_err(|e| VangaError::FeatureError(format!("Failed to add VWAP: {}", e)))?
         .clone();
-        
+
     df = df
         .with_column(Series::new("price_gaps", price_gaps))
         .map_err(|e| VangaError::FeatureError(format!("Failed to add price gaps: {}", e)))?
         .clone();
-        
+
     df = df
         .with_column(Series::new("intraday_range", intraday_range))
         .map_err(|e| VangaError::FeatureError(format!("Failed to add intraday range: {}", e)))?

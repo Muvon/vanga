@@ -32,9 +32,17 @@ impl MultiTargetParser {
             println!("DEBUG: Price levels segment found: ({}, {})", start, end);
             if end <= raw_output.len() {
                 let price_level_logits = raw_output.slice(s![start..end]);
-                println!("DEBUG: Price levels slice: start={}, end={}, slice_len={}, expected_bins={}", 
-                    start, end, price_level_logits.len(), self.output_heads.price_levels.bins);
-                println!("DEBUG: Price levels slice content: {:?}", price_level_logits.to_vec());
+                println!(
+                    "DEBUG: Price levels slice: start={}, end={}, slice_len={}, expected_bins={}",
+                    start,
+                    end,
+                    price_level_logits.len(),
+                    self.output_heads.price_levels.bins
+                );
+                println!(
+                    "DEBUG: Price levels slice content: {:?}",
+                    price_level_logits.to_vec()
+                );
                 parsed.price_levels = Some(self.parse_price_levels(&price_level_logits)?);
             } else {
                 log::warn!(

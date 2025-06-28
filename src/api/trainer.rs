@@ -51,16 +51,14 @@ impl ModelTrainer {
 
         // Create target converter for multi-target training
         let target_converter = TargetConverter::new(self.config.model_config.output_heads.clone());
-        
+
         // Validate targets are compatible with output configuration
         target_converter.validate_targets(&targets)?;
-        
+
         // Convert targets to training array format
-        let training_targets = target_converter.convert_to_training_array(
-            &targets,
-            &targets.valid_indices,
-        )?;
-        
+        let training_targets =
+            target_converter.convert_to_training_array(&targets, &targets.valid_indices)?;
+
         log::info!(
             "Training targets prepared: {} samples x {} outputs",
             training_targets.shape()[0],
@@ -68,7 +66,9 @@ impl ModelTrainer {
         );
 
         // Train the LSTM model with multi-target outputs
-        model.train(&prepared_data.sequences, &training_targets).await?;
+        model
+            .train(&prepared_data.sequences, &training_targets)
+            .await?;
 
         log::info!("Model training completed successfully");
         Ok(model)
