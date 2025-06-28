@@ -1,7 +1,8 @@
 // Sequence generator for LSTM training and prediction
 use crate::data::{
-    DataMetadata, NormalizationStats, PreparedData, PreparedPredictionData, PreparedTargets,
+    DataMetadata, NormalizationStats, PreparedData, PreparedPredictionData,
 };
+use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use chrono::Utc;
 use ndarray::{s, Array2, Array3, Axis};
@@ -241,12 +242,8 @@ impl SequenceGenerator {
             sequences.slice_mut(s![i, .., ..]).assign(&sequence);
         }
 
-        // Create targets (placeholder for now)
-        let targets = PreparedTargets {
-            price_levels: None,
-            direction: None,
-            volatility: None,
-        };
+        // Create targets (placeholder for now - real targets come from TargetGenerator)
+        let targets = PreparedTargets::new(num_sequences);
 
         Ok((sequences, targets))
     }

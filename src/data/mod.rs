@@ -2,12 +2,15 @@ pub mod loader;
 pub mod preprocessor;
 pub mod schema;
 pub mod sequence;
+pub mod target_converter;
 
 pub use loader::DataLoader;
 pub use preprocessor::DataPreprocessor;
 pub use schema::{CryptoDataSchema, DataValidationError};
 pub use sequence::SequenceGenerator;
+pub use target_converter::TargetConverter;
 
+use crate::targets::PreparedTargets;
 use crate::utils::error::Result;
 
 use std::path::Path;
@@ -110,14 +113,6 @@ pub struct PreparedPredictionData {
     pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
     pub feature_names: Vec<String>,
     pub metadata: DataMetadata,
-}
-
-/// Training targets for different prediction heads
-#[derive(Debug)]
-pub struct PreparedTargets {
-    pub price_levels: Option<ndarray::Array2<f64>>, // [batch, bins]
-    pub direction: Option<ndarray::Array1<f64>>,    // [batch]
-    pub volatility: Option<ndarray::Array2<f64>>,   // [batch, horizons]
 }
 
 /// Normalization statistics for features

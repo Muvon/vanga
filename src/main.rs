@@ -414,7 +414,7 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                 }
             };
 
-            std::fs::write(output_path, output_content)?;
+            std::fs::write(output_path.as_path(), output_content)?;
             log::info!("Predictions saved to: {}", output_path.display());
         }
 

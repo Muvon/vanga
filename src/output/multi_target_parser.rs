@@ -10,7 +10,7 @@ use ndarray::{s, ArrayView1};
 /// Multi-target output parser
 pub struct MultiTargetParser {
     output_heads: OutputHeadsConfig,
-    segments: OutputSegments,
+    pub segments: OutputSegments, // Made public for debugging
 }
 
 impl MultiTargetParser {
@@ -29,8 +29,12 @@ impl MultiTargetParser {
 
         // Parse price levels if enabled
         if let Some((start, end)) = self.segments.price_levels {
+            println!("DEBUG: Price levels segment found: ({}, {})", start, end);
             if end <= raw_output.len() {
                 let price_level_logits = raw_output.slice(s![start..end]);
+                println!("DEBUG: Price levels slice: start={}, end={}, slice_len={}, expected_bins={}", 
+                    start, end, price_level_logits.len(), self.output_heads.price_levels.bins);
+                println!("DEBUG: Price levels slice content: {:?}", price_level_logits.to_vec());
                 parsed.price_levels = Some(self.parse_price_levels(&price_level_logits)?);
             } else {
                 log::warn!(
@@ -39,6 +43,8 @@ impl MultiTargetParser {
                     raw_output.len()
                 );
             }
+        } else {
+            println!("DEBUG: No price levels segment found");
         }
 
         // Parse direction if enabled
@@ -90,8 +96,18 @@ impl MultiTargetParser {
             ));
         }
 
-        // Apply softmax
-        let probabilities = self.parse_price_levels(logits)?;
+        // Apply softmax to convert logits to probabilities
+        let max_logit = logits.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let exp_logits: Vec<f64> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
+        let sum_exp: f64 = exp_logits.iter().sum();
+
+        if sum_exp == 0.0 {
+            return Err(VangaError::PredictionError(
+                "Invalid direction logits: sum of exponentials is zero".to_string(),
+            ));
+        }
+
+        let probabilities: Vec<f64> = exp_logits.iter().map(|&x| x / sum_exp).collect();
 
         Ok(DirectionOutput {
             down_probability: probabilities[0],

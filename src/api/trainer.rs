@@ -1,6 +1,6 @@
 // Model trainer
 use crate::config::TrainingConfig;
-use crate::data::DataPipeline;
+use crate::data::{DataPipeline, TargetConverter};
 use crate::model::lstm_simple::LSTMModel;
 use crate::targets::TargetGenerator;
 use crate::utils::error::Result;
@@ -49,26 +49,26 @@ impl ModelTrainer {
         // Train the model
         log::info!("Starting LSTM training...");
 
-        // For now, use price level targets as the main training target
-        if let Some(price_targets) = targets.price_levels.get("1h") {
-            // Convert targets to the format expected by LSTM (batch, output_size)
-            let target_array = ndarray::Array2::from_shape_vec(
-                (price_targets.len(), 1),
-                price_targets.iter().map(|&x| x as f64).collect(),
-            )
-            .map_err(|e| {
-                crate::utils::error::VangaError::DataError(format!(
-                    "Target conversion error: {}",
-                    e
-                ))
-            })?;
+        // Create target converter for multi-target training
+        let target_converter = TargetConverter::new(self.config.model_config.output_heads.clone());
+        
+        // Validate targets are compatible with output configuration
+        target_converter.validate_targets(&targets)?;
+        
+        // Convert targets to training array format
+        let training_targets = target_converter.convert_to_training_array(
+            &targets,
+            &targets.valid_indices,
+        )?;
+        
+        log::info!(
+            "Training targets prepared: {} samples x {} outputs",
+            training_targets.shape()[0],
+            training_targets.shape()[1]
+        );
 
-            model.train(&prepared_data.sequences, &target_array).await?;
-        } else {
-            return Err(crate::utils::error::VangaError::ModelError(
-                "No price level targets available for training".to_string(),
-            ));
-        }
+        // Train the LSTM model with multi-target outputs
+        model.train(&prepared_data.sequences, &training_targets).await?;
 
         log::info!("Model training completed successfully");
         Ok(model)

@@ -1,6 +1,6 @@
 // Model predictor
 use crate::config::PredictionConfig;
-use crate::data::DataPipeline;
+use crate::data::{DataPipeline, PreparedPredictionData};
 use crate::model::lstm_simple::LSTMModel;
 use crate::output::{OutputFormatter, PostProcessor, PredictionResult};
 use crate::utils::error::Result;
@@ -44,8 +44,8 @@ impl Predictor {
         // Format predictions using output formatter
         let formatter = OutputFormatter::new(self.config.output_config.clone());
 
-        // Get current price (simplified - use last close price)
-        let current_price = 50000.0; // TODO: Extract from actual data
+        // Extract current price from the most recent data point
+        let current_price = self.extract_current_price_from_data(&prepared_data)?;
 
         // Determine horizon
         let horizon = self
@@ -77,6 +77,26 @@ impl Predictor {
 
         log::info!("Prediction completed successfully");
         Ok(final_predictions)
+    }
+
+    /// Extract current price from prepared prediction data
+    fn extract_current_price_from_data(&self, data: &PreparedPredictionData) -> Result<f64> {
+        // The last sequence contains the most recent data
+        // Assuming 'close' price is the last feature in the sequence
+        let last_sequence_idx = data.sequences.shape()[0] - 1;
+        let last_time_step = data.sequences.shape()[1] - 1;
+        let close_price_idx = data.sequences.shape()[2] - 1; // Assuming close is last feature
+        
+        let current_price = data.sequences[[last_sequence_idx, last_time_step, close_price_idx]];
+        
+        if current_price <= 0.0 {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Invalid current price extracted from data".to_string()
+            ));
+        }
+        
+        log::debug!("Extracted current price: {:.2}", current_price);
+        Ok(current_price)
     }
 }
 

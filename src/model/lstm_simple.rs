@@ -268,12 +268,18 @@ impl LSTMModel {
             }
 
             // Create target sequence (for now, use the final target for all timesteps)
-            for _seq_idx in 0..sequences.shape()[1] {
+            for seq_idx in 0..sequences.shape()[1] {
                 let mut target_timestep = Array2::zeros((targets.shape()[1], 1));
                 for target_idx in 0..targets.shape()[1] {
                     target_timestep[[target_idx, 0]] = targets[[batch_idx, target_idx]];
                 }
                 target_sequence.push(target_timestep);
+                
+                // Log progress for debugging sequence processing
+                if seq_idx % 10 == 0 {
+                    log::debug!("Processing sequence {} of {} for batch {}", 
+                               seq_idx, sequences.shape()[1], batch_idx);
+                }
             }
 
             training_data.push((input_sequence, target_sequence));
