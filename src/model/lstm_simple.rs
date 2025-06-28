@@ -14,8 +14,9 @@ type TrainingDataBatch = Vec<(Vec<Array2<f64>>, Vec<Array2<f64>>)>;
 pub struct LSTMConfig {
     pub input_size: usize,
     pub hidden_size: usize,
-    pub num_layers: usize,
-    pub dropout: f64,
+    pub output_size: usize,
+    pub sequence_length: usize,
+    pub learning_rate: f64,
 }
 
 /// LSTM model for cryptocurrency forecasting
@@ -87,8 +88,9 @@ impl LSTMModel {
         let lstm_config = LSTMConfig {
             input_size,
             hidden_size: effective_hidden_size,
-            num_layers: 2,
-            dropout: 0.2,
+            output_size: 1,       // Default single output for backward compatibility
+            sequence_length: 60,  // Default sequence length
+            learning_rate: 0.001, // Default learning rate
         };
         Self::new(lstm_config)
     }
@@ -112,7 +114,7 @@ impl LSTMModel {
             let network = rust_lstm::models::lstm_network::LSTMNetwork::new(
                 self.config.input_size,
                 self.config.hidden_size,
-                self.config.num_layers,
+                2, // Default to 2 layers
             );
             self.network = Some(network);
         }
@@ -230,7 +232,7 @@ impl LSTMModel {
         let network = LSTMNetwork::new(
             model_state.config.input_size,
             model_state.config.hidden_size,
-            model_state.config.num_layers,
+            2, // Default to 2 layers
         );
 
         log::info!("Model loaded successfully");
@@ -287,7 +289,7 @@ impl LSTMModel {
         sequences: &Array3<f64>,
     ) -> Result<Array2<f64>> {
         let batch_size = sequences.shape()[0];
-        let output_size = 1; // For now, assume single output
+        let output_size = self.config.output_size; // Use configured output size
         let mut predictions = Array2::zeros((batch_size, output_size));
 
         for batch_idx in 0..batch_size {
@@ -306,7 +308,10 @@ impl LSTMModel {
 
             // Use the last output as the prediction
             if let Some((last_output, _)) = outputs.last() {
-                predictions[[batch_idx, 0]] = last_output[[0, 0]]; // Take first output dimension
+                // Extract all output dimensions for multi-target predictions
+                for output_idx in 0..output_size.min(last_output.nrows()) {
+                    predictions[[batch_idx, output_idx]] = last_output[[output_idx, 0]];
+                }
             }
         }
 

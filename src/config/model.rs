@@ -187,3 +187,85 @@ impl Default for ModelConfig {
         }
     }
 }
+
+impl OutputHeadsConfig {
+    /// Calculate total output size needed for all enabled prediction heads
+    pub fn calculate_total_output_size(&self) -> usize {
+        let mut total_size = 0;
+
+        // Price level classification outputs (softmax probabilities)
+        if self.price_levels.enabled {
+            total_size += self.price_levels.bins as usize;
+        }
+
+        // Direction prediction outputs (3 classes: DOWN, SIDEWAYS, UP)
+        if self.direction.enabled {
+            total_size += 3;
+        }
+
+        // Volatility prediction outputs (one per horizon)
+        if self.volatility.enabled {
+            total_size += self.volatility.horizons.len();
+        }
+
+        // Ensure at least one output
+        if total_size == 0 {
+            log::warn!("No prediction heads enabled, defaulting to single output");
+            total_size = 1;
+        }
+
+        total_size
+    }
+
+    /// Get output segment information for parsing multi-target predictions
+    pub fn get_output_segments(&self) -> OutputSegments {
+        let mut segments = OutputSegments::new();
+        let mut current_offset = 0;
+
+        if self.price_levels.enabled {
+            let size = self.price_levels.bins as usize;
+            segments.price_levels = Some((current_offset, current_offset + size));
+            current_offset += size;
+        }
+
+        if self.direction.enabled {
+            let size = 3; // DOWN, SIDEWAYS, UP
+            segments.direction = Some((current_offset, current_offset + size));
+            current_offset += size;
+        }
+
+        if self.volatility.enabled {
+            let size = self.volatility.horizons.len();
+            segments.volatility = Some((current_offset, current_offset + size));
+        }
+
+        segments
+    }
+}
+
+/// Output segment information for parsing multi-target predictions
+#[derive(Debug, Clone)]
+pub struct OutputSegments {
+    /// Price levels segment: (start_idx, end_idx)
+    pub price_levels: Option<(usize, usize)>,
+    /// Direction segment: (start_idx, end_idx)
+    pub direction: Option<(usize, usize)>,
+    /// Volatility segment: (start_idx, end_idx)
+    pub volatility: Option<(usize, usize)>,
+}
+
+impl Default for OutputSegments {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OutputSegments {
+    pub fn new() -> Self {
+        Self {
+            price_levels: None,
+            direction: None,
+            volatility: None,
+        }
+    }
+}

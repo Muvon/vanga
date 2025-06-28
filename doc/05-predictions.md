@@ -185,31 +185,45 @@ pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
 
 ## Output Formats
 
-### **CSV Output Format**
+### **Structured JSON Output**
 
-The prediction CSV file contains:
-```csv
-prediction
-0.750123
-0.823456
-0.691234
-0.789012
+VANGA generates structured JSON predictions matching the ARCHITECTURE.md specification:
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "horizon": "4h", 
+  "current_price": 42500.0,
+  "price_levels": {
+    "bins": {
+      "bin_1": {"range": "< -5% ($40375.00)", "probability": 0.05},
+      "bin_2": {"range": "-5% to -3% ($41225.00)", "probability": 0.10},
+      "bin_3": {"range": "-3% to -1% ($42075.00)", "probability": 0.15},
+      "bin_4": {"range": "-1% to 1% ($42500.00)", "probability": 0.25},
+      "bin_5": {"range": "1% to 3% ($42925.00)", "probability": 0.20},
+      "bin_6": {"range": "3% to 5% ($43775.00)", "probability": 0.15},
+      "bin_7": {"range": "> 5% ($44625.00)", "probability": 0.10}
+    },
+    "most_likely_range": "-1% to 1%",
+    "confidence": 0.82
+  },
+  "direction": {
+    "up_probability": 0.68,
+    "down_probability": 0.32,
+    "prediction": "UP",
+    "confidence": 0.68
+  },
+  "volatility": {
+    "expected_1h": 0.018,
+    "expected_4h": 0.035, 
+    "expected_24h": 0.062,
+    "regime": "MEDIUM",
+    "confidence": 0.75
+  },
+  "confidence": 0.82
+}
 ```
-
-For multi-horizon predictions:
-```csv
-horizon_1h,horizon_4h,horizon_1d
-0.750123,0.823456,0.691234
-0.789012,0.856789,0.723456
-0.712345,0.798012,0.667890
-```
-
-### **Prediction Values**
-
-Prediction values represent:
-- **Normalized Outputs**: Values between 0.0 and 1.0
-- **Multi-Target**: Different columns for different prediction types
-- **Confidence Scores**: Higher values indicate higher confidence
 
 ## Prediction Performance
 
