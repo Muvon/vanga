@@ -54,12 +54,15 @@ impl Predictor {
             .clone()
             .unwrap_or_else(|| "1h".to_string());
 
+        // Generate targets for the prediction data to enable confidence calculation
+        let targets_config = self.generate_targets_for_confidence(&prepared_data).await?;
+
         let formatted_predictions = formatter.format_predictions(
             &raw_predictions,
             &self.config.symbol,
             &horizon,
             current_price,
-            None, // TODO: Pass actual targets config
+            Some(&targets_config), // Pass actual targets config for confidence calculation
         )?;
 
         // Apply post-processing if configured
@@ -97,6 +100,46 @@ impl Predictor {
 
         log::debug!("Extracted current price: {:.2}", current_price);
         Ok(current_price)
+    }
+
+    /// Generate targets from prediction data for confidence calculation
+    async fn generate_targets_for_confidence(
+        &self,
+        prepared_data: &PreparedPredictionData,
+    ) -> Result<crate::targets::PreparedTargets> {
+        // Create a minimal DataFrame from the prepared data for target generation
+        // This allows us to calculate target statistics for confidence assessment
+
+        // Extract the most recent data point for target generation
+        let last_sequence_idx = prepared_data.sequences.shape()[0].saturating_sub(1);
+        let sequence = prepared_data
+            .sequences
+            .slice(ndarray::s![last_sequence_idx, .., ..]);
+
+        // Find close price feature (assuming it's one of the features)
+        let close_feature_idx = prepared_data
+            .feature_names
+            .iter()
+            .position(|name| name.contains("close"))
+            .unwrap_or(0); // Default to first feature if close not found
+
+        // Extract close prices from the sequence
+        let close_prices: Vec<f64> = sequence.column(close_feature_idx).to_vec();
+
+        // Create a minimal DataFrame for target generation
+        let close_series = polars::prelude::Series::from_iter(close_prices.iter().cloned());
+        let df = polars::prelude::DataFrame::new(vec![close_series.with_name("close")]).map_err(
+            |e| {
+                crate::utils::error::VangaError::DataError(format!(
+                    "Failed to create DataFrame for target generation: {}",
+                    e
+                ))
+            },
+        )?;
+
+        // Generate targets using the default configuration
+        let target_generator = crate::targets::TargetGenerator::with_defaults();
+        target_generator.generate_all_targets(&df).await
     }
 }
 
