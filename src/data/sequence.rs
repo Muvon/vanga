@@ -75,8 +75,9 @@ impl SequenceGenerator {
         let feature_data = self.extract_feature_matrix(&df, &feature_columns)?;
 
         // Generate sequences using sliding window
-        let (sequences, targets) =
-            self.create_sliding_windows(&feature_data, sequence_length, horizons, &df)?;
+        let (sequences, targets) = self
+            .create_sliding_windows(&feature_data, sequence_length, horizons, &df)
+            .await?;
 
         // Calculate normalization statistics
         let normalization_stats = self.calculate_normalization_stats(&feature_data)?;
@@ -219,12 +220,12 @@ impl SequenceGenerator {
         Ok(matrix)
     }
 
-    fn create_sliding_windows(
+    async fn create_sliding_windows(
         &self,
         feature_data: &Array2<f64>,
         sequence_length: usize,
-        _horizons: &[String],
-        _df: &DataFrame,
+        horizons: &[String],
+        df: &DataFrame,
     ) -> Result<(Array3<f64>, PreparedTargets)> {
         let total_rows = feature_data.nrows();
         let feature_count = feature_data.ncols();
@@ -237,6 +238,35 @@ impl SequenceGenerator {
             )));
         }
 
+        // Calculate maximum horizon offset for proper sequence alignment
+        let max_horizon_steps = horizons
+            .iter()
+            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+            .max()
+            .unwrap_or(1);
+
+        // Adjust sequence count to account for multi-horizon targets
+        let effective_rows = total_rows.saturating_sub(max_horizon_steps);
+        let num_sequences = effective_rows.saturating_sub(sequence_length);
+
+        if num_sequences == 0 {
+            return Err(VangaError::DataError(format!(
+                "Insufficient data for multi-horizon sequences: {} total rows, {} max horizon steps, {} sequence length",
+                total_rows, max_horizon_steps, sequence_length
+            )));
+        }
+
+        log::info!(
+            "Creating {} sequences with {} features for {} horizons (max offset: {} steps)",
+            num_sequences,
+            feature_count,
+            horizons.len(),
+            max_horizon_steps
+        );
+
+        // Generate targets using DataFrame for all horizons
+        let prepared_targets = self.generate_multi_horizon_targets(df, horizons).await?;
+
         let num_sequences = total_rows - sequence_length;
         let mut sequences = Array3::zeros((num_sequences, sequence_length, feature_count));
 
@@ -246,10 +276,8 @@ impl SequenceGenerator {
             sequences.slice_mut(s![i, .., ..]).assign(&sequence);
         }
 
-        // Create targets (placeholder for now - real targets come from TargetGenerator)
-        let targets = PreparedTargets::new(num_sequences);
-
-        Ok((sequences, targets))
+        // Return both sequences and the actual generated targets
+        Ok((sequences, prepared_targets))
     }
 
     fn calculate_normalization_stats(
@@ -419,5 +447,26 @@ impl SequenceGenerator {
     fn parse_horizon_to_steps(&self, horizon: &str) -> Result<usize> {
         // Reuse the existing function from volatility module
         crate::targets::volatility::parse_horizon_to_steps(horizon)
+    }
+
+    /// Generate targets for multiple horizons using DataFrame
+    async fn generate_multi_horizon_targets(
+        &self,
+        df: &DataFrame,
+        horizons: &[String],
+    ) -> Result<PreparedTargets> {
+        log::info!(
+            "Generating targets for {} specific horizons",
+            horizons.len()
+        );
+
+        // Create target generator with horizon-specific configuration
+        let config = crate::targets::MultiTargetConfig {
+            horizons: horizons.to_vec(),
+            ..Default::default()
+        };
+
+        let target_generator = crate::targets::TargetGenerator::new(config);
+        target_generator.generate_all_targets(df).await
     }
 }

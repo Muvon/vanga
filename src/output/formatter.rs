@@ -5,12 +5,10 @@
 
 use crate::config::prediction::{OutputConfig, OutputFormat};
 use crate::output::structures::{
-    DataQuality, DirectionPrediction, PredictionMetadata, PredictionResult, PriceBin,
-    PriceLevelPrediction, VolatilityPrediction,
+    DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
 };
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
-use chrono::Utc;
 use ndarray::Array2;
 use std::collections::HashMap;
 
@@ -84,7 +82,7 @@ impl OutputFormatter {
         let mut results = Vec::new();
 
         // Calculate confidence based on target distribution balance if available
-        let _base_confidence = if let Some(targets) = targets_config {
+        let base_confidence = if let Some(targets) = targets_config {
             calculate_target_based_confidence(targets, horizon)
         } else {
             0.7 // Default confidence when no target statistics available
@@ -118,27 +116,13 @@ impl OutputFormatter {
 
             if batch_predictions.len() >= 3 {
                 // Assume third output is volatility
-                let volatility_value = batch_predictions[2];
+                let volatility_prob = batch_predictions[2];
                 result =
-                    result.with_volatility(self.create_volatility_prediction(volatility_value)?);
+                    result.with_volatility(self.create_volatility_prediction(volatility_prob)?);
             }
 
-            // Calculate overall confidence
-            let confidence = self.calculate_overall_confidence(&batch_predictions);
-            result = result.with_confidence(confidence);
-
-            // Add metadata
-            result = result.with_metadata(PredictionMetadata {
-                model_version: "1.0.0".to_string(),
-                generated_at: Utc::now(),
-                feature_count: 0,   // TODO: Get from actual data
-                sequence_length: 0, // TODO: Get from actual data
-                data_quality: DataQuality {
-                    completeness: 1.0,
-                    freshness_hours: 0.0,
-                    market_condition: "NORMAL".to_string(),
-                },
-            });
+            // Apply the calculated confidence to the prediction result
+            result = result.with_confidence(base_confidence);
 
             results.push(result);
         }
@@ -249,17 +233,6 @@ impl OutputFormatter {
             regime: regime.to_string(),
             confidence: raw_output.abs().min(1.0),
         })
-    }
-
-    /// Calculate overall confidence from all predictions
-    fn calculate_overall_confidence(&self, predictions: &ndarray::ArrayView1<f64>) -> f64 {
-        if predictions.is_empty() {
-            return 0.0;
-        }
-
-        // Simple average of absolute values (confidence)
-        let sum: f64 = predictions.iter().map(|&x| x.abs()).sum();
-        (sum / predictions.len() as f64).min(1.0)
     }
 
     /// Format as confidence intervals (placeholder)

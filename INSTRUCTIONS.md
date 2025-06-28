@@ -1,5 +1,7 @@
 # VANGA LSTM Development Instructions
 
+! THE PROJECT in ACTIVE DEVELOPMENT - DO NOT keep legacy or fallbacks to old code. KEEP CLEAN
+
 ## Core Principles
 
 ### Strict Configuration Management

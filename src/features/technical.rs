@@ -615,7 +615,7 @@ fn add_cci_indicator(
 /// Add Volume indicators to DataFrame
 fn add_volume_indicators(
     mut df: DataFrame,
-    _close: &[f64],
+    close: &[f64],
     volume: &[f64],
     periods: &[u32],
 ) -> Result<DataFrame> {
@@ -625,6 +625,26 @@ fn add_volume_indicators(
         df = df
             .with_column(Series::new(&column_name, volume_sma))
             .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
+            .clone();
+
+        // Add price-volume correlation indicator
+        let pv_correlation = calculate_price_volume_correlation(close, volume, period as usize);
+        let corr_column_name = format!("pv_correlation_{}", period);
+        df = df
+            .with_column(Series::new(&corr_column_name, pv_correlation))
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add {}: {}", corr_column_name, e))
+            })?
+            .clone();
+
+        // Add volume-weighted price indicator
+        let vwap = calculate_volume_weighted_average_price(close, volume, period as usize);
+        let vwap_column_name = format!("vwap_{}", period);
+        df = df
+            .with_column(Series::new(&vwap_column_name, vwap))
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add {}: {}", vwap_column_name, e))
+            })?
             .clone();
     }
     Ok(df)
@@ -776,4 +796,77 @@ fn add_crypto_specific_indicators(
         .clone();
 
     Ok(df)
+}
+
+/// Calculate price-volume correlation over a rolling window
+fn calculate_price_volume_correlation(close: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
+    let mut correlation = vec![f64::NAN; close.len()];
+
+    if close.len() != volume.len() || period < 2 {
+        return correlation;
+    }
+
+    for i in period..close.len() {
+        let price_window = &close[i - period..i];
+        let volume_window = &volume[i - period..i];
+
+        // Calculate Pearson correlation coefficient
+        let price_mean = price_window.iter().sum::<f64>() / period as f64;
+        let volume_mean = volume_window.iter().sum::<f64>() / period as f64;
+
+        let mut numerator = 0.0;
+        let mut price_variance = 0.0;
+        let mut volume_variance = 0.0;
+
+        for j in 0..period {
+            let price_diff = price_window[j] - price_mean;
+            let volume_diff = volume_window[j] - volume_mean;
+
+            numerator += price_diff * volume_diff;
+            price_variance += price_diff * price_diff;
+            volume_variance += volume_diff * volume_diff;
+        }
+
+        let denominator = (price_variance * volume_variance).sqrt();
+        correlation[i] = if denominator > 0.0 {
+            numerator / denominator
+        } else {
+            0.0
+        };
+    }
+
+    correlation
+}
+
+/// Calculate Volume Weighted Average Price (VWAP) over a rolling window
+fn calculate_volume_weighted_average_price(
+    close: &[f64],
+    volume: &[f64],
+    period: usize,
+) -> Vec<f64> {
+    let mut vwap = vec![f64::NAN; close.len()];
+
+    if close.len() != volume.len() || period == 0 {
+        return vwap;
+    }
+
+    for i in period..close.len() {
+        let mut total_volume = 0.0;
+        let mut weighted_price_sum = 0.0;
+
+        for j in (i - period)..i {
+            if volume[j] > 0.0 {
+                weighted_price_sum += close[j] * volume[j];
+                total_volume += volume[j];
+            }
+        }
+
+        vwap[i] = if total_volume > 0.0 {
+            weighted_price_sum / total_volume
+        } else {
+            close[i] // Fallback to current price if no volume
+        };
+    }
+
+    vwap
 }

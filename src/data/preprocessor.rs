@@ -95,11 +95,29 @@ impl DataPreprocessor {
     async fn apply_feature_engineering(
         &self,
         df: DataFrame,
-        _config_path: &std::path::Path,
+        config_path: &std::path::Path,
     ) -> Result<DataFrame> {
-        // Load and apply feature engineering configuration
-        // This would read the config file and apply transformations
-        Ok(df)
+        // Load feature engineering configuration from TOML file
+        log::info!("Loading feature engineering config from: {:?}", config_path);
+
+        let config_content = tokio::fs::read_to_string(config_path).await.map_err(|e| {
+            crate::utils::error::VangaError::DataError(format!(
+                "Failed to read feature config file {:?}: {}",
+                config_path, e
+            ))
+        })?;
+
+        let features_config: crate::config::features::FeatureConfig =
+            toml::from_str(&config_content).map_err(|e| {
+                crate::utils::error::VangaError::DataError(format!(
+                    "Failed to parse feature config: {}",
+                    e
+                ))
+            })?;
+
+        // Apply feature engineering using the loaded configuration
+        let feature_engineer = crate::features::FeatureEngineer::new(features_config);
+        feature_engineer.generate_features(df).await
     }
 
     /// Normalize features for training/prediction

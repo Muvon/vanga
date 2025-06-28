@@ -340,39 +340,146 @@ impl TargetGenerator {
     #[deprecated(note = "Use generate_all_targets() instead")]
     pub fn generate_price_level_targets(
         &self,
-        _prices: &[f64],
-        _bins: u32,
-        _range_percent: f64,
+        prices: &[f64],
+        bins: u32,
+        range_percent: f64,
     ) -> Result<Vec<Vec<f64>>> {
         log::warn!(
             "DEPRECATED: Use generate_all_targets() instead of legacy price level generation"
         );
-        Err(crate::utils::error::VangaError::DataError(
-            "Legacy method deprecated - use generate_all_targets()".to_string(),
-        ))
+
+        // For backward compatibility, create a temporary DataFrame and delegate to the working implementation
+        if prices.is_empty() {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Empty price data provided to deprecated method".to_string(),
+            ));
+        }
+
+        // Create a minimal DataFrame for compatibility
+        let df =
+            polars::prelude::DataFrame::new(vec![polars::prelude::Series::new("close", prices)])
+                .map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to create DataFrame for backward compatibility: {}",
+                        e
+                    ))
+                })?;
+
+        // Use the working implementation with adapted config
+        let config = crate::targets::price_levels::PriceLevelConfig {
+            bins,
+            min_price_change: range_percent / 100.0, // Convert percentage to decimal
+            ..Default::default()
+        };
+
+        let targets = crate::targets::price_levels::generate_price_level_targets(
+            &df,
+            &self.config.horizons,
+            &config,
+        )?;
+
+        // Convert HashMap<String, Vec<i32>> to Vec<Vec<f64>> for backward compatibility
+        let mut result = Vec::new();
+        for horizon in &self.config.horizons {
+            if let Some(horizon_targets) = targets.get(horizon) {
+                let float_targets: Vec<f64> = horizon_targets.iter().map(|&x| x as f64).collect();
+                result.push(float_targets);
+            }
+        }
+
+        Ok(result)
     }
 
     /// Generate direction targets (DEPRECATED - use generate_all_targets)
     #[deprecated(note = "Use generate_all_targets() instead")]
-    pub fn generate_direction_targets(&self, _prices: &[f64], _threshold: f64) -> Result<Vec<f64>> {
+    pub fn generate_direction_targets(&self, prices: &[f64], threshold: f64) -> Result<Vec<f64>> {
         log::warn!("DEPRECATED: Use generate_all_targets() instead of legacy direction generation");
-        Err(crate::utils::error::VangaError::DataError(
-            "Legacy method deprecated - use generate_all_targets()".to_string(),
-        ))
+
+        // For backward compatibility, create a temporary DataFrame and delegate to the working implementation
+        if prices.is_empty() {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Empty price data provided to deprecated method".to_string(),
+            ));
+        }
+
+        // Create a minimal DataFrame for compatibility
+        let df =
+            polars::prelude::DataFrame::new(vec![polars::prelude::Series::new("close", prices)])
+                .map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to create DataFrame for backward compatibility: {}",
+                        e
+                    ))
+                })?;
+
+        // Use the working implementation with adapted config
+        let config = crate::targets::direction::DirectionConfig {
+            up_threshold: threshold,
+            down_threshold: -threshold,
+            ..Default::default()
+        };
+
+        let targets = crate::targets::direction::generate_direction_targets(
+            &df,
+            &self.config.horizons,
+            &config,
+        )?;
+
+        // Convert HashMap<String, Vec<i32>> to Vec<f64> for backward compatibility
+        // Take the first horizon's targets or return empty if none
+        if let Some(first_horizon) = self.config.horizons.first() {
+            if let Some(horizon_targets) = targets.get(first_horizon) {
+                let float_targets: Vec<f64> = horizon_targets.iter().map(|&x| x as f64).collect();
+                return Ok(float_targets);
+            }
+        }
+
+        Ok(vec![])
     }
 
     /// Generate volatility targets (DEPRECATED - use generate_all_targets)
     #[deprecated(note = "Use generate_all_targets() instead")]
     pub fn generate_volatility_targets(
         &self,
-        _prices: &[f64],
-        _horizons: &[String],
+        prices: &[f64],
+        horizons: &[String],
     ) -> Result<Vec<Vec<f64>>> {
         log::warn!(
             "DEPRECATED: Use generate_all_targets() instead of legacy volatility generation"
         );
-        Err(crate::utils::error::VangaError::DataError(
-            "Legacy method deprecated - use generate_all_targets()".to_string(),
-        ))
+
+        // For backward compatibility, create a temporary DataFrame and delegate to the working implementation
+        if prices.is_empty() {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Empty price data provided to deprecated method".to_string(),
+            ));
+        }
+
+        // Create a minimal DataFrame for compatibility
+        let df =
+            polars::prelude::DataFrame::new(vec![polars::prelude::Series::new("close", prices)])
+                .map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to create DataFrame for backward compatibility: {}",
+                        e
+                    ))
+                })?;
+
+        // Use the working implementation with default config
+        let config = crate::targets::volatility::VolatilityConfig::default();
+
+        let targets =
+            crate::targets::volatility::generate_volatility_targets(&df, horizons, &config)?;
+
+        // Convert HashMap<String, Vec<i32>> to Vec<Vec<f64>> for backward compatibility
+        let mut result = Vec::new();
+        for horizon in horizons {
+            if let Some(horizon_targets) = targets.get(horizon) {
+                let float_targets: Vec<f64> = horizon_targets.iter().map(|&x| x as f64).collect();
+                result.push(float_targets);
+            }
+        }
+
+        Ok(result)
     }
 }
