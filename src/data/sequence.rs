@@ -1,0 +1,359 @@
+// Sequence generator for LSTM training and prediction
+use crate::data::{
+    DataMetadata, NormalizationStats, PreparedData, PreparedPredictionData, PreparedTargets,
+};
+use crate::utils::error::{Result, VangaError};
+use chrono::Utc;
+use ndarray::{s, Array2, Array3, Axis};
+use polars::prelude::*;
+
+pub struct SequenceGenerator;
+
+impl Default for SequenceGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SequenceGenerator {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn generate_training_sequences(
+        &self,
+        df: DataFrame,
+        horizons: &[String],
+        model_config: &crate::config::ModelConfig,
+    ) -> Result<PreparedData> {
+        log::info!("Generating training sequences for LSTM...");
+
+        // Get basic info
+        let total_records = df.height();
+        let sequence_length = match &model_config.sequence_length {
+            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+            crate::config::model::SequenceLengthConfig::Auto {
+                min_length,
+                max_length: _,
+            } => *min_length as usize,
+            crate::config::model::SequenceLengthConfig::Adaptive => 60,
+        };
+
+        // Ensure we have enough data
+        if total_records < sequence_length + 10 {
+            return Err(VangaError::DataError(format!(
+                "Not enough data: {} records, need at least {}",
+                total_records,
+                sequence_length + 10
+            )));
+        }
+
+        // Extract feature columns (exclude timestamp and target columns)
+        let feature_columns: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .filter(|&col| {
+                ![
+                    "timestamp",
+                    "target_price",
+                    "target_direction",
+                    "target_volatility",
+                ]
+                .contains(col)
+            })
+            .map(|s| s.to_string())
+            .collect();
+
+        let feature_count = feature_columns.len();
+
+        // Extract feature data as matrix
+        let feature_data = self.extract_feature_matrix(&df, &feature_columns)?;
+
+        // Generate sequences using sliding window
+        let (sequences, targets) =
+            self.create_sliding_windows(&feature_data, sequence_length, horizons, &df)?;
+
+        // Calculate normalization statistics
+        let normalization_stats = self.calculate_normalization_stats(&feature_data)?;
+
+        // Apply normalization to sequences
+        let normalized_sequences = self.normalize_sequences(&sequences, &normalization_stats)?;
+
+        // Create metadata
+        let metadata = DataMetadata {
+            symbol: "".to_string(), // Will be set by caller
+            start_time: Utc::now(),
+            end_time: Utc::now(),
+            total_records,
+            feature_count,
+            sequence_length,
+            horizons: horizons.to_vec(),
+        };
+
+        log::info!(
+            "Generated {} sequences with {} features",
+            normalized_sequences.len_of(Axis(0)),
+            feature_count
+        );
+
+        Ok(PreparedData {
+            sequences: normalized_sequences,
+            targets,
+            feature_names: feature_columns,
+            normalization_stats,
+            metadata,
+        })
+    }
+
+    pub async fn generate_prediction_sequences(
+        &self,
+        df: DataFrame,
+        symbol: &str,
+        model_config: &crate::config::ModelConfig,
+    ) -> Result<PreparedPredictionData> {
+        log::info!("Generating prediction sequences for symbol: {}", symbol);
+
+        // Extract sequence length from config
+        let sequence_length = match &model_config.sequence_length {
+            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+            crate::config::model::SequenceLengthConfig::Auto {
+                min_length,
+                max_length: _,
+            } => *min_length as usize,
+            crate::config::model::SequenceLengthConfig::Adaptive => 60,
+        };
+
+        // Get basic info
+        let num_rows = df.height();
+        let num_cols = df.width();
+
+        log::debug!("Input data shape: {} rows, {} columns", num_rows, num_cols);
+        log::debug!("Using sequence length: {}", sequence_length);
+
+        // Ensure we have enough data for at least one sequence
+        if num_rows < sequence_length {
+            return Err(VangaError::DataError(format!(
+                "Not enough data for prediction: {} rows < {} required",
+                num_rows, sequence_length
+            )));
+        }
+
+        // Extract feature columns (exclude timestamp and target columns)
+        let exclude_columns = ["timestamp", "price_level", "direction", "volatility"];
+        let feature_columns: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .filter(|&col| !exclude_columns.contains(col))
+            .map(|&col| col.to_string())
+            .collect();
+
+        log::debug!(
+            "Using {} feature columns for prediction",
+            feature_columns.len()
+        );
+
+        // Extract feature data as matrix
+        let feature_data = self.extract_feature_matrix(&df, &feature_columns)?;
+
+        // Generate prediction sequences (use the last sequence_length rows)
+        let start_idx = num_rows.saturating_sub(sequence_length);
+        let sequences =
+            self.create_prediction_sequences(&feature_data, start_idx, sequence_length)?;
+
+        // Create metadata
+        let metadata = crate::data::DataMetadata {
+            symbol: symbol.to_string(),
+            start_time: chrono::Utc::now(),
+            end_time: chrono::Utc::now(),
+            total_records: num_rows,
+            feature_count: feature_columns.len(),
+            sequence_length,
+            horizons: vec!["1h".to_string()], // Default horizon
+        };
+
+        Ok(PreparedPredictionData {
+            sequences,
+            feature_names: feature_columns,
+            metadata,
+        })
+    }
+
+    // Helper methods for sequence generation
+    fn extract_feature_matrix(
+        &self,
+        df: &DataFrame,
+        feature_columns: &[String],
+    ) -> Result<Array2<f64>> {
+        let rows = df.height();
+        let cols = feature_columns.len();
+        let mut matrix = Array2::zeros((rows, cols));
+
+        for (col_idx, col_name) in feature_columns.iter().enumerate() {
+            let series = df.column(col_name).map_err(|e| {
+                VangaError::DataError(format!("Column '{}' not found: {}", col_name, e))
+            })?;
+
+            let values: Vec<f64> = series
+                .f64()
+                .map_err(|e| {
+                    VangaError::DataError(format!(
+                        "Failed to convert column '{}' to f64: {}",
+                        col_name, e
+                    ))
+                })?
+                .into_no_null_iter()
+                .collect();
+
+            for (row_idx, &value) in values.iter().enumerate() {
+                if row_idx < rows {
+                    matrix[[row_idx, col_idx]] = value;
+                }
+            }
+        }
+
+        Ok(matrix)
+    }
+
+    fn create_sliding_windows(
+        &self,
+        feature_data: &Array2<f64>,
+        sequence_length: usize,
+        _horizons: &[String],
+        _df: &DataFrame,
+    ) -> Result<(Array3<f64>, PreparedTargets)> {
+        let total_rows = feature_data.nrows();
+        let feature_count = feature_data.ncols();
+
+        if total_rows < sequence_length + 1 {
+            return Err(VangaError::DataError(format!(
+                "Not enough data for sequences: {} rows, need {}",
+                total_rows,
+                sequence_length + 1
+            )));
+        }
+
+        let num_sequences = total_rows - sequence_length;
+        let mut sequences = Array3::zeros((num_sequences, sequence_length, feature_count));
+
+        // Create sequences using sliding window
+        for i in 0..num_sequences {
+            let sequence = feature_data.slice(s![i..i + sequence_length, ..]);
+            sequences.slice_mut(s![i, .., ..]).assign(&sequence);
+        }
+
+        // Create targets (placeholder for now)
+        let targets = PreparedTargets {
+            price_levels: None,
+            direction: None,
+            volatility: None,
+        };
+
+        Ok((sequences, targets))
+    }
+
+    fn calculate_normalization_stats(
+        &self,
+        feature_data: &Array2<f64>,
+    ) -> Result<NormalizationStats> {
+        let feature_count = feature_data.ncols();
+        let mut means = Vec::with_capacity(feature_count);
+        let mut stds = Vec::with_capacity(feature_count);
+        let mut mins = Vec::with_capacity(feature_count);
+        let mut maxs = Vec::with_capacity(feature_count);
+        let mut medians = Vec::with_capacity(feature_count);
+        let mut q25 = Vec::with_capacity(feature_count);
+        let mut q75 = Vec::with_capacity(feature_count);
+
+        for col_idx in 0..feature_count {
+            let column = feature_data.column(col_idx);
+            let mut sorted_values = column.to_vec();
+            sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+            let mean = column.mean().unwrap_or(0.0);
+            let std = column.std(0.0);
+            let min_val = sorted_values.first().copied().unwrap_or(0.0);
+            let max_val = sorted_values.last().copied().unwrap_or(0.0);
+
+            let len = sorted_values.len();
+            let median = if len % 2 == 0 {
+                (sorted_values[len / 2 - 1] + sorted_values[len / 2]) / 2.0
+            } else {
+                sorted_values[len / 2]
+            };
+
+            let q25_val = sorted_values[len / 4];
+            let q75_val = sorted_values[3 * len / 4];
+
+            means.push(mean);
+            stds.push(std);
+            mins.push(min_val);
+            maxs.push(max_val);
+            medians.push(median);
+            q25.push(q25_val);
+            q75.push(q75_val);
+        }
+
+        Ok(NormalizationStats {
+            means,
+            stds,
+            mins,
+            maxs,
+            medians,
+            q25,
+            q75,
+        })
+    }
+
+    fn normalize_sequences(
+        &self,
+        sequences: &Array3<f64>,
+        stats: &NormalizationStats,
+    ) -> Result<Array3<f64>> {
+        let mut normalized = sequences.clone();
+        let feature_count = sequences.len_of(Axis(2));
+
+        for feature_idx in 0..feature_count {
+            let mean = stats.means[feature_idx];
+            let std = stats.stds[feature_idx];
+
+            if std > 0.0 {
+                // Z-score normalization
+                normalized
+                    .slice_mut(s![.., .., feature_idx])
+                    .mapv_inplace(|x| (x - mean) / std);
+            }
+        }
+
+        Ok(normalized)
+    }
+
+    /// Create prediction sequences from feature data
+    fn create_prediction_sequences(
+        &self,
+        feature_data: &Array2<f64>,
+        start_idx: usize,
+        sequence_length: usize,
+    ) -> Result<Array3<f64>> {
+        let num_features = feature_data.ncols();
+        let available_rows = feature_data.nrows() - start_idx;
+
+        if available_rows < sequence_length {
+            return Err(VangaError::DataError(format!(
+                "Not enough data for sequence: {} available < {} required",
+                available_rows, sequence_length
+            )));
+        }
+
+        // Create single sequence for prediction (batch size = 1)
+        let mut sequences = Array3::zeros((1, sequence_length, num_features));
+
+        for seq_idx in 0..sequence_length {
+            let data_idx = start_idx + seq_idx;
+            for feature_idx in 0..num_features {
+                sequences[[0, seq_idx, feature_idx]] = feature_data[[data_idx, feature_idx]];
+            }
+        }
+
+        Ok(sequences)
+    }
+}

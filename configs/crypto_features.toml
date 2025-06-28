@@ -1,0 +1,140 @@
+# Example crypto features configuration for LSTM forecasting
+# This file demonstrates the comprehensive feature engineering capabilities
+
+[technical_indicators]
+enabled = true
+
+[technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 200]
+ema_periods = [5, 10, 20, 50, 200]
+wma_periods = [10, 20]
+hull_periods = [9, 21]
+
+[technical_indicators.momentum]
+rsi_periods = [14, 21]
+stochastic = true
+williams_r = true
+cci_periods = [14, 20]
+momentum_periods = [10, 20]
+
+[technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14, 21]
+keltner_channels = true
+donchian_channels = true
+
+[technical_indicators.volume]
+obv = true
+volume_sma_periods = [10, 20]
+mfi_periods = [14]
+ad_line = true
+chaikin_oscillator = true
+
+[technical_indicators.trend]
+macd = { enabled = true, fast_period = 12, slow_period = 26, signal_period = 9 }
+adx_periods = [14]
+parabolic_sar = true
+aroon = true
+
+[market_microstructure]
+enabled = true
+
+[market_microstructure.price_dynamics]
+velocity_periods = [5, 10, 20]
+acceleration_periods = [5, 10]
+jerk_periods = [5]
+
+[market_microstructure.volume_price]
+vwap_periods = [20, 50]
+volume_price_trend = true
+ease_of_movement = true
+negative_volume_index = true
+
+[market_microstructure.trade_intensity]
+enabled = true
+lookback_periods = [10, 20, 50]
+intensity_metrics = ["TradesPerMinute", "VolumePerTrade"]
+
+[market_microstructure.market_depth]
+bid_ask_spread_proxy = true
+order_book_imbalance_proxy = true
+market_impact_proxy = true
+
+[volatility_features]
+enabled = true
+
+[volatility_features.realized_volatility]
+periods = ["1h", "4h", "24h"]
+estimators = ["Standard", "RangeBasedYangZhang"]
+
+[volatility_features.garch_features]
+enabled = true
+model_orders = [[1, 1], [1, 2], [2, 1]]
+conditional_volatility = true
+volatility_forecasts = true
+
+[volatility_features.clustering]
+enabled = true
+clustering_strength = true
+persistence_measures = true
+
+[volatility_features.regime_detection]
+enabled = true
+methods = ["VolatilityBased", "TrendBased"]
+sensitivity = 0.5
+
+[custom_features]
+# Automatically include all additional columns from CSV
+auto_include_all = true
+
+# Specific custom features to include (if auto_include_all = false)
+include_features = [
+    "social_sentiment",
+    "on_chain_volume",
+    "whale_activity",
+    "funding_rate"
+]
+
+# Features to exclude even if present
+exclude_features = [
+    "irrelevant_column",
+    "noisy_indicator"
+]
+
+# Custom transformations for specific features
+[custom_features.transformations]
+social_sentiment = "ZScore"
+funding_rate = "PercentChange"
+whale_activity = "Log"
+
+[engineering]
+
+[engineering.polynomial_features]
+enabled = false
+degree = 2
+include_bias = false
+interaction_only = true
+
+[engineering.interaction_features]
+enabled = true
+max_interactions = 10
+# Specific feature pairs can be defined here
+feature_pairs = []
+
+[engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3, 5, 10]
+features_to_lag = ["close", "volume", "rsi_14"]
+
+[engineering.rolling_features]
+enabled = true
+window_sizes = [5, 10, 20]
+statistics = ["Mean", "Std", "Min", "Max"]
+
+[selection]
+enabled = true
+max_features = 100  # Limit total features
+correlation_threshold = 0.95  # Remove highly correlated features
+importance_threshold = 0.001  # Minimum feature importance
+methods = ["CorrelationFilter", "ImportanceBased"]
+keep_crypto_features = true  # Always keep crypto-specific features
