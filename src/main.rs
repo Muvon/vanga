@@ -311,7 +311,9 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         }
     } else {
         // Single symbol training
-        let mut config = TrainingConfig::default().symbol(params.symbol).data_path(params.data);
+        let mut config = TrainingConfig::default()
+            .symbol(params.symbol)
+            .data_path(params.data);
 
         if params.fresh {
             config = config.fresh_training(true);
@@ -368,7 +370,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
         }
     } else {
         // Single prediction
-        let mut config = PredictionConfig::default().symbol(params.symbol).input_path(params.input);
+        let mut config = PredictionConfig::default()
+            .symbol(params.symbol)
+            .input_path(params.input);
 
         if let Some(horizon) = params.horizon {
             config = config.horizon(horizon);
@@ -395,19 +399,22 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
 
         // Save predictions if output path specified
         if let Some(ref output_path) = config.output_path {
-            // Create a simple CSV with predictions
-            let mut output = String::new();
-            output.push_str("prediction\n");
-            for row in 0..predictions.nrows() {
-                for col in 0..predictions.ncols() {
-                    output.push_str(&format!("{:.6}", predictions[[row, col]]));
-                    if col < predictions.ncols() - 1 {
-                        output.push(',');
-                    }
+            use vanga::output::formatter::{predictions_to_csv, predictions_to_json};
+
+            let output_content = match config.output_config.format {
+                vanga::config::prediction::OutputFormat::ProbabilityDistribution
+                | vanga::config::prediction::OutputFormat::ConfidenceInterval
+                | vanga::config::prediction::OutputFormat::All => {
+                    // Save as JSON for structured formats
+                    predictions_to_json(&predictions)?
                 }
-                output.push('\n');
-            }
-            std::fs::write(output_path, output)?;
+                vanga::config::prediction::OutputFormat::PointEstimate => {
+                    // Save as CSV for simple point estimates
+                    predictions_to_csv(&predictions)?
+                }
+            };
+
+            std::fs::write(output_path, output_content)?;
             log::info!("Predictions saved to: {}", output_path.display());
         }
 

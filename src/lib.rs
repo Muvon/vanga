@@ -27,6 +27,7 @@ pub mod config;
 pub mod data;
 pub mod features;
 pub mod model;
+pub mod output;
 pub mod targets;
 pub mod utils;
 
@@ -34,4 +35,5 @@ pub mod utils;
 pub use api::{predict, train_model, ModelTrainer, Predictor};
 pub use config::{ModelConfig, PredictionConfig, TrainingConfig};
 pub use data::{CryptoDataSchema, DataLoader};
+pub use output::{OutputFormatter, PostProcessor, PredictionResult};
 pub use utils::error::{Result, VangaError};

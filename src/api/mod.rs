@@ -17,7 +17,7 @@ pub async fn train_model(config: TrainingConfig) -> Result<crate::model::lstm_si
 pub async fn predict(
     config: PredictionConfig,
     model: &crate::model::lstm_simple::LSTMModel,
-) -> Result<ndarray::Array2<f64>> {
+) -> Result<Vec<crate::output::PredictionResult>> {
     let predictor = Predictor::new(config);
     predictor.predict(model).await
 }

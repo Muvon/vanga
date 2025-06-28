@@ -2,8 +2,8 @@
 use crate::config::PredictionConfig;
 use crate::data::DataPipeline;
 use crate::model::lstm_simple::LSTMModel;
+use crate::output::{OutputFormatter, PostProcessor, PredictionResult};
 use crate::utils::error::Result;
-use ndarray::Array2;
 
 pub struct Predictor {
     config: PredictionConfig,
@@ -14,7 +14,7 @@ impl Predictor {
         Self { config }
     }
 
-    pub async fn predict(&self, model: &LSTMModel) -> Result<Array2<f64>> {
+    pub async fn predict(&self, model: &LSTMModel) -> Result<Vec<PredictionResult>> {
         log::info!("Starting prediction for symbol: {}", self.config.symbol);
 
         // Initialize data pipeline
@@ -37,20 +37,42 @@ impl Predictor {
 
         // Make predictions
         log::info!("Generating predictions...");
-        let predictions = model.predict(&prepared_data.sequences).await?;
+        let raw_predictions = model.predict(&prepared_data.sequences).await?;
 
-        log::info!("Generated {} predictions", predictions.nrows());
+        log::info!("Generated {} predictions", raw_predictions.nrows());
+
+        // Format predictions using output formatter
+        let formatter = OutputFormatter::new(self.config.output_config.clone());
+
+        // Get current price (simplified - use last close price)
+        let current_price = 50000.0; // TODO: Extract from actual data
+
+        // Determine horizon
+        let horizon = self
+            .config
+            .horizon
+            .clone()
+            .unwrap_or_else(|| "1h".to_string());
+
+        let formatted_predictions = formatter.format_predictions(
+            &raw_predictions,
+            &self.config.symbol,
+            &horizon,
+            current_price,
+            None, // TODO: Pass actual targets config
+        )?;
 
         // Apply post-processing if configured
+        let post_processor = PostProcessor::new(self.config.post_processing.clone());
         let final_predictions = if self.config.min_confidence > 0.0 {
-            // Filter predictions by confidence (simplified - just return all for now)
             log::debug!(
                 "Applying confidence threshold: {}",
                 self.config.min_confidence
             );
-            predictions
+            let processed = post_processor.process(formatted_predictions)?;
+            post_processor.filter_by_confidence(processed, self.config.min_confidence)
         } else {
-            predictions
+            post_processor.process(formatted_predictions)?
         };
 
         log::info!("Prediction completed successfully");
@@ -59,7 +81,7 @@ impl Predictor {
 }
 
 /// High-level prediction function
-pub async fn predict(config: PredictionConfig, model: &LSTMModel) -> Result<Array2<f64>> {
+pub async fn predict(config: PredictionConfig, model: &LSTMModel) -> Result<Vec<PredictionResult>> {
     let predictor = Predictor::new(config);
     predictor.predict(model).await
 }

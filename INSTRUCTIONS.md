@@ -98,6 +98,8 @@ let predictions = predict_multi_target(config, &model).await?;
 
 ## Development Patterns
 
+!!! NEVER SILENCE WARNINGS with undefined variables like _var INSTEAD Find the REAL reaon why worning appears and FIX it
+
 ### Adding New Technical Indicators
 1. Add indicator logic to `src/features/technical.rs`
 2. Update `TechnicalConfig` struct in `src/config/features.rs`
@@ -311,5 +313,3 @@ NEVER DO THIS:
 □ Following established feature engineering patterns?
 
 UNCHECKED = STOP & FIX
-
-Core Behavior: Configure → Engineer → Train → Predict → Evaluate. Production-ready LSTM cryptocurrency forecasting through intelligent auto-optimization, comprehensive feature engineering, robust error handling, and symbol-specific model specialization.
