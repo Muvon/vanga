@@ -1,0 +1,6 @@
+# Development Training Config
+[training_params]
+epochs = { Fixed = 100 }
+learning_rate = { Fixed = 0.001 }
+validation_split = 0.0
+gradient_clip = 0.5

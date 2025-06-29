@@ -79,13 +79,13 @@ impl ModelTrainer {
             .get_or_create_multi_target_model(&model_path, input_size, target_names)
             .await?;
 
-        // Train the multi-target LSTM model with ALL targets (no data loss!)
+        // Train the multi-target LSTM model with intelligent early stopping
         log::info!(
-            "🚀 Starting multi-target training - using ALL {} targets (0% data loss)",
+            "🚀 Starting intelligent multi-target training with early stopping - using ALL {} targets (0% data loss)",
             training_targets.shape()[1]
         );
         model
-            .train(&prepared_data.sequences, &training_targets)
+            .train_with_early_stopping(&prepared_data.sequences, &training_targets, &self.config)
             .await?;
 
         // Save the trained multi-target model

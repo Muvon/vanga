@@ -15,9 +15,15 @@
 8. **[Multi-Target System](08-targets.md)** - Prediction targets and configuration
 9. **[Evaluation](09-evaluation.md)** - Model performance evaluation and metrics
 
-### **✅ Final Implementation (NEW)**
+### **✅ Final Implementation (UPDATED)**
 10. **[Technical Implementation Guide](10-technical-implementation.md)** - Complete technical specifications
 11. **[Usage Examples](11-usage-examples.md)** - Comprehensive usage guide with real-world examples
+12. **[Quick Start Guide](12-quick-start.md)** - Fast-track setup with intelligent training
+13. **[Complete Usage Guide](13-usage-guide.md)** - Detailed training and custom features guide
+
+### **🧠 NEW: Intelligent Training System**
+- **[Auto-Optimization](05-auto-optimization.md)** - Intelligent training features and configuration
+- **[Training Guide](04-training.md)** - Updated with early stopping and adaptive learning rate
 
 ## 🎯 **Quick Navigation**
 

@@ -39,8 +39,8 @@ impl LSTMModel {
     /// Create a new LSTM model
     pub fn new(config: LSTMConfig) -> Result<Self> {
         let training_config = TrainingConfig {
-            epochs: 100,
-            print_every: 100,
+            epochs: 1000, // Will be controlled by early stopping
+            print_every: 10,
             clip_gradient: Some(1.0),
         };
 
@@ -99,7 +99,369 @@ impl LSTMModel {
         Self::new(lstm_config)
     }
 
-    /// Train the model using the network and training config
+    /// Configure training parameters from TrainingConfig
+    pub fn configure_training(&mut self, vanga_config: &crate::config::TrainingConfig) {
+        // Extract epochs from config
+        let (max_epochs, use_early_stopping) = match &vanga_config.training_params.epochs {
+            crate::config::training::EpochConfig::Auto { max_epochs } => {
+                (*max_epochs as usize, true)
+            }
+            crate::config::training::EpochConfig::Fixed(epochs) => (*epochs as usize, false),
+        };
+
+        // Extract learning rate from config
+        let learning_rate = match &vanga_config.training_params.learning_rate {
+            crate::config::training::LearningRateConfig::Fixed(lr) => {
+                log::info!("Using FIXED learning rate: {:.6}", lr);
+                *lr
+            }
+            crate::config::training::LearningRateConfig::Adaptive { initial_lr } => {
+                log::info!(
+                    "Using ADAPTIVE learning rate starting at: {:.6}",
+                    initial_lr
+                );
+                *initial_lr
+            }
+            crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
+                log::info!("Using AUTO learning rate: {:.6} - {:.6}", min_lr, max_lr);
+                *max_lr // Start with max, will be reduced automatically
+            }
+        };
+
+        // Update rust-lstm training config
+        self.training_config.epochs = max_epochs;
+        self.training_config.print_every = if use_early_stopping { 10 } else { 50 }; // More frequent logging for early stopping
+
+        // Store learning rate for optimizer creation
+        self.config.learning_rate = learning_rate;
+
+        log::info!(
+            "✅ Training configured: epochs={}, lr={:.6}, early_stopping={}, print_every={}",
+            max_epochs,
+            learning_rate,
+            use_early_stopping,
+            self.training_config.print_every
+        );
+    }
+
+    /// Train with intelligent early stopping
+    pub async fn train_with_early_stopping(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &Array2<f64>,
+        vanga_config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        // Configure training parameters
+        self.configure_training(vanga_config);
+
+        // Determine if we should use early stopping
+        let (max_epochs, use_early_stopping) = match &vanga_config.training_params.epochs {
+            crate::config::training::EpochConfig::Auto { max_epochs } => {
+                (*max_epochs as usize, true)
+            }
+            crate::config::training::EpochConfig::Fixed(epochs) => (*epochs as usize, false),
+        };
+
+        let patience = vanga_config.training_params.early_stopping_patience;
+        let validation_split = vanga_config.training_params.validation_split;
+
+        log::info!(
+            "Starting intelligent training: max_epochs={}, early_stopping={}, patience={}, validation_split={:.2}",
+            max_epochs, use_early_stopping, patience, validation_split
+        );
+
+        if use_early_stopping && validation_split > 0.0 {
+            // Split data for validation-based early stopping
+            self.train_with_validation_monitoring(sequences, targets, vanga_config)
+                .await
+        } else {
+            // Use standard training (may still have fixed epoch limit)
+            self.train(sequences, targets).await
+        }
+    }
+
+    /// Calculate MSE loss between predictions and targets
+    fn calculate_mse_loss(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
+        let diff = predictions - targets;
+        let squared_diff = &diff * &diff;
+        squared_diff.mean().unwrap_or(f64::INFINITY)
+    }
+
+    /// Continue training with new data (incremental learning)
+    pub async fn continue_training(
+        &mut self,
+        new_sequences: &Array3<f64>,
+        new_targets: &Array2<f64>,
+        vanga_config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        log::info!(
+            "🔄 INCREMENTAL TRAINING: Adding {} new samples to existing model",
+            new_sequences.shape()[0]
+        );
+
+        // Check if model is already trained
+        if self.network.is_none() {
+            return Err(crate::utils::error::VangaError::ModelError(
+                "Cannot continue training: model not initialized. Use train_with_early_stopping() first.".to_string()
+            ));
+        }
+
+        // Configure training with typically lower learning rate for incremental training
+        let mut incremental_config = vanga_config.clone();
+
+        // Reduce learning rate for incremental training to preserve existing knowledge
+        incremental_config.training_params.learning_rate = match &vanga_config
+            .training_params
+            .learning_rate
+        {
+            crate::config::training::LearningRateConfig::Fixed(lr) => {
+                let reduced_lr = lr * 0.1; // 10x smaller for incremental
+                log::info!(
+                    "🔽 Reducing learning rate for incremental training: {:.6} → {:.6}",
+                    lr,
+                    reduced_lr
+                );
+                crate::config::training::LearningRateConfig::Fixed(reduced_lr)
+            }
+            crate::config::training::LearningRateConfig::Adaptive { initial_lr } => {
+                let reduced_lr = initial_lr * 0.1;
+                log::info!(
+                    "🔽 Reducing initial learning rate for incremental training: {:.6} → {:.6}",
+                    initial_lr,
+                    reduced_lr
+                );
+                crate::config::training::LearningRateConfig::Adaptive {
+                    initial_lr: reduced_lr,
+                }
+            }
+            crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
+                let reduced_max = max_lr * 0.1;
+                let reduced_min = min_lr * 0.1;
+                log::info!("🔽 Reducing learning rate range for incremental training: {:.6}-{:.6} → {:.6}-{:.6}",
+                    min_lr, max_lr, reduced_min, reduced_max);
+                crate::config::training::LearningRateConfig::Auto {
+                    min_lr: reduced_min,
+                    max_lr: reduced_max,
+                }
+            }
+        };
+
+        // Use smaller patience for incremental training (faster convergence expected)
+        incremental_config.training_params.early_stopping_patience =
+            (vanga_config.training_params.early_stopping_patience / 2).max(10);
+
+        log::info!(
+            "⚙️  Incremental training config: patience={}, reduced_lr=true",
+            incremental_config.training_params.early_stopping_patience
+        );
+
+        // Train with the new data using reduced learning rate
+        self.train_with_early_stopping(new_sequences, new_targets, &incremental_config)
+            .await?;
+
+        log::info!("✅ Incremental training completed successfully!");
+        Ok(())
+    }
+
+    /// Append new data to existing training data and retrain (alternative approach)
+    pub async fn retrain_with_appended_data(
+        &mut self,
+        existing_sequences: &Array3<f64>,
+        existing_targets: &Array2<f64>,
+        new_sequences: &Array3<f64>,
+        new_targets: &Array2<f64>,
+        vanga_config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        log::info!(
+            "🔄 RETRAIN WITH APPENDED DATA: {} existing + {} new = {} total samples",
+            existing_sequences.shape()[0],
+            new_sequences.shape()[0],
+            existing_sequences.shape()[0] + new_sequences.shape()[0]
+        );
+
+        // Combine existing and new data
+        let combined_sequences = ndarray::concatenate(
+            ndarray::Axis(0),
+            &[existing_sequences.view(), new_sequences.view()],
+        )
+        .map_err(|e| {
+            crate::utils::error::VangaError::DataError(format!(
+                "Failed to concatenate sequences: {}",
+                e
+            ))
+        })?;
+        let combined_targets = ndarray::concatenate(
+            ndarray::Axis(0),
+            &[existing_targets.view(), new_targets.view()],
+        )
+        .map_err(|e| {
+            crate::utils::error::VangaError::DataError(format!(
+                "Failed to concatenate targets: {}",
+                e
+            ))
+        })?;
+
+        log::info!(
+            "📊 Combined dataset: {} samples x {} features x {} sequence_length",
+            combined_sequences.shape()[0],
+            combined_sequences.shape()[2],
+            combined_sequences.shape()[1]
+        );
+
+        // Train on combined dataset (this preserves all historical patterns)
+        self.train_with_early_stopping(&combined_sequences, &combined_targets, vanga_config)
+            .await?;
+
+        log::info!("✅ Retrain with appended data completed successfully!");
+        Ok(())
+    }
+
+    /// Train with validation monitoring and adaptive learning rate
+    async fn train_with_validation_monitoring(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &Array2<f64>,
+        vanga_config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        let validation_split = vanga_config.training_params.validation_split;
+        let patience = vanga_config.training_params.early_stopping_patience;
+
+        // Determine learning rate strategy
+        let lr_strategy = &vanga_config.training_params.learning_rate;
+        let adaptive_lr = matches!(
+            lr_strategy,
+            crate::config::training::LearningRateConfig::Adaptive { .. }
+                | crate::config::training::LearningRateConfig::Auto { .. }
+        );
+
+        // Split data
+        let total_samples = sequences.shape()[0];
+        let train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
+
+        log::info!(
+            "📊 Data split: {} total → {} training ({:.1}%), {} validation ({:.1}%)",
+            total_samples,
+            train_samples,
+            (train_samples as f64 / total_samples as f64) * 100.0,
+            total_samples - train_samples,
+            (validation_split * 100.0)
+        );
+
+        // Create training and validation sets
+        let train_sequences = sequences
+            .slice(ndarray::s![0..train_samples, .., ..])
+            .to_owned();
+        let train_targets = targets.slice(ndarray::s![0..train_samples, ..]).to_owned();
+
+        let val_sequences = sequences
+            .slice(ndarray::s![train_samples.., .., ..])
+            .to_owned();
+        let val_targets = targets.slice(ndarray::s![train_samples.., ..]).to_owned();
+
+        // Early stopping and adaptive learning rate variables
+        let original_epochs = self.training_config.epochs;
+        let mut current_lr = self.config.learning_rate;
+        let mut current_epochs = 50.min(original_epochs); // Start with smaller batches
+        let mut best_val_loss = f64::INFINITY;
+        let mut patience_counter = 0;
+        let mut lr_reduction_counter = 0;
+        let lr_patience = (patience / 3).max(10); // Reduce LR more frequently than early stopping
+
+        log::info!(
+            "🧠 Starting intelligent training: adaptive_lr={}, lr_patience={}, early_stop_patience={}",
+            adaptive_lr, lr_patience, patience
+        );
+
+        loop {
+            // Update learning rate in config for this training batch
+            self.config.learning_rate = current_lr;
+            self.training_config.epochs = current_epochs;
+
+            log::info!(
+                "🏃 Training batch: epochs={}, learning_rate={:.6}",
+                current_epochs,
+                current_lr
+            );
+
+            // Train on training data
+            self.train(&train_sequences, &train_targets).await?;
+
+            // Evaluate on validation data
+            let val_predictions = self.predict(&val_sequences).await?;
+            let val_loss = self.calculate_mse_loss(&val_predictions, &val_targets);
+
+            log::info!("📈 Validation loss: {:.6}", val_loss);
+
+            // Check for improvement
+            if val_loss < best_val_loss {
+                let improvement = ((best_val_loss - val_loss) / best_val_loss) * 100.0;
+                best_val_loss = val_loss;
+                patience_counter = 0;
+                lr_reduction_counter = 0;
+                log::info!(
+                    "✅ NEW BEST validation loss: {:.6} (improved by {:.2}%)",
+                    best_val_loss,
+                    improvement
+                );
+            } else {
+                patience_counter += 1;
+                lr_reduction_counter += 1;
+
+                log::info!(
+                    "📉 No improvement: patience={}/{}, lr_patience={}/{}",
+                    patience_counter,
+                    patience,
+                    lr_reduction_counter,
+                    lr_patience
+                );
+
+                // Adaptive learning rate reduction
+                if adaptive_lr && lr_reduction_counter >= lr_patience && current_lr > 1e-6 {
+                    let old_lr = current_lr;
+                    current_lr *= 0.5; // Reduce by half
+                    lr_reduction_counter = 0;
+                    log::info!(
+                        "🔽 REDUCING learning rate: {:.6} → {:.6}",
+                        old_lr,
+                        current_lr
+                    );
+                }
+
+                // Early stopping check
+                if patience_counter >= patience {
+                    log::info!(
+                        "🛑 EARLY STOPPING triggered at {} total epochs! Best validation loss: {:.6}",
+                        current_epochs, best_val_loss
+                    );
+                    break;
+                }
+            }
+
+            // Check if we've reached max epochs
+            if current_epochs >= original_epochs {
+                log::info!("⏰ Reached maximum epochs: {}", original_epochs);
+                break;
+            }
+
+            // Increase epochs for next iteration
+            let next_epochs = (current_epochs + 50).min(original_epochs);
+            log::info!(
+                "📈 Continuing training: {} → {} epochs",
+                current_epochs,
+                next_epochs
+            );
+            current_epochs = next_epochs;
+        }
+
+        log::info!(
+            "🎯 Training completed! Final validation loss: {:.6}, final learning rate: {:.6}",
+            best_val_loss,
+            current_lr
+        );
+
+        Ok(())
+    }
+
     pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
         log::info!(
             "Training LSTM model with {} input features",

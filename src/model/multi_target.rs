@@ -61,6 +61,128 @@ impl MultiTargetLSTMModel {
         })
     }
 
+    /// Train all target models with intelligent early stopping (ONLY if configured)
+    pub async fn train_with_early_stopping(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &Array2<f64>,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        // Determine training strategy from configuration
+        let (use_early_stopping, max_epochs) = match &config.training_params.epochs {
+            crate::config::training::EpochConfig::Auto { max_epochs } => (true, *max_epochs),
+            crate::config::training::EpochConfig::Fixed(epochs) => (false, *epochs),
+        };
+
+        let validation_split = config.training_params.validation_split;
+
+        if use_early_stopping && validation_split > 0.0 {
+            log::info!(
+                "🧠 INTELLIGENT multi-target training: {} models with early stopping (validation_split={:.1}%)",
+                self.models.len(), validation_split * 100.0
+            );
+        } else {
+            log::info!(
+                "📊 STANDARD multi-target training: {} models with fixed epochs={}",
+                self.models.len(),
+                max_epochs
+            );
+        }
+
+        // Validate input dimensions
+        if targets.shape()[1] != self.num_targets {
+            return Err(VangaError::ModelError(format!(
+                "Target dimension mismatch: expected {} targets, got {}",
+                self.num_targets,
+                targets.shape()[1]
+            )));
+        }
+
+        // Train each target model with the configured approach
+        for (i, model) in self.models.iter_mut().enumerate() {
+            let target_name = &self.target_names[i];
+            log::info!(
+                "Training model {}/{}: {}",
+                i + 1,
+                self.num_targets,
+                target_name
+            );
+
+            // Extract single target column for this model
+            let single_target = targets.column(i).into_owned().insert_axis(ndarray::Axis(1));
+
+            // Use the appropriate training method based on configuration
+            if use_early_stopping && validation_split > 0.0 {
+                // Use intelligent early stopping
+                model
+                    .train_with_early_stopping(sequences, &single_target, config)
+                    .await?;
+            } else {
+                // Use standard training with configured epochs/learning rate
+                model.configure_training(config);
+                model.train(sequences, &single_target).await?;
+            }
+
+            log::info!("✅ Completed training for target: {}", target_name);
+        }
+
+        log::info!("🎉 Multi-target training completed successfully!");
+        Ok(())
+    }
+
+    /// Continue training with new data for all target models (incremental learning)
+    pub async fn continue_training(
+        &mut self,
+        new_sequences: &Array3<f64>,
+        new_targets: &Array2<f64>,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        log::info!(
+            "🔄 INCREMENTAL multi-target training: {} models with {} new samples",
+            self.models.len(),
+            new_sequences.shape()[0]
+        );
+
+        // Validate input dimensions
+        if new_targets.shape()[1] != self.num_targets {
+            return Err(VangaError::ModelError(format!(
+                "Target dimension mismatch: expected {} targets, got {}",
+                self.num_targets,
+                new_targets.shape()[1]
+            )));
+        }
+
+        // Continue training for each target model
+        for (i, model) in self.models.iter_mut().enumerate() {
+            let target_name = &self.target_names[i];
+            log::info!(
+                "Incremental training model {}/{}: {}",
+                i + 1,
+                self.num_targets,
+                target_name
+            );
+
+            // Extract single target column for this model
+            let single_target = new_targets
+                .column(i)
+                .into_owned()
+                .insert_axis(ndarray::Axis(1));
+
+            // Continue training with new data
+            model
+                .continue_training(new_sequences, &single_target, config)
+                .await?;
+
+            log::info!(
+                "✅ Incremental training completed for target: {}",
+                target_name
+            );
+        }
+
+        log::info!("🎉 Multi-target incremental training completed successfully!");
+        Ok(())
+    }
+
     /// Train all target models with the provided data
     pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
         log::info!(

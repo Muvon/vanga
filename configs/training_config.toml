@@ -1,0 +1,78 @@
+# VANGA Training Configuration Template
+# This file controls LSTM training behavior, epochs, learning rate, and early stopping
+
+[training_params]
+# EPOCH CONFIGURATION - Choose one approach:
+
+# Option 1: Automatic early stopping (RECOMMENDED for quality)
+# Trains until validation loss stops improving, up to max_epochs limit
+epochs = { Auto = { max_epochs = 1000 } }
+
+# Option 2: Fixed epochs (for reproducible research/testing)
+# epochs = { Fixed = 100 }
+
+# LEARNING RATE CONFIGURATION - Choose one approach:
+
+# Option 1: Fixed learning rate (simple, predictable)
+learning_rate = { Fixed = 0.001 }
+
+# Option 2: Adaptive learning rate (starts high, reduces when needed)
+# learning_rate = { Adaptive = { initial_lr = 0.01 } }
+
+# Option 3: Auto learning rate optimization (experimental)
+# learning_rate = { Auto = { min_lr = 0.0001, max_lr = 0.01 } }
+
+# BATCH SIZE CONFIGURATION
+# Option 1: Auto batch size (optimizes based on data size and memory)
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+
+# Option 2: Fixed batch size
+# batch_size = { Fixed = 128 }
+
+# VALIDATION AND EARLY STOPPING
+validation_split = 0.2          # 20% of data for validation (0.0 to disable)
+test_split = 0.1               # 10% of data for final testing
+early_stopping_patience = 50   # Stop after 50 epochs without improvement
+gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding gradients)
+
+[data_config]
+# Data preprocessing configuration
+normalization = "Robust"                    # Robust, MinMax, Standard, Quantile
+sequence_overlap = 0.8                      # Overlap between training sequences
+missing_data_strategy = "Interpolate"       # Interpolate, Forward, Drop
+
+[data_config.outlier_handling]
+enabled = true
+method = "ModifiedZScore"                   # ModifiedZScore, IQR, Isolation
+threshold = 3.5
+
+[data_config.feature_selection]
+enabled = true
+max_features = 100                          # Limit total features for performance
+correlation_threshold = 0.95               # Remove highly correlated features
+importance_threshold = 0.001               # Minimum feature importance to keep
+
+[optimization_config]
+# Hyperparameter optimization settings
+enabled = false                             # Enable automatic hyperparameter tuning
+trials = 50                                # Number of optimization trials
+metric = "ValidationLoss"                  # ValidationLoss, TrainingLoss, Accuracy
+
+# USAGE EXAMPLES:
+#
+# 1. QUALITY-FIRST TRAINING (Recommended):
+#    epochs = { Auto = { max_epochs = 1000 } }
+#    learning_rate = { Adaptive = { initial_lr = 0.01 } }
+#    validation_split = 0.2
+#    early_stopping_patience = 50
+#
+# 2. FAST FIXED TRAINING (Testing/Development):
+#    epochs = { Fixed = 100 }
+#    learning_rate = { Fixed = 0.001 }
+#    validation_split = 0.0
+#
+# 3. RESEARCH/REPRODUCIBLE:
+#    epochs = { Fixed = 500 }
+#    learning_rate = { Fixed = 0.001 }
+#    validation_split = 0.2
+#    batch_size = { Fixed = 128 }

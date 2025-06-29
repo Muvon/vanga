@@ -1,0 +1,7 @@
+# Research Training Config
+[training_params]
+epochs = { Fixed = 500 }
+learning_rate = { Fixed = 0.001 }
+validation_split = 0.2
+early_stopping_patience = 100
+gradient_clip = 1.0

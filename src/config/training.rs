@@ -186,16 +186,16 @@ impl Default for TrainingConfig {
 impl Default for TrainingParams {
     fn default() -> Self {
         Self {
-            epochs: EpochConfig::Auto { max_epochs: 1000 },
+            epochs: EpochConfig::Auto { max_epochs: 1000 }, // Auto early stopping by default
             batch_size: BatchSizeConfig::Auto {
                 min_size: 32,
                 max_size: 512,
             },
-            learning_rate: LearningRateConfig::Adaptive { initial_lr: 0.001 },
-            validation_split: 0.2,
+            learning_rate: LearningRateConfig::Adaptive { initial_lr: 0.001 }, // Adaptive by default
+            validation_split: 0.2, // 20% validation for early stopping
             test_split: 0.1,
-            early_stopping_patience: 50,
-            gradient_clip: Some(1.0),
+            early_stopping_patience: 50, // Reasonable patience
+            gradient_clip: Some(1.0),    // Prevent exploding gradients
         }
     }
 }
