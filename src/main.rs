@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use vanga::api;
-use vanga::model::lstm_simple::LSTMModel;
-use vanga::{PredictionConfig, Result, TrainingConfig, VangaError};
+use vanga::config::{PredictionConfig, TrainingConfig};
+use vanga::utils::error::{Result, VangaError};
 
 /// Training command parameters
 struct TrainParams {
@@ -298,12 +298,16 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
                 match api::train_model(symbol_config.clone()).await {
                     Ok(model) => {
                         log::info!("Successfully trained model for {}", sym);
-                        // Save model with symbol-specific name
-                        let model_path = format!("./models/{}_model.bin", sym);
+
+                        // Save model with consistent path
+                        let model_path =
+                            vanga::utils::model_path::get_multi_target_model_path(&sym);
+                        let _ = vanga::utils::model_path::ensure_models_dir_exists();
+
                         if let Err(e) = model.save(&model_path) {
                             log::error!("Failed to save model for {}: {}", sym, e);
                         } else {
-                            log::info!("Model saved to: {}", model_path);
+                            log::info!("💾 Model saved to: {}", model_path.display());
                         }
                     }
                     Err(e) => {
@@ -360,14 +364,14 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         }
 
         // Train the model using the API
-        let model = crate::api::train_model(config.clone()).await?;
+        let model = vanga::api::train_model(config.clone()).await?;
 
-        // Save the trained model
-        let model_path = format!("./models/{}_model.bin", config.symbol);
-        std::fs::create_dir_all("./models")?;
+        // Save model with consistent path
+        let model_path = vanga::utils::model_path::get_multi_target_model_path(&config.symbol);
+        let _ = vanga::utils::model_path::ensure_models_dir_exists();
         model.save(&model_path)?;
 
-        log::info!("Model saved to: {}", model_path);
+        log::info!("💾 Model saved to: {}", model_path.display());
         log::info!("Training completed successfully");
     }
 
@@ -418,32 +422,28 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
             config = config.min_confidence(min_confidence);
         }
 
-        // Load the trained model
-        let model_path = format!("./models/{}_model.bin", config.symbol);
-        let model = LSTMModel::load(&model_path)?;
+        // Load the trained model using consistent path
+        let model_path = vanga::utils::model_path::get_multi_target_model_path(&config.symbol);
+        let model = vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path)?;
 
-        // Make predictions using the API
-        let predictions = crate::api::predict(config.clone(), &model).await?;
+        // Make predictions using the multi-target API
+        let predictions = vanga::api::predict_multi_target(config.clone(), &model).await?;
 
         // Save predictions if output path specified
         if let Some(ref output_path) = config.output_path {
-            use vanga::output::formatter::{predictions_to_csv, predictions_to_json};
-
-            let output_content = match config.output_config.format {
-                vanga::config::prediction::OutputFormat::ProbabilityDistribution
-                | vanga::config::prediction::OutputFormat::ConfidenceInterval
-                | vanga::config::prediction::OutputFormat::All => {
-                    // Save as JSON for structured formats
-                    predictions_to_json(&predictions)?
-                }
-                vanga::config::prediction::OutputFormat::PointEstimate => {
-                    // Save as CSV for simple point estimates
-                    predictions_to_csv(&predictions)?
-                }
-            };
+            // For now, save multi-target predictions as JSON
+            let output_content = format!(
+                "{{\"symbol\":\"{}\",\"targets\":{:?},\"predictions\":{:?}}}",
+                predictions.symbol,
+                predictions.target_names,
+                predictions.predictions.as_slice().unwrap()
+            );
 
             std::fs::write(output_path.as_path(), output_content)?;
-            log::info!("Predictions saved to: {}", output_path.display());
+            log::info!(
+                "Multi-target predictions saved to: {}",
+                output_path.display()
+            );
         }
 
         log::info!("Prediction configuration: {:?}", config);

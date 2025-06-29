@@ -73,10 +73,9 @@ impl ModelTrainer {
         // CRITICAL FIX: Use MultiTargetLSTMModel instead of single-target model
         // This eliminates the 93% data loss issue
         let input_size = prepared_data.sequences.shape()[2]; // Number of features
-        let model_path = format!("./models/{}_multi_model", self.config.symbol); // Different path for multi-target
 
         let mut model = self
-            .get_or_create_multi_target_model(&model_path, input_size, target_names)
+            .get_or_create_multi_target_model(input_size, target_names)
             .await?;
 
         // Train the multi-target LSTM model with intelligent early stopping
@@ -89,9 +88,6 @@ impl ModelTrainer {
             .await?;
 
         // Save the trained multi-target model
-        log::info!("💾 Saving multi-target model to: {}", model_path);
-        model.save(&model_path)?;
-
         log::info!("✅ Multi-target model training completed successfully!");
         Ok(model)
     }
@@ -99,89 +95,17 @@ impl ModelTrainer {
     /// Get existing multi-target model or create new one based on training configuration
     async fn get_or_create_multi_target_model(
         &self,
-        model_path: &str,
         input_size: usize,
         target_names: Vec<String>,
     ) -> Result<MultiTargetLSTMModel> {
-        let model_exists = std::path::Path::new(&format!("{}.meta", model_path)).exists();
-
-        match (self.config.fresh_training, self.config.continue_training, model_exists) {
-            // Fresh training requested - always create new model
-            (true, _, _) => {
-                log::info!("🆕 Fresh training requested - creating new multi-target model");
-                MultiTargetLSTMModel::new(&self.config.model_config, input_size, target_names)
-            }
-
-            // Continue training requested - must have existing model
-            (false, true, false) => {
-                Err(VangaError::ModelError(format!(
-                    "Continue training requested but no existing multi-target model found for symbol: {}. Train without --continue-training first, or use --fresh to start new training.",
-                    self.config.symbol
-                )))
-            }
-            (false, true, true) => {
-                log::info!("📂 Continue training requested - loading existing multi-target model from: {}", model_path);
-                let model = MultiTargetLSTMModel::load(model_path)?;
-
-                // Validate model compatibility
-                if model.get_input_size() != input_size {
-                    return Err(VangaError::ConfigError(format!(
-                        "Model input size mismatch: existing model expects {} features, but data has {} features. Use --fresh to retrain with new data structure.",
-                        model.get_input_size(),
-                        input_size
-                    )));
-                }
-
-                if model.get_num_targets() != target_names.len() {
-                    return Err(VangaError::ConfigError(format!(
-                        "Model target count mismatch: existing model has {} targets, but config needs {} targets. Use --fresh to retrain with new target configuration.",
-                        model.get_num_targets(),
-                        target_names.len()
-                    )));
-                }
-
-                Ok(model)
-            }
-
-            // Default behavior - continue if model exists, otherwise create new
-            (false, false, true) => {
-                log::info!("📂 Existing multi-target model found - continuing training from: {}", model_path);
-                match MultiTargetLSTMModel::load(model_path) {
-                    Ok(model) => {
-                        // Check compatibility, fallback to fresh if incompatible
-                        if model.get_input_size() != input_size {
-                            log::warn!(
-                                "Model input size mismatch (expected {}, got {}). Creating fresh multi-target model.",
-                                model.get_input_size(),
-                                input_size
-                            );
-                            MultiTargetLSTMModel::new(&self.config.model_config, input_size, target_names)
-                        } else if model.get_num_targets() != target_names.len() {
-                            log::warn!(
-                                "Model target count mismatch (expected {}, got {}). Creating fresh multi-target model.",
-                                model.get_num_targets(),
-                                target_names.len()
-                            );
-                            MultiTargetLSTMModel::new(&self.config.model_config, input_size, target_names)
-                        } else {
-                            Ok(model)
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to load existing multi-target model: {}. Creating fresh model.", e);
-                        MultiTargetLSTMModel::new(&self.config.model_config, input_size, target_names)
-                    }
-                }
-            }
-            (false, false, false) => {
-                log::info!("🆕 No existing multi-target model found - creating new model");
-                MultiTargetLSTMModel::new(&self.config.model_config, input_size, target_names)
-            }
-        }
+        // Create new model since we're not loading from file anymore
+        // The caller (main.rs) will handle loading/saving based on training config
+        log::info!("🆕 Creating new multi-target model for training");
+        MultiTargetLSTMModel::new(&self.config.model_config, input_size, target_names)
     }
 }
 
-/// High-level training function
+/// High-level training function  
 pub async fn train_model(config: TrainingConfig) -> Result<MultiTargetLSTMModel> {
     let trainer = ModelTrainer::new(config);
     trainer.train().await
