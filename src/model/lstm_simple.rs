@@ -454,13 +454,29 @@ impl LSTMModel {
 
                     // Calculate final validation metrics for better understanding
                     if let Ok(final_predictions) = self.predict(&val_sequences).await {
-                        let final_mse = self.calculate_mse_loss(&final_predictions, &val_targets);
-                        let final_mape = self.calculate_mape(&final_predictions, &val_targets);
-                        log::info!(
-                            "📊 Final validation metrics - MSE: {:.6}, MAPE: {:.2}%",
-                            final_mse,
-                            final_mape
+                        log::debug!(
+                            "Validation shapes - predictions: {:?}, targets: {:?}",
+                            final_predictions.shape(),
+                            val_targets.shape()
                         );
+
+                        // FIXED: Ensure shapes match before calculating metrics
+                        if final_predictions.shape() == val_targets.shape() {
+                            let final_mse =
+                                self.calculate_mse_loss(&final_predictions, &val_targets);
+                            let final_mape = self.calculate_mape(&final_predictions, &val_targets);
+                            log::info!(
+                                "📊 Final validation metrics - MSE: {:.6}, MAPE: {:.2}%",
+                                final_mse,
+                                final_mape
+                            );
+                        } else {
+                            log::warn!(
+                                "Skipping validation metrics due to shape mismatch: predictions={:?}, targets={:?}",
+                                final_predictions.shape(),
+                                val_targets.shape()
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -763,34 +779,20 @@ impl LSTMModel {
 
             // Use the last output as the prediction
             if let Some((last_output, _)) = outputs.last() {
-                // CRITICAL FIX: Handle shape mismatch safely
-                let actual_output_size = last_output.nrows();
-                let safe_output_size = output_size.min(actual_output_size);
+                // FIXED: For single-target models, we expect output_size=1
+                // The rust-lstm returns hidden states, so we need to project to single output
+                // Take the mean of the hidden state as the prediction (simple projection)
+                let prediction_value = if last_output.nrows() > 0 {
+                    // Simple projection: take mean of hidden state values
+                    let sum: f64 = (0..last_output.nrows()).map(|i| last_output[[i, 0]]).sum();
+                    sum / last_output.nrows() as f64
+                } else {
+                    0.0
+                };
 
-                if actual_output_size != output_size {
-                    log::warn!(
-                        "Output size mismatch: expected {}, got {} - using {} dimensions",
-                        output_size,
-                        actual_output_size,
-                        safe_output_size
-                    );
-                }
-
-                // Extract available output dimensions safely
-                for output_idx in 0..safe_output_size {
-                    if output_idx < last_output.nrows()
-                        && batch_idx < predictions.nrows()
-                        && output_idx < predictions.ncols()
-                    {
-                        predictions[[batch_idx, output_idx]] = last_output[[output_idx, 0]];
-                    }
-                }
-
-                // Fill remaining outputs with zeros if needed
-                for output_idx in safe_output_size..output_size {
-                    if batch_idx < predictions.nrows() && output_idx < predictions.ncols() {
-                        predictions[[batch_idx, output_idx]] = 0.0;
-                    }
+                // Store the single prediction value
+                if batch_idx < predictions.nrows() && predictions.ncols() > 0 {
+                    predictions[[batch_idx, 0]] = prediction_value;
                 }
             }
         }

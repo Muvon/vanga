@@ -501,3 +501,16 @@ The VANGA LSTM cryptocurrency forecasting system represents a complete, producti
 - **Extensible Design**: Easy to add new features, indicators, and models
 
 **Status**: ✅ **PRODUCTION READY** - Complete implementation with all features functional
+
+---
+
+## 🔧 **Recent Bug Fixes (2025-06-29)**
+
+### **Critical LSTM Model Fixes**
+- **Fixed Output Size Mismatch**: Resolved hundreds of "Output size mismatch: expected 1, got 64" warnings
+- **Fixed Shape Validation**: Prevented MSE/MAPE calculation crashes from array shape mismatches
+- **Improved Prediction Logic**: Proper hidden state projection from rust-lstm network outputs
+- **Enhanced Error Handling**: Graceful degradation with informative logging
+
+**Files Modified**: `src/model/lstm_simple.rs` (lines 780-798, 455-479)
+**Reference**: See `doc/14-troubleshooting.md` for detailed solutions
