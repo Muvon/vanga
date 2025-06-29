@@ -45,6 +45,10 @@ impl MultiTargetPredictor {
             prepared_data.sequences.shape()[2]
         );
 
+        // Capture metadata for later use
+        let input_feature_count = prepared_data.sequences.shape()[2];
+        let sequence_length = prepared_data.sequences.shape()[1];
+
         // Validate input compatibility with model
         if prepared_data.sequences.shape()[2] != model.get_input_size() {
             return Err(VangaError::ModelError(format!(
@@ -61,12 +65,14 @@ impl MultiTargetPredictor {
         );
         let raw_predictions = model.predict(&prepared_data.sequences).await?;
 
-        // Format predictions with target names
-        let predictions = MultiTargetPredictions::new(
+        // Format predictions with target names and metadata
+        let predictions = MultiTargetPredictions::new_with_metadata(
             raw_predictions,
             model.get_target_names().to_vec(),
             self.config.symbol.clone(),
             current_price,
+            input_feature_count,
+            sequence_length,
         );
 
         log::info!("✅ Multi-target predictions completed successfully");
@@ -116,6 +122,10 @@ pub struct MultiTargetPredictions {
     pub symbol: String,
     /// Current price at prediction time
     pub current_price: f64,
+    /// Number of input features used
+    pub input_feature_count: usize,
+    /// Sequence length used for prediction
+    pub sequence_length: usize,
 }
 
 impl MultiTargetPredictions {
@@ -131,6 +141,27 @@ impl MultiTargetPredictions {
             target_names,
             symbol,
             current_price,
+            input_feature_count: 0,
+            sequence_length: 0,
+        }
+    }
+
+    /// Create new multi-target predictions with metadata
+    pub fn new_with_metadata(
+        predictions: Array2<f64>,
+        target_names: Vec<String>,
+        symbol: String,
+        current_price: f64,
+        input_feature_count: usize,
+        sequence_length: usize,
+    ) -> Self {
+        Self {
+            predictions,
+            target_names,
+            symbol,
+            current_price,
+            input_feature_count,
+            sequence_length,
         }
     }
 
@@ -187,21 +218,52 @@ impl MultiTargetPredictions {
         // Extract horizon from config or use default
         let horizon = config.horizon.as_deref().unwrap_or("1h");
 
-        // Format predictions using existing formatter
-        let structured_predictions = formatter.format_predictions(
-            &self.predictions,
-            &self.symbol,
-            horizon,
-            self.current_price,
-            None, // PreparedTargets not available in prediction context
-        )?;
+        // Create structured predictions with correct metadata
+        let mut results = Vec::new();
+
+        for batch_idx in 0..self.predictions.nrows() {
+            let mut result = PredictionResult::new_with_metadata(
+                self.symbol.clone(),
+                horizon.to_string(),
+                self.current_price,
+                self.input_feature_count,
+                self.sequence_length,
+            );
+
+            // Extract predictions for this batch
+            let batch_predictions = self.predictions.row(batch_idx);
+
+            // Convert raw outputs to structured predictions
+            if !batch_predictions.is_empty() {
+                let price_level_prob = batch_predictions[0];
+                result = result.with_price_levels(
+                    formatter
+                        .create_price_level_prediction(price_level_prob, self.current_price)?,
+                );
+            }
+
+            if batch_predictions.len() >= 2 {
+                let direction_prob = batch_predictions[1];
+                result =
+                    result.with_direction(formatter.create_direction_prediction(direction_prob)?);
+            }
+
+            if batch_predictions.len() >= 3 {
+                let volatility_prob = batch_predictions[2];
+                result = result
+                    .with_volatility(formatter.create_volatility_prediction(volatility_prob)?);
+            }
+
+            result = result.with_confidence(0.7); // Default confidence
+            results.push(result);
+        }
 
         log::info!(
             "✅ Successfully converted {} raw predictions to structured format",
-            structured_predictions.len()
+            results.len()
         );
 
-        Ok(structured_predictions)
+        Ok(results)
     }
 
     /// Get all predictions for a specific sample

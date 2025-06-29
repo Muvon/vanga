@@ -82,16 +82,25 @@ impl OutputFormatter {
         let mut results = Vec::new();
 
         // Calculate confidence based on target distribution balance if available
-        let base_confidence = if let Some(targets) = targets_config {
-            calculate_target_based_confidence(targets, horizon)
+        let base_confidence = if let Some(targets_data) = targets_config {
+            calculate_target_based_confidence(targets_data, horizon)
         } else {
             0.7 // Default confidence when no target statistics available
         };
 
         // For now, create one prediction result per batch
         for batch_idx in 0..raw_predictions.nrows() {
-            let mut result =
-                PredictionResult::new(symbol.to_string(), horizon.to_string(), current_price);
+            // Get actual feature count and sequence length from the prediction data
+            let feature_count = raw_predictions.ncols();
+            let sequence_length = 60; // Default LSTM sequence length since targets_config doesn't contain this info
+
+            let mut result = PredictionResult::new_with_metadata(
+                symbol.to_string(),
+                horizon.to_string(),
+                current_price,
+                feature_count,
+                sequence_length,
+            );
 
             // Extract predictions for this batch
             let batch_predictions = raw_predictions.row(batch_idx);
@@ -132,7 +141,7 @@ impl OutputFormatter {
 
     /// Create price level prediction from raw output
     /// Reuses the bin structure from ARCHITECTURE.md
-    fn create_price_level_prediction(
+    pub fn create_price_level_prediction(
         &self,
         raw_output: f64,
         current_price: f64,
@@ -190,7 +199,7 @@ impl OutputFormatter {
     }
 
     /// Create direction prediction from raw output
-    fn create_direction_prediction(&self, raw_output: f64) -> Result<DirectionPrediction> {
+    pub fn create_direction_prediction(&self, raw_output: f64) -> Result<DirectionPrediction> {
         // Convert raw output to probability (assuming sigmoid-like output)
         let up_probability = (raw_output + 1.0) / 2.0; // Normalize -1,1 to 0,1
         let down_probability = 1.0 - up_probability;
@@ -214,7 +223,7 @@ impl OutputFormatter {
     }
 
     /// Create volatility prediction from raw output
-    fn create_volatility_prediction(&self, raw_output: f64) -> Result<VolatilityPrediction> {
+    pub fn create_volatility_prediction(&self, raw_output: f64) -> Result<VolatilityPrediction> {
         // Convert raw output to volatility values
         let base_vol = (raw_output.abs() * 0.1).max(0.001); // Scale to reasonable volatility
 

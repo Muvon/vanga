@@ -163,8 +163,39 @@ impl PredictionResult {
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
                 generated_at: Utc::now(),
-                feature_count: 0,
-                sequence_length: 0,
+                feature_count: 0,   // Will be updated by formatter
+                sequence_length: 0, // Will be updated by formatter
+                data_quality: DataQuality {
+                    completeness: 1.0,
+                    freshness_hours: 0.0,
+                    market_condition: "NORMAL".to_string(),
+                },
+            },
+        }
+    }
+
+    /// Create a new prediction result with complete metadata
+    pub fn new_with_metadata(
+        symbol: String,
+        horizon: String,
+        current_price: f64,
+        feature_count: usize,
+        sequence_length: usize,
+    ) -> Self {
+        Self {
+            symbol,
+            timestamp: Utc::now().to_rfc3339(),
+            horizon,
+            current_price,
+            price_levels: None,
+            direction: None,
+            volatility: None,
+            confidence: 0.0,
+            metadata: PredictionMetadata {
+                model_version: "1.0.0".to_string(),
+                generated_at: Utc::now(),
+                feature_count,
+                sequence_length,
                 data_quality: DataQuality {
                     completeness: 1.0,
                     freshness_hours: 0.0,
