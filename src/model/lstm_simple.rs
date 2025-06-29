@@ -52,7 +52,11 @@ impl LSTMModel {
     }
 
     /// Create LSTM model from ModelConfig
-    pub fn from_model_config(model_config: &ModelConfig, input_size: usize) -> Result<Self> {
+    pub fn from_model_config(
+        model_config: &ModelConfig,
+        input_size: usize,
+        output_size: usize,
+    ) -> Result<Self> {
         // Extract sequence length from config
         let sequence_length = match &model_config.sequence_length {
             crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
@@ -88,9 +92,9 @@ impl LSTMModel {
         let lstm_config = LSTMConfig {
             input_size,
             hidden_size: effective_hidden_size,
-            output_size: 1,       // Default single output for backward compatibility
-            sequence_length: 60,  // Default sequence length
-            learning_rate: 0.001, // Default learning rate
+            output_size,
+            sequence_length: sequence_length, // Use actual sequence length from config
+            learning_rate: 0.001,             // Default learning rate
         };
         Self::new(lstm_config)
     }
@@ -111,16 +115,24 @@ impl LSTMModel {
         // Initialize network if not already done
         if self.network.is_none() {
             log::info!("Initializing LSTM network with config: {:?}", self.config);
+
+            // Use default 2 layers for now (we can make this configurable later)
+            let num_layers = 2;
+
+            // NOTE: rust-lstm network output size is determined by target data structure, not constructor
             let network = rust_lstm::models::lstm_network::LSTMNetwork::new(
                 self.config.input_size,
                 self.config.hidden_size,
-                2, // Default to 2 layers
+                num_layers,
             );
             self.network = Some(network);
         }
 
         // Convert Array3 sequences to Vec<Array2> format expected by rust-lstm
         let training_data = self.convert_sequences_to_training_data(sequences, targets)?;
+
+        // Update config to reflect actual output size (1 for rust-lstm compatibility)
+        self.config.output_size = 1;
 
         // Create trainer with MSE loss and SGD optimizer
         use rust_lstm::loss::MSELoss;
@@ -144,13 +156,26 @@ impl LSTMModel {
                 trainer.config.epochs
             );
 
-            // Train the model
-            trainer.train(&training_data, None); // No validation data for now
-
-            // Get the trained network back
-            self.network = Some(trainer.network);
-
-            log::info!("LSTM training completed successfully");
+            // Train the model with error handling
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                trainer.train(&training_data, None); // No validation data for now
+            })) {
+                Ok(_) => {
+                    // Get the trained network back
+                    self.network = Some(trainer.network);
+                    log::info!("LSTM training completed successfully");
+                }
+                Err(_) => {
+                    return Err(crate::utils::error::VangaError::ModelError(
+                        format!(
+                            "LSTM training failed due to shape incompatibility. Expected: input_size={}, output_size={}, sequence_length={}. Check that training data dimensions match model configuration.",
+                            self.config.input_size,
+                            self.config.output_size,
+                            self.config.sequence_length
+                        )
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -243,23 +268,39 @@ impl LSTMModel {
         })
     }
 
+    /// Get the input size of the model
+    pub fn get_input_size(&self) -> usize {
+        self.config.input_size
+    }
+
     /// Convert Array3 sequences to training data format for rust-lstm
     fn convert_sequences_to_training_data(
         &self,
         sequences: &Array3<f64>,
         targets: &Array2<f64>,
     ) -> Result<TrainingDataBatch> {
-        let mut training_data = Vec::new();
+        let mut training_data: Vec<(Vec<Array2<f64>>, Vec<Array2<f64>>)> = Vec::new();
 
         // sequences shape: [batch, sequence_length, features]
         // targets shape: [batch, output_size]
 
-        for batch_idx in 0..sequences.shape()[0] {
+        // Use minimum batch size to ensure alignment
+        let batch_size = std::cmp::min(sequences.shape()[0], targets.shape()[0]);
+
+        log::debug!(
+            "Converting training data: {} sequences, {} targets, using {} aligned samples",
+            sequences.shape()[0],
+            targets.shape()[0],
+            batch_size
+        );
+
+        for batch_idx in 0..batch_size {
             let mut input_sequence = Vec::new();
             let mut target_sequence = Vec::new();
 
-            // Extract sequence for this batch
+            // Extract sequence for this batch - fix input structure
             for seq_idx in 0..sequences.shape()[1] {
+                // Create input with proper shape (features, 1) to match official example
                 let mut input_timestep = Array2::zeros((sequences.shape()[2], 1));
                 for feature_idx in 0..sequences.shape()[2] {
                     input_timestep[[feature_idx, 0]] = sequences[[batch_idx, seq_idx, feature_idx]];
@@ -267,26 +308,40 @@ impl LSTMModel {
                 input_sequence.push(input_timestep);
             }
 
-            // Create target sequence (for now, use the final target for all timesteps)
-            for seq_idx in 0..sequences.shape()[1] {
-                let mut target_timestep = Array2::zeros((targets.shape()[1], 1));
-                for target_idx in 0..targets.shape()[1] {
-                    target_timestep[[target_idx, 0]] = targets[[batch_idx, target_idx]];
-                }
+            // CRITICAL FIX: rust-lstm expects single output per timestep, not multi-target
+            // We need to create separate training runs for each target or restructure approach
+            // For now, let's use only the first target to test basic functionality
+            for _seq_idx in 0..sequences.shape()[1] {
+                // Use only first target (single output) to match rust-lstm expectations
+                let target_value = targets[[batch_idx, 0]]; // Take first target only
+                let target_timestep = Array2::from_elem((1, 1), target_value);
                 target_sequence.push(target_timestep);
-
-                // Log progress for debugging sequence processing
-                if seq_idx % 10 == 0 {
-                    log::debug!(
-                        "Processing sequence {} of {} for batch {}",
-                        seq_idx,
-                        sequences.shape()[1],
-                        batch_idx
-                    );
-                }
             }
 
             training_data.push((input_sequence, target_sequence));
+        }
+
+        log::info!(
+            "Training data converted: {} samples with sequence length {} (using single target output instead of {})",
+            training_data.len(),
+            if !training_data.is_empty() { training_data[0].0.len() } else { 0 },
+            targets.shape()[1]
+        );
+
+        // Debug: Log the actual shapes we're working with
+        log::debug!(
+            "Input shapes: sequences={:?}, targets={:?}, batch_size={}",
+            sequences.shape(),
+            targets.shape(),
+            batch_size
+        );
+
+        // Log warning about multi-target limitation
+        if targets.shape()[1] > 1 {
+            log::warn!(
+                "rust-lstm library limitation: Using only first target out of {} targets. Consider implementing separate models for each target or using a different ML library for true multi-target support.",
+                targets.shape()[1]
+            );
         }
 
         Ok(training_data)

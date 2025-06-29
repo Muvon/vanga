@@ -17,6 +17,10 @@
 - **[Multi-Target System](doc/08-targets.md)** - Prediction targets and configuration
 - **[Evaluation](doc/09-evaluation.md)** - Model performance evaluation
 
+### **Usage Guides**
+- **[Quick Start Guide](doc/13-quick-start.md)** - Fast-track setup and usage
+- **[Complete Usage Guide](doc/14-usage-guide.md)** - Detailed training and custom features guide
+
 ### **Final Implementation**
 - **[Final Completion Status](doc/10-final-completion.md)** - 100% completion summary
 - **[Technical Implementation Guide](doc/11-technical-implementation.md)** - Complete technical specifications

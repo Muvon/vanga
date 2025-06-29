@@ -1,0 +1,39 @@
+# Minimal custom features configuration
+# Use this for simple custom feature setups
+
+[technical_indicators]
+enabled = true
+
+[technical_indicators.moving_averages]
+sma_periods = [5, 20, 50]
+ema_periods = [5, 20, 50]
+
+[technical_indicators.momentum]
+rsi_periods = [14]
+stochastic = true
+
+[market_microstructure]
+enabled = false  # Disable for minimal setup
+
+[volatility_features]
+enabled = false  # Disable for minimal setup
+
+[custom_features]
+# Simple approach: include all custom columns
+auto_include_all = true
+
+# Basic transformations for common features
+[custom_features.transformations]
+funding_rate = "PercentChange"
+social_sentiment = "ZScore"
+
+[engineering]
+[engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3]
+features_to_lag = ["close", "volume"]
+
+[selection]
+enabled = true
+max_features = 50
+correlation_threshold = 0.95

@@ -1,0 +1,175 @@
+# Advanced custom features configuration
+# Use this for sophisticated feature engineering with multiple data sources
+
+[technical_indicators]
+enabled = true
+
+[technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 100, 200]
+ema_periods = [5, 10, 20, 50, 100, 200]
+wma_periods = [10, 20, 50]
+hull_periods = [9, 21, 50]
+
+[technical_indicators.momentum]
+rsi_periods = [14, 21, 30]
+stochastic = true
+williams_r = true
+cci_periods = [14, 20, 30]
+momentum_periods = [10, 20, 30]
+
+[technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14, 21, 30]
+keltner_channels = true
+donchian_channels = true
+
+[technical_indicators.volume]
+obv = true
+volume_sma_periods = [10, 20, 50]
+mfi_periods = [14, 21]
+ad_line = true
+chaikin_oscillator = true
+
+[technical_indicators.trend]
+macd = { enabled = true, fast_period = 12, slow_period = 26, signal_period = 9 }
+adx_periods = [14, 21]
+parabolic_sar = true
+aroon = true
+
+[market_microstructure]
+enabled = true
+
+[market_microstructure.price_dynamics]
+velocity_periods = [5, 10, 20, 50]
+acceleration_periods = [5, 10, 20]
+jerk_periods = [5, 10]
+
+[market_microstructure.volume_price]
+vwap_periods = [20, 50, 100]
+volume_price_trend = true
+ease_of_movement = true
+negative_volume_index = true
+
+[market_microstructure.trade_intensity]
+enabled = true
+lookback_periods = [10, 20, 50, 100]
+intensity_metrics = ["TradesPerMinute", "VolumePerTrade", "AverageTradeSize"]
+
+[volatility_features]
+enabled = true
+
+[volatility_features.realized_volatility]
+periods = ["15m", "1h", "4h", "24h", "7d"]
+estimators = ["Standard", "RangeBasedYangZhang", "GarmanKlass"]
+
+[volatility_features.garch_features]
+enabled = true
+model_orders = [[1, 1], [1, 2], [2, 1], [2, 2]]
+conditional_volatility = true
+volatility_forecasts = true
+
+[volatility_features.clustering]
+enabled = true
+clustering_strength = true
+persistence_measures = true
+
+[volatility_features.regime_detection]
+enabled = true
+methods = ["VolatilityBased", "TrendBased", "MacroRegime"]
+sensitivity = 0.3
+
+[custom_features]
+auto_include_all = true
+
+# Comprehensive transformations for all feature types
+[custom_features.transformations]
+# Sentiment & Social
+social_sentiment = "ZScore"
+twitter_sentiment = "ZScore"
+reddit_sentiment = "ZScore"
+fear_greed_index = "MinMaxScale"
+google_trends = "MinMaxScale"
+news_sentiment = "ZScore"
+
+# On-Chain Metrics
+active_addresses = "Log"
+transaction_count = "Log"
+transaction_volume = "Log"
+nvt_ratio = "ZScore"
+mvrv_ratio = "ZScore"
+realized_cap = "Log"
+dormancy_flow = "ZScore"
+coin_days_destroyed = "Log"
+hash_rate = "Log"
+difficulty = "Log"
+
+# Market Microstructure
+funding_rate = "PercentChange"
+open_interest = "Log"
+liquidations = "RobustScale"
+whale_activity = "Log"
+large_transactions = "Log"
+exchange_inflows = "Log"
+exchange_outflows = "Log"
+
+# Cross-Market Data
+binance_volume = "Log"
+coinbase_volume = "Log"
+kraken_volume = "Log"
+coinbase_premium = "ZScore"
+kimchi_premium = "ZScore"
+grayscale_premium = "ZScore"
+
+# Derivatives
+futures_basis = "ZScore"
+options_put_call_ratio = "ZScore"
+implied_volatility = "ZScore"
+term_structure = "ZScore"
+
+# Macro Indicators
+dxy_index = "ZScore"
+gold_price = "PercentChange"
+silver_price = "PercentChange"
+sp500_close = "PercentChange"
+nasdaq_close = "PercentChange"
+vix_index = "ZScore"
+us_10y_yield = "ZScore"
+crude_oil = "PercentChange"
+
+[engineering]
+[engineering.polynomial_features]
+enabled = true
+degree = 2
+include_bias = false
+interaction_only = true
+
+[engineering.interaction_features]
+enabled = true
+max_interactions = 20
+feature_pairs = [
+    ["social_sentiment", "volume"],
+    ["funding_rate", "open_interest"],
+    ["nvt_ratio", "active_addresses"],
+    ["fear_greed_index", "vix_index"]
+]
+
+[engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3, 5, 10, 20, 50]
+features_to_lag = [
+    "close", "volume", "social_sentiment", "funding_rate",
+    "active_addresses", "nvt_ratio", "fear_greed_index"
+]
+
+[engineering.rolling_features]
+enabled = true
+window_sizes = [5, 10, 20, 50, 100]
+statistics = ["Mean", "Std", "Min", "Max", "Skew", "Kurt"]
+
+[selection]
+enabled = true
+max_features = 200
+correlation_threshold = 0.98
+importance_threshold = 0.0001
+methods = ["CorrelationFilter", "ImportanceBased", "RecursiveFeatureElimination"]
+keep_crypto_features = true

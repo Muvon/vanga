@@ -1,0 +1,123 @@
+# Minimal configuration for examples - only basic features
+[technical_indicators]
+enabled = true
+
+[technical_indicators.moving_averages]
+sma_periods = [5, 10]
+ema_periods = [5, 10]
+wma_periods = [5]
+hull_periods = [5]
+
+[technical_indicators.momentum]
+rsi_periods = [14]
+stochastic = true
+williams_r = true
+cci_periods = [14]
+momentum_periods = [10]
+
+[technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14]
+keltner_channels = false
+donchian_channels = false
+
+[technical_indicators.volume]
+obv = true
+volume_sma_periods = [10]
+mfi_periods = [14]
+ad_line = true
+chaikin_oscillator = false
+
+[technical_indicators.trend]
+macd = { enabled = true, fast_period = 12, slow_period = 26, signal_period = 9 }
+adx_periods = [14]
+parabolic_sar = false
+aroon = false
+
+[market_microstructure]
+enabled = false
+
+[market_microstructure.price_dynamics]
+velocity_periods = [5]
+acceleration_periods = [5]
+jerk_periods = [5]
+
+[market_microstructure.volume_price]
+vwap_periods = [20]
+volume_price_trend = false
+ease_of_movement = false
+negative_volume_index = false
+
+[market_microstructure.trade_intensity]
+enabled = false
+lookback_periods = [10]
+intensity_metrics = ["TradesPerMinute"]
+
+[market_microstructure.market_depth]
+bid_ask_spread_proxy = false
+order_book_imbalance_proxy = false
+market_impact_proxy = false
+
+[volatility_features]
+enabled = false
+
+[volatility_features.realized_volatility]
+periods = ["1h"]
+estimators = ["Standard"]
+
+[volatility_features.garch_features]
+enabled = false
+model_orders = [[1, 1]]
+conditional_volatility = false
+volatility_forecasts = false
+
+[volatility_features.clustering]
+enabled = false
+clustering_strength = false
+persistence_measures = false
+
+[volatility_features.regime_detection]
+enabled = false
+methods = ["VolatilityBased"]
+sensitivity = 0.5
+
+[custom_features]
+auto_include_all = true
+include_features = []
+exclude_features = []
+
+[custom_features.transformations]
+social_sentiment = "ZScore"
+funding_rate = "PercentChange"
+whale_activity = "Log"
+fear_greed_index = "MinMaxScale"
+
+[engineering]
+[engineering.polynomial_features]
+enabled = false
+degree = 2
+include_bias = false
+interaction_only = false
+
+[engineering.interaction_features]
+enabled = false
+max_interactions = 5
+feature_pairs = []
+
+[engineering.lag_features]
+enabled = false
+lag_periods = [1]
+features_to_lag = ["close"]
+
+[engineering.rolling_features]
+enabled = false
+window_sizes = [5]
+statistics = ["Mean"]
+
+[selection]
+enabled = true
+max_features = 30
+correlation_threshold = 0.95
+importance_threshold = 0.001
+methods = ["CorrelationFilter"]
+keep_crypto_features = true
