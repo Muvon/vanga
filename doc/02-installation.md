@@ -269,7 +269,7 @@ chmod +x ./target/release/vanga
 
 For additional help:
 
-1. **Check the documentation**: See [Usage Examples](12-usage-examples.md)
+1. **Check the documentation**: See [Usage Examples](11-usage-examples.md)
 2. **Review error messages**: VANGA provides detailed error information
 3. **Check system compatibility**: Ensure Rust 1.87.0+ is installed
 
@@ -298,8 +298,8 @@ After successful installation:
 
 1. **[Data Preparation](03-data-preparation.md)** - Format your cryptocurrency data
 2. **[Training](04-training.md)** - Train your first LSTM model
-3. **[Usage Examples](12-usage-examples.md)** - Comprehensive usage guide
-4. **[Technical Implementation](11-technical-implementation.md)** - Advanced technical details
+3. **[Usage Examples](11-usage-examples.md)** - Comprehensive usage guide
+4. **[Technical Implementation](10-technical-implementation.md)** - Advanced technical details
 
 ## Status
 

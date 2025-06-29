@@ -1,6 +1,6 @@
 # Example crypto features configuration for LSTM forecasting
 # This file demonstrates comprehensive feature engineering for cryptocurrency prediction
-# 
+#
 # USAGE EXAMPLES:
 # 1. Basic training: vanga train --symbol BTCUSDT --data data.csv
 # 2. Custom features: vanga train --symbol BTCUSDT --data data.csv --features-config configs/crypto_features.toml
@@ -10,7 +10,7 @@
 # CSV STRUCTURE REQUIREMENTS:
 # Required columns: timestamp, open, high, low, close, volume
 # Custom columns: Any additional numeric columns (sentiment, on-chain, macro, etc.)
-# 
+#
 # TRANSFORMATION TYPES:
 # - ZScore: Normalize to mean=0, std=1 (good for ratios, indices)
 # - MinMaxScale: Scale to [0,1] (good for bounded values like percentages)
@@ -112,25 +112,25 @@ include_features = [
     "social_sentiment",        # Twitter/Reddit sentiment scores
     "fear_greed_index",       # Crypto Fear & Greed Index (0-100)
     "google_trends",          # Google search trends
-    
+
     # On-Chain Metrics
     "active_addresses",       # Number of active addresses
     "transaction_count",      # Daily transaction count
     "nvt_ratio",             # Network Value to Transactions ratio
     "mvrv_ratio",            # Market Value to Realized Value ratio
     "realized_cap",          # Realized capitalization
-    
+
     # Market Microstructure
     "funding_rate",          # Perpetual futures funding rate
     "open_interest",         # Total open interest
     "liquidations",          # Liquidation volumes
     "whale_activity",        # Large holder activity
-    
+
     # Cross-Market Data
     "binance_volume",        # Volume from specific exchanges
     "coinbase_premium",      # Coinbase premium/discount
     "grayscale_premium",     # Grayscale trust premium
-    
+
     # Macro Indicators
     "dxy_index",            # US Dollar Index
     "gold_price",           # Gold price correlation

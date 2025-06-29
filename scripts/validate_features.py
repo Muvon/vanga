@@ -16,24 +16,24 @@ def validate_csv_structure(df):
     """Validate basic CSV structure and required columns."""
     required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
     missing_cols = [col for col in required_cols if col not in df.columns]
-    
+
     if missing_cols:
         return False, f"Missing required columns: {missing_cols}"
-    
+
     return True, "Basic structure valid"
 
 def analyze_custom_features(df):
     """Analyze custom features and provide recommendations."""
     required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
     custom_cols = [col for col in df.columns if col not in required_cols]
-    
+
     if not custom_cols:
         return {
             'status': 'no_custom_features',
             'message': 'No custom features detected - only OHLCV data',
             'recommendations': ['Consider adding sentiment, on-chain, or macro indicators']
         }
-    
+
     analysis = {
         'status': 'custom_features_found',
         'custom_features': custom_cols,
@@ -42,19 +42,19 @@ def analyze_custom_features(df):
         'transformations': {},
         'warnings': []
     }
-    
+
     for col in custom_cols:
         series = df[col]
-        
+
         # Check for missing values
         missing_pct = series.isnull().sum() / len(series) * 100
         if missing_pct > 10:
             analysis['warnings'].append(f"{col}: {missing_pct:.1f}% missing values")
-        
+
         # Analyze distribution and recommend transformations
         if series.dtype in ['int64', 'float64']:
             skewness = series.skew()
-            
+
             # Recommend transformations based on data characteristics
             if abs(skewness) > 2:
                 if series.min() > 0:
@@ -75,7 +75,7 @@ def analyze_custom_features(df):
             elif 'volume' in col.lower() or 'count' in col.lower() or 'address' in col.lower():
                 analysis['transformations'][col] = 'Log'
                 analysis['recommendations'].append(f"{col}: Volume/count data, recommend Log transformation")
-    
+
     return analysis
 
 def generate_config_template(analysis, output_path):
@@ -114,14 +114,14 @@ periods = ["1h", "4h", "24h"]
 auto_include_all = true
 
 """
-    
+
     if analysis.get('transformations'):
         template += "# Recommended transformations based on data analysis\n"
         template += "[custom_features.transformations]\n"
         for feature, transform in analysis['transformations'].items():
             template += f'{feature} = "{transform}"\n'
         template += "\n"
-    
+
     template += """[engineering]
 [engineering.lag_features]
 enabled = true
@@ -139,7 +139,7 @@ max_features = 80
 correlation_threshold = 0.95
 importance_threshold = 0.001
 """
-    
+
     with open(output_path, 'w') as f:
         f.write(template)
 
@@ -148,9 +148,9 @@ def main():
     parser.add_argument('csv_file', help='Path to CSV file to validate')
     parser.add_argument('--generate-config', help='Generate TOML config file', metavar='OUTPUT_PATH')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
-    
+
     args = parser.parse_args()
-    
+
     # Load and validate CSV
     try:
         df = pd.read_csv(args.csv_file)
@@ -158,7 +158,7 @@ def main():
     except Exception as e:
         print(f"❌ Error loading CSV: {e}")
         sys.exit(1)
-    
+
     # Validate structure
     valid, message = validate_csv_structure(df)
     if not valid:
@@ -166,10 +166,10 @@ def main():
         sys.exit(1)
     else:
         print(f"✅ {message}")
-    
+
     # Analyze custom features
     analysis = analyze_custom_features(df)
-    
+
     if analysis['status'] == 'no_custom_features':
         print(f"ℹ️  {analysis['message']}")
         for rec in analysis['recommendations']:
@@ -178,24 +178,24 @@ def main():
         print(f"✅ Found {analysis['feature_count']} custom features:")
         for feature in analysis['custom_features']:
             print(f"   - {feature}")
-        
+
         if analysis['warnings']:
             print("\n⚠️  Warnings:")
             for warning in analysis['warnings']:
                 print(f"   - {warning}")
-        
+
         if analysis['recommendations']:
             print("\n💡 Recommendations:")
             for rec in analysis['recommendations']:
                 print(f"   - {rec}")
-    
+
     # Generate config if requested
     if args.generate_config:
         generate_config_template(analysis, args.generate_config)
         print(f"\n📝 Generated configuration template: {args.generate_config}")
         print("   Edit the template as needed and use with:")
         print(f"   vanga train --symbol SYMBOL --data {args.csv_file} --features-config {args.generate_config}")
-    
+
     # Verbose output
     if args.verbose and analysis.get('transformations'):
         print("\n🔧 Recommended transformations:")

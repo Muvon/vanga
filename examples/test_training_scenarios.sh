@@ -89,7 +89,7 @@ echo "🎉 All training continuation scenarios completed successfully!"
 echo
 echo "Summary:"
 echo "✅ Fresh training works"
-echo "✅ Default continuation works" 
+echo "✅ Default continuation works"
 echo "✅ Explicit continuation works"
 echo "✅ Proper error handling for missing models"
 echo "✅ Fresh training override works"
