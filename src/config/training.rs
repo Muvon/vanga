@@ -263,4 +263,53 @@ impl TrainingConfig {
         self.features_config_path = Some(path.into());
         self
     }
+
+    /// Load training configuration from TOML file
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::utils::error::VangaError::IoError(format!("Failed to read config file: {}", e))
+        })?;
+
+        toml::from_str(&content).map_err(|e| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "Failed to parse config file: {}",
+                e
+            ))
+        })
+    }
+
+    /// Load training parameters from TOML file and merge with base config
+    pub fn with_training_params_from_file<P: AsRef<std::path::Path>>(
+        mut self,
+        path: P,
+    ) -> crate::utils::error::Result<Self> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::utils::error::VangaError::IoError(format!("Failed to read config file: {}", e))
+        })?;
+
+        // Parse only the training_params section
+        let parsed: toml::Value = toml::from_str(&content).map_err(|e| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "Failed to parse config file: {}",
+                e
+            ))
+        })?;
+
+        if let Some(training_params_value) = parsed.get("training_params") {
+            let training_params: TrainingParams =
+                training_params_value.clone().try_into().map_err(|e| {
+                    crate::utils::error::VangaError::ConfigError(format!(
+                        "Failed to parse training_params: {}",
+                        e
+                    ))
+                })?;
+
+            self.training_params = training_params;
+            Ok(self)
+        } else {
+            Err(crate::utils::error::VangaError::ConfigError(
+                "Config file must contain [training_params] section".to_string(),
+            ))
+        }
+    }
 }

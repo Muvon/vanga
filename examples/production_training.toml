@@ -1,7 +1,9 @@
 # Production Training Config (RECOMMENDED)
 [training_params]
 epochs = { Auto = { max_epochs = 1000 } }
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
 learning_rate = { Adaptive = { initial_lr = 0.01 } }
 validation_split = 0.2
+test_split = 0.1
 early_stopping_patience = 50
 gradient_clip = 1.0

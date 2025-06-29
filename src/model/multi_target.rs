@@ -113,11 +113,13 @@ impl MultiTargetLSTMModel {
 
             // Use the appropriate training method based on configuration
             if use_early_stopping && validation_split > 0.0 {
+                log::info!("🧠 Using INTELLIGENT training for target: {}", target_name);
                 // Use intelligent early stopping
                 model
                     .train_with_early_stopping(sequences, &single_target, config)
                     .await?;
             } else {
+                log::info!("📊 Using STANDARD training for target: {} (early_stopping={}, validation_split={})", target_name, use_early_stopping, validation_split);
                 // Use standard training with configured epochs/learning rate
                 model.configure_training(config);
                 model.train(sequences, &single_target).await?;

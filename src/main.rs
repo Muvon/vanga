@@ -12,6 +12,7 @@ struct TrainParams {
     continue_training: bool,
     horizons: Option<Vec<String>>,
     features_config: Option<PathBuf>,
+    config: Option<PathBuf>,
     batch: bool,
     data_dir: Option<PathBuf>,
     symbols: Option<Vec<String>>,
@@ -72,6 +73,10 @@ enum Commands {
         /// Custom features configuration file
         #[arg(long)]
         features_config: Option<PathBuf>,
+
+        /// Training configuration file (enables intelligent training)
+        #[arg(long)]
+        config: Option<PathBuf>,
 
         /// Batch training for multiple symbols
         #[arg(long)]
@@ -217,6 +222,7 @@ async fn main() -> Result<()> {
             continue_training,
             horizons,
             features_config,
+            config,
             batch,
             data_dir,
             symbols,
@@ -228,6 +234,7 @@ async fn main() -> Result<()> {
                 continue_training,
                 horizons,
                 features_config,
+                config,
                 batch,
                 data_dir,
                 symbols,
@@ -311,9 +318,30 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         }
     } else {
         // Single symbol training
-        let mut config = TrainingConfig::default()
-            .symbol(params.symbol)
-            .data_path(params.data);
+        let mut config = if let Some(config_path) = params.config {
+            // Load config from file
+            log::info!("🔧 Loading training config from: {:?}", config_path);
+            match TrainingConfig::default()
+                .symbol(params.symbol.clone())
+                .data_path(params.data.clone())
+                .with_training_params_from_file(&config_path)
+            {
+                Ok(file_config) => file_config,
+                Err(e) => {
+                    log::error!("Failed to load config file: {}", e);
+                    log::info!("Falling back to default configuration");
+                    TrainingConfig::default()
+                        .symbol(params.symbol)
+                        .data_path(params.data)
+                }
+            }
+        } else {
+            // Use default config
+            log::info!("🔧 Using default intelligent training configuration");
+            TrainingConfig::default()
+                .symbol(params.symbol)
+                .data_path(params.data)
+        };
 
         if params.fresh {
             config = config.fresh_training(true);

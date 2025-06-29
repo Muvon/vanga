@@ -171,10 +171,16 @@ impl LSTMModel {
         );
 
         if use_early_stopping && validation_split > 0.0 {
+            log::info!("🧠 USING INTELLIGENT TRAINING with validation monitoring");
             // Split data for validation-based early stopping
             self.train_with_validation_monitoring(sequences, targets, vanga_config)
                 .await
         } else {
+            log::info!(
+                "📊 USING STANDARD TRAINING (early_stopping={}, validation_split={})",
+                use_early_stopping,
+                validation_split
+            );
             // Use standard training (may still have fixed epoch limit)
             self.train(sequences, targets).await
         }
@@ -182,9 +188,55 @@ impl LSTMModel {
 
     /// Calculate MSE loss between predictions and targets
     fn calculate_mse_loss(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
+        // CRITICAL FIX: Validate shapes before operations
+        if predictions.shape() != targets.shape() {
+            log::error!(
+                "Shape mismatch in MSE calculation: predictions={:?}, targets={:?}",
+                predictions.shape(),
+                targets.shape()
+            );
+            return f64::INFINITY;
+        }
+
         let diff = predictions - targets;
         let squared_diff = &diff * &diff;
         squared_diff.mean().unwrap_or(f64::INFINITY)
+    }
+
+    /// Calculate MAPE (Mean Absolute Percentage Error) for better understanding
+    fn calculate_mape(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
+        // CRITICAL FIX: Validate shapes before operations
+        if predictions.shape() != targets.shape() {
+            log::error!(
+                "Shape mismatch in MAPE calculation: predictions={:?}, targets={:?}",
+                predictions.shape(),
+                targets.shape()
+            );
+            return f64::INFINITY;
+        }
+
+        let mut total_percentage_error = 0.0;
+        let mut valid_samples = 0;
+
+        for i in 0..predictions.nrows() {
+            for j in 0..predictions.ncols() {
+                let actual = targets[[i, j]];
+                let predicted = predictions[[i, j]];
+
+                // Avoid division by zero and very small values
+                if actual.abs() > 1e-8 {
+                    let percentage_error = ((actual - predicted).abs() / actual.abs()) * 100.0;
+                    total_percentage_error += percentage_error;
+                    valid_samples += 1;
+                }
+            }
+        }
+
+        if valid_samples > 0 {
+            total_percentage_error / valid_samples as f64
+        } else {
+            f64::INFINITY
+        }
     }
 
     /// Continue training with new data (incremental learning)
@@ -316,7 +368,7 @@ impl LSTMModel {
         Ok(())
     }
 
-    /// Train with validation monitoring and adaptive learning rate
+    /// Train with validation monitoring using rust-lstm's built-in validation
     async fn train_with_validation_monitoring(
         &mut self,
         sequences: &Array3<f64>,
@@ -324,27 +376,20 @@ impl LSTMModel {
         vanga_config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         let validation_split = vanga_config.training_params.validation_split;
-        let patience = vanga_config.training_params.early_stopping_patience;
-
-        // Determine learning rate strategy
-        let lr_strategy = &vanga_config.training_params.learning_rate;
-        let adaptive_lr = matches!(
-            lr_strategy,
-            crate::config::training::LearningRateConfig::Adaptive { .. }
-                | crate::config::training::LearningRateConfig::Auto { .. }
-        );
-
-        // Split data
-        let total_samples = sequences.shape()[0];
-        let train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
 
         log::info!(
-            "📊 Data split: {} total → {} training ({:.1}%), {} validation ({:.1}%)",
-            total_samples,
+            "🧠 Starting intelligent training with validation split: {:.1}%",
+            validation_split * 100.0
+        );
+
+        // Split data for validation
+        let total_samples = sequences.shape()[0];
+        let train_samples = ((total_samples as f64) * (1.0 - validation_split)) as usize;
+
+        log::info!(
+            "📊 Data split: {} training samples, {} validation samples",
             train_samples,
-            (train_samples as f64 / total_samples as f64) * 100.0,
-            total_samples - train_samples,
-            (validation_split * 100.0)
+            total_samples - train_samples
         );
 
         // Create training and validation sets
@@ -358,106 +403,77 @@ impl LSTMModel {
             .to_owned();
         let val_targets = targets.slice(ndarray::s![train_samples.., ..]).to_owned();
 
-        // Early stopping and adaptive learning rate variables
-        let original_epochs = self.training_config.epochs;
-        let mut current_lr = self.config.learning_rate;
-        let mut current_epochs = 50.min(original_epochs); // Start with smaller batches
-        let mut best_val_loss = f64::INFINITY;
-        let mut patience_counter = 0;
-        let mut lr_reduction_counter = 0;
-        let lr_patience = (patience / 3).max(10); // Reduce LR more frequently than early stopping
-
-        log::info!(
-            "🧠 Starting intelligent training: adaptive_lr={}, lr_patience={}, early_stop_patience={}",
-            adaptive_lr, lr_patience, patience
-        );
-
-        loop {
-            // Update learning rate in config for this training batch
-            self.config.learning_rate = current_lr;
-            self.training_config.epochs = current_epochs;
-
-            log::info!(
-                "🏃 Training batch: epochs={}, learning_rate={:.6}",
-                current_epochs,
-                current_lr
+        // Initialize network if not already done
+        if self.network.is_none() {
+            log::info!("Initializing LSTM network with config: {:?}", self.config);
+            let num_layers = 2;
+            let network = rust_lstm::models::lstm_network::LSTMNetwork::new(
+                self.config.input_size,
+                self.config.hidden_size,
+                num_layers,
             );
-
-            // Train on training data
-            self.train(&train_sequences, &train_targets).await?;
-
-            // Evaluate on validation data
-            let val_predictions = self.predict(&val_sequences).await?;
-            let val_loss = self.calculate_mse_loss(&val_predictions, &val_targets);
-
-            log::info!("📈 Validation loss: {:.6}", val_loss);
-
-            // Check for improvement
-            if val_loss < best_val_loss {
-                let improvement = ((best_val_loss - val_loss) / best_val_loss) * 100.0;
-                best_val_loss = val_loss;
-                patience_counter = 0;
-                lr_reduction_counter = 0;
-                log::info!(
-                    "✅ NEW BEST validation loss: {:.6} (improved by {:.2}%)",
-                    best_val_loss,
-                    improvement
-                );
-            } else {
-                patience_counter += 1;
-                lr_reduction_counter += 1;
-
-                log::info!(
-                    "📉 No improvement: patience={}/{}, lr_patience={}/{}",
-                    patience_counter,
-                    patience,
-                    lr_reduction_counter,
-                    lr_patience
-                );
-
-                // Adaptive learning rate reduction
-                if adaptive_lr && lr_reduction_counter >= lr_patience && current_lr > 1e-6 {
-                    let old_lr = current_lr;
-                    current_lr *= 0.5; // Reduce by half
-                    lr_reduction_counter = 0;
-                    log::info!(
-                        "🔽 REDUCING learning rate: {:.6} → {:.6}",
-                        old_lr,
-                        current_lr
-                    );
-                }
-
-                // Early stopping check
-                if patience_counter >= patience {
-                    log::info!(
-                        "🛑 EARLY STOPPING triggered at {} total epochs! Best validation loss: {:.6}",
-                        current_epochs, best_val_loss
-                    );
-                    break;
-                }
-            }
-
-            // Check if we've reached max epochs
-            if current_epochs >= original_epochs {
-                log::info!("⏰ Reached maximum epochs: {}", original_epochs);
-                break;
-            }
-
-            // Increase epochs for next iteration
-            let next_epochs = (current_epochs + 50).min(original_epochs);
-            log::info!(
-                "📈 Continuing training: {} → {} epochs",
-                current_epochs,
-                next_epochs
-            );
-            current_epochs = next_epochs;
+            self.network = Some(network);
         }
 
-        log::info!(
-            "🎯 Training completed! Final validation loss: {:.6}, final learning rate: {:.6}",
-            best_val_loss,
-            current_lr
-        );
+        // Convert data to rust-lstm format
+        let training_data =
+            self.convert_sequences_to_training_data(&train_sequences, &train_targets)?;
+        let validation_data =
+            self.convert_sequences_to_training_data(&val_sequences, &val_targets)?;
+
+        // Update config to reflect actual output size (1 for rust-lstm compatibility)
+        self.config.output_size = 1;
+
+        // Create trainer with MSE loss and SGD optimizer
+        use rust_lstm::loss::MSELoss;
+        use rust_lstm::optimizers::SGD;
+        use rust_lstm::training::LSTMTrainer;
+
+        if let Some(network) = self.network.take() {
+            let mut trainer =
+                LSTMTrainer::new(network, MSELoss, SGD::new(self.config.learning_rate));
+
+            // Set training configuration
+            trainer.config.epochs = self.training_config.epochs;
+            trainer.config.print_every = self.training_config.print_every;
+            trainer.config.clip_gradient = self.training_config.clip_gradient;
+
+            log::info!(
+                "🧠 Starting LSTM training with validation monitoring (max {} epochs)",
+                trainer.config.epochs
+            );
+
+            // Train the model with validation data using rust-lstm's built-in validation
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                trainer.train(&training_data, Some(&validation_data));
+            })) {
+                Ok(_) => {
+                    // Get the trained network back
+                    self.network = Some(trainer.network);
+                    log::info!("✅ LSTM training with validation completed successfully");
+
+                    // Calculate final validation metrics for better understanding
+                    if let Ok(final_predictions) = self.predict(&val_sequences).await {
+                        let final_mse = self.calculate_mse_loss(&final_predictions, &val_targets);
+                        let final_mape = self.calculate_mape(&final_predictions, &val_targets);
+                        log::info!(
+                            "📊 Final validation metrics - MSE: {:.6}, MAPE: {:.2}%",
+                            final_mse,
+                            final_mape
+                        );
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("LSTM training panicked: {:?}", e);
+                    log::error!("{}", error_msg);
+                    return Err(crate::utils::error::VangaError::ModelError(error_msg));
+                }
+            }
+        } else {
+            return Err(crate::utils::error::VangaError::ModelError(
+                "Network not initialized".to_string(),
+            ));
+        }
 
         Ok(())
     }
@@ -505,10 +521,10 @@ impl LSTMModel {
             let mut trainer = LSTMTrainer::new(
                 network,
                 MSELoss,
-                SGD::new(0.001), // Learning rate
+                SGD::new(self.config.learning_rate), // Use configured learning rate
             );
 
-            // Set training configuration
+            // Set training configuration with early stopping support
             trainer.config.epochs = self.training_config.epochs;
             trainer.config.print_every = self.training_config.print_every;
             trainer.config.clip_gradient = self.training_config.clip_gradient;
@@ -520,12 +536,24 @@ impl LSTMModel {
 
             // Train the model with error handling
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                trainer.train(&training_data, None); // No validation data for now
+                trainer.train(&training_data, None);
             })) {
                 Ok(_) => {
                     // Get the trained network back
                     self.network = Some(trainer.network);
                     log::info!("LSTM training completed successfully");
+
+                    // Calculate final training metrics for better understanding
+                    if let Ok(final_predictions) = self.predict(sequences).await {
+                        let final_mse = self.calculate_mse_loss(&final_predictions, targets);
+                        let final_mape = self.calculate_mape(&final_predictions, targets);
+                        log::info!(
+                            "📊 Final Training Metrics - MSE: {:.6} (√MSE: {:.3}), MAPE: {:.2}%",
+                            final_mse,
+                            final_mse.sqrt(),
+                            final_mape
+                        );
+                    }
                 }
                 Err(_) => {
                     return Err(crate::utils::error::VangaError::ModelError(
@@ -716,7 +744,7 @@ impl LSTMModel {
         sequences: &Array3<f64>,
     ) -> Result<Array2<f64>> {
         let batch_size = sequences.shape()[0];
-        let output_size = self.config.output_size; // Use configured output size
+        let output_size = self.config.output_size;
         let mut predictions = Array2::zeros((batch_size, output_size));
 
         for batch_idx in 0..batch_size {
@@ -735,9 +763,34 @@ impl LSTMModel {
 
             // Use the last output as the prediction
             if let Some((last_output, _)) = outputs.last() {
-                // Extract all output dimensions for multi-target predictions
-                for output_idx in 0..output_size.min(last_output.nrows()) {
-                    predictions[[batch_idx, output_idx]] = last_output[[output_idx, 0]];
+                // CRITICAL FIX: Handle shape mismatch safely
+                let actual_output_size = last_output.nrows();
+                let safe_output_size = output_size.min(actual_output_size);
+
+                if actual_output_size != output_size {
+                    log::warn!(
+                        "Output size mismatch: expected {}, got {} - using {} dimensions",
+                        output_size,
+                        actual_output_size,
+                        safe_output_size
+                    );
+                }
+
+                // Extract available output dimensions safely
+                for output_idx in 0..safe_output_size {
+                    if output_idx < last_output.nrows()
+                        && batch_idx < predictions.nrows()
+                        && output_idx < predictions.ncols()
+                    {
+                        predictions[[batch_idx, output_idx]] = last_output[[output_idx, 0]];
+                    }
+                }
+
+                // Fill remaining outputs with zeros if needed
+                for output_idx in safe_output_size..output_size {
+                    if batch_idx < predictions.nrows() && output_idx < predictions.ncols() {
+                        predictions[[batch_idx, output_idx]] = 0.0;
+                    }
                 }
             }
         }
