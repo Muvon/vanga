@@ -430,19 +430,23 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
 
         // Save predictions if output path specified
         if let Some(ref output_path) = config.output_path {
-            // For now, save multi-target predictions as JSON
-            let output_content = format!(
-                "{{\"symbol\":\"{}\",\"targets\":{:?},\"predictions\":{:?}}}",
-                predictions.symbol,
-                predictions.target_names,
-                predictions.predictions.as_slice().unwrap()
-            );
+            // Convert raw predictions to structured format using OutputFormatter
+            log::info!("Converting raw predictions to structured format...");
+            let structured_predictions = predictions.to_structured_predictions(&config).await?;
+
+            // Use existing formatter method to create JSON
+            let output_content =
+                vanga::output::formatter::predictions_to_json(&structured_predictions)?;
 
             std::fs::write(output_path.as_path(), output_content)?;
-            log::info!(
-                "Multi-target predictions saved to: {}",
-                output_path.display()
-            );
+            log::info!("Structured predictions saved to: {}", output_path.display());
+        } else {
+            // If no output path, print structured predictions to console
+            log::info!("Converting raw predictions to structured format for console output...");
+            let structured_predictions = predictions.to_structured_predictions(&config).await?;
+            let output_content =
+                vanga::output::formatter::predictions_to_json(&structured_predictions)?;
+            println!("{}", output_content);
         }
 
         log::info!("Prediction configuration: {:?}", config);

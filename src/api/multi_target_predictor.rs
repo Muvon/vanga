@@ -2,6 +2,7 @@
 use crate::config::PredictionConfig;
 use crate::data::DataPipeline;
 use crate::model::multi_target::MultiTargetLSTMModel;
+use crate::output::{OutputFormatter, PredictionResult};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 
@@ -35,6 +36,9 @@ impl MultiTargetPredictor {
             .prepare_prediction_data(&self.config.input_path, &self.config)
             .await?;
 
+        // Extract current price from the input data (last close price)
+        let current_price = self.extract_current_price(&self.config.input_path).await?;
+
         log::info!(
             "Prediction data prepared: {} sequences, {} features",
             prepared_data.sequences.shape()[0],
@@ -62,10 +66,42 @@ impl MultiTargetPredictor {
             raw_predictions,
             model.get_target_names().to_vec(),
             self.config.symbol.clone(),
+            current_price,
         );
 
         log::info!("✅ Multi-target predictions completed successfully");
         Ok(predictions)
+    }
+
+    /// Extract current price from input data (latest close price)
+    async fn extract_current_price<P: AsRef<std::path::Path>>(&self, data_path: P) -> Result<f64> {
+        use crate::data::DataLoader;
+
+        let loader = DataLoader::new();
+        let df = loader.load_csv(data_path).await?;
+
+        // Get the last close price
+        let close_series = df
+            .column("close")
+            .map_err(|e| VangaError::DataError(format!("Failed to get close column: {}", e)))?;
+
+        let close_values = close_series
+            .f64()
+            .map_err(|e| VangaError::DataError(format!("Failed to convert close to f64: {}", e)))?;
+
+        // Get the last non-null value using to_vec()
+        let close_vec = close_values.to_vec();
+        let current_price = close_vec
+            .iter()
+            .rev()
+            .filter_map(|v| *v)
+            .next()
+            .ok_or_else(|| {
+                VangaError::DataError("No valid close price found in data".to_string())
+            })?;
+
+        log::info!("Extracted current price: ${:.2}", current_price);
+        Ok(current_price)
     }
 }
 
@@ -78,15 +114,23 @@ pub struct MultiTargetPredictions {
     pub target_names: Vec<String>,
     /// Symbol these predictions are for
     pub symbol: String,
+    /// Current price at prediction time
+    pub current_price: f64,
 }
 
 impl MultiTargetPredictions {
     /// Create new multi-target predictions
-    pub fn new(predictions: Array2<f64>, target_names: Vec<String>, symbol: String) -> Self {
+    pub fn new(
+        predictions: Array2<f64>,
+        target_names: Vec<String>,
+        symbol: String,
+        current_price: f64,
+    ) -> Self {
         Self {
             predictions,
             target_names,
             symbol,
+            current_price,
         }
     }
 
@@ -128,6 +172,36 @@ impl MultiTargetPredictions {
         } else {
             None
         }
+    }
+
+    /// Convert raw predictions to structured format using OutputFormatter
+    pub async fn to_structured_predictions(
+        &self,
+        config: &PredictionConfig,
+    ) -> Result<Vec<PredictionResult>> {
+        log::info!("Converting raw predictions to structured format");
+
+        // Create output formatter with config
+        let formatter = OutputFormatter::new(config.output_config.clone());
+
+        // Extract horizon from config or use default
+        let horizon = config.horizon.as_deref().unwrap_or("1h");
+
+        // Format predictions using existing formatter
+        let structured_predictions = formatter.format_predictions(
+            &self.predictions,
+            &self.symbol,
+            horizon,
+            self.current_price,
+            None, // PreparedTargets not available in prediction context
+        )?;
+
+        log::info!(
+            "✅ Successfully converted {} raw predictions to structured format",
+            structured_predictions.len()
+        );
+
+        Ok(structured_predictions)
     }
 
     /// Get all predictions for a specific sample
