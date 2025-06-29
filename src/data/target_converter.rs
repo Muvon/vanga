@@ -3,7 +3,7 @@
 //! This module handles the conversion from PreparedTargets (HashMap<String, Vec<i32>>)
 //! to the Array2<f64> format expected by the LSTM model for training.
 
-use crate::config::model::{OutputHeadsConfig, OutputSegments};
+use crate::config::model::OutputHeadsConfig;
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
@@ -12,20 +12,16 @@ use std::collections::HashMap;
 /// Converts prepared targets to training arrays for LSTM model
 pub struct TargetConverter {
     output_heads: OutputHeadsConfig,
-    #[allow(dead_code)] // Used for future output parsing
-    segments: OutputSegments,
     total_output_size: usize,
 }
 
 impl TargetConverter {
     /// Create new target converter with output configuration
     pub fn new(output_heads: OutputHeadsConfig) -> Self {
-        let segments = output_heads.get_output_segments();
         let total_output_size = output_heads.calculate_total_output_size();
 
         Self {
             output_heads,
-            segments,
             total_output_size,
         }
     }

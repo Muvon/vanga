@@ -1,0 +1,503 @@
+//! Objective functions for VANGA LSTM optimization
+//!
+//! Defines optimization metrics and objective functions specifically designed
+//! for cryptocurrency forecasting performance evaluation.
+
+use crate::utils::error::{Result, VangaError};
+use ndarray::Array2;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Optimization metrics for model evaluation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OptimizationMetric {
+    /// Mean Absolute Error
+    MAE,
+    /// Root Mean Square Error
+    RMSE,
+    /// Mean Absolute Percentage Error
+    MAPE,
+    /// Sharpe Ratio (risk-adjusted returns)
+    SharpeRatio,
+    /// Maximum Drawdown
+    MaxDrawdown,
+    /// Directional Accuracy
+    DirectionalAccuracy,
+    /// Multi-objective combining multiple metrics
+    MultiObjective { weights: HashMap<String, f64> },
+    /// Crypto-specific composite metric
+    CryptoComposite,
+}
+
+/// Market regime classification for regime-aware optimization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MarketRegime {
+    /// Low volatility, sideways movement
+    LowVolatility,
+    /// Medium volatility, trending
+    MediumVolatility,
+    /// High volatility, rapid changes
+    HighVolatility,
+    /// Bull market trending upward
+    BullMarket,
+    /// Bear market trending downward
+    BearMarket,
+    /// Range-bound market
+    RangeBound,
+}
+
+/// Objective function for optimization
+#[derive(Debug, Clone)]
+pub struct ObjectiveFunction {
+    primary_metric: OptimizationMetric,
+    secondary_metrics: Vec<OptimizationMetric>,
+    regime_awareness: bool,
+    horizon_weights: HashMap<String, f64>,
+}
+
+impl ObjectiveFunction {
+    /// Create new objective function with primary metric
+    pub fn new(primary_metric: OptimizationMetric) -> Self {
+        Self {
+            primary_metric,
+            secondary_metrics: Vec::new(),
+            regime_awareness: false,
+            horizon_weights: HashMap::new(),
+        }
+    }
+
+    /// Create crypto-specific objective function
+    pub fn crypto_specific() -> Self {
+        let mut horizon_weights = HashMap::new();
+        horizon_weights.insert("1h".to_string(), 0.2);
+        horizon_weights.insert("4h".to_string(), 0.3);
+        horizon_weights.insert("1d".to_string(), 0.3);
+        horizon_weights.insert("7d".to_string(), 0.2);
+
+        Self {
+            primary_metric: OptimizationMetric::CryptoComposite,
+            secondary_metrics: vec![
+                OptimizationMetric::SharpeRatio,
+                OptimizationMetric::MaxDrawdown,
+                OptimizationMetric::DirectionalAccuracy,
+            ],
+            regime_awareness: true,
+            horizon_weights,
+        }
+    }
+
+    /// Add secondary metric for multi-objective optimization
+    pub fn add_secondary_metric(mut self, metric: OptimizationMetric) -> Self {
+        self.secondary_metrics.push(metric);
+        self
+    }
+
+    /// Enable regime-aware optimization
+    pub fn with_regime_awareness(mut self) -> Self {
+        self.regime_awareness = true;
+        self
+    }
+
+    /// Set horizon weights for multi-horizon optimization
+    pub fn with_horizon_weights(mut self, weights: HashMap<String, f64>) -> Self {
+        self.horizon_weights = weights;
+        self
+    }
+
+    /// Evaluate objective function
+    pub fn evaluate(
+        &self,
+        predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+        prices: &[f64],
+        market_regime: Option<MarketRegime>,
+    ) -> Result<f64> {
+        let primary_score = self.calculate_metric_score(
+            &self.primary_metric,
+            predictions,
+            targets,
+            prices,
+            market_regime.as_ref(),
+        )?;
+
+        if self.secondary_metrics.is_empty() {
+            return Ok(primary_score);
+        }
+
+        // Multi-objective optimization
+        let mut total_score = primary_score * 0.7; // Primary metric gets 70% weight
+
+        let secondary_weight = 0.3 / self.secondary_metrics.len() as f64;
+        for metric in &self.secondary_metrics {
+            let score = self.calculate_metric_score(
+                metric,
+                predictions,
+                targets,
+                prices,
+                market_regime.as_ref(),
+            )?;
+            total_score += score * secondary_weight;
+        }
+
+        Ok(total_score)
+    }
+
+    /// Calculate individual metric score
+    fn calculate_metric_score(
+        &self,
+        metric: &OptimizationMetric,
+        predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+        prices: &[f64],
+        market_regime: Option<&MarketRegime>,
+    ) -> Result<f64> {
+        match metric {
+            OptimizationMetric::MAE => self.calculate_mae(predictions, targets),
+            OptimizationMetric::RMSE => self.calculate_rmse(predictions, targets),
+            OptimizationMetric::MAPE => self.calculate_mape(predictions, targets),
+            OptimizationMetric::SharpeRatio => self.calculate_sharpe_ratio(predictions, prices),
+            OptimizationMetric::MaxDrawdown => self.calculate_max_drawdown(predictions, prices),
+            OptimizationMetric::DirectionalAccuracy => {
+                self.calculate_directional_accuracy(predictions, targets)
+            }
+            OptimizationMetric::MultiObjective { weights } => {
+                self.calculate_multi_objective(predictions, targets, prices, weights)
+            }
+            OptimizationMetric::CryptoComposite => {
+                self.calculate_crypto_composite(predictions, targets, prices, market_regime)
+            }
+        }
+    }
+
+    /// Calculate Mean Absolute Error
+    fn calculate_mae(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> Result<f64> {
+        if predictions.shape() != targets.shape() {
+            return Err(VangaError::DataError(
+                "Predictions and targets shape mismatch".to_string(),
+            ));
+        }
+
+        let mae = predictions
+            .iter()
+            .zip(targets.iter())
+            .map(|(pred, target)| (pred - target).abs())
+            .sum::<f64>()
+            / (predictions.len() as f64);
+
+        // Convert to score (lower MAE = higher score)
+        Ok(1.0 / (1.0 + mae))
+    }
+
+    /// Calculate Root Mean Square Error
+    fn calculate_rmse(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> Result<f64> {
+        if predictions.shape() != targets.shape() {
+            return Err(VangaError::DataError(
+                "Predictions and targets shape mismatch".to_string(),
+            ));
+        }
+
+        let mse = predictions
+            .iter()
+            .zip(targets.iter())
+            .map(|(pred, target)| (pred - target).powi(2))
+            .sum::<f64>()
+            / (predictions.len() as f64);
+
+        let rmse = mse.sqrt();
+
+        // Convert to score (lower RMSE = higher score)
+        Ok(1.0 / (1.0 + rmse))
+    }
+
+    /// Calculate Mean Absolute Percentage Error
+    fn calculate_mape(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> Result<f64> {
+        if predictions.shape() != targets.shape() {
+            return Err(VangaError::DataError(
+                "Predictions and targets shape mismatch".to_string(),
+            ));
+        }
+
+        let mut total_percentage_error = 0.0;
+        let mut valid_count = 0;
+
+        for (pred, target) in predictions.iter().zip(targets.iter()) {
+            if target.abs() > 1e-8 {
+                // Avoid division by zero
+                total_percentage_error += ((pred - target) / target).abs();
+                valid_count += 1;
+            }
+        }
+
+        if valid_count == 0 {
+            return Ok(0.0);
+        }
+
+        let mape = total_percentage_error / valid_count as f64;
+
+        // Convert to score (lower MAPE = higher score)
+        Ok(1.0 / (1.0 + mape))
+    }
+
+    /// Calculate Sharpe Ratio for risk-adjusted returns
+    fn calculate_sharpe_ratio(&self, predictions: &Array2<f64>, prices: &[f64]) -> Result<f64> {
+        if predictions.is_empty() || prices.len() < 2 {
+            return Ok(0.0);
+        }
+
+        // Calculate returns from predictions
+        let returns = self.calculate_returns_from_predictions(predictions, prices)?;
+
+        if returns.len() < 2 {
+            return Ok(0.0);
+        }
+
+        // Calculate mean return
+        let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
+
+        // Calculate standard deviation of returns
+        let variance = returns
+            .iter()
+            .map(|r| (r - mean_return).powi(2))
+            .sum::<f64>()
+            / returns.len() as f64;
+        let std_dev = variance.sqrt();
+
+        if std_dev == 0.0 {
+            return Ok(0.0);
+        }
+
+        // Sharpe ratio (assuming risk-free rate = 0 for simplicity)
+        let sharpe_ratio = mean_return / std_dev;
+
+        // Normalize to 0-1 range (assuming good Sharpe ratio is around 1.0)
+        Ok(((sharpe_ratio + 1.0) / 3.0).clamp(0.0, 1.0))
+    }
+
+    /// Calculate Maximum Drawdown
+    fn calculate_max_drawdown(&self, predictions: &Array2<f64>, prices: &[f64]) -> Result<f64> {
+        let returns = self.calculate_returns_from_predictions(predictions, prices)?;
+
+        if returns.is_empty() {
+            return Ok(0.0);
+        }
+
+        // Calculate cumulative returns
+        let mut cumulative_returns = vec![1.0];
+        for &ret in &returns {
+            let new_value = cumulative_returns.last().unwrap() * (1.0 + ret);
+            cumulative_returns.push(new_value);
+        }
+
+        // Calculate maximum drawdown
+        let mut max_drawdown = 0.0;
+        let mut peak = cumulative_returns[0];
+
+        for &value in &cumulative_returns {
+            if value > peak {
+                peak = value;
+            }
+            let drawdown = (peak - value) / peak;
+            if drawdown > max_drawdown {
+                max_drawdown = drawdown;
+            }
+        }
+
+        // Convert to score (lower drawdown = higher score)
+        Ok(1.0 - max_drawdown.min(1.0))
+    }
+
+    /// Calculate Directional Accuracy
+    fn calculate_directional_accuracy(
+        &self,
+        predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+    ) -> Result<f64> {
+        if predictions.shape() != targets.shape() || predictions.is_empty() {
+            return Ok(0.0);
+        }
+
+        let mut correct_directions = 0;
+        let mut total_predictions = 0;
+
+        // Compare prediction directions with target directions
+        for i in 1..predictions.nrows() {
+            for j in 0..predictions.ncols() {
+                let pred_direction = predictions[[i, j]] > predictions[[i - 1, j]];
+                let target_direction = targets[[i, j]] > targets[[i - 1, j]];
+
+                if pred_direction == target_direction {
+                    correct_directions += 1;
+                }
+                total_predictions += 1;
+            }
+        }
+
+        if total_predictions == 0 {
+            return Ok(0.0);
+        }
+
+        Ok((correct_directions as f64 / total_predictions as f64).min(1.0))
+    }
+
+    /// Calculate multi-objective score with custom weights
+    fn calculate_multi_objective(
+        &self,
+        predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+        prices: &[f64],
+        weights: &HashMap<String, f64>,
+    ) -> Result<f64> {
+        let mut total_score = 0.0;
+        let mut total_weight = 0.0;
+
+        for (metric_name, &weight) in weights {
+            let metric = match metric_name.as_str() {
+                "mae" => OptimizationMetric::MAE,
+                "rmse" => OptimizationMetric::RMSE,
+                "mape" => OptimizationMetric::MAPE,
+                "sharpe" => OptimizationMetric::SharpeRatio,
+                "drawdown" => OptimizationMetric::MaxDrawdown,
+                "direction" => OptimizationMetric::DirectionalAccuracy,
+                _ => continue,
+            };
+
+            let score = self.calculate_metric_score(&metric, predictions, targets, prices, None)?;
+            total_score += score * weight;
+            total_weight += weight;
+        }
+
+        if total_weight == 0.0 {
+            return Ok(0.0);
+        }
+
+        Ok(total_score / total_weight)
+    }
+
+    /// Calculate crypto-specific composite score
+    fn calculate_crypto_composite(
+        &self,
+        predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+        prices: &[f64],
+        market_regime: Option<&MarketRegime>,
+    ) -> Result<f64> {
+        // Base metrics with crypto-specific weights
+        let mae_score = self.calculate_mae(predictions, targets)? * 0.2;
+        let directional_score = self.calculate_directional_accuracy(predictions, targets)? * 0.3;
+        let sharpe_score = self.calculate_sharpe_ratio(predictions, prices)? * 0.25;
+        let drawdown_score = self.calculate_max_drawdown(predictions, prices)? * 0.25;
+
+        let mut composite_score = mae_score + directional_score + sharpe_score + drawdown_score;
+
+        // Regime-specific adjustments
+        if let Some(regime) = market_regime {
+            composite_score *= match regime {
+                MarketRegime::HighVolatility => 0.9, // Slightly penalize in high volatility
+                MarketRegime::LowVolatility => 1.1,  // Bonus for low volatility performance
+                MarketRegime::BullMarket => 1.05,    // Small bonus for bull market
+                MarketRegime::BearMarket => 1.05,    // Small bonus for bear market (harder)
+                MarketRegime::MediumVolatility => 1.0,
+                MarketRegime::RangeBound => 0.95, // Slightly harder to predict
+            };
+        }
+
+        Ok(composite_score.clamp(0.0, 1.0))
+    }
+
+    /// Helper: Calculate returns from predictions and prices
+    fn calculate_returns_from_predictions(
+        &self,
+        predictions: &Array2<f64>,
+        prices: &[f64],
+    ) -> Result<Vec<f64>> {
+        if predictions.is_empty() || prices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut returns = Vec::new();
+
+        // Simple return calculation (this is a placeholder)
+        // In production, this would use actual prediction-based trading signals
+        for i in 1..prices.len().min(predictions.nrows()) {
+            let price_return = (prices[i] - prices[i - 1]) / prices[i - 1];
+
+            // Use prediction direction to determine position
+            let prediction_direction = if predictions.ncols() > 0 {
+                predictions[[i, 0]] > 0.5 // Assuming binary prediction
+            } else {
+                true
+            };
+
+            // Calculate strategy return
+            let strategy_return = if prediction_direction {
+                price_return // Long position
+            } else {
+                -price_return // Short position
+            };
+
+            returns.push(strategy_return);
+        }
+
+        Ok(returns)
+    }
+
+    /// Detect market regime from price data
+    pub fn detect_market_regime(&self, prices: &[f64]) -> Result<MarketRegime> {
+        if prices.len() < 20 {
+            return Ok(MarketRegime::MediumVolatility);
+        }
+
+        // Calculate volatility
+        let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
+
+        let volatility = self.calculate_volatility(&returns);
+
+        // Calculate trend
+        let trend = self.calculate_trend(prices);
+
+        // Classify regime
+        let regime = match (volatility, trend) {
+            (v, _) if v > 0.05 => MarketRegime::HighVolatility,
+            (v, _) if v < 0.02 => MarketRegime::LowVolatility,
+            (_, t) if t > 0.1 => MarketRegime::BullMarket,
+            (_, t) if t < -0.1 => MarketRegime::BearMarket,
+            (_, t) if t.abs() < 0.05 => MarketRegime::RangeBound,
+            _ => MarketRegime::MediumVolatility,
+        };
+
+        Ok(regime)
+    }
+
+    /// Calculate volatility from returns
+    fn calculate_volatility(&self, returns: &[f64]) -> f64 {
+        if returns.len() < 2 {
+            return 0.02;
+        }
+
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let variance =
+            returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+
+        variance.sqrt()
+    }
+
+    /// Calculate trend from prices
+    fn calculate_trend(&self, prices: &[f64]) -> f64 {
+        if prices.len() < 2 {
+            return 0.0;
+        }
+
+        let first_half_avg =
+            prices[..prices.len() / 2].iter().sum::<f64>() / (prices.len() / 2) as f64;
+        let second_half_avg = prices[prices.len() / 2..].iter().sum::<f64>()
+            / (prices.len() - prices.len() / 2) as f64;
+
+        (second_half_avg - first_half_avg) / first_half_avg
+    }
+}
+
+impl Default for ObjectiveFunction {
+    fn default() -> Self {
+        Self::crypto_specific()
+    }
+}

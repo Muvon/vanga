@@ -101,6 +101,7 @@ let predictions = predict_multi_target(config, &model).await?;
 ## Development Patterns
 
 !!! NEVER SILENCE WARNINGS with undefined variables like _var INSTEAD Find the REAL reaon why worning appears and FIX it
+!!! NEVER hiding unused functions/methods with #[allow(dead_code)]
 
 ### Adding New Technical Indicators
 1. Add indicator logic to `src/features/technical.rs`

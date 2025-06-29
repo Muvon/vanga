@@ -193,7 +193,7 @@ VANGA generates structured JSON predictions matching the ARCHITECTURE.md specifi
 {
   "symbol": "BTCUSDT",
   "timestamp": "2024-01-15T10:30:00Z",
-  "horizon": "4h", 
+  "horizon": "4h",
   "current_price": 42500.0,
   "price_levels": {
     "bins": {
@@ -216,7 +216,7 @@ VANGA generates structured JSON predictions matching the ARCHITECTURE.md specifi
   },
   "volatility": {
     "expected_1h": 0.018,
-    "expected_4h": 0.035, 
+    "expected_4h": 0.035,
     "expected_24h": 0.062,
     "regime": "MEDIUM",
     "confidence": 0.75

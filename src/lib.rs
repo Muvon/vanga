@@ -32,6 +32,7 @@ pub mod config;
 pub mod data;
 pub mod features;
 pub mod model;
+pub mod optimization; // NEW: Auto-optimization system
 pub mod output;
 pub mod targets;
 pub mod utils;
