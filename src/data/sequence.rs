@@ -267,7 +267,6 @@ impl SequenceGenerator {
         // Generate targets using DataFrame for all horizons
         let prepared_targets = self.generate_multi_horizon_targets(df, horizons).await?;
 
-        let num_sequences = total_rows - sequence_length;
         let mut sequences = Array3::zeros((num_sequences, sequence_length, feature_count));
 
         // Create sequences using sliding window
