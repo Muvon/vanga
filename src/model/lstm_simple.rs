@@ -39,7 +39,7 @@ impl LSTMModel {
     /// Create a new LSTM model
     pub fn new(config: LSTMConfig) -> Result<Self> {
         let training_config = TrainingConfig {
-            epochs: 1000, // Will be controlled by early stopping
+            epochs: 1, // Placeholder - will be set by configure_training()
             print_every: 10,
             clip_gradient: Some(1.0),
         };

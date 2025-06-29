@@ -1,0 +1,24 @@
+# High Performance Training Config (Long Training)
+# Use this for maximum model performance with extended training
+
+[training_params]
+# Auto epochs with high max limit for thorough training
+epochs = { Auto = { max_epochs = 2000 } }
+
+# Auto learning rate range for optimal convergence
+learning_rate = { Auto = { min_lr = 0.0001, max_lr = 0.01 } }
+
+# Large batch size range for efficiency
+batch_size = { Auto = { min_size = 64, max_size = 1024 } }
+
+# Standard validation split
+validation_split = 0.2
+
+# High patience for thorough training
+early_stopping_patience = 100
+
+# Strong gradient clipping for stability
+gradient_clip = 1.5
+
+# Other parameters
+test_split = 0.1

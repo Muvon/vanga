@@ -1,0 +1,22 @@
+# Custom Auto Training Config (Custom Early Stopping)
+# Use this for custom intelligent training with your own limits
+
+[training_params]
+# Auto epochs with custom max limit - early stopping enabled
+epochs = { Auto = { max_epochs = 500 } }
+
+# Adaptive learning rate with custom starting point
+learning_rate = { Adaptive = { initial_lr = 0.005 } }
+
+# Custom validation split for early stopping
+validation_split = 0.25
+
+# Custom batch size range
+batch_size = { Auto = { min_size = 16, max_size = 256 } }
+
+# Custom early stopping patience (how many epochs to wait for improvement)
+early_stopping_patience = 25
+
+# Other parameters
+test_split = 0.15
+gradient_clip = 0.8

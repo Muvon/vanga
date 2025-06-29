@@ -1,0 +1,9 @@
+# Test Configuration - Demonstrates No Hardcoding
+[training_params]
+epochs = { Fixed = 25 }  # Custom epoch count - should train for exactly 25 epochs
+learning_rate = { Fixed = 0.002 }  # Custom learning rate
+batch_size = { Fixed = 16 }  # Custom batch size
+validation_split = 0.0  # No validation since using Fixed epochs
+test_split = 0.1
+early_stopping_patience = 50  # Required field (ignored for Fixed epochs)
+gradient_clip = 0.5
