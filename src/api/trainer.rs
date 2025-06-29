@@ -105,7 +105,7 @@ impl ModelTrainer {
     }
 }
 
-/// High-level training function  
+/// High-level training function
 pub async fn train_model(config: TrainingConfig) -> Result<MultiTargetLSTMModel> {
     let trainer = ModelTrainer::new(config);
     trainer.train().await

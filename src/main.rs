@@ -300,8 +300,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
                         log::info!("Successfully trained model for {}", sym);
 
                         // Save model with consistent path
-                        let model_path =
-                            vanga::utils::model_path::get_multi_target_model_path(&sym);
+                        let model_path = vanga::utils::model_path::get_model_path(&sym);
                         let _ = vanga::utils::model_path::ensure_models_dir_exists();
 
                         if let Err(e) = model.save(&model_path) {
@@ -367,7 +366,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         let model = vanga::api::train_model(config.clone()).await?;
 
         // Save model with consistent path
-        let model_path = vanga::utils::model_path::get_multi_target_model_path(&config.symbol);
+        let model_path = vanga::utils::model_path::get_model_path(&config.symbol);
         let _ = vanga::utils::model_path::ensure_models_dir_exists();
         model.save(&model_path)?;
 
@@ -423,7 +422,7 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
         }
 
         // Load the trained model using consistent path
-        let model_path = vanga::utils::model_path::get_multi_target_model_path(&config.symbol);
+        let model_path = vanga::utils::model_path::get_model_path(&config.symbol);
         let model = vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path)?;
 
         // Make predictions using the multi-target API
@@ -457,22 +456,20 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
     match action {
         ModelCommands::List => {
             log::info!("Listing available models");
-            // List available models in ./models directory
-            let models_dir = std::path::Path::new("./models");
-            if models_dir.exists() {
-                let entries = std::fs::read_dir(models_dir)?;
-                log::info!("Available models:");
-                for entry in entries {
-                    let entry = entry?;
-                    if let Some(name) = entry.file_name().to_str() {
-                        if name.ends_with("_model.bin") {
-                            let symbol = name.replace("_model.bin", "");
-                            log::info!("  - {} ({})", symbol, name);
-                        }
-                    }
-                }
+
+            let models = vanga::utils::model_path::list_available_models()?;
+
+            if models.is_empty() {
+                log::info!("No models found in ./models directory");
+                println!("No trained models available. Train a model first with: vanga train --symbol <SYMBOL> --data <DATA_FILE>");
             } else {
-                log::info!("No models directory found. Train a model first.");
+                log::info!("Available models:");
+                println!("\nAvailable Models:");
+                println!("================");
+                for model in &models {
+                    println!("📊 {}", model);
+                }
+                println!("\nUse: vanga predict --symbol <SYMBOL> --input <DATA_FILE>");
             }
         }
 
