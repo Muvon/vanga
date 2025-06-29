@@ -29,10 +29,19 @@ During training, you'll see progress like this:
 [INFO] Starting model training for symbol: BTCUSDT
 [INFO] Loading training data from: data/btc_1h.csv
 [INFO] Training data prepared: 1000 sequences, 55 features
-[INFO] Starting LSTM training...
-[INFO] Model training completed successfully
-[INFO] Model saved to: ./models/BTCUSDT_model.bin
-[INFO] Training completed successfully
+[INFO] Generated 3 targets: ["price_level_1h", "direction_1h", "volatility_1h"]
+[INFO] 🚀 Starting multi-target training - using ALL 3 targets (0% data loss)
+[INFO] Creating multi-target LSTM model with 3 targets
+[INFO] Starting multi-target training: 3 models for 3 targets
+[INFO] Training model 1/3: price_level_1h
+[INFO] ✅ Successfully trained model for target: price_level_1h
+[INFO] Training model 2/3: direction_1h
+[INFO] ✅ Successfully trained model for target: direction_1h
+[INFO] Training model 3/3: volatility_1h
+[INFO] ✅ Successfully trained model for target: volatility_1h
+[INFO] 🎉 Multi-target training completed successfully for all 3 targets!
+[INFO] 💾 Saving multi-target model to: ./models/BTCUSDT_multi_model
+[INFO] ✅ Multi-target model saved successfully
 ```
 
 ## Training Architecture

@@ -1,6 +1,10 @@
+pub mod multi_target_predictor;
 pub mod predictor;
 pub mod trainer;
 
+pub use multi_target_predictor::{
+    predict_multi_target, MultiTargetPredictions, MultiTargetPredictor,
+};
 pub use predictor::Predictor;
 pub use trainer::ModelTrainer;
 
@@ -8,7 +12,9 @@ use crate::config::{PredictionConfig, TrainingConfig};
 use crate::utils::error::Result;
 
 /// High-level training function
-pub async fn train_model(config: TrainingConfig) -> Result<crate::model::lstm_simple::LSTMModel> {
+pub async fn train_model(
+    config: TrainingConfig,
+) -> Result<crate::model::multi_target::MultiTargetLSTMModel> {
     let trainer = ModelTrainer::new(config);
     trainer.train().await
 }

@@ -93,8 +93,8 @@ impl LSTMModel {
             input_size,
             hidden_size: effective_hidden_size,
             output_size,
-            sequence_length: sequence_length, // Use actual sequence length from config
-            learning_rate: 0.001,             // Default learning rate
+            sequence_length,      // Use actual sequence length from config
+            learning_rate: 0.001, // Default learning rate
         };
         Self::new(lstm_config)
     }
@@ -279,7 +279,7 @@ impl LSTMModel {
         sequences: &Array3<f64>,
         targets: &Array2<f64>,
     ) -> Result<TrainingDataBatch> {
-        let mut training_data: Vec<(Vec<Array2<f64>>, Vec<Array2<f64>>)> = Vec::new();
+        let mut training_data: TrainingDataBatch = Vec::new();
 
         // sequences shape: [batch, sequence_length, features]
         // targets shape: [batch, output_size]

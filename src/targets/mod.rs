@@ -192,6 +192,34 @@ impl TargetGenerator {
         Self::new(MultiTargetConfig::default())
     }
 
+    /// Get descriptive names for all generated targets
+    pub fn get_target_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+
+        // Price level targets
+        for horizon in &self.config.horizons {
+            names.push(format!("price_level_{}", horizon));
+        }
+
+        // Direction targets
+        for horizon in &self.config.horizons {
+            names.push(format!("direction_{}", horizon));
+        }
+
+        // Volatility targets
+        for horizon in &self.config.horizons {
+            names.push(format!("volatility_{}", horizon));
+        }
+
+        names
+    }
+
+    /// Get the total number of targets that will be generated
+    pub fn get_num_targets(&self) -> usize {
+        // Each horizon generates: 1 price level + 1 direction + 1 volatility = 3 targets per horizon
+        self.config.horizons.len() * 3
+    }
+
     /// Generate all targets for the given DataFrame
     pub async fn generate_all_targets(&self, df: &DataFrame) -> Result<PreparedTargets> {
         let data_length = df.height();

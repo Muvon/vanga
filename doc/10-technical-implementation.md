@@ -303,15 +303,15 @@ impl ModelTrainer {
 }
 ```
 
-#### **Prediction API** (`src/api/predictor.rs`)
+#### **Multi-Target Prediction API** (`src/api/multi_target_predictor.rs`)
 ```rust
-pub async fn predict(config: PredictionConfig, model: &LSTMModel) -> Result<Array2<f64>> {
-    let predictor = Predictor::new(config);
+pub async fn predict_multi_target(config: PredictionConfig, model: &MultiTargetLSTMModel) -> Result<MultiTargetPredictions> {
+    let predictor = MultiTargetPredictor::new(config);
     predictor.predict(model).await
 }
 
-impl Predictor {
-    pub async fn predict(&self, model: &LSTMModel) -> Result<Array2<f64>> {
+impl MultiTargetPredictor {
+    pub async fn predict(&self, model: &MultiTargetLSTMModel) -> Result<MultiTargetPredictions> {
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new();
 
@@ -321,20 +321,24 @@ impl Predictor {
             &self.config,
         ).await?;
 
-        // Make predictions
-        let predictions = model.predict(&prepared_data.sequences).await?;
+        // Make predictions using all target models
+        let raw_predictions = model.predict(&prepared_data.sequences).await?;
 
-        // Apply confidence filtering if configured
-        let final_predictions = if self.config.min_confidence > 0.0 {
-            // Apply confidence threshold (simplified implementation)
-            predictions
-        } else {
-            predictions
-        };
+        // Format predictions with target names
+        let predictions = MultiTargetPredictions::new(
+            raw_predictions,
+            model.get_target_names().to_vec(),
+            self.config.symbol.clone(),
+        );
 
-        Ok(final_predictions)
+        Ok(predictions)
     }
 }
+
+// Access specific target predictions
+let price_predictions = predictions.get_target_predictions("price_level_1h");
+let direction_predictions = predictions.get_target_predictions("direction_1h");
+let volatility_predictions = predictions.get_target_predictions("volatility_1h");
 ```
 
 ---

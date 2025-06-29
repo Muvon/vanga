@@ -225,7 +225,7 @@ vanga train --symbol BTCUSDT --data data.csv --verbose
 
 ---
 
-**Ready to get started?** 
+**Ready to get started?**
 
 1. 📊 **Validate your data:** `python3 scripts/validate_features.py your_data.csv`
 2. 🔧 **Generate config:** `python3 scripts/validate_features.py your_data.csv --generate-config config.toml`

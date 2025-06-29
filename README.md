@@ -27,11 +27,11 @@
 ## 🎯 Architecture Overview
 
 ### Core Design Principles
-- **Symbol-Agnostic**: Each trading pair gets its own specialized LSTM model
-- **Multi-Target Prediction**: Price levels, direction, and volatility in one framework
+- **Symbol-Agnostic**: Each trading pair gets its own specialized multi-target LSTM model
+- **Multi-Target Prediction**: Price levels, direction, and volatility with separate specialized models (0% data loss)
 - **Adaptive Feature Engineering**: Automatic feature selection and generation
-- **Ensemble Approach**: Multiple LSTM variants for robust predictions
-- **Zero-Parameter Tuning**: Auto-optimization using Bayesian methods
+- **Multi-Model Architecture**: Separate LSTM models per target for optimal performance
+- **Zero-Parameter Tuning**: Auto-optimization using Adam optimizer with intelligent epoch management
 
 ### Required Data Format
 

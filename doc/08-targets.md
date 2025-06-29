@@ -6,37 +6,37 @@ The VANGA LSTM cryptocurrency forecasting system implements a comprehensive mult
 
 ## Architecture Overview
 
-### **Multi-Target Framework**
+### **Multi-Target Architecture**
+
+VANGA implements a revolutionary multi-target LSTM architecture that eliminates data loss:
+
 ```rust
-// Implemented in src/targets/mod.rs
-pub struct TargetGenerator {
-    config: MultiTargetConfig,
+// Multi-target LSTM model with separate models per target
+pub struct MultiTargetLSTMModel {
+    /// Individual LSTM models, one per target (0% data loss)
+    models: Vec<LSTMModel>,
+    /// Names/descriptions of each target
+    target_names: Vec<String>,
+    /// Input feature size (shared across all models)
+    input_size: usize,
+    /// Number of targets
+    num_targets: usize,
 }
 
-impl TargetGenerator {
-    pub async fn generate_all_targets(&self, df: &DataFrame) -> Result<PreparedTargets> {
-        let data_length = df.height();
-        let mut prepared_targets = PreparedTargets::new(data_length);
+impl MultiTargetLSTMModel {
+    /// Train all target models with the provided data
+    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
+        // Train each model with its corresponding target
+        for (i, model) in self.models.iter_mut().enumerate() {
+            let target_name = &self.target_names[i];
 
-        // Generate price level targets
-        if self.config.price_levels.enabled {
-            let price_targets = price_levels::generate_price_level_targets(df, &self.config.price_levels.horizons).await?;
-            prepared_targets.price_levels = price_targets;
+            // Extract single target column for this model
+            let single_target = targets.column(i).to_owned().insert_axis(Axis(1));
+
+            // Train individual model
+            model.train(sequences, &single_target).await?;
         }
-
-        // Generate direction targets
-        if self.config.direction.enabled {
-            let direction_targets = direction::generate_direction_targets(df, &self.config.direction.horizons).await?;
-            prepared_targets.direction = direction_targets;
-        }
-
-        // Generate volatility targets
-        if self.config.volatility.enabled {
-            let volatility_targets = volatility::generate_volatility_targets(df, &self.config.volatility.horizons).await?;
-            prepared_targets.volatility = volatility_targets;
-        }
-
-        Ok(prepared_targets)
+        Ok(())
     }
 }
 ```
