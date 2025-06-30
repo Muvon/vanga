@@ -108,7 +108,7 @@ impl LSTMModel {
         batch_size: usize,
     ) -> Result<()> {
         let num_samples = sequences.shape()[0];
-        let num_batches = (num_samples + batch_size - 1) / batch_size;
+        let num_batches = num_samples.div_ceil(batch_size);
 
         log::info!(
             "Training with {} parallel batches of size {}",
@@ -745,7 +745,6 @@ impl LSTMModel {
 
         for batch_idx in 0..batch_size {
             let mut input_sequence = Vec::new();
-            let mut target_sequence = Vec::new();
 
             // Extract sequence for this batch - fix input structure
             for seq_idx in 0..sequences.shape()[1] {
@@ -757,12 +756,15 @@ impl LSTMModel {
                 input_sequence.push(input_timestep);
             }
 
-            // CRITICAL FIX: rust-lstm expects single output per sequence, not per timestep
-            // For sequence-to-one prediction (which is typical for price prediction),
-            // we use the final target value for the entire sequence
+            // CRITICAL FIX: rust-lstm expects target sequence length to match input sequence length
+            // For sequence-to-one prediction, we repeat the same target value for each timestep
+            // but only the final timestep's prediction is used during training
             let target_value = targets[[batch_idx, 0]]; // Take first target only (single output)
-            let final_target = Array2::from_elem((1, 1), target_value);
-            target_sequence.push(final_target);
+            let target_timestep = Array2::from_elem((1, 1), target_value);
+            let sequence_length = sequences.shape()[1];
+            
+            // Create target sequence with same length as input sequence (vec! macro creates efficiently)
+            let target_sequence = vec![target_timestep; sequence_length];
 
             training_data.push((input_sequence, target_sequence));
         }
