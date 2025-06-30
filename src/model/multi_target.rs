@@ -18,6 +18,8 @@ pub struct MultiTargetLSTMModel {
     input_size: usize,
     /// Number of targets
     num_targets: usize,
+    /// Prediction horizons the model was trained on
+    trained_horizons: Vec<String>,
 }
 
 /// Serializable state for multi-target model persistence
@@ -26,6 +28,9 @@ struct MultiTargetModelState {
     target_names: Vec<String>,
     input_size: usize,
     num_targets: usize,
+    /// Prediction horizons the model was trained on (optional for backward compatibility)
+    #[serde(default)]
+    trained_horizons: Option<Vec<String>>,
 }
 
 impl MultiTargetLSTMModel {
@@ -34,6 +39,7 @@ impl MultiTargetLSTMModel {
         model_config: &ModelConfig,
         input_size: usize,
         target_names: Vec<String>,
+        trained_horizons: Vec<String>,
     ) -> Result<Self> {
         let num_targets = target_names.len();
 
@@ -58,6 +64,7 @@ impl MultiTargetLSTMModel {
             target_names,
             input_size,
             num_targets,
+            trained_horizons,
         })
     }
 
@@ -336,6 +343,7 @@ impl MultiTargetLSTMModel {
             target_names: self.target_names.clone(),
             input_size: self.input_size,
             num_targets: self.num_targets,
+            trained_horizons: Some(self.trained_horizons.clone()),
         };
 
         let metadata_path = base_path.with_extension("meta");
@@ -387,17 +395,28 @@ impl MultiTargetLSTMModel {
             state.num_targets
         );
 
+        // Handle backward compatibility - if no trained_horizons in metadata, use default
+        let trained_horizons = state
+            .trained_horizons
+            .unwrap_or_else(|| vec!["1h".to_string()]);
+
         Ok(Self {
             models,
             target_names: state.target_names,
             input_size: state.input_size,
             num_targets: state.num_targets,
+            trained_horizons,
         })
     }
 
     /// Get target names
     pub fn get_target_names(&self) -> &[String] {
         &self.target_names
+    }
+
+    /// Get trained horizons
+    pub fn get_trained_horizons(&self) -> &[String] {
+        &self.trained_horizons
     }
 
     /// Get number of targets
@@ -432,7 +451,12 @@ mod tests {
             "volatility".to_string(),
         ];
 
-        let result = MultiTargetLSTMModel::new(&model_config, 10, target_names.clone());
+        let result = MultiTargetLSTMModel::new(
+            &model_config,
+            10,
+            target_names.clone(),
+            vec!["1h".to_string()],
+        );
         assert!(result.is_ok());
 
         let model = result.unwrap();
@@ -445,7 +469,9 @@ mod tests {
     async fn test_multi_target_training_validation() {
         let model_config = ModelConfig::default();
         let target_names = vec!["target1".to_string(), "target2".to_string()];
-        let mut model = MultiTargetLSTMModel::new(&model_config, 5, target_names).unwrap();
+        let mut model =
+            MultiTargetLSTMModel::new(&model_config, 5, target_names, vec!["1h".to_string()])
+                .unwrap();
 
         // Create test data with wrong target dimensions
         let sequences = Array3::zeros((10, 30, 5)); // [batch, seq_len, features]
