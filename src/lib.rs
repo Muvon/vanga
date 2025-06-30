@@ -7,10 +7,10 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use vanga::{train_model, predict, TrainingConfig, PredictionConfig};
+//! use vanga::{train_model, predict_multi_target, TrainingConfig, PredictionConfig};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Train a model
+//! // Train a multi-target model
 //! let config = TrainingConfig::default()
 //!     .symbol("BTCUSDT")
 //!     .data_path("./data/btc_ohlcv.csv")
@@ -18,11 +18,11 @@
 //!
 //! let model = train_model(config).await?;
 //!
-//! // Make predictions
+//! // Make multi-target predictions
 //! let pred_config = PredictionConfig::default()
 //!     .symbol("BTCUSDT")
 //!     .input_path("./data/recent_btc.csv");
-//! let predictions = predict(pred_config, &model).await?;
+//! let predictions = predict_multi_target(pred_config, &model).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -43,6 +43,7 @@ pub use config::{FeatureConfig, ModelConfig, PredictionConfig, TrainingConfig};
 pub use utils::{Result, VangaError};
 
 // Re-export high-level API functions
+pub use api::multi_target_predictor::predict_multi_target;
 pub use api::predictor::predict;
 pub use api::trainer::train_model;
 

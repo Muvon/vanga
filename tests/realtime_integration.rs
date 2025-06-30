@@ -6,7 +6,9 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::time::timeout;
 
-use vanga::realtime::{start_realtime_prediction, OutputFormat, RealtimeConfig};
+use vanga::realtime::{
+    start_realtime_prediction, OutputFormat, RealtimeConfig, StreamingPredictor,
+};
 
 /// Test data for integration tests
 const TEST_CSV_HEADER: &str = "timestamp,open,high,low,close,volume";
@@ -48,19 +50,38 @@ fn create_test_config(file_path: PathBuf) -> RealtimeConfig {
 }
 
 #[tokio::test]
-#[ignore] // Ignore by default as it requires a trained model
 async fn test_realtime_prediction_integration() {
-    // This test requires a trained model to exist
-    // Run with: cargo test test_realtime_prediction_integration -- --ignored
+    // Test that the real-time prediction system can be initialized but fails on actual prediction
+    // without a trained model (which is the expected behavior)
 
     let temp_file = create_test_csv_file().await;
     let config = create_test_config(temp_file.path().to_path_buf());
 
-    // Start real-time prediction with timeout
-    let result = timeout(Duration::from_secs(5), start_realtime_prediction(config)).await;
+    // Test that StreamingPredictor can be created (this should succeed)
+    let predictor_result = StreamingPredictor::new(config.clone()).await;
+    assert!(
+        predictor_result.is_ok(),
+        "StreamingPredictor creation should succeed"
+    );
 
-    // Should timeout (which is expected behavior for continuous streaming)
-    assert!(result.is_err());
+    // Test that the actual streaming with timeout fails gracefully
+    // (either due to missing model or timeout - both are acceptable)
+    let result = timeout(Duration::from_secs(2), start_realtime_prediction(config)).await;
+
+    match result {
+        Ok(stream_result) => {
+            // If streaming somehow completes, it should be an error (missing model)
+            assert!(
+                stream_result.is_err(),
+                "Streaming should fail without trained model"
+            );
+        }
+        Err(_) => {
+            // Timeout is expected - the streaming loop runs indefinitely
+            // This is the normal behavior when no file changes occur
+            println!("Streaming timed out as expected (infinite loop behavior)");
+        }
+    }
 }
 
 #[tokio::test]

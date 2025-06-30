@@ -576,6 +576,7 @@ impl StreamingPredictor {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     async fn create_test_config() -> (RealtimeConfig, NamedTempFile) {
@@ -605,10 +606,40 @@ mod tests {
     async fn test_streaming_predictor_creation() {
         let (config, _temp_file) = create_test_config().await;
 
-        // This test will fail if model doesn't exist, which is expected in test environment
+        // Test successful creation with valid config and temp file
         let result = StreamingPredictor::new(config).await;
-        // We expect this to fail in test environment due to missing model
-        assert!(result.is_err());
+        // Should succeed with valid config and existing file
+        assert!(
+            result.is_ok(),
+            "StreamingPredictor creation should succeed with valid config"
+        );
+
+        if let Ok(predictor) = result {
+            assert_eq!(predictor.config.symbol, "BTCUSDT");
+            assert_eq!(predictor.config.buffer_size, 100);
+            assert_eq!(predictor.prediction_count, 0);
+            assert_eq!(predictor.error_count, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_predictor_creation_with_invalid_file() {
+        let config = RealtimeConfig {
+            file_path: PathBuf::from("/nonexistent/path/data.csv"),
+            symbol: "BTCUSDT".to_string(),
+            buffer_size: 100,
+            feature_window: 10,
+            output_format: OutputFormat::Json,
+            debug: true,
+            ..Default::default()
+        };
+
+        // This should fail due to invalid file path
+        let result = StreamingPredictor::new(config).await;
+        assert!(
+            result.is_err(),
+            "StreamingPredictor should fail with invalid file path"
+        );
     }
 
     #[tokio::test]

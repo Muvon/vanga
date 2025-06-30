@@ -714,15 +714,12 @@ impl LSTMModel {
                 input_sequence.push(input_timestep);
             }
 
-            // CRITICAL FIX: rust-lstm expects single output per timestep, not multi-target
-            // We need to create separate training runs for each target or restructure approach
-            // For now, let's use only the first target to test basic functionality
-            for _seq_idx in 0..sequences.shape()[1] {
-                // Use only first target (single output) to match rust-lstm expectations
-                let target_value = targets[[batch_idx, 0]]; // Take first target only
-                let target_timestep = Array2::from_elem((1, 1), target_value);
-                target_sequence.push(target_timestep);
-            }
+            // CRITICAL FIX: rust-lstm expects single output per sequence, not per timestep
+            // For sequence-to-one prediction (which is typical for price prediction),
+            // we use the final target value for the entire sequence
+            let target_value = targets[[batch_idx, 0]]; // Take first target only (single output)
+            let final_target = Array2::from_elem((1, 1), target_value);
+            target_sequence.push(final_target);
 
             training_data.push((input_sequence, target_sequence));
         }
