@@ -225,35 +225,47 @@ impl TargetGenerator {
         let data_length = df.height();
         let mut prepared_targets = PreparedTargets::new(data_length);
 
-        // Generate price level targets
         log::info!(
-            "Generating price level targets for {} horizons",
+            "Generating all targets in parallel for {} horizons",
             self.config.horizons.len()
         );
-        let price_targets = generate_price_level_targets(
-            df,
-            &self.config.horizons,
-            &self.config.price_level_config,
-        )?;
-        prepared_targets.price_levels = price_targets;
 
-        // Generate direction targets
-        log::info!(
-            "Generating direction targets for {} horizons",
-            self.config.horizons.len()
+        // PARALLELIZED: Generate all target types concurrently using rayon::join
+        let (price_targets, (direction_targets, volatility_targets)) = rayon::join(
+            || {
+                log::debug!("Generating price level targets in parallel");
+                generate_price_level_targets(
+                    df,
+                    &self.config.horizons,
+                    &self.config.price_level_config,
+                )
+            },
+            || {
+                rayon::join(
+                    || {
+                        log::debug!("Generating direction targets in parallel");
+                        generate_direction_targets(
+                            df,
+                            &self.config.horizons,
+                            &self.config.direction_config,
+                        )
+                    },
+                    || {
+                        log::debug!("Generating volatility targets in parallel");
+                        generate_volatility_targets(
+                            df,
+                            &self.config.horizons,
+                            &self.config.volatility_config,
+                        )
+                    },
+                )
+            },
         );
-        let direction_targets =
-            generate_direction_targets(df, &self.config.horizons, &self.config.direction_config)?;
-        prepared_targets.directions = direction_targets;
 
-        // Generate volatility targets
-        log::info!(
-            "Generating volatility targets for {} horizons",
-            self.config.horizons.len()
-        );
-        let volatility_targets =
-            generate_volatility_targets(df, &self.config.horizons, &self.config.volatility_config)?;
-        prepared_targets.volatility = volatility_targets;
+        // Assign results
+        prepared_targets.price_levels = price_targets?;
+        prepared_targets.directions = direction_targets?;
+        prepared_targets.volatility = volatility_targets?;
 
         // Calculate valid indices (where all targets are available)
         prepared_targets.valid_indices = self.calculate_valid_indices(&prepared_targets)?;

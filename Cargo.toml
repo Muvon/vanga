@@ -49,6 +49,7 @@ rmp-serde = "1.1"  # MessagePack for model serialization
 # Parallel processing
 rayon = "1.8"
 rand = "0.9.1"
+num_cpus = "1.16"  # For optimal thread configuration
 
 # Real-time streaming and file watching
 notify = "6.1"

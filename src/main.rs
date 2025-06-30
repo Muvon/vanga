@@ -216,6 +216,11 @@ async fn main() -> Result<()> {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
+    // Configure rayon for optimal CPU utilization
+    configure_rayon_threads();
+
+    let _monitor = PerformanceMonitor::new("VANGA Application");
+
     match cli.command {
         Commands::Train {
             symbol,
@@ -562,4 +567,59 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Configure rayon thread pool for optimal CPU utilization
+fn configure_rayon_threads() {
+    let num_cpus = num_cpus::get();
+    let optimal_threads = std::cmp::max(1, num_cpus - 1); // Leave one core for system
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(optimal_threads)
+        .build_global()
+        .expect("Failed to configure rayon thread pool");
+
+    log::info!(
+        "🚀 Configured rayon with {} threads for {} CPU cores",
+        optimal_threads,
+        num_cpus
+    );
+}
+
+/// Performance monitoring helper
+struct PerformanceMonitor {
+    start_time: std::time::Instant,
+    task_name: String,
+}
+
+impl PerformanceMonitor {
+    fn new(task_name: &str) -> Self {
+        log::info!("⏱️  Starting: {}", task_name);
+        Self {
+            start_time: std::time::Instant::now(),
+            task_name: task_name.to_string(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn checkpoint(&self, checkpoint_name: &str) {
+        let elapsed = self.start_time.elapsed();
+        log::info!(
+            "⏱️  {} - {}: {:.2}s",
+            self.task_name,
+            checkpoint_name,
+            elapsed.as_secs_f64()
+        );
+    }
+}
+
+impl Drop for PerformanceMonitor {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed();
+        log::info!(
+            "✅ Completed: {} in {:.2}s",
+            self.task_name,
+            elapsed.as_secs_f64()
+        );
+    }
 }

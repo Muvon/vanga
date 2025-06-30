@@ -5,6 +5,7 @@ use crate::utils::error::{Result, VangaError};
 use chrono::Utc;
 use ndarray::{s, Array2, Array3, Axis};
 use polars::prelude::*;
+use rayon::prelude::*;
 
 pub struct SequenceGenerator;
 
@@ -269,9 +270,18 @@ impl SequenceGenerator {
 
         let mut sequences = Array3::zeros((num_sequences, sequence_length, feature_count));
 
-        // Create sequences using sliding window
-        for i in 0..num_sequences {
-            let sequence = feature_data.slice(s![i..i + sequence_length, ..]);
+        // PARALLELIZED: Create sequences using sliding window
+        let sequences_vec: Vec<Array2<f64>> = (0..num_sequences)
+            .into_par_iter()
+            .map(|i| {
+                feature_data
+                    .slice(s![i..i + sequence_length, ..])
+                    .to_owned()
+            })
+            .collect();
+
+        // Convert parallel results to Array3
+        for (i, sequence) in sequences_vec.into_iter().enumerate() {
             sequences.slice_mut(s![i, .., ..]).assign(&sequence);
         }
 

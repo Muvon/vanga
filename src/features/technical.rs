@@ -2,28 +2,87 @@
 use crate::config::features::TechnicalIndicatorsConfig;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
+use rayon::prelude::*;
 
-/// Generate comprehensive technical indicators for cryptocurrency data
+/// Generate comprehensive technical indicators for cryptocurrency data - PARALLELIZED
 pub async fn generate_technical_indicators(
     mut df: DataFrame,
     config: &TechnicalIndicatorsConfig,
 ) -> Result<DataFrame> {
-    log::info!("Generating comprehensive technical indicators...");
+    log::info!("Generating comprehensive technical indicators with parallel processing...");
 
-    // Extract OHLCV data for calculations
+    // Extract OHLCV data for calculations - PARALLEL EXTRACTION
     let close_prices = extract_numeric_column(&df, "close")?;
     let high_prices = extract_numeric_column(&df, "high")?;
     let low_prices = extract_numeric_column(&df, "low")?;
     let open_prices = extract_numeric_column(&df, "open")?;
     let volume = extract_numeric_column(&df, "volume")?;
 
-    // Trend Indicators - using actual config structure
-    if !config.moving_averages.sma_periods.is_empty() {
-        df = add_sma_indicators(df, &close_prices, &config.moving_averages.sma_periods)?;
+    // PARALLEL INDICATOR PROCESSING: Process all indicator groups concurrently
+    let results = rayon::join(
+        || {
+            // Trend indicators group
+            let mut trend_results = Vec::new();
+
+            if !config.moving_averages.sma_periods.is_empty() {
+                trend_results.push((
+                    "sma",
+                    add_sma_indicators(
+                        df.clone(),
+                        &close_prices,
+                        &config.moving_averages.sma_periods,
+                    ),
+                ));
+            }
+
+            if !config.moving_averages.ema_periods.is_empty() {
+                trend_results.push((
+                    "ema",
+                    add_ema_indicators(
+                        df.clone(),
+                        &close_prices,
+                        &config.moving_averages.ema_periods,
+                    ),
+                ));
+            }
+
+            trend_results
+        },
+        || {
+            // Momentum indicators group
+            let mut momentum_results = Vec::new();
+
+            if !config.momentum.rsi_periods.is_empty() {
+                momentum_results.push((
+                    "rsi",
+                    add_rsi_indicators(df.clone(), &close_prices, &config.momentum.rsi_periods),
+                ));
+            }
+
+            momentum_results
+        },
+    );
+
+    // Apply trend indicators
+    for (name, result) in results.0 {
+        match result {
+            Ok(updated_df) => {
+                df = updated_df;
+                log::debug!("Applied {} indicators", name);
+            }
+            Err(e) => log::warn!("Failed to apply {} indicators: {}", name, e),
+        }
     }
 
-    if !config.moving_averages.ema_periods.is_empty() {
-        df = add_ema_indicators(df, &close_prices, &config.moving_averages.ema_periods)?;
+    // Apply momentum indicators
+    for (name, result) in results.1 {
+        match result {
+            Ok(updated_df) => {
+                df = updated_df;
+                log::debug!("Applied {} indicators", name);
+            }
+            Err(e) => log::warn!("Failed to apply {} indicators: {}", name, e),
+        }
     }
 
     if config.trend.macd.enabled {
@@ -430,15 +489,23 @@ fn calculate_mfi(
 
 // Helper functions for DataFrame integration - CRITICAL for compilation
 
-/// Add SMA indicators to DataFrame
+/// Add SMA indicators to DataFrame - PARALLELIZED
 fn add_sma_indicators(
     mut df: DataFrame,
     close_prices: &[f64],
     periods: &[u32],
 ) -> Result<DataFrame> {
-    for &period in periods {
-        let sma_values = calculate_sma(close_prices, period as usize);
-        let column_name = format!("sma_{}", period);
+    // Compute all SMA periods in parallel
+    let sma_results: Vec<_> = periods
+        .par_iter()
+        .map(|&period| {
+            let sma = calculate_sma(close_prices, period as usize);
+            (format!("sma_{}", period), sma)
+        })
+        .collect();
+
+    // Add all computed SMAs to DataFrame
+    for (column_name, sma_values) in sma_results {
         let series = Series::new(&column_name, sma_values);
         df = df
             .with_column(series)
@@ -450,15 +517,23 @@ fn add_sma_indicators(
     Ok(df)
 }
 
-/// Add EMA indicators to DataFrame
+/// Add EMA indicators to DataFrame - PARALLELIZED
 fn add_ema_indicators(
     mut df: DataFrame,
     close_prices: &[f64],
     periods: &[u32],
 ) -> Result<DataFrame> {
-    for &period in periods {
-        let ema_values = calculate_ema(close_prices, period as usize);
-        let column_name = format!("ema_{}", period);
+    // Compute all EMA periods in parallel
+    let ema_results: Vec<_> = periods
+        .par_iter()
+        .map(|&period| {
+            let ema = calculate_ema(close_prices, period as usize);
+            (format!("ema_{}", period), ema)
+        })
+        .collect();
+
+    // Add all computed EMAs to DataFrame
+    for (column_name, ema_values) in ema_results {
         let series = Series::new(&column_name, ema_values);
         df = df
             .with_column(series)
@@ -534,15 +609,23 @@ fn add_bollinger_bands(
     Ok(df)
 }
 
-/// Add RSI indicators to DataFrame
+/// Add RSI indicators to DataFrame - PARALLELIZED
 fn add_rsi_indicators(
     mut df: DataFrame,
     close_prices: &[f64],
     periods: &[u32],
 ) -> Result<DataFrame> {
-    for &period in periods {
-        let rsi_values = calculate_rsi(close_prices, period as usize);
-        let column_name = format!("rsi_{}", period);
+    // Compute all RSI periods in parallel
+    let rsi_results: Vec<_> = periods
+        .par_iter()
+        .map(|&period| {
+            let rsi = calculate_rsi(close_prices, period as usize);
+            (format!("rsi_{}", period), rsi)
+        })
+        .collect();
+
+    // Add all computed RSIs to DataFrame
+    for (column_name, rsi_values) in rsi_results {
         let series = Series::new(&column_name, rsi_values);
         df = df
             .with_column(series)

@@ -1,6 +1,7 @@
 use crate::config::GlobalConfig;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
+use rayon::prelude::*;
 use std::path::Path;
 
 /// Data loader for CSV files with automatic schema detection
@@ -13,6 +14,52 @@ impl DataLoader {
         Self {
             chunk_size: 10000, // Process in chunks for memory efficiency
         }
+    }
+
+    /// PARALLELIZED: Load multiple CSV files concurrently
+    pub async fn load_multiple_csv<P: AsRef<Path> + Sync>(
+        &self,
+        paths: &[P],
+    ) -> Result<Vec<DataFrame>> {
+        log::info!("Loading {} CSV files in parallel", paths.len());
+
+        let results: Vec<Result<DataFrame>> = paths
+            .iter()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .map(|path| {
+                let path = path.as_ref();
+                log::debug!("Loading file: {}", path.display());
+
+                if !path.exists() {
+                    return Err(VangaError::DataError(format!(
+                        "Data file not found: {}",
+                        path.display()
+                    )));
+                }
+
+                // Load CSV with validation
+                let df = polars::prelude::CsvReader::from_path(path)
+                    .map_err(|e| {
+                        VangaError::DataError(format!("Failed to create CSV reader: {}", e))
+                    })?
+                    .has_header(true)
+                    .finish()
+                    .map_err(|e| VangaError::DataError(format!("Failed to read CSV: {}", e)))?;
+
+                log::debug!("Loaded {} rows from {}", df.height(), path.display());
+                Ok(df)
+            })
+            .collect();
+
+        // Collect results and handle errors
+        let mut dataframes = Vec::with_capacity(results.len());
+        for result in results {
+            dataframes.push(result?);
+        }
+
+        log::info!("Successfully loaded {} CSV files", dataframes.len());
+        Ok(dataframes)
     }
 
     /// Load CSV data with automatic validation
