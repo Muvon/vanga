@@ -217,7 +217,7 @@ impl MultiTargetPredictions {
         let formatter = OutputFormatter::new(config.output_config.clone());
 
         // Smart horizon selection logic
-        let horizon = if let Some(requested_horizon) = &config.horizon {
+        let horizons_to_predict = if let Some(requested_horizon) = &config.horizon {
             // Validate requested horizon against trained horizons
             let trained_horizons = model.get_trained_horizons();
             if !trained_horizons.contains(requested_horizon) {
@@ -226,68 +226,78 @@ impl MultiTargetPredictions {
                     requested_horizon, trained_horizons
                 )));
             }
-            requested_horizon.as_str()
+            vec![requested_horizon.clone()]
         } else if config.all_horizons {
-            // For all_horizons, we'll handle this differently - for now use first trained horizon
+            // For all_horizons, use all trained horizons
             let trained_horizons = model.get_trained_horizons();
             if trained_horizons.is_empty() {
-                "1h" // Fallback for backward compatibility
+                vec!["1h".to_string()] // Fallback for backward compatibility
             } else {
-                &trained_horizons[0]
+                trained_horizons.to_vec()
             }
         } else {
             // No specific horizon requested - use first trained horizon
             let trained_horizons = model.get_trained_horizons();
             if trained_horizons.is_empty() {
-                "1h" // Fallback for backward compatibility
+                vec!["1h".to_string()] // Fallback for backward compatibility
             } else {
-                &trained_horizons[0]
+                vec![trained_horizons[0].clone()]
             }
         };
 
-        // Create structured predictions with correct metadata
+        log::info!(
+            "Generating predictions for horizons: {:?}",
+            horizons_to_predict
+        );
+
+        // Create structured predictions with correct metadata for each horizon
         let mut results = Vec::new();
 
-        for batch_idx in 0..self.predictions.nrows() {
-            let mut result = PredictionResult::new_with_metadata(
-                self.symbol.clone(),
-                horizon.to_string(),
-                self.current_price,
-                self.input_feature_count,
-                self.sequence_length,
-            );
-
-            // Extract predictions for this batch
-            let batch_predictions = self.predictions.row(batch_idx);
-
-            // Convert raw outputs to structured predictions
-            if !batch_predictions.is_empty() {
-                let price_level_prob = batch_predictions[0];
-                result = result.with_price_levels(
-                    formatter
-                        .create_price_level_prediction(price_level_prob, self.current_price)?,
+        // Generate predictions for each requested horizon
+        for horizon in &horizons_to_predict {
+            for batch_idx in 0..self.predictions.nrows() {
+                let mut result = PredictionResult::new_with_metadata(
+                    self.symbol.clone(),
+                    horizon.clone(),
+                    self.current_price,
+                    self.input_feature_count,
+                    self.sequence_length,
                 );
-            }
 
-            if batch_predictions.len() >= 2 {
-                let direction_prob = batch_predictions[1];
-                result =
-                    result.with_direction(formatter.create_direction_prediction(direction_prob)?);
-            }
+                // Extract predictions for this batch
+                let batch_predictions = self.predictions.row(batch_idx);
 
-            if batch_predictions.len() >= 3 {
-                let volatility_prob = batch_predictions[2];
-                result = result
-                    .with_volatility(formatter.create_volatility_prediction(volatility_prob)?);
-            }
+                // Convert raw outputs to structured predictions
+                if !batch_predictions.is_empty() {
+                    let price_level_prob = batch_predictions[0];
+                    result = result.with_price_levels(
+                        formatter
+                            .create_price_level_prediction(price_level_prob, self.current_price)?,
+                    );
+                }
 
-            result = result.with_confidence(0.7); // Default confidence
-            results.push(result);
+                if batch_predictions.len() >= 2 {
+                    let direction_prob = batch_predictions[1];
+                    result = result
+                        .with_direction(formatter.create_direction_prediction(direction_prob)?);
+                }
+
+                if batch_predictions.len() >= 3 {
+                    let volatility_prob = batch_predictions[2];
+                    result = result
+                        .with_volatility(formatter.create_volatility_prediction(volatility_prob)?);
+                }
+
+                result = result.with_confidence(0.7); // Default confidence
+                results.push(result);
+            }
         }
 
         log::info!(
-            "✅ Successfully converted {} raw predictions to structured format",
-            results.len()
+            "✅ Successfully converted {} raw predictions to structured format for {} horizon(s): {:?}",
+            results.len(),
+            horizons_to_predict.len(),
+            horizons_to_predict
         );
 
         Ok(results)
