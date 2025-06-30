@@ -70,8 +70,13 @@ mod candle_integration_tests {
         ];
 
         // Create multi-target model - same interface as original
-        let mut model = MultiTargetLSTMModel::new(&model_config, 15, target_names.clone())
-            .expect("Failed to create multi-target model");
+        let mut model = MultiTargetLSTMModel::new(
+            &model_config,
+            15,
+            target_names.clone(),
+            vec!["1h".to_string()],
+        )
+        .expect("Failed to create multi-target model");
 
         // Create test data
         let sequences = Array3::zeros((8, 30, 15)); // 8 samples, 30 timesteps, 15 features

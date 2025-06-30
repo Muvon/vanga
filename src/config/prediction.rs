@@ -211,4 +211,54 @@ impl PredictionConfig {
         self.min_confidence = confidence;
         self
     }
+
+    /// Validate horizon against model's trained horizons
+    pub fn validate_horizon_against_model(
+        &self,
+        model: &crate::model::multi_target::MultiTargetLSTMModel,
+    ) -> crate::utils::error::Result<()> {
+        if let Some(requested_horizon) = &self.horizon {
+            let trained_horizons = model.get_trained_horizons();
+            if !trained_horizons.contains(requested_horizon) {
+                return Err(crate::utils::error::VangaError::ConfigError(format!(
+                    "Requested horizon '{}' was not trained. Available horizons: {:?}. Use one of the available horizons or --all-horizons to predict all.",
+                    requested_horizon, trained_horizons
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Get effective horizon for prediction (validates and returns appropriate horizon)
+    pub fn get_effective_horizon(
+        &self,
+        model: &crate::model::multi_target::MultiTargetLSTMModel,
+    ) -> crate::utils::error::Result<String> {
+        let trained_horizons = model.get_trained_horizons();
+
+        if let Some(requested_horizon) = &self.horizon {
+            // Validate requested horizon
+            if !trained_horizons.contains(requested_horizon) {
+                return Err(crate::utils::error::VangaError::ConfigError(format!(
+                    "Requested horizon '{}' was not trained. Available horizons: {:?}",
+                    requested_horizon, trained_horizons
+                )));
+            }
+            Ok(requested_horizon.clone())
+        } else if self.all_horizons {
+            // For all_horizons, return the first one (caller should handle multiple)
+            if trained_horizons.is_empty() {
+                Ok("1h".to_string()) // Fallback for backward compatibility
+            } else {
+                Ok(trained_horizons[0].clone())
+            }
+        } else {
+            // No specific horizon requested - use first trained horizon
+            if trained_horizons.is_empty() {
+                Ok("1h".to_string()) // Fallback for backward compatibility
+            } else {
+                Ok(trained_horizons[0].clone())
+            }
+        }
+    }
 }

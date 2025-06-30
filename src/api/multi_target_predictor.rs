@@ -209,14 +209,41 @@ impl MultiTargetPredictions {
     pub async fn to_structured_predictions(
         &self,
         config: &PredictionConfig,
+        model: &MultiTargetLSTMModel,
     ) -> Result<Vec<PredictionResult>> {
         log::info!("Converting raw predictions to structured format");
 
         // Create output formatter with config
         let formatter = OutputFormatter::new(config.output_config.clone());
 
-        // Extract horizon from config or use default
-        let horizon = config.horizon.as_deref().unwrap_or("1h");
+        // Smart horizon selection logic
+        let horizon = if let Some(requested_horizon) = &config.horizon {
+            // Validate requested horizon against trained horizons
+            let trained_horizons = model.get_trained_horizons();
+            if !trained_horizons.contains(requested_horizon) {
+                return Err(crate::utils::error::VangaError::ConfigError(format!(
+                    "Requested horizon '{}' was not trained. Available horizons: {:?}",
+                    requested_horizon, trained_horizons
+                )));
+            }
+            requested_horizon.as_str()
+        } else if config.all_horizons {
+            // For all_horizons, we'll handle this differently - for now use first trained horizon
+            let trained_horizons = model.get_trained_horizons();
+            if trained_horizons.is_empty() {
+                "1h" // Fallback for backward compatibility
+            } else {
+                &trained_horizons[0]
+            }
+        } else {
+            // No specific horizon requested - use first trained horizon
+            let trained_horizons = model.get_trained_horizons();
+            if trained_horizons.is_empty() {
+                "1h" // Fallback for backward compatibility
+            } else {
+                &trained_horizons[0]
+            }
+        };
 
         // Create structured predictions with correct metadata
         let mut results = Vec::new();

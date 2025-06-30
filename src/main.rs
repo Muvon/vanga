@@ -103,12 +103,18 @@ enum Commands {
         #[arg(short, long)]
         input: PathBuf,
 
-        /// Prediction horizon (1h, 4h, 1d, 7d)
-        #[arg(long)]
+        /// Prediction horizon (must match one used during training: e.g., 1h, 4h, 1d, 7d)
+        #[arg(
+            long,
+            help = "Prediction horizon (must match one used during training). Use 'vanga models list' to see available horizons for each model."
+        )]
         horizon: Option<String>,
 
-        /// Predict all available horizons
-        #[arg(long)]
+        /// Predict all available horizons (shows predictions for all horizons the model was trained on)
+        #[arg(
+            long,
+            help = "Predict all available horizons that the model was trained on"
+        )]
         all_horizons: bool,
 
         /// Batch prediction mode
@@ -461,6 +467,23 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
         let model_path = vanga::utils::model_path::get_model_path(&config.symbol);
         let model = vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path)?;
 
+        // Validate horizon configuration against model
+        config.validate_horizon_against_model(&model)?;
+
+        // Log available horizons for user information
+        let trained_horizons = model.get_trained_horizons();
+        log::info!("Model trained horizons: {:?}", trained_horizons);
+        if let Some(requested_horizon) = &config.horizon {
+            log::info!("Using requested horizon: {}", requested_horizon);
+        } else if config.all_horizons {
+            log::info!("Predicting all available horizons: {:?}", trained_horizons);
+        } else {
+            log::info!(
+                "No horizon specified, using primary horizon: {}",
+                trained_horizons.first().unwrap_or(&"1h".to_string())
+            );
+        }
+
         // Make predictions using the multi-target API
         let predictions = vanga::api::predict_multi_target(config.clone(), &model).await?;
 
@@ -468,7 +491,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
         if let Some(ref output_path) = config.output_path {
             // Convert raw predictions to structured format using OutputFormatter
             log::info!("Converting raw predictions to structured format...");
-            let structured_predictions = predictions.to_structured_predictions(&config).await?;
+            let structured_predictions = predictions
+                .to_structured_predictions(&config, &model)
+                .await?;
 
             // Use existing formatter method to create JSON
             let output_content =
@@ -479,7 +504,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
         } else {
             // If no output path, print structured predictions to console
             log::info!("Converting raw predictions to structured format for console output...");
-            let structured_predictions = predictions.to_structured_predictions(&config).await?;
+            let structured_predictions = predictions
+                .to_structured_predictions(&config, &model)
+                .await?;
             let output_content =
                 vanga::output::formatter::predictions_to_json(&structured_predictions)?;
             println!("{}", output_content);
@@ -504,12 +531,40 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
                 println!("No trained models available. Train a model first with: vanga train --symbol <SYMBOL> --data <DATA_FILE>");
             } else {
                 log::info!("Available models:");
-                println!("\nAvailable Models:");
-                println!("================");
-                for model in &models {
-                    println!("📊 {}", model);
+                println!("\n📊 Available Trained Models:");
+                println!(
+                    "{:<15} {:<20} {:<30}",
+                    "Symbol", "Status", "Trained Horizons"
+                );
+                println!("{}", "-".repeat(70));
+
+                for model_name in &models {
+                    let model_path = vanga::utils::model_path::get_model_path(model_name);
+
+                    // Try to load model to get horizon information
+                    match vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path) {
+                        Ok(model) => {
+                            let horizons = model.get_trained_horizons();
+                            let horizons_str = if horizons.is_empty() {
+                                "[legacy - no horizon info]".to_string()
+                            } else {
+                                format!("{:?}", horizons)
+                            };
+                            println!("{:<15} {:<20} {:<30}", model_name, "✅ Ready", horizons_str);
+                        }
+                        Err(_) => {
+                            println!(
+                                "{:<15} {:<20} {:<30}",
+                                model_name, "❌ Error", "Unable to load"
+                            );
+                        }
+                    }
                 }
-                println!("\nUse: vanga predict --symbol <SYMBOL> --input <DATA_FILE>");
+
+                println!("\n💡 Usage:");
+                println!("  • Predict with specific horizon: vanga predict --symbol <SYMBOL> --horizon <HORIZON> --input <DATA>");
+                println!("  • Predict all horizons: vanga predict --symbol <SYMBOL> --all-horizons --input <DATA>");
+                println!("  • Auto-select horizon: vanga predict --symbol <SYMBOL> --input <DATA>");
             }
         }
 
