@@ -112,7 +112,7 @@ timestamp,open,high,low,close,volume
 
 ---
 
-## 🔄 **Complete Workflow Examples**
+## **Complete Workflow Examples**
 
 ### **End-to-End Bitcoin Forecasting**
 

@@ -6,10 +6,10 @@ This document provides detailed technical specifications for the fully implement
 
 ---
 
-## 📋 **System Architecture Overview**
+## **System Architecture Overview**
 
 ### **Core Components**
-- **LSTM Model Layer**: rust-lstm integration with persistence
+- **LSTM Model Layer**: Candle framework integration with SGD optimizer
 - **Feature Engineering**: 50+ technical indicators
 - **Data Pipeline**: High-performance Polars-based processing
 - **API Layer**: High-level training and prediction functions
@@ -18,7 +18,7 @@ This document provides detailed technical specifications for the fully implement
 
 ### **Technology Stack**
 - **Language**: Rust 1.87.0
-- **ML Framework**: rust-lstm 0.2.0
+- **ML Framework**: Candle (candle-core + candle-nn)
 - **Data Processing**: Polars 0.35
 - **Serialization**: bincode 1.3
 - **CLI Framework**: clap 4.4
@@ -37,8 +37,8 @@ pub enum VangaError {
     ConfigError(String),
     DataError(String),
     DataValidation(DataValidationError),
-    ModelError(String),
-    TrainingError(String),
+candle-core = "0.8.0"
+candle-nn = "0.8.0"
     PredictionError(String),
     FeatureError(String),
     IoError(String),
@@ -90,10 +90,16 @@ pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
     #[derive(Serialize)]
     struct ModelState {
         config: LSTMConfig,
+        epochs: usize,
+        print_every: usize,
+        clip_gradient: Option<f64>,
     }
 
     let model_state = ModelState {
         config: self.config.clone(),
+        epochs: self.training_config.epochs,
+        print_every: self.training_config.print_every,
+        clip_gradient: self.training_config.clip_gradient,
     };
 
     let encoded = bincode::serialize(&model_state)?;
@@ -101,22 +107,21 @@ pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
     Ok(())
 }
 
-// Load model with network reconstruction
+// Load model with automatic network initialization
 pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
     let data = std::fs::read(&path)?;
     let model_state: ModelState = bincode::deserialize(&data)?;
 
-    let network = LSTMNetwork::new(
-        model_state.config.input_size,
-        model_state.config.hidden_size,
-        model_state.config.num_layers,
-    );
+    let mut model = Self::new(model_state.config)?;
+    model.training_config.epochs = model_state.epochs;
+    model.training_config.print_every = model_state.print_every;
+    model.training_config.clip_gradient = model_state.clip_gradient;
 
-    Ok(Self {
-        config: model_state.config,
-        network: Some(network),
-        training_config: TrainingConfig::default(),
-    })
+    // CRITICAL: Initialize the network for predictions
+    model.initialize_network()?;
+    model.trained = true;
+
+    Ok(model)
 }
 ```
 
@@ -245,7 +250,7 @@ pub async fn load_csv_chunked<P: AsRef<Path>>(
             let processed_chunk = process_chunk(chunk)?;
             results.push(processed_chunk);
         }
-
+- **Improved Prediction Logic**: Proper network initialization from Candle LSTM network outputs
         // Combine all processed chunks
         if results.is_empty() {
             Err(VangaError::DataError("No chunks processed".to_string()))
@@ -398,7 +403,7 @@ cargo test                     # ✅ All tests pass (when implemented)
 ```toml
 [dependencies]
 # LSTM and ML
-rust-lstm = "0.2.0"
+candle-core = "0.8.0"
 ndarray = "0.15"
 ndarray-stats = "0.5"
 
@@ -509,7 +514,7 @@ The VANGA LSTM cryptocurrency forecasting system represents a complete, producti
 ### **Critical LSTM Model Fixes**
 - **Fixed Output Size Mismatch**: Resolved hundreds of "Output size mismatch: expected 1, got 64" warnings
 - **Fixed Shape Validation**: Prevented MSE/MAPE calculation crashes from array shape mismatches
-- **Improved Prediction Logic**: Proper hidden state projection from rust-lstm network outputs
+- **Improved Prediction Logic**: Proper network initialization from Candle LSTM network outputs
 - **Enhanced Error Handling**: Graceful degradation with informative logging
 
 **Files Modified**: `src/model/lstm_simple.rs` (lines 780-798, 455-479)
