@@ -13,6 +13,6 @@ pub use formatter::OutputFormatter;
 pub use multi_target_parser::{DirectionOutput, MultiTargetParser, ParsedOutput};
 pub use post_processor::PostProcessor;
 pub use structures::{
-    ConfidenceScore, DirectionPrediction, PredictionMetadata, PredictionResult, PriceBin,
-    PriceLevelPrediction, VolatilityPrediction,
+    ConfidenceScore, DirectionPrediction, OrderConfig, OrderLevel, PredictionMetadata,
+    PredictionResult, PriceBin, PriceLevelPrediction, TradingOrders, VolatilityPrediction,
 };

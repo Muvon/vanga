@@ -218,6 +218,33 @@ VANGA generates structured JSON predictions with crypto-native terminology and n
 
 ### **Crypto Terminology Explained**
 
+**Price Level Bins:**
+- **"rekt"** (-100% to -30%): Total rekt territory, black swan events
+- **"capitulation"** (-30% to -15%): Capitulation dump phase
+- **"dump"** (-15% to -3%): Regular dump territory
+- **"sideways"** (-3% to +3%): Consolidation/crab market (most probable)
+- **"pump"** (+3% to +15%): Pump territory
+- **"parabolic"** (+15% to +30%): Parabolic pump phase
+- **"moon"** (+30% to +500%): To the moon territory
+
+**Trading Orders Terminology:**
+- **"Dynamic Sizing"**: Position allocation based on confidence (not fixed 33%)
+- **"ATR Distance"**: Distance from current price in Average True Range units
+- **"Hunt Protection"**: Extra distance on stops to avoid market maker hunting
+- **"Risk-Reward Ratio"**: Potential profit divided by potential loss (crypto target: 4.0+)
+
+**Order Types:**
+- **"LIMIT"**: Entry and exit orders at specific prices
+- **"STOP_LIMIT"**: Stop-loss orders with hunt protection
+- **"NONE"**: Empty orders when no trading signal present
+
+**Price Precision:**
+VANGA automatically adjusts decimal places based on cryptocurrency price:
+- **< $0.001**: 8 decimal places (micro-cap tokens like SHIB)
+- **< $0.01**: 6 decimal places
+- **< $1.00**: 4 decimal places
+- **≥ $1.00**: 2 decimal places (BTC, ETH, etc.)
+
 VANGA uses authentic crypto market terminology for price level predictions:
 
 - **"rekt"** (-100% to -30%): Total rekt territory - extreme losses, black swan events
