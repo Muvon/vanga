@@ -34,6 +34,7 @@ pub mod features;
 pub mod model;
 pub mod optimization; // NEW: Auto-optimization system
 pub mod output;
+pub mod realtime; // NEW: Real-time streaming prediction
 pub mod targets;
 pub mod utils;
 

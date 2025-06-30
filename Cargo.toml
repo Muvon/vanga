@@ -50,9 +50,17 @@ rmp-serde = "1.1"  # MessagePack for model serialization
 rayon = "1.8"
 rand = "0.9.1"
 
+# Real-time streaming and file watching
+notify = "6.1"
+tokio-stream = "0.1"
+futures = "0.3"
+linemux = "0.3"
+csv-async = "1.2"
+
 [dev-dependencies]
 approx = "0.5"
 criterion = "0.5"
+tempfile = "3.8"
 
 [[bin]]
 name = "vanga"

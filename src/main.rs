@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::Duration;
 use vanga::api;
 use vanga::config::{PredictionConfig, TrainingConfig};
+use vanga::realtime::{start_realtime_prediction, OutputFormat, RealtimeConfig};
 use vanga::utils::error::{Result, VangaError};
 
 /// Training command parameters
@@ -382,14 +384,43 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
 
     if params.realtime {
         log::info!("Real-time prediction mode");
+
+        let mut config = RealtimeConfig {
+            file_path: params.input,
+            symbol: params.symbol,
+            poll_interval: Duration::from_secs(1), // Default 1 second
+            buffer_size: 1000,
+            feature_window: 100,
+            output_format: OutputFormat::Json,
+            debug: false,
+        };
+
+        // Parse interval if provided
+        if let Some(interval_str) = params.interval {
+            let seconds = interval_str
+                .trim_end_matches('s')
+                .parse::<u64>()
+                .unwrap_or(1);
+            config.poll_interval = Duration::from_secs(seconds);
+            log::info!("Using custom poll interval: {}s", seconds);
+        }
+
+        // Set output format based on source parameter
         if let Some(source) = params.source {
-            log::info!("Using data source: {}", source);
+            match source.as_str() {
+                "json" => config.output_format = OutputFormat::Json,
+                "csv" => config.output_format = OutputFormat::Csv,
+                "pretty" => config.output_format = OutputFormat::Pretty,
+                _ => {
+                    log::warn!("Unknown output format: {}, using JSON", source);
+                    config.output_format = OutputFormat::Json;
+                }
+            }
+            log::info!("Using output format: {:?}", config.output_format);
         }
-        if let Some(interval) = params.interval {
-            log::info!("Using interval: {}", interval);
-        }
-        // Real-time prediction implementation
-        log::warn!("Real-time prediction not yet implemented - use batch mode instead");
+
+        // Start real-time prediction
+        start_realtime_prediction(config).await?;
     } else if params.batch {
         log::info!("Batch prediction mode");
         if let Some(input_dir) = params.input_dir {

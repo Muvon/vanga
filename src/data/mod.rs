@@ -2,6 +2,7 @@ pub mod loader;
 pub mod preprocessor;
 pub mod schema;
 pub mod sequence;
+pub mod structures;
 pub mod target_converter;
 
 pub use loader::DataLoader;

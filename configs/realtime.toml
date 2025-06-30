@@ -1,0 +1,32 @@
+[realtime]
+# Real-time prediction configuration
+
+# File monitoring settings
+poll_interval_seconds = 1          # Health check interval
+buffer_size = 1000                 # Maximum data points in memory
+feature_window = 100               # Minimum data points for prediction
+output_format = "json"             # Output format: json, csv, pretty
+debug = false                      # Enable debug logging
+
+# File watcher settings
+[realtime.file_watcher]
+debounce_ms = 100                  # Debounce file change events
+recursive = false                  # Monitor subdirectories
+
+# Performance limits
+[realtime.limits]
+max_memory_mb = 512                # Maximum memory usage
+max_predictions_per_second = 10    # Rate limiting
+max_consecutive_errors = 10        # Error threshold before shutdown
+
+# Output formatting
+[realtime.output]
+timestamp_format = "iso8601"       # Timestamp format in output
+include_metadata = true            # Include processing metadata
+flush_immediately = true           # Flush output immediately
+
+# Health monitoring
+[realtime.monitoring]
+enable_metrics = true              # Enable performance metrics
+stats_interval_seconds = 60       # Statistics logging interval
+log_buffer_stats = true            # Log buffer usage statistics
