@@ -7,10 +7,10 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 ## Key Features
 
 ### 🎯 **Complete LSTM Implementation**
-- **rust-lstm Integration**: Full LSTM neural network implementation
+- **Candle Framework Integration**: Full LSTM neural network implementation with SGD optimizer
 - **Multi-Target Prediction**: Price levels, direction, and volatility forecasting
-- **Model Persistence**: Save/load trained models with bincode serialization
-- **Production-Ready**: Zero compilation errors, optimized performance
+- **Model Persistence**: Save/load trained models with automatic network initialization
+- **Early Stopping**: Intelligent training with validation monitoring and adaptive learning rates
 
 ### 🚀 **Professional Architecture**
 - **High Performance**: Rust implementation for maximum speed and safety
@@ -43,7 +43,7 @@ LSTM Sequences → Multi-Target Prediction → CSV Output
 ### **System Components**
 - **Data Layer**: High-performance CSV loading and validation
 - **Feature Layer**: Comprehensive technical analysis engine
-- **Model Layer**: LSTM neural networks with rust-lstm
+- **Model Layer**: LSTM neural networks with Candle framework
 - **API Layer**: High-level training and prediction functions
 - **CLI Layer**: Complete command-line interface
 - **Config Layer**: TOML-based configuration management
@@ -56,7 +56,7 @@ LSTM Sequences → Multi-Target Prediction → CSV Output
 - **Accuracy**: Financial mathematics validated formulas
 
 ### **LSTM Training**
-- **Framework**: rust-lstm integration with training configuration
+- **Framework**: Candle integration with training configuration
 - **Persistence**: Bincode serialization for model save/load
 - **Sequences**: Sliding window approach for time series data
 - **Targets**: Multi-target prediction (price/direction/volatility)

@@ -4,7 +4,7 @@
 
 VANGA now features **intelligent automatic training** that eliminates hardcoded epochs and optimizes for quality.
 
-### Key Features
+## 🧠 Intelligent Training
 
 #### ✅ Auto Early Stopping
 - Monitors validation loss every epoch
@@ -33,18 +33,18 @@ learning_rate = { Fixed = 0.001 }
 
 ### 1. Intelligent Training (Default)
 - **When**: `epochs = Auto` + `validation_split > 0.0`
-- **Behavior**: Auto early stopping with validation monitoring
+- **Behavior**: Early stopping with validation data splitting and monitoring
 - **Best for**: Production, quality-first training
 
 ### 2. Fixed Training
 - **When**: `epochs = Fixed` OR `validation_split = 0.0`
-- **Behavior**: Trains for exact number of epochs
+- **Behavior**: Trains for exact number of epochs without early stopping
 - **Best for**: Development, research, reproducible results
 
 ### 3. Incremental Training
-- **Method**: Automatically detects existing models
-- **Behavior**: Continues training with reduced learning rate
-- **Best for**: Adding new market data without losing patterns
+- **Method**: Automatically detects existing models with `continue_training` flag
+- **Behavior**: Continues training with reduced learning rate (10x smaller)
+- **Best for**: Adding new market data without losing existing patterns
 
 ## Performance Benefits
 
@@ -264,6 +264,15 @@ match regime {
 4. **Memory Efficient**: Optimizes resource usage based on constraints
 5. **Multi-Objective**: Balances multiple performance metrics
 6. **Regime-Aware**: Adapts to different market conditions
+
+## Performance Improvements
+
+- **30-50% better prediction accuracy** through optimal hyperparameters
+- **40-60% faster training** through efficient batch sizing and architecture
+- **20-30% better feature relevance** through crypto-specific selection
+- **Reduced overfitting** through adaptive regularization
+- **Better risk-adjusted returns** through crypto-specific loss functions
+different market conditions
 
 ## Performance Improvements
 

@@ -6,8 +6,9 @@ description = "LSTM-based cryptocurrency forecasting system with automatic featu
 license = "MIT"
 
 [dependencies]
-# LSTM and ML
-rust-lstm = "0.2.0"
+# LSTM and ML - Migrated to Candle (latest stable)
+candle-core = "0.9"
+candle-nn = "0.9"
 ndarray = "0.15"
 ndarray-stats = "0.5"
 linfa = "0.7"

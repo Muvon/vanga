@@ -4,18 +4,18 @@ This guide covers VANGA's new **intelligent training system** with automatic ear
 
 ## 🧠 Intelligent Training Features
 
-### ✅ NEW: Auto Early Stopping
+### ✅ Auto Early Stopping
 - **No more hardcoded epochs!**
 - Automatically stops when validation loss plateaus
 - Saves best model during training
 - Prevents overfitting
 
-### ✅ NEW: Adaptive Learning Rate
+### ✅ Adaptive Learning Rate
 - Starts with higher learning rate
 - Reduces when validation loss stops improving
 - Optimizes convergence automatically
 
-### ✅ NEW: Configuration-Driven
+### ✅ Configuration-Driven
 - Choose between Auto (intelligent) and Fixed (research) modes
 - Supports incremental training with new data
 - Quality-first defaults
@@ -36,7 +36,7 @@ vanga train --symbol BTCUSDT --data data/btc_1h.csv
 
 ### **Fixed Epochs Training**
 ```bash
-# Uses fixed 100 epochs, no early stopping
+### ✅ Auto Early Stopping
 vanga train --symbol BTCUSDT --data data/btc_1h.csv --config examples/dev_training.toml
 ```
 
@@ -48,7 +48,7 @@ vanga train --symbol BTCUSDT --data historical_data.csv
 # Later: add new data (automatically continues training)
 vanga train --symbol BTCUSDT --data new_data.csv
 ```
-
+### ✅ Adaptive Learning Rate
 ## Configuration Examples
 
 ### Production Quality (RECOMMENDED)
@@ -60,7 +60,7 @@ learning_rate = { Adaptive = { initial_lr = 0.01 } }
 validation_split = 0.2
 early_stopping_patience = 50
 gradient_clip = 1.0
-```
+### ✅ Configuration-Driven
 
 ### Development/Testing
 ```toml
@@ -97,9 +97,10 @@ gradient_clip = 1.0
 [INFO] 🧠 INTELLIGENT TRAINING: early_stopping=true, validation_split=20.0%, patience=50
 [INFO] 📊 Data split: 1000 total → 800 training (80.0%), 200 validation (20.0%)
 [INFO] 🏃 Training batch: epochs=50, learning_rate=0.010000
-[INFO] 📈 Validation loss: 0.045231
+[INFO] 📈 Epoch 1/50: Train Loss = 0.052341, Validation loss: 0.045231, Learning rate: 0.010000
 [INFO] ✅ NEW BEST validation loss: 0.045231 (improved by 12.34%)
 [INFO] 🔽 REDUCING learning rate: 0.010000 → 0.005000
+[INFO] 📈 Epoch 25/50: Train Loss = 0.038912, Validation loss: 0.032156, Learning rate: 0.005000
 [INFO] 🛑 EARLY STOPPING triggered at 150 total epochs! Best validation loss: 0.032156
 [INFO] 🎯 Training completed! Final validation loss: 0.032156, final learning rate: 0.002500
 ```
@@ -119,8 +120,8 @@ gradient_clip = 1.0
 // Implemented in src/api/trainer.rs
 impl ModelTrainer {
     pub async fn train(&self) -> Result<LSTMModel> {
-        // 1. Initialize data pipeline
-        let data_pipeline = DataPipeline::new();
+        // 1. Initialize Candle LSTM network
+        // 2. Convert sequences to Candle tensor format
 
         // 2. Load and prepare training data
         let prepared_data = data_pipeline.prepare_training_data(&self.config.data_path, &self.config).await?;
@@ -145,10 +146,10 @@ impl ModelTrainer {
 // Implemented in src/model/lstm_simple.rs
 impl LSTMModel {
     pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
-        // 1. Initialize rust-lstm network
+        // 1. Initialize Candle LSTM network
         let mut network = LSTMNetwork::new(self.config.input_size, self.config.hidden_size, self.config.num_layers);
 
-        // 2. Convert sequences to rust-lstm format
+        // 2. Convert sequences to Candle tensor format
         let training_data = self.convert_sequences_to_training_data(sequences, targets)?;
 
         // 3. Train the network
@@ -171,7 +172,7 @@ impl LSTMModel {
 // Implemented in src/config/training.rs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingConfig {
-    pub symbol: String,
+[INFO] ✅ BEST validation loss: 0.045231 (improved by 12.34%)
     pub data_path: PathBuf,
     pub fresh_training: bool,
     pub continue_training: bool,

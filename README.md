@@ -286,18 +286,16 @@ vanga/
 - **Logging**: Comprehensive logging system
 
 - **Production Ready**: Robust error management and comprehensive logging
+## 🤝 Support & Community
 
-## 🎯 Status
+- **🐛 Issues**: [GitHub Issues](https://github.com/Muvon/vanga/issues)
+- **📧 Email**: [opensource@muvon.io](mailto:opensource@muvon.io)
+- **🏢 Company**: Muvon Un Limited (Hong Kong)
 
-✅ **COMPLETE**: All core functionality implemented and tested
-- ✅ **Core LSTM Logic**: rust-lstm integration complete
-- ✅ **Feature Engineering**: 50+ technical indicators implemented
-- ✅ **CLI Interface**: Complete train/predict/manage commands
-- ✅ **Model Persistence**: Save/load functionality working
-- ✅ **Production Ready**: Zero compilation errors, optimized build
+## ⚖️ License
 
-**Status**: 🎉 **100% COMPLETE - PRODUCTION READY** 🎉
+This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
 
-## 📝 License
+---
 
-MIT License - see LICENSE file for details.
+**Built with ❤️ by the Muvon team in Hong Kong**

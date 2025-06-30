@@ -168,18 +168,17 @@ pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
     // 2. Deserialize model state
     let model_state: ModelState = bincode::deserialize(&data)?;
 
-    // 3. Recreate LSTM network
-    let network = LSTMNetwork::new(
-        model_state.config.input_size,
-        model_state.config.hidden_size,
-        model_state.config.num_layers,
-    );
+    // 3. Create new LSTM model with loaded configuration
+    let mut model = Self::new(model_state.config)?;
+    model.training_config.epochs = model_state.epochs;
+    model.training_config.print_every = model_state.print_every;
+    model.training_config.clip_gradient = model_state.clip_gradient;
 
-    Ok(Self {
-        config: model_state.config,
-        network: Some(network),
-        training_config: TrainingConfig::default(),
-    })
+    // 4. Initialize the network for predictions
+    model.initialize_network()?;
+    model.trained = true;
+
+    Ok(model)
 }
 ```
 
