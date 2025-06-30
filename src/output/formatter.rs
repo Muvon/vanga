@@ -152,23 +152,36 @@ impl OutputFormatter {
 
         let mut bins = HashMap::new();
 
-        // Create 7 bins as specified in ARCHITECTURE.md with actual price ranges
-        let bin_configs = vec![
-            ("bin_1", "< -5%", current_price * 0.95),
-            ("bin_2", "-5% to -3%", current_price * 0.97),
-            ("bin_3", "-3% to -1%", current_price * 0.99),
-            ("bin_4", "-1% to 1%", current_price),
-            ("bin_5", "1% to 3%", current_price * 1.01),
-            ("bin_6", "3% to 5%", current_price * 1.03),
-            ("bin_7", "> 5%", current_price * 1.05),
-        ];
-
         // Simple distribution based on raw output
         // In production, this would be proper softmax probabilities
         let center_bin = ((raw_output + 1.0) / 2.0 * 7.0) as usize;
         let center_bin = center_bin.min(6);
 
-        for (i, (bin_name, range, price_level)) in bin_configs.iter().enumerate() {
+        // Create 7 bins with CRYPTO REALITY ranges and thematic naming
+        let bin_configs = vec![
+            ("rekt", [-100.0, -30.0]), // Total rekt territory (black swan events)
+            ("capitulation", [-30.0, -15.0]), // Capitulation dump (-30% to -15%)
+            ("dump", [-15.0, -3.0]),   // Dump (-15% to -3%)
+            ("sideways", [-3.0, 3.0]), // Sideways consolidation (-3% to +3%)
+            ("pump", [3.0, 15.0]),     // Pump (+3% to +15%)
+            ("parabolic", [15.0, 30.0]), // Parabolic pump (+15% to +30%)
+            ("moon", [30.0, 500.0]),   // Moon territory (+30%+)
+        ];
+
+        for (i, (bin_name, range_pct)) in bin_configs.iter().enumerate() {
+            // Calculate actual price range
+            let price_min = if range_pct[0] == -f64::INFINITY {
+                0.0 // Minimum possible price
+            } else {
+                current_price * (1.0 + range_pct[0] / 100.0)
+            };
+
+            let price_max = if range_pct[1] == f64::INFINITY {
+                current_price * 2.0 // Reasonable upper bound
+            } else {
+                current_price * (1.0 + range_pct[1] / 100.0)
+            };
+
             let probability = if i == center_bin {
                 0.4 // High probability for predicted bin
             } else if (i as i32 - center_bin as i32).abs() == 1 {
@@ -180,21 +193,21 @@ impl OutputFormatter {
             bins.insert(
                 bin_name.to_string(),
                 PriceBin {
-                    range: format!("{} (${:.2})", range, price_level), // Include actual price level
+                    range: *range_pct,
+                    price: [price_min, price_max],
                     probability,
                 },
             );
         }
 
-        // Find most likely range using actual price calculation
-        let most_likely_range = bin_configs[center_bin].1.to_string();
-        let predicted_price = bin_configs[center_bin].2;
-        let price_confidence = 1.0 - ((predicted_price - current_price).abs() / current_price);
+        // Find most likely range using numeric format
+        let most_likely_range = bin_configs[center_bin].1;
+        let price_confidence = 0.8; // Base confidence for price level prediction
 
         Ok(PriceLevelPrediction {
             bins,
             most_likely_range,
-            confidence: price_confidence.clamp(0.0, 1.0),
+            confidence: price_confidence,
         })
     }
 
@@ -302,7 +315,8 @@ impl OutputFormatter {
                     bins.insert(
                         "point_estimate".to_string(),
                         crate::output::structures::PriceBin {
-                            range: format!("{:.2}", estimated_price),
+                            range: [0.0, 0.0], // Point estimate has no range
+                            price: [estimated_price, estimated_price],
                             probability: 1.0,
                         },
                     );
@@ -310,7 +324,7 @@ impl OutputFormatter {
                     result =
                         result.with_price_levels(crate::output::structures::PriceLevelPrediction {
                             bins,
-                            most_likely_range: format!("{:.2}", estimated_price),
+                            most_likely_range: [-1.0, 1.0], // Small range for point estimate
                             confidence: confidence_interval,
                         });
 
@@ -354,7 +368,8 @@ impl OutputFormatter {
                     bins.insert(
                         "point_estimate".to_string(),
                         crate::output::structures::PriceBin {
-                            range: format!("{:.2}", estimated_price),
+                            range: [0.0, 0.0], // Point estimate has no range
+                            price: [estimated_price, estimated_price],
                             probability: 1.0,
                         },
                     );
@@ -362,8 +377,8 @@ impl OutputFormatter {
                     result =
                         result.with_price_levels(crate::output::structures::PriceLevelPrediction {
                             bins,
-                            most_likely_range: format!("{:.2}", estimated_price),
-                            confidence: 0.5, // Default confidence for single output
+                            most_likely_range: [-1.0, 1.0], // Small range for point estimate
+                            confidence: 0.5,                // Default confidence for single output
                         });
                 };
 

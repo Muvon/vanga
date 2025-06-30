@@ -187,7 +187,7 @@ pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
 
 ### **Structured JSON Output**
 
-VANGA generates structured JSON predictions matching the ARCHITECTURE.md specification:
+VANGA generates structured JSON predictions with crypto-native terminology and numeric ranges:
 
 ```json
 {
@@ -197,15 +197,15 @@ VANGA generates structured JSON predictions matching the ARCHITECTURE.md specifi
   "current_price": 42500.0,
   "price_levels": {
     "bins": {
-      "bin_1": {"range": "< -5% ($40375.00)", "probability": 0.05},
-      "bin_2": {"range": "-5% to -3% ($41225.00)", "probability": 0.10},
-      "bin_3": {"range": "-3% to -1% ($42075.00)", "probability": 0.15},
-      "bin_4": {"range": "-1% to 1% ($42500.00)", "probability": 0.25},
-      "bin_5": {"range": "1% to 3% ($42925.00)", "probability": 0.20},
-      "bin_6": {"range": "3% to 5% ($43775.00)", "probability": 0.15},
-      "bin_7": {"range": "> 5% ($44625.00)", "probability": 0.10}
+      "rekt": {"range": [-100.0, -30.0], "price": [0.0, 29750.00], "probability": 0.025},
+      "capitulation": {"range": [-30.0, -15.0], "price": [29750.00, 36125.00], "probability": 0.05},
+      "dump": {"range": [-15.0, -3.0], "price": [36125.00, 41225.00], "probability": 0.10},
+      "sideways": {"range": [-3.0, 3.0], "price": [41225.00, 43775.00], "probability": 0.40},
+      "pump": {"range": [3.0, 15.0], "price": [43775.00, 48875.00], "probability": 0.20},
+      "parabolic": {"range": [15.0, 30.0], "price": [48875.00, 55250.00], "probability": 0.10},
+      "moon": {"range": [30.0, 500.0], "price": [55250.00, 255000.00], "probability": 0.05}
     },
-    "most_likely_range": "-1% to 1%",
+    "most_likely_range": [-3.0, 3.0],
     "confidence": 0.82
   },
   "direction": {
@@ -214,6 +214,23 @@ VANGA generates structured JSON predictions matching the ARCHITECTURE.md specifi
     "prediction": "UP",
     "confidence": 0.68
   },
+```
+
+### **Crypto Terminology Explained**
+
+VANGA uses authentic crypto market terminology for price level predictions:
+
+- **"rekt"** (-100% to -30%): Total rekt territory - extreme losses, black swan events
+- **"capitulation"** (-30% to -15%): Capitulation phase - mass selling, despair
+- **"dump"** (-15% to -3%): Regular dump - significant bearish move
+- **"sideways"** (-3% to +3%): Crab market - consolidation, range-bound trading (most common)
+- **"pump"** (+3% to +15%): Pump phase - strong bullish movement
+- **"parabolic"** (+15% to +30%): Parabolic growth - explosive upward movement
+- **"moon"** (+30% to +500%): To the moon - extreme gains, euphoria phase
+
+These ranges reflect real cryptocurrency market volatility where 15-30% moves are normal daily occurrences, unlike traditional finance where 5% moves are significant.
+
+```json
   "volatility": {
     "expected_1h": 0.018,
     "expected_4h": 0.035,

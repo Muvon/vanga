@@ -126,7 +126,7 @@ impl PostProcessor {
                     smoothed_pred.price_levels =
                         Some(crate::output::structures::PriceLevelPrediction {
                             bins: smoothed_bins,
-                            most_likely_range: current_price_levels.most_likely_range.clone(),
+                            most_likely_range: current_price_levels.most_likely_range,
                             confidence: alpha * current_price_levels.confidence
                                 + (1.0 - alpha) * prev_price_levels.confidence,
                         });
@@ -382,7 +382,7 @@ impl PostProcessor {
             ensemble_pred =
                 ensemble_pred.with_price_levels(crate::output::structures::PriceLevelPrediction {
                     bins: ensemble_bins,
-                    most_likely_range: first_price_levels.most_likely_range.clone(),
+                    most_likely_range: first_price_levels.most_likely_range,
                     confidence: confidence_interval,
                 });
         }

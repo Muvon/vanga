@@ -48,8 +48,8 @@ pub struct PriceLevelPrediction {
     /// Probability distribution across price bins
     pub bins: HashMap<String, PriceBin>,
 
-    /// Most likely price range
-    pub most_likely_range: String,
+    /// Most likely price range as numeric array [min, max]
+    pub most_likely_range: [f64; 2],
 
     /// Confidence in price level prediction
     pub confidence: f64,
@@ -58,8 +58,11 @@ pub struct PriceLevelPrediction {
 /// Individual price bin with range and probability
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceBin {
-    /// Price range description (e.g., "1% to 3%")
-    pub range: String,
+    /// Price range as percentage array [min, max] (e.g., [-5.0, -3.0])
+    pub range: [f64; 2],
+
+    /// Price range in actual currency values [min, max]
+    pub price: [f64; 2],
 
     /// Probability of price falling in this range
     pub probability: f64,
