@@ -289,6 +289,7 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_train_command(params: TrainParams) -> Result<()> {
+    let monitor = PerformanceMonitor::new(&format!("Training {}", params.symbol));
     log::info!("Starting training for symbol: {}", params.symbol);
 
     if params.batch {
@@ -307,9 +308,12 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
                     .symbol(sym.clone())
                     .data_path(data_dir.join(format!("{}.csv", sym)));
 
+                monitor.checkpoint(&format!("Config prepared for {}", sym));
+
                 // Train the model
                 match api::train_model(symbol_config.clone()).await {
                     Ok(model) => {
+                        monitor.checkpoint(&format!("Model trained for {}", sym));
                         log::info!("Successfully trained model for {}", sym);
 
                         // Save model with consistent path
@@ -319,6 +323,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
                         if let Err(e) = model.save(&model_path) {
                             log::error!("Failed to save model for {}: {}", sym, e);
                         } else {
+                            monitor.checkpoint(&format!("Model saved for {}", sym));
                             log::info!("💾 Model saved to: {}", model_path.display());
                         }
                     }
@@ -375,13 +380,17 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             config = config.features_config_path(features_config);
         }
 
+        monitor.checkpoint("Configuration prepared");
+
         // Train the model using the API
         let model = vanga::api::train_model(config.clone()).await?;
+        monitor.checkpoint("Model training completed");
 
         // Save model with consistent path
         let model_path = vanga::utils::model_path::get_model_path(&config.symbol);
         let _ = vanga::utils::model_path::ensure_models_dir_exists();
         model.save(&model_path)?;
+        monitor.checkpoint("Model saved to disk");
 
         log::info!("💾 Model saved to: {}", model_path.display());
         log::info!("Training completed successfully");
@@ -391,6 +400,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 }
 
 async fn handle_predict_command(params: PredictParams) -> Result<()> {
+    let _monitor = PerformanceMonitor::new(&format!("Prediction {}", params.symbol));
     log::info!("Starting prediction for symbol: {}", params.symbol);
 
     if params.realtime {
@@ -656,7 +666,6 @@ impl PerformanceMonitor {
         }
     }
 
-    #[allow(dead_code)]
     fn checkpoint(&self, checkpoint_name: &str) {
         let elapsed = self.start_time.elapsed();
         log::info!(

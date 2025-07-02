@@ -1,15 +1,16 @@
 //! Streaming prediction engine for real-time cryptocurrency forecasting
 //!
-//! This module integrates file watching and CSV streaming with the existing ML pipeline
-//! to provide continuous real-time predictions as new market data arrives.
+//! This module provides real-time prediction capabilities for cryptocurrency markets,
+//! integrating with the trained VANGA LSTM models for live forecasting.
 
 use crate::api::multi_target_predictor::MultiTargetPredictor;
 use crate::config::PredictionConfig;
 use crate::data::structures::MarketDataRow;
-use crate::output::structures::PredictionResult;
+use crate::model::multi_target::MultiTargetLSTMModel;
+use crate::output::PredictionResult;
 use crate::realtime::{CsvStreamer, FileWatcher, OutputFormat, RealtimeConfig};
 use crate::utils::error::{Result, VangaError};
-use serde_json;
+use crate::utils::model_path::get_model_path;
 use std::collections::VecDeque;
 use tokio::select;
 use tokio::time::{interval, Duration, Instant};
@@ -24,8 +25,7 @@ use tokio::time::{interval, Duration, Instant};
 /// - Configurable output formatting
 pub struct StreamingPredictor {
     config: RealtimeConfig,
-    #[allow(dead_code)] // Will be used when ML integration is complete
-    predictor: MultiTargetPredictor,
+    model: MultiTargetLSTMModel,
     feature_buffer: VecDeque<MarketDataRow>,
     watcher: FileWatcher,
     streamer: CsvStreamer,
@@ -66,8 +66,25 @@ impl StreamingPredictor {
         );
 
         // Load the trained model for the symbol
-        // Create a simplified predictor configuration for realtime
-        let predictor = MultiTargetPredictor::new(PredictionConfig::default());
+        let model_path = get_model_path(&config.symbol);
+        log::info!("Loading model from: {}", model_path.display());
+
+        let model = MultiTargetLSTMModel::load(&model_path).map_err(|e| {
+            VangaError::ModelError(format!(
+                "Failed to load model for symbol {}: {}. Please train a model first using 'vanga train --symbol {}'",
+                config.symbol, e, config.symbol
+            ))
+        })?;
+
+        log::info!("✅ Model loaded successfully for symbol: {}", config.symbol);
+
+        // Create predictor configuration for realtime use
+        let _prediction_config = PredictionConfig {
+            symbol: config.symbol.clone(),
+            input_path: config.file_path.clone(), // Will be updated per prediction
+            horizon: Some("1h".to_string()),
+            ..Default::default()
+        };
 
         // Create file watcher
         let watcher = FileWatcher::new(&config.file_path).map_err(|e| {
@@ -93,7 +110,7 @@ impl StreamingPredictor {
 
         Ok(Self {
             config,
-            predictor,
+            model,
             feature_buffer,
             watcher,
             streamer,
@@ -316,11 +333,33 @@ impl StreamingPredictor {
             log::debug!("Generating prediction with {} data points", data.len());
         }
 
-        // Use existing prediction pipeline with real ML model
-        // Use existing prediction pipeline
-        // TODO: Integrate with actual ML model when ready
-        // For now, use dummy predictions to test the streaming infrastructure
-        let prediction = self.create_dummy_prediction();
+        // Use real ML prediction pipeline
+        log::debug!("Converting buffer to CSV format for ML prediction");
+        let temp_csv_path = self.create_temp_csv_from_buffer(&data).await?;
+
+        // Create temporary prediction config with the CSV data
+        let temp_config = PredictionConfig {
+            symbol: self.config.symbol.clone(),
+            input_path: temp_csv_path.clone(),
+            horizon: Some("1h".to_string()),
+            ..Default::default()
+        };
+        let temp_predictor = MultiTargetPredictor::new(temp_config.clone());
+
+        // Generate real ML predictions
+        log::debug!("Generating ML prediction using trained model");
+        let ml_predictions = temp_predictor.predict(&self.model).await?;
+        let structured_predictions = ml_predictions
+            .to_structured_predictions(&temp_config, &self.model)
+            .await?;
+
+        // Convert to realtime prediction format
+        let prediction = self.convert_to_prediction_result(&structured_predictions)?;
+
+        // Cleanup temporary file
+        if let Err(e) = std::fs::remove_file(&temp_csv_path) {
+            log::warn!("Failed to cleanup temporary CSV file: {}", e);
+        }
 
         // Update statistics
         self.prediction_count += 1;
@@ -538,37 +577,115 @@ impl StreamingPredictor {
         (self.prediction_count, self.error_count, error_rate)
     }
 
-    /// Create a dummy prediction for testing/development
-    fn create_dummy_prediction(&self) -> PredictionResult {
-        use crate::output::structures::{DirectionPrediction, TradingOrders, VolatilityPrediction};
+    /// Convert MarketDataRow buffer to temporary CSV file for ML prediction
+    async fn create_temp_csv_from_buffer(
+        &self,
+        data: &[MarketDataRow],
+    ) -> Result<std::path::PathBuf> {
+        use std::io::Write;
 
-        // Create dummy predictions - this will be replaced with actual predictions
-        let direction = DirectionPrediction {
-            up_probability: 0.75,
-            down_probability: 0.25,
-            prediction: "LONG".to_string(),
-            confidence: 0.8,
+        // Create temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!(
+            "vanga_realtime_{}_{}.csv",
+            self.config.symbol,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+
+        let mut file = std::fs::File::create(&temp_file)
+            .map_err(|e| VangaError::IoError(format!("Failed to create temp CSV: {}", e)))?;
+
+        // Write CSV header
+        writeln!(file, "timestamp,open,high,low,close,volume")
+            .map_err(|e| VangaError::IoError(format!("Failed to write CSV header: {}", e)))?;
+
+        // Write data rows
+        for row in data {
+            writeln!(
+                file,
+                "{},{},{},{},{},{}",
+                row.timestamp, row.open, row.high, row.low, row.close, row.volume
+            )
+            .map_err(|e| VangaError::IoError(format!("Failed to write CSV row: {}", e)))?;
+        }
+
+        file.flush()
+            .map_err(|e| VangaError::IoError(format!("Failed to flush CSV file: {}", e)))?;
+
+        log::debug!(
+            "Created temporary CSV with {} rows: {}",
+            data.len(),
+            temp_file.display()
+        );
+        Ok(temp_file)
+    }
+
+    /// Convert structured ML predictions to realtime PredictionResult format
+    fn convert_to_prediction_result(
+        &self,
+        structured_predictions: &[crate::output::PredictionResult],
+    ) -> Result<PredictionResult> {
+        use crate::output::structures::{DirectionPrediction, VolatilityPrediction};
+
+        // Use the first (most recent) prediction
+        let ml_prediction = structured_predictions.first().ok_or_else(|| {
+            VangaError::DataError("No predictions generated by ML model".to_string())
+        })?;
+
+        // Extract direction prediction
+        let direction = if let Some(dir) = &ml_prediction.direction {
+            DirectionPrediction {
+                up_probability: dir.up_probability,
+                down_probability: dir.down_probability,
+                prediction: dir.prediction.clone(),
+                confidence: dir.confidence,
+            }
+        } else {
+            DirectionPrediction {
+                up_probability: 0.5,
+                down_probability: 0.5,
+                prediction: "SIDEWAYS".to_string(),
+                confidence: 0.5,
+            }
         };
 
-        let volatility = VolatilityPrediction {
-            expected_1h: 0.025,
-            expected_4h: 0.035,
-            expected_24h: 0.055,
-            regime: "MEDIUM".to_string(),
-            confidence: 0.7,
+        // Extract volatility prediction
+        let volatility = if let Some(vol) = &ml_prediction.volatility {
+            VolatilityPrediction {
+                expected_1h: vol.expected_1h,
+                expected_4h: vol.expected_4h,
+                expected_24h: vol.expected_24h,
+                regime: vol.regime.clone(),
+                confidence: vol.confidence,
+            }
+        } else {
+            VolatilityPrediction {
+                expected_1h: 0.02,
+                expected_4h: 0.03,
+                expected_24h: 0.05,
+                regime: "MEDIUM".to_string(),
+                confidence: 0.5,
+            }
         };
 
-        // Create empty trading orders for now
-        let orders = TradingOrders::empty(&direction, "Real-time streaming mode");
+        // Use the trading orders from ML prediction
+        let orders = ml_prediction.orders.clone();
 
-        PredictionResult::new(
-            self.config.symbol.clone(),
-            "1h".to_string(),
-            50000.0, // Dummy current price
-        )
-        .with_direction(direction)
-        .with_volatility(volatility)
-        .with_orders(orders)
+        Ok(PredictionResult {
+            symbol: self.config.symbol.clone(),
+            timestamp: ml_prediction.timestamp.clone(),
+            horizon: ml_prediction.horizon.clone(),
+            current_price: ml_prediction.current_price,
+            price_levels: ml_prediction.price_levels.clone(),
+            direction: Some(direction),
+            volatility: Some(volatility),
+            orders,
+            confidence: ml_prediction.confidence,
+            metadata: ml_prediction.metadata.clone(),
+        })
     }
 }
 
