@@ -18,6 +18,7 @@ pub struct LSTMConfig {
     pub output_size: usize,
     pub sequence_length: usize,
     pub learning_rate: f64,
+    pub num_layers: usize, // Added for multi-layer support
 }
 
 /// Training configuration - preserving original structure
@@ -41,7 +42,7 @@ impl Default for TrainingConfig {
 /// LSTM model for cryptocurrency forecasting - SAME interface as original
 pub struct LSTMModel {
     config: LSTMConfig,
-    lstm: Option<LSTM>,
+    lstm_layers: Option<Vec<LSTM>>, // Changed to Vec<LSTM> for manual chaining
     output_layer: Option<Linear>,
     device: Device,
     varmap: VarMap,
@@ -69,7 +70,7 @@ impl LSTMModel {
 
         Ok(Self {
             config,
-            lstm: None,
+            lstm_layers: None,
             output_layer: None,
             device: Device::Cpu,
             varmap: VarMap::new(),
@@ -77,8 +78,7 @@ impl LSTMModel {
             trained: false,
         })
     }
-
-    /// Create LSTM model from ModelConfig - EXACT same logic as original
+    /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
     pub fn from_model_config(
         model_config: &ModelConfig,
         input_size: usize,
@@ -109,6 +109,9 @@ impl LSTMModel {
             } => *base_units as usize,
         };
 
+        // Extract number of layers from architecture config - NEW
+        let num_layers = Self::extract_num_layers_from_architecture(&model_config.architecture);
+
         // Use sequence_length for LSTM configuration if needed - SAME logic
         let effective_hidden_size = if sequence_length > 100 {
             hidden_size + (sequence_length / 10) // Adjust hidden size based on sequence length
@@ -122,59 +125,109 @@ impl LSTMModel {
             output_size,
             sequence_length,      // Use actual sequence length from config
             learning_rate: 0.001, // Default learning rate
+            num_layers,           // Now properly extracted from architecture
         };
+
         Self::new(lstm_config)
     }
 
-    /// Initialize LSTM network - equivalent to original rust-lstm initialization
+    /// Extract number of layers from ModelConfig architecture - NEW helper method
+    fn extract_num_layers_from_architecture(
+        architecture: &crate::config::model::LSTMArchitecture,
+    ) -> usize {
+        use crate::config::model::LSTMArchitecture;
+        match architecture {
+            LSTMArchitecture::MultiLSTM { layers } => *layers as usize,
+            LSTMArchitecture::StackedLSTM { layers } => *layers as usize,
+            LSTMArchitecture::BidirectionalLSTM { layers } => *layers as usize,
+            LSTMArchitecture::CNNLSTM { lstm_layers, .. } => *lstm_layers as usize,
+            LSTMArchitecture::TransformerLSTM { lstm_layers, .. } => *lstm_layers as usize,
+        }
+    }
+
+    /// Initialize multi-layer LSTM network using Sequential - COMPLETE REWRITE
     fn initialize_network(&mut self) -> Result<()> {
-        if self.lstm.is_some() {
+        if self.lstm_layers.is_some() {
             return Ok(()); // Already initialized
         }
 
-        log::info!("Initializing LSTM network with config: {:?}", self.config);
+        log::info!(
+            "Initializing multi-layer LSTM network with config: {:?}",
+            self.config
+        );
 
         let vs = VarBuilder::from_varmap(&self.varmap, DType::F32, &self.device);
+        let num_layers = self.config.num_layers;
 
-        // Use default 2 layers for now (we can make this configurable later) - SAME as original
-        let num_layers = 2;
+        // Validate layer count for optimal performance
+        if num_layers == 0 {
+            return Err(VangaError::ModelError(
+                "Number of layers must be at least 1".to_string(),
+            ));
+        }
+        if num_layers > 4 {
+            log::warn!("Large number of layers ({}) may cause overfitting. Consider 2-3 layers for most datasets.", num_layers);
+        }
 
-        // Create LSTM with same structure as rust-lstm - PROPERLY CONFIGURED
-        let lstm_config = CandleLSTMConfig {
-            layer_idx: 0,
-            direction: candle_nn::rnn::Direction::Forward,
-            ..CandleLSTMConfig::default()
-        };
+        // Build multi-layer LSTM stack using Sequential
+        let mut lstm_layers = Vec::new();
 
-        // TODO: Candle LSTM doesn't directly support multi-layer configuration in single LSTM
-        // For now, we use single layer but log the intended configuration
-        if num_layers > 1 {
-            log::warn!(
-                "Candle LSTM limitation: Requested {} layers, but using single layer. Consider stacking multiple LSTM layers manually for multi-layer support.",
-                num_layers
+        for layer_idx in 0..num_layers {
+            // Input size: first layer uses input_size, subsequent layers use hidden_size
+            let layer_input_size = if layer_idx == 0 {
+                self.config.input_size
+            } else {
+                self.config.hidden_size
+            };
+
+            // Create LSTM configuration for this layer
+            let lstm_config = CandleLSTMConfig {
+                layer_idx,
+                direction: candle_nn::rnn::Direction::Forward,
+                ..CandleLSTMConfig::default()
+            };
+
+            // Create LSTM layer with proper naming
+            let lstm_layer = lstm(
+                layer_input_size,
+                self.config.hidden_size,
+                lstm_config,
+                vs.pp(format!("lstm_layer_{}", layer_idx)),
+            )
+            .map_err(|e| {
+                VangaError::ModelError(format!("LSTM layer {} creation failed: {}", layer_idx, e))
+            })?;
+
+            // Store LSTM layer directly (no boxing needed)
+            lstm_layers.push(lstm_layer);
+
+            log::debug!(
+                "✅ LSTM layer {} initialized: input_size={}, hidden_size={}",
+                layer_idx,
+                layer_input_size,
+                self.config.hidden_size
             );
         }
 
-        let lstm = lstm(
-            self.config.input_size,
-            self.config.hidden_size,
-            lstm_config,
-            vs.pp("lstm"),
-        )
-        .map_err(|e| VangaError::ModelError(format!("LSTM creation failed: {}", e)))?;
+        // Store the LSTM layers for manual chaining in forward pass
+        self.lstm_layers = Some(lstm_layers);
 
         // Create output layer for sequence-to-one prediction - SAME as original
         let output_layer = linear(
             self.config.hidden_size,
-            1, // Single output like rust-lstm (output_size determined by target structure)
+            1, // Single output like original (output_size determined by target structure)
             vs.pp("output"),
         )
         .map_err(|e| VangaError::ModelError(format!("Output layer creation failed: {}", e)))?;
 
-        self.lstm = Some(lstm);
         self.output_layer = Some(output_layer);
 
-        log::info!("LSTM network initialized successfully");
+        log::info!(
+            "✅ Multi-layer LSTM network initialized successfully: {} layers, {} → {} → 1",
+            num_layers,
+            self.config.input_size,
+            self.config.hidden_size
+        );
         Ok(())
     }
 
@@ -242,58 +295,77 @@ impl LSTMModel {
         Ok((seq_tensor, target_tensor))
     }
 
-    /// Forward pass through LSTM network
+    /// Forward pass through multi-layer LSTM network using Sequential
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let lstm = self
-            .lstm
+        let lstm_layers = self
+            .lstm_layers
             .as_ref()
-            .ok_or_else(|| VangaError::ModelError("LSTM not initialized".to_string()))?;
+            .ok_or_else(|| VangaError::ModelError("LSTM layers not initialized".to_string()))?;
 
         let output_layer = self
             .output_layer
             .as_ref()
             .ok_or_else(|| VangaError::ModelError("Output layer not initialized".to_string()))?;
 
-        // LSTM forward pass using RNN interface - get all timestep states
-        let lstm_states = lstm
-            .seq(input)
-            .map_err(|e| VangaError::ModelError(format!("LSTM forward failed: {}", e)))?;
+        // Manual forward pass through LSTM layers
+        let mut current_output = input.clone();
+        for (i, lstm_layer) in lstm_layers.iter().enumerate() {
+            // Use the seq method from RNN trait which processes the full sequence
+            let layer_states = lstm_layer.seq(&current_output)?;
 
-        // Take the last timestep hidden state for sequence-to-one prediction - SAME as original logic
-        let last_state = lstm_states
-            .last()
-            .ok_or_else(|| VangaError::ModelError("No LSTM states generated".to_string()))?;
+            // Validate we have states to process
+            if layer_states.is_empty() {
+                return Err(VangaError::ModelError(format!(
+                    "Layer {} produced no states",
+                    i
+                )));
+            }
+
+            // Collect all hidden states from the sequence to form the output tensor
+            // Each state.h() is [batch_size, hidden_size], we need [batch_size, seq_len, hidden_size]
+            let mut hidden_states = Vec::new();
+            for state in &layer_states {
+                hidden_states.push(state.h().clone());
+            }
+
+            // Stack the hidden states to form [batch_size, seq_len, hidden_size]
+            current_output = Tensor::stack(&hidden_states, 1)?;
+
+            // Validate output dimensions match expectations
+            let output_shape = current_output.shape();
+            log::debug!("Layer {} output shape: {:?}", i, output_shape);
+
+            // Ensure we have the expected 3D tensor [batch_size, seq_len, hidden_size]
+            if output_shape.dims().len() != 3 {
+                return Err(VangaError::ModelError(format!(
+                    "Layer {} output has wrong dimensions: expected 3D tensor, got {:?}",
+                    i, output_shape
+                )));
+            }
+        }
+        let lstm_output = current_output;
+
+        // For sequence-to-one prediction, we need the last timestep
+        // Sequential output should be [batch_size, seq_len, hidden_size]
+        let seq_len = lstm_output
+            .dim(1)
+            .map_err(|e| VangaError::ModelError(format!("Failed to get sequence length: {}", e)))?;
+
+        // Take the last timestep hidden state for sequence-to-one prediction
+        let last_hidden = lstm_output
+            .narrow(1, seq_len - 1, 1)
+            .map_err(|e| VangaError::ModelError(format!("Failed to extract last timestep: {}", e)))?
+            .squeeze(1)
+            .map_err(|e| {
+                VangaError::ModelError(format!("Failed to squeeze last timestep: {}", e))
+            })?;
 
         // Apply output layer to final hidden state
         let predictions = output_layer
-            .forward(last_state.h())
+            .forward(&last_hidden)
             .map_err(|e| VangaError::ModelError(format!("Output layer forward failed: {}", e)))?;
 
         Ok(predictions)
-    }
-
-    /// Convert Candle tensor back to ndarray
-    fn tensor_to_array2(&self, tensor: &Tensor) -> Result<Array2<f64>> {
-        let shape = tensor.shape();
-        if shape.dims().len() != 2 {
-            return Err(VangaError::ModelError(format!(
-                "Expected 2D tensor, got {}D",
-                shape.dims().len()
-            )));
-        }
-
-        let data = tensor
-            .to_vec2::<f32>()
-            .map_err(|e| VangaError::ModelError(format!("Tensor conversion failed: {}", e)))?;
-
-        let mut array = Array2::zeros((shape.dims()[0], shape.dims()[1]));
-        for i in 0..shape.dims()[0] {
-            for j in 0..shape.dims()[1] {
-                array[[i, j]] = data[i][j] as f64;
-            }
-        }
-
-        Ok(array)
     }
 
     /// Calculate MSE loss between predictions and targets - EXACT same as original
@@ -496,7 +568,7 @@ impl LSTMModel {
         }
 
         // Ensure network is initialized (defensive programming for loaded models)
-        if self.lstm.is_none() || self.output_layer.is_none() {
+        if self.lstm_layers.is_none() || self.output_layer.is_none() {
             return Err(VangaError::ModelError(
                 "LSTM network not properly initialized - model may not be loaded correctly"
                     .to_string(),
@@ -515,6 +587,37 @@ impl LSTMModel {
 
         log::info!("Generated {} predictions", predictions.nrows());
         Ok(predictions)
+    }
+
+    /// Convert Candle tensor to ndarray Array2 - helper method
+    fn tensor_to_array2(&self, tensor: &Tensor) -> Result<Array2<f64>> {
+        // Get tensor shape
+        let shape = tensor.shape();
+        if shape.dims().len() != 2 {
+            return Err(VangaError::ModelError(format!(
+                "Expected 2D tensor, got {}D tensor with shape {:?}",
+                shape.dims().len(),
+                shape.dims()
+            )));
+        }
+
+        let rows = shape.dims()[0];
+        let cols = shape.dims()[1];
+
+        // Convert tensor to Vec<f32> then to f64
+        let data: Vec<f32> = tensor
+            .flatten_all()
+            .map_err(|e| VangaError::ModelError(format!("Failed to flatten tensor: {}", e)))?
+            .to_vec1()
+            .map_err(|e| {
+                VangaError::ModelError(format!("Failed to convert tensor to vec: {}", e))
+            })?;
+
+        // Convert f32 to f64 and create Array2
+        let data_f64: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+
+        Array2::from_shape_vec((rows, cols), data_f64)
+            .map_err(|e| VangaError::ModelError(format!("Failed to create Array2: {}", e)))
     }
 
     /// Save model to file - SAME interface as original
@@ -908,6 +1011,7 @@ mod tests {
             output_size: 1,
             sequence_length: 5,
             learning_rate: 0.01,
+            num_layers: 2, // Default multi-layer
         };
 
         let mut model = LSTMModel::new(config).expect("Failed to create model");
@@ -966,6 +1070,7 @@ mod tests {
             output_size: 1,
             sequence_length: 5,
             learning_rate: 0.01,
+            num_layers: 2, // Default multi-layer
         };
 
         let mut model = LSTMModel::new(config).expect("Failed to create model");
@@ -1031,6 +1136,7 @@ mod tests {
             output_size: 1,
             sequence_length: 5,
             learning_rate: 0.01,
+            num_layers: 2, // Default multi-layer
         };
 
         let mut model = LSTMModel::new(config).expect("Failed to create model");
@@ -1098,12 +1204,105 @@ mod tests {
             "Loaded model should be marked as trained"
         );
         assert!(
-            loaded_model.lstm.is_some(),
-            "Loaded model should have initialized LSTM"
+            loaded_model.lstm_layers.is_some(),
+            "Loaded model should have initialized LSTM stack"
         );
         assert!(
             loaded_model.output_layer.is_some(),
             "Loaded model should have initialized output layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_layer_lstm_functionality() {
+        // Test multi-layer LSTM creation and training
+        let config = LSTMConfig {
+            input_size: 4,
+            hidden_size: 16,
+            output_size: 1,
+            sequence_length: 10,
+            learning_rate: 0.01,
+            num_layers: 3, // Test 3-layer LSTM
+        };
+
+        let mut model = LSTMModel::new(config).expect("Failed to create multi-layer model");
+
+        // Create training data with more complexity for multi-layer testing
+        let sequences =
+            Array3::from_shape_vec((20, 10, 4), (0..800).map(|i| (i as f64) * 0.01).collect())
+                .expect("Failed to create sequences");
+
+        let targets = Array2::from_shape_vec((20, 1), (0..20).map(|i| (i as f64) * 0.3).collect())
+            .expect("Failed to create targets");
+
+        // Create training config for multi-layer testing
+        let training_config = crate::config::TrainingConfig {
+            symbol: "TEST_MULTI".to_string(),
+            data_path: std::path::PathBuf::from("test_multi.csv"),
+            fresh_training: true,
+            continue_training: false,
+            horizons: vec!["1h".to_string()],
+            features_config_path: None,
+            model_config: crate::config::ModelConfig {
+                architecture: crate::config::model::LSTMArchitecture::StackedLSTM { layers: 3 },
+                ..crate::config::ModelConfig::default()
+            },
+            training_params: TrainingParams {
+                epochs: EpochConfig::Fixed(5), // Quick training for test
+                batch_size: crate::config::training::BatchSizeConfig::Fixed(16),
+                learning_rate: LearningRateConfig::Fixed(0.01),
+                validation_split: 0.0,
+                test_split: 0.0,
+                early_stopping_patience: 10,
+                gradient_clip: Some(1.0),
+            },
+            data_config: crate::config::training::DataConfig::default(),
+            optimization_config: crate::config::training::OptimizationConfig::default(),
+        };
+
+        // Test multi-layer training
+        let result = model
+            .train_with_early_stopping(&sequences, &targets, &training_config)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Multi-layer LSTM training should complete successfully"
+        );
+        assert!(
+            model.trained,
+            "Multi-layer model should be marked as trained"
+        );
+
+        // Test prediction with multi-layer model
+        let prediction_result = model.predict(&sequences).await;
+        assert!(
+            prediction_result.is_ok(),
+            "Multi-layer prediction should succeed"
+        );
+
+        let predictions = prediction_result.unwrap();
+        assert_eq!(
+            predictions.nrows(),
+            sequences.shape()[0],
+            "Should predict for all sequences"
+        );
+        assert_eq!(predictions.ncols(), 1, "Should have single output column");
+
+        // Verify multi-layer architecture is properly initialized
+        assert!(
+            model.lstm_layers.is_some(),
+            "Multi-layer LSTM stack should be initialized"
+        );
+        assert_eq!(
+            model.config.num_layers, 3,
+            "Model should have 3 layers as configured"
+        );
+
+        // Verify multi-layer architecture is properly initialized
+        assert!(
+            model.lstm_layers.is_some(),
+            "Multi-layer LSTM layers should be initialized"
         );
     }
 }
