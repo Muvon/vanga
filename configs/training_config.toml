@@ -35,6 +35,39 @@ test_split = 0.1               # 10% of data for final testing
 early_stopping_patience = 50   # Stop after 50 epochs without improvement
 gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding gradients)
 
+[model]
+# Model architecture configuration
+architecture = { MultiLSTM = { layers = 2 } }
+
+# Sequence length configuration
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+
+# Hidden units configuration
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+
+# Dropout configuration
+[model.dropout]
+enabled = true
+rate = { Auto = { min_rate = 0.1, max_rate = 0.5 } }
+variational = true
+recurrent = true
+
+# ATTENTION CONFIGURATION
+[model.attention]
+enabled = true                          # Enable attention mechanism
+mechanism = "SelfAttention"            # SelfAttention, MultiHeadAttention, AdditiveAttention
+heads = 8                              # Number of attention heads (auto-optimized if not specified)
+head_dim = 64                          # Dimension per head (auto-optimized if not specified)
+dropout_rate = 0.1                     # Attention dropout rate
+temperature_scaling = 1.0              # Temperature for attention softmax (crypto volatility adaptation)
+use_relative_position = true           # Use relative position encoding (better for time series)
+
+# Attention visualization and analysis
+[model.attention.visualization]
+save_heatmaps = false                  # Save attention heatmaps (performance impact)
+export_analysis = false                # Export detailed attention analysis
+output_dir = "attention_analysis"      # Directory for attention outputs
+
 [data_config]
 # Data preprocessing configuration
 normalization = "Robust"                    # Robust, MinMax, Standard, Quantile
@@ -60,19 +93,32 @@ metric = "ValidationLoss"                  # ValidationLoss, TrainingLoss, Accur
 
 # USAGE EXAMPLES:
 #
-# 1. QUALITY-FIRST TRAINING (Recommended):
+# 1. ATTENTION-ENABLED TRAINING (NEW - RECOMMENDED for crypto):
+#    [model.attention]
+#    enabled = true
+#    mechanism = "SelfAttention"
+#    heads = 8
+#    head_dim = 64
+#    use_relative_position = true
+#
+# 2. QUALITY-FIRST TRAINING (Recommended):
 #    epochs = { Auto = { max_epochs = 1000 } }
 #    learning_rate = { Adaptive = { initial_lr = 0.01 } }
 #    validation_split = 0.2
 #    early_stopping_patience = 50
 #
-# 2. FAST FIXED TRAINING (Testing/Development):
+# 3. FAST FIXED TRAINING (Testing/Development):
 #    epochs = { Fixed = 100 }
 #    learning_rate = { Fixed = 0.001 }
 #    validation_split = 0.0
+#    [model.attention]
+#    enabled = false
 #
-# 3. RESEARCH/REPRODUCIBLE:
+# 4. RESEARCH/REPRODUCIBLE WITH ATTENTION:
 #    epochs = { Fixed = 500 }
 #    learning_rate = { Fixed = 0.001 }
 #    validation_split = 0.2
 #    batch_size = { Fixed = 128 }
+#    [model.attention]
+#    enabled = true
+#    heads = 8

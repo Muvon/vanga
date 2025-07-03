@@ -1,5 +1,6 @@
 // LSTM model implementation with Candle framework - PRESERVING ALL ORIGINAL LOGIC
 use crate::config::ModelConfig;
+use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
 use crate::utils::error::{Result, VangaError};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{
@@ -39,11 +40,14 @@ impl Default for TrainingConfig {
     }
 }
 
-/// LSTM model for cryptocurrency forecasting - SAME interface as original
+/// LSTM model for cryptocurrency forecasting - Enhanced with attention support
 pub struct LSTMModel {
     config: LSTMConfig,
     lstm_layers: Option<Vec<LSTM>>, // Changed to Vec<LSTM> for manual chaining
     output_layer: Option<Linear>,
+    pub attention_layers: Option<MultiHeadAttention>, // Public for testing
+    pub attention_config: Option<AttentionModuleConfig>, // Public for testing
+    pub use_attention: bool,                          // Public for testing
     device: Device,
     varmap: VarMap,
     training_config: TrainingConfig,
@@ -72,6 +76,9 @@ impl LSTMModel {
             config,
             lstm_layers: None,
             output_layer: None,
+            attention_layers: None, // Initialize attention as None
+            attention_config: None, // Initialize attention config as None
+            use_attention: false,   // Attention disabled by default
             device: Device::Cpu,
             varmap: VarMap::new(),
             training_config,
@@ -128,7 +135,68 @@ impl LSTMModel {
             num_layers,           // Now properly extracted from architecture
         };
 
-        Self::new(lstm_config)
+        let mut model = Self::new(lstm_config)?;
+
+        // Configure attention if enabled
+        if let Some(model_config) = Some(model_config) {
+            model.configure_attention(&model_config.attention)?;
+        }
+
+        Ok(model)
+    }
+
+    /// Configure attention for the model
+    pub fn configure_attention(
+        &mut self,
+        attention_config: &crate::config::model::AttentionConfig,
+    ) -> Result<()> {
+        if !attention_config.enabled {
+            self.use_attention = false;
+            return Ok(());
+        }
+
+        // Convert config AttentionConfig to module AttentionConfig
+        let module_config = AttentionModuleConfig {
+            num_heads: attention_config.heads as usize,
+            head_dim: attention_config.head_dim.unwrap_or(64) as usize, // Auto-optimized default
+            dropout_rate: attention_config.dropout_rate,
+            temperature_scaling: attention_config.temperature_scaling,
+            use_relative_position: attention_config.use_relative_position,
+            max_sequence_length: self.config.sequence_length,
+        };
+
+        self.attention_config = Some(module_config);
+        self.use_attention = true;
+
+        log::info!(
+            "✅ Attention configured: {} heads, head_dim={}",
+            attention_config.heads,
+            attention_config.head_dim.unwrap_or(64)
+        );
+
+        Ok(())
+    }
+
+    /// Initialize attention layers during model initialization
+    fn initialize_attention_layers(&mut self, vs: &VarBuilder) -> Result<()> {
+        if let Some(attention_config) = &self.attention_config {
+            let attention = MultiHeadAttention::new(
+                self.config.hidden_size, // Use LSTM hidden size as input dimension
+                attention_config.clone(),
+                vs.pp("attention"),
+                self.device.clone(),
+            )?;
+
+            self.attention_layers = Some(attention);
+
+            log::info!(
+                "✅ Attention layers initialized: {} heads, hidden_size={}",
+                attention_config.num_heads,
+                self.config.hidden_size
+            );
+        }
+
+        Ok(())
     }
 
     /// Extract number of layers from ModelConfig architecture - NEW helper method
@@ -211,6 +279,11 @@ impl LSTMModel {
 
         // Store the LSTM layers for manual chaining in forward pass
         self.lstm_layers = Some(lstm_layers);
+
+        // Initialize attention layers if configured
+        if self.use_attention && self.attention_config.is_some() {
+            self.initialize_attention_layers(&vs)?;
+        }
 
         // Attention integration temporarily disabled for clean compilation
 
@@ -347,24 +420,53 @@ impl LSTMModel {
         }
         let lstm_output = current_output;
 
-        // For sequence-to-one prediction, we need the last timestep
-        // Sequential output should be [batch_size, seq_len, hidden_size]
-        let seq_len = lstm_output
-            .dim(1)
-            .map_err(|e| VangaError::ModelError(format!("Failed to get sequence length: {}", e)))?;
+        // Apply attention if enabled
+        let final_output = if self.use_attention && self.attention_layers.is_some() {
+            let attention = self.attention_layers.as_ref().unwrap();
+            let (attended_output, _attention_weights) = attention.forward(&lstm_output)?;
 
-        // Take the last timestep hidden state for sequence-to-one prediction
-        let last_hidden = lstm_output
-            .narrow(1, seq_len - 1, 1)
-            .map_err(|e| VangaError::ModelError(format!("Failed to extract last timestep: {}", e)))?
-            .squeeze(1)
-            .map_err(|e| {
-                VangaError::ModelError(format!("Failed to squeeze last timestep: {}", e))
+            // For sequence-to-one prediction, take the last timestep from attended output
+            let seq_len = attended_output.dim(1).map_err(|e| {
+                VangaError::ModelError(format!("Failed to get attended sequence length: {}", e))
             })?;
+
+            attended_output
+                .narrow(1, seq_len - 1, 1)
+                .map_err(|e| {
+                    VangaError::ModelError(format!(
+                        "Failed to extract last timestep from attended output: {}",
+                        e
+                    ))
+                })?
+                .squeeze(1)
+                .map_err(|e| {
+                    VangaError::ModelError(format!(
+                        "Failed to squeeze attended last timestep: {}",
+                        e
+                    ))
+                })?
+        } else {
+            // Standard LSTM: For sequence-to-one prediction, we need the last timestep
+            // Sequential output should be [batch_size, seq_len, hidden_size]
+            let seq_len = lstm_output.dim(1).map_err(|e| {
+                VangaError::ModelError(format!("Failed to get sequence length: {}", e))
+            })?;
+
+            // Take the last timestep hidden state for sequence-to-one prediction
+            lstm_output
+                .narrow(1, seq_len - 1, 1)
+                .map_err(|e| {
+                    VangaError::ModelError(format!("Failed to extract last timestep: {}", e))
+                })?
+                .squeeze(1)
+                .map_err(|e| {
+                    VangaError::ModelError(format!("Failed to squeeze last timestep: {}", e))
+                })?
+        };
 
         // Apply output layer to final hidden state
         let predictions = output_layer
-            .forward(&last_hidden)
+            .forward(&final_output)
             .map_err(|e| VangaError::ModelError(format!("Output layer forward failed: {}", e)))?;
 
         Ok(predictions)

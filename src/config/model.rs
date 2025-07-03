@@ -82,6 +82,11 @@ pub struct AttentionConfig {
     pub enabled: bool,
     pub mechanism: AttentionMechanism,
     pub heads: u32,
+    pub head_dim: Option<u32>,              // Auto-optimized if None
+    pub dropout_rate: f64,                  // Attention dropout
+    pub temperature_scaling: f64,           // Crypto volatility adaptation
+    pub use_relative_position: bool,        // Temporal modeling for crypto
+    pub visualization: VisualizationConfig, // Analysis options
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +95,23 @@ pub enum AttentionMechanism {
     MultiHeadAttention,
     AdditiveAttention,
     None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisualizationConfig {
+    pub save_heatmaps: bool,
+    pub export_analysis: bool,
+    pub output_dir: String,
+}
+
+impl Default for VisualizationConfig {
+    fn default() -> Self {
+        Self {
+            save_heatmaps: false,   // Disabled by default for performance
+            export_analysis: false, // Disabled by default
+            output_dir: "attention_analysis".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +187,11 @@ impl Default for ModelConfig {
                 enabled: true,
                 mechanism: AttentionMechanism::SelfAttention,
                 heads: 8,
+                head_dim: None,              // Auto-optimized
+                dropout_rate: 0.1,           // Conservative for crypto
+                temperature_scaling: 1.0,    // Standard temperature
+                use_relative_position: true, // Better for time series
+                visualization: VisualizationConfig::default(),
             },
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {

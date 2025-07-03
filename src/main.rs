@@ -15,6 +15,7 @@ struct TrainParams {
     horizons: Option<Vec<String>>,
     features_config: Option<PathBuf>,
     config: Option<PathBuf>,
+    attention: bool,
     batch: bool,
     data_dir: Option<PathBuf>,
     symbols: Option<Vec<String>>,
@@ -79,6 +80,10 @@ enum Commands {
         /// Training configuration file (enables intelligent training)
         #[arg(long)]
         config: Option<PathBuf>,
+
+        /// Enable attention mechanism for enhanced accuracy
+        #[arg(long)]
+        attention: bool,
 
         /// Batch training for multiple symbols
         #[arg(long)]
@@ -236,6 +241,7 @@ async fn main() -> Result<()> {
             horizons,
             features_config,
             config,
+            attention,
             batch,
             data_dir,
             symbols,
@@ -248,6 +254,7 @@ async fn main() -> Result<()> {
                 horizons,
                 features_config,
                 config,
+                attention,
                 batch,
                 data_dir,
                 symbols,
@@ -378,6 +385,12 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 
         if let Some(features_config) = params.features_config {
             config = config.features_config_path(features_config);
+        }
+
+        // Configure attention if enabled
+        if params.attention {
+            log::info!("🎯 Attention mechanism enabled for enhanced accuracy");
+            config = config.with_attention_enabled(true);
         }
 
         monitor.checkpoint("Configuration prepared");

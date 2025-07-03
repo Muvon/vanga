@@ -507,3 +507,9 @@ mod integration_tests {
         println!("✅ Backward compatibility test passed!");
     }
 }
+
+#[cfg(test)]
+mod attention_integration_tests {
+
+    include!("tests/attention_integration.rs");
+}

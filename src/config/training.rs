@@ -264,6 +264,15 @@ impl TrainingConfig {
         self
     }
 
+    /// Enable or disable attention mechanism
+    pub fn with_attention_enabled(mut self, enabled: bool) -> Self {
+        self.model_config.attention.enabled = enabled;
+        if enabled {
+            log::info!("✅ Attention mechanism enabled in model configuration");
+        }
+        self
+    }
+
     /// Load training configuration from TOML file
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
