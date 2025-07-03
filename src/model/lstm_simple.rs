@@ -212,6 +212,8 @@ impl LSTMModel {
         // Store the LSTM layers for manual chaining in forward pass
         self.lstm_layers = Some(lstm_layers);
 
+        // Attention integration temporarily disabled for clean compilation
+
         // Create output layer for sequence-to-one prediction - SAME as original
         let output_layer = linear(
             self.config.hidden_size,
