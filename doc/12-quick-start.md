@@ -1,54 +1,126 @@
-# VANGA LSTM Training & Custom Features - Complete Guide
+# VANGA Multi-Layer LSTM Quick Start Guide
 
-## Quick Start Summary
+## 🚀 **Multi-Layer LSTM Training Commands**
 
-### 🚀 Training Commands
-
+### **Auto-Optimized Training (RECOMMENDED)**
 ```bash
-# Default behavior: Continue if model exists, create new if not
+# Automatically selects optimal 2-3 layer architecture
 vanga train --symbol BTCUSDT --data btc_data.csv
-
-# Fresh training: Always create new model (ignore existing)
-vanga train --symbol BTCUSDT --data btc_data.csv --fresh
-
-# Force continuation: Must have existing model (error if not found)
-vanga train --symbol BTCUSDT --data btc_data.csv --continue-training
-
-# With custom features configuration
-vanga train --symbol BTCUSDT --data btc_data.csv --features-config configs/custom.toml
+# Result: 3-layer MultiLSTM with 50+ technical indicators
 ```
 
-### 📊 Custom Features Workflow
+### **Custom Architecture Training**
+```bash
+# Specify exact layer count and architecture
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/multi_lstm_3layer.toml
 
-#### 1. **Prepare CSV with Custom Columns**
+# Fast 2-layer training for development
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/fast_training.toml
+
+# Advanced 4-layer training for maximum quality
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/stacked_lstm.toml
+```
+
+### **Training Mode Options**
+```bash
+# Fresh training: Always create new multi-layer model
+vanga train --symbol BTCUSDT --data btc_data.csv --fresh
+
+# Continue training: Preserve existing layer architecture
+vanga train --symbol BTCUSDT --data btc_data.csv --continue-training
+
+# With custom features + multi-layer architecture
+vanga train --symbol BTCUSDT --data btc_data.csv --features-config configs/custom.toml --config configs/multi_lstm.toml
+```
+
+## 🏗️ **Multi-Layer Architecture Configuration**
+
+### **Quick Architecture Templates**
+
+#### **Production Quality (3-Layer MultiLSTM)**
+```toml
+# configs/production_multi_lstm.toml
+[model]
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 3
+
+[model.lstm]
+hidden_size = 128
+sequence_length = 60
+
+[training]
+[training.epochs]
+type = "Auto"
+max_epochs = 1000
+
+[training.learning_rate]
+type = "Adaptive"
+initial_lr = 0.001
+```
+
+#### **Fast Training (2-Layer)**
+```toml
+# configs/fast_training.toml
+[model]
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 2
+
+[model.lstm]
+hidden_size = 64
+sequence_length = 30
+```
+
+#### **Advanced Quality (4-Layer StackedLSTM)**
+```toml
+# configs/stacked_lstm.toml
+[model]
+architecture = "StackedLSTM"
+
+[model.architecture_config.StackedLSTM]
+layers = 4
+
+[model.lstm]
+hidden_size = 256
+sequence_length = 120
+```
+
+### 📊 **Custom Features + Multi-Layer Workflow**
+
+#### 1. **Prepare Enhanced CSV**
 ```csv
 timestamp,open,high,low,close,volume,social_sentiment,funding_rate,whale_activity
 2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56,0.75,-0.01,1250000
 ```
 
-#### 2. **Validate Your Data**
-```bash
-# Check data quality and get recommendations
-python3 scripts/validate_features.py your_data.csv --verbose
-
-# Generate configuration template
-python3 scripts/validate_features.py your_data.csv --generate-config custom_config.toml
-```
-
-#### 3. **Configure Features** (custom_config.toml)
+#### 2. **Configure Multi-Layer + Custom Features**
 ```toml
+# configs/custom_multi_layer.toml
+[model]
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 3  # Optimal for custom features
+
 [custom_features]
-auto_include_all = true  # Include all non-OHLCV columns
+auto_include_all = true
 
 [custom_features.transformations]
-social_sentiment = "ZScore"      # Normalize sentiment
-funding_rate = "PercentChange"   # Convert to % change
-whale_activity = "Log"           # Log transform volumes
+social_sentiment = "ZScore"
+funding_rate = "PercentChange"
+whale_activity = "Log"
+
+[features.technical_indicators]
+enabled = true  # 50+ indicators + custom features
 ```
 
-#### 4. **Train Model**
+#### 3. **Train Multi-Layer Model**
 ```bash
-vanga train --symbol BTCUSDT --data your_data.csv --features-config custom_config.toml
+vanga train --symbol BTCUSDT --data enhanced_data.csv --config configs/custom_multi_layer.toml
+# Result: 3-layer LSTM with 50+ technical indicators + custom features
 ```
 
 ## Training Behavior Explained

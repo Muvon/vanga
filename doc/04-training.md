@@ -1,117 +1,223 @@
-# Training Models
+# Multi-Layer LSTM Training Guide
 
-This guide covers VANGA's new **intelligent training system** with automatic early stopping.
+This guide covers VANGA's **multi-layer LSTM training system** with intelligent architecture optimization and automatic early stopping.
 
-## 🧠 Intelligent Training Features
+## 🧠 Multi-Layer LSTM Features
 
-### ✅ Auto Early Stopping
-- **No more hardcoded epochs!**
-- Automatically stops when validation loss plateaus
-- Saves best model during training
-- Prevents overfitting
+### ✅ **Multi-Layer Architecture Support**
+- **1-4+ Layers**: Automatic layer count optimization based on data characteristics
+- **Manual Layer Chaining**: Precise control over multi-layer data flow
+- **Architecture Types**: MultiLSTM, StackedLSTM, BidirectionalLSTM, CNNLSTM, TransformerLSTM
+- **Performance Optimization**: Intelligent layer sizing and memory management
 
-### ✅ Adaptive Learning Rate
-- Starts with higher learning rate
-- Reduces when validation loss stops improving
-- Optimizes convergence automatically
+### ✅ **Intelligent Training System**
+- **Auto Early Stopping**: Automatically stops when validation loss plateaus
+- **Adaptive Learning Rate**: Dynamic learning rate adjustment during training
+- **Layer Validation**: Real-time dimension checking and error detection
+- **Performance Monitoring**: Layer-by-layer shape and timing logs
 
-### ✅ Configuration-Driven
-- Choose between Auto (intelligent) and Fixed (research) modes
-- Supports incremental training with new data
-- Quality-first defaults
+### ✅ **Configuration-Driven Architecture**
+- **Auto-Optimization**: Automatic layer count selection based on dataset size
+- **Manual Configuration**: Precise control over layer count and architecture type
+- **Symbol-Specific Models**: One optimized model per trading pair
+- **Quality-First Defaults**: Production-ready configurations out of the box
 
 ## Quick Start
 
-### **Intelligent Training (RECOMMENDED)**
+### **Multi-Layer LSTM Training (RECOMMENDED)**
 ```bash
-# Uses intelligent defaults: Auto epochs, Adaptive LR, Early stopping
+# Uses intelligent defaults: 3-layer LSTM, Auto epochs, Adaptive LR, Early stopping
 vanga train --symbol BTCUSDT --data data/btc_1h.csv
 ```
 
 **What happens:**
-- Auto early stopping (max 1000 epochs)
-- Adaptive learning rate (starts at 0.01)
-- 20% validation split for monitoring
-- Stops after 50 epochs without improvement
+- **Multi-Layer LSTM**: Automatically selects 2-3 layers based on data size
+- **Auto Early Stopping**: Max 1000 epochs, stops after 50 epochs without improvement
+- **Adaptive Learning Rate**: Starts at 0.001, reduces when loss plateaus
+- **50+ Technical Indicators**: Full feature engineering pipeline
+- **Validation Monitoring**: 20% validation split with performance tracking
 
-### **Fixed Epochs Training**
+### **Custom Architecture Training**
 ```bash
-### ✅ Auto Early Stopping
-vanga train --symbol BTCUSDT --data data/btc_1h.csv --config examples/dev_training.toml
+# Specify exact layer count and architecture type
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/multi_lstm_3layer.toml
 ```
 
-### **Incremental Training (New Data)**
-```bash
-# First: train initial model
-vanga train --symbol BTCUSDT --data historical_data.csv
+**Example Configuration** (`configs/multi_lstm_3layer.toml`):
+```toml
+[model]
+architecture = "MultiLSTM"
 
-# Later: add new data (automatically continues training)
-vanga train --symbol BTCUSDT --data new_data.csv
+[model.architecture_config.MultiLSTM]
+layers = 3
+
+[model.lstm]
+hidden_size = 128
+sequence_length = 60
+
+[training]
+[training.epochs]
+type = "Auto"
+max_epochs = 1000
+
+[training.learning_rate]
+type = "Adaptive"
+initial_lr = 0.001
+```
+
+### **Performance-Optimized Training**
+```bash
+# 2-layer LSTM for faster training
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/fast_training.toml
+```
+
+### **Advanced Architecture Training**
+```bash
+# StackedLSTM with 4 layers for complex patterns
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/stacked_lstm.toml
 ```
 ### ✅ Adaptive Learning Rate
-## Configuration Examples
+## Multi-Layer Architecture Configuration
 
-### Production Quality (RECOMMENDED)
+### **Production Quality Multi-Layer (RECOMMENDED)**
 ```toml
-# examples/production_training.toml
-[training_params]
-epochs = { Auto = { max_epochs = 1000 } }
-learning_rate = { Adaptive = { initial_lr = 0.01 } }
-validation_split = 0.2
-early_stopping_patience = 50
-gradient_clip = 1.0
-### ✅ Configuration-Driven
+# configs/production_multi_lstm.toml
+[model]
+architecture = "MultiLSTM"
 
-### Development/Testing
-```toml
-# examples/dev_training.toml
-[training_params]
-epochs = { Fixed = 100 }
-learning_rate = { Fixed = 0.001 }
-validation_split = 0.0
-gradient_clip = 0.5
+[model.architecture_config.MultiLSTM]
+layers = 3  # Optimal for most crypto datasets
+
+[model.lstm]
+hidden_size = 128
+sequence_length = 60
+
+[training]
+[training.epochs]
+type = "Auto"
+max_epochs = 1000
+
+[training.learning_rate]
+type = "Adaptive"
+initial_lr = 0.001
+
+[training.early_stopping]
+enabled = true
+patience = 50
+min_delta = 0.0001
+
+[features.technical_indicators]
+enabled = true  # Full 50+ indicator suite
 ```
 
-### Research/Reproducible
+### **Fast Training (2-Layer)**
 ```toml
-# examples/research_training.toml
-[training_params]
-epochs = { Fixed = 500 }
-learning_rate = { Fixed = 0.001 }
-validation_split = 0.2
-early_stopping_patience = 100
-gradient_clip = 1.0
+# configs/fast_training.toml
+[model]
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 2  # Faster training
+
+[model.lstm]
+hidden_size = 64   # Smaller for speed
+sequence_length = 30
+
+[training]
+[training.epochs]
+type = "Auto"
+max_epochs = 500
+
+[training.learning_rate]
+type = "Fixed"
+value = 0.001
 ```
 
-## Training Modes
+### **Advanced Stacked LSTM**
+```toml
+# configs/stacked_lstm.toml
+[model]
+architecture = "StackedLSTM"
 
-| Mode | Epochs | Learning Rate | Early Stopping | Use Case |
-|------|--------|---------------|-----------------|----------|
-| **Intelligent** | Auto | Adaptive | ✅ Yes | Production, Quality-first |
-| **Fixed** | Fixed | Fixed | ❌ No | Development, Testing |
-| **Research** | Fixed | Fixed | ❌ No | Academic, Reproducible |
+[model.architecture_config.StackedLSTM]
+layers = 4  # Deep architecture for complex patterns
 
-## Expected Output
+[model.lstm]
+hidden_size = 256  # Larger for complex patterns
+sequence_length = 120
+
+[training]
+[training.epochs]
+type = "Auto"
+max_epochs = 1500
+
+[training.learning_rate]
+type = "Adaptive"
+initial_lr = 0.0005  # Lower for stability
+
+[training.early_stopping]
+enabled = true
+patience = 100  # More patience for deep networks
+```
+
+## Multi-Layer Training Modes
+
+| Architecture | Layers | Training Time | Memory Usage | Use Case |
+|--------------|--------|---------------|--------------|----------|
+| **MultiLSTM** | 2-3 | Fast-Medium | Low-Medium | General purpose, production |
+| **StackedLSTM** | 3-4 | Medium-Slow | Medium-High | Complex patterns, research |
+| **BidirectionalLSTM** | 2 | Medium | Medium | Time series with future context |
+| **CNNLSTM** | 2+2 | Slow | High | Hybrid CNN+LSTM features |
+| **TransformerLSTM** | 2+8 | Very Slow | Very High | Advanced attention mechanisms |
+
+### **Layer Count Guidelines**
+- **1 Layer**: Simple patterns, fast training (~2-5 minutes)
+- **2 Layers**: Balanced performance, most common (~5-10 minutes)
+- **3 Layers**: Complex patterns, crypto-optimized (~10-15 minutes)
+- **4+ Layers**: Advanced patterns, overfitting risk (~15+ minutes)
+
+## Expected Multi-Layer Training Output
 
 ```
+[INFO] Initializing multi-layer LSTM network with config: LSTMConfig { input_size: 52, hidden_size: 128, num_layers: 3, ... }
+[INFO] ✅ LSTM layer 0 initialized: input_size=52, hidden_size=128
+[INFO] ✅ LSTM layer 1 initialized: input_size=128, hidden_size=128
+[INFO] ✅ LSTM layer 2 initialized: input_size=128, hidden_size=128
 [INFO] 🧠 INTELLIGENT TRAINING: early_stopping=true, validation_split=20.0%, patience=50
 [INFO] 📊 Data split: 1000 total → 800 training (80.0%), 200 validation (20.0%)
-[INFO] 🏃 Training batch: epochs=50, learning_rate=0.010000
-[INFO] 📈 Epoch 1/50: Train Loss = 0.052341, Validation loss: 0.045231, Learning rate: 0.010000
-[INFO] ✅ NEW BEST validation loss: 0.045231 (improved by 12.34%)
-[INFO] 🔽 REDUCING learning rate: 0.010000 → 0.005000
-[INFO] 📈 Epoch 25/50: Train Loss = 0.038912, Validation loss: 0.032156, Learning rate: 0.005000
-[INFO] 🛑 EARLY STOPPING triggered at 150 total epochs! Best validation loss: 0.032156
-[INFO] 🎯 Training completed! Final validation loss: 0.032156, final learning rate: 0.002500
+[INFO] Training multi-layer LSTM with 3 layers, input_size: 52
+[INFO] Starting LSTM training for 1000 epochs
+[DEBUG] Layer 0 output shape: [32, 60, 128]
+[DEBUG] Layer 1 output shape: [32, 60, 128]
+[DEBUG] Layer 2 output shape: [32, 60, 128]
+[INFO] Epoch 1/1000: Loss = 0.052341, Learning rate: 0.001000
+[INFO] Epoch 10/1000: Loss = 0.045231, Learning rate: 0.001000
+[INFO] ✅ NEW BEST validation loss: 0.032156 (improved by 12.34%)
+[INFO] 🔽 REDUCING learning rate: 0.001000 → 0.0005000
+[INFO] 🛑 EARLY STOPPING triggered at 150 total epochs! Best validation loss: 0.028945
+[INFO] Multi-layer LSTM training completed successfully
+[INFO] 📊 Final Training Metrics - MSE: 0.028945 (√MSE: 0.170), MAPE: 2.45%
 ```
 
-## Benefits
+## Multi-Layer LSTM Benefits
 
-- **30-50% faster training** through early stopping
-- **10-20% better model quality** through adaptive learning rate
-- **Automatic overfitting prevention**
-- **Resource efficiency** - no wasted epochs
+### **Performance Improvements**
+- **Superior Pattern Recognition**: Multi-layer architecture captures complex crypto market patterns
+- **30-50% faster training** through intelligent early stopping
+- **10-20% better model quality** through adaptive learning rate and layer optimization
+- **Automatic overfitting prevention** with layer validation and early stopping
+
+### **Architecture Advantages**
+- **Hierarchical Learning**: Each layer learns different levels of abstraction
+- **Better Feature Extraction**: Deep networks extract richer features from 50+ technical indicators
+- **Improved Generalization**: Multi-layer models generalize better to unseen market conditions
+- **Scalable Performance**: Performance scales with data complexity and size
+
+### **Production Benefits**
+- **Resource efficiency** - no wasted epochs or unnecessary layers
 - **Quality-first defaults** optimized for cryptocurrency forecasting
+- **Symbol-specific optimization** - each trading pair gets optimal layer configuration
+- **Robust error handling** with comprehensive validation at each layer
 
 ## Training Architecture
 

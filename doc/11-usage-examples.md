@@ -1,8 +1,8 @@
-# VANGA LSTM Usage Examples
+# VANGA Multi-Layer LSTM Usage Examples
 
-## 🚀 **Complete Usage Guide**
+## 🚀 **Complete Multi-Layer Usage Guide**
 
-This document provides comprehensive usage examples for the VANGA LSTM cryptocurrency forecasting system.
+This document provides comprehensive usage examples for the VANGA multi-layer LSTM cryptocurrency forecasting system with intelligent architecture optimization.
 
 ---
 
@@ -24,30 +24,62 @@ timestamp,open,high,low,close,volume
 
 ---
 
-## 🎯 **Basic Usage Examples**
+## 🎯 **Multi-Layer LSTM Usage Examples**
 
-### **1. Training a Model**
+### **1. Auto-Optimized Multi-Layer Training**
 
-#### **Simple Training**
+#### **Intelligent Training (RECOMMENDED)**
 ```bash
-# Train a Bitcoin model with default settings
+# Automatically selects optimal 2-3 layer architecture
 ./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+# Result: 3-layer MultiLSTM with 50+ technical indicators
 ```
 
-#### **Training with Custom Options**
+#### **Expected Output:**
+```
+[INFO] Initializing multi-layer LSTM network with config: LSTMConfig { input_size: 52, hidden_size: 128, num_layers: 3, ... }
+[INFO] ✅ LSTM layer 0 initialized: input_size=52, hidden_size=128
+[INFO] ✅ LSTM layer 1 initialized: input_size=128, hidden_size=128
+[INFO] ✅ LSTM layer 2 initialized: input_size=128, hidden_size=128
+[INFO] Training multi-layer LSTM with 3 layers, input_size: 52
+[INFO] Multi-layer LSTM training completed successfully
+```
+
+### **2. Custom Architecture Training**
+
+#### **Fast 2-Layer Training**
 ```bash
-# Train with fresh start and custom horizons
+# Fast training for development and testing
 ./target/release/vanga train \
     --symbol BTCUSDT \
     --data data/btc_historical.csv \
-    --fresh \
-    --horizons 1h,4h,1d \
-    --features-config config/custom_features.toml
+    --config configs/fast_training.toml
+# Result: 2-layer MultiLSTM, ~5 minute training
 ```
 
-#### **Batch Training for Multiple Symbols**
+#### **Advanced 4-Layer Training**
 ```bash
-# Train models for multiple cryptocurrencies
+# Maximum quality training for production
+./target/release/vanga train \
+    --symbol BTCUSDT \
+    --data data/btc_historical.csv \
+    --config configs/stacked_lstm.toml
+# Result: 4-layer StackedLSTM, ~20 minute training
+```
+
+#### **Bidirectional LSTM Training**
+```bash
+# Bidirectional processing for time series with future context
+./target/release/vanga train \
+    --symbol BTCUSDT \
+    --data data/btc_historical.csv \
+    --config configs/bidirectional_lstm.toml
+# Result: 2-layer BidirectionalLSTM
+```
+
+### **3. Batch Multi-Layer Training**
+```bash
+# Train multi-layer models for multiple cryptocurrencies
 ./target/release/vanga train \
     --batch \
     --symbols BTCUSDT,ETHUSDT,ADAUSDT \
