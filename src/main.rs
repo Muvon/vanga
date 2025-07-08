@@ -7,8 +7,8 @@ use vanga::utils::error::{Result, VangaError};
 
 /// Training command parameters
 struct TrainParams {
-    symbols: Vec<String>,
-    data: PathBuf,
+    symbols: Vec<String>, // Will be empty when using batch auto-detection
+    data: Option<PathBuf>,
     fresh: bool,
     continue_training: bool,
     horizons: Option<Vec<String>>,
@@ -52,12 +52,13 @@ enum Commands {
     /// Train LSTM model for cryptocurrency forecasting
     Train {
         /// Trading symbols (comma-separated: BTCUSDT,ETHUSDT,ADAUSDT)
+        /// Optional when using --batch mode for auto-detection
         #[arg(short, long, value_delimiter = ',')]
         symbol: Vec<String>,
 
-        /// Path to CSV data file
+        /// Path to CSV data file (not used in batch mode)
         #[arg(short, long)]
-        data: PathBuf,
+        data: Option<PathBuf>,
 
         /// Start fresh training (ignore existing model)
         #[arg(long)]
@@ -287,15 +288,106 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Auto-detect symbols from CSV files in data directory
+fn auto_detect_symbols_from_directory(data_dir: &PathBuf) -> Result<Vec<String>> {
+    if !data_dir.exists() {
+        return Err(VangaError::IoError(format!(
+            "Data directory does not exist: {}",
+            data_dir.display()
+        )));
+    }
+
+    let mut symbols = Vec::new();
+
+    for entry in std::fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Look for .csv files
+        if path.extension().and_then(|s| s.to_str()) == Some("csv") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                // Extract symbol name (handle both BTCUSDT.csv and BTCUSDT_1h.csv)
+                let symbol = if stem.contains('_') {
+                    stem.split('_').next().unwrap_or(stem)
+                } else {
+                    stem
+                };
+
+                if !symbol.is_empty() && !symbols.contains(&symbol.to_string()) {
+                    symbols.push(symbol.to_uppercase());
+                }
+            }
+        }
+    }
+
+    symbols.sort();
+
+    if symbols.is_empty() {
+        return Err(VangaError::ConfigError(format!(
+            "No CSV files found in directory: {}. Expected files like BTCUSDT.csv",
+            data_dir.display()
+        )));
+    }
+
+    log::info!("Auto-detected {} symbols: {:?}", symbols.len(), symbols);
+    Ok(symbols)
+}
+
 async fn handle_train_command(params: TrainParams) -> Result<()> {
-    let monitor = PerformanceMonitor::new(&format!("Training {:?}", params.symbols));
-    log::info!("Starting training for symbols: {:?}", params.symbols);
+    // Handle batch mode with auto-detection
+    let symbols_to_train = if params.batch {
+        log::info!("Batch training mode enabled");
+
+        // Require data_dir for batch mode
+        let data_dir = params.data_dir.as_ref().ok_or_else(|| {
+            VangaError::ConfigError("Batch mode requires --data-dir argument".to_string())
+        })?;
+
+        // Auto-detect symbols from directory if no symbols provided
+        if params.symbols.is_empty() {
+            log::info!(
+                "Auto-detecting symbols from directory: {}",
+                data_dir.display()
+            );
+            auto_detect_symbols_from_directory(data_dir)?
+        } else {
+            log::info!(
+                "Using provided symbols for batch training: {:?}",
+                params.symbols
+            );
+            params.symbols
+        }
+    } else {
+        // Non-batch mode: use provided symbols
+        if params.symbols.is_empty() {
+            return Err(VangaError::ConfigError(
+                "No symbols provided. Use --symbol or --batch mode".to_string(),
+            ));
+        }
+        params.symbols
+    };
+
+    let monitor = PerformanceMonitor::new(&format!("Training {:?}", symbols_to_train));
+    log::info!("Starting training for symbols: {:?}", symbols_to_train);
 
     // Determine if this is single or multi-symbol training
-    if params.symbols.len() == 1 {
+    if symbols_to_train.len() == 1 {
         // Single symbol training
-        let symbol = &params.symbols[0];
+        let symbol = &symbols_to_train[0];
         log::info!("Single symbol training mode for: {}", symbol);
+
+        // Determine data path for single symbol
+        let data_path = if let Some(data_file) = params.data {
+            // Use provided data file
+            data_file
+        } else if let Some(data_dir) = params.data_dir.as_ref() {
+            // Use data directory with symbol name
+            data_dir.join(format!("{}.csv", symbol))
+        } else {
+            return Err(VangaError::ConfigError(
+                "Single symbol training requires either --data or --data-dir".to_string(),
+            ));
+        };
 
         // Create training config for single symbol
         let mut config = if let Some(config_path) = params.config {
@@ -303,7 +395,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             log::info!("🔧 Loading training config from: {:?}", config_path);
             match TrainingConfig::default()
                 .symbol(symbol.clone())
-                .data_path(params.data.clone())
+                .data_path(data_path.clone())
                 .with_training_params_from_file(&config_path)
             {
                 Ok(file_config) => file_config,
@@ -312,7 +404,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
                     log::info!("Falling back to default configuration");
                     TrainingConfig::default()
                         .symbol(symbol.clone())
-                        .data_path(params.data)
+                        .data_path(data_path)
                 }
             }
         } else {
@@ -320,7 +412,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             log::info!("🔧 Using default intelligent training configuration");
             TrainingConfig::default()
                 .symbol(symbol.clone())
-                .data_path(params.data)
+                .data_path(data_path)
         };
 
         // Apply training parameters
@@ -364,11 +456,11 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         // Multi-symbol training
         log::info!(
             "Multi-symbol training mode for {} symbols",
-            params.symbols.len()
+            symbols_to_train.len()
         );
 
         // Require data_dir for multi-symbol training
-        let data_dir = params.data_dir.ok_or_else(|| {
+        let data_dir = params.data_dir.as_ref().ok_or_else(|| {
             VangaError::ConfigError(
                 "Multi-symbol training requires --data-dir argument".to_string(),
             )
@@ -376,7 +468,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 
         // Train each symbol individually for now
         // TODO: Implement true multi-symbol training with cross-asset learning
-        for symbol in &params.symbols {
+        for symbol in &symbols_to_train {
             log::info!(
                 "Training model for symbol: {} using data from: {}",
                 symbol,
