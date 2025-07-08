@@ -1,5 +1,47 @@
 use serde::{Deserialize, Serialize};
 
+/// TFT Variable Selection configuration for model config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TFTVariableSelectionConfig {
+    pub static_selection: bool,
+    pub temporal_selection: bool,
+    pub selection_threshold: f64,
+    pub top_k_features: Option<usize>,
+    pub enable_interpretability: bool,
+}
+
+impl Default for TFTVariableSelectionConfig {
+    fn default() -> Self {
+        Self {
+            static_selection: true,
+            temporal_selection: true,
+            selection_threshold: 0.1,
+            top_k_features: None,
+            enable_interpretability: true,
+        }
+    }
+}
+
+/// TFT Quantile Output configuration for model config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TFTQuantileOutputConfig {
+    pub enabled: bool,
+    pub quantiles: Vec<f64>,
+    pub loss_weighting: String, // "equal", "extreme_weighted", "custom"
+    pub uncertainty_calibration: bool,
+}
+
+impl Default for TFTQuantileOutputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            quantiles: vec![0.1, 0.5, 0.9],
+            loss_weighting: "equal".to_string(),
+            uncertainty_calibration: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     /// LSTM architecture type
@@ -19,6 +61,9 @@ pub struct ModelConfig {
 
     /// Output heads configuration
     pub output_heads: OutputHeadsConfig,
+
+    /// TFT Quantile regression configuration
+    pub quantile_outputs: Option<TFTQuantileOutputConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +139,8 @@ pub enum AttentionMechanism {
     SelfAttention,
     MultiHeadAttention,
     AdditiveAttention,
+    /// TFT Variable Selection Attention (builds on MultiHeadAttention)
+    VariableSelection,
     None,
 }
 
@@ -211,6 +258,7 @@ impl Default for ModelConfig {
                     horizons: vec!["1h".to_string(), "4h".to_string(), "24h".to_string()],
                 },
             },
+            quantile_outputs: None, // Disabled by default for backward compatibility
         }
     }
 }

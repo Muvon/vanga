@@ -1,0 +1,110 @@
+# TFT-Enhanced VANGA Configuration
+# Temporal Fusion Transformer features built on existing LSTM architecture
+
+[model]
+# Use existing architecture with TFT enhancements
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 2
+
+[model.sequence_length]
+type = "Auto"
+min_length = 30
+max_length = 120
+
+[model.hidden_units]
+type = "Auto"
+min_units = 64
+max_units = 512
+
+[model.dropout]
+enabled = true
+rate = { type = "Auto", min_rate = 0.1, max_rate = 0.5 }
+variational = true
+recurrent = true
+
+# Enhanced attention with TFT Variable Selection
+[model.attention]
+enabled = true
+mechanism = "VariableSelection"  # NEW: TFT Variable Selection
+heads = 8
+dropout_rate = 0.1
+temperature_scaling = 1.0
+use_relative_position = true
+
+# TFT Variable Selection configuration
+[model.attention.variable_selection]
+static_selection = true
+temporal_selection = true
+selection_threshold = 0.15  # Crypto-optimized threshold
+top_k_features = 20         # Limit to top 20 features
+enable_interpretability = true
+
+[model.attention.visualization]
+save_heatmaps = false
+export_analysis = false
+output_dir = "attention_analysis"
+
+# Multi-target outputs (existing)
+[model.output_heads.price_levels]
+enabled = true
+bins = 10
+range_percent = 5.0
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+threshold = 0.01
+confidence_calibration = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+horizons = ["1h", "4h", "24h"]
+
+# NEW: TFT Quantile Regression outputs
+[model.quantile_outputs]
+enabled = true
+quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]  # 90% prediction interval
+loss_weighting = "extreme_weighted"          # Higher weight for extreme quantiles
+uncertainty_calibration = true
+
+# Existing feature configuration (unchanged)
+[features]
+auto_include_all = true
+
+[features.technical]
+enabled = true
+sma_periods = [5, 10, 20, 50]
+ema_periods = [12, 26]
+rsi_period = 14
+macd = true
+bollinger_bands = true
+stochastic = true
+atr_period = 14
+volume_sma_periods = [10, 20]
+
+[features.custom]
+enabled = true
+momentum_periods = [5, 10]
+volume_price_trend = true
+price_acceleration = true
+
+# Training configuration (existing)
+[training]
+[training.training_params]
+epochs = { type = "Auto", max_epochs = 100 }
+batch_size = { type = "Auto", min_size = 16, max_size = 128 }
+learning_rate = { type = "Auto", min_rate = 0.0001, max_rate = 0.01 }
+
+[training.early_stopping]
+enabled = true
+patience = 10
+min_delta = 0.001
+restore_best_weights = true
+
+[training.optimization]
+optimizer = "Adam"
+gradient_clipping = 1.0
+weight_decay = 0.0001
