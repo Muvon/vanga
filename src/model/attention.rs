@@ -179,7 +179,7 @@ impl MultiHeadAttention {
         let attention_scores = self.compute_attention_scores(&queries, &keys, seq_len)?;
 
         // Apply attention to values
-        let attended_values = attention_scores.matmul(&values)?;
+        let attended_values = attention_scores.contiguous()?.matmul(&values)?;
 
         // Reshape back and apply output projection
         let attended_output = self.reshape_from_attention(&attended_values, batch_size, seq_len)?;
@@ -204,7 +204,8 @@ impl MultiHeadAttention {
                 self.config.num_heads,
                 self.config.head_dim,
             ))?
-            .transpose(1, 2)
+            .transpose(1, 2)?
+            .contiguous()
             .map_err(|e| VangaError::ModelError(format!("Attention reshape failed: {}", e)))
     }
 
@@ -218,6 +219,7 @@ impl MultiHeadAttention {
         // Reshape from [batch, num_heads, seq_len, head_dim] to [batch, seq_len, num_heads * head_dim]
         tensor
             .transpose(1, 2)?
+            .contiguous()?
             .reshape((
                 batch_size,
                 seq_len,
@@ -234,11 +236,12 @@ impl MultiHeadAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
-        let scale = (self.config.head_dim as f64).sqrt();
-        let scaled_queries = queries.div(&Tensor::new(scale as f32, &self.device)?)?;
+        let scale = (self.config.head_dim as f64).sqrt() as f32;
+        let scale_tensor = Tensor::from_slice(&[scale], (1,), &self.device)?;
+        let scaled_queries = queries.broadcast_div(&scale_tensor)?;
 
         // Compute attention scores: Q * K^T
-        let keys_transposed = keys.transpose(2, 3)?;
+        let keys_transposed = keys.transpose(2, 3)?.contiguous()?;
         let mut attention_scores = scaled_queries.matmul(&keys_transposed)?;
 
         // Add relative position embeddings for better temporal modeling
@@ -249,8 +252,9 @@ impl MultiHeadAttention {
 
         // Apply temperature scaling for crypto volatility adaptation
         if self.config.temperature_scaling != 1.0 {
-            let temperature = Tensor::new(self.config.temperature_scaling as f32, &self.device)?;
-            attention_scores = attention_scores.div(&temperature)?;
+            let temp_value = self.config.temperature_scaling as f32;
+            let temperature = Tensor::from_slice(&[temp_value], (1,), &self.device)?;
+            attention_scores = attention_scores.broadcast_div(&temperature)?;
         }
 
         // Apply causal mask for time series (prevent looking into future)
@@ -268,23 +272,68 @@ impl MultiHeadAttention {
         Ok(attention_weights)
     }
 
-    /// Add relative position bias for better temporal modeling
+    /// Add relative position bias using pre-computed sinusoidal embeddings
     fn add_relative_position_bias(
         &self,
         attention_scores: &Tensor,
         pos_embeddings: &Tensor,
         seq_len: usize,
     ) -> Result<Tensor> {
-        // Extract relevant position embeddings for current sequence length
-        let start_idx = pos_embeddings.dim(0)? / 2 - seq_len / 2;
-        let _end_idx = start_idx + seq_len;
+        // pos_embeddings shape: [max_length * 2 - 1, head_dim]
+        // We need to extract relevant embeddings for current sequence length
+        let max_length = pos_embeddings.dim(0)?.div_ceil(2);
+        let center_idx = max_length - 1;
 
-        let relevant_embeddings = pos_embeddings.narrow(0, start_idx, seq_len)?;
+        // Calculate the range of relative positions we need
+        let start_offset = if seq_len <= max_length {
+            // Use signed arithmetic to avoid underflow
+            let signed_start = center_idx as i32 - seq_len as i32 + 1;
+            if signed_start < 0 {
+                0
+            } else {
+                signed_start as usize
+            }
+        } else {
+            0 // Use full range if sequence is longer than max_length
+        };
+        let end_offset = start_offset + seq_len.min(pos_embeddings.dim(0)?);
+
+        // Extract relevant position embeddings for current sequence
+        let extract_length = if end_offset > start_offset {
+            end_offset - start_offset
+        } else {
+            1 // Minimum length to avoid empty slice
+        };
+        let relevant_embeddings = pos_embeddings.narrow(0, start_offset, extract_length)?;
+
+        // Create position bias matrix [seq_len, seq_len] using sinusoidal embeddings
+        let mut bias_data = vec![0.0f32; seq_len * seq_len];
+
+        for i in 0..seq_len {
+            for j in 0..seq_len {
+                let relative_pos = (i as i32 - j as i32).unsigned_abs() as usize;
+
+                // Use sinusoidal embedding for this relative position
+                if relative_pos < relevant_embeddings.dim(0)? {
+                    // Extract the embedding vector for this relative position
+                    let pos_embedding = relevant_embeddings.get(relative_pos)?;
+                    // Use the mean of the embedding as position bias (more sophisticated than distance)
+                    let embedding_values = pos_embedding.to_vec1::<f32>()?;
+                    let bias_value =
+                        embedding_values.iter().sum::<f32>() / embedding_values.len() as f32;
+                    bias_data[i * seq_len + j] = bias_value * 0.1; // Scale down for stability
+                }
+            }
+        }
+
+        let position_bias = Tensor::from_vec(bias_data, (seq_len, seq_len), &self.device)?;
+
+        // Expand bias to match attention_scores shape [batch, heads, seq_len, seq_len]
+        let expanded_bias = position_bias.unsqueeze(0)?.unsqueeze(0)?;
 
         // Add position bias to attention scores
-        // This is a simplified implementation - in practice, you'd want more sophisticated position encoding
         attention_scores
-            .broadcast_add(&relevant_embeddings.unsqueeze(0)?.unsqueeze(0)?)
+            .broadcast_add(&expanded_bias)
             .map_err(|e| VangaError::ModelError(format!("Position bias addition failed: {}", e)))
     }
 
