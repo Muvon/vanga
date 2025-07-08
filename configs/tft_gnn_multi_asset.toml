@@ -1,0 +1,206 @@
+# TFT+GNN Multi-Asset Configuration
+# Advanced configuration combining TFT Variable Selection with Graph Neural Networks
+
+[model]
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 3  # Increased for complex multi-asset relationships
+
+[model.sequence_length]
+type = "Auto"
+min_length = 60   # Longer sequences for cross-asset patterns
+max_length = 240
+
+[model.hidden_units]
+type = "Auto"
+min_units = 128   # Larger for multi-asset complexity
+max_units = 1024
+
+[model.dropout]
+enabled = true
+rate = { type = "Auto", min_rate = 0.15, max_rate = 0.4 }  # Higher dropout for regularization
+variational = true
+recurrent = true
+
+# TFT Variable Selection with GNN enhancement
+[model.attention]
+enabled = true
+mechanism = "VariableSelection"
+heads = 12  # More heads for complex relationships
+dropout_rate = 0.15
+temperature_scaling = 0.9
+use_relative_position = true
+
+[model.attention.variable_selection]
+static_selection = true
+temporal_selection = true
+selection_threshold = 0.12  # Lower threshold for cross-asset features
+top_k_features = 35         # More features for multi-asset
+enable_interpretability = true
+
+# Graph Neural Network Configuration
+[model.gnn]
+enabled = true
+cross_asset_enabled = true
+regime_detection_enabled = true
+
+[model.gnn.graph_attention]
+num_heads = 16
+hidden_dim = 512
+dropout_rate = 0.2
+use_edge_features = true
+multi_hop_attention = true
+temperature = 0.9
+learnable_position_encoding = true
+
+[model.gnn.cross_asset]
+enabled = true
+assets = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "AAVEUSDT"]
+correlation_threshold = 0.2
+max_connections = 10
+dynamic_graph_updates = true
+graph_update_frequency = 5
+fusion_method = "GraphConvolution"
+asset_specific_weights = true
+
+[model.gnn.regime_detection]
+enabled = true
+lookback_window = 40
+volatility_threshold = 0.04
+trend_threshold = 0.015
+crisis_sensitivity = 0.85
+multi_timeframe = true
+timeframes = ["15m", "1h", "4h", "1d"]
+smoothing_factor = 0.7
+detect_transitions = true
+
+# Enhanced Quantile Outputs with Regime Awareness
+[model.quantile_outputs]
+enabled = true
+quantiles = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]  # Extended for risk management
+loss_weighting = "regime_adaptive"  # Adapt weighting based on detected regime
+uncertainty_calibration = true
+
+# TFT Auto-Optimization
+[model.tft_auto_optimizer]
+enabled = true
+
+[model.tft_auto_optimizer.variable_selection]
+auto_tune_threshold = true
+dynamic_top_k = true
+min_threshold = 0.08
+max_threshold = 0.35
+min_features = 15
+max_features = 50
+analysis_window = 30
+
+[model.tft_auto_optimizer.quantile_regression]
+auto_select_quantiles = true
+dynamic_loss_weighting = true
+min_quantiles = 5
+max_quantiles = 11
+selection_strategy = "VolatilityAdaptive"
+weighting_adaptation_rate = 0.015
+
+[model.tft_auto_optimizer.training_integration]
+enable_during_training = true
+validation_based_tuning = true
+tft_early_stopping = true
+baseline_comparison = true
+tracking_interval = 3
+
+# Multi-target outputs with regime conditioning
+[model.output_heads.price_levels]
+enabled = true
+bins = 15  # More bins for precise predictions
+range_percent = 8.0  # Wider range for volatile markets
+distribution_type = "Categorical"
+regime_conditioning = true  # Condition on detected regime
+
+[model.output_heads.direction]
+enabled = true
+threshold = 0.008  # Lower threshold for crypto sensitivity
+confidence_calibration = true
+regime_conditioning = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+horizons = ["15m", "1h", "4h", "24h", "7d"]  # Extended horizons
+regime_conditioning = true
+
+# Enhanced feature configuration for multi-asset
+[features]
+auto_include_all = true
+cross_asset_features = true  # Enable cross-asset feature engineering
+
+[features.technical]
+enabled = true
+sma_periods = [5, 10, 20, 50, 100, 200]
+ema_periods = [8, 12, 21, 26, 55]
+rsi_period = 14
+macd = true
+bollinger_bands = true
+stochastic = true
+atr_period = 14
+volume_sma_periods = [10, 20, 50]
+# Cross-asset technical indicators
+cross_asset_correlation = true
+relative_strength_vs_btc = true
+volume_ratio_vs_market = true
+
+[features.custom]
+enabled = true
+momentum_periods = [3, 5, 10, 20]
+volume_price_trend = true
+price_acceleration = true
+# Multi-asset custom features
+market_cap_momentum = true
+sector_rotation_signals = true
+correlation_breakdown_detection = true
+
+[features.regime_features]
+enabled = true
+regime_transition_signals = true
+volatility_regime_indicators = true
+crisis_probability_features = true
+market_stress_indicators = true
+
+# Training configuration for complex model
+[training]
+[training.training_params]
+epochs = { type = "Auto", max_epochs = 150 }  # More epochs for complex model
+batch_size = { type = "Auto", min_size = 8, max_size = 64 }  # Smaller batches for memory
+learning_rate = { type = "Auto", min_rate = 0.00005, max_rate = 0.005 }  # Lower LR for stability
+
+[training.early_stopping]
+enabled = true
+patience = 15  # More patience for complex model
+min_delta = 0.0005
+restore_best_weights = true
+
+[training.optimization]
+optimizer = "AdamW"  # Better for complex models
+gradient_clipping = 0.5  # Tighter clipping for stability
+weight_decay = 0.001
+warmup_steps = 100
+
+[training.gnn_specific]
+graph_update_during_training = true
+regime_loss_weighting = 0.1  # Additional loss for regime prediction
+cross_asset_loss_weighting = 0.15  # Additional loss for cross-asset consistency
+
+# Validation and testing
+[validation]
+cross_asset_validation = true  # Validate on multiple assets
+regime_aware_metrics = true    # Include regime-specific metrics
+out_of_sample_assets = ["SOLUSDT", "AVAXUSDT"]  # Test generalization
+
+# Performance monitoring
+[monitoring]
+attention_weight_tracking = true
+regime_transition_tracking = true
+cross_asset_correlation_monitoring = true
+feature_importance_logging = true
+quantile_coverage_monitoring = true

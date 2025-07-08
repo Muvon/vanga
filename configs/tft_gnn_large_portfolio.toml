@@ -1,0 +1,205 @@
+# TFT+GNN Large Portfolio Configuration  
+# Optimized for 9+ asset portfolios
+
+[model]
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 4  # More layers for complex portfolios
+
+[model.sequence_length]
+type = "Auto"
+min_length = 80
+max_length = 300
+
+[model.hidden_units]
+type = "Auto"
+min_units = 256
+max_units = 1024
+
+[model.dropout]
+enabled = true
+rate = { type = "Auto", min_rate = 0.2, max_rate = 0.5 }  # Higher dropout for regularization
+variational = true
+recurrent = true
+
+# TFT Variable Selection for large portfolios
+[model.attention]
+enabled = true
+mechanism = "VariableSelection"
+heads = 16  # More heads for complex relationships
+dropout_rate = 0.2
+temperature_scaling = 0.8
+use_relative_position = true
+
+[model.attention.variable_selection]
+static_selection = true
+temporal_selection = true
+selection_threshold = 0.1   # Lower threshold for diverse features
+top_k_features = 50         # More features for large portfolios
+enable_interpretability = true
+
+# GNN Configuration for large portfolios
+[model.gnn]
+enabled = true
+cross_asset_enabled = true
+regime_detection_enabled = true
+
+[model.gnn.graph_attention]
+num_heads = 20
+hidden_dim = 768
+dropout_rate = 0.25
+use_edge_features = true
+multi_hop_attention = true  # Enable for complex relationships
+temperature = 0.8
+
+[model.gnn.cross_asset]
+enabled = true
+assets = []  # Populated automatically from --symbol argument
+correlation_threshold = 0.15  # Lower threshold for diverse portfolios
+max_connections = 15
+dynamic_graph_updates = true
+graph_update_frequency = 3   # More frequent updates
+fusion_method = "GraphConvolution"
+asset_specific_weights = true
+
+[model.gnn.regime_detection]
+enabled = true
+lookback_window = 60
+volatility_threshold = 0.06
+trend_threshold = 0.02
+crisis_sensitivity = 0.9
+multi_timeframe = true
+timeframes = ["15m", "1h", "4h", "1d", "1w"]
+smoothing_factor = 0.6  # Less smoothing for faster adaptation
+detect_transitions = true
+
+# Enhanced Quantile Outputs for large portfolios
+[model.quantile_outputs]
+enabled = true
+quantiles = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]  # More quantiles
+loss_weighting = "extreme_weighted"
+uncertainty_calibration = true
+
+# TFT Auto-Optimization for large portfolios
+[model.tft_auto_optimizer]
+enabled = true
+
+[model.tft_auto_optimizer.variable_selection]
+auto_tune_threshold = true
+dynamic_top_k = true
+min_threshold = 0.05
+max_threshold = 0.4
+min_features = 20
+max_features = 80
+analysis_window = 20  # Shorter window for faster adaptation
+
+[model.tft_auto_optimizer.quantile_regression]
+auto_select_quantiles = true
+dynamic_loss_weighting = true
+min_quantiles = 7
+max_quantiles = 11
+selection_strategy = "ExtremeWeighted"
+weighting_adaptation_rate = 0.02
+
+# Multi-target outputs with portfolio focus
+[model.output_heads.price_levels]
+enabled = true
+bins = 20  # More bins for precision
+range_percent = 10.0  # Wider range for diverse assets
+distribution_type = "Categorical"
+regime_conditioning = true
+
+[model.output_heads.direction]
+enabled = true
+threshold = 0.005  # Lower threshold for sensitivity
+confidence_calibration = true
+regime_conditioning = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+horizons = ["15m", "1h", "4h", "24h", "7d", "30d"]  # Extended horizons
+regime_conditioning = true
+
+# Comprehensive feature configuration
+[features]
+auto_include_all = true
+cross_asset_features = true
+
+[features.technical]
+enabled = true
+sma_periods = [3, 5, 10, 20, 50, 100, 200]
+ema_periods = [5, 8, 12, 21, 26, 55]
+rsi_period = 14
+macd = true
+bollinger_bands = true
+stochastic = true
+atr_period = 14
+volume_sma_periods = [5, 10, 20, 50]
+# Advanced cross-asset indicators
+cross_asset_correlation = true
+relative_strength_vs_btc = true
+relative_strength_eth_vs_btc = true
+volume_ratio_vs_market = true
+sector_rotation_signals = true
+
+[features.custom]
+enabled = true
+momentum_periods = [3, 5, 10, 20, 50]
+volume_price_trend = true
+price_acceleration = true
+market_cap_momentum = true
+sector_rotation_signals = true
+correlation_breakdown_detection = true
+liquidity_stress_indicators = true
+
+[features.regime_features]
+enabled = true
+regime_transition_signals = true
+volatility_regime_indicators = true
+crisis_probability_features = true
+market_stress_indicators = true
+cross_asset_contagion_signals = true
+
+# Training configuration for large portfolios
+[training]
+[training.training_params]
+epochs = { type = "Auto", max_epochs = 200 }  # More epochs for complexity
+batch_size = { type = "Auto", min_size = 4, max_size = 32 }  # Smaller batches for memory
+learning_rate = { type = "Auto", min_rate = 0.00001, max_rate = 0.002 }  # Lower LR
+
+[training.early_stopping]
+enabled = true
+patience = 20  # More patience for complex models
+min_delta = 0.0001
+restore_best_weights = true
+
+[training.optimization]
+optimizer = "AdamW"  # Better for large models
+gradient_clipping = 0.3  # Tighter clipping
+weight_decay = 0.01
+warmup_steps = 200
+
+[training.gnn_specific]
+graph_update_during_training = true
+regime_loss_weighting = 0.15
+cross_asset_loss_weighting = 0.2
+portfolio_consistency_weight = 0.1
+
+# Advanced validation for large portfolios
+[validation]
+cross_asset_validation = true
+regime_aware_metrics = true
+portfolio_risk_metrics = true
+out_of_sample_assets = []  # Can specify test assets
+
+# Performance monitoring
+[monitoring]
+attention_weight_tracking = true
+regime_transition_tracking = true
+cross_asset_correlation_monitoring = true
+feature_importance_logging = true
+quantile_coverage_monitoring = true
+portfolio_risk_monitoring = true
+memory_usage_monitoring = true

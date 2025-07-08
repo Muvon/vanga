@@ -175,6 +175,41 @@ pub async fn generate_technical_indicators(
         &volume,
     )?;
 
+    // Portfolio-specific indicators (single-asset versions)
+    if config.liquidity_stress_indicators {
+        df = add_liquidity_stress_indicators(df, &close_prices, &volume, 20)?;
+    }
+
+    // Note: Multi-asset indicators (relative_strength_vs_btc, relative_strength_eth_vs_btc, volume_ratio_vs_market,
+    // cross_asset_correlation, sector_rotation_signals, correlation_breakdown_detection)
+    // require additional data and should be implemented at the portfolio level
+    if config.relative_strength_vs_btc {
+        log::warn!(
+            "relative_strength_vs_btc requires BTC price data - implement at portfolio level"
+        );
+    }
+    if config.relative_strength_eth_vs_btc {
+        log::warn!("relative_strength_eth_vs_btc requires ETH and BTC price data - implement at portfolio level");
+    }
+    if config.volume_ratio_vs_market {
+        log::warn!(
+            "volume_ratio_vs_market requires market volume data - implement at portfolio level"
+        );
+    }
+    if config.cross_asset_correlation {
+        log::warn!(
+            "cross_asset_correlation requires multiple assets - implement at portfolio level"
+        );
+    }
+    if config.sector_rotation_signals {
+        log::warn!(
+            "sector_rotation_signals requires multiple assets - implement at portfolio level"
+        );
+    }
+    if config.correlation_breakdown_detection {
+        log::warn!("correlation_breakdown_detection requires multiple assets - implement at portfolio level");
+    }
+
     log::info!("Generated {} technical indicators", df.width() - 6); // Subtract OHLCV + timestamp
     Ok(df)
 }
@@ -952,4 +987,435 @@ fn calculate_volume_weighted_average_price(
     }
 
     vwap
+}
+
+/// Calculate relative strength vs BTC (price ratio normalized)
+fn calculate_relative_strength_vs_btc(asset_close: &[f64], btc_close: &[f64]) -> Vec<f64> {
+    let mut relative_strength = vec![f64::NAN; asset_close.len()];
+
+    if asset_close.len() != btc_close.len() {
+        return relative_strength;
+    }
+
+    for i in 0..asset_close.len() {
+        if btc_close[i] > 0.0 && !btc_close[i].is_nan() && !asset_close[i].is_nan() {
+            relative_strength[i] = asset_close[i] / btc_close[i];
+        }
+    }
+
+    relative_strength
+}
+
+/// Calculate ETH/BTC dominance ratio for crypto market cycle analysis
+fn calculate_eth_btc_dominance_ratio(eth_close: &[f64], btc_close: &[f64]) -> Vec<f64> {
+    let mut eth_btc_ratio = vec![f64::NAN; eth_close.len()];
+
+    if eth_close.len() != btc_close.len() {
+        return eth_btc_ratio;
+    }
+
+    for i in 0..eth_close.len() {
+        if btc_close[i] > 0.0 && !btc_close[i].is_nan() && !eth_close[i].is_nan() {
+            eth_btc_ratio[i] = eth_close[i] / btc_close[i];
+        }
+    }
+
+    eth_btc_ratio
+}
+
+/// Calculate ETH/BTC cycle phase detection (alt season vs BTC dominance)
+fn calculate_eth_btc_cycle_phases(eth_btc_ratio: &[f64]) -> Vec<f64> {
+    let mut cycle_phase = vec![f64::NAN; eth_btc_ratio.len()];
+
+    // Crypto market proven thresholds
+    const ALT_SEASON_THRESHOLD: f64 = 0.08; // ETH/BTC > 0.08 = alt season
+    const BTC_DOMINANCE_THRESHOLD: f64 = 0.05; // ETH/BTC < 0.05 = BTC dominance
+
+    for i in 0..eth_btc_ratio.len() {
+        if !eth_btc_ratio[i].is_nan() {
+            cycle_phase[i] = if eth_btc_ratio[i] > ALT_SEASON_THRESHOLD {
+                1.0 // Alt season
+            } else if eth_btc_ratio[i] < BTC_DOMINANCE_THRESHOLD {
+                -1.0 // BTC dominance
+            } else {
+                0.0 // Neutral/transition zone
+            };
+        }
+    }
+
+    cycle_phase
+}
+
+/// Calculate ETH/BTC momentum (rate of change in dominance)
+fn calculate_eth_btc_momentum(eth_btc_ratio: &[f64], period: usize) -> Vec<f64> {
+    let mut momentum = vec![f64::NAN; eth_btc_ratio.len()];
+
+    if period == 0 || eth_btc_ratio.len() <= period {
+        return momentum;
+    }
+
+    for i in period..eth_btc_ratio.len() {
+        if !eth_btc_ratio[i].is_nan()
+            && !eth_btc_ratio[i - period].is_nan()
+            && eth_btc_ratio[i - period] > 0.0
+        {
+            momentum[i] =
+                (eth_btc_ratio[i] - eth_btc_ratio[i - period]) / eth_btc_ratio[i - period] * 100.0;
+        }
+    }
+
+    momentum
+}
+
+/// Calculate ETH/BTC volatility regime detection
+fn calculate_eth_btc_volatility_regime(eth_btc_ratio: &[f64], period: usize) -> Vec<f64> {
+    let mut volatility_regime = vec![f64::NAN; eth_btc_ratio.len()];
+
+    if period < 2 || eth_btc_ratio.len() <= period {
+        return volatility_regime;
+    }
+
+    for i in period..eth_btc_ratio.len() {
+        let window = &eth_btc_ratio[i - period..i];
+        let valid_values: Vec<f64> = window.iter().filter(|&&x| !x.is_nan()).copied().collect();
+
+        if valid_values.len() >= 2 {
+            let mean = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
+            let variance = valid_values
+                .iter()
+                .map(|&x| (x - mean).powi(2))
+                .sum::<f64>()
+                / valid_values.len() as f64;
+            let volatility = variance.sqrt();
+
+            // Normalize volatility relative to price level
+            volatility_regime[i] = if mean > 0.0 {
+                volatility / mean * 100.0 // Coefficient of variation as percentage
+            } else {
+                f64::NAN
+            };
+        }
+    }
+
+    volatility_regime
+}
+
+/// Calculate volume ratio vs market average (portfolio-level function)
+pub fn calculate_volume_ratio_vs_market(volume: &[f64], market_volume: &[f64]) -> Vec<f64> {
+    let mut volume_ratio = vec![f64::NAN; volume.len()];
+
+    if volume.len() != market_volume.len() {
+        return volume_ratio;
+    }
+
+    for i in 0..volume.len() {
+        if market_volume[i] > 0.0 && !market_volume[i].is_nan() && !volume[i].is_nan() {
+            volume_ratio[i] = volume[i] / market_volume[i];
+        }
+    }
+
+    volume_ratio
+}
+
+/// Calculate cross-asset correlation matrix features (portfolio-level function)
+pub fn calculate_cross_asset_correlation(prices: &[Vec<f64>], period: usize) -> Vec<f64> {
+    if prices.len() < 2 {
+        return vec![f64::NAN; prices[0].len()];
+    }
+
+    let data_len = prices[0].len();
+    let mut avg_correlation = vec![f64::NAN; data_len];
+
+    for (i, correlation_value) in avg_correlation
+        .iter_mut()
+        .enumerate()
+        .take(data_len)
+        .skip(period)
+    {
+        let mut correlations = Vec::new();
+
+        // Calculate pairwise correlations for current window
+        for j in 0..prices.len() {
+            for k in (j + 1)..prices.len() {
+                let window_j = &prices[j][i - period..i];
+                let window_k = &prices[k][i - period..i];
+
+                // Reuse existing correlation calculation logic
+                let mean_j = window_j.iter().sum::<f64>() / period as f64;
+                let mean_k = window_k.iter().sum::<f64>() / period as f64;
+
+                let mut numerator = 0.0;
+                let mut var_j = 0.0;
+                let mut var_k = 0.0;
+
+                for l in 0..period {
+                    let diff_j = window_j[l] - mean_j;
+                    let diff_k = window_k[l] - mean_k;
+
+                    numerator += diff_j * diff_k;
+                    var_j += diff_j * diff_j;
+                    var_k += diff_k * diff_k;
+                }
+
+                let denominator = (var_j * var_k).sqrt();
+                if denominator > 0.0 {
+                    correlations.push(numerator / denominator);
+                }
+            }
+        }
+
+        // Average correlation across all pairs
+        if !correlations.is_empty() {
+            *correlation_value = correlations.iter().sum::<f64>() / correlations.len() as f64;
+        }
+    }
+
+    avg_correlation
+}
+
+/// Calculate sector rotation signals (momentum divergence between assets) (portfolio-level function)
+pub fn calculate_sector_rotation_signals(prices: &[Vec<f64>], period: usize) -> Vec<f64> {
+    if prices.len() < 2 {
+        return vec![f64::NAN; prices[0].len()];
+    }
+
+    let data_len = prices[0].len();
+    let mut rotation_signal = vec![f64::NAN; data_len];
+
+    for i in period..data_len {
+        let mut momentum_values = Vec::new();
+
+        // Calculate momentum for each asset
+        for price_series in prices {
+            if i >= period && price_series[i - period] > 0.0 {
+                let momentum =
+                    (price_series[i] - price_series[i - period]) / price_series[i - period];
+                momentum_values.push(momentum);
+            }
+        }
+
+        if momentum_values.len() >= 2 {
+            // Calculate momentum dispersion (standard deviation)
+            let mean_momentum = momentum_values.iter().sum::<f64>() / momentum_values.len() as f64;
+            let variance = momentum_values
+                .iter()
+                .map(|&x| (x - mean_momentum).powi(2))
+                .sum::<f64>()
+                / momentum_values.len() as f64;
+
+            rotation_signal[i] = variance.sqrt(); // Higher values = more rotation
+        }
+    }
+
+    rotation_signal
+}
+
+/// Calculate correlation breakdown detection (portfolio-level function)
+pub fn calculate_correlation_breakdown_detection(
+    prices: &[Vec<f64>],
+    short_period: usize,
+    long_period: usize,
+) -> Vec<f64> {
+    let short_corr = calculate_cross_asset_correlation(prices, short_period);
+    let long_corr = calculate_cross_asset_correlation(prices, long_period);
+
+    let mut breakdown_signal = vec![f64::NAN; short_corr.len()];
+
+    for i in 0..short_corr.len() {
+        if !short_corr[i].is_nan() && !long_corr[i].is_nan() {
+            // Breakdown signal = difference between short and long-term correlation
+            breakdown_signal[i] = (short_corr[i] - long_corr[i]).abs();
+        }
+    }
+
+    breakdown_signal
+}
+
+/// Calculate liquidity stress indicators (volume volatility and price impact)
+fn calculate_liquidity_stress_indicators(close: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
+    let mut stress_indicator = vec![f64::NAN; close.len()];
+
+    if close.len() != volume.len() || period < 2 {
+        return stress_indicator;
+    }
+
+    for i in period..close.len() {
+        let volume_window = &volume[i - period..i];
+        let price_window = &close[i - period..i];
+
+        // Calculate volume volatility
+        let volume_mean = volume_window.iter().sum::<f64>() / period as f64;
+
+        // Calculate price volatility
+        let mut price_changes = Vec::new();
+        for j in 1..price_window.len() {
+            if price_window[j - 1] > 0.0 {
+                price_changes.push((price_window[j] - price_window[j - 1]) / price_window[j - 1]);
+            }
+        }
+
+        if !price_changes.is_empty() && volume_mean > 0.0 {
+            let price_volatility = {
+                let mean = price_changes.iter().sum::<f64>() / price_changes.len() as f64;
+                let variance = price_changes
+                    .iter()
+                    .map(|&x| (x - mean).powi(2))
+                    .sum::<f64>()
+                    / price_changes.len() as f64;
+                variance.sqrt()
+            };
+
+            // Stress = price volatility / volume (higher when low volume + high volatility)
+            stress_indicator[i] =
+                price_volatility / (volume_mean / volume_window.iter().sum::<f64>()).max(0.001);
+        }
+    }
+
+    stress_indicator
+}
+
+/// Add liquidity stress indicators to DataFrame
+fn add_liquidity_stress_indicators(
+    mut df: DataFrame,
+    close: &[f64],
+    volume: &[f64],
+    period: u32,
+) -> Result<DataFrame> {
+    let stress_values = calculate_liquidity_stress_indicators(close, volume, period as usize);
+    let column_name = format!("liquidity_stress_{}", period);
+    df = df
+        .with_column(Series::new(&column_name, stress_values))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
+        .clone();
+    Ok(df)
+}
+
+/// Add ETH/BTC dominance indicators to DataFrame (portfolio-level function)
+/// This function should be called when both ETH and BTC data are available
+pub fn add_eth_btc_dominance_indicators(
+    mut df: DataFrame,
+    eth_close: &[f64],
+    btc_close: &[f64],
+) -> Result<DataFrame> {
+    // Basic ETH/BTC ratio
+    let eth_btc_ratio = calculate_eth_btc_dominance_ratio(eth_close, btc_close);
+    df = df
+        .with_column(Series::new("eth_btc_ratio", eth_btc_ratio.clone()))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add eth_btc_ratio: {}", e)))?
+        .clone();
+
+    // Cycle phase detection
+    let cycle_phases = calculate_eth_btc_cycle_phases(&eth_btc_ratio);
+    df = df
+        .with_column(Series::new("eth_btc_cycle_phase", cycle_phases))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add eth_btc_cycle_phase: {}", e)))?
+        .clone();
+
+    // Momentum analysis (10-period default)
+    let momentum_10 = calculate_eth_btc_momentum(&eth_btc_ratio, 10);
+    df = df
+        .with_column(Series::new("eth_btc_momentum_10", momentum_10))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add eth_btc_momentum_10: {}", e)))?
+        .clone();
+
+    // Momentum analysis (20-period)
+    let momentum_20 = calculate_eth_btc_momentum(&eth_btc_ratio, 20);
+    df = df
+        .with_column(Series::new("eth_btc_momentum_20", momentum_20))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add eth_btc_momentum_20: {}", e)))?
+        .clone();
+
+    // Volatility regime (20-period)
+    let volatility_regime = calculate_eth_btc_volatility_regime(&eth_btc_ratio, 20);
+    df = df
+        .with_column(Series::new("eth_btc_volatility_regime", volatility_regime))
+        .map_err(|e| {
+            VangaError::FeatureError(format!("Failed to add eth_btc_volatility_regime: {}", e))
+        })?
+        .clone();
+
+    log::info!("Added ETH/BTC dominance indicators: ratio, cycle_phase, momentum_10, momentum_20, volatility_regime");
+    Ok(df)
+}
+
+/// Add relative strength vs BTC indicators to DataFrame (portfolio-level function)
+/// This function should be called when BTC data is available
+pub fn add_relative_strength_vs_btc_indicators(
+    mut df: DataFrame,
+    asset_close: &[f64],
+    btc_close: &[f64],
+    asset_symbol: &str,
+) -> Result<DataFrame> {
+    let relative_strength = calculate_relative_strength_vs_btc(asset_close, btc_close);
+    let column_name = format!("{}_btc_ratio", asset_symbol.to_lowercase());
+
+    df = df
+        .with_column(Series::new(&column_name, relative_strength))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
+        .clone();
+
+    log::info!("Added relative strength indicator: {}", column_name);
+    Ok(df)
+}
+
+/// Add multi-timeframe ETH/BTC dominance analysis
+/// Analyzes dominance across multiple timeframes for comprehensive market cycle detection
+pub fn add_multi_timeframe_eth_btc_analysis(
+    mut df: DataFrame,
+    eth_close: &[f64],
+    btc_close: &[f64],
+    timeframes: &[u32], // periods like [10, 20, 50, 100] for different timeframes
+) -> Result<DataFrame> {
+    let eth_btc_ratio = calculate_eth_btc_dominance_ratio(eth_close, btc_close);
+
+    // Add basic ratio first
+    df = df
+        .with_column(Series::new("eth_btc_ratio", eth_btc_ratio.clone()))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add eth_btc_ratio: {}", e)))?
+        .clone();
+
+    // Add cycle phase detection
+    let cycle_phases = calculate_eth_btc_cycle_phases(&eth_btc_ratio);
+    df = df
+        .with_column(Series::new("eth_btc_cycle_phase", cycle_phases))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add eth_btc_cycle_phase: {}", e)))?
+        .clone();
+
+    // Multi-timeframe momentum analysis
+    for &period in timeframes {
+        let momentum = calculate_eth_btc_momentum(&eth_btc_ratio, period as usize);
+        let column_name = format!("eth_btc_momentum_{}", period);
+        df = df
+            .with_column(Series::new(&column_name, momentum))
+            .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
+            .clone();
+    }
+
+    // Multi-timeframe volatility regime analysis
+    for &period in timeframes {
+        let volatility_regime =
+            calculate_eth_btc_volatility_regime(&eth_btc_ratio, period as usize);
+        let column_name = format!("eth_btc_volatility_{}", period);
+        df = df
+            .with_column(Series::new(&column_name, volatility_regime))
+            .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
+            .clone();
+    }
+
+    // Add dominance trend strength (SMA of momentum)
+    for &period in timeframes {
+        let momentum = calculate_eth_btc_momentum(&eth_btc_ratio, period as usize);
+        let trend_strength = calculate_sma(&momentum, period as usize);
+        let column_name = format!("eth_btc_trend_strength_{}", period);
+        df = df
+            .with_column(Series::new(&column_name, trend_strength))
+            .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
+            .clone();
+    }
+
+    log::info!(
+        "Added multi-timeframe ETH/BTC dominance analysis for periods: {:?}",
+        timeframes
+    );
+    Ok(df)
 }

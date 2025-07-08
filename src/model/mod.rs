@@ -2,6 +2,7 @@ pub mod attention;
 pub mod attention_loss;
 pub mod attention_optimizer;
 pub mod attention_viz;
+pub mod gnn_simple;
 pub mod lstm_simple;
 pub mod multi_target;
 pub mod tft;

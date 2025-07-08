@@ -28,6 +28,7 @@
 //! ```
 
 pub mod api;
+pub mod cli; // NEW: Unified symbol interface
 pub mod config;
 pub mod data;
 pub mod features;
@@ -36,7 +37,8 @@ pub mod optimization; // NEW: Auto-optimization system
 pub mod output;
 pub mod realtime; // NEW: Real-time streaming prediction
 pub mod targets;
-pub mod utils;
+pub mod training;
+pub mod utils; // NEW: Multi-symbol training
 
 // Re-export commonly used types for convenience
 pub use config::{FeatureConfig, ModelConfig, PredictionConfig, TrainingConfig};

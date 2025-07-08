@@ -40,6 +40,17 @@ pub struct TechnicalIndicatorsConfig {
 
     /// Trend indicators
     pub trend: TrendIndicatorsConfig,
+
+    /// Cross-asset indicators
+    pub cross_asset_correlation: bool,
+    pub relative_strength_vs_btc: bool,
+    pub relative_strength_eth_vs_btc: bool,
+    pub volume_ratio_vs_market: bool,
+
+    /// Portfolio-specific indicators
+    pub sector_rotation_signals: bool,
+    pub correlation_breakdown_detection: bool,
+    pub liquidity_stress_indicators: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,6 +383,15 @@ impl Default for TechnicalIndicatorsConfig {
                 parabolic_sar: true,
                 aroon: true,
             },
+            // Cross-asset indicators (disabled by default)
+            cross_asset_correlation: false,
+            relative_strength_vs_btc: false,
+            relative_strength_eth_vs_btc: false,
+            volume_ratio_vs_market: false,
+            // Portfolio-specific indicators (disabled by default)
+            sector_rotation_signals: false,
+            correlation_breakdown_detection: false,
+            liquidity_stress_indicators: false,
         }
     }
 }

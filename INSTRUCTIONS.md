@@ -2,6 +2,8 @@
 
 ! THE PROJECT in ACTIVE DEVELOPMENT - DO NOT keep legacy or fallbacks to old code. KEEP CLEAN
 
+Documentation is located in `doc/` folder.
+
 ## Core Principles
 
 ### Strict Configuration Management
@@ -307,6 +309,8 @@ NEVER DO THIS:
 - Use synchronous operations for I/O-heavy tasks
 - Assume data format without validation
 - Create models without proper target generation
+- Renaming var to _var to mock THE REAL issue, instead investigaed WHY it appears and fix properly 
+- Adding dead_code to unused functions if we really do not need it, remove 
 
 ⚡ MANDATORY PRE-DEVELOPMENT CHECK:
 □ Using auto-optimization instead of manual tuning?

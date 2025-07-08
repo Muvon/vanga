@@ -1,0 +1,169 @@
+# TFT+GNN Small Portfolio Configuration
+# Optimized for 2-4 asset portfolios
+
+[model]
+architecture = "MultiLSTM"
+
+[model.architecture_config.MultiLSTM]
+layers = 2
+
+[model.sequence_length]
+type = "Auto"
+min_length = 40
+max_length = 120
+
+[model.hidden_units]
+type = "Auto"
+min_units = 64
+max_units = 256
+
+[model.dropout]
+enabled = true
+rate = { type = "Auto", min_rate = 0.1, max_rate = 0.3 }
+variational = true
+recurrent = true
+
+# TFT Variable Selection for small portfolios
+[model.attention]
+enabled = true
+mechanism = "VariableSelection"
+heads = 8
+dropout_rate = 0.1
+temperature_scaling = 1.0
+use_relative_position = true
+
+[model.attention.variable_selection]
+static_selection = true
+temporal_selection = true
+selection_threshold = 0.15
+top_k_features = 15  # Smaller for focused portfolios
+enable_interpretability = true
+
+# GNN Configuration for small portfolios
+[model.gnn]
+enabled = true
+cross_asset_enabled = true
+regime_detection_enabled = true
+
+[model.gnn.graph_attention]
+num_heads = 8
+hidden_dim = 256
+dropout_rate = 0.15
+use_edge_features = true
+multi_hop_attention = false  # Disabled for small portfolios
+temperature = 1.0
+
+[model.gnn.cross_asset]
+enabled = true
+assets = []  # Populated automatically from --symbol argument
+correlation_threshold = 0.25
+max_connections = 4
+dynamic_graph_updates = true
+graph_update_frequency = 10
+fusion_method = "AttentionFusion"
+asset_specific_weights = true
+
+[model.gnn.regime_detection]
+enabled = true
+lookback_window = 30
+volatility_threshold = 0.03
+trend_threshold = 0.015
+crisis_sensitivity = 0.8
+multi_timeframe = true
+timeframes = ["1h", "4h", "1d"]
+smoothing_factor = 0.8
+detect_transitions = true
+
+# Quantile Outputs
+[model.quantile_outputs]
+enabled = true
+quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
+loss_weighting = "moderate_weighted"
+uncertainty_calibration = true
+
+# TFT Auto-Optimization for small portfolios
+[model.tft_auto_optimizer]
+enabled = true
+
+[model.tft_auto_optimizer.variable_selection]
+auto_tune_threshold = true
+dynamic_top_k = true
+min_threshold = 0.1
+max_threshold = 0.3
+min_features = 8
+max_features = 20
+analysis_window = 50
+
+[model.tft_auto_optimizer.quantile_regression]
+auto_select_quantiles = true
+dynamic_loss_weighting = true
+min_quantiles = 3
+max_quantiles = 7
+selection_strategy = "VolatilityAdaptive"
+weighting_adaptation_rate = 0.01
+
+# Multi-target outputs
+[model.output_heads.price_levels]
+enabled = true
+bins = 10
+range_percent = 5.0
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+threshold = 0.01
+confidence_calibration = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+horizons = ["1h", "4h", "24h"]
+
+# Feature configuration
+[features]
+auto_include_all = true
+cross_asset_features = true
+
+[features.technical]
+enabled = true
+sma_periods = [5, 10, 20, 50]
+ema_periods = [12, 26]
+rsi_period = 14
+macd = true
+bollinger_bands = true
+stochastic = true
+atr_period = 14
+volume_sma_periods = [10, 20]
+cross_asset_correlation = true
+relative_strength_vs_btc = true
+relative_strength_eth_vs_btc = true
+
+[features.custom]
+enabled = true
+momentum_periods = [5, 10]
+volume_price_trend = true
+price_acceleration = true
+market_cap_momentum = true
+
+# Training configuration
+[training]
+[training.training_params]
+epochs = { type = "Auto", max_epochs = 100 }
+batch_size = { type = "Auto", min_size = 16, max_size = 64 }
+learning_rate = { type = "Auto", min_rate = 0.0001, max_rate = 0.005 }
+
+[training.early_stopping]
+enabled = true
+patience = 12
+min_delta = 0.001
+restore_best_weights = true
+
+[training.optimization]
+optimizer = "Adam"
+gradient_clipping = 1.0
+weight_decay = 0.0001
+
+[training.gnn_specific]
+graph_update_during_training = true
+regime_loss_weighting = 0.1
+cross_asset_loss_weighting = 0.1

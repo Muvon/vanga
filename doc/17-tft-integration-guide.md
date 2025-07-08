@@ -4,16 +4,6 @@
 
 VANGA's TFT integration enhances existing LSTM models with intelligent Variable Selection Networks and Quantile Regression capabilities, providing 25-30% accuracy improvements while maintaining full backward compatibility.
 
-## Table of Contents
-
-1. [Quick Start](#quick-start)
-2. [TFT Components](#tft-components)
-3. [Training with TFT](#training-with-tft)
-4. [Configuration Guide](#configuration-guide)
-5. [Auto-Optimization](#auto-optimization)
-6. [Performance Benchmarking](#performance-benchmarking)
-7. [Troubleshooting](#troubleshooting)
-
 ## Quick Start
 
 ### Basic TFT-Enhanced Training
@@ -152,32 +142,38 @@ quantile_regression.auto_select_quantiles = true
 training_integration.enable_during_training = true
 ```
 
-### Training Process Integration
+## Performance Benchmarking
 
-TFT components are seamlessly integrated into the training pipeline:
+### Baseline Comparison
 
-1. **Data Loading**: Standard VANGA data loading (no changes required)
-2. **Feature Engineering**: Enhanced with TFT Variable Selection
-3. **Model Training**: LSTM + TFT components trained jointly
-4. **Validation**: TFT-specific metrics tracked alongside standard metrics
-5. **Auto-Optimization**: Parameters adjusted based on validation performance
+TFT models are automatically compared against baseline LSTM:
 
-### Training Metrics
+```bash
+# Training automatically generates comparison
+vanga train --symbol BTCUSDT --config configs/tft_enhanced.toml
 
-TFT training provides additional metrics:
+# Explicit comparison
+vanga compare \
+    --model-a models/BTCUSDT_tft.model \
+    --model-b models/BTCUSDT_standard.model \
+    --test-data data/BTCUSDT_test.csv \
+    --metrics accuracy,sharpe,max_drawdown
+```
+
+### Performance Metrics
+
+TFT models provide enhanced metrics:
 
 ```
-Epoch 50/100:
-  Standard Metrics:
-    - Training Loss: 0.0234
-    - Validation Loss: 0.0267
-    - Accuracy: 0.847
-  
-  TFT Metrics:
-    - Variable Selection Score: 0.923  # Feature importance quality
-    - Quantile Coverage: 0.891         # Prediction interval accuracy
-    - Feature Importance Entropy: 2.34 # Feature diversity
-    - Uncertainty Calibration: 0.876   # Confidence accuracy
+Model Comparison Results:
+                    Standard LSTM    TFT Enhanced    Improvement
+Accuracy            84.2%           89.7%           +5.5%
+Sharpe Ratio        1.23            1.58            +28.5%
+Max Drawdown        -12.4%          -8.9%           +28.2%
+Prediction Interval
+Coverage            N/A             89.1%           New Feature
+Feature Importance  N/A             Available       New Feature
+Uncertainty Score   N/A             0.876           New Feature
 ```
 
 ## Configuration Guide
@@ -253,113 +249,6 @@ tft_early_stopping = true      # Early stopping based on TFT metrics
 baseline_comparison = true      # Compare with standard LSTM
 ```
 
-## Auto-Optimization
-
-### Automatic Parameter Tuning
-
-TFT Auto-Optimization intelligently adjusts parameters based on:
-
-1. **Data Characteristics**:
-   - Feature count and correlation structure
-   - Data quality and missing value ratio
-   - Volatility and noise levels
-
-2. **Training Performance**:
-   - Validation loss trends
-   - Feature importance stability
-   - Quantile coverage accuracy
-
-3. **Market Conditions**:
-   - Volatility regime detection
-   - Trend vs. ranging market identification
-   - Cross-asset correlation analysis
-
-### Optimization Strategies
-
-#### Crypto-Optimized Strategy
-```rust
-let config = TFTOptimizerFactory::crypto_optimized();
-// - Higher selection thresholds (0.1-0.4) for noise filtering
-// - Extreme-weighted quantiles for risk management
-// - Faster adaptation rates for volatile markets
-// - Focused feature sets (8-30 features)
-```
-
-#### Conservative Strategy
-```rust
-let config = TFTOptimizerFactory::conservative();
-// - Lower selection thresholds (0.05-0.2) for stable assets
-// - Symmetric quantiles for balanced predictions
-// - Slower adaptation for stability
-// - Larger feature sets (10-25 features)
-```
-
-### Manual Override
-
-Auto-optimization can be overridden for specific use cases:
-
-```toml
-[model.tft_auto_optimizer]
-enabled = false  # Disable auto-optimization
-
-[model.attention.variable_selection]
-selection_threshold = 0.2  # Manual threshold
-top_k_features = 15        # Manual feature count
-
-[model.quantile_outputs]
-quantiles = [0.1, 0.5, 0.9]  # Custom quantiles
-loss_weighting = "balanced"   # Manual weighting
-```
-
-## Performance Benchmarking
-
-### Baseline Comparison
-
-TFT models are automatically compared against baseline LSTM:
-
-```bash
-# Training automatically generates comparison
-vanga train --symbol BTCUSDT --config configs/tft_enhanced.toml
-
-# Explicit comparison
-vanga compare \
-    --model-a models/BTCUSDT_tft.model \
-    --model-b models/BTCUSDT_standard.model \
-    --test-data data/BTCUSDT_test.csv \
-    --metrics accuracy,sharpe,max_drawdown
-```
-
-### Performance Metrics
-
-TFT models provide enhanced metrics:
-
-```
-Model Comparison Results:
-                    Standard LSTM    TFT Enhanced    Improvement
-Accuracy            84.2%           89.7%           +5.5%
-Sharpe Ratio        1.23            1.58            +28.5%
-Max Drawdown        -12.4%          -8.9%           +28.2%
-Prediction Interval 
-Coverage            N/A             89.1%           New Feature
-Feature Importance  N/A             Available       New Feature
-Uncertainty Score   N/A             0.876           New Feature
-```
-
-### Feature Importance Analysis
-
-```bash
-# Generate feature importance report
-vanga analyze features \
-    --model models/BTCUSDT_tft.model \
-    --output reports/feature_importance.html
-
-# Export importance scores
-vanga export importance \
-    --model models/BTCUSDT_tft.model \
-    --format csv \
-    --output importance_scores.csv
-```
-
 ## Troubleshooting
 
 ### Common Issues
@@ -387,101 +276,6 @@ vanga export importance \
 - Increase `gradient_clipping` (1.0 → 0.5)
 - Enable `quantile_dropout = 0.2`
 - Use `conservative` auto-optimizer
-
-#### 4. Memory Issues
-**Symptoms**: OOM errors, slow training
-**Solutions**:
-- Reduce `top_k_features` (20 → 10)
-- Decrease `batch_size`
-- Use `sequence_length` optimization
-- Enable gradient checkpointing
-
-### Debug Mode
-
-Enable detailed TFT logging:
-
-```bash
-export RUST_LOG=vanga::model::tft=debug
-vanga train --symbol BTCUSDT --config configs/tft_enhanced.toml
-```
-
-### Performance Profiling
-
-```bash
-# Profile TFT components
-vanga profile \
-    --model models/BTCUSDT_tft.model \
-    --component variable_selection \
-    --iterations 100
-
-# Memory usage analysis
-vanga analyze memory \
-    --config configs/tft_enhanced.toml \
-    --data-size 10000
-```
-
-## Advanced Usage
-
-### Custom Feature Engineering
-
-```rust
-// Custom feature importance calculation
-impl FeatureImportanceCalculator for CustomCalculator {
-    fn calculate_importance(&self, features: &Tensor) -> Result<Vec<f64>> {
-        // Custom importance logic
-        Ok(importance_scores)
-    }
-}
-
-// Use in TFT model
-let variable_selection = VariableSelectionNetwork::with_custom_calculator(
-    input_dim,
-    config,
-    Box::new(CustomCalculator::new()),
-    vs,
-)?;
-```
-
-### Multi-Asset Training
-
-```toml
-# configs/tft_multi_asset.toml
-[model.cross_asset]
-enabled = true
-assets = ["BTCUSDT", "ETHUSDT", "ADAUSDT"]
-correlation_threshold = 0.3
-shared_features = ["market_cap", "volume_24h"]
-
-[model.attention.variable_selection]
-cross_asset_selection = true  # Select features across assets
-asset_specific_weights = true # Different weights per asset
-```
-
-### Real-Time Optimization
-
-```rust
-// Real-time parameter adjustment
-let mut optimizer = TFTAutoOptimizer::new(config);
-
-// During training loop
-for epoch in 0..max_epochs {
-    // Train model
-    let metrics = train_epoch(&model, &data)?;
-    
-    // Update optimizer
-    optimizer.update_training_metrics(metrics);
-    
-    // Check for parameter adjustments
-    if epoch % 10 == 0 {
-        let new_config = optimizer.optimize_variable_selection(
-            &current_config,
-            &feature_importance,
-            &data_characteristics,
-        )?;
-        model.update_config(new_config)?;
-    }
-}
-```
 
 ## Integration with Existing Workflows
 
