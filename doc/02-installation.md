@@ -296,10 +296,9 @@ vm_stat  # macOS
 
 After successful installation:
 
-1. **[Data Preparation](03-data-preparation.md)** - Format your cryptocurrency data
-2. **[Training](04-training.md)** - Train your first LSTM model
-3. **[Usage Examples](11-usage-examples.md)** - Comprehensive usage guide
-4. **[Technical Implementation](10-technical-implementation.md)** - Advanced technical details
+1. **[Training](04-training.md)** - Train your first LSTM model
+2. **[Usage Examples](11-usage-examples.md)** - Comprehensive usage guide
+3. **[Technical Implementation](10-technical-implementation.md)** - Advanced technical details
 
 ## Status
 

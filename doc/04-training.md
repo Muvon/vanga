@@ -67,8 +67,8 @@ initial_lr = 0.001
 
 ### **Performance-Optimized Training**
 ```bash
-# 2-layer LSTM for faster training
-vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/fast_training.toml
+# Fast training configuration
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/minimal_custom.toml
 ```
 
 ### **Advanced Architecture Training**
@@ -76,8 +76,7 @@ vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/fast_traini
 # StackedLSTM with 4 layers for complex patterns
 vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/stacked_lstm.toml
 ```
-### ✅ Adaptive Learning Rate
-## Multi-Layer Architecture Configuration
+## Training Configuration
 
 ### **Production Quality Multi-Layer (RECOMMENDED)**
 ```toml
@@ -328,7 +327,7 @@ pub struct ModelConfig {
 ./target/release/vanga train --symbol BTCUSDT --data data/btc_data.csv --features-config config/custom_features.toml
 
 # Batch training for multiple symbols
-./target/release/vanga train --batch --symbols BTCUSDT,ETHUSDT,ADAUSDT --data-dir data/
+./target/release/vanga train --batch --symbol BTCUSDT,ETHUSDT,ADAUSDT --data-dir data/
 ```
 
 ## Data Processing During Training

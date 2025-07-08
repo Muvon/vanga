@@ -17,11 +17,23 @@ VANGA is a production-ready LSTM-based cryptocurrency forecasting system featuri
 #### **Supported Architectures**
 ```rust
 pub enum LSTMArchitecture {
-    MultiLSTM { layers: u32 },           // Standard multi-layer LSTM
-    StackedLSTM { layers: u32 },         // Stacked LSTM layers
-    BidirectionalLSTM { layers: u32 },   // Bidirectional processing
-    CNNLSTM { cnn_layers: u32, lstm_layers: u32 },  // CNN + LSTM hybrid
-    TransformerLSTM { attention_heads: u32, lstm_layers: u32 }, // Transformer + LSTM
+    /// Multi-layer LSTM with shared representation
+    MultiLSTM { layers: u32 },
+
+    /// Stacked LSTM layers
+    StackedLSTM { layers: u32 },
+
+    /// Bidirectional LSTM
+    BidirectionalLSTM { layers: u32 },
+
+    /// LSTM with CNN feature extraction
+    CNNLSTM { cnn_layers: u32, lstm_layers: u32 },
+
+    /// Transformer-LSTM hybrid
+    TransformerLSTM {
+        transformer_layers: u32,
+        lstm_layers: u32,
+    },
 }
 ```
 
@@ -199,7 +211,7 @@ lstm_layers = 2
 
 # TransformerLSTM configuration
 [model.architecture_config.TransformerLSTM]
-attention_heads = 8
+transformer_layers = 4
 lstm_layers = 2
 ```
 
@@ -208,34 +220,27 @@ lstm_layers = 2
 [features.technical_indicators]
 enabled = true
 
-# Trend indicators
-[features.technical_indicators.moving_averages]
+# Moving averages
 sma_periods = [5, 10, 20, 50, 200]
 ema_periods = [5, 10, 20, 50, 200]
 
-[features.technical_indicators.trend.macd]
-enabled = true
-fast_period = 12
-slow_period = 26
-signal_period = 9
+# MACD configuration
+macd_fast = 12
+macd_slow = 26
+macd_signal = 9
 
-# Momentum indicators
-[features.technical_indicators.momentum]
+# RSI configuration
 rsi_periods = [14, 21]
-stochastic = true
-williams_r = true
-cci_periods = [14, 20]
 
 # Volume indicators
-[features.technical_indicators.volume]
-obv = true
+obv_enabled = true
 volume_sma_periods = [10, 20]
 mfi_periods = [14]
 
 # Volatility indicators
-[features.technical_indicators.volatility]
 atr_periods = [14, 21]
-bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+bollinger_period = 20
+bollinger_std_dev = 2.0
 ```
 
 ### **Training Configuration**

@@ -100,7 +100,7 @@ cargo build --release
 ./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
 
 # Make predictions
-./target/release/vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
+./target/release/vanga predict --symbol BTCUSDT --input data/btc_recent.csv
 
 # List models
 ./target/release/vanga models list

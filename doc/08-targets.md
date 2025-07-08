@@ -46,7 +46,7 @@ impl MultiTargetLSTMModel {
 // Multi-target container
 pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,    // Horizon -> targets
-    pub direction: HashMap<String, Vec<i32>>,       // Horizon -> targets
+    pub directions: HashMap<String, Vec<i32>>,      // Horizon -> targets
     pub volatility: HashMap<String, Vec<i32>>,      // Horizon -> targets
 }
 

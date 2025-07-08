@@ -294,7 +294,7 @@ fn select_config(symbols: &[String], config_arg: Option<&str>) -> String {
     if let Some(config) = config_arg {
         return config.to_string();
     }
-    
+
     match symbols.len() {
         1 => "configs/tft_enhanced.toml".to_string(),
         2..=4 => "configs/tft_gnn_small_portfolio.toml".to_string(),
@@ -410,7 +410,7 @@ Output: {
    [model.gnn.graph_attention]
    hidden_dim = 128  # Reduce from 256
    num_heads = 8     # Reduce from 16
-   
+
    [training.training_params]
    batch_size = { type = "Fixed", value = 16 }  # Smaller batches
    ```

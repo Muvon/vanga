@@ -17,16 +17,13 @@ vanga train --symbol BTCUSDT --data data/BTCUSDT_1h.csv --config configs/tft_enh
 ### Multi-Symbol Training
 ```bash
 # Small portfolio (2-4 assets)
-vanga train --symbol BTCUSDT,ETHUSDT --data-dir data/multi_asset/ --output models/small_portfolio.model
+vanga train --symbol BTCUSDT,ETHUSDT --data-dir data/multi_asset/
 
 # Medium portfolio (5-8 assets)
-vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT,DOTUSDT,LINKUSDT --data-dir data/multi_asset/ --output models/medium_portfolio.model
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT,DOTUSDT,LINKUSDT --data-dir data/multi_asset/
 
 # Large portfolio (9+ assets)
-vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT,DOTUSDT,LINKUSDT,UNIUSDT,AAVEUSDT,COMPUSDT,SOLUSDT --data-dir data/multi_asset/ --output models/large_portfolio.model
-
-# With auto-optimization for portfolios
-vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data-dir data/multi_asset/ --auto-optimize --strategy portfolio_optimized --output models/optimized_portfolio.model
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT,DOTUSDT,LINKUSDT,UNIUSDT,AAVEUSDT,COMPUSDT,SOLUSDT --data-dir data/multi_asset/
 ```
 
 ### Single Symbol Prediction
@@ -44,10 +41,10 @@ vanga predict --symbol BTCUSDT --input data/BTCUSDT_recent.csv --model models/BT
 ### Multi-Symbol Prediction
 ```bash
 # Portfolio prediction
-vanga predict --symbol BTCUSDT,ETHUSDT,ADAUSDT --input-dir data/recent/ --model models/portfolio.model --output predictions/portfolio_pred.json
+vanga predict --symbol BTCUSDT,ETHUSDT,ADAUSDT --input-dir data/recent/ --output predictions/
 
-# With regime detection
-vanga predict --symbol BTCUSDT,ETHUSDT,ADAUSDT --input-dir data/recent/ --model models/portfolio.model --include-regime --output predictions/portfolio_with_regime.json
+# With batch mode
+vanga predict --symbol BTCUSDT,ETHUSDT,ADAUSDT --batch --input-dir data/recent/ --output predictions/
 
 # With correlations
 vanga predict --symbol BTCUSDT,ETHUSDT,ADAUSDT --input-dir data/recent/ --model models/portfolio.model --include-correlations --output predictions/portfolio_with_corr.json

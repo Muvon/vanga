@@ -5,15 +5,14 @@
 ### **🚀 Getting Started**
 1. **[Introduction](01-introduction.md)** - System overview, features, and concepts
 2. **[Installation](02-installation.md)** - Setup, dependencies, and build instructions
-3. **[Data Preparation](03-data-preparation.md)** - Data format, preprocessing, and validation
-4. **[Training](04-training.md)** - Model training, configuration, and optimization
-5. **[Predictions](05-predictions.md)** - Making predictions, output formats, and evaluation
+3. **[Training](04-training.md)** - Model training, configuration, and optimization
+4. **[Auto-Optimization](05-auto-optimization.md)** - Intelligent training and optimization
 
 ### **🔧 Technical Reference**
-6. **[Technical Indicators](06-technical-indicators.md)** - 50+ indicators implementation and usage
-7. **[System Architecture](07-architecture.md)** - Complete system architecture and design
-8. **[Multi-Target System](08-targets.md)** - Prediction targets and configuration
-9. **[Evaluation](09-evaluation.md)** - Model performance evaluation and metrics
+5. **[System Architecture](07-architecture.md)** - Complete system architecture and design
+6. **[Multi-Target System](08-targets.md)** - Prediction targets and configuration
+7. **[Troubleshooting](14-troubleshooting.md)** - Common issues and solutions
+8. **[Attention Guide](15-attention-guide.md)** - Advanced attention mechanisms
 
 ### **✅ Final Implementation**
 10. **[Technical Implementation Guide](10-technical-implementation.md)** - Complete technical specifications

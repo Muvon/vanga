@@ -37,8 +37,6 @@ pub enum VangaError {
     ConfigError(String),
     DataError(String),
     DataValidation(DataValidationError),
-candle-core = "0.8.0"
-candle-nn = "0.8.0"
     PredictionError(String),
     FeatureError(String),
     IoError(String),

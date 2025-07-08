@@ -3,7 +3,7 @@ name = "vanga"
 version = "0.1.0"
 edition = "2021"
 description = "LSTM-based cryptocurrency forecasting system with automatic feature engineering"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 # LSTM and ML - Migrated to Candle (latest stable)

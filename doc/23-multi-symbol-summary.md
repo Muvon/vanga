@@ -31,7 +31,7 @@ Standard    Enhanced    Intelligent  Multi-Asset
 
 **Single Interface, Multiple Capabilities:**
 - **1 Symbol**: TFT Variable Selection + Quantile Regression
-- **2-4 Symbols**: + Small Portfolio GNN  
+- **2-4 Symbols**: + Small Portfolio GNN
 - **5-8 Symbols**: + Medium Portfolio GNN
 - **9+ Symbols**: + Large Portfolio GNN with advanced features
 
@@ -74,7 +74,7 @@ data/recent/
 **3. Configuration Templates**
 - ✅ `configs/tft_enhanced.toml` - Single symbol TFT
 - ✅ `configs/tft_gnn_small_portfolio.toml` - 2-4 assets
-- ✅ `configs/tft_gnn_multi_asset.toml` - 5-8 assets  
+- ✅ `configs/tft_gnn_multi_asset.toml` - 5-8 assets
 - ✅ `configs/tft_gnn_large_portfolio.toml` - 9+ assets
 
 **4. Comprehensive Documentation**
@@ -164,20 +164,20 @@ vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data-dir data/multi_asset/ --auto
 for epoch in range(max_epochs):
     # Standard LSTM training for each symbol
     train_loss = model.train_step(multi_symbol_batch)
-    
+
     # TFT enhancements active
     if epoch % 10 == 0:
         # Variable selection optimization per symbol
         for symbol in symbols:
             importance_scores = model.get_feature_importance(symbol)
             optimizer.update_variable_selection(symbol, importance_scores)
-    
+
     # GNN cross-asset learning
     if epoch % 5 == 0:
         # Update market graph with current correlations
         correlation_matrix = calculate_correlations(multi_symbol_data)
         model.update_market_graph(correlation_matrix)
-        
+
         # Update regime detection
         regime_features = extract_regime_features(market_data)
         model.update_regime_detector(regime_features)

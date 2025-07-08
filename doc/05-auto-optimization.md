@@ -129,9 +129,9 @@ vanga train --symbol BTCUSDT --data data.csv
 
 ### **Performance-Optimized Training**
 ```bash
-# Fast 2-layer training for development
-vanga train --symbol BTCUSDT --data data.csv --config configs/fast_training.toml
-# Result: 2-layer MultiLSTM, ~5 minute training
+# Fast training for development
+vanga train --symbol BTCUSDT --data data.csv --config configs/minimal_custom.toml
+# Result: Faster training with reduced complexity
 ```
 
 ### **Quality-Optimized Training**

@@ -309,8 +309,8 @@ NEVER DO THIS:
 - Use synchronous operations for I/O-heavy tasks
 - Assume data format without validation
 - Create models without proper target generation
-- Renaming var to _var to mock THE REAL issue, instead investigaed WHY it appears and fix properly 
-- Adding dead_code to unused functions if we really do not need it, remove 
+- Renaming var to _var to mock THE REAL issue, instead investigaed WHY it appears and fix properly
+- Adding dead_code to unused functions if we really do not need it, remove
 
 ⚡ MANDATORY PRE-DEVELOPMENT CHECK:
 □ Using auto-optimization instead of manual tuning?

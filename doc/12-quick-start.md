@@ -64,14 +64,13 @@ initial_lr = 0.001
 ```toml
 # configs/fast_training.toml
 [model]
-architecture = "MultiLSTM"
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Fixed = 30 }
+hidden_units = { Fixed = 64 }
 
-[model.architecture_config.MultiLSTM]
-layers = 2
-
-[model.lstm]
-hidden_size = 64
-sequence_length = 30
+[training_params]
+epochs = { Fixed = 100 }
+learning_rate = { Fixed = 0.001 }
 ```
 
 #### **Advanced Quality (4-Layer StackedLSTM)**

@@ -6,7 +6,7 @@
 
 **1. TFT (Temporal Fusion Transformer) Integration**
 - ✅ Variable Selection Network with intelligent feature filtering
-- ✅ Quantile Regression for 90% prediction intervals  
+- ✅ Quantile Regression for 90% prediction intervals
 - ✅ Auto-optimization with crypto-specific parameter tuning
 - ✅ Training integration with real-time parameter adaptation
 
@@ -113,20 +113,20 @@ vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data-dir data/multi_asset/ --auto
 for epoch in range(max_epochs):
     # Standard LSTM training
     train_loss = model.train_step(batch)
-    
+
     # TFT Variable Selection (active every epoch)
     feature_importance = model.get_feature_importance()
     selected_features = variable_selector.select(features, importance)
-    
+
     # Quantile Regression (active every epoch)
     quantile_predictions = model.predict_quantiles(input)
     quantile_loss = calculate_quantile_loss(quantile_predictions, targets)
-    
+
     # Auto-optimization (every 10 epochs)
     if epoch % 10 == 0:
         optimizer.update_thresholds(validation_metrics)
         optimizer.update_quantile_levels(coverage_metrics)
-    
+
     # GNN Cross-asset learning (every 5 epochs for multi-symbol)
     if multi_symbol and epoch % 5 == 0:
         correlation_matrix = calculate_correlations(multi_data)

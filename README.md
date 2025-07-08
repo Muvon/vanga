@@ -155,6 +155,9 @@ vanga models compare --symbols BTCUSDT,ETHUSDT --metric sharpe_ratio
 
 # Export model
 vanga models export --symbol BTCUSDT --format msgpack --output ./models/
+
+# Create model ensemble
+vanga models ensemble --symbols BTCUSDT,ETHUSDT --output ./models/ensemble/
 ```
 
 ## 📊 Output Formats
@@ -250,20 +253,24 @@ vanga/
 │   ├── features/      # Feature engineering
 │   ├── model/         # LSTM model implementation
 │   ├── targets/       # Prediction targets
-│   └── utils/         # Utilities & error handling
+│   ├── utils/         # Utilities & error handling
+│   └── main.rs        # CLI entry point
 ├── models/            # Trained model storage
 ├── data/              # Input data directory
-└── configs/           # Configuration files
+├── configs/           # Configuration files
+└── doc/               # Documentation
 ```
 
 ## 🔧 Dependencies
 
-- **rust-lstm**: Core LSTM implementation
+- **candle-core/candle-nn**: Core LSTM implementation
 - **polars**: High-performance data processing
 - **ndarray**: Numerical computing
 - **ta**: Technical analysis indicators
 - **clap**: Command-line interface
 - **tokio**: Async runtime
+- **linfa**: Machine learning toolkit
+- **chrono**: Date and time handling
 
 ## 📈 Key Features
 
@@ -299,3 +306,4 @@ This project is licensed under the **Apache License 2.0** - see the [LICENSE](LI
 ---
 
 **Built with ❤️ by the Muvon team in Hong Kong**
+Kong**
