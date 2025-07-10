@@ -1,0 +1,87 @@
+# VANGA Backtesting Configuration Template
+# Comprehensive backtesting settings for cryptocurrency forecasting models
+
+[backtest]
+# Default train/test split ratio
+default_train_split = 0.8
+
+# Minimum samples required for backtesting
+min_samples = 1000
+
+# Output configuration
+output_dir = "backtest_results"
+save_predictions = true
+save_detailed_metrics = true
+
+# Report formats to generate
+report_formats = ["console", "json", "csv"]
+
+[evaluation_metrics]
+# Regression metrics
+calculate_rmse = true
+calculate_mae = true
+calculate_r_squared = true
+calculate_mape = true
+
+# Trading metrics
+calculate_directional_accuracy = true
+calculate_sharpe_ratio = false  # Requires return data
+calculate_max_drawdown = false  # Requires return data
+
+# Classification metrics (for direction prediction)
+calculate_classification_metrics = true
+
+[time_series]
+# Ensure chronological splitting (no data leakage)
+chronological_split = true
+
+# Minimum test period (as fraction of total data)
+min_test_ratio = 0.1
+
+# Maximum test period (as fraction of total data)
+max_test_ratio = 0.4
+
+[batch_processing]
+# Parallel processing for multiple symbols
+parallel_execution = true
+
+# Maximum concurrent backtests
+max_concurrent = 4
+
+# Continue on individual failures
+continue_on_error = true
+
+[model_validation]
+# Validate model exists before backtesting
+check_model_exists = true
+
+# Validate data quality before splitting
+validate_data_quality = true
+
+# Required columns for backtesting
+required_columns = ["timestamp", "open", "high", "low", "close", "volume"]
+
+[performance]
+# Memory optimization
+use_streaming = true
+chunk_size = 10000
+
+# Cleanup temporary files
+cleanup_temp_files = true
+
+# Progress reporting
+show_progress = true
+
+# USAGE EXAMPLES:
+#
+# 1. BASIC BACKTESTING:
+#    vanga models evaluate --symbol BTCUSDT --test-data data.csv --backtest
+#
+# 2. CUSTOM SPLIT RATIO:
+#    vanga models evaluate --symbol BTCUSDT --test-data data.csv --backtest --train-split 0.7
+#
+# 3. BATCH BACKTESTING:
+#    vanga models evaluate --symbols BTCUSDT,ETHUSDT --test-data data/ --backtest --batch
+#
+# 4. WITH CUSTOM CONFIG:
+#    vanga models evaluate --symbol BTCUSDT --test-data data.csv --backtest --config configs/backtest.toml

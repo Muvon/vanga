@@ -253,6 +253,40 @@ impl DataLoader {
             end_time,
         }
     }
+
+    /// Split data chronologically for backtesting (no data leakage)
+    pub fn split_chronological(
+        &self,
+        df: &DataFrame,
+        train_ratio: f64,
+    ) -> Result<(DataFrame, DataFrame)> {
+        if !(0.0..1.0).contains(&train_ratio) {
+            return Err(VangaError::DataError(
+                "train_ratio must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+
+        let total_rows = df.height();
+        let train_rows = (total_rows as f64 * train_ratio) as usize;
+
+        if train_rows == 0 || train_rows >= total_rows {
+            return Err(VangaError::DataError(
+                "Invalid train_ratio or insufficient data for splitting".to_string(),
+            ));
+        }
+
+        // Split chronologically to prevent data leakage
+        let train_df = df.slice(0, train_rows);
+        let test_df = df.slice(train_rows as i64, total_rows - train_rows);
+
+        log::info!(
+            "📊 Chronological split: {} train samples, {} test samples",
+            train_df.height(),
+            test_df.height()
+        );
+
+        Ok((train_df, test_df))
+    }
 }
 
 /// Information about loaded data

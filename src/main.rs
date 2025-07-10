@@ -163,15 +163,31 @@ enum ModelCommands {
     /// List available models
     List,
 
-    /// Evaluate model performance
+    /// Evaluate model performance with optional backtesting
     Evaluate {
-        /// Trading symbol
+        /// Trading symbol (required for single symbol evaluation)
         #[arg(short, long)]
-        symbol: String,
+        symbol: Option<String>,
 
         /// Test data path
         #[arg(long)]
         test_data: PathBuf,
+
+        /// Enable backtesting mode (train/test split)
+        #[arg(long)]
+        backtest: bool,
+
+        /// Training data split ratio (0.0-1.0, default: 0.8)
+        #[arg(long, default_value = "0.8")]
+        train_split: f64,
+
+        /// Batch evaluation for multiple symbols
+        #[arg(long)]
+        batch: bool,
+
+        /// Symbols for batch evaluation (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        symbols: Option<Vec<String>>,
     },
 
     /// Compare multiple models
@@ -591,14 +607,70 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
             }
         }
 
-        ModelCommands::Evaluate { symbol, test_data } => {
-            log::info!(
-                "Evaluating model for symbol: {} with test data: {:?}",
-                symbol,
-                test_data
-            );
-            // Model evaluation implementation
-            log::warn!("Model evaluation not yet implemented - feature planned for future release");
+        ModelCommands::Evaluate {
+            symbol,
+            test_data,
+            backtest,
+            train_split,
+            batch,
+            symbols,
+        } => {
+            if backtest {
+                if batch && symbols.is_some() {
+                    // Batch backtesting for multiple symbols
+                    let symbols = symbols.unwrap();
+                    log::info!("📊 Running batch backtesting for {} symbols", symbols.len());
+
+                    match vanga::api::run_batch_backtest(&symbols, &test_data, train_split).await {
+                        Ok(results) => {
+                            vanga::utils::backtest_reporter::print_backtest_results(&results);
+
+                            // Save results to file
+                            let output_dir = std::path::Path::new("backtest_results");
+                            if let Err(e) = vanga::utils::backtest_reporter::save_backtest_report(
+                                &results, output_dir, "json",
+                            ) {
+                                log::warn!("Failed to save backtest report: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("❌ Batch backtesting failed: {}", e);
+                            return Err(e);
+                        }
+                    }
+                } else if symbol.is_some() {
+                    // Single symbol backtesting
+                    let symbol = symbol.unwrap();
+                    match vanga::api::run_backtest(&symbol, &test_data, train_split).await {
+                        Ok(result) => {
+                            vanga::utils::backtest_reporter::print_backtest_results(&[result]);
+                        }
+                        Err(e) => {
+                            log::error!("❌ Backtesting failed for {}: {}", symbol, e);
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    log::error!("❌ Symbol is required for single symbol backtesting");
+                    return Err(vanga::utils::error::VangaError::DataError(
+                        "Symbol is required when not using batch mode".to_string(),
+                    ));
+                }
+            } else if symbol.is_some() {
+                // Traditional evaluation (existing placeholder)
+                let symbol = symbol.unwrap();
+                log::info!(
+                    "Evaluating model for symbol: {} with test data: {:?}",
+                    symbol,
+                    test_data
+                );
+                log::warn!("Traditional model evaluation not yet implemented - use --backtest flag for comprehensive evaluation");
+            } else {
+                log::error!("❌ Symbol is required for evaluation");
+                return Err(vanga::utils::error::VangaError::DataError(
+                    "Symbol is required for evaluation".to_string(),
+                ));
+            }
         }
 
         ModelCommands::Compare { symbols, metric } => {

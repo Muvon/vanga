@@ -172,7 +172,7 @@ Epoch 50/100:
     - Training Loss: 0.0234
     - Validation Loss: 0.0267
     - Accuracy: 0.847
-  
+
   TFT Metrics:
     - Variable Selection Score: 0.923  # Feature importance quality
     - Quantile Coverage: 0.891         # Prediction interval accuracy
@@ -339,7 +339,7 @@ Model Comparison Results:
 Accuracy            84.2%           89.7%           +5.5%
 Sharpe Ratio        1.23            1.58            +28.5%
 Max Drawdown        -12.4%          -8.9%           +28.2%
-Prediction Interval 
+Prediction Interval
 Coverage            N/A             89.1%           New Feature
 Feature Importance  N/A             Available       New Feature
 Uncertainty Score   N/A             0.876           New Feature
@@ -467,10 +467,10 @@ let mut optimizer = TFTAutoOptimizer::new(config);
 for epoch in 0..max_epochs {
     // Train model
     let metrics = train_epoch(&model, &data)?;
-    
+
     // Update optimizer
     optimizer.update_training_metrics(metrics);
-    
+
     // Check for parameter adjustments
     if epoch % 10 == 0 {
         let new_config = optimizer.optimize_variable_selection(

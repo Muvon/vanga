@@ -1,3 +1,4 @@
-target/
-examples/*.csv
-models/
+/target
+/examples/*.csv
+/models
+/backtest_results

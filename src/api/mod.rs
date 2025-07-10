@@ -1,7 +1,9 @@
+pub mod backtester;
 pub mod multi_target_predictor;
 pub mod predictor;
 pub mod trainer;
 
+pub use backtester::{run_backtest, run_batch_backtest, BacktestResults, Backtester};
 pub use multi_target_predictor::{
     predict_multi_target, MultiTargetPredictions, MultiTargetPredictor,
 };
