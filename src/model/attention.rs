@@ -204,10 +204,10 @@ impl MultiHeadAttention {
                 self.config.num_heads,
                 self.config.head_dim,
             ))?
-            .transpose(1, 2)
+            .transpose(1, 2)?
+            .contiguous()
             .map_err(|e| VangaError::ModelError(format!("Attention reshape failed: {}", e)))
     }
-
     /// Reshape tensor back from multi-head attention
     fn reshape_from_attention(
         &self,
@@ -235,10 +235,10 @@ impl MultiHeadAttention {
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
         let scale = (self.config.head_dim as f64).sqrt();
-        let scaled_queries = queries.div(&Tensor::new(scale as f32, &self.device)?)?;
+        let scaled_queries = queries.broadcast_div(&Tensor::new(scale as f32, &self.device)?)?;
 
         // Compute attention scores: Q * K^T
-        let keys_transposed = keys.transpose(2, 3)?;
+        let keys_transposed = keys.transpose(2, 3)?.contiguous()?;
         let mut attention_scores = scaled_queries.matmul(&keys_transposed)?;
 
         // Add relative position embeddings for better temporal modeling
@@ -283,8 +283,13 @@ impl MultiHeadAttention {
 
         // Add position bias to attention scores
         // This is a simplified implementation - in practice, you'd want more sophisticated position encoding
+        let relative_bias = relevant_embeddings
+            .matmul(&relevant_embeddings.transpose(0, 1)?.contiguous()?)?
+            .unsqueeze(0)?
+            .unsqueeze(0)?;
+
         attention_scores
-            .broadcast_add(&relevant_embeddings.unsqueeze(0)?.unsqueeze(0)?)
+            .broadcast_add(&relative_bias)
             .map_err(|e| VangaError::ModelError(format!("Position bias addition failed: {}", e)))
     }
 
