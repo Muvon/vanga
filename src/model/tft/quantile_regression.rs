@@ -80,9 +80,11 @@ impl QuantileRegressionHead {
         }
 
         // Stack quantile predictions: [batch_size, num_quantiles]
-        Tensor::cat(&quantile_outputs, 1).map_err(|e| {
-            VangaError::ModelError(format!("Failed to concatenate quantile outputs: {}", e))
-        })
+        Tensor::cat(&quantile_outputs, 1)?
+            .contiguous()
+            .map_err(|e| {
+                VangaError::ModelError(format!("Failed to concatenate quantile outputs: {}", e))
+            })
     }
 
     /// Get quantile levels

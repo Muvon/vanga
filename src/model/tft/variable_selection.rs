@@ -83,7 +83,11 @@ impl VariableSelectionNetwork {
 
             // Combine importance scores if both exist
             importance_scores = match importance_scores {
-                Some(static_imp) => Some(static_imp.broadcast_mul(&temporal_importance)?),
+                Some(static_imp) => Some(
+                    static_imp
+                        .broadcast_mul(&temporal_importance)?
+                        .contiguous()?,
+                ),
                 None => Some(temporal_importance),
             };
         }

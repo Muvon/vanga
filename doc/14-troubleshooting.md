@@ -6,6 +6,40 @@ This document provides solutions to common issues encountered during VANGA multi
 
 ---
 
+## ✅ **Tensor Operations and Memory Layout Issues (RESOLVED)**
+
+### **Tensor Contiguity Problems - FIXED**
+
+**Issue**: "view size is not compatible" errors during tensor reshaping operations.
+
+**Root Cause**: Non-contiguous memory layout after operations like `transpose()`, `narrow()`, `broadcast_*()`, and `Tensor::cat()`.
+
+**Solution Applied**: Added `.contiguous()` calls after operations that break memory contiguity:
+
+```rust
+// ✅ Fixed Pattern
+tensor.transpose(1, 2)?.contiguous()?.reshape((batch, seq, dim))
+tensor.narrow(1, start, len)?.contiguous()?.squeeze(1)?.contiguous()
+Tensor::cat(&tensors, dim)?.contiguous()
+```
+
+**Files Fixed**:
+- `src/model/attention.rs` - Attention reshape operations
+- `src/model/attention_optimizer.rs` - Tensor concatenation and windowing
+- `src/model/lstm_simple.rs` - LSTM forward pass operations
+- `src/model/attention_loss.rs` - Temporal consistency operations
+- `src/model/tft/variable_selection.rs` - Broadcast operations
+- `src/model/tft/quantile_regression.rs` - Quantile concatenation
+
+**Prevention**: Always call `.contiguous()` after:
+- `transpose()` operations before `reshape()`
+- `narrow()` operations before `squeeze()`
+- `broadcast_*()` operations
+- `Tensor::cat()` operations
+- Before `matmul()` with potentially non-contiguous tensors
+
+---
+
 ## 🚨 **Multi-Layer LSTM Implementation (COMPLETED)**
 
 ### **Multi-Layer Architecture Implementation (RESOLVED)**

@@ -454,11 +454,10 @@ impl LSTMModel {
 
             // Take the last timestep hidden state for sequence-to-one prediction
             lstm_output
-                .narrow(1, seq_len - 1, 1)
-                .map_err(|e| {
-                    VangaError::ModelError(format!("Failed to extract last timestep: {}", e))
-                })?
-                .squeeze(1)
+                .narrow(1, seq_len - 1, 1)?
+                .contiguous()?
+                .squeeze(1)?
+                .contiguous()
                 .map_err(|e| {
                     VangaError::ModelError(format!("Failed to squeeze last timestep: {}", e))
                 })?

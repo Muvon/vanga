@@ -323,8 +323,8 @@ impl OptimizedAttention {
             ));
         }
 
-        let combined_output = Tensor::cat(&outputs, 1)?;
-        let combined_weights = Tensor::cat(&all_weights, 1)?;
+        let combined_output = Tensor::cat(&outputs, 1)?.contiguous()?;
+        let combined_weights = Tensor::cat(&all_weights, 1)?.contiguous()?;
 
         // Resize to original sequence length if needed
         let final_output = if combined_output.dim(1)? != seq_len {
@@ -559,11 +559,11 @@ impl SparseAttention {
             outputs.push(window_input);
         }
 
-        let combined_output = Tensor::cat(&outputs, 1)?;
+        let combined_output = Tensor::cat(&outputs, 1)?.contiguous()?;
 
         // Resize to original length if needed
         let final_output = if combined_output.dim(1)? > seq_len {
-            combined_output.narrow(1, 0, seq_len)?
+            combined_output.narrow(1, 0, seq_len)?.contiguous()?
         } else {
             combined_output
         };

@@ -210,8 +210,8 @@ impl AttentionWeightedLoss {
         }
 
         let seq_len = pred_shape.dims()[1];
-        let current_preds = predictions.narrow(1, 1, seq_len - 1)?;
-        let previous_preds = predictions.narrow(1, 0, seq_len - 1)?;
+        let current_preds = predictions.narrow(1, 1, seq_len - 1)?.contiguous()?;
+        let previous_preds = predictions.narrow(1, 0, seq_len - 1)?.contiguous()?;
 
         // Calculate temporal difference penalty
         let temporal_diff = current_preds.sub(&previous_preds)?;

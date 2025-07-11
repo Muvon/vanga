@@ -235,7 +235,9 @@ impl MultiHeadAttention {
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
         let scale = (self.config.head_dim as f64).sqrt();
-        let scaled_queries = queries.broadcast_div(&Tensor::new(scale as f32, &self.device)?)?;
+        let scaled_queries = queries
+            .broadcast_div(&Tensor::new(scale as f32, &self.device)?)?
+            .contiguous()?;
 
         // Compute attention scores: Q * K^T
         let keys_transposed = keys.transpose(2, 3)?.contiguous()?;
@@ -307,7 +309,8 @@ impl MultiHeadAttention {
         let mask = mask.unsqueeze(0)?.unsqueeze(0)?; // Add batch and head dimensions
 
         attention_scores
-            .broadcast_add(&mask)
+            .broadcast_add(&mask)?
+            .contiguous()
             .map_err(|e| VangaError::ModelError(format!("Causal mask application failed: {}", e)))
     }
 
