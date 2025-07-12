@@ -78,7 +78,6 @@ uncertainty_calibration = true
 # Data preprocessing configuration
 normalization = "Robust"
 sequence_overlap = 0.8
-missing_data_strategy = "Interpolate"
 
 [data.outlier_handling]
 enabled = true

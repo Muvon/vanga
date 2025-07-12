@@ -304,7 +304,12 @@ impl SequenceGenerator {
 
         for col_idx in 0..feature_count {
             let column = feature_data.column(col_idx);
-            let mut sorted_values = column.to_vec();
+            // Filter out NaN values before sorting and statistics
+            let mut sorted_values: Vec<f64> = column
+                .to_vec()
+                .into_iter()
+                .filter(|x| x.is_finite())
+                .collect();
             sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
             let mean = column.mean().unwrap_or(0.0);
@@ -313,14 +318,29 @@ impl SequenceGenerator {
             let max_val = sorted_values.last().copied().unwrap_or(0.0);
 
             let len = sorted_values.len();
-            let median = if len % 2 == 0 {
-                (sorted_values[len / 2 - 1] + sorted_values[len / 2]) / 2.0
+            let (median, q25_val, q75_val) = if len == 0 {
+                // Handle case where all values were NaN
+                (0.0, 0.0, 0.0)
             } else {
-                sorted_values[len / 2]
-            };
+                let median = if len % 2 == 0 && len > 1 {
+                    (sorted_values[len / 2 - 1] + sorted_values[len / 2]) / 2.0
+                } else {
+                    sorted_values[len / 2]
+                };
 
-            let q25_val = sorted_values[len / 4];
-            let q75_val = sorted_values[3 * len / 4];
+                let q25_val = if len > 4 {
+                    sorted_values[len / 4]
+                } else {
+                    sorted_values[0]
+                };
+                let q75_val = if len > 4 {
+                    sorted_values[3 * len / 4]
+                } else {
+                    sorted_values[len - 1]
+                };
+
+                (median, q25_val, q75_val)
+            };
 
             means.push(mean);
             stds.push(std);

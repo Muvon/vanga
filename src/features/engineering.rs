@@ -15,28 +15,117 @@ pub async fn apply_feature_engineering(
     let high_prices = crate::features::technical::extract_numeric_column(&df, "high")?;
     let low_prices = crate::features::technical::extract_numeric_column(&df, "low")?;
 
-    // Generate interaction features
-    let price_volume_ratio: Vec<f64> = close_prices
-        .iter()
-        .zip(volume.iter())
-        .map(|(p, v)| if *v > 0.0 { p / v } else { 0.0 })
-        .collect();
+    // Generate interaction features if enabled
+    if config.interaction_features.enabled {
+        let price_volume_ratio: Vec<f64> = close_prices
+            .iter()
+            .zip(volume.iter())
+            .map(|(p, v)| if *v > 0.0 { p / v } else { 0.0 })
+            .collect();
 
-    // Generate polynomial features (price squared, cubed)
-    let price_squared: Vec<f64> = close_prices.iter().map(|p| p.powi(2)).collect();
-    let price_log: Vec<f64> = close_prices
-        .iter()
-        .map(|p| if *p > 0.0 { p.ln() } else { 0.0 })
-        .collect();
+        df = df
+            .with_column(Series::new("price_volume_ratio", price_volume_ratio))
+            .map_err(|e| {
+                crate::utils::error::VangaError::DataError(format!(
+                    "Failed to add price_volume_ratio column: {}",
+                    e
+                ))
+            })?
+            .clone();
+    }
 
-    // Generate lag features
-    let price_lag_1 = create_lag_feature(&close_prices, 1);
-    let price_lag_5 = create_lag_feature(&close_prices, 5);
-    let volume_lag_1 = create_lag_feature(&volume, 1);
+    // Generate polynomial features if enabled
+    if config.polynomial_features.enabled {
+        let price_squared: Vec<f64> = close_prices.iter().map(|p| p.powi(2)).collect();
+        let price_log: Vec<f64> = close_prices
+            .iter()
+            .map(|p| if *p > 0.0 { p.ln() } else { 0.0 })
+            .collect();
 
-    // Generate rolling statistics
-    let price_rolling_mean = calculate_rolling_mean(&close_prices, 10);
-    let price_rolling_std = calculate_rolling_std(&close_prices, 10);
+        df = df
+            .with_column(Series::new("price_squared", price_squared))
+            .map_err(|e| {
+                crate::utils::error::VangaError::DataError(format!(
+                    "Failed to add price_squared column: {}",
+                    e
+                ))
+            })?
+            .clone();
+
+        df = df
+            .with_column(Series::new("price_log", price_log))
+            .map_err(|e| {
+                crate::utils::error::VangaError::DataError(format!(
+                    "Failed to add price_log column: {}",
+                    e
+                ))
+            })?
+            .clone();
+    }
+
+    // Generate lag features based on configuration
+    if config.lag_features.enabled {
+        for feature_name in &config.lag_features.features_to_lag {
+            // Check if the column exists in the DataFrame
+            if let Ok(column_data) =
+                crate::features::technical::extract_numeric_column(&df, feature_name)
+            {
+                for &lag_period in &config.lag_features.lag_periods {
+                    let lag_feature = create_lag_feature(&column_data, lag_period as usize);
+                    let lag_column_name = format!("{}_lag_{}", feature_name, lag_period);
+
+                    df = df
+                        .with_column(Series::new(&lag_column_name, lag_feature))
+                        .map_err(|e| {
+                            crate::utils::error::VangaError::DataError(format!(
+                                "Failed to add {} column: {}",
+                                lag_column_name, e
+                            ))
+                        })?
+                        .clone();
+                }
+            } else {
+                log::warn!(
+                    "Column '{}' not found for lag feature generation, skipping",
+                    feature_name
+                );
+            }
+        }
+    }
+
+    // Generate rolling statistics if enabled
+    if config.rolling_features.enabled {
+        for &window_size in &config.rolling_features.window_sizes {
+            let price_rolling_mean = calculate_rolling_mean(&close_prices, window_size as usize);
+            let price_rolling_std = calculate_rolling_std(&close_prices, window_size as usize);
+
+            df = df
+                .with_column(Series::new(
+                    &format!("price_rolling_mean_{}", window_size),
+                    price_rolling_mean,
+                ))
+                .map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to add price_rolling_mean_{} column: {}",
+                        window_size, e
+                    ))
+                })?
+                .clone();
+
+            df = df
+                .with_column(Series::new(
+                    &format!("price_rolling_std_{}", window_size),
+                    price_rolling_std,
+                ))
+                .map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to add price_rolling_std_{} column: {}",
+                        window_size, e
+                    ))
+                })?
+                .clone();
+        }
+    }
 
     // Generate relative features
     let high_low_ratio: Vec<f64> = high_prices
@@ -45,79 +134,6 @@ pub async fn apply_feature_engineering(
         .map(|(h, l)| if *l > 0.0 { h / l } else { 1.0 })
         .collect();
 
-    // Add engineered features to DataFrame one by one
-    df = df
-        .with_column(Series::new("price_volume_ratio", price_volume_ratio))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add price_volume_ratio column: {}",
-                e
-            ))
-        })?
-        .clone();
-    df = df
-        .with_column(Series::new("price_squared", price_squared))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add price_squared column: {}",
-                e
-            ))
-        })?
-        .clone();
-    df = df
-        .with_column(Series::new("price_log", price_log))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add price_log column: {}",
-                e
-            ))
-        })?
-        .clone();
-    df = df
-        .with_column(Series::new("price_lag_1", price_lag_1))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add price_lag_1 column: {}",
-                e
-            ))
-        })?
-        .clone();
-    df = df
-        .with_column(Series::new("price_lag_5", price_lag_5))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add price_lag_5 column: {}",
-                e
-            ))
-        })?
-        .clone();
-    df = df
-        .with_column(Series::new("volume_lag_1", volume_lag_1))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add volume_lag_1 column: {}",
-                e
-            ))
-        })?
-        .clone();
-    df = df
-        .with_column(Series::new("price_rolling_mean_10", price_rolling_mean))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add price_rolling_mean_10 column: {}",
-                e
-            ))
-        })?
-        .clone();
-    df = df
-        .with_column(Series::new("price_rolling_std_10", price_rolling_std))
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add price_rolling_std_10 column: {}",
-                e
-            ))
-        })?
-        .clone();
     df = df
         .with_column(Series::new("high_low_ratio", high_low_ratio))
         .map_err(|e| {
@@ -133,14 +149,14 @@ pub async fn apply_feature_engineering(
 
 /// Create lag feature
 fn create_lag_feature(data: &[f64], lag: usize) -> Vec<f64> {
-    let mut lagged = vec![0.0; lag];
+    let mut lagged = vec![f64::NAN; lag]; // Use NaN for lag padding, not 0.0
     lagged.extend_from_slice(&data[..data.len().saturating_sub(lag)]);
     lagged
 }
 
 /// Calculate rolling mean
 fn calculate_rolling_mean(data: &[f64], window: usize) -> Vec<f64> {
-    let mut rolling_mean = vec![0.0; data.len()];
+    let mut rolling_mean = vec![f64::NAN; data.len()]; // Use NaN for initial values
 
     for i in window..data.len() {
         let sum: f64 = data[i - window..i].iter().sum();
@@ -152,7 +168,7 @@ fn calculate_rolling_mean(data: &[f64], window: usize) -> Vec<f64> {
 
 /// Calculate rolling standard deviation
 fn calculate_rolling_std(data: &[f64], window: usize) -> Vec<f64> {
-    let mut rolling_std = vec![0.0; data.len()];
+    let mut rolling_std = vec![f64::NAN; data.len()]; // Use NaN for initial values
 
     for i in window..data.len() {
         let window_data = &data[i - window..i];

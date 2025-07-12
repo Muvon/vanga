@@ -1,0 +1,115 @@
+# VANGA Quick Start Configuration
+# Minimal configuration for getting started with VANGA LSTM training
+# For detailed parameter explanations, see configs/example_single_asset.toml
+# Usage: vanga train --symbol BTCUSDT --data data.csv --config configs/quick_start.toml
+
+[training]
+# Auto early stopping with intelligent defaults
+epochs = { Auto = { max_epochs = 1000 } }
+learning_rate = { Fixed = 0.001 }
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+validation_split = 0.2
+test_split = 0.1
+early_stopping_patience = 50
+gradient_clip = 1.0
+
+[model]
+# Simple but effective architecture
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.2 }
+variational = true
+recurrent = true
+
+[model.attention]
+enabled = false  # Disabled for quick start
+
+[model.output_heads]
+
+[model.output_heads.price_levels]
+enabled = true
+bins = 10
+range_percent = 0.05
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+threshold = 0.01
+confidence_calibration = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+horizons = ["1h", "4h", "1d"]
+
+# Essential features only
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 20, 50]
+ema_periods = [5, 20, 50]
+
+[features.technical_indicators.momentum]
+rsi_periods = [14]
+stochastic = true
+
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14]
+
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [20]
+
+[features.market_microstructure]
+enabled = false  # Disabled for quick start
+
+[features.volatility_features]
+enabled = false  # Disabled for quick start
+
+[features.custom_features]
+enabled = true
+include_all_numeric = true
+exclude_features = []
+
+[features.engineering]
+enabled = true
+
+[features.engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3]
+features_to_lag = ["close", "volume"]
+
+[features.engineering.rolling_features]
+enabled = true
+window_sizes = [5, 10]
+statistics = ["Mean", "Std"]
+
+[features.selection]
+enabled = true
+max_features = 50
+correlation_threshold = 0.95
+importance_threshold = 0.001
+methods = ["CorrelationFilter"]
+keep_crypto_features = true
+
+[features.cross_asset]
+enabled = false  # Disabled for single-asset quick start
+
+[data]
+normalization = "Robust"
+sequence_overlap = 0.8
+
+[data.outlier_handling]
+enabled = true
+method = "ModifiedZScore"
+threshold = 3.5
+
+[optimization]
+enabled = false  # Disabled for quick start
+method = "None"

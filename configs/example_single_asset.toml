@@ -1,0 +1,376 @@
+# VANGA Single Asset Training Configuration
+# Complete configuration template for training LSTM models on individual cryptocurrency pairs
+# This file contains all available parameters with detailed explanations and tuning guidance
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# Controls the training process, optimization, and convergence behavior
+# ============================================================================
+
+[training]
+# EPOCH CONFIGURATION
+# Controls how many training iterations to run
+# - Auto: Intelligent early stopping based on validation loss (RECOMMENDED)
+# - Fixed: Run exact number of epochs (use for reproducible experiments)
+# TUNING: Use Auto for production, Fixed for debugging/research
+# EFFECT: Auto prevents overfitting and saves training time (30-50% faster)
+epochs = { Auto = { max_epochs = 1000 } }
+# Alternative: epochs = { Fixed = 200 }
+
+# LEARNING RATE CONFIGURATION
+# Controls how quickly the model learns from training data
+# - Fixed: Constant learning rate throughout training
+# - Adaptive: Automatically reduces when loss plateaus (RECOMMENDED)
+# TUNING: Start with 0.001, reduce to 0.0001 for fine-tuning, increase to 0.01 for faster convergence
+# EFFECT: Higher values = faster learning but risk instability, lower values = stable but slower
+learning_rate = { Fixed = 0.001 }
+# Alternative: learning_rate = { Adaptive = { initial = 0.001, factor = 0.5, patience = 10 } }
+
+# BATCH SIZE CONFIGURATION
+# Controls how many samples are processed together in each training step
+# - Auto: Automatically selects optimal batch size based on data size and memory (RECOMMENDED)
+# - Fixed: Use specific batch size for reproducible results
+# TUNING: Larger batches = more stable gradients but higher memory usage
+# EFFECT: Auto optimizes memory usage and training speed, typically selects 32-512
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+# Alternative: batch_size = { Fixed = 64 }
+
+# VALIDATION AND EARLY STOPPING
+# Controls how training data is split and when to stop training
+# TUNING: validation_split 0.15-0.25 (15-25%), test_split 0.1-0.15 (10-15%)
+# EFFECT: Higher validation split = better overfitting detection but less training data
+validation_split = 0.2          # 20% of data reserved for validation monitoring
+test_split = 0.1               # 10% of data reserved for final evaluation
+early_stopping_patience = 50   # Stop training after 50 epochs without validation improvement
+gradient_clip = 1.0            # Prevent exploding gradients (important for crypto volatility)
+
+# ============================================================================
+# MODEL ARCHITECTURE
+# Defines the neural network structure and complexity
+# ============================================================================
+
+[model]
+# ARCHITECTURE TYPE
+# Defines the LSTM model structure
+# - MultiLSTM: Multiple LSTM layers with residual connections (RECOMMENDED for most cases)
+# - StackedLSTM: Traditional stacked LSTM layers (good for sequential patterns)
+# - BidirectionalLSTM: Processes sequences in both directions (best for pattern recognition)
+# TUNING: MultiLSTM for general use, Bidirectional for complex patterns, Stacked for simple data
+# EFFECT: More complex architectures can capture more patterns but risk overfitting
+architecture = { MultiLSTM = { layers = 2 } }
+# Alternatives:
+# architecture = { StackedLSTM = { layers = 3 } }
+# architecture = { BidirectionalLSTM = { layers = 2 } }
+
+# SEQUENCE LENGTH CONFIGURATION
+# Controls how many historical time steps the model considers for each prediction
+# - Auto: Automatically determines optimal sequence length based on data patterns (RECOMMENDED)
+# - Fixed: Use specific sequence length for consistent behavior
+# TUNING: Longer sequences capture more historical context but increase computation
+# EFFECT: Auto typically selects 30-120 steps, optimizing for crypto market patterns
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+# Alternative: sequence_length = { Fixed = 60 }
+
+# HIDDEN UNITS CONFIGURATION
+# Controls the capacity/complexity of each LSTM layer
+# - Auto: Automatically sizes based on input features and data complexity (RECOMMENDED)
+# - Fixed: Use specific size for reproducible results
+# TUNING: More units = higher capacity but slower training and risk of overfitting
+# EFFECT: Auto typically selects 64-512 units, balancing capacity and efficiency
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+# Alternative: hidden_units = { Fixed = 128 }
+
+# DROPOUT CONFIGURATION
+# Prevents overfitting by randomly disabling neurons during training
+[model.dropout]
+enabled = true                  # Enable dropout regularization (RECOMMENDED)
+rate = { Fixed = 0.2 }         # Drop 20% of neurons randomly (0.1-0.3 typical range)
+# TUNING: Increase rate (0.3-0.5) if overfitting, decrease (0.1-0.2) if underfitting
+# EFFECT: Higher dropout = less overfitting but potentially slower convergence
+variational = true             # Apply same dropout pattern across time steps (RECOMMENDED for LSTM)
+recurrent = true              # Apply dropout to recurrent connections (helps with overfitting)
+
+# ATTENTION MECHANISM (OPTIONAL)
+# Allows model to focus on most relevant parts of input sequence
+[model.attention]
+enabled = true                 # Enable attention mechanism (RECOMMENDED for complex patterns)
+mechanism = "SelfAttention"    # Type of attention (SelfAttention most effective)
+heads = 8                     # Number of attention heads (4-16 typical range)
+# TUNING: More heads = more detailed attention but higher computation
+# EFFECT: Attention improves pattern recognition and model interpretability
+head_dim = 64                 # Dimension of each attention head
+dropout_rate = 0.1            # Dropout rate for attention layers
+temperature_scaling = 1.0     # Controls attention sharpness (0.5-2.0 range)
+use_relative_position = true  # Include position information in attention
+
+# ATTENTION VISUALIZATION (OPTIONAL)
+[model.attention.visualization]
+save_heatmaps = false         # Save attention heatmaps for analysis
+export_analysis = false       # Export detailed attention analysis
+output_dir = "attention_analysis"  # Directory for attention outputs
+
+# ============================================================================
+# OUTPUT HEADS CONFIGURATION
+# Defines what the model predicts and how predictions are structured
+# ============================================================================
+
+[model.output_heads]
+
+# PRICE LEVELS PREDICTION
+# Predicts probability distribution of future price changes
+[model.output_heads.price_levels]
+enabled = true                # Enable price level prediction (RECOMMENDED)
+bins = 10                    # Number of price change bins (5-20 typical range)
+# TUNING: More bins = finer granularity but harder to train, fewer bins = coarser but more stable
+# EFFECT: 10 bins typically covers -5% to +5% in 1% increments
+range_percent = 0.05         # Price change range (±5% = ±0.05)
+distribution_type = "Categorical"  # Output type (Categorical for probability distribution)
+
+# DIRECTION PREDICTION
+# Predicts whether price will go up or down
+[model.output_heads.direction]
+enabled = true               # Enable direction prediction (RECOMMENDED)
+threshold = 0.01            # Minimum price change to consider significant (1% = 0.01)
+# TUNING: Lower threshold = more sensitive to small moves, higher = focus on major moves
+# EFFECT: 0.01 filters out noise and focuses on meaningful price movements
+confidence_calibration = true  # Calibrate confidence scores for better reliability
+
+# VOLATILITY PREDICTION
+# Predicts expected price volatility over different time horizons
+[model.output_heads.volatility]
+enabled = true              # Enable volatility prediction (RECOMMENDED)
+method = "Direct"           # Prediction method (Direct most accurate)
+horizons = ["1h", "4h", "1d"]  # Time horizons for volatility prediction
+# TUNING: Add more horizons for comprehensive analysis, remove for faster training
+# EFFECT: Multiple horizons provide complete volatility picture for risk management
+
+# ============================================================================
+# FEATURES CONFIGURATION
+# Controls what input features are generated and used for training
+# ============================================================================
+
+[features.technical_indicators]
+enabled = true              # Enable technical indicators (HIGHLY RECOMMENDED)
+
+# MOVING AVERAGES
+# Trend-following indicators that smooth price data
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 200]    # Simple Moving Average periods
+ema_periods = [5, 10, 20, 50, 200]    # Exponential Moving Average periods
+wma_periods = [10, 20]                # Weighted Moving Average periods
+hull_periods = [9, 21]                # Hull Moving Average periods (trend detection)
+# TUNING: Add shorter periods (3, 7) for scalping, longer periods (100, 300) for position trading
+# EFFECT: More periods = more trend information but higher dimensionality
+
+# MOMENTUM INDICATORS
+# Measure the rate of price change and trend strength
+[features.technical_indicators.momentum]
+rsi_periods = [14, 21]        # Relative Strength Index periods
+stochastic = true            # Stochastic oscillator (overbought/oversold)
+williams_r = true            # Williams %R (momentum oscillator)
+cci_periods = [14, 20]       # Commodity Channel Index periods
+momentum_periods = [10, 20]  # Price momentum periods
+# TUNING: Shorter periods (7, 10) for faster signals, longer periods (21, 30) for smoother signals
+# EFFECT: Multiple momentum indicators provide comprehensive trend strength analysis
+
+# VOLATILITY INDICATORS
+# Measure price volatility and market uncertainty
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }  # Bollinger Bands configuration
+atr_periods = [14, 21]       # Average True Range periods
+keltner_channels = true      # Keltner Channels (volatility bands)
+donchian_channels = true     # Donchian Channels (breakout detection)
+# TUNING: Adjust std_dev (1.5-2.5) for Bollinger Bands sensitivity
+# EFFECT: Volatility indicators help identify market regime changes
+
+# VOLUME INDICATORS
+# Analyze trading volume patterns and market participation
+[features.technical_indicators.volume]
+obv = true                   # On-Balance Volume (volume-price relationship)
+volume_sma_periods = [10, 20]  # Volume moving averages
+mfi_periods = [14]           # Money Flow Index periods
+volume_profile = true        # Volume profile analysis
+# TUNING: Add more volume periods for detailed analysis
+# EFFECT: Volume indicators confirm price movements and detect divergences
+
+# MARKET MICROSTRUCTURE FEATURES
+# Advanced features that capture market dynamics and trading behavior
+[features.market_microstructure]
+enabled = true              # Enable microstructure features (RECOMMENDED for advanced analysis)
+
+# SPREAD ANALYSIS
+# Analyze bid-ask spreads and market liquidity
+[features.market_microstructure.spread_analysis]
+bid_ask_spread = true       # Bid-ask spread analysis (requires order book data)
+effective_spread = true     # Effective spread calculation
+price_impact = true         # Price impact measurement
+# NOTE: These features require additional data beyond OHLCV
+
+# ORDER FLOW ANALYSIS
+# Analyze order flow and market participation
+[features.market_microstructure.order_flow]
+volume_imbalance = true     # Buy/sell volume imbalance
+trade_intensity = true      # Trading intensity measurement
+arrival_rate = true         # Order arrival rate analysis
+# NOTE: These features work with standard OHLCV data
+
+# VOLATILITY FEATURES
+# Advanced volatility modeling and forecasting
+[features.volatility_features]
+enabled = true              # Enable volatility features (RECOMMENDED)
+
+# REALIZED VOLATILITY
+# Calculate historical volatility using different methods
+[features.volatility_features.realized_volatility]
+periods = ["1h", "4h", "24h"]  # Time periods for volatility calculation
+estimators = ["Standard", "RangeBasedYangZhang"]  # Volatility estimation methods
+# TUNING: Add more periods for comprehensive volatility analysis
+# EFFECT: Multiple estimators provide robust volatility measurements
+
+# GARCH FEATURES (OPTIONAL)
+# Advanced volatility modeling using GARCH models
+[features.volatility_features.garch_features]
+enabled = true              # Enable GARCH features (advanced users)
+model_orders = [[1, 1], [1, 2], [2, 1]]  # GARCH model orders (p, q)
+conditional_volatility = true  # Include conditional volatility forecasts
+volatility_forecasts = true    # Include volatility forecasts
+# TUNING: Experiment with different model orders for best fit
+# EFFECT: GARCH features capture volatility clustering in crypto markets
+
+# CUSTOM FEATURES
+# Include additional features from your data files
+[features.custom_features]
+enabled = true              # Enable custom features (RECOMMENDED)
+include_all_numeric = true  # Automatically include all numeric columns from CSV
+exclude_features = ["irrelevant_column", "noisy_indicator"]  # Exclude specific features
+# TUNING: Add features like sentiment, on-chain metrics, macro indicators
+# EFFECT: Custom features can significantly improve model performance
+
+# FEATURE ENGINEERING
+# Create new features from existing ones
+[features.engineering]
+enabled = true              # Enable feature engineering (RECOMMENDED)
+
+# POLYNOMIAL FEATURES (OPTIONAL)
+# Create polynomial combinations of features
+[features.engineering.polynomial_features]
+enabled = false             # Disabled by default (can cause overfitting)
+degree = 2                 # Polynomial degree
+include_bias = false       # Include bias term
+interaction_only = true    # Only interaction terms (no powers)
+# TUNING: Enable for complex non-linear relationships, but monitor for overfitting
+# EFFECT: Can capture non-linear patterns but increases feature count significantly
+
+# INTERACTION FEATURES
+# Create features from combinations of existing features
+[features.engineering.interaction_features]
+enabled = true             # Enable interaction features (RECOMMENDED)
+max_interactions = 10      # Maximum number of interaction features to create
+feature_pairs = []         # Specific feature pairs (empty = automatic selection)
+# TUNING: Increase max_interactions for more complex relationships
+# EFFECT: Captures relationships between different indicators
+
+# LAG FEATURES
+# Include historical values of features
+[features.engineering.lag_features]
+enabled = true             # Enable lag features (HIGHLY RECOMMENDED)
+lag_periods = [1, 2, 3, 5, 10]  # Number of periods to lag
+features_to_lag = ["close", "volume", "rsi_14"]  # Which features to lag
+# TUNING: Add more lag periods for longer memory, specific features for targeted analysis
+# EFFECT: Provides historical context and improves pattern recognition
+
+# ROLLING FEATURES
+# Create rolling statistics of features
+[features.engineering.rolling_features]
+enabled = true             # Enable rolling features (RECOMMENDED)
+window_sizes = [5, 10, 20]  # Rolling window sizes
+statistics = ["Mean", "Std", "Min", "Max"]  # Statistics to calculate
+# TUNING: Add more window sizes and statistics for comprehensive analysis
+# EFFECT: Captures local trends and volatility patterns
+
+# FEATURE SELECTION
+# Automatically select the most important features
+[features.selection]
+enabled = true             # Enable feature selection (HIGHLY RECOMMENDED)
+max_features = 100         # Maximum number of features to keep
+correlation_threshold = 0.95  # Remove highly correlated features
+importance_threshold = 0.001  # Remove low-importance features
+methods = ["CorrelationFilter", "ImportanceBased"]  # Selection methods
+keep_crypto_features = true   # Always keep crypto-specific features
+# TUNING: Adjust max_features based on data size and complexity
+# EFFECT: Reduces overfitting and improves training speed
+
+# ============================================================================
+# DATA PROCESSING CONFIGURATION
+# Controls how data is preprocessed and prepared for training
+# ============================================================================
+
+[data]
+normalization = "Robust"    # Normalization method (Robust handles outliers well)
+# Alternatives: "StandardScaler", "MinMaxScaler", "None"
+# TUNING: Use Robust for crypto (handles extreme values), StandardScaler for normal distributions
+# EFFECT: Proper normalization is crucial for LSTM training stability
+sequence_overlap = 0.8     # Overlap between training sequences (0.0-1.0)
+# TUNING: Higher overlap = more training data but potential overfitting
+# EFFECT: 0.8 provides good balance between data augmentation and independence
+
+# OUTLIER HANDLING
+# Detect and handle extreme values in the data
+[data.outlier_handling]
+enabled = true             # Enable outlier detection (RECOMMENDED for crypto)
+method = "ModifiedZScore"   # Outlier detection method
+threshold = 3.5           # Outlier threshold (higher = less sensitive)
+# TUNING: Lower threshold (2.5-3.0) for stricter outlier removal
+# EFFECT: Prevents extreme crypto price movements from distorting training
+
+# ============================================================================
+# OPTIMIZATION CONFIGURATION
+# Controls hyperparameter optimization and model tuning
+# ============================================================================
+
+[optimization]
+enabled = false            # Disable optimization for single-asset training (use defaults)
+method = "None"           # No optimization method
+n_trials = 100            # Number of optimization trials (if enabled)
+timeout_seconds = 3600    # Optimization timeout (1 hour)
+metric = "MAE"            # Optimization metric (MAE, MSE, RMSE)
+# TUNING: Enable for production models, use Bayesian method for efficiency
+# EFFECT: Optimization can improve performance but significantly increases training time
+
+# ============================================================================
+# PARAMETER TUNING GUIDELINES
+# ============================================================================
+
+# FOR SMALL DATASETS (< 1000 samples):
+# - Use simpler architecture: { MultiLSTM = { layers = 1 } }
+# - Reduce sequence_length: { Fixed = 30 }
+# - Increase dropout: rate = { Fixed = 0.3 }
+# - Disable complex features: garch_features.enabled = false
+
+# FOR LARGE DATASETS (> 10000 samples):
+# - Use complex architecture: { MultiLSTM = { layers = 3 } }
+# - Increase sequence_length: { Auto = { min_length = 60, max_length = 200 } }
+# - Enable all features for maximum information
+# - Consider enabling optimization for best performance
+
+# FOR HIGH-FREQUENCY DATA (1-minute intervals):
+# - Focus on microstructure features
+# - Use shorter moving average periods: [3, 5, 10, 20]
+# - Increase lag_periods: [1, 2, 3, 5, 10, 15, 30]
+
+# FOR LOW-FREQUENCY DATA (daily intervals):
+# - Focus on technical indicators
+# - Use longer moving average periods: [20, 50, 100, 200]
+# - Reduce lag_periods: [1, 2, 3, 5]
+
+# FOR VOLATILE ASSETS:
+# - Increase gradient_clip: 2.0
+# - Enable robust normalization
+# - Use higher dropout rates: 0.3-0.4
+# - Enable outlier handling with lower threshold: 2.5
+
+# FOR STABLE ASSETS:
+# - Reduce gradient_clip: 0.5
+# - Use standard normalization
+# - Lower dropout rates: 0.1-0.2
+# - Disable outlier handling or use higher threshold: 4.0

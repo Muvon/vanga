@@ -186,7 +186,7 @@ Supported timeframes:
 ### **Quality Indicators**
 ```bash
 # Check data quality with VANGA
-./target/release/vanga train --symbol BTCUSDT --data data/btc_data.csv --dry-run
+vanga train --symbol BTCUSDT --data data/btc_data.csv --dry-run
 
 # Output shows data quality metrics:
 # - Total samples: 8760
@@ -236,7 +236,7 @@ timestamp,open,high,low,close,volume
 ### **Step 2: Data Validation**
 ```bash
 # Test data loading
-./target/release/vanga train --symbol TESTCOIN --data your_data.csv --dry-run
+vanga train --symbol TESTCOIN --data your_data.csv --dry-run
 ```
 
 ### **Step 3: Data Quality Check**
@@ -294,10 +294,10 @@ Solution: Review and clean data inconsistencies
 ### **Data Debugging**
 ```bash
 # Enable debug logging
-RUST_LOG=debug ./target/release/vanga train --symbol BTCUSDT --data data.csv
+RUST_LOG=debug vanga train --symbol BTCUSDT --data data.csv
 
 # Check data info
-./target/release/vanga data-info --file data.csv
+vanga data-info --file data.csv
 ```
 
 ## Next Steps

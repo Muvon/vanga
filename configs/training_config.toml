@@ -72,7 +72,6 @@ output_dir = "attention_analysis"      # Directory for attention outputs
 # Data preprocessing configuration
 normalization = "Robust"                    # Robust, MinMax, Standard, Quantile
 sequence_overlap = 0.8                      # Overlap between training sequences
-missing_data_strategy = "Interpolate"       # Interpolate, Forward, Drop
 
 [data.outlier_handling]
 enabled = true

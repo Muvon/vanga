@@ -4,7 +4,7 @@
 //! training, prediction, and metrics infrastructure with minimal code changes.
 
 use crate::api::{predict_multi_target, train_model};
-use crate::config::{PredictionConfig, TrainingConfig};
+use crate::config::{FeatureConfig, PredictionConfig, TrainingConfig};
 use crate::data::loader::DataLoader;
 use crate::targets::TargetGenerator;
 use crate::utils::error::{Result, VangaError};
@@ -221,7 +221,7 @@ impl Backtester {
             horizons: vec!["1h".to_string()], // Single horizon for backtesting
             fresh_training: true,             // Always start fresh for backtesting
             continue_training: false,
-            features_config_path: None,
+            features: FeatureConfig::default(),
             training: crate::config::training::TrainingParams {
                 epochs: crate::config::training::EpochConfig::Fixed(5), // Very short training for testing
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16), // Smaller batch size
@@ -239,7 +239,7 @@ impl Backtester {
     /// Create prediction configuration for backtesting
     fn create_prediction_config(&self, test_path: &Path) -> Result<PredictionConfig> {
         Ok(PredictionConfig {
-            symbol: self.config.symbol.clone(),
+            symbols: vec![self.config.symbol.clone()],
             input_path: test_path.to_path_buf(),
             horizon: Some("1h".to_string()),
             ..Default::default()

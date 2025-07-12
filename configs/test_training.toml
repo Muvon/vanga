@@ -1,0 +1,72 @@
+# Quick Test Training Configuration - Short epochs for testing
+# Based on training.toml but with minimal epochs for fast testing
+
+[model]
+type = "MultiTarget"
+sequence_length = 30
+hidden_size = 64
+num_layers = 2
+dropout = 0.2
+learning_rate = 0.001
+
+[model.attention]
+enabled = true
+num_heads = 8
+head_dim = 64
+
+[training]
+epochs = 3                    # Very short for testing
+batch_size = 64
+validation_split = 0.2
+early_stopping = false        # Disable for quick test
+patience = 5
+print_every = 1              # Print every epoch for testing
+
+[targets]
+horizons = ["1h", "4h", "1d"]
+price_levels = true
+direction = true
+volatility = true
+
+# Minimal features for fast testing
+[features.technical_indicators]
+enabled = true
+sma_periods = [20, 50]
+ema_periods = [12, 26]
+rsi_periods = [14]
+macd = true
+bollinger_bands = true
+stochastic = true
+atr_periods = [14]
+volume_sma_periods = [20]
+
+[features.market_microstructure]
+enabled = false              # Disable for speed
+
+[features.volatility]
+enabled = false              # Disable for speed
+
+[features.custom]
+auto_include_all = false     # Disable for speed
+include_features = []
+exclude_features = []
+transformations = {}
+
+[features.engineering]
+polynomial_features.enabled = false
+interaction_features.enabled = false
+lag_features.enabled = false
+rolling_features.enabled = false
+
+[features.selection]
+enabled = false
+
+[features.cross_asset]
+enabled = false
+
+[optimization]
+enabled = false
+method = "None"
+n_trials = 10
+timeout_seconds = 300
+metric = "MAE"

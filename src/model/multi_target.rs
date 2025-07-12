@@ -20,6 +20,8 @@ pub struct MultiTargetLSTMModel {
     num_targets: usize,
     /// Prediction horizons the model was trained on
     trained_horizons: Vec<String>,
+    /// Feature configuration used during training
+    feature_config: Option<crate::config::FeatureConfig>,
 }
 
 /// Serializable state for multi-target model persistence
@@ -31,6 +33,9 @@ struct MultiTargetModelState {
     /// Prediction horizons the model was trained on (optional for backward compatibility)
     #[serde(default)]
     trained_horizons: Option<Vec<String>>,
+    /// Feature configuration used during training
+    #[serde(default)]
+    feature_config: Option<crate::config::FeatureConfig>,
 }
 
 impl MultiTargetLSTMModel {
@@ -65,6 +70,7 @@ impl MultiTargetLSTMModel {
             input_size,
             num_targets,
             trained_horizons,
+            feature_config: None, // Will be set during training
         })
     }
 
@@ -344,6 +350,7 @@ impl MultiTargetLSTMModel {
             input_size: self.input_size,
             num_targets: self.num_targets,
             trained_horizons: Some(self.trained_horizons.clone()),
+            feature_config: self.feature_config.clone(),
         };
 
         let metadata_path = base_path.with_extension("meta");
@@ -406,6 +413,7 @@ impl MultiTargetLSTMModel {
             input_size: state.input_size,
             num_targets: state.num_targets,
             trained_horizons,
+            feature_config: state.feature_config,
         })
     }
 
@@ -427,6 +435,16 @@ impl MultiTargetLSTMModel {
     /// Get input size
     pub fn get_input_size(&self) -> usize {
         self.input_size
+    }
+
+    /// Get feature configuration used during training
+    pub fn get_feature_config(&self) -> Option<&crate::config::FeatureConfig> {
+        self.feature_config.as_ref()
+    }
+
+    /// Set feature configuration (used during training)
+    pub fn set_feature_config(&mut self, config: crate::config::FeatureConfig) {
+        self.feature_config = Some(config);
     }
 
     /// Check if all models are trained (have networks)

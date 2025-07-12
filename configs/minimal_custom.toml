@@ -1,5 +1,7 @@
-# Minimal custom features configuration
-# Use this for simple custom feature setups
+# VANGA Minimal Custom Features Configuration
+# Lightweight configuration for simple custom feature setups
+# For complete parameter explanations, see configs/example_single_asset.toml
+# Usage: vanga train --symbol BTCUSDT --data data.csv --config configs/minimal_custom.toml
 
 [technical_indicators]
 enabled = true

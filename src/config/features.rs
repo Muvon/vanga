@@ -20,6 +20,9 @@ pub struct FeatureConfig {
 
     /// Feature selection settings
     pub selection: FeatureSelectionConfig,
+
+    /// Cross-asset features (multi-symbol analysis)
+    pub cross_asset: CrossAssetConfig,
 }
 
 impl FeatureConfig {
@@ -540,6 +543,99 @@ impl Default for AdvancedIndicatorsConfig {
             regime_window: 50,
             clustering_window: 50,
             reversion_window: 50,
+        }
+    }
+}
+
+/// Cross-asset feature configuration for multi-symbol analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossAssetConfig {
+    /// Enable cross-asset features (requires multiple symbols)
+    pub enabled: bool,
+
+    /// Minimum symbols required for cross-asset analysis
+    pub min_symbols_required: usize,
+
+    /// Required symbols for cross-asset analysis (e.g., ["BTCUSDT"] for BTC dominance)
+    pub required_symbols: Vec<String>,
+
+    /// Calculate BTC dominance (requires BTCUSDT)
+    pub btc_dominance_enabled: bool,
+
+    /// Calculate ETH/BTC ratio (optional, requires both ETHUSDT and BTCUSDT)
+    pub eth_btc_ratio_enabled: bool,
+
+    /// Market sentiment analysis configuration
+    pub sentiment_analysis: SentimentAnalysisConfig,
+
+    /// Price correlation analysis configuration
+    pub correlation_analysis: CorrelationAnalysisConfig,
+}
+
+/// Market sentiment analysis configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentimentAnalysisConfig {
+    /// Enable sentiment analysis
+    pub enabled: bool,
+
+    /// Number of periods to look back for sentiment calculation
+    pub lookback_periods: usize,
+
+    /// Weight for price velocity component (0.0-1.0)
+    pub price_velocity_weight: f64,
+
+    /// Weight for volume spike component (0.0-1.0)
+    pub volume_spike_weight: f64,
+
+    /// Weight for volatility component (0.0-1.0)
+    pub volatility_weight: f64,
+}
+
+/// Price correlation analysis configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrelationAnalysisConfig {
+    /// Enable correlation analysis
+    pub enabled: bool,
+
+    /// Minimum periods required for correlation calculation
+    pub min_periods: usize,
+
+    /// Rolling window size for correlation calculation
+    pub correlation_window: usize,
+}
+
+impl Default for CrossAssetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default
+            min_symbols_required: 2,
+            required_symbols: vec![], // No strict requirements by default
+            btc_dominance_enabled: true,
+            eth_btc_ratio_enabled: true, // Optional - only works if both symbols present
+            sentiment_analysis: SentimentAnalysisConfig::default(),
+            correlation_analysis: CorrelationAnalysisConfig::default(),
+        }
+    }
+}
+
+impl Default for SentimentAnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            lookback_periods: 24,
+            price_velocity_weight: 0.3,
+            volume_spike_weight: 0.3,
+            volatility_weight: 0.4,
+        }
+    }
+}
+
+impl Default for CorrelationAnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_periods: 50,
+            correlation_window: 20,
         }
     }
 }

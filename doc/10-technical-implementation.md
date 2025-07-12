@@ -563,18 +563,18 @@ cargo test                     # ✅ All tests pass (when implemented)
 ### **CLI Functionality Tests**
 ```bash
 # Test help system
-./target/release/vanga --help           # ✅ Main help working
-./target/release/vanga train --help     # ✅ Training help working
-./target/release/vanga predict --help   # ✅ Prediction help working
-./target/release/vanga models --help    # ✅ Models help working
+vanga --help           # ✅ Main help working
+vanga train --help     # ✅ Training help working
+vanga predict --help   # ✅ Prediction help working
+vanga models --help    # ✅ Models help working
 ```
 
 ### **End-to-End Workflow Test**
 ```bash
 # Test complete workflow (with sample data)
-./target/release/vanga train --symbol TESTCOIN --data sample_data.csv
-./target/release/vanga predict --symbol TESTCOIN --input test_data.csv --output predictions.csv
-./target/release/vanga models list
+vanga train --symbol TESTCOIN --data sample_data.csv
+vanga predict --symbol TESTCOIN --input test_data.csv --output predictions.csv
+vanga models list
 ```
 
 ---
@@ -631,7 +631,7 @@ panic = "abort"
 ## 🚀 **Production Deployment**
 
 ### **Binary Deployment**
-- **Location**: `./target/release/vanga`
+- **Location**: `vanga`
 - **Size**: Optimized for minimal footprint
 - **Dependencies**: Self-contained binary
 - **Configuration**: TOML files in `config/` directory
@@ -655,7 +655,7 @@ mkdir -p models data config
 export RUST_LOG=info
 
 # Run the system
-./target/release/vanga --help
+vanga --help
 ```
 
 ---

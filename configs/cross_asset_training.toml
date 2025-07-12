@@ -1,0 +1,202 @@
+# VANGA Cross-Asset Training Configuration
+# Production-ready configuration for multi-asset LSTM training
+# For detailed parameter explanations, see configs/example_cross_asset.toml
+# Usage: vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross_asset_training.toml
+
+[training]
+# EPOCH CONFIGURATION - Choose one approach:
+# Option 1: Automatic early stopping (RECOMMENDED for quality)
+epochs = { Auto = { max_epochs = 1000 } }
+
+# LEARNING RATE CONFIGURATION
+learning_rate = { Fixed = 0.001 }
+
+# BATCH SIZE CONFIGURATION
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+
+# VALIDATION AND EARLY STOPPING
+validation_split = 0.2          # 20% of data for validation
+test_split = 0.1               # 10% of data for final testing
+early_stopping_patience = 50   # Stop after 50 epochs without improvement
+gradient_clip = 1.0            # Gradient clipping threshold
+
+[model]
+# Model architecture configuration
+architecture = { MultiLSTM = { layers = 2 } }
+
+# Sequence length configuration
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+
+# Hidden units configuration
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+
+# Dropout configuration
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.2 }
+variational = true
+recurrent = true
+
+# Attention mechanism (optional)
+[model.attention]
+enabled = true
+mechanism = "SelfAttention"
+heads = 8
+head_dim = 64
+dropout_rate = 0.1
+temperature_scaling = 1.0
+use_relative_position = true
+
+[model.attention.visualization]
+save_heatmaps = false
+export_analysis = false
+output_dir = "attention_analysis"
+
+# Output heads configuration
+[model.output_heads]
+
+[model.output_heads.price_levels]
+enabled = true
+bins = 10
+range_percent = 0.05
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+threshold = 0.01
+confidence_calibration = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+horizons = ["1h", "4h", "1d"]
+
+# ✅ NEW: Features section (replaces separate features config file)
+[features]
+
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 200]
+ema_periods = [5, 10, 20, 50, 200]
+wma_periods = [10, 20]
+hull_periods = [9, 21]
+
+[features.technical_indicators.momentum]
+rsi_periods = [14, 21]
+stochastic = true
+williams_r = true
+cci_periods = [14, 20]
+momentum_periods = [10, 20]
+
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14, 21]
+keltner_channels = true
+donchian_channels = true
+
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [10, 20]
+mfi_periods = [14]
+ad_line = true
+chaikin_oscillator = true
+
+[features.market_microstructure]
+enabled = true
+
+[features.market_microstructure.price_dynamics]
+velocity_periods = [5, 10, 20]
+acceleration_periods = [5, 10]
+jerk_periods = [5]
+
+[features.market_microstructure.volume_price]
+vwap_periods = [20, 50]
+volume_price_trend = true
+ease_of_movement = true
+negative_volume_index = true
+
+[features.volatility_features]
+enabled = true
+
+[features.volatility_features.realized_volatility]
+periods = ["1h", "4h", "24h"]
+estimators = ["Standard", "RangeBasedYangZhang"]
+
+[features.custom_features]
+auto_include_all = true
+include_features = []
+exclude_features = []
+
+[features.custom_features.transformations]
+# Example transformations for custom features
+# sentiment = "ZScore"
+# on_chain_volume = "Log"
+# macro_indicator = "MinMaxScale"
+
+[features.engineering]
+[features.engineering.polynomial_features]
+enabled = false
+degree = 2
+include_bias = false
+interaction_only = true
+
+[features.engineering.interaction_features]
+enabled = true
+max_interactions = 10
+feature_pairs = []
+
+[features.engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3, 5, 10]
+features_to_lag = ["close", "volume", "rsi_14"]
+
+[features.engineering.rolling_features]
+enabled = true
+window_sizes = [5, 10, 20]
+statistics = ["Mean", "Std", "Min", "Max"]
+
+[features.selection]
+enabled = true
+max_features = 100
+correlation_threshold = 0.95
+importance_threshold = 0.001
+methods = ["CorrelationFilter", "ImportanceBased"]
+keep_crypto_features = true
+
+# ✅ NEW: Cross-Asset Features Configuration
+# ONLY works with multiple symbols: --symbol BTCUSDT,ETHUSDT,DOTUSDT
+[features.cross_asset]
+enabled = true                    # Enable cross-asset features
+min_symbols_required = 2          # Require at least 2 symbols
+required_symbols = ["BTCUSDT"]    # Require BTC for market analysis
+btc_dominance_enabled = true      # Calculate BTC dominance
+eth_btc_ratio_enabled = true      # Calculate ETH/BTC ratio (optional)
+
+[features.cross_asset.sentiment_analysis]
+enabled = true
+lookback_periods = 24             # Hours/days to look back
+price_velocity_weight = 0.3       # Weight for price velocity component
+volume_spike_weight = 0.3         # Weight for volume spike component
+volatility_weight = 0.4           # Weight for volatility component
+
+[features.cross_asset.correlation_analysis]
+enabled = true
+min_periods = 50                  # Minimum periods for correlation
+correlation_window = 20           # Rolling window for correlation
+
+[data]
+normalization = "Robust"
+sequence_overlap = 0.8
+
+[data.outlier_handling]
+enabled = true
+method = "ModifiedZScore"
+threshold = 3.5
+
+[optimization]
+method = "Bayesian"
+n_trials = 100
+timeout_seconds = 3600
+metric = "MAE"

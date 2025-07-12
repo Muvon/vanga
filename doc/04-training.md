@@ -1,101 +1,114 @@
-# Multi-Layer LSTM Training Guide
+# LSTM Training Guide - Single-Config System
 
-This guide covers VANGA's **multi-layer LSTM training system** with intelligent architecture optimization and automatic early stopping.
+This guide covers VANGA's **single-config LSTM training system** with intelligent architecture optimization and automatic early stopping.
 
-## 🧠 Multi-Layer LSTM Features
+## 🧠 Single-Config Training Features
 
-### ✅ **Multi-Layer Architecture Support**
-- **1-4+ Layers**: Automatic layer count optimization based on data characteristics
-- **Manual Layer Chaining**: Precise control over multi-layer data flow
-- **Architecture Types**: MultiLSTM, StackedLSTM, BidirectionalLSTM, CNNLSTM, TransformerLSTM
-- **Performance Optimization**: Intelligent layer sizing and memory management
+### ✅ **Unified Configuration**
+- **All-in-One**: Training, model, and feature parameters in single TOML file
+- **Template-Based**: Pre-configured templates for different use cases
+- **Parameter Documentation**: Comprehensive explanations in example configs
+- **Validation**: Automatic parameter validation and error checking
 
 ### ✅ **Intelligent Training System**
 - **Auto Early Stopping**: Automatically stops when validation loss plateaus
 - **Adaptive Learning Rate**: Dynamic learning rate adjustment during training
-- **Layer Validation**: Real-time dimension checking and error detection
-- **Performance Monitoring**: Layer-by-layer shape and timing logs
+- **Architecture Optimization**: Automatic layer count and sizing based on data
+- **Performance Monitoring**: Real-time training metrics and convergence tracking
 
-### ✅ **Configuration-Driven Architecture**
-- **Auto-Optimization**: Automatic layer count selection based on dataset size
-- **Manual Configuration**: Precise control over layer count and architecture type
-- **Symbol-Specific Models**: One optimized model per trading pair
-- **Quality-First Defaults**: Production-ready configurations out of the box
+### ✅ **Configuration Templates**
+- **Quick Start**: `configs/quick_start.toml` - Minimal but effective
+- **Standard**: `configs/training.toml` - Production single-asset
+- **Cross-Asset**: `configs/cross_asset_training.toml` - Multi-asset with correlations
+- **Examples**: `configs/example_single_asset.toml` - Complete parameter reference
 
 ## Quick Start
 
-### **Multi-Layer LSTM Training (RECOMMENDED)**
+### **Single-Config Training (RECOMMENDED)**
 ```bash
-# Uses intelligent defaults: 3-layer LSTM, Auto epochs, Adaptive LR, Early stopping
-vanga train --symbol BTCUSDT --data data/btc_1h.csv
+# Quick start for beginners
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/quick_start.toml
+
+# Standard production training
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/training.toml
+
+# Cross-asset training
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross_asset_training.toml
 ```
 
 **What happens:**
-- **Multi-Layer LSTM**: Automatically selects 2-3 layers based on data size
+- **Single Config Loading**: All parameters loaded from one TOML file
+- **Auto Architecture**: Automatically selects 2-3 layers based on data size
 - **Auto Early Stopping**: Max 1000 epochs, stops after 50 epochs without improvement
 - **Adaptive Learning Rate**: Starts at 0.001, reduces when loss plateaus
 - **50+ Technical Indicators**: Full feature engineering pipeline
 - **Validation Monitoring**: 20% validation split with performance tracking
 
-### **Custom Architecture Training**
+### **Configuration Examples**
+
+#### **Quick Start Configuration**
 ```bash
-# Specify exact layer count and architecture type
-vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/multi_lstm_3layer.toml
+# Use pre-configured template for beginners
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/quick_start.toml
 ```
 
-**Example Configuration** (`configs/multi_lstm_3layer.toml`):
+**Configuration Preview** (`configs/quick_start.toml`):
 ```toml
-[model]
-architecture = "MultiLSTM"
-
-[model.architecture_config.MultiLSTM]
-layers = 3
-
-[model.lstm]
-hidden_size = 128
-sequence_length = 60
-
 [training]
-[training.epochs]
-type = "Auto"
-max_epochs = 1000
+epochs = { Auto = { max_epochs = 1000 } }
+learning_rate = { Fixed = 0.001 }
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+early_stopping_patience = 50
 
-[training.learning_rate]
-type = "Adaptive"
-initial_lr = 0.001
+[model]
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+
+[features.technical_indicators]
+enabled = true
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 20, 50]
+ema_periods = [5, 20, 50]
 ```
 
-### **Performance-Optimized Training**
+#### **Production Configuration**
 ```bash
-# 2-layer LSTM for faster training
-vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/fast_training.toml
+# Full-featured production training
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/training.toml
 ```
 
-### **Advanced Architecture Training**
+#### **Cross-Asset Configuration**
 ```bash
-# StackedLSTM with 4 layers for complex patterns
-vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/stacked_lstm.toml
+# Multi-asset training with correlation analysis
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross_asset_training.toml
 ```
-### ✅ Adaptive Learning Rate
-## Multi-Layer Architecture Configuration
 
-### **Production Quality Multi-Layer (RECOMMENDED)**
+### **Parameter Customization**
+
+For detailed parameter explanations and tuning guidance:
+- **Single-asset reference**: `configs/example_single_asset.toml`
+- **Cross-asset reference**: `configs/example_cross_asset.toml`
+
+**Key customization areas:**
 ```toml
-# configs/production_multi_lstm.toml
+# Architecture complexity
 [model]
-architecture = "MultiLSTM"
+architecture = { MultiLSTM = { layers = 3 } }  # 1-4 layers
 
-[model.architecture_config.MultiLSTM]
-layers = 3  # Optimal for most crypto datasets
-
-[model.lstm]
-hidden_size = 128
-sequence_length = 60
-
+# Learning configuration
 [training]
-[training.epochs]
-type = "Auto"
-max_epochs = 1000
+learning_rate = { Adaptive = { initial = 0.001, factor = 0.5, patience = 10 } }
+
+# Feature selection
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 200]  # Customize periods
+
+# Cross-asset features (multi-asset only)
+[features.cross_asset]
+enabled = true
+required_symbols = ["BTCUSDT"]
+```
 
 [training.learning_rate]
 type = "Adaptive"
@@ -309,26 +322,26 @@ pub struct ModelConfig {
 
 ```bash
 # Train with default settings
-./target/release/vanga train --symbol BTCUSDT --data data/btc_data.csv
+vanga train --symbol BTCUSDT --data data/btc_data.csv
 
 # Fresh training (ignore existing model)
-./target/release/vanga train --symbol BTCUSDT --data data/btc_data.csv --fresh
+vanga train --symbol BTCUSDT --data data/btc_data.csv --fresh
 
 # Continue training existing model
-./target/release/vanga train --symbol BTCUSDT --data data/new_btc_data.csv --continue-training
+vanga train --symbol BTCUSDT --data data/new_btc_data.csv --continue-training
 ```
 
 ### **Advanced Commands**
 
 ```bash
 # Custom horizons
-./target/release/vanga train --symbol BTCUSDT --data data/btc_data.csv --horizons 1h,4h,1d
+vanga train --symbol BTCUSDT --data data/btc_data.csv --horizons 1h,4h,1d
 
 # Custom features configuration
-./target/release/vanga train --symbol BTCUSDT --data data/btc_data.csv --features-config config/custom_features.toml
+vanga train --symbol BTCUSDT --data data/btc_data.csv --features-config config/custom_features.toml
 
 # Batch training for multiple symbols
-./target/release/vanga train --batch --symbols BTCUSDT,ETHUSDT,ADAUSDT --data-dir data/
+vanga train --batch --symbols BTCUSDT,ETHUSDT,ADAUSDT --data-dir data/
 ```
 
 ## Data Processing During Training
@@ -461,13 +474,13 @@ Solution: Reduce data size or use chunked processing
 ### **Training Diagnostics**
 ```bash
 # Enable debug logging
-RUST_LOG=debug ./target/release/vanga train --symbol BTCUSDT --data data.csv
+RUST_LOG=debug vanga train --symbol BTCUSDT --data data.csv
 
 # Check training progress
 tail -f logs/training.log
 
 # Validate model after training
-./target/release/vanga models list
+vanga models list
 ```
 
 ## Advanced Training
@@ -502,7 +515,7 @@ DATA_DIR="data"
 
 for symbol in "${SYMBOLS[@]}"; do
     echo "Training $symbol..."
-    ./target/release/vanga train \
+    vanga train \
         --symbol $symbol \
         --data "$DATA_DIR/${symbol}_1h.csv" \
         --fresh
@@ -516,13 +529,13 @@ echo "Batch training completed!"
 ### **Training → Prediction Workflow**
 ```bash
 # 1. Train model
-./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+vanga train --symbol BTCUSDT --data data/btc_historical.csv
 
 # 2. Make predictions
-./target/release/vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
+vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
 
 # 3. List trained models
-./target/release/vanga models list
+vanga models list
 ```
 
 ## Next Steps

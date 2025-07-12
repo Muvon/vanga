@@ -80,7 +80,7 @@ impl StreamingPredictor {
 
         // Create predictor configuration for realtime use
         let _prediction_config = PredictionConfig {
-            symbol: config.symbol.clone(),
+            symbols: vec![config.symbol.clone()],
             input_path: config.file_path.clone(), // Will be updated per prediction
             horizon: Some("1h".to_string()),
             ..Default::default()
@@ -339,7 +339,7 @@ impl StreamingPredictor {
 
         // Create temporary prediction config with the CSV data
         let temp_config = PredictionConfig {
-            symbol: self.config.symbol.clone(),
+            symbols: vec![self.config.symbol.clone()],
             input_path: temp_csv_path.clone(),
             horizon: Some("1h".to_string()),
             ..Default::default()

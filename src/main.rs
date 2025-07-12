@@ -5,6 +5,7 @@ use vanga::api;
 use vanga::config::{PredictionConfig, TrainingConfig};
 use vanga::realtime::{start_realtime_prediction, OutputFormat, RealtimeConfig};
 use vanga::utils::error::{Result, VangaError};
+use vanga::utils::file_discovery;
 
 /// Training command parameters
 struct TrainParams {
@@ -13,7 +14,6 @@ struct TrainParams {
     fresh: bool,
     continue_training: bool,
     horizons: Option<Vec<String>>,
-    features_config: Option<PathBuf>,
     config: Option<PathBuf>,
     attention: bool,
     tft: bool,
@@ -72,11 +72,7 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         horizons: Option<Vec<String>>,
 
-        /// Custom features configuration file
-        #[arg(long)]
-        features_config: Option<PathBuf>,
-
-        /// Training configuration file (enables intelligent training)
+        /// Training configuration file (includes all features and settings)
         #[arg(long)]
         config: Option<PathBuf>,
 
@@ -95,12 +91,20 @@ enum Commands {
 
     /// Make predictions using trained model
     Predict {
-        /// Trading symbol (e.g., BTCUSDT)
-        #[arg(short, long)]
+        /// Trading symbol(s) - single: BTCUSDT or multiple: BTCUSDT,ETHUSDT for cross-asset prediction
+        #[arg(
+            short,
+            long,
+            help = "Trading symbol(s): single (BTCUSDT) or comma-separated for cross-asset (BTCUSDT,ETHUSDT)"
+        )]
         symbol: String,
 
-        /// Path to input CSV data
-        #[arg(short, long)]
+        /// Path to input CSV data file or directory containing symbol files
+        #[arg(
+            short,
+            long,
+            help = "Input CSV file or directory with {SYMBOL}.csv files for multi-symbol prediction"
+        )]
         input: PathBuf,
 
         /// Prediction horizon (must match one used during training: e.g., 1h, 4h, 1d, 7d)
@@ -250,7 +254,6 @@ async fn main() -> Result<()> {
             fresh,
             continue_training,
             horizons,
-            features_config,
             config,
             attention,
             tft,
@@ -262,7 +265,6 @@ async fn main() -> Result<()> {
                 fresh,
                 continue_training,
                 horizons,
-                features_config,
                 config,
                 attention,
                 tft,
@@ -325,42 +327,21 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         log::info!("🔄 Batch training mode detected");
 
         // Validate data path for batch mode
-        if !params.data.exists() {
-            return Err(VangaError::DataError(format!(
-                "❌ Data path not found: {}\n💡 Create the directory or check the path.",
-                params.data.display()
-            )));
-        }
-
-        if params.data.is_file() && symbols.len() > 1 {
-            return Err(VangaError::DataError(format!(
-                "❌ Multiple symbols specified but data is a single file: {}\n💡 Use a directory with individual CSV files for each symbol: {}/SYMBOL.csv",
-                params.data.display(),
-                params.data.parent().unwrap_or_else(|| std::path::Path::new(".")).display()
-            )));
-        }
+        file_discovery::validate_data_path_for_symbols(&params.data, &symbols)?;
 
         // Process each symbol
         for symbol in symbols {
             log::info!("🚀 Training model for symbol: {}", symbol);
 
-            // Determine data file path
-            let data_file_path = if params.data.is_dir() {
-                // Auto-discovery: look for SYMBOL.csv in directory
-                let csv_path = params.data.join(format!("{}.csv", symbol));
-                if !csv_path.exists() {
-                    log::error!(
-                        "❌ Data file not found for {}: {}",
-                        symbol,
-                        csv_path.display()
-                    );
-                    continue; // Skip this symbol and continue with others
-                }
-                csv_path
-            } else {
-                // Single file for single symbol
-                params.data.clone()
-            };
+            // Resolve data file path using reusable utility
+            let data_file_path =
+                match file_discovery::resolve_symbol_data_path(&params.data, &symbol) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        log::error!("❌ Failed to resolve data file for {}: {}", symbol, e);
+                        continue; // Skip this symbol and continue with others
+                    }
+                };
 
             log::info!("📂 Using data file: {}", data_file_path.display());
 
@@ -387,9 +368,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             if let Some(ref horizons) = params.horizons {
                 symbol_config = symbol_config.horizons(horizons.clone());
             }
-            if let Some(ref features_config) = params.features_config {
-                symbol_config = symbol_config.features_config_path(features_config.clone());
-            }
+
             if params.attention {
                 log::info!("🎯 Attention mechanism enabled for {}", symbol);
                 symbol_config = symbol_config.with_attention_enabled(true);
@@ -491,9 +470,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         if let Some(horizons) = params.horizons {
             config = config.horizons(horizons);
         }
-        if let Some(features_config) = params.features_config {
-            config = config.features_config_path(features_config);
-        }
+        // Features are now part of the main config, no separate handling needed
         if params.attention {
             log::info!("🎯 Attention mechanism enabled for enhanced accuracy");
             config = config.with_attention_enabled(true);
@@ -506,8 +483,11 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         monitor.checkpoint("Configuration prepared");
 
         // Train the model
-        let model = api::train_model(config.clone()).await?;
+        let mut model = api::train_model(config.clone()).await?;
         monitor.checkpoint("Model training completed");
+
+        // Set feature configuration in model metadata for prediction use
+        model.set_feature_config(config.features.clone());
 
         // Save model
         let model_path = vanga::utils::model_path::get_model_path(&config.symbol);
@@ -575,78 +555,383 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
             log::warn!("Batch mode enabled but no input directory specified");
         }
     } else {
-        // Single prediction
-        let mut config = PredictionConfig::default()
-            .symbol(params.symbol)
-            .input_path(params.input);
+        // Parse symbols (single or comma-separated)
+        let symbols: Vec<String> = params
+            .symbol
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
-        if let Some(horizon) = params.horizon {
-            config = config.horizon(horizon);
+        log::info!("📋 Parsed {} symbol(s): {:?}", symbols.len(), symbols);
+
+        if symbols.is_empty() {
+            return Err(vanga::utils::error::VangaError::ConfigError(
+                "No valid symbols provided".to_string(),
+            ));
         }
 
-        if params.all_horizons {
-            config = config.all_horizons(true);
-        }
+        if symbols.len() == 1 {
+            // Single symbol prediction - works exactly as before
+            log::info!("🎯 Single symbol prediction mode: {}", symbols[0]);
 
-        if let Some(output) = params.output {
-            config = config.output_path(output);
-        }
+            let mut config = PredictionConfig::default()
+                .symbol(symbols[0].clone())
+                .input_path(params.input);
 
-        if let Some(min_confidence) = params.min_confidence {
-            config = config.min_confidence(min_confidence);
-        }
+            if let Some(horizon) = params.horizon {
+                config = config.horizon(horizon);
+            }
 
-        // Load the trained model using consistent path
-        let model_path = vanga::utils::model_path::get_model_path(&config.symbol);
-        let model = vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path)?;
+            if params.all_horizons {
+                config = config.all_horizons(true);
+            }
 
-        // Validate horizon configuration against model
-        config.validate_horizon_against_model(&model)?;
+            if let Some(output) = params.output {
+                config = config.output_path(output);
+            }
 
-        // Log available horizons for user information
-        let trained_horizons = model.get_trained_horizons();
-        log::info!("Model trained horizons: {:?}", trained_horizons);
-        if let Some(requested_horizon) = &config.horizon {
-            log::info!("Using requested horizon: {}", requested_horizon);
-        } else if config.all_horizons {
-            log::info!("Predicting all available horizons: {:?}", trained_horizons);
+            if let Some(min_confidence) = params.min_confidence {
+                config = config.min_confidence(min_confidence);
+            }
+
+            // Resolve data file path
+            let data_file_path =
+                file_discovery::resolve_symbol_data_path(&config.input_path, &symbols[0])?;
+
+            log::info!("📂 Using data file: {}", data_file_path.display());
+
+            // Load the trained model
+            let model_path = vanga::utils::model_path::get_model_path(&symbols[0]);
+            let model = vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path)?;
+
+            // Validate horizon configuration against model
+            config.validate_horizon_against_model(&model)?;
+
+            // Log available horizons
+            let trained_horizons = model.get_trained_horizons();
+            log::info!("Model trained horizons: {:?}", trained_horizons);
+            if let Some(requested_horizon) = &config.horizon {
+                log::info!("Using requested horizon: {}", requested_horizon);
+            } else if config.all_horizons {
+                log::info!("Predicting all available horizons: {:?}", trained_horizons);
+            } else {
+                log::info!(
+                    "No horizon specified, using primary horizon: {}",
+                    trained_horizons.first().unwrap_or(&"1h".to_string())
+                );
+            }
+
+            // Make predictions using the multi-target API
+            let predictions = vanga::api::predict_multi_target(config.clone(), &model).await?;
+
+            // Save predictions if output path specified
+            if let Some(ref output_path) = config.output_path {
+                // Convert raw predictions to structured format using OutputFormatter
+                log::info!("Converting raw predictions to structured format...");
+                let structured_predictions = predictions
+                    .to_structured_predictions(&config, &model)
+                    .await?;
+
+                // Use existing formatter method to create JSON
+                let output_content =
+                    vanga::output::formatter::predictions_to_json(&structured_predictions)?;
+
+                std::fs::write(output_path.as_path(), output_content)?;
+                log::info!("Structured predictions saved to: {}", output_path.display());
+            } else {
+                // If no output path, print structured predictions to console
+                log::info!("Converting raw predictions to structured format for console output...");
+                let structured_predictions = predictions
+                    .to_structured_predictions(&config, &model)
+                    .await?;
+                let output_content =
+                    vanga::output::formatter::predictions_to_json(&structured_predictions)?;
+                println!("{}", output_content);
+            }
+
+            log::info!("Prediction configuration: {:?}", config);
+            log::info!("Prediction completed successfully");
         } else {
+            // Multi-symbol prediction with cross-asset features
             log::info!(
-                "No horizon specified, using primary horizon: {}",
-                trained_horizons.first().unwrap_or(&"1h".to_string())
+                "🔄 Multi-symbol prediction mode with {} symbols",
+                symbols.len()
             );
+
+            // Resolve data file paths for all symbols
+            let mut symbol_paths = std::collections::HashMap::new();
+            for symbol in &symbols {
+                match file_discovery::resolve_symbol_data_path(&params.input, symbol) {
+                    Ok(path) => {
+                        symbol_paths.insert(symbol.clone(), path);
+                    }
+                    Err(e) => {
+                        log::error!("❌ Failed to resolve data file for {}: {}", symbol, e);
+                        continue;
+                    }
+                }
+            }
+
+            if symbol_paths.is_empty() {
+                return Err(vanga::utils::error::VangaError::DataError(
+                    "No valid data files found for any symbols".to_string(),
+                ));
+            }
+
+            log::info!("📂 Found data files for {} symbols", symbol_paths.len());
+
+            // Create prediction config for multi-symbol mode
+            let mut config = PredictionConfig::default()
+                .symbols(symbols.clone())
+                .input_path(params.input.clone());
+
+            if let Some(horizon) = params.horizon.clone() {
+                config = config.horizon(horizon);
+            }
+
+            if params.all_horizons {
+                config = config.all_horizons(true);
+            }
+
+            if let Some(min_confidence) = params.min_confidence {
+                config = config.min_confidence(min_confidence);
+            }
+
+            // Get feature configuration from first symbol's model metadata
+            let features_config = {
+                let first_symbol = &symbols[0];
+                let model_path = vanga::utils::model_path::get_model_path(first_symbol);
+                match vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path) {
+                    Ok(model) => {
+                        if let Some(config) = model.get_feature_config() {
+                            log::info!("✅ Loaded feature configuration from model metadata");
+                            config.clone()
+                        } else {
+                            log::warn!("Model metadata missing feature config, using default");
+                            vanga::config::FeatureConfig::default()
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Could not load model for {}: {}, using default feature config",
+                            first_symbol,
+                            e
+                        );
+                        vanga::config::FeatureConfig::default()
+                    }
+                }
+            };
+
+            // Check if cross-asset features should be enabled
+            let cross_asset_enabled = features_config.cross_asset.enabled && symbols.len() > 1;
+
+            if cross_asset_enabled {
+                log::info!("🔗 Cross-asset features enabled for multi-symbol prediction");
+
+                // Use cross-asset prediction pipeline
+                let data_pipeline = vanga::data::DataPipeline::new();
+                let prepared_data = data_pipeline
+                    .prepare_cross_asset_prediction_data(&symbol_paths, &config, &features_config)
+                    .await?;
+
+                // Make predictions for each symbol with cross-asset features
+                for symbol in &symbols {
+                    if let Some(_symbol_data) = prepared_data.get(symbol) {
+                        log::info!("🎯 Making cross-asset prediction for {}", symbol);
+
+                        // Load the trained model for this symbol
+                        let model_path = vanga::utils::model_path::get_model_path(symbol);
+                        let model = match vanga::model::multi_target::MultiTargetLSTMModel::load(
+                            &model_path,
+                        ) {
+                            Ok(model) => model,
+                            Err(e) => {
+                                log::error!("❌ Failed to load model for {}: {}", symbol, e);
+                                continue;
+                            }
+                        };
+
+                        // Create single-symbol config for this prediction
+                        let symbol_config = config.clone().symbol(symbol.clone());
+
+                        // Validate horizon configuration against model
+                        if let Err(e) = symbol_config.validate_horizon_against_model(&model) {
+                            log::error!("❌ Horizon validation failed for {}: {}", symbol, e);
+                            continue;
+                        }
+
+                        // Make prediction using multi-target API
+                        let predictions =
+                            match vanga::api::predict_multi_target(symbol_config.clone(), &model)
+                                .await
+                            {
+                                Ok(predictions) => predictions,
+                                Err(e) => {
+                                    log::error!(
+                                        "❌ Cross-asset prediction failed for {}: {}",
+                                        symbol,
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
+
+                        // Save predictions for this symbol
+                        let output_path = if let Some(output) = &params.output {
+                            if output.is_dir() {
+                                Some(
+                                    output.join(format!("{}_cross_asset_predictions.json", symbol)),
+                                )
+                            } else {
+                                let stem = output.file_stem().unwrap_or_default().to_string_lossy();
+                                let ext = output.extension().unwrap_or_default().to_string_lossy();
+                                Some(output.with_file_name(format!(
+                                    "{}_{}_cross_asset.{}",
+                                    stem, symbol, ext
+                                )))
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some(output_path) = output_path {
+                            let structured_predictions = predictions
+                                .to_structured_predictions(&symbol_config, &model)
+                                .await?;
+                            let output_content = vanga::output::formatter::predictions_to_json(
+                                &structured_predictions,
+                            )?;
+                            std::fs::write(&output_path, output_content)?;
+                            log::info!(
+                                "✅ Cross-asset predictions for {} saved to: {}",
+                                symbol,
+                                output_path.display()
+                            );
+                        } else {
+                            let structured_predictions = predictions
+                                .to_structured_predictions(&symbol_config, &model)
+                                .await?;
+                            let output_content = vanga::output::formatter::predictions_to_json(
+                                &structured_predictions,
+                            )?;
+                            println!("=== Cross-Asset Predictions for {} ===", symbol);
+                            println!("{}", output_content);
+                        }
+                    } else {
+                        log::error!("❌ No prepared data found for symbol: {}", symbol);
+                    }
+                }
+            } else {
+                log::info!("🔄 Cross-asset features disabled, using individual predictions");
+
+                // Fall back to individual symbol predictions
+                for symbol in &symbols {
+                    log::info!("🎯 Predicting symbol: {}", symbol);
+
+                    let mut symbol_config = PredictionConfig::default()
+                        .symbol(symbol.clone())
+                        .input_path(params.input.clone());
+
+                    if let Some(horizon) = &params.horizon {
+                        symbol_config = symbol_config.horizon(horizon.clone());
+                    }
+
+                    if params.all_horizons {
+                        symbol_config = symbol_config.all_horizons(true);
+                    }
+
+                    if let Some(min_confidence) = params.min_confidence {
+                        symbol_config = symbol_config.min_confidence(min_confidence);
+                    }
+
+                    // Resolve data file path for this symbol
+                    let data_file_path = match file_discovery::resolve_symbol_data_path(
+                        &symbol_config.input_path,
+                        symbol,
+                    ) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            log::error!("❌ Failed to resolve data file for {}: {}", symbol, e);
+                            continue;
+                        }
+                    };
+
+                    log::info!(
+                        "📂 Using data file for {}: {}",
+                        symbol,
+                        data_file_path.display()
+                    );
+
+                    // Load the trained model for this symbol
+                    let model_path = vanga::utils::model_path::get_model_path(symbol);
+                    let model =
+                        match vanga::model::multi_target::MultiTargetLSTMModel::load(&model_path) {
+                            Ok(model) => model,
+                            Err(e) => {
+                                log::error!("❌ Failed to load model for {}: {}", symbol, e);
+                                continue;
+                            }
+                        };
+
+                    // Validate horizon configuration against model
+                    if let Err(e) = symbol_config.validate_horizon_against_model(&model) {
+                        log::error!("❌ Horizon validation failed for {}: {}", symbol, e);
+                        continue;
+                    }
+
+                    // Make prediction for this symbol
+                    log::info!("🔮 Making prediction for {}", symbol);
+
+                    let predictions =
+                        match vanga::api::predict_multi_target(symbol_config.clone(), &model).await
+                        {
+                            Ok(predictions) => predictions,
+                            Err(e) => {
+                                log::error!("❌ Prediction failed for {}: {}", symbol, e);
+                                continue;
+                            }
+                        };
+
+                    // Save predictions for this symbol
+                    let output_path = if let Some(output) = &params.output {
+                        if output.is_dir() {
+                            Some(output.join(format!("{}_predictions.json", symbol)))
+                        } else {
+                            let stem = output.file_stem().unwrap_or_default().to_string_lossy();
+                            let ext = output.extension().unwrap_or_default().to_string_lossy();
+                            Some(output.with_file_name(format!("{}_{}.{}", stem, symbol, ext)))
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(output_path) = output_path {
+                        let structured_predictions = predictions
+                            .to_structured_predictions(&symbol_config, &model)
+                            .await?;
+                        let output_content =
+                            vanga::output::formatter::predictions_to_json(&structured_predictions)?;
+                        std::fs::write(&output_path, output_content)?;
+                        log::info!(
+                            "✅ Predictions for {} saved to: {}",
+                            symbol,
+                            output_path.display()
+                        );
+                    } else {
+                        let structured_predictions = predictions
+                            .to_structured_predictions(&symbol_config, &model)
+                            .await?;
+                        let output_content =
+                            vanga::output::formatter::predictions_to_json(&structured_predictions)?;
+                        println!("=== Predictions for {} ===", symbol);
+                        println!("{}", output_content);
+                    }
+                }
+            }
+
+            log::info!("✅ Multi-symbol prediction completed");
         }
-
-        // Make predictions using the multi-target API
-        let predictions = vanga::api::predict_multi_target(config.clone(), &model).await?;
-
-        // Save predictions if output path specified
-        if let Some(ref output_path) = config.output_path {
-            // Convert raw predictions to structured format using OutputFormatter
-            log::info!("Converting raw predictions to structured format...");
-            let structured_predictions = predictions
-                .to_structured_predictions(&config, &model)
-                .await?;
-
-            // Use existing formatter method to create JSON
-            let output_content =
-                vanga::output::formatter::predictions_to_json(&structured_predictions)?;
-
-            std::fs::write(output_path.as_path(), output_content)?;
-            log::info!("Structured predictions saved to: {}", output_path.display());
-        } else {
-            // If no output path, print structured predictions to console
-            log::info!("Converting raw predictions to structured format for console output...");
-            let structured_predictions = predictions
-                .to_structured_predictions(&config, &model)
-                .await?;
-            let output_content =
-                vanga::output::formatter::predictions_to_json(&structured_predictions)?;
-            println!("{}", output_content);
-        }
-
-        log::info!("Prediction configuration: {:?}", config);
-        log::info!("Prediction completed successfully");
     }
 
     Ok(())

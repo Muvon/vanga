@@ -20,7 +20,9 @@ pub async fn generate_volatility_features(
         .map(|w| (w[1] / w[0]).ln())
         .collect();
 
-    let realized_vol = calculate_rolling_volatility(&returns, 24)?; // 24-period rolling
+    let mut realized_vol = calculate_rolling_volatility(&returns, 24)?; // 24-period rolling
+                                                                        // Pad to match original DataFrame length (returns is 1 shorter than close_prices)
+    realized_vol.insert(0, f64::NAN);
 
     // Calculate range-based volatility (Parkinson estimator)
     let range_vol: Vec<f64> = high_prices
@@ -36,10 +38,12 @@ pub async fn generate_volatility_features(
         .collect();
 
     // Calculate volatility of volatility
-    let vol_of_vol = calculate_rolling_volatility(&realized_vol, 12)?; // 12-period rolling
+    let mut vol_of_vol = calculate_rolling_volatility(&realized_vol[1..], 12)?; // Skip the NaN we added
+    vol_of_vol.insert(0, f64::NAN); // Pad to match DataFrame length
 
     // Calculate GARCH-like volatility (simplified)
-    let garch_vol = calculate_garch_volatility(&returns)?;
+    let mut garch_vol = calculate_garch_volatility(&returns)?;
+    garch_vol.insert(0, f64::NAN); // Pad to match DataFrame length
 
     // Add volatility features to DataFrame one by one
     df = df
