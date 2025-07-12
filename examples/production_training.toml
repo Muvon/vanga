@@ -1,5 +1,5 @@
 # Production Training Config (RECOMMENDED)
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 1000 } }
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
 learning_rate = { Adaptive = { initial_lr = 0.01 } }

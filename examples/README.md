@@ -49,7 +49,7 @@ vanga train --symbol BTCUSDT --data new_data.csv
 
 All configs follow this structure:
 ```toml
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 1000 } }  # or { Fixed = 500 }
 learning_rate = { Adaptive = { initial_lr = 0.01 } }  # or { Fixed = 0.001 }
 validation_split = 0.2  # 0.0 to disable validation

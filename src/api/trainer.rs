@@ -102,7 +102,7 @@ impl ModelTrainer {
         // The caller (main.rs) will handle loading/saving based on training config
         log::info!("🆕 Creating new multi-target model for training");
         MultiTargetLSTMModel::new(
-            &self.config.model_config,
+            &self.config.model,
             input_size,
             target_names,
             self.config.horizons.clone(),

@@ -284,7 +284,7 @@ pub struct TrainingConfig {
     pub continue_training: bool,
     pub horizons: Vec<String>,
     pub features_config_path: Option<PathBuf>,
-    pub model_config: ModelConfig,
+    pub model: ModelConfig,
 }
 ```
 

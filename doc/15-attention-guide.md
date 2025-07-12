@@ -147,7 +147,7 @@ Input → LSTM Layers → Attention Layer → Output Layer → Predictions
 #### Memory Errors
 ```toml
 # Reduce batch size
-[training_params]
+[training]
 batch_size = { Fixed = 64 }
 
 # Or disable attention temporarily

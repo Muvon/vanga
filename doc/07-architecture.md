@@ -170,7 +170,7 @@ pub struct MultiTargetPredictions {
 
 ### **Multi-Layer LSTM Configuration**
 ```toml
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 1000 } }
 learning_rate = { Adaptive = { initial_lr = 0.001 } }
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
@@ -198,12 +198,12 @@ rate = { Auto = { min_rate = 0.1, max_rate = 0.5 } }
 variational = true
 recurrent = true
 
-[data_config]
+[data]
 normalization = "Robust"
 sequence_overlap = 0.8
 missing_data_strategy = "Interpolate"
 
-[optimization_config]
+[optimization]
 enabled = true
 trials = 100
 metric = "ValidationLoss"

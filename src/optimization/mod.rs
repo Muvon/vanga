@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 pub struct AutoOptimizer {
     pub hyperparameter_optimizer: HyperparameterOptimizer,
     pub feature_selector: FeatureSelector,
-    pub optimization_config: OptimizationConfig,
+    pub optimization: OptimizationConfig,
 }
 
 impl AutoOptimizer {
@@ -38,16 +38,52 @@ impl AutoOptimizer {
         Self {
             hyperparameter_optimizer: HyperparameterOptimizer::new(),
             feature_selector: FeatureSelector::new(),
-            optimization_config: OptimizationConfig::default(),
+            optimization: OptimizationConfig::default(),
         }
     }
 
     /// Create auto-optimizer with custom configuration
-    pub fn with_config(config: OptimizationConfig) -> Self {
+    pub fn with_config(config: crate::config::training::OptimizationConfig) -> Self {
+        // Convert training config to internal optimization config
+        let internal_config = OptimizationConfig {
+            hyperparameter_config: HyperparameterConfig {
+                method: match config.method {
+                    crate::config::training::OptimizationMethod::Bayesian => {
+                        hyperparameter::OptimizationMethod::Bayesian
+                    }
+                    crate::config::training::OptimizationMethod::Grid => {
+                        hyperparameter::OptimizationMethod::Grid
+                    }
+                    crate::config::training::OptimizationMethod::Random => {
+                        hyperparameter::OptimizationMethod::Random
+                    }
+                    crate::config::training::OptimizationMethod::None => {
+                        hyperparameter::OptimizationMethod::Random
+                    } // Default fallback
+                },
+                n_trials: config.n_trials,
+                sequence_length_range: (10, 200),  // Default range
+                hidden_units_range: (32, 512),     // Default range
+                learning_rate_range: (1e-5, 1e-2), // Default range
+                batch_size_options: vec![16, 32, 64, 128, 256], // Default options
+            },
+            feature_selection_config: FeatureSelectionConfig::default(),
+            max_optimization_time: config.timeout_seconds.unwrap_or(3600),
+            parallel_trials: 4,
+            early_stopping_patience: 10,
+        };
+
+        log::info!(
+            "Auto-optimizer configured: method={:?}, trials={}, timeout={}s",
+            config.method,
+            config.n_trials,
+            config.timeout_seconds.unwrap_or(3600)
+        );
+
         Self {
-            hyperparameter_optimizer: HyperparameterOptimizer::with_config(&config),
-            feature_selector: FeatureSelector::with_config(&config),
-            optimization_config: config,
+            hyperparameter_optimizer: HyperparameterOptimizer::with_config(&internal_config),
+            feature_selector: FeatureSelector::with_config(&internal_config),
+            optimization: internal_config,
         }
     }
 

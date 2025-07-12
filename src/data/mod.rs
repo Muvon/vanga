@@ -53,17 +53,13 @@ impl DataPipeline {
         // Preprocess data (features, normalization, etc.)
         let processed_data = self
             .preprocessor
-            .process_for_training(
-                raw_data,
-                &config.data_config,
-                config.features_config_path.as_ref(),
-            )
+            .process_for_training(raw_data, &config.data, config.features_config_path.as_ref())
             .await?;
 
         // Generate sequences for LSTM
         let sequences = self
             .sequence_generator
-            .generate_training_sequences(processed_data, &config.horizons, &config.model_config)
+            .generate_training_sequences(processed_data, &config.horizons, &config.model)
             .await?;
 
         Ok(sequences)

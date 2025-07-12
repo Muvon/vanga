@@ -2,6 +2,8 @@ use crate::config::ModelConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Complete configuration for VANGA training pipeline
+/// This is a coordinator that loads and manages all configuration sections
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingConfig {
     /// Trading symbol (e.g., BTCUSDT)
@@ -23,16 +25,16 @@ pub struct TrainingConfig {
     pub features_config_path: Option<PathBuf>,
 
     /// Model architecture configuration
-    pub model_config: ModelConfig,
+    pub model: ModelConfig,
 
     /// Training hyperparameters
-    pub training_params: TrainingParams,
+    pub training: TrainingParams,
 
     /// Data preprocessing configuration
-    pub data_config: DataConfig,
+    pub data: DataConfig,
 
     /// Optimization configuration
-    pub optimization_config: OptimizationConfig,
+    pub optimization: OptimizationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,13 +159,80 @@ pub enum OptimizationMethod {
     None,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OptimizationMetric {
-    Accuracy,
-    SharpeRatio,
-    MaxDrawdown,
-    ProfitFactor,
-    Custom(String),
+// Re-export OptimizationMetric from objective module to avoid duplication
+pub use crate::optimization::objective::OptimizationMetric;
+
+impl TrainingParams {
+    /// Validate training parameters for correctness
+    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+        // Validate validation split
+        if self.validation_split <= 0.0 || self.validation_split >= 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "validation_split must be between 0.0 and 1.0, got: {}",
+                self.validation_split
+            )));
+        }
+
+        // Validate test split
+        if self.test_split < 0.0 || self.test_split >= 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "test_split must be between 0.0 and 1.0, got: {}",
+                self.test_split
+            )));
+        }
+
+        // Validate combined splits don't exceed 1.0
+        if self.validation_split + self.test_split >= 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "validation_split + test_split must be < 1.0, got: {} + {} = {}",
+                self.validation_split,
+                self.test_split,
+                self.validation_split + self.test_split
+            )));
+        }
+
+        // Validate gradient clipping
+        if let Some(clip) = self.gradient_clip {
+            if clip <= 0.0 {
+                return Err(crate::utils::error::VangaError::ConfigError(format!(
+                    "gradient_clip must be positive, got: {}",
+                    clip
+                )));
+            }
+        }
+
+        // Validate early stopping patience
+        if self.early_stopping_patience == 0 {
+            return Err(crate::utils::error::VangaError::ConfigError(
+                "early_stopping_patience must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl OptimizationConfig {
+    /// Validate optimization configuration parameters
+    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+        // Validate number of trials
+        if self.n_trials == 0 {
+            return Err(crate::utils::error::VangaError::ConfigError(
+                "n_trials must be greater than 0".to_string(),
+            ));
+        }
+
+        // Validate timeout
+        if let Some(timeout) = self.timeout_seconds {
+            if timeout == 0 {
+                return Err(crate::utils::error::VangaError::ConfigError(
+                    "timeout_seconds must be greater than 0".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for TrainingConfig {
@@ -175,10 +244,10 @@ impl Default for TrainingConfig {
             continue_training: false,
             horizons: vec!["1h".to_string(), "4h".to_string(), "1d".to_string()],
             features_config_path: None,
-            model_config: ModelConfig::default(),
-            training_params: TrainingParams::default(),
-            data_config: DataConfig::default(),
-            optimization_config: OptimizationConfig::default(),
+            model: ModelConfig::default(),
+            training: TrainingParams::default(),
+            data: DataConfig::default(),
+            optimization: OptimizationConfig::default(),
         }
     }
 }
@@ -226,8 +295,8 @@ impl Default for OptimizationConfig {
         Self {
             method: OptimizationMethod::Bayesian,
             n_trials: 100,
-            timeout_seconds: Some(3600), // 1 hour
-            metric: OptimizationMetric::SharpeRatio,
+            timeout_seconds: Some(3600),     // 1 hour
+            metric: OptimizationMetric::MAE, // Use MAE for hyperparameter optimization
         }
     }
 }
@@ -266,7 +335,7 @@ impl TrainingConfig {
 
     /// Enable or disable attention mechanism
     pub fn with_attention_enabled(mut self, enabled: bool) -> Self {
-        self.model_config.attention.enabled = enabled;
+        self.model.attention.enabled = enabled;
         if enabled {
             log::info!("✅ Attention mechanism enabled in model configuration");
         }
@@ -277,13 +346,13 @@ impl TrainingConfig {
     pub fn with_tft_enabled(mut self, enabled: bool) -> Self {
         if enabled {
             // Enable TFT Variable Selection attention mechanism
-            self.model_config.attention.enabled = true;
-            self.model_config.attention.mechanism =
+            self.model.attention.enabled = true;
+            self.model.attention.mechanism =
                 crate::config::model::AttentionMechanism::VariableSelection;
             log::info!("✅ TFT Variable Selection attention enabled in model configuration");
 
             // Enable quantile regression outputs for uncertainty quantification
-            self.model_config.quantile_outputs =
+            self.model.quantile_outputs =
                 Some(crate::config::model::TFTQuantileOutputConfig::default());
 
             log::info!("✅ TFT (Temporal Fusion Transformer) enabled in model configuration");
@@ -293,28 +362,38 @@ impl TrainingConfig {
 
     /// Load training configuration from TOML file
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
+        let content = std::fs::read_to_string(&path).map_err(|e| {
             crate::utils::error::VangaError::IoError(format!("Failed to read config file: {}", e))
         })?;
 
-        toml::from_str(&content).map_err(|e| {
+        let config = toml::from_str::<TrainingConfig>(&content).map_err(|e| {
             crate::utils::error::VangaError::ConfigError(format!(
                 "Failed to parse config file: {}",
                 e
             ))
-        })
+        })?;
+
+        // Validate configuration parameters
+        config.training.validate()?;
+        config.optimization.validate()?;
+
+        log::info!(
+            "✅ Configuration loaded and validated from: {}",
+            path.as_ref().display()
+        );
+        Ok(config)
     }
 
-    /// Load training parameters from TOML file and merge with base config
-    pub fn with_training_params_from_file<P: AsRef<std::path::Path>>(
+    /// Load configuration sections from TOML file and merge with base config
+    pub fn with_config_from_file<P: AsRef<std::path::Path>>(
         mut self,
         path: P,
     ) -> crate::utils::error::Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
+        let content = std::fs::read_to_string(&path).map_err(|e| {
             crate::utils::error::VangaError::IoError(format!("Failed to read config file: {}", e))
         })?;
 
-        // Parse only the training_params section
+        // Parse the TOML content
         let parsed: toml::Value = toml::from_str(&content).map_err(|e| {
             crate::utils::error::VangaError::ConfigError(format!(
                 "Failed to parse config file: {}",
@@ -322,21 +401,57 @@ impl TrainingConfig {
             ))
         })?;
 
-        if let Some(training_params_value) = parsed.get("training_params") {
+        // Load training section if present
+        if let Some(training_value) = parsed.get("training") {
             let training_params: TrainingParams =
-                training_params_value.clone().try_into().map_err(|e| {
+                training_value.clone().try_into().map_err(|e| {
                     crate::utils::error::VangaError::ConfigError(format!(
-                        "Failed to parse training_params: {}",
+                        "Failed to parse training: {}",
                         e
                     ))
                 })?;
-
-            self.training_params = training_params;
-            Ok(self)
-        } else {
-            Err(crate::utils::error::VangaError::ConfigError(
-                "Config file must contain [training_params] section".to_string(),
-            ))
+            self.training = training_params;
         }
+
+        // Load model section if present
+        if let Some(model_value) = parsed.get("model") {
+            let model: ModelConfig = model_value.clone().try_into().map_err(|e| {
+                crate::utils::error::VangaError::ConfigError(format!(
+                    "Failed to parse model: {}",
+                    e
+                ))
+            })?;
+            self.model = model;
+        }
+
+        // Load data section if present
+        if let Some(data_value) = parsed.get("data") {
+            let data_config: DataConfig = data_value.clone().try_into().map_err(|e| {
+                crate::utils::error::VangaError::ConfigError(format!("Failed to parse data: {}", e))
+            })?;
+            self.data = data_config;
+        }
+
+        // Load optimization section if present
+        if let Some(optimization_value) = parsed.get("optimization") {
+            let optimization: OptimizationConfig =
+                optimization_value.clone().try_into().map_err(|e| {
+                    crate::utils::error::VangaError::ConfigError(format!(
+                        "Failed to parse optimization: {}",
+                        e
+                    ))
+                })?;
+            self.optimization = optimization;
+        }
+
+        // Validate configuration parameters
+        self.training.validate()?;
+        self.optimization.validate()?;
+
+        log::info!(
+            "✅ Configuration loaded and validated from: {}",
+            path.as_ref().display()
+        );
+        Ok(self)
     }
 }

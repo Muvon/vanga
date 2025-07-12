@@ -159,7 +159,7 @@ Classification Metrics:
 TrainingConfig {
     symbol: symbol.to_string(),
     data_path: train_path.to_path_buf(),
-    model_config: ModelConfig::default(),
+    model: ModelConfig::default(),
     horizons: vec!["1h".to_string()],
     fresh_training: true,
     continue_training: false,

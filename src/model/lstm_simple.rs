@@ -538,7 +538,7 @@ impl LSTMModel {
     /// Configure training parameters from TrainingConfig - EXACT same logic as original
     pub fn configure_training(&mut self, vanga_config: &crate::config::TrainingConfig) {
         // Extract epochs from config - SAME logic as original
-        let (max_epochs, use_early_stopping) = match &vanga_config.training_params.epochs {
+        let (max_epochs, use_early_stopping) = match &vanga_config.training.epochs {
             crate::config::training::EpochConfig::Auto { max_epochs } => {
                 (*max_epochs as usize, true)
             }
@@ -546,7 +546,7 @@ impl LSTMModel {
         };
 
         // Extract learning rate from config - SAME logic as original
-        let learning_rate = match &vanga_config.training_params.learning_rate {
+        let learning_rate = match &vanga_config.training.learning_rate {
             crate::config::training::LearningRateConfig::Fixed(lr) => {
                 log::info!("Using FIXED learning rate: {:.6}", lr);
                 *lr
@@ -571,12 +571,19 @@ impl LSTMModel {
         // Store learning rate for optimizer creation - SAME as original
         self.config.learning_rate = learning_rate;
 
+        // Extract and apply gradient clipping from config
+        if let Some(gradient_clip) = vanga_config.training.gradient_clip {
+            self.training_config.clip_gradient = Some(gradient_clip);
+            log::info!("Using gradient clipping: {:.3}", gradient_clip);
+        }
+
         log::info!(
-            "✅ Training configured: epochs={}, lr={:.6}, early_stopping={}, print_every={}",
+            "✅ Training configured: epochs={}, lr={:.6}, early_stopping={}, print_every={}, gradient_clip={:?}",
             max_epochs,
             learning_rate,
             use_early_stopping,
-            self.training_config.print_every
+            self.training_config.print_every,
+            vanga_config.training.gradient_clip
         );
     }
 
@@ -785,11 +792,11 @@ impl LSTMModel {
         // Configure training parameters
         self.configure_training(vanga_config);
 
-        let validation_split = vanga_config.training_params.validation_split;
-        let early_stopping_patience = vanga_config.training_params.early_stopping_patience;
+        let validation_split = vanga_config.training.validation_split;
+        let early_stopping_patience = vanga_config.training.early_stopping_patience;
 
         // Check if early stopping is enabled
-        let use_early_stopping = match &vanga_config.training_params.epochs {
+        let use_early_stopping = match &vanga_config.training.epochs {
             crate::config::training::EpochConfig::Auto { .. } => true,
             crate::config::training::EpochConfig::Fixed(_) => false,
         };
@@ -862,10 +869,7 @@ impl LSTMModel {
         let mut incremental_config = vanga_config.clone();
 
         // Reduce learning rate for incremental training to preserve existing knowledge - SAME logic as original
-        incremental_config.training_params.learning_rate = match &vanga_config
-            .training_params
-            .learning_rate
-        {
+        incremental_config.training.learning_rate = match &vanga_config.training.learning_rate {
             crate::config::training::LearningRateConfig::Fixed(lr) => {
                 let reduced_lr = lr * 0.1; // 10x smaller for incremental
                 log::info!(
@@ -899,12 +903,12 @@ impl LSTMModel {
         };
 
         // Use smaller patience for incremental training (faster convergence expected) - SAME logic as original
-        incremental_config.training_params.early_stopping_patience =
-            (vanga_config.training_params.early_stopping_patience / 2).max(10);
+        incremental_config.training.early_stopping_patience =
+            (vanga_config.training.early_stopping_patience / 2).max(10);
 
         log::info!(
             "⚙️  Incremental training config: patience={}, reduced_lr=true",
-            incremental_config.training_params.early_stopping_patience
+            incremental_config.training.early_stopping_patience
         );
 
         // Train with the new data using reduced learning rate - SAME logic as original
@@ -1135,8 +1139,8 @@ mod tests {
             continue_training: false,
             horizons: vec!["1h".to_string()],
             features_config_path: None,
-            model_config: crate::config::ModelConfig::default(),
-            training_params: TrainingParams {
+            model: crate::config::ModelConfig::default(),
+            training: TrainingParams {
                 epochs: EpochConfig::Auto { max_epochs: 100 },
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
                 learning_rate: LearningRateConfig::Fixed(0.01),
@@ -1145,8 +1149,8 @@ mod tests {
                 early_stopping_patience: 5, // Small patience for quick testing
                 gradient_clip: Some(1.0),
             },
-            data_config: crate::config::training::DataConfig::default(),
-            optimization_config: crate::config::training::OptimizationConfig::default(),
+            data: crate::config::training::DataConfig::default(),
+            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         // Test that early stopping training completes without errors
@@ -1194,8 +1198,8 @@ mod tests {
             continue_training: false,
             horizons: vec!["1h".to_string()],
             features_config_path: None,
-            model_config: crate::config::ModelConfig::default(),
-            training_params: TrainingParams {
+            model: crate::config::ModelConfig::default(),
+            training: TrainingParams {
                 epochs: EpochConfig::Fixed(5), // Fixed epochs - should bypass early stopping
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
                 learning_rate: LearningRateConfig::Fixed(0.01),
@@ -1204,8 +1208,8 @@ mod tests {
                 early_stopping_patience: 10,
                 gradient_clip: Some(1.0),
             },
-            data_config: crate::config::training::DataConfig::default(),
-            optimization_config: crate::config::training::OptimizationConfig::default(),
+            data: crate::config::training::DataConfig::default(),
+            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         // Test that fixed epochs training completes without errors
@@ -1260,8 +1264,8 @@ mod tests {
             continue_training: false,
             horizons: vec!["1h".to_string()],
             features_config_path: None,
-            model_config: crate::config::ModelConfig::default(),
-            training_params: TrainingParams {
+            model: crate::config::ModelConfig::default(),
+            training: TrainingParams {
                 epochs: EpochConfig::Fixed(3), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
                 learning_rate: LearningRateConfig::Fixed(0.01),
@@ -1270,8 +1274,8 @@ mod tests {
                 early_stopping_patience: 5,
                 gradient_clip: Some(1.0),
             },
-            data_config: crate::config::training::DataConfig::default(),
-            optimization_config: crate::config::training::OptimizationConfig::default(),
+            data: crate::config::training::DataConfig::default(),
+            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         model
@@ -1346,11 +1350,11 @@ mod tests {
             continue_training: false,
             horizons: vec!["1h".to_string()],
             features_config_path: None,
-            model_config: crate::config::ModelConfig {
+            model: crate::config::ModelConfig {
                 architecture: crate::config::model::LSTMArchitecture::StackedLSTM { layers: 3 },
                 ..crate::config::ModelConfig::default()
             },
-            training_params: TrainingParams {
+            training: TrainingParams {
                 epochs: EpochConfig::Fixed(5), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16),
                 learning_rate: LearningRateConfig::Fixed(0.01),
@@ -1359,8 +1363,8 @@ mod tests {
                 early_stopping_patience: 10,
                 gradient_clip: Some(1.0),
             },
-            data_config: crate::config::training::DataConfig::default(),
-            optimization_config: crate::config::training::OptimizationConfig::default(),
+            data: crate::config::training::DataConfig::default(),
+            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         // Test multi-layer training

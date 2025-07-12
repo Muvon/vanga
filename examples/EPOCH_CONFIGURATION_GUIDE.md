@@ -14,7 +14,7 @@ VANGA's epoch configuration is completely driven by your config files with **zer
 
 ### 1. Auto Mode (Intelligent Early Stopping)
 ```toml
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 500 } }  # Your custom limit
 validation_split = 0.2                    # Required for early stopping
 early_stopping_patience = 25              # Your custom patience
@@ -22,7 +22,7 @@ early_stopping_patience = 25              # Your custom patience
 
 ### 2. Fixed Mode (Exact Control)
 ```toml
-[training_params]
+[training]
 epochs = { Fixed = 200 }                  # Exactly 200 epochs
 validation_split = 0.0                    # Optional
 ```
@@ -33,7 +33,7 @@ validation_split = 0.0                    # Optional
 ```bash
 # Create config file
 cat > quick_training.toml << EOF
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 50 } }
 learning_rate = { Fixed = 0.001 }
 validation_split = 0.2
@@ -49,7 +49,7 @@ vanga train --symbol BTCUSDT --data data.csv --config quick_training.toml
 ```bash
 # Create config file
 cat > exact_training.toml << EOF
-[training_params]
+[training]
 epochs = { Fixed = 100 }
 learning_rate = { Fixed = 0.0005 }
 batch_size = { Fixed = 64 }
@@ -64,7 +64,7 @@ vanga train --symbol BTCUSDT --data data.csv --config exact_training.toml
 ```bash
 # Create config file
 cat > high_perf_training.toml << EOF
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 2000 } }
 learning_rate = { Adaptive = { initial_lr = 0.01 } }
 validation_split = 0.2
@@ -113,7 +113,7 @@ EpochConfig::Auto { max_epochs: 500 }
 model.configure_training(&config);
 
 // Sets epochs based on your config
-match config.training_params.epochs {
+match config.training.epochs {
     EpochConfig::Auto { max_epochs } => {
         self.training_config.epochs = max_epochs;
         // Enable early stopping

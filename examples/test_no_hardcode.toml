@@ -1,5 +1,5 @@
 # Test Configuration - Demonstrates No Hardcoding
-[training_params]
+[training]
 epochs = { Fixed = 25 }  # Custom epoch count - should train for exactly 25 epochs
 learning_rate = { Fixed = 0.002 }  # Custom learning rate
 batch_size = { Fixed = 16 }  # Custom batch size

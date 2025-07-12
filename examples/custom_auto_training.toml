@@ -1,7 +1,7 @@
 # Custom Auto Training Config (Custom Early Stopping)
 # Use this for custom intelligent training with your own limits
 
-[training_params]
+[training]
 # Auto epochs with custom max limit - early stopping enabled
 epochs = { Auto = { max_epochs = 500 } }
 

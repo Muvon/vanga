@@ -1,7 +1,7 @@
 # VANGA Training Configuration Template
 # This file controls LSTM training behavior, epochs, learning rate, and early stopping
 
-[training_params]
+[training]
 # EPOCH CONFIGURATION - Choose one approach:
 
 # Option 1: Automatic early stopping (RECOMMENDED for quality)
@@ -68,13 +68,13 @@ save_heatmaps = false                  # Save attention heatmaps (performance im
 export_analysis = false                # Export detailed attention analysis
 output_dir = "attention_analysis"      # Directory for attention outputs
 
-[data_config]
+[data]
 # Data preprocessing configuration
 normalization = "Robust"                    # Robust, MinMax, Standard, Quantile
 sequence_overlap = 0.8                      # Overlap between training sequences
 missing_data_strategy = "Interpolate"       # Interpolate, Forward, Drop
 
-[data_config.outlier_handling]
+[data.outlier_handling]
 enabled = true
 method = "ModifiedZScore"                   # ModifiedZScore, IQR, Isolation
 threshold = 3.5
@@ -85,11 +85,13 @@ max_features = 100                          # Limit total features for performan
 correlation_threshold = 0.95               # Remove highly correlated features
 importance_threshold = 0.001               # Minimum feature importance to keep
 
-[optimization_config]
+[optimization]
 # Hyperparameter optimization settings
 enabled = false                             # Enable automatic hyperparameter tuning
-trials = 50                                # Number of optimization trials
-metric = "ValidationLoss"                  # ValidationLoss, TrainingLoss, Accuracy
+method = "Bayesian"                         # Bayesian, Random, Grid
+n_trials = 50                              # Number of optimization trials (renamed from trials)
+timeout_seconds = 3600                     # Optimization timeout in seconds (1 hour)
+metric = "MAE"                             # MAE, RMSE, MAPE, SharpeRatio, MaxDrawdown, DirectionalAccuracy
 
 # USAGE EXAMPLES:
 #

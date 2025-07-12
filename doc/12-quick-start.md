@@ -33,6 +33,39 @@ vanga train --symbol BTCUSDT --data btc_data.csv --continue-training
 vanga train --symbol BTCUSDT --data btc_data.csv --features-config configs/custom.toml --config configs/multi_lstm.toml
 ```
 
+## 🔧 **Configuration Management**
+
+### **Validated Configuration Loading**
+All configuration files are automatically validated when loaded:
+
+```bash
+# Configuration validation happens automatically
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training_config.toml
+# ✅ Configuration loaded and validated from: configs/training_config.toml
+```
+
+### **Key Configuration Parameters**
+```toml
+[training]
+gradient_clip = 1.0                   # Gradient clipping (validated > 0)
+validation_split = 0.2                # Data split validation (0.0 < x < 1.0)
+early_stopping_patience = 10          # Early stopping (validated > 0)
+
+[optimization]
+method = "Bayesian"                   # Optimization method (validated)
+n_trials = 50                        # Trial count (validated > 0)
+timeout_seconds = 3600               # Timeout (validated > 0)
+```
+
+### **Configuration Error Handling**
+Invalid configurations are caught early with detailed error messages:
+```bash
+# Example validation error
+Error: validation_split + test_split must be < 1.0, got: 0.8 + 0.3 = 1.1
+Error: gradient_clip must be positive, got: -1.0
+Error: n_trials must be greater than 0
+```
+
 ## 🏗️ **Multi-Layer Architecture Configuration**
 
 ### **Quick Architecture Templates**
@@ -63,7 +96,7 @@ initial_lr = 0.001
 #### **Fast Training (2-Layer)**
 ```toml
 # configs/fast_training.toml
-[training_params]
+[training]
 epochs = { Fixed = 100 }
 learning_rate = { Fixed = 0.001 }
 batch_size = { Fixed = 64 }
@@ -79,7 +112,7 @@ sequence_length = { Fixed = 30 }
 #### **Advanced Quality (4-Layer StackedLSTM)**
 ```toml
 # configs/stacked_lstm.toml
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 1500 } }
 learning_rate = { Adaptive = { initial_lr = 0.0005 } }
 batch_size = { Auto = { min_size = 16, max_size = 256 } }
@@ -111,7 +144,7 @@ timestamp,open,high,low,close,volume,social_sentiment,funding_rate,whale_activit
 #### 2. **Configure Multi-Layer + Custom Features**
 ```toml
 # configs/custom_multi_layer.toml - Training Configuration
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 800 } }
 learning_rate = { Adaptive = { initial_lr = 0.001 } }
 batch_size = { Auto = { min_size = 32, max_size = 256 } }

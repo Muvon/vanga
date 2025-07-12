@@ -76,12 +76,12 @@ impl MultiTargetLSTMModel {
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         // Determine training strategy from configuration
-        let (use_early_stopping, max_epochs) = match &config.training_params.epochs {
+        let (use_early_stopping, max_epochs) = match &config.training.epochs {
             crate::config::training::EpochConfig::Auto { max_epochs } => (true, *max_epochs),
             crate::config::training::EpochConfig::Fixed(epochs) => (false, *epochs),
         };
 
-        let validation_split = config.training_params.validation_split;
+        let validation_split = config.training.validation_split;
 
         if use_early_stopping && validation_split > 0.0 {
             log::info!(

@@ -10,7 +10,7 @@ VANGA supports flexible training configuration through TOML files. You can contr
 Uses intelligent early stopping and automatic parameter optimization.
 
 ```toml
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 1000 } }
 learning_rate = { Adaptive = { initial_lr = 0.01 } }
 validation_split = 0.2  # Required for early stopping
@@ -21,7 +21,7 @@ early_stopping_patience = 50
 Fixed parameters for reproducible experiments.
 
 ```toml
-[training_params]
+[training]
 epochs = { Fixed = 200 }
 learning_rate = { Fixed = 0.001 }
 validation_split = 0.0  # Optional since no early stopping

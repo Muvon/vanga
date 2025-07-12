@@ -365,24 +365,12 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             log::info!("📂 Using data file: {}", data_file_path.display());
 
             // Create training config for this symbol
-            let data_path_clone = data_file_path.clone(); // Clone for potential reuse
             let mut symbol_config = if let Some(config_path) = &params.config {
-                log::info!("🔧 Loading full training config from: {:?}", config_path);
-                match TrainingConfig::from_file(config_path) {
-                    Ok(mut file_config) => {
-                        // Override file config with CLI parameters
-                        file_config.symbol = symbol.clone();
-                        file_config.data_path = data_file_path;
-                        file_config
-                    }
-                    Err(e) => {
-                        log::error!("Failed to load config file for {}: {}", symbol, e);
-                        log::info!("Falling back to default configuration for {}", symbol);
-                        TrainingConfig::default()
-                            .symbol(symbol.clone())
-                            .data_path(data_path_clone)
-                    }
-                }
+                log::info!("🔧 Loading training config from: {:?}", config_path);
+                TrainingConfig::default()
+                    .symbol(symbol.clone())
+                    .data_path(data_file_path)
+                    .with_config_from_file(config_path)?
             } else {
                 TrainingConfig::default()
                     .symbol(symbol.clone())
@@ -475,7 +463,7 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             match TrainingConfig::default()
                 .symbol(symbol.clone())
                 .data_path(params.data.clone())
-                .with_training_params_from_file(&config_path)
+                .with_config_from_file(&config_path)
             {
                 Ok(file_config) => file_config,
                 Err(e) => {

@@ -307,7 +307,7 @@ mod candle_integration_tests {
     fn create_test_training_config() -> TrainingConfig {
         TrainingConfig {
             symbol: "BTCUSDT".to_string(),
-            model_config: create_test_model_config(),
+            model: create_test_model_config(),
             training_params: crate::config::training::TrainingParams {
                 epochs: crate::config::training::EpochConfig::Fixed(10),
                 learning_rate: crate::config::training::LearningRateConfig::Fixed(0.001),
@@ -315,7 +315,7 @@ mod candle_integration_tests {
                 validation_split: 0.2,
                 early_stopping_patience: 5,
             },
-            data_config: crate::config::data::DataConfig {
+            data: crate::config::data::DataConfig {
                 file_path: "test.csv".to_string(),
                 target_column: "close".to_string(),
                 feature_columns: vec![],

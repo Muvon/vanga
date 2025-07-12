@@ -217,12 +217,12 @@ impl Backtester {
         Ok(TrainingConfig {
             symbol: self.config.symbol.clone(),
             data_path: train_path.to_path_buf(),
-            model_config,
+            model: model_config,
             horizons: vec!["1h".to_string()], // Single horizon for backtesting
             fresh_training: true,             // Always start fresh for backtesting
             continue_training: false,
             features_config_path: None,
-            training_params: crate::config::training::TrainingParams {
+            training: crate::config::training::TrainingParams {
                 epochs: crate::config::training::EpochConfig::Fixed(5), // Very short training for testing
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16), // Smaller batch size
                 learning_rate: crate::config::training::LearningRateConfig::Fixed(0.001),
@@ -231,8 +231,8 @@ impl Backtester {
                 early_stopping_patience: 3, // Quick early stopping
                 gradient_clip: Some(1.0),
             },
-            data_config: crate::config::training::DataConfig::default(),
-            optimization_config: crate::config::training::OptimizationConfig::default(),
+            data: crate::config::training::DataConfig::default(),
+            optimization: crate::config::training::OptimizationConfig::default(),
         })
     }
 

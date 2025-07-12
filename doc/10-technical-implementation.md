@@ -444,7 +444,7 @@ impl ModelTrainer {
 ```rust
 /// Create LSTM model from ModelConfig with multi-layer support
 pub fn from_model_config(
-    model_config: &ModelConfig,
+    model: &ModelConfig,
     input_size: usize,
     sequence_length: usize,
 ) -> Result<Self> {

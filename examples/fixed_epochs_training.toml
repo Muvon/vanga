@@ -1,7 +1,7 @@
 # Fixed Epochs Training Config (No Early Stopping)
 # Use this when you want exact control over training duration
 
-[training_params]
+[training]
 # Fixed epochs - will train for exactly 200 epochs, no early stopping
 epochs = { Fixed = 200 }
 

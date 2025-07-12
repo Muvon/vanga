@@ -1,7 +1,7 @@
 # High Performance Training Config (Long Training)
 # Use this for maximum model performance with extended training
 
-[training_params]
+[training]
 # Auto epochs with high max limit for thorough training
 epochs = { Auto = { max_epochs = 2000 } }
 

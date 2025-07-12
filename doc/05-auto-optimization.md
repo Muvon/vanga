@@ -11,21 +11,45 @@ VANGA features **intelligent multi-layer LSTM optimization** that automatically 
 - **Performance-Optimized**: Balances model complexity with training time and overfitting risk
 - **Crypto-Specific**: Optimized for cryptocurrency market patterns and volatility
 
-### ✅ **Architecture Type Selection**
-```rust
-// Automatic architecture selection based on data characteristics
-pub fn select_optimal_architecture(data_size: usize, complexity: f64) -> LSTMArchitecture {
-    match (data_size, complexity) {
-        (size, _) if size < 1000 => LSTMArchitecture::MultiLSTM { layers: 1 },
-        (size, complexity) if size < 5000 && complexity < 0.5 =>
-            LSTMArchitecture::MultiLSTM { layers: 2 },
-        (size, complexity) if size < 10000 =>
-            LSTMArchitecture::MultiLSTM { layers: 3 },
-        (_, complexity) if complexity > 0.8 =>
-            LSTMArchitecture::StackedLSTM { layers: 4 },
-        _ => LSTMArchitecture::MultiLSTM { layers: 3 }, // Default optimal
-    }
-}
+### ✅ **Optimization Configuration**
+
+The optimization system now supports comprehensive configuration through TOML files:
+
+```toml
+[optimization]
+# Optimization method selection
+method = "Bayesian"                    # Options: Bayesian, Grid, Random, None
+n_trials = 100                        # Number of optimization trials
+timeout_seconds = 7200                # Maximum optimization time (2 hours)
+metric = "SharpeRatio"                # Target metric for optimization
+
+# Advanced optimization settings
+enabled = true                        # Enable/disable optimization
+parallel_trials = 4                   # Number of parallel optimization processes
+```
+
+### ✅ **Gradient Clipping Integration**
+
+Gradient clipping is now fully integrated and configurable:
+
+```toml
+[training]
+gradient_clip = 1.0                   # Prevents exploding gradients
+```
+
+This parameter is automatically:
+- **Extracted** from configuration files
+- **Validated** to ensure positive values
+- **Applied** during LSTM training
+- **Logged** for monitoring and debugging
+
+### ✅ **Configuration Validation**
+
+All optimization parameters are validated automatically:
+- **Method validation**: Ensures valid optimization methods
+- **Range validation**: Validates trial counts and timeouts
+- **Type conversion**: Handles different optimization method types
+- **Error handling**: Provides detailed validation error messages
 ```
 
 ### ✅ **Layer-Specific Optimization**
@@ -42,7 +66,7 @@ architecture = "Auto"  # Automatically selects best architecture
 
 [model.auto_optimization]
 max_layers = 4
-[training_params]
+[training]
 epochs = { Auto = { max_epochs = 1000 } }
 learning_rate = { Adaptive = { initial_lr = 0.001 } }  # Optimized for multi-layer training
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
@@ -56,7 +80,7 @@ architecture = { Auto = { min_layers = 1, max_layers = 4 } }
 hidden_units = { Auto = { min_units = 64, max_units = 512 } }
 sequence_length = { Auto = { min_length = 30, max_length = 120 } }
 
-[optimization_config]
+[optimization]
 enabled = true
 trials = 100
 metric = "ValidationLoss"

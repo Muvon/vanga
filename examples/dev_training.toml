@@ -1,5 +1,5 @@
 # Development Training Config
-[training_params]
+[training]
 epochs = { Fixed = 100 }
 learning_rate = { Fixed = 0.001 }
 validation_split = 0.0

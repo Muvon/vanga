@@ -24,6 +24,43 @@ timestamp,open,high,low,close,volume
 
 ---
 
+## 🔧 **Configuration Parameters**
+
+### **Training Parameters**
+All training parameters can be configured via TOML files and are automatically validated:
+
+```toml
+[training]
+# Gradient clipping (prevents exploding gradients in volatile crypto markets)
+gradient_clip = 1.0                    # Threshold for gradient clipping (must be > 0)
+
+# Data splits (automatically validated)
+validation_split = 0.2                 # Must be between 0.0 and 1.0
+test_split = 0.1                      # Must be between 0.0 and 1.0
+                                      # Combined splits must be < 1.0
+
+# Early stopping
+early_stopping_patience = 10          # Must be > 0
+```
+
+### **Optimization Configuration**
+Hyperparameter optimization is now fully configurable:
+
+```toml
+[optimization]
+method = "Bayesian"                    # Bayesian, Grid, Random, or None
+n_trials = 50                         # Number of optimization trials (must be > 0)
+timeout_seconds = 3600                # Optimization timeout in seconds (must be > 0)
+metric = "ValidationLoss"             # Optimization target metric
+```
+
+### **Configuration Validation**
+All parameters are automatically validated when loading configuration files:
+- **Range validation**: Ensures splits, timeouts, and trials are within valid ranges
+- **Consistency checks**: Validates that validation_split + test_split < 1.0
+- **Type safety**: Prevents invalid optimization methods or metrics
+- **Error reporting**: Provides detailed error messages with actual values
+
 ## 🎯 **Multi-Layer LSTM Usage Examples**
 
 ### **1. Auto-Optimized Multi-Layer Training**
@@ -287,7 +324,7 @@ Use with training:
 
 Create `config/training.toml`:
 ```toml
-[training_params]
+[training]
 epochs = { Fixed = 100 }
 learning_rate = { Fixed = 0.001 }
 batch_size = { Fixed = 32 }
@@ -307,12 +344,12 @@ rate = { Fixed = 0.2 }
 variational = true
 recurrent = true
 
-[data_config]
+[data]
 normalization = "Robust"
 sequence_overlap = 0.8
 missing_data_strategy = "Interpolate"
 
-[optimization_config]
+[optimization]
 enabled = false
 trials = 50
 metric = "ValidationLoss"

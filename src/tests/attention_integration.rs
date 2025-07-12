@@ -48,7 +48,7 @@ async fn test_attention_training_workflow() -> Result<()> {
         .with_attention_enabled(true);
 
     // Verify attention is enabled in model config
-    assert!(training_config.model_config.attention.enabled);
+    assert!(training_config.model.attention.enabled);
 
     // Create test data
     let sequences = create_test_sequences();
@@ -56,7 +56,7 @@ async fn test_attention_training_workflow() -> Result<()> {
 
     // Create model from training config
     let model = LSTMModel::from_model_config(
-        &training_config.model_config,
+        &training_config.model,
         sequences.shape()[2], // input_size
         targets.shape()[1],   // output_size
     )?;
@@ -137,15 +137,15 @@ fn test_cli_attention_flag() {
     // Test that training config has attention enabled by default
     let config_default = TrainingConfig::default();
     assert!(
-        config_default.model_config.attention.enabled,
+        config_default.model.attention.enabled,
         "Attention should be enabled by default"
     );
 
     let config_with_attention = TrainingConfig::default().with_attention_enabled(true);
-    assert!(config_with_attention.model_config.attention.enabled);
+    assert!(config_with_attention.model.attention.enabled);
 
     let config_disabled_attention = TrainingConfig::default().with_attention_enabled(false);
-    assert!(!config_disabled_attention.model_config.attention.enabled);
+    assert!(!config_disabled_attention.model.attention.enabled);
 }
 
 /// Test attention configuration validation

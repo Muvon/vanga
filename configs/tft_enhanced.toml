@@ -1,7 +1,7 @@
 # TFT-Enhanced VANGA Training Configuration
 # Temporal Fusion Transformer features built on existing LSTM architecture
 
-[training_params]
+[training]
 # Training hyperparameters
 epochs = { Auto = { max_epochs = 100 } }
 batch_size = { Auto = { min_size = 16, max_size = 128 } }
@@ -74,25 +74,27 @@ quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]  # 90% prediction interval
 loss_weighting = "extreme_weighted"          # Higher weight for extreme quantiles
 uncertainty_calibration = true
 
-[data_config]
+[data]
 # Data preprocessing configuration
 normalization = "Robust"
 sequence_overlap = 0.8
 missing_data_strategy = "Interpolate"
 
-[data_config.outlier_handling]
+[data.outlier_handling]
 enabled = true
 method = "ModifiedZScore"
 threshold = 3.5
 
-[data_config.feature_selection]
+[data.feature_selection]
 enabled = true
 max_features = 100
 correlation_threshold = 0.95
 importance_threshold = 0.001
 
-[optimization_config]
+[optimization]
 # Hyperparameter optimization settings
 enabled = false
-trials = 50
-metric = "ValidationLoss"
+n_trials = 50
+metric = "MAE"                             # MAE, RMSE, MAPE, SharpeRatio, MaxDrawdown, DirectionalAccuracy
+method = "Bayesian"
+timeout_seconds = 3600
