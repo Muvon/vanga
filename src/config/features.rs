@@ -89,6 +89,8 @@ pub struct TrendIndicatorsConfig {
     pub adx_periods: Vec<u32>,
     pub parabolic_sar: bool,
     pub aroon: bool,
+    /// Advanced mathematical indicators
+    pub advanced: AdvancedIndicatorsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +99,16 @@ pub struct MACDConfig {
     pub fast_period: u32,
     pub slow_period: u32,
     pub signal_period: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvancedIndicatorsConfig {
+    pub enabled: bool,
+    pub hurst_window: usize,
+    pub fractal_window: usize,
+    pub regime_window: usize,
+    pub clustering_window: usize,
+    pub reversion_window: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,6 +383,7 @@ impl Default for TechnicalIndicatorsConfig {
                 adx_periods: vec![14],
                 parabolic_sar: true,
                 aroon: true,
+                advanced: AdvancedIndicatorsConfig::default(),
             },
         }
     }
@@ -495,6 +508,19 @@ impl Default for FeatureSelectionConfig {
                 FeatureSelectionMethod::ImportanceBased,
             ],
             keep_crypto_features: true,
+        }
+    }
+}
+
+impl Default for AdvancedIndicatorsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hurst_window: 100,
+            fractal_window: 50,
+            regime_window: 50,
+            clustering_window: 50,
+            reversion_window: 50,
         }
     }
 }

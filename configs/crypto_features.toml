@@ -53,6 +53,14 @@ adx_periods = [14]
 parabolic_sar = true
 aroon = true
 
+[technical_indicators.trend.advanced]
+enabled = true
+hurst_window = 100
+fractal_window = 50
+regime_window = 50
+clustering_window = 50
+reversion_window = 50
+
 [market_microstructure]
 enabled = true
 

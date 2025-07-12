@@ -173,6 +173,7 @@ pub async fn generate_technical_indicators(
         &low_prices,
         &close_prices,
         &volume,
+        &config.trend.advanced,
     )?;
 
     log::info!("Generated {} technical indicators", df.width() - 6); // Subtract OHLCV + timestamp
@@ -823,6 +824,7 @@ fn add_crypto_specific_indicators(
     low: &[f64],
     close: &[f64],
     volume: &[f64],
+    advanced_config: &crate::config::features::AdvancedIndicatorsConfig,
 ) -> Result<DataFrame> {
     // Price velocity (rate of change)
     let mut price_velocity = vec![f64::NAN; close.len()];
@@ -855,6 +857,54 @@ fn add_crypto_specific_indicators(
     let mut intraday_range = vec![0.0; close.len()];
     for i in 0..close.len() {
         intraday_range[i] = (high[i] - low[i]) / close[i] * 100.0;
+    }
+
+    // Advanced mathematical indicators (completing AUTO_INDICATORS)
+    if advanced_config.enabled {
+        let hurst_values = calculate_hurst_exponent(close, advanced_config.hurst_window);
+        let fractal_dims = calculate_fractal_dimension(close, advanced_config.fractal_window);
+        let regime_values =
+            calculate_regime_indicator(close, volume, advanced_config.regime_window);
+        let clustering_values =
+            calculate_volatility_clustering(close, advanced_config.clustering_window);
+        let reversion_values =
+            calculate_mean_reversion_strength(close, advanced_config.reversion_window);
+
+        // Add advanced mathematical indicators to DataFrame
+        df = df
+            .with_column(Series::new("hurst_exponent", hurst_values))
+            .map_err(|e| VangaError::FeatureError(format!("Failed to add hurst_exponent: {}", e)))?
+            .clone();
+
+        df = df
+            .with_column(Series::new("fractal_dimension", fractal_dims))
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add fractal_dimension: {}", e))
+            })?
+            .clone();
+
+        df = df
+            .with_column(Series::new("regime_indicator", regime_values))
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add regime_indicator: {}", e))
+            })?
+            .clone();
+
+        df = df
+            .with_column(Series::new("volatility_clustering", clustering_values))
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add volatility_clustering: {}", e))
+            })?
+            .clone();
+
+        df = df
+            .with_column(Series::new("mean_reversion_strength", reversion_values))
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add mean_reversion_strength: {}", e))
+            })?
+            .clone();
+
+        log::debug!("Added {} advanced mathematical indicators", 5);
     }
 
     // Add indicators
@@ -952,4 +1002,341 @@ fn calculate_volume_weighted_average_price(
     }
 
     vwap
+}
+
+/// Calculate Hurst Exponent using R/S analysis for regime detection
+/// H > 0.65: Trending regime, H < 0.45: Mean-reverting regime
+fn calculate_hurst_exponent(prices: &[f64], window: usize) -> Vec<f64> {
+    let mut hurst_values = vec![f64::NAN; prices.len()];
+
+    if prices.len() < window || window < 20 {
+        return hurst_values;
+    }
+
+    for i in window..prices.len() {
+        let price_window = &prices[i - window..i];
+        let returns: Vec<f64> = price_window
+            .windows(2)
+            .map(|w| (w[1] / w[0]).ln())
+            .collect();
+
+        if returns.len() < 10 {
+            continue;
+        }
+
+        // R/S Analysis with multiple lags
+        let max_lag = (returns.len() / 4).min(20);
+        let lags: Vec<usize> = (2..=max_lag).collect();
+        let mut rs_values = Vec::new();
+
+        for &lag in &lags {
+            if lag >= returns.len() {
+                continue;
+            }
+
+            let chunks = returns.len() / lag;
+            if chunks == 0 {
+                continue;
+            }
+
+            let mut rs_sum = 0.0;
+            let mut valid_chunks = 0;
+
+            for chunk in 0..chunks {
+                let start = chunk * lag;
+                let end = start + lag;
+                let subset = &returns[start..end];
+
+                // Calculate mean and cumulative deviations
+                let mean = subset.iter().sum::<f64>() / lag as f64;
+                let mut cumulative_devs = vec![0.0; lag];
+                cumulative_devs[0] = subset[0] - mean;
+
+                for j in 1..lag {
+                    cumulative_devs[j] = cumulative_devs[j - 1] + (subset[j] - mean);
+                }
+
+                // Calculate range
+                let max_dev = cumulative_devs
+                    .iter()
+                    .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let min_dev = cumulative_devs.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let range = max_dev - min_dev;
+
+                // Calculate standard deviation
+                let variance = subset.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / lag as f64;
+                let std_dev = variance.sqrt();
+
+                if std_dev > 1e-10 && range > 0.0 {
+                    rs_sum += range / std_dev;
+                    valid_chunks += 1;
+                }
+            }
+
+            if valid_chunks > 0 {
+                rs_values.push(rs_sum / valid_chunks as f64);
+            }
+        }
+
+        // Linear regression to find Hurst exponent
+        if rs_values.len() >= 3 {
+            let log_lags: Vec<f64> = lags[..rs_values.len()]
+                .iter()
+                .map(|&x| (x as f64).ln())
+                .collect();
+            let log_rs: Vec<f64> = rs_values.iter().map(|&x| x.ln()).collect();
+
+            let n = log_lags.len() as f64;
+            let sum_x = log_lags.iter().sum::<f64>();
+            let sum_y = log_rs.iter().sum::<f64>();
+            let sum_xy = log_lags
+                .iter()
+                .zip(log_rs.iter())
+                .map(|(x, y)| x * y)
+                .sum::<f64>();
+            let sum_x2 = log_lags.iter().map(|x| x * x).sum::<f64>();
+
+            let denominator = n * sum_x2 - sum_x * sum_x;
+            if denominator.abs() > 1e-10 {
+                let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+                // Clamp to reasonable range for crypto markets
+                hurst_values[i] = slope.clamp(0.1, 0.9);
+            }
+        }
+    }
+
+    hurst_values
+}
+
+/// Calculate Fractal Dimension using box-counting method
+/// Higher values indicate more complex, chaotic price movements
+fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
+    let mut fractal_dims = vec![f64::NAN; prices.len()];
+
+    if prices.len() < window || window < 10 {
+        return fractal_dims;
+    }
+
+    for i in window..prices.len() {
+        let price_window = &prices[i - window..i];
+
+        // Find price range
+        let min_price = price_window.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_price = price_window
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let price_range = max_price - min_price;
+
+        if price_range <= 0.0 {
+            continue;
+        }
+
+        // Box-counting method with multiple scales
+        let mut scales = Vec::new();
+        let mut counts = Vec::new();
+
+        for scale_exp in 1..8 {
+            let scale = price_range / (2_f64.powi(scale_exp));
+            if scale <= 0.0 {
+                continue;
+            }
+
+            let boxes = (price_range / scale).ceil() as usize;
+            if boxes == 0 {
+                continue;
+            }
+
+            let mut occupied_boxes = std::collections::HashSet::new();
+            for &price in price_window {
+                let box_index = ((price - min_price) / scale).floor() as usize;
+                occupied_boxes.insert(box_index.min(boxes - 1));
+            }
+
+            if !occupied_boxes.is_empty() {
+                scales.push(scale.ln());
+                counts.push((occupied_boxes.len() as f64).ln());
+            }
+        }
+
+        // Linear regression to find fractal dimension
+        if scales.len() >= 3 {
+            let n = scales.len() as f64;
+            let sum_x = scales.iter().sum::<f64>();
+            let sum_y = counts.iter().sum::<f64>();
+            let sum_xy = scales
+                .iter()
+                .zip(counts.iter())
+                .map(|(x, y)| x * y)
+                .sum::<f64>();
+            let sum_x2 = scales.iter().map(|x| x * x).sum::<f64>();
+
+            let denominator = n * sum_x2 - sum_x * sum_x;
+            if denominator.abs() > 1e-10 {
+                let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+                // Fractal dimension is negative slope, clamped to [1.0, 2.0]
+                fractal_dims[i] = (-slope).clamp(1.0, 2.0);
+            }
+        }
+    }
+
+    fractal_dims
+}
+
+/// Calculate Regime Indicator combining volatility, trend, and volume signals
+/// Returns 0-3 scale: 0=stable/ranging, 3=high volatility/trending/high volume
+fn calculate_regime_indicator(prices: &[f64], volume: &[f64], window: usize) -> Vec<f64> {
+    let mut regime_values = vec![f64::NAN; prices.len()];
+
+    if prices.len() < window || volume.len() != prices.len() || window < 5 {
+        return regime_values;
+    }
+
+    for i in window..prices.len() {
+        let price_window = &prices[i - window..i];
+        let volume_window = &volume[i - window..i];
+
+        // Calculate returns for volatility analysis
+        let returns: Vec<f64> = price_window
+            .windows(2)
+            .map(|w| (w[1] / w[0]).ln())
+            .collect();
+
+        if returns.is_empty() {
+            continue;
+        }
+
+        // 1. Volatility regime (high/low volatility)
+        let volatility = returns.iter().map(|r| r.powi(2)).sum::<f64>() / returns.len() as f64;
+        let vol_threshold = 0.0004; // Crypto-optimized threshold
+        let vol_regime = if volatility > vol_threshold { 1.0 } else { 0.0 };
+
+        // 2. Trend regime (trending/ranging)
+        let price_start = price_window[0];
+        let price_end = price_window[price_window.len() - 1];
+        let price_change = (price_end - price_start) / price_start;
+        let trend_strength = price_change.abs();
+        let trend_threshold = 0.02; // 2% threshold for crypto
+        let trend_regime = if trend_strength > trend_threshold {
+            1.0
+        } else {
+            0.0
+        };
+
+        // 3. Volume regime (high/low volume)
+        let avg_volume = volume_window.iter().sum::<f64>() / volume_window.len() as f64;
+        let recent_volume = volume_window[volume_window.len() - 1];
+        let volume_regime = if recent_volume > avg_volume * 1.5 {
+            1.0
+        } else {
+            0.0
+        };
+
+        // Combine regimes (0-3 scale)
+        regime_values[i] = vol_regime + trend_regime + volume_regime;
+    }
+
+    regime_values
+}
+
+/// Calculate Volatility Clustering using autocorrelation of squared returns
+/// Higher values indicate stronger volatility clustering (GARCH effects)
+fn calculate_volatility_clustering(prices: &[f64], window: usize) -> Vec<f64> {
+    let mut clustering_values = vec![f64::NAN; prices.len()];
+
+    if prices.len() < window || window < 10 {
+        return clustering_values;
+    }
+
+    for i in window..prices.len() {
+        let price_window = &prices[i - window..i];
+        let returns: Vec<f64> = price_window
+            .windows(2)
+            .map(|w| (w[1] / w[0]).ln())
+            .collect();
+
+        if returns.len() < 5 {
+            continue;
+        }
+
+        // Calculate squared returns (volatility proxy)
+        let squared_returns: Vec<f64> = returns.iter().map(|r| r.powi(2)).collect();
+
+        // Calculate autocorrelation of squared returns (lag 1)
+        let mean_sq = squared_returns.iter().sum::<f64>() / squared_returns.len() as f64;
+
+        let mut numerator = 0.0;
+        let mut denominator = 0.0;
+        let mut count = 0;
+
+        for j in 1..squared_returns.len() {
+            let current_dev = squared_returns[j] - mean_sq;
+            let prev_dev = squared_returns[j - 1] - mean_sq;
+
+            numerator += current_dev * prev_dev;
+            denominator += current_dev.powi(2);
+            count += 1;
+        }
+
+        clustering_values[i] = if denominator > 1e-10 && count > 0 {
+            (numerator / denominator).clamp(-1.0, 1.0) // Clamp correlation
+        } else {
+            0.0
+        };
+    }
+
+    clustering_values
+}
+
+/// Calculate Mean Reversion Strength using deviation analysis
+/// Higher values indicate stronger tendency to revert to mean
+fn calculate_mean_reversion_strength(prices: &[f64], window: usize) -> Vec<f64> {
+    let mut reversion_values = vec![f64::NAN; prices.len()];
+
+    if prices.len() < window || window < 5 {
+        return reversion_values;
+    }
+
+    for i in window..prices.len() {
+        let price_window = &prices[i - window..i];
+
+        // Calculate moving average
+        let mean_price = price_window.iter().sum::<f64>() / price_window.len() as f64;
+
+        // Calculate normalized deviations from mean
+        let deviations: Vec<f64> = price_window
+            .iter()
+            .map(|&p| (p - mean_price) / mean_price)
+            .collect();
+
+        // Calculate mean reversion coefficient
+        let mut reversion_sum = 0.0;
+        let mut count = 0;
+
+        for j in 1..deviations.len() {
+            let current_dev = deviations[j];
+            let prev_dev = deviations[j - 1];
+
+            // Check if price moves back toward mean
+            let moving_toward_mean = if prev_dev > 0.0 {
+                current_dev < prev_dev // Positive deviation decreasing
+            } else if prev_dev < 0.0 {
+                current_dev > prev_dev // Negative deviation increasing (toward zero)
+            } else {
+                false
+            };
+
+            if moving_toward_mean {
+                reversion_sum += (prev_dev - current_dev).abs();
+                count += 1;
+            }
+        }
+
+        reversion_values[i] = if count > 0 {
+            (reversion_sum / count as f64).min(1.0) // Cap at 1.0 for normalization
+        } else {
+            0.0
+        };
+    }
+
+    reversion_values
 }
