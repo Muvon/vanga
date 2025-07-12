@@ -1,4 +1,5 @@
-use crate::config::ModelConfig;
+use crate::config::{FeatureConfig, ModelConfig};
+use crate::utils::error::{Result, VangaError};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -21,8 +22,8 @@ pub struct TrainingConfig {
     /// Prediction horizons to train for
     pub horizons: Vec<String>,
 
-    /// Path to custom features configuration
-    pub features_config_path: Option<PathBuf>,
+    /// Feature engineering configuration
+    pub features: FeatureConfig,
 
     /// Model architecture configuration
     pub model: ModelConfig,
@@ -68,9 +69,6 @@ pub struct DataConfig {
 
     /// Sequence overlap ratio
     pub sequence_overlap: f64,
-
-    /// Missing data handling strategy
-    pub missing_data_strategy: MissingDataStrategy,
 
     /// Outlier detection and handling
     pub outlier_handling: OutlierHandling,
@@ -164,7 +162,40 @@ pub use crate::optimization::objective::OptimizationMetric;
 
 impl TrainingParams {
     /// Validate training parameters for correctness
-    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+    pub fn validate(&self) -> Result<()> {
+        // Validate validation split
+        if self.validation_split <= 0.0 || self.validation_split >= 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "validation_split must be between 0.0 and 1.0, got: {}",
+                self.validation_split
+            )));
+        }
+
+        // Validate test split
+        if self.test_split < 0.0 || self.test_split >= 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "test_split must be between 0.0 and 1.0, got: {}",
+                self.test_split
+            )));
+        }
+
+        // Validate that validation + test splits don't exceed 1.0
+        if self.validation_split + self.test_split >= 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "validation_split + test_split must be less than 1.0, got: {} + {} = {}",
+                self.validation_split,
+                self.test_split,
+                self.validation_split + self.test_split
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Validate training parameters for correctness with symbol context
+    pub fn validate_for_symbols(&self, _symbols: &[String]) -> Result<()> {
+        // First run basic validation
+        self.validate()?;
         // Validate validation split
         if self.validation_split <= 0.0 || self.validation_split >= 1.0 {
             return Err(crate::utils::error::VangaError::ConfigError(format!(
@@ -214,7 +245,7 @@ impl TrainingParams {
 
 impl OptimizationConfig {
     /// Validate optimization configuration parameters
-    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+    pub fn validate(&self) -> Result<()> {
         // Validate number of trials
         if self.n_trials == 0 {
             return Err(crate::utils::error::VangaError::ConfigError(
@@ -243,7 +274,7 @@ impl Default for TrainingConfig {
             fresh_training: false,
             continue_training: false,
             horizons: vec!["1h".to_string(), "4h".to_string(), "1d".to_string()],
-            features_config_path: None,
+            features: FeatureConfig::default(),
             model: ModelConfig::default(),
             training: TrainingParams::default(),
             data: DataConfig::default(),
@@ -274,7 +305,6 @@ impl Default for DataConfig {
         Self {
             normalization: NormalizationMethod::Robust,
             sequence_overlap: 0.8,
-            missing_data_strategy: MissingDataStrategy::Interpolate,
             outlier_handling: OutlierHandling {
                 enabled: true,
                 method: OutlierMethod::ModifiedZScore,
@@ -328,9 +358,66 @@ impl TrainingConfig {
         self
     }
 
-    pub fn features_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.features_config_path = Some(path.into());
-        self
+    /// Validate configuration against provided symbols
+    pub fn validate_for_symbols(&self, symbols: &[String]) -> Result<()> {
+        // Validate cross-asset features
+        if self.features.cross_asset.enabled {
+            self.validate_cross_asset_requirements(symbols)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate cross-asset feature requirements
+    fn validate_cross_asset_requirements(&self, symbols: &[String]) -> Result<()> {
+        let config = &self.features.cross_asset;
+
+        // Check minimum symbol count
+        if symbols.len() < config.min_symbols_required {
+            return Err(VangaError::ConfigError(format!(
+                "Cross-asset features enabled but only {} symbols provided. Minimum required: {}. Use: --symbol BTCUSDT,ETHUSDT,DOTUSDT",
+                symbols.len(),
+                config.min_symbols_required
+            )));
+        }
+
+        // Check required symbols
+        for required in &config.required_symbols {
+            if !symbols.contains(required) {
+                return Err(VangaError::ConfigError(format!(
+                    "Cross-asset features require '{}' but not found in symbols: {:?}",
+                    required, symbols
+                )));
+            }
+        }
+
+        // Check BTC dominance requirements
+        if config.btc_dominance_enabled && !symbols.contains(&"BTCUSDT".to_string()) {
+            return Err(VangaError::ConfigError(format!(
+                "BTC dominance enabled but BTCUSDT not in symbols: {:?}",
+                symbols
+            )));
+        }
+
+        // Check ETH/BTC ratio requirements (only warn if enabled but missing symbols)
+        if config.eth_btc_ratio_enabled {
+            let has_btc = symbols.contains(&"BTCUSDT".to_string());
+            let has_eth = symbols.contains(&"ETHUSDT".to_string());
+
+            if !has_btc || !has_eth {
+                log::warn!(
+                    "ETH/BTC ratio enabled but missing symbols (BTCUSDT: {}, ETHUSDT: {}). Feature will be skipped.",
+                    has_btc, has_eth
+                );
+                // Don't error - just warn and skip this feature
+            }
+        }
+
+        log::info!(
+            "✅ Cross-asset validation passed for symbols: {:?}",
+            symbols
+        );
+        Ok(())
     }
 
     /// Enable or disable attention mechanism
@@ -444,9 +531,18 @@ impl TrainingConfig {
             self.optimization = optimization;
         }
 
-        // Validate configuration parameters
-        self.training.validate()?;
-        self.optimization.validate()?;
+        // Load features section if present
+        if let Some(features_value) = parsed.get("features") {
+            let features: FeatureConfig = features_value.clone().try_into().map_err(|e| {
+                crate::utils::error::VangaError::ConfigError(format!(
+                    "Failed to parse features: {}",
+                    e
+                ))
+            })?;
+            self.features = features;
+        }
+
+        // Configuration loaded successfully
 
         log::info!(
             "✅ Configuration loaded and validated from: {}",

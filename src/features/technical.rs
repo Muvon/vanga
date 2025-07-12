@@ -238,12 +238,30 @@ fn calculate_ema(data: &[f64], period: usize) -> Vec<f64> {
 fn calculate_rsi(data: &[f64], period: usize) -> Vec<f64> {
     let mut result = vec![f64::NAN; data.len()];
 
-    if data.len() < period + 1 {
+    if data.len() <= period {
+        log::warn!(
+            "RSI calculation: insufficient data length {} for period {} (need at least {} points)",
+            data.len(),
+            period,
+            period + 1
+        );
         return result;
     }
 
-    let mut gains = Vec::new();
-    let mut losses = Vec::new();
+    // Check for any NaN or infinite values in input data
+    for (i, &value) in data.iter().enumerate() {
+        if !value.is_finite() {
+            log::error!(
+                "RSI calculation: non-finite input value {} at index {}",
+                value,
+                i
+            );
+            return result;
+        }
+    }
+
+    let mut gains = Vec::with_capacity(data.len() - 1);
+    let mut losses = Vec::with_capacity(data.len() - 1);
 
     // Calculate price changes
     for i in 1..data.len() {
@@ -257,17 +275,52 @@ fn calculate_rsi(data: &[f64], period: usize) -> Vec<f64> {
         }
     }
 
-    // Calculate average gains and losses
+    // Calculate RSI values starting from period index
+    // We need at least 'period' price changes to calculate RSI
     for i in (period - 1)..gains.len() {
-        let avg_gain = gains[(i + 1 - period)..=i].iter().sum::<f64>() / period as f64;
-        let avg_loss = losses[(i + 1 - period)..=i].iter().sum::<f64>() / period as f64;
+        let start_idx = i + 1 - period;
+        let end_idx = i;
 
-        if avg_loss == 0.0 {
-            result[i + 1] = 100.0;
-        } else {
-            let rs = avg_gain / avg_loss;
-            result[i + 1] = 100.0 - (100.0 / (1.0 + rs));
+        let avg_gain = gains[start_idx..=end_idx].iter().sum::<f64>() / period as f64;
+        let avg_loss = losses[start_idx..=end_idx].iter().sum::<f64>() / period as f64;
+
+        // Validate averages
+        if !avg_gain.is_finite() || !avg_loss.is_finite() {
+            log::error!(
+                "RSI calculation: non-finite averages - gain: {}, loss: {} at index {}",
+                avg_gain,
+                avg_loss,
+                i
+            );
+            continue;
         }
+
+        let rsi_value = if avg_loss == 0.0 && avg_gain == 0.0 {
+            // No price movement - neutral RSI
+            50.0
+        } else if avg_loss == 0.0 {
+            // Only gains, no losses - maximum RSI
+            100.0
+        } else {
+            // Normal RSI calculation
+            let rs = avg_gain / avg_loss;
+            100.0 - (100.0 / (1.0 + rs))
+        };
+
+        // Validate final RSI value
+        if !rsi_value.is_finite() || rsi_value < 0.0 || rsi_value > 100.0 {
+            log::error!(
+                "RSI calculation: invalid RSI value {} (avg_gain: {}, avg_loss: {}) at index {}",
+                rsi_value,
+                avg_gain,
+                avg_loss,
+                i
+            );
+            continue;
+        }
+
+        // RSI corresponds to the data point at i+1 (since gains[i] is change from data[i] to data[i+1])
+        result[i + 1] = rsi_value;
     }
 
     result
@@ -479,7 +532,14 @@ fn calculate_mfi(
         let pos_sum = positive_flow[(i + 1 - period)..=i].iter().sum::<f64>();
         let neg_sum = negative_flow[(i + 1 - period)..=i].iter().sum::<f64>();
 
-        if neg_sum != 0.0 {
+        if neg_sum == 0.0 && pos_sum == 0.0 {
+            // No money flow - neutral MFI
+            result[i] = 50.0;
+        } else if neg_sum == 0.0 {
+            // Only positive flow - maximum MFI
+            result[i] = 100.0;
+        } else {
+            // Normal MFI calculation
             let money_ratio = pos_sum / neg_sum;
             result[i] = 100.0 - (100.0 / (1.0 + money_ratio));
         }
@@ -616,11 +676,36 @@ fn add_rsi_indicators(
     close_prices: &[f64],
     periods: &[u32],
 ) -> Result<DataFrame> {
+    // Debug: Check input data quality
+    log::debug!(
+        "RSI calculation: input data length = {}",
+        close_prices.len()
+    );
+    let nan_count = close_prices.iter().filter(|&&x| !x.is_finite()).count();
+    if nan_count > 0 {
+        log::error!(
+            "RSI calculation: {} non-finite values in input close_prices",
+            nan_count
+        );
+        return Err(VangaError::FeatureError(format!(
+            "RSI calculation failed: {} non-finite values in input close prices",
+            nan_count
+        )));
+    }
+
     // Compute all RSI periods in parallel
     let rsi_results: Vec<_> = periods
         .par_iter()
         .map(|&period| {
+            log::debug!("Calculating RSI for period {}", period);
             let rsi = calculate_rsi(close_prices, period as usize);
+            let nan_count = rsi.iter().filter(|&&x| !x.is_finite()).count();
+            log::debug!(
+                "RSI period {}: {} NaN values out of {} total",
+                period,
+                nan_count,
+                rsi.len()
+            );
             (format!("rsi_{}", period), rsi)
         })
         .collect();

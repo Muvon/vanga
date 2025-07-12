@@ -1,8 +1,8 @@
-# VANGA Multi-Layer LSTM Usage Examples
+# VANGA Single-Config Usage Examples
 
-## 🚀 **Complete Multi-Layer Usage Guide**
+## 🚀 **Complete Single-Config Usage Guide**
 
-This document provides comprehensive usage examples for the VANGA multi-layer LSTM cryptocurrency forecasting system with intelligent architecture optimization.
+This document provides comprehensive usage examples for the VANGA single-config LSTM cryptocurrency forecasting system with intelligent architecture optimization.
 
 ---
 
@@ -10,7 +10,7 @@ This document provides comprehensive usage examples for the VANGA multi-layer LS
 
 ### **System Requirements**
 - Rust 1.87.0 or later
-- Compiled VANGA binary (`./target/release/vanga`)
+- Compiled VANGA binary (`vanga`)
 - CSV data files with OHLCV format
 
 ### **Data Format**
@@ -24,91 +24,445 @@ timestamp,open,high,low,close,volume
 
 ---
 
-## 🔧 **Configuration Parameters**
+## 🔧 **Single-Config System Overview**
 
-### **Training Parameters**
-All training parameters can be configured via TOML files and are automatically validated:
+### **Configuration Templates**
+All parameters (training, model, features) are defined in a single TOML file:
+
+| Template | Purpose | Best For |
+|----------|---------|----------|
+| `configs/quick_start.toml` | Beginner setup | Learning, small datasets |
+| `configs/training.toml` | Production single-asset | Standard crypto trading |
+| `configs/cross_asset_training.toml` | Multi-asset production | Portfolio management |
+| `configs/minimal_custom.toml` | Simple customization | Basic custom features |
+| `configs/advanced_custom.toml` | Complex customization | Advanced feature engineering |
+| `configs/example_single_asset.toml` | Complete reference | Parameter documentation |
+| `configs/example_cross_asset.toml` | Cross-asset reference | Multi-asset documentation |
+
+### **Configuration Structure**
+```toml
+[training]          # Training parameters (epochs, learning rate, validation)
+[model]             # Model architecture (LSTM layers, attention, dropout)
+[features]          # Feature engineering (technical indicators, custom features)
+[data]              # Data processing (normalization, outlier handling)
+[optimization]      # Hyperparameter optimization (optional)
+```
+
+### **Key Configuration Parameters**
+All training parameters are automatically validated when loaded:
 
 ```toml
 [training]
-# Gradient clipping (prevents exploding gradients in volatile crypto markets)
-gradient_clip = 1.0                    # Threshold for gradient clipping (must be > 0)
-
-# Data splits (automatically validated)
-validation_split = 0.2                 # Must be between 0.0 and 1.0
-test_split = 0.1                      # Must be between 0.0 and 1.0
-                                      # Combined splits must be < 1.0
-
-# Early stopping
-early_stopping_patience = 10          # Must be > 0
-```
-
-### **Optimization Configuration**
-Hyperparameter optimization is now fully configurable:
-
-```toml
-[optimization]
-method = "Bayesian"                    # Bayesian, Grid, Random, or None
-n_trials = 50                         # Number of optimization trials (must be > 0)
-timeout_seconds = 3600                # Optimization timeout in seconds (must be > 0)
-metric = "ValidationLoss"             # Optimization target metric
+# Epoch configuration - Auto early stopping (RECOMMENDED)
+epochs = { Auto = { max_epochs = 1000 } }     # Stops when validation loss plateaus
+learning_rate = { Fixed = 0.001 }             # Learning rate (0.0001-0.01 range)
+batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto batch sizing
+validation_split = 0.2                        # 20% validation split (0.1-0.3 range)
+test_split = 0.1                              # 10% test split (0.05-0.2 range)
+early_stopping_patience = 50                  # Stop after 50 epochs without improvement
+gradient_clip = 1.0                           # Gradient clipping threshold (0.5-2.0 range)
 ```
 
 ### **Configuration Validation**
 All parameters are automatically validated when loading configuration files:
-- **Range validation**: Ensures splits, timeouts, and trials are within valid ranges
+- **Range validation**: Ensures splits, learning rates, and patience are within valid ranges
 - **Consistency checks**: Validates that validation_split + test_split < 1.0
 - **Type safety**: Prevents invalid optimization methods or metrics
 - **Error reporting**: Provides detailed error messages with actual values
 
-## 🎯 **Multi-Layer LSTM Usage Examples**
+---
 
-### **1. Auto-Optimized Multi-Layer Training**
+## 🎯 **Single-Config Training Examples**
 
-#### **Intelligent Training (RECOMMENDED)**
+### **1. Quick Start Training**
+
+#### **Beginner Setup (RECOMMENDED)**
 ```bash
-# Automatically selects optimal 2-3 layer architecture
-./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
-# Result: 3-layer MultiLSTM with 50+ technical indicators
+# Minimal but effective configuration for beginners
+vanga train --symbol BTCUSDT --data data/btc_historical.csv --config configs/quick_start.toml
+# Result: 2-layer MultiLSTM with essential technical indicators
 ```
 
 #### **Expected Output:**
 ```
-[INFO] Initializing multi-layer LSTM network with config: LSTMConfig { input_size: 52, hidden_size: 128, num_layers: 3, ... }
-[INFO] ✅ LSTM layer 0 initialized: input_size=52, hidden_size=128
-[INFO] ✅ LSTM layer 1 initialized: input_size=128, hidden_size=128
-[INFO] ✅ LSTM layer 2 initialized: input_size=128, hidden_size=128
-[INFO] Training multi-layer LSTM with 3 layers, input_size: 52
-[INFO] Multi-layer LSTM training completed successfully
+[INFO] Loading configuration from: configs/quick_start.toml
+[INFO] ✅ Configuration validated successfully
+[INFO] Initializing LSTM network: MultiLSTM with 2 layers
+[INFO] ✅ LSTM layer 0 initialized: input_size=25, hidden_size=64
+[INFO] ✅ LSTM layer 1 initialized: input_size=64, hidden_size=64
+[INFO] Training with auto early stopping (max 1000 epochs)
+[INFO] Epoch 1/1000 - Loss: 0.0234, Val Loss: 0.0267
+[INFO] Training completed after 127 epochs (early stopping)
 ```
 
-### **2. Custom Architecture Training**
+### **2. Production Training**
 
-#### **Fast 2-Layer Training**
+#### **Standard Production Setup**
 ```bash
-# Fast training for development and testing
-./target/release/vanga train \
+# Full-featured production configuration
+vanga train --symbol BTCUSDT --data data/btc_historical.csv --config configs/training.toml
+# Result: Optimized architecture with 50+ technical indicators
+```
+
+#### **Production with Custom Data**
+```bash
+# Production training with custom features
+vanga train \
+    --symbol BTCUSDT \
+    --data data/btc_with_sentiment.csv \
+    --config configs/training.toml
+# Automatically includes sentiment columns as custom features
+```
+
+### **3. Cross-Asset Training**
+
+#### **Multi-Asset Portfolio Training**
+```bash
+# Cross-asset training with correlation analysis
+vanga train \
+    --symbol BTCUSDT,ETHUSDT,ADAUSDT \
+    --data data/ \
+    --config configs/cross_asset_training.toml
+# Result: Cross-asset LSTM with correlation features
+```
+
+#### **Large Portfolio Training**
+```bash
+# Training with 10+ assets for comprehensive market analysis
+vanga train \
+    --symbol BTCUSDT,ETHUSDT,ADAUSDT,DOTUSDT,LINKUSDT,UNIUSDT,AAVEUSDT,COMPUSDT,MKRUSDT,YFIUSDT \
+    --data data/ \
+    --config configs/cross_asset_training.toml
+# Result: Advanced cross-asset model with market sentiment
+```
+
+### **4. Custom Configuration Training**
+
+#### **Minimal Custom Features**
+```bash
+# Simple custom feature setup
+vanga train \
+    --symbol BTCUSDT \
+    --data data/btc_with_funding.csv \
+    --config configs/minimal_custom.toml
+# Includes funding rate as custom feature
+```
+
+#### **Advanced Custom Features**
+```bash
+# Comprehensive custom feature engineering
+vanga train \
+    --symbol BTCUSDT \
+    --data data/btc_comprehensive.csv \
+    --config configs/advanced_custom.toml
+# Includes on-chain metrics, sentiment, macro indicators
+```
+
+### **5. Training Mode Variations**
+
+#### **Fresh Training**
+```bash
+# Always create new model (ignore existing)
+vanga train \
     --symbol BTCUSDT \
     --data data/btc_historical.csv \
-    --config configs/fast_training.toml
-# Result: 2-layer MultiLSTM, ~5 minute training
+    --config configs/training.toml \
+    --fresh
 ```
 
-#### **Advanced 4-Layer Training**
+#### **Continue Training**
 ```bash
-# Maximum quality training for production
-./target/release/vanga train \
+# Add new data to existing model
+vanga train \
     --symbol BTCUSDT \
-    --data data/btc_historical.csv \
-    --config configs/stacked_lstm.toml
-# Result: 4-layer StackedLSTM, ~20 minute training
+    --data data/btc_new_data.csv \
+    --config configs/training.toml \
+    --continue-training
 ```
 
-#### **Bidirectional LSTM Training**
+#### **Development Training**
 ```bash
-# Bidirectional processing for time series with future context
-./target/release/vanga train \
+# Fast training for development/testing
+vanga train \
     --symbol BTCUSDT \
+    --data data/btc_sample.csv \
+    --config configs/quick_start.toml \
+    --fresh
+```
+
+---
+
+## 🔮 **Prediction Examples**
+
+### **1. Single Predictions**
+
+#### **Basic Prediction**
+```bash
+# Single prediction with default horizon
+vanga predict --symbol BTCUSDT --input data/btc_recent.csv
+```
+
+#### **Multi-Horizon Prediction**
+```bash
+# Predictions for multiple time horizons
+vanga predict \
+    --symbol BTCUSDT \
+    --input data/btc_recent.csv \
+    --horizons 1h,4h,1d,7d
+```
+
+### **2. Batch Predictions**
+
+#### **Multiple Symbols**
+```bash
+# Batch predictions for portfolio
+vanga predict \
+    --symbols BTCUSDT,ETHUSDT,ADAUSDT \
+    --input-dir data/current/ \
+    --output predictions/
+```
+
+#### **Cross-Asset Predictions**
+```bash
+# Predictions using cross-asset model
+vanga predict \
+    --symbol BTCUSDT \
+    --input data/btc_recent.csv \
+    --model models/cross_asset_BTCUSDT_ETHUSDT_ADAUSDT.msgpack
+```
+
+---
+
+## 📊 **Configuration Customization Examples**
+
+### **1. Parameter Tuning for Different Scenarios**
+
+#### **Small Dataset (< 1000 samples)**
+```toml
+# configs/small_dataset.toml
+[training]
+epochs = { Auto = { max_epochs = 500 } }
+early_stopping_patience = 25
+validation_split = 0.15
+
+[model]
+architecture = { MultiLSTM = { layers = 1 } }
+hidden_units = { Fixed = 64 }
+
+[model.dropout]
+rate = { Fixed = 0.3 }  # Higher dropout for small data
+```
+
+#### **Large Dataset (> 10000 samples)**
+```toml
+# configs/large_dataset.toml
+[training]
+epochs = { Auto = { max_epochs = 2000 } }
+early_stopping_patience = 100
+batch_size = { Auto = { min_size = 128, max_size = 1024 } }
+
+[model]
+architecture = { MultiLSTM = { layers = 3 } }
+hidden_units = { Auto = { min_units = 128, max_units = 768 } }
+
+[optimization]
+enabled = true
+method = "Bayesian"
+n_trials = 200
+```
+
+#### **High-Frequency Data (1-minute intervals)**
+```toml
+# configs/high_frequency.toml
+[model]
+sequence_length = { Auto = { min_length = 60, max_length = 300 } }
+
+[features.technical_indicators.moving_averages]
+sma_periods = [3, 5, 10, 20, 50]  # Shorter periods
+ema_periods = [3, 5, 10, 20, 50]
+
+[features.engineering.lag_features]
+lag_periods = [1, 2, 3, 5, 10, 15, 30]  # More lags
+```
+
+#### **Daily Data (Low Frequency)**
+```toml
+# configs/daily_data.toml
+[model]
+sequence_length = { Auto = { min_length = 20, max_length = 60 } }
+
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 100, 200]  # Standard periods
+ema_periods = [5, 10, 20, 50, 100, 200]
+
+[features.engineering.lag_features]
+lag_periods = [1, 2, 3, 5, 7]  # Fewer lags
+```
+
+### **2. Feature Engineering Examples**
+
+#### **Minimal Features (Fast Training)**
+```toml
+# configs/minimal_features.toml
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 20]
+ema_periods = [5, 20]
+
+[features.technical_indicators.momentum]
+rsi_periods = [14]
+
+[features.market_microstructure]
+enabled = false
+
+[features.volatility_features]
+enabled = false
+```
+
+#### **Maximum Features (Best Accuracy)**
+```toml
+# configs/maximum_features.toml
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [3, 5, 10, 20, 50, 100, 200, 300]
+ema_periods = [3, 5, 10, 20, 50, 100, 200, 300]
+wma_periods = [5, 10, 20, 50, 100]
+hull_periods = [9, 21, 50, 100]
+
+[features.market_microstructure]
+enabled = true
+
+[features.volatility_features]
+enabled = true
+
+[features.volatility_features.garch_features]
+enabled = true
+model_orders = [[1, 1], [1, 2], [2, 1], [2, 2], [3, 1]]
+
+[features.engineering.polynomial_features]
+enabled = true
+degree = 2
+```
+
+---
+
+## 🚀 **Advanced Usage Patterns**
+
+### **1. Model Comparison Workflow**
+
+```bash
+# Train multiple models with different configurations
+vanga train --symbol BTCUSDT --data data/btc.csv --config configs/quick_start.toml --fresh
+vanga train --symbol BTCUSDT --data data/btc.csv --config configs/training.toml --fresh
+vanga train --symbol BTCUSDT --data data/btc.csv --config configs/advanced_custom.toml --fresh
+
+# Compare model performance
+vanga models compare --symbol BTCUSDT --metric sharpe_ratio
+vanga models compare --symbol BTCUSDT --metric accuracy
+```
+
+### **2. Production Deployment Workflow**
+
+```bash
+# 1. Train production model
+vanga train --symbol BTCUSDT --data data/btc_historical.csv --config configs/training.toml
+
+# 2. Evaluate on test data
+vanga models evaluate --symbol BTCUSDT --test-data data/btc_test.csv
+
+# 3. Export for deployment
+vanga models export --symbol BTCUSDT --format msgpack --output production/
+
+# 4. Make real-time predictions
+vanga predict --symbol BTCUSDT --input data/btc_current.csv --output predictions/
+```
+
+### **3. Research and Development Workflow**
+
+```bash
+# 1. Quick prototype with minimal config
+vanga train --symbol BTCUSDT --data data/btc_sample.csv --config configs/quick_start.toml --fresh
+
+# 2. Experiment with custom features
+vanga train --symbol BTCUSDT --data data/btc_with_features.csv --config configs/minimal_custom.toml --fresh
+
+# 3. Scale up with full features
+vanga train --symbol BTCUSDT --data data/btc_full.csv --config configs/advanced_custom.toml --fresh
+
+# 4. Cross-asset analysis
+vanga train --symbol BTCUSDT,ETHUSDT --data data/ --config configs/cross_asset_training.toml --fresh
+```
+
+---
+
+## 📈 **Performance Optimization Tips**
+
+### **1. Training Speed Optimization**
+- Use `configs/quick_start.toml` for development
+- Enable fewer technical indicators for faster feature engineering
+- Use smaller batch sizes for memory-constrained systems
+- Disable attention mechanism for faster training
+
+### **2. Accuracy Optimization**
+- Use `configs/training.toml` or `configs/advanced_custom.toml`
+- Enable all technical indicators and volatility features
+- Use cross-asset training for portfolio models
+- Enable hyperparameter optimization for production models
+
+### **3. Memory Optimization**
+- Use smaller sequence lengths (30-60)
+- Reduce number of LSTM layers (1-2)
+- Use smaller hidden units (64-128)
+- Enable feature selection to reduce dimensionality
+
+---
+
+## 🔍 **Troubleshooting Common Issues**
+
+### **Configuration Errors**
+```bash
+# Error: Invalid configuration parameter
+[ERROR] Configuration validation failed: validation_split (0.5) + test_split (0.6) = 1.1 > 1.0
+
+# Solution: Adjust splits in config file
+validation_split = 0.2
+test_split = 0.1
+```
+
+### **Data Issues**
+```bash
+# Error: Missing required columns
+[ERROR] Missing required columns: ['close', 'volume']
+
+# Solution: Ensure CSV has required OHLCV columns
+timestamp,open,high,low,close,volume
+```
+
+### **Memory Issues**
+```bash
+# Error: Out of memory during training
+[ERROR] CUDA out of memory
+
+# Solution: Reduce batch size or model complexity
+[model]
+hidden_units = { Fixed = 64 }  # Reduce from default
+[training]
+batch_size = { Fixed = 32 }    # Reduce batch size
+```
+
+---
+
+## 📚 **Next Steps**
+
+1. **Start with Quick Start**: Use `configs/quick_start.toml` for your first model
+2. **Explore Templates**: Review `configs/example_single_asset.toml` for parameter details
+3. **Scale Up**: Move to `configs/training.toml` for production models
+4. **Cross-Asset**: Try `configs/cross_asset_training.toml` for portfolio analysis
+5. **Customize**: Create your own config based on the examples
     --data data/btc_historical.csv \
     --config configs/bidirectional_lstm.toml
 # Result: 2-layer BidirectionalLSTM
@@ -117,7 +471,7 @@ All parameters are automatically validated when loading configuration files:
 ### **3. Batch Multi-Layer Training**
 ```bash
 # Train multi-layer models for multiple cryptocurrencies
-./target/release/vanga train \
+vanga train \
     --batch \
     --symbols BTCUSDT,ETHUSDT,ADAUSDT \
     --data-dir data/crypto/ \
@@ -129,7 +483,7 @@ All parameters are automatically validated when loading configuration files:
 #### **Simple Prediction**
 ```bash
 # Make predictions for Bitcoin
-./target/release/vanga predict \
+vanga predict \
     --symbol BTCUSDT \
     --input data/btc_recent.csv \
     --output predictions/btc_predictions.csv
@@ -138,7 +492,7 @@ All parameters are automatically validated when loading configuration files:
 #### **Multi-Horizon Predictions**
 ```bash
 # Predict all available horizons
-./target/release/vanga predict \
+vanga predict \
     --symbol BTCUSDT \
     --input data/btc_recent.csv \
     --all-horizons \
@@ -148,7 +502,7 @@ All parameters are automatically validated when loading configuration files:
 #### **Predictions with Confidence Filtering**
 ```bash
 # Only output predictions above 70% confidence
-./target/release/vanga predict \
+vanga predict \
     --symbol BTCUSDT \
     --input data/btc_recent.csv \
     --min-confidence 0.7 \
@@ -160,13 +514,13 @@ All parameters are automatically validated when loading configuration files:
 #### **List Available Models**
 ```bash
 # Show all trained models
-./target/release/vanga models list
+vanga models list
 ```
 
 #### **Model Evaluation** (Future Feature)
 ```bash
 # Evaluate model performance
-./target/release/vanga models evaluate \
+vanga models evaluate \
     --symbol BTCUSDT \
     --test-data data/btc_test.csv
 ```
@@ -174,7 +528,7 @@ All parameters are automatically validated when loading configuration files:
 #### **Model Comparison** (Future Feature)
 ```bash
 # Compare multiple models
-./target/release/vanga models compare \
+vanga models compare \
     --symbols BTCUSDT,ETHUSDT \
     --metric accuracy
 ```
@@ -198,7 +552,7 @@ mkdir -p data models predictions
 #### **Step 2: Train Model**
 ```bash
 # Train Bitcoin model with verbose logging
-RUST_LOG=info ./target/release/vanga train \
+RUST_LOG=info vanga train \
     --symbol BTCUSDT \
     --data data/btc_historical.csv \
     --fresh
@@ -218,7 +572,7 @@ Expected output:
 #### **Step 3: Make Predictions**
 ```bash
 # Generate predictions
-./target/release/vanga predict \
+vanga predict \
     --symbol BTCUSDT \
     --input data/btc_recent.csv \
     --output predictions/btc_predictions.csv
@@ -238,7 +592,7 @@ Expected output:
 #### **Step 4: Review Results**
 ```bash
 # Check the saved model
-./target/release/vanga models list
+vanga models list
 
 # View prediction results
 head predictions/btc_predictions.csv
@@ -260,24 +614,24 @@ mkdir -p data/{btc,eth,ada} predictions models
 #### **Train All Models**
 ```bash
 # Train Bitcoin model
-./target/release/vanga train --symbol BTCUSDT --data data/btc/historical.csv
+vanga train --symbol BTCUSDT --data data/btc/historical.csv
 
 # Train Ethereum model
-./target/release/vanga train --symbol ETHUSDT --data data/eth/historical.csv
+vanga train --symbol ETHUSDT --data data/eth/historical.csv
 
 # Train Cardano model
-./target/release/vanga train --symbol ADAUSDT --data data/ada/historical.csv
+vanga train --symbol ADAUSDT --data data/ada/historical.csv
 ```
 
 #### **Generate Portfolio Predictions**
 ```bash
 # Generate predictions for all assets
-./target/release/vanga predict --symbol BTCUSDT --input data/btc/recent.csv --output predictions/btc.csv
-./target/release/vanga predict --symbol ETHUSDT --input data/eth/recent.csv --output predictions/eth.csv
-./target/release/vanga predict --symbol ADAUSDT --input data/ada/recent.csv --output predictions/ada.csv
+vanga predict --symbol BTCUSDT --input data/btc/recent.csv --output predictions/btc.csv
+vanga predict --symbol ETHUSDT --input data/eth/recent.csv --output predictions/eth.csv
+vanga predict --symbol ADAUSDT --input data/ada/recent.csv --output predictions/ada.csv
 
 # List all trained models
-./target/release/vanga models list
+vanga models list
 ```
 
 ---
@@ -314,7 +668,7 @@ mfi_period = 14
 
 Use with training:
 ```bash
-./target/release/vanga train \
+vanga train \
     --symbol BTCUSDT \
     --data data/btc_historical.csv \
     --features-config config/custom_features.toml
@@ -347,7 +701,6 @@ recurrent = true
 [data]
 normalization = "Robust"
 sequence_overlap = 0.8
-missing_data_strategy = "Interpolate"
 
 [optimization]
 enabled = false
@@ -400,7 +753,7 @@ Running `vanga models list` shows:
 ```bash
 # Error: Model file not found
 # Solution: Train the model first
-./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+vanga train --symbol BTCUSDT --data data/btc_historical.csv
 ```
 
 #### **Data Format Error**
@@ -414,14 +767,14 @@ head -n 5 data/btc_historical.csv
 ```bash
 # For very large datasets, use chunked processing
 # The system automatically handles this, but you can monitor with:
-RUST_LOG=debug ./target/release/vanga train --symbol BTCUSDT --data large_data.csv
+RUST_LOG=debug vanga train --symbol BTCUSDT --data large_data.csv
 ```
 
 ### **Verbose Logging for Debugging**
 ```bash
 # Enable detailed logging
 export RUST_LOG=debug
-./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+vanga train --symbol BTCUSDT --data data/btc_historical.csv
 
 # Or for specific modules
 export RUST_LOG=vanga::model=debug,vanga::data=info
@@ -439,7 +792,7 @@ Create a shell script `trading_pipeline.sh`:
 
 # Set up environment
 export RUST_LOG=info
-VANGA_BIN="./target/release/vanga"
+VANGA_BIN="vanga"
 DATA_DIR="data"
 MODELS_DIR="models"
 PREDICTIONS_DIR="predictions"
@@ -491,11 +844,11 @@ mkdir -p $RESULTS_DIR
 
 # Train model on training data
 echo "Training model..."
-./target/release/vanga train --symbol $SYMBOL --data $TRAIN_DATA --fresh
+vanga train --symbol $SYMBOL --data $TRAIN_DATA --fresh
 
 # Generate predictions on test data
 echo "Generating predictions..."
-./target/release/vanga predict \
+vanga predict \
     --symbol $SYMBOL \
     --input $TEST_DATA \
     --output "$RESULTS_DIR/${SYMBOL}_backtest.csv"
@@ -510,16 +863,16 @@ echo "Backtesting complete. Results in $RESULTS_DIR/"
 ### **Timing Your Operations**
 ```bash
 # Time training process
-time ./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+time vanga train --symbol BTCUSDT --data data/btc_historical.csv
 
 # Time prediction process
-time ./target/release/vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
+time vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
 ```
 
 ### **Memory Usage Monitoring**
 ```bash
 # Monitor memory usage during training
-/usr/bin/time -v ./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+/usr/bin/time -v vanga train --symbol BTCUSDT --data data/btc_historical.csv
 ```
 
 ---

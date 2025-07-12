@@ -12,16 +12,16 @@ Generate predictions with a trained model:
 
 ```bash
 # Single prediction
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_btc.csv
+vanga predict --symbol BTCUSDT --input data/recent_btc.csv
 
 # Prediction with output file
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_btc.csv --output predictions.csv
+vanga predict --symbol BTCUSDT --input data/recent_btc.csv --output predictions.csv
 
 # Multi-horizon predictions
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_btc.csv --all-horizons
+vanga predict --symbol BTCUSDT --input data/recent_btc.csv --all-horizons
 
 # Prediction with confidence filtering
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_btc.csv --min-confidence 0.7
+vanga predict --symbol BTCUSDT --input data/recent_btc.csv --min-confidence 0.7
 ```
 
 ### **Prediction Output**
@@ -108,26 +108,26 @@ pub struct PredictionConfig {
 
 ```bash
 # Simple prediction
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_data.csv
+vanga predict --symbol BTCUSDT --input data/recent_data.csv
 
 # Prediction with specific horizon
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_data.csv --horizon 4h
+vanga predict --symbol BTCUSDT --input data/recent_data.csv --horizon 4h
 
 # All horizons prediction
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_data.csv --all-horizons
+vanga predict --symbol BTCUSDT --input data/recent_data.csv --all-horizons
 ```
 
 ### **Advanced Commands**
 
 ```bash
 # Prediction with output file
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_data.csv --output predictions/btc_forecast.csv
+vanga predict --symbol BTCUSDT --input data/recent_data.csv --output predictions/btc_forecast.csv
 
 # Prediction with confidence filtering
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_data.csv --min-confidence 0.8
+vanga predict --symbol BTCUSDT --input data/recent_data.csv --min-confidence 0.8
 
 # Batch prediction (future feature)
-./target/release/vanga predict --batch --input-dir data/current/ --output predictions/
+vanga predict --batch --input-dir data/current/ --output predictions/
 ```
 
 ## Data Processing During Prediction
@@ -290,7 +290,7 @@ These ranges reflect real cryptocurrency market volatility where 15-30% moves ar
 # ... (your data collection process)
 
 # Make prediction
-./target/release/vanga predict \
+vanga predict \
     --symbol BTCUSDT \
     --input data/btc_recent_1h.csv \
     --output predictions/btc_forecast.csv \
@@ -304,7 +304,7 @@ head predictions/btc_forecast.csv
 ```bash
 # Predict multiple assets
 for symbol in BTCUSDT ETHUSDT ADAUSDT; do
-    ./target/release/vanga predict \
+    vanga predict \
         --symbol $symbol \
         --input "data/${symbol}_recent.csv" \
         --output "predictions/${symbol}_forecast.csv"
@@ -320,8 +320,8 @@ done
 python scripts/fetch_latest_data.py
 
 # Generate predictions
-./target/release/vanga predict --symbol BTCUSDT --input data/btc_latest.csv --output predictions/btc.csv
-./target/release/vanga predict --symbol ETHUSDT --input data/eth_latest.csv --output predictions/eth.csv
+vanga predict --symbol BTCUSDT --input data/btc_latest.csv --output predictions/btc.csv
+vanga predict --symbol ETHUSDT --input data/eth_latest.csv --output predictions/eth.csv
 
 # Process results
 python scripts/analyze_predictions.py predictions/
@@ -332,7 +332,7 @@ python scripts/analyze_predictions.py predictions/
 ### **Model Availability Check**
 ```bash
 # List available models before prediction
-./target/release/vanga models list
+vanga models list
 
 # Output shows available models:
 # [INFO] Available models:
@@ -373,10 +373,10 @@ Solution: Provide at least 60 data points (sequence length)
 ### **Prediction Diagnostics**
 ```bash
 # Enable debug logging
-RUST_LOG=debug ./target/release/vanga predict --symbol BTCUSDT --input data.csv
+RUST_LOG=debug vanga predict --symbol BTCUSDT --input data.csv
 
 # Check model status
-./target/release/vanga models list
+vanga models list
 
 # Validate input data
 head -n 10 data/input_data.csv
@@ -387,7 +387,7 @@ head -n 10 data/input_data.csv
 ### **Confidence Filtering**
 ```bash
 # Only output high-confidence predictions
-./target/release/vanga predict \
+vanga predict \
     --symbol BTCUSDT \
     --input data/recent_data.csv \
     --min-confidence 0.8 \
@@ -441,7 +441,7 @@ while true; do
     python scripts/fetch_data.py
 
     # Generate predictions
-    ./target/release/vanga predict --symbol BTCUSDT --input data/latest.csv --output predictions/current.csv
+    vanga predict --symbol BTCUSDT --input data/latest.csv --output predictions/current.csv
 
     # Execute trading logic
     python scripts/trading_bot.py predictions/current.csv

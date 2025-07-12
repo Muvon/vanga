@@ -97,13 +97,13 @@ LSTM Sequences → Multi-Target Prediction → CSV Output
 cargo build --release
 
 # Train a model
-./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+vanga train --symbol BTCUSDT --data data/btc_historical.csv
 
 # Make predictions
-./target/release/vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
+vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
 
 # List models
-./target/release/vanga models list
+vanga models list
 ```
 
 ### **Next Steps**

@@ -1,53 +1,154 @@
-# VANGA Multi-Layer LSTM Quick Start Guide
+# VANGA Single-Config Quick Start Guide
 
-## 🚀 **Multi-Layer LSTM Training Commands**
+## 🚀 **Single-Config Training Commands**
 
-### **Auto-Optimized Training (RECOMMENDED)**
+### **Quick Start Training (RECOMMENDED)**
 ```bash
-# Automatically selects optimal 2-3 layer architecture
-vanga train --symbol BTCUSDT --data btc_data.csv
-# Result: 3-layer MultiLSTM with 50+ technical indicators
+# Beginner-friendly minimal configuration
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/quick_start.toml
+# Result: 2-layer MultiLSTM with essential technical indicators
 ```
 
-### **Custom Architecture Training**
+### **Production Training**
 ```bash
-# Specify exact layer count and architecture
-vanga train --symbol BTCUSDT --data btc_data.csv --config configs/multi_lstm_3layer.toml
+# Full-featured production configuration
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training.toml
+# Result: Optimized architecture with 50+ technical indicators and advanced features
+```
 
-# Fast 2-layer training for development
-vanga train --symbol BTCUSDT --data btc_data.csv --config configs/fast_training.toml
+### **Cross-Asset Training**
+```bash
+# Multi-asset training with correlation analysis
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross_asset_training.toml
+# Result: Cross-asset LSTM with correlation features and market sentiment analysis
+```
 
-# Advanced 4-layer training for maximum quality
-vanga train --symbol BTCUSDT --data btc_data.csv --config configs/stacked_lstm.toml
+### **Custom Configuration Training**
+```bash
+# Use comprehensive example as starting point
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/example_single_asset.toml
+
+# Minimal custom features
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/minimal_custom.toml
+
+# Advanced custom features
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/advanced_custom.toml
 ```
 
 ### **Training Mode Options**
 ```bash
-# Fresh training: Always create new multi-layer model
-vanga train --symbol BTCUSDT --data btc_data.csv --fresh
+# Fresh training: Always create new model
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training.toml --fresh
 
-# Continue training: Preserve existing layer architecture
-vanga train --symbol BTCUSDT --data btc_data.csv --continue-training
-
-# With custom features + multi-layer architecture
-vanga train --symbol BTCUSDT --data btc_data.csv --features-config configs/custom.toml --config configs/multi_lstm.toml
+# Continue training: Add new data to existing model
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training.toml --continue-training
 ```
 
-## 🔧 **Configuration Management**
+## 🔧 **Single-Config System**
 
-### **Validated Configuration Loading**
-All configuration files are automatically validated when loaded:
+### **Unified Configuration Loading**
+All configuration parameters are loaded from a single TOML file:
 
 ```bash
-# Configuration validation happens automatically
-vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training_config.toml
-# ✅ Configuration loaded and validated from: configs/training_config.toml
+# Single config file contains all parameters
+vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training.toml
+# ✅ Configuration loaded and validated from: configs/training.toml
 ```
 
-### **Key Configuration Parameters**
+### **Available Configuration Templates**
+
+| Template | Use Case | Features |
+|----------|----------|----------|
+| `quick_start.toml` | Beginners | Minimal but effective setup |
+| `training.toml` | Production | Full-featured single-asset |
+| `cross_asset_training.toml` | Multi-asset | Cross-asset correlations |
+| `minimal_custom.toml` | Simple custom | Basic custom features |
+| `advanced_custom.toml` | Complex custom | Advanced feature engineering |
+| `example_single_asset.toml` | Reference | Complete parameter guide |
+| `example_cross_asset.toml` | Reference | Cross-asset parameter guide |
+
+### **Key Configuration Sections**
+
+#### **Training Parameters**
 ```toml
 [training]
-gradient_clip = 1.0                   # Gradient clipping (validated > 0)
+epochs = { Auto = { max_epochs = 1000 } }        # Auto early stopping (RECOMMENDED)
+learning_rate = { Fixed = 0.001 }                # Fixed learning rate
+batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto batch sizing
+validation_split = 0.2                           # 20% validation split
+early_stopping_patience = 50                     # Stop after 50 epochs without improvement
+gradient_clip = 1.0                              # Gradient clipping (prevents exploding gradients)
+```
+
+**Parameter Tuning:**
+- **epochs**: Use `Auto` for production, `Fixed` for reproducible experiments
+- **learning_rate**: Start with 0.001, reduce to 0.0001 for fine-tuning
+- **batch_size**: `Auto` optimizes memory usage, `Fixed` for consistent behavior
+- **early_stopping_patience**: Increase (75-100) for complex models, decrease (25-40) for simple models
+
+#### **Model Architecture**
+```toml
+[model]
+architecture = { MultiLSTM = { layers = 2 } }    # Multi-layer LSTM (RECOMMENDED)
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }  # Auto sequence length
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }  # Auto hidden units
+
+[model.dropout]
+enabled = true                                    # Enable dropout regularization
+rate = { Fixed = 0.2 }                          # 20% dropout rate
+variational = true                               # Variational dropout (RECOMMENDED for LSTM)
+recurrent = true                                 # Recurrent dropout
+```
+
+**Parameter Tuning:**
+- **architecture**: MultiLSTM (general), StackedLSTM (sequential), BidirectionalLSTM (patterns)
+- **layers**: 1-2 for small data, 2-3 for medium data, 3-4 for large datasets
+- **sequence_length**: Auto optimizes for crypto patterns (typically 30-120)
+- **dropout rate**: Increase (0.3-0.5) if overfitting, decrease (0.1-0.2) if underfitting
+
+#### **Feature Configuration**
+```toml
+[features.technical_indicators]
+enabled = true                                   # Enable technical indicators
+
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 200]             # Simple moving averages
+ema_periods = [5, 10, 20, 50, 200]             # Exponential moving averages
+
+[features.technical_indicators.momentum]
+rsi_periods = [14, 21]                          # RSI periods
+stochastic = true                               # Stochastic oscillator
+williams_r = true                               # Williams %R
+
+[features.custom_features]
+enabled = true                                  # Enable custom features
+include_all_numeric = true                      # Include all CSV numeric columns
+exclude_features = ["unwanted_column"]          # Exclude specific features
+```
+
+**Parameter Tuning:**
+- **periods**: Shorter (3, 5, 7) for scalping, longer (100, 200, 300) for position trading
+- **indicators**: Enable more for complex patterns, disable for minimal setups
+- **custom_features**: Include domain-specific features (sentiment, on-chain, macro)
+
+#### **Cross-Asset Features (Multi-Asset Only)**
+```toml
+[features.cross_asset]
+enabled = true                                  # Enable cross-asset features
+min_symbols_required = 2                        # Minimum symbols for cross-asset
+required_symbols = ["BTCUSDT"]                  # Require BTC for market analysis
+btc_dominance_enabled = true                    # BTC dominance calculation
+eth_btc_ratio_enabled = true                    # ETH/BTC ratio
+
+[features.cross_asset.correlation_analysis]
+enabled = true                                  # Enable correlation analysis
+correlation_window = 50                         # Rolling correlation window
+```
+
+**Parameter Tuning:**
+- **min_symbols_required**: 2-3 for basic cross-asset, 5+ for comprehensive analysis
+- **correlation_window**: Shorter (20-30) for dynamic correlations, longer (100+) for stable
+- **required_symbols**: Always include BTCUSDT for market context
 validation_split = 0.2                # Data split validation (0.0 < x < 1.0)
 early_stopping_patience = 10          # Early stopping (validated > 0)
 

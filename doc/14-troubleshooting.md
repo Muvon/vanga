@@ -192,7 +192,7 @@ Layer 2 produced no states
 
 **Debug Commands**:
 ```bash
-RUST_LOG=debug ./target/release/vanga train --symbol BTCUSDT --data data.csv
+RUST_LOG=debug vanga train --symbol BTCUSDT --data data.csv
 ```
 
 ### **Overfitting with Deep Networks**
@@ -390,7 +390,7 @@ cargo build
 ### **Layer Performance Debugging**
 ```bash
 # Enable detailed layer logging
-RUST_LOG=debug ./target/release/vanga train --symbol BTCUSDT --data data.csv
+RUST_LOG=debug vanga train --symbol BTCUSDT --data data.csv
 
 # Expected debug output:
 # [DEBUG] Layer 0 output shape: [32, 60, 128]

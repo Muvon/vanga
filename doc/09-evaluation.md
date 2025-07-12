@@ -247,7 +247,7 @@ pub fn directional_accuracy(price_changes: &[f64], predicted_changes: &[f64]) ->
 ### **Evaluation Pipeline**
 ```rust
 // Future implementation in CLI
-// ./target/release/vanga models evaluate --symbol BTCUSDT --test-data test.csv
+// vanga models evaluate --symbol BTCUSDT --test-data test.csv
 
 pub async fn evaluate_model(symbol: &str, test_data_path: &Path) -> Result<ModelEvaluationReport> {
     // 1. Load trained model
@@ -306,13 +306,13 @@ pub struct FinancialMetrics {
 
 ```bash
 # Evaluate model on test data
-./target/release/vanga models evaluate --symbol BTCUSDT --test-data data/btc_test.csv
+vanga models evaluate --symbol BTCUSDT --test-data data/btc_test.csv
 
 # Compare multiple models
-./target/release/vanga models compare --symbols BTCUSDT,ETHUSDT --metric accuracy
+vanga models compare --symbols BTCUSDT,ETHUSDT --metric accuracy
 
 # Generate evaluation report
-./target/release/vanga models evaluate --symbol BTCUSDT --test-data data/btc_test.csv --output-report evaluation_report.json
+vanga models evaluate --symbol BTCUSDT --test-data data/btc_test.csv --output-report evaluation_report.json
 ```
 
 ### **Evaluation Output**

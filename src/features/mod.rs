@@ -1,3 +1,4 @@
+pub mod cross_asset;
 pub mod custom;
 pub mod engineering;
 pub mod microstructure;
@@ -7,6 +8,8 @@ pub mod volatility;
 use crate::config::FeatureConfig;
 use crate::utils::error::Result;
 use polars::prelude::*;
+
+pub use cross_asset::CrossAssetFeatureGenerator;
 
 /// Main feature engineering pipeline
 pub struct FeatureEngineer {

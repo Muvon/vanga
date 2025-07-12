@@ -3,11 +3,14 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictionConfig {
-    /// Trading symbol (e.g., BTCUSDT)
-    pub symbol: String,
+    /// Trading symbols (e.g., ["BTCUSDT"] or ["BTCUSDT", "ETHUSDT"])
+    pub symbols: Vec<String>,
 
-    /// Path to input data CSV file
+    /// Path to input data CSV file or directory containing symbol files
     pub input_path: PathBuf,
+
+    /// Whether this is cross-asset prediction (auto-computed from symbols.len() > 1)
+    pub is_cross_asset: bool,
 
     /// Specific prediction horizon (if not all)
     pub horizon: Option<String>,
@@ -125,8 +128,9 @@ pub enum RegimeMethod {
 impl Default for PredictionConfig {
     fn default() -> Self {
         Self {
-            symbol: String::new(),
+            symbols: vec![],
             input_path: PathBuf::new(),
+            is_cross_asset: false,
             horizon: None,
             all_horizons: false,
             output_path: None,
@@ -182,8 +186,15 @@ impl Default for PostProcessingConfig {
 
 // Builder pattern implementation
 impl PredictionConfig {
+    /// Set single symbol (for backward compatibility)
     pub fn symbol<S: Into<String>>(mut self, symbol: S) -> Self {
-        self.symbol = symbol.into();
+        self.symbols = vec![symbol.into()];
+        self
+    }
+
+    /// Set multiple symbols
+    pub fn symbols<S: Into<String>>(mut self, symbols: Vec<S>) -> Self {
+        self.symbols = symbols.into_iter().map(|s| s.into()).collect();
         self
     }
 
@@ -210,6 +221,11 @@ impl PredictionConfig {
     pub fn min_confidence(mut self, confidence: f64) -> Self {
         self.min_confidence = confidence;
         self
+    }
+
+    /// Check if this is multi-symbol prediction
+    pub fn is_multi_symbol(&self) -> bool {
+        self.symbols.len() > 1
     }
 
     /// Validate horizon against model's trained horizons

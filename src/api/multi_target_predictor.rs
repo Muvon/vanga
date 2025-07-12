@@ -21,7 +21,7 @@ impl MultiTargetPredictor {
     pub async fn predict(&self, model: &MultiTargetLSTMModel) -> Result<MultiTargetPredictions> {
         log::info!(
             "Starting multi-target prediction for symbol: {}",
-            self.config.symbol
+            &self.config.symbols[0]
         );
 
         // Initialize data pipeline
@@ -69,7 +69,7 @@ impl MultiTargetPredictor {
         let predictions = MultiTargetPredictions::new_with_metadata(
             raw_predictions,
             model.get_target_names().to_vec(),
-            self.config.symbol.clone(),
+            self.config.symbols[0].clone(),
             current_price,
             input_feature_count,
             sequence_length,

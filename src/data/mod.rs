@@ -53,7 +53,7 @@ impl DataPipeline {
         // Preprocess data (features, normalization, etc.)
         let processed_data = self
             .preprocessor
-            .process_for_training(raw_data, &config.data, config.features_config_path.as_ref())
+            .process_for_training(raw_data, &config.data, Some(&config.features))
             .await?;
 
         // Generate sequences for LSTM
@@ -80,17 +80,62 @@ impl DataPipeline {
         // Preprocess data using training statistics
         let processed_data = self
             .preprocessor
-            .process_for_prediction(raw_data, &config.symbol)
+            .process_for_prediction(raw_data, &config.symbols[0])
             .await?;
 
         // Generate prediction sequences (use default model config for now)
         let default_model_config = crate::config::ModelConfig::default();
         let sequences = self
             .sequence_generator
-            .generate_prediction_sequences(processed_data, &config.symbol, &default_model_config)
+            .generate_prediction_sequences(
+                processed_data,
+                &config.symbols[0],
+                &default_model_config,
+            )
             .await?;
 
         Ok(sequences)
+    }
+
+    /// Load and preprocess data for multi-symbol cross-asset prediction
+    pub async fn prepare_cross_asset_prediction_data(
+        &self,
+        symbol_paths: &std::collections::HashMap<String, std::path::PathBuf>,
+        _config: &crate::config::PredictionConfig,
+        features_config: &crate::config::FeatureConfig,
+    ) -> Result<std::collections::HashMap<String, PreparedPredictionData>> {
+        log::info!(
+            "Preparing cross-asset prediction data for {} symbols",
+            symbol_paths.len()
+        );
+
+        // Load raw data for all symbols
+        let mut symbol_data = std::collections::HashMap::new();
+        for (symbol, path) in symbol_paths {
+            let raw_data = self.loader.load_csv(path).await?;
+            CryptoDataSchema::validate(&raw_data)?;
+            symbol_data.insert(symbol.clone(), raw_data);
+        }
+
+        // Apply cross-asset preprocessing
+        let processed_symbol_data = self
+            .preprocessor
+            .process_for_cross_asset_prediction(symbol_data, features_config)
+            .await?;
+
+        // Generate prediction sequences for each symbol
+        let mut prepared_data = std::collections::HashMap::new();
+        let default_model_config = crate::config::ModelConfig::default();
+
+        for (symbol, processed_df) in processed_symbol_data {
+            let sequences = self
+                .sequence_generator
+                .generate_prediction_sequences(processed_df, &symbol, &default_model_config)
+                .await?;
+            prepared_data.insert(symbol, sequences);
+        }
+
+        Ok(prepared_data)
     }
 }
 

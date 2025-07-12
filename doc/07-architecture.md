@@ -201,7 +201,6 @@ recurrent = true
 [data]
 normalization = "Robust"
 sequence_overlap = 0.8
-missing_data_strategy = "Interpolate"
 
 [optimization]
 enabled = true
@@ -455,7 +454,7 @@ env_logger::init();
 log::set_max_level(log::LevelFilter::Debug);
 
 // Enable detailed layer logging
-RUST_LOG=debug ./target/release/vanga train --symbol BTCUSDT --data data.csv
+RUST_LOG=debug vanga train --symbol BTCUSDT --data data.csv
 ```
 
 ### **Performance Monitoring**

@@ -19,27 +19,41 @@ VANGA now features **automatic training optimization** that eliminates hardcoded
 
 ### Install
 ```bash
-git clone https://github.com/muvon/vanga
-cd vanga
-cargo build --release
+cargo install --git https://github.com/muvon/vanga
 ```
 
-### Train with Intelligence (RECOMMENDED)
+```
+
+### Single-Config Training (RECOMMENDED)
 ```bash
-# Automatic early stopping, adaptive learning rate
-./target/release/vanga train --symbol BTCUSDT --data data/btc_1h.csv
+# Quick start: Minimal but effective configuration
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/quick_start.toml
+
+# Standard: Production-ready single-asset training
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/training.toml
+
+# Advanced: Cross-asset training with multiple symbols
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross_asset_training.toml
 ```
 
-**What happens:**
+**What happens with single-config:**
+- All parameters (training, model, features) in one file
 - Auto early stopping (max 1000 epochs)
-- Adaptive learning rate (starts at 0.01)
+- Adaptive learning rate (starts at 0.001)
 - 20% validation split for monitoring
 - Stops after 50 epochs without improvement
+- 50+ technical indicators automatically generated
 
 ### Make Predictions
 ```bash
-./target/release/vanga predict --symbol BTCUSDT --input data/recent_btc.csv
+vanga predict --symbol BTCUSDT --input data/recent_btc.csv
 ```
+
+### Configuration Templates
+- **Beginner**: `configs/quick_start.toml` - Minimal setup
+- **Standard**: `configs/training.toml` - Production single-asset
+- **Advanced**: `configs/cross_asset_training.toml` - Multi-asset with correlations
+- **Reference**: `configs/example_single_asset.toml` - Complete parameter guide
 
 ### **Getting Started**
 - **[Introduction](doc/01-introduction.md)** - Overview and key features
@@ -106,23 +120,38 @@ cargo build --release
 
 ## 🚀 Quick Start
 
-### Training a Model
+## 🚀 Training Examples
+
+### Single-Asset Training
 
 ```bash
-# Basic training
-vanga train --symbol BTCUSDT --data ./data/btc_ohlcv.csv
+# Quick start with minimal configuration
+vanga train --symbol BTCUSDT --data ./data/btc_ohlcv.csv --config configs/quick_start.toml
 
-# Training with custom horizons
-vanga train --symbol ETHUSDT --data ./data/eth_data.csv --horizons 1h,4h,1d,7d
+# Standard production training
+vanga train --symbol ETHUSDT --data ./data/eth_data.csv --config configs/training.toml
+
+# Custom features training
+vanga train --symbol BTCUSDT --data ./data/btc_data.csv --config configs/advanced_custom.toml
 
 # Fresh training (ignore existing model)
-vanga train --symbol BTCUSDT --data ./data/btc_data.csv --fresh
+vanga train --symbol BTCUSDT --data ./data/btc_data.csv --config configs/training.toml --fresh
 
-# Continue training existing model
-vanga train --symbol BTCUSDT --data ./data/new_btc_data.csv --continue
+# Continue training existing model with new data
+vanga train --symbol BTCUSDT --data ./data/new_btc_data.csv --config configs/training.toml --continue
+```
 
-# Batch training for multiple symbols
-vanga train --batch --data-dir ./data/ --symbols BTCUSDT,ETHUSDT,ADAUSDT
+### Cross-Asset Training
+
+```bash
+# Multi-asset training with correlation analysis
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data ./data/ --config configs/cross_asset_training.toml
+
+# Large portfolio training
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT,DOTUSDT,LINKUSDT --data ./data/ --config configs/cross_asset_training.toml
+
+# Cross-asset with custom configuration
+vanga train --symbol BTCUSDT,ETHUSDT --data ./data/ --config configs/example_cross_asset.toml
 ```
 
 ### Making Predictions
@@ -200,44 +229,64 @@ vanga models export --symbol BTCUSDT --format msgpack --output ./models/
 
 ## ⚙️ Configuration
 
-The system uses TOML configuration files for advanced customization:
+VANGA uses a **single-config system** where all parameters (training, model, features) are defined in one TOML file for maximum simplicity and consistency.
 
-### Training Configuration
+### Quick Start Configurations
+
+```bash
+# Beginner: Minimal but effective setup
+vanga train --symbol BTCUSDT --data data.csv --config configs/quick_start.toml
+
+# Standard: Production-ready single-asset training
+vanga train --symbol BTCUSDT --data data.csv --config configs/training.toml
+
+# Advanced: Cross-asset training with correlation analysis
+vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross_asset_training.toml
+```
+
+### Configuration Templates
+
+- **`configs/example_single_asset.toml`** - Complete parameter reference with detailed explanations
+- **`configs/example_cross_asset.toml`** - Cross-asset training with correlation features
+- **`configs/quick_start.toml`** - Minimal configuration for beginners
+- **`configs/training.toml`** - Production-ready single-asset defaults
+- **`configs/cross_asset_training.toml`** - Production-ready cross-asset defaults
+
+### Key Configuration Sections
+
 ```toml
-[model]
-architecture = "multi_lstm"
-sequence_length = "auto"
-hidden_units = "auto"
-dropout_rate = "auto"
-
-[features]
-technical_indicators = true
-market_microstructure = true
-volatility_features = true
-custom_features = ["volume_profile", "order_book_imbalance"]
-
 [training]
-epochs = "auto"
-batch_size = "auto"
-optimization_method = "bayesian"
+epochs = { Auto = { max_epochs = 1000 } }    # Intelligent early stopping
+learning_rate = { Fixed = 0.001 }            # Learning rate configuration
+batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto batch sizing
+
+[model]
+architecture = { MultiLSTM = { layers = 2 } }  # Model architecture
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }  # Auto sequence length
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }  # Auto hidden units
+
+[features.technical_indicators]
+enabled = true                                # Enable technical indicators
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 200]          # Simple moving averages
+ema_periods = [5, 10, 20, 50, 200]          # Exponential moving averages
+
+[features.cross_asset]                        # For multi-asset training only
+enabled = true                                # Enable cross-asset features
+required_symbols = ["BTCUSDT"]               # Require BTC for market analysis
 ```
 
-### Feature Configuration
-```toml
-[technical_indicators.moving_averages]
-sma_periods = [5, 10, 20, 50, 200]
-ema_periods = [5, 10, 20, 50, 200]
+### Parameter Tuning Guidelines
 
-[market_microstructure]
-enabled = true
-price_velocity = true
-vwap_deviation = true
-trade_intensity = true
+For detailed parameter explanations and tuning guidance, see:
+- **Single-asset**: `configs/example_single_asset.toml` (comprehensive parameter reference)
+- **Cross-asset**: `configs/example_cross_asset.toml` (multi-asset specific guidance)
 
-[custom_features]
-auto_include_all = true  # Include all extra CSV columns
-exclude_features = ["unwanted_column"]
-```
+**Quick tuning tips:**
+- **Small datasets (< 1K samples)**: Use `configs/quick_start.toml`
+- **Large datasets (> 10K samples)**: Use `configs/training.toml` with optimization enabled
+- **Multiple assets**: Use `configs/cross_asset_training.toml`
+- **Custom features**: Start with `configs/minimal_custom.toml`, expand to `configs/advanced_custom.toml`
 
 ## 🏗️ Project Structure
 

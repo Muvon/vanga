@@ -237,7 +237,7 @@ impl MultiHeadAttention {
         // Compute scaled dot-product attention
         let scale = (self.config.head_dim as f64).sqrt() as f32;
         let scale_tensor = Tensor::new(scale, &self.device)?;
-        let scaled_queries = queries.div(&scale_tensor)?.contiguous()?;
+        let scaled_queries = queries.broadcast_div(&scale_tensor)?.contiguous()?;
 
         // Compute attention scores: Q * K^T
         let keys_transposed = keys.transpose(2, 3)?.contiguous()?;
@@ -252,7 +252,7 @@ impl MultiHeadAttention {
         // Apply temperature scaling for crypto volatility adaptation
         if self.config.temperature_scaling != 1.0 {
             let temperature = Tensor::new(self.config.temperature_scaling as f32, &self.device)?;
-            attention_scores = attention_scores.div(&temperature)?.contiguous()?;
+            attention_scores = attention_scores.broadcast_div(&temperature)?.contiguous()?;
         }
 
         // Apply causal mask for time series (prevent looking into future)

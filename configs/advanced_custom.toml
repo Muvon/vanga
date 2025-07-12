@@ -1,5 +1,7 @@
-# Advanced custom features configuration
-# Use this for sophisticated feature engineering with multiple data sources
+# VANGA Advanced Custom Features Configuration
+# Comprehensive configuration for sophisticated feature engineering with multiple data sources
+# For complete parameter explanations, see configs/example_single_asset.toml
+# Usage: vanga train --symbol BTCUSDT --data data.csv --config configs/advanced_custom.toml
 
 [technical_indicators]
 enabled = true

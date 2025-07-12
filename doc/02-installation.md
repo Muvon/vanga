@@ -56,7 +56,7 @@ cargo build
 cargo build --release
 
 # Verify the build
-./target/release/vanga --help
+vanga --help
 ```
 
 **Build Time**: Approximately 5-10 seconds for release build
@@ -74,12 +74,12 @@ cd vanga
 cargo build --release
 
 # 3. Verify installation
-./target/release/vanga --version
+vanga --version
 
 # 4. Test basic functionality
-./target/release/vanga --help
-./target/release/vanga train --help
-./target/release/vanga predict --help
+vanga --help
+vanga train --help
+vanga predict --help
 ```
 
 ### **Option 2: Development Setup**
@@ -131,13 +131,13 @@ vanga/
 
 ```bash
 # Check version
-./target/release/vanga --version
+vanga --version
 
 # Test help system
-./target/release/vanga --help
-./target/release/vanga train --help
-./target/release/vanga predict --help
-./target/release/vanga models --help
+vanga --help
+vanga train --help
+vanga predict --help
+vanga models --help
 ```
 
 ### **Test Basic Functionality**
@@ -147,9 +147,9 @@ vanga/
 mkdir -p data models predictions
 
 # Test commands (will show help if no data provided)
-./target/release/vanga train --symbol BTCUSDT --data data/sample.csv
-./target/release/vanga predict --symbol BTCUSDT --input data/sample.csv
-./target/release/vanga models list
+vanga train --symbol BTCUSDT --data data/sample.csv
+vanga predict --symbol BTCUSDT --input data/sample.csv
+vanga models list
 ```
 
 ## Configuration
@@ -185,31 +185,31 @@ timestamp,open,high,low,close,volume
 
 ```bash
 # Train a Bitcoin model
-./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv
+vanga train --symbol BTCUSDT --data data/btc_historical.csv
 
 # Train with fresh start
-./target/release/vanga train --symbol BTCUSDT --data data/btc_historical.csv --fresh
+vanga train --symbol BTCUSDT --data data/btc_historical.csv --fresh
 ```
 
 ### **Making Predictions**
 
 ```bash
 # Make predictions
-./target/release/vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
+vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
 
 # Predict all horizons
-./target/release/vanga predict --symbol BTCUSDT --input data/btc_recent.csv --all-horizons
+vanga predict --symbol BTCUSDT --input data/btc_recent.csv --all-horizons
 ```
 
 ### **Model Management**
 
 ```bash
 # List available models
-./target/release/vanga models list
+vanga models list
 
 # Future features (marked as planned)
-./target/release/vanga models evaluate --symbol BTCUSDT --test-data test.csv
-./target/release/vanga models compare --symbols BTCUSDT,ETHUSDT
+vanga models evaluate --symbol BTCUSDT --test-data test.csv
+vanga models compare --symbols BTCUSDT,ETHUSDT
 ```
 
 ## Troubleshooting
@@ -253,10 +253,10 @@ brew install openssl pkg-config
 
 ```bash
 # Make executable
-chmod +x ./target/release/vanga
+chmod +x vanga
 
 # Or use full path
-./target/release/vanga --help
+vanga --help
 ```
 
 #### **Memory Issues**

@@ -1,0 +1,388 @@
+# VANGA Cross-Asset Training Configuration
+# Complete configuration template for training LSTM models across multiple cryptocurrency pairs
+# This configuration enables cross-asset features and correlation analysis for improved predictions
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# Optimized for cross-asset training with multiple symbols
+# ============================================================================
+
+[training]
+# EPOCH CONFIGURATION
+# Cross-asset training typically requires more epochs due to increased complexity
+# TUNING: Use higher max_epochs (1500-2000) for cross-asset models
+# EFFECT: More complex relationships require longer training time
+epochs = { Auto = { max_epochs = 1500 } }
+
+# LEARNING RATE CONFIGURATION
+# Lower learning rate recommended for cross-asset stability
+# TUNING: Start with 0.0005 for cross-asset, can increase to 0.001 if convergence is slow
+# EFFECT: Lower rates provide more stable training with multiple correlated assets
+learning_rate = { Adaptive = { initial = 0.0005, factor = 0.5, patience = 15 } }
+
+# BATCH SIZE CONFIGURATION
+# Larger batch sizes help with cross-asset correlation learning
+# TUNING: Increase min_size to 64 for better cross-asset pattern recognition
+# EFFECT: Larger batches provide more stable gradients for complex cross-asset relationships
+batch_size = { Auto = { min_size = 64, max_size = 1024 } }
+
+# VALIDATION AND EARLY STOPPING
+# Longer patience needed for cross-asset convergence
+validation_split = 0.2          # 20% validation split
+test_split = 0.1               # 10% test split
+early_stopping_patience = 75   # Increased patience for cross-asset complexity
+gradient_clip = 1.5            # Higher clipping for cross-asset volatility
+
+# ============================================================================
+# MODEL ARCHITECTURE
+# Enhanced architecture for cross-asset pattern recognition
+# ============================================================================
+
+[model]
+# ARCHITECTURE TYPE
+# MultiLSTM with more layers recommended for cross-asset complexity
+# TUNING: Use 3-4 layers for cross-asset to capture inter-asset relationships
+# EFFECT: More layers can model complex cross-asset dependencies
+architecture = { MultiLSTM = { layers = 3 } }
+
+# SEQUENCE LENGTH CONFIGURATION
+# Longer sequences help capture cross-asset correlation patterns
+# TUNING: Increase max_length to 200 for cross-asset temporal dependencies
+# EFFECT: Longer sequences capture cross-asset lead-lag relationships
+sequence_length = { Auto = { min_length = 60, max_length = 200 } }
+
+# HIDDEN UNITS CONFIGURATION
+# More capacity needed for cross-asset feature processing
+# TUNING: Increase max_units to 768 for complex cross-asset patterns
+# EFFECT: Higher capacity handles increased feature dimensionality from multiple assets
+hidden_units = { Auto = { min_units = 128, max_units = 768 } }
+
+# DROPOUT CONFIGURATION
+# Higher dropout to prevent overfitting on cross-asset correlations
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.3 }         # Higher dropout for cross-asset complexity
+# TUNING: Increase to 0.4-0.5 if overfitting on cross-asset patterns
+# EFFECT: Prevents model from memorizing specific cross-asset correlations
+variational = true
+recurrent = true
+
+# ATTENTION MECHANISM
+# Attention is crucial for cross-asset models to focus on relevant assets
+[model.attention]
+enabled = true                 # HIGHLY RECOMMENDED for cross-asset
+mechanism = "SelfAttention"
+heads = 12                    # More heads for cross-asset attention
+# TUNING: Increase heads (16-20) for complex multi-asset portfolios
+# EFFECT: More attention heads can focus on different asset relationships
+head_dim = 64
+dropout_rate = 0.15           # Slightly higher attention dropout
+temperature_scaling = 0.8     # Sharper attention for cross-asset focus
+use_relative_position = true
+
+[model.attention.visualization]
+save_heatmaps = true          # Enable for cross-asset analysis
+export_analysis = true        # Export cross-asset attention patterns
+output_dir = "cross_asset_attention"
+
+# ============================================================================
+# OUTPUT HEADS CONFIGURATION
+# Same as single-asset but optimized for cross-asset predictions
+# ============================================================================
+
+[model.output_heads]
+
+[model.output_heads.price_levels]
+enabled = true
+bins = 12                     # More bins for cross-asset granularity
+# TUNING: Increase bins (15-20) for fine-grained cross-asset predictions
+# EFFECT: More bins capture subtle cross-asset influence on price movements
+range_percent = 0.06         # Slightly wider range for cross-asset volatility
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+threshold = 0.008            # Lower threshold for cross-asset sensitivity
+# TUNING: Reduce to 0.005 for high-frequency cross-asset signals
+# EFFECT: Lower threshold captures cross-asset influence on direction
+confidence_calibration = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+horizons = ["1h", "4h", "1d", "7d"]  # Extended horizons for cross-asset analysis
+# TUNING: Add "12h", "3d" for comprehensive cross-asset volatility modeling
+# EFFECT: Multiple horizons show how cross-asset effects propagate over time
+
+# ============================================================================
+# FEATURES CONFIGURATION
+# Enhanced feature set for cross-asset analysis
+# ============================================================================
+
+[features.technical_indicators]
+enabled = true
+
+# MOVING AVERAGES
+# Extended periods for cross-asset trend analysis
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 100, 200, 300]  # Extended periods
+ema_periods = [5, 10, 20, 50, 100, 200, 300]  # Extended periods
+wma_periods = [10, 20, 50, 100]               # More WMA periods
+hull_periods = [9, 21, 50, 100]               # Extended Hull MA
+# TUNING: Add very long periods (500, 1000) for macro cross-asset trends
+# EFFECT: Longer periods capture cross-asset trend relationships
+
+# MOMENTUM INDICATORS
+# Comprehensive momentum analysis for cross-asset signals
+[features.technical_indicators.momentum]
+rsi_periods = [14, 21, 30, 50]    # Extended RSI periods
+stochastic = true
+williams_r = true
+cci_periods = [14, 20, 30, 50]    # Extended CCI periods
+momentum_periods = [10, 20, 30, 50]  # Extended momentum periods
+# TUNING: Add shorter periods (7, 9) for cross-asset momentum divergences
+# EFFECT: Multiple periods capture cross-asset momentum relationships
+
+# VOLATILITY INDICATORS
+# Enhanced volatility analysis for cross-asset risk assessment
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14, 21, 30, 50]    # Extended ATR periods
+keltner_channels = true
+donchian_channels = true
+# TUNING: Add multiple Bollinger Band configurations with different std_dev values
+# EFFECT: Multiple volatility measures capture cross-asset volatility transmission
+
+# VOLUME INDICATORS
+# Enhanced volume analysis for cross-asset flow detection
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [10, 20, 50, 100]  # Extended volume periods
+mfi_periods = [14, 21, 30]              # Multiple MFI periods
+volume_profile = true
+# TUNING: Add volume ratio indicators between assets
+# EFFECT: Volume patterns show cross-asset capital flow
+
+# MARKET MICROSTRUCTURE FEATURES
+# Advanced microstructure for cross-asset market dynamics
+[features.market_microstructure]
+enabled = true
+
+[features.market_microstructure.spread_analysis]
+bid_ask_spread = true
+effective_spread = true
+price_impact = true
+
+[features.market_microstructure.order_flow]
+volume_imbalance = true
+trade_intensity = true
+arrival_rate = true
+
+# VOLATILITY FEATURES
+# Comprehensive volatility modeling for cross-asset risk
+[features.volatility_features]
+enabled = true
+
+[features.volatility_features.realized_volatility]
+periods = ["30m", "1h", "2h", "4h", "8h", "24h", "7d"]  # Extended periods
+estimators = ["Standard", "RangeBasedYangZhang", "GarmanKlass"]  # More estimators
+# TUNING: Add "Parkinson" estimator for high-frequency cross-asset analysis
+# EFFECT: Multiple estimators provide robust cross-asset volatility measures
+
+[features.volatility_features.garch_features]
+enabled = true
+model_orders = [[1, 1], [1, 2], [2, 1], [2, 2]]  # Extended GARCH orders
+conditional_volatility = true
+volatility_forecasts = true
+# TUNING: Add higher-order GARCH models for complex cross-asset volatility
+# EFFECT: GARCH models capture cross-asset volatility clustering
+
+# CUSTOM FEATURES
+# Include cross-asset specific features
+[features.custom_features]
+enabled = true
+include_all_numeric = true
+exclude_features = []  # Keep all features for cross-asset analysis
+# NOTE: Add features like BTC dominance, ETH/BTC ratio, market cap ratios
+
+# FEATURE ENGINEERING
+# Enhanced engineering for cross-asset relationships
+[features.engineering]
+enabled = true
+
+[features.engineering.polynomial_features]
+enabled = false             # Disabled to prevent overfitting in cross-asset
+degree = 2
+include_bias = false
+interaction_only = true
+
+[features.engineering.interaction_features]
+enabled = true
+max_interactions = 20       # More interactions for cross-asset relationships
+feature_pairs = []          # Auto-select cross-asset feature pairs
+# TUNING: Increase to 30-50 for complex multi-asset portfolios
+# EFFECT: Captures non-linear cross-asset relationships
+
+[features.engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3, 5, 10, 15, 30]  # Extended lags for cross-asset delays
+features_to_lag = ["close", "volume", "rsi_14", "btc_dominance"]  # Include cross-asset features
+# TUNING: Add longer lags (60, 120) for macro cross-asset effects
+# EFFECT: Captures cross-asset lead-lag relationships
+
+[features.engineering.rolling_features]
+enabled = true
+window_sizes = [5, 10, 20, 50, 100]    # Extended windows
+statistics = ["Mean", "Std", "Min", "Max", "Skew", "Kurt"]  # More statistics
+# TUNING: Add "Median", "Quantile" for robust cross-asset statistics
+# EFFECT: Rolling statistics capture cross-asset regime changes
+
+# FEATURE SELECTION
+# Careful selection to maintain cross-asset information
+[features.selection]
+enabled = true
+max_features = 200          # More features for cross-asset complexity
+correlation_threshold = 0.98  # Higher threshold to keep cross-asset correlations
+importance_threshold = 0.0005  # Lower threshold for cross-asset features
+methods = ["CorrelationFilter", "ImportanceBased", "MutualInformation"]
+keep_crypto_features = true
+# TUNING: Increase max_features (300-500) for large multi-asset portfolios
+# EFFECT: Preserves important cross-asset relationships while removing noise
+
+# ============================================================================
+# CROSS-ASSET FEATURES CONFIGURATION
+# Core cross-asset analysis features - THIS IS THE KEY SECTION
+# ============================================================================
+
+[features.cross_asset]
+enabled = true                    # MUST BE TRUE for cross-asset training
+min_symbols_required = 2          # Minimum symbols needed for cross-asset features
+required_symbols = ["BTCUSDT"]    # BTC required for market analysis
+btc_dominance_enabled = true      # Calculate BTC market dominance
+eth_btc_ratio_enabled = true      # Calculate ETH/BTC ratio
+# TUNING: Add more required_symbols for specific market analysis
+# EFFECT: These features capture overall market dynamics and relationships
+
+# SENTIMENT ANALYSIS
+# Cross-asset sentiment derived from price and volume patterns
+[features.cross_asset.sentiment_analysis]
+enabled = true
+lookback_periods = 48             # Extended lookback for cross-asset sentiment
+# TUNING: Increase to 72-96 for longer-term cross-asset sentiment
+# EFFECT: Captures market-wide sentiment that affects all assets
+price_velocity_weight = 0.3       # Weight for price velocity in sentiment
+volume_spike_weight = 0.3         # Weight for volume spikes in sentiment
+volatility_weight = 0.4           # Weight for volatility in sentiment
+# TUNING: Adjust weights based on which factors drive your market
+# EFFECT: Balanced weighting captures comprehensive cross-asset sentiment
+
+# CORRELATION ANALYSIS
+# Dynamic correlation tracking between assets
+[features.cross_asset.correlation_analysis]
+enabled = true
+min_periods = 100                 # More periods for stable cross-asset correlations
+# TUNING: Increase to 200+ for very stable correlation estimates
+# EFFECT: Stable correlations provide reliable cross-asset signals
+correlation_window = 50           # Longer window for cross-asset correlation
+# TUNING: Adjust based on how quickly cross-asset relationships change
+# EFFECT: Longer windows capture persistent cross-asset relationships
+
+# ============================================================================
+# DATA PROCESSING CONFIGURATION
+# Optimized for cross-asset data handling
+# ============================================================================
+
+[data]
+normalization = "Robust"        # Robust normalization handles cross-asset outliers
+sequence_overlap = 0.9          # Higher overlap for cross-asset pattern learning
+# TUNING: Increase to 0.95 for maximum cross-asset pattern extraction
+# EFFECT: More overlap helps learn complex cross-asset temporal patterns
+
+[data.outlier_handling]
+enabled = true
+method = "ModifiedZScore"
+threshold = 4.0                 # Higher threshold for cross-asset outliers
+# TUNING: Increase to 4.5-5.0 for very volatile cross-asset periods
+# EFFECT: Preserves extreme cross-asset movements that may be informative
+
+# ============================================================================
+# OPTIMIZATION CONFIGURATION
+# Recommended for cross-asset models due to complexity
+# ============================================================================
+
+[optimization]
+enabled = true                  # RECOMMENDED for cross-asset models
+method = "Bayesian"            # Bayesian optimization for cross-asset complexity
+n_trials = 150                 # More trials for cross-asset optimization
+timeout_seconds = 7200         # Longer timeout (2 hours) for cross-asset
+metric = "SharpeRatio"         # Use Sharpe ratio for cross-asset performance
+# TUNING: Increase n_trials to 200-300 for production cross-asset models
+# EFFECT: Optimization finds best parameters for complex cross-asset relationships
+
+# ============================================================================
+# CROSS-ASSET TRAINING GUIDELINES
+# ============================================================================
+
+# REQUIRED COMMAND FORMAT:
+# vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/example_cross_asset.toml
+
+# MINIMUM REQUIREMENTS:
+# - At least 2 symbols (BTCUSDT should be included for market analysis)
+# - Synchronized data files with same timestamp ranges
+# - Sufficient data (5000+ samples recommended for cross-asset)
+
+# SYMBOL SELECTION GUIDELINES:
+# - Always include BTCUSDT (market leader)
+# - Include major altcoins: ETHUSDT, ADAUSDT, DOTUSDT, LINKUSDT
+# - Mix market caps: large-cap (BTC, ETH), mid-cap (ADA, DOT), small-cap
+# - Consider sector diversity: DeFi, Layer 1, Layer 2, etc.
+
+# DATA SYNCHRONIZATION:
+# - All symbol data files must have overlapping time ranges
+# - Missing data is automatically interpolated
+# - Recommend 1-hour or 4-hour intervals for cross-asset analysis
+
+# PERFORMANCE EXPECTATIONS:
+# - Training time: 2-5x longer than single-asset
+# - Memory usage: 3-10x higher depending on symbol count
+# - Accuracy improvement: 10-30% over single-asset models
+# - Best results with 5-10 carefully selected symbols
+
+# FEATURE IMPORTANCE IN CROSS-ASSET:
+# 1. Cross-asset correlations (most important)
+# 2. BTC dominance and market sentiment
+# 3. Volume flow between assets
+# 4. Technical indicator divergences
+# 5. Volatility transmission patterns
+
+# TUNING FOR DIFFERENT SCENARIOS:
+
+# FOR HIGH-CORRELATION ASSETS (e.g., major altcoins):
+# - Increase correlation_threshold to 0.99
+# - Use shorter correlation_window (20-30)
+# - Focus on momentum divergences
+# - Lower threshold for direction prediction (0.005)
+
+# FOR LOW-CORRELATION ASSETS (e.g., diverse sectors):
+# - Decrease correlation_threshold to 0.95
+# - Use longer correlation_window (100+)
+# - Focus on sentiment analysis
+# - Higher threshold for direction prediction (0.01)
+
+# FOR LARGE PORTFOLIOS (10+ assets):
+# - Increase max_features to 500+
+# - Use more LSTM layers (4-5)
+# - Enable optimization with 300+ trials
+# - Consider feature selection methods like "LASSO"
+
+# FOR REAL-TIME TRADING:
+# - Reduce sequence_length max to 100
+# - Focus on short-term features (1h, 4h horizons)
+# - Increase attention heads for faster pattern recognition
+# - Use fixed batch_size for consistent latency
+
+# MONITORING CROSS-ASSET TRAINING:
+# - Watch for correlation breakdown during market stress
+# - Monitor attention patterns for asset focus shifts
+# - Check feature importance for cross-asset signal strength
+# - Validate on out-of-sample periods with different market regimes

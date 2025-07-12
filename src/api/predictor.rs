@@ -15,18 +15,24 @@ impl Predictor {
     }
 
     pub async fn predict(&self, model: &LSTMModel) -> Result<Vec<PredictionResult>> {
-        log::info!("Starting prediction for symbol: {}", self.config.symbol);
+        let symbol = &self.config.symbols[0]; // Use first symbol for single-symbol prediction
+        log::info!("Starting prediction for symbol: {}", symbol);
+
+        // Resolve data file path using the same logic as training
+        let data_file_path = crate::utils::file_discovery::resolve_symbol_data_path(
+            &self.config.input_path,
+            symbol,
+        )?;
+
+        log::info!("📂 Using data file: {}", data_file_path.display());
 
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new();
 
         // Load and prepare prediction data
-        log::info!(
-            "Loading prediction data from: {}",
-            self.config.input_path.display()
-        );
+        log::info!("Loading prediction data from: {}", data_file_path.display());
         let prepared_data = data_pipeline
-            .prepare_prediction_data(&self.config.input_path, &self.config)
+            .prepare_prediction_data(&data_file_path, &self.config)
             .await?;
 
         log::info!(
@@ -59,7 +65,7 @@ impl Predictor {
 
         let formatted_predictions = formatter.format_predictions(
             &raw_predictions,
-            &self.config.symbol,
+            &self.config.symbols[0],
             &horizon,
             current_price,
             Some(&targets_config), // Pass actual targets config for confidence calculation

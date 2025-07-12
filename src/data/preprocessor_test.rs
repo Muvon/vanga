@@ -19,10 +19,7 @@ mod tests {
     #[tokio::test]
     async fn process_for_training_forward_fill() {
         let mut df = make_df_with_missing();
-        let config = DataConfig {
-            missing_data_strategy: MissingDataStrategy::ForwardFill,
-            ..Default::default()
-        };
+        let config = DataConfig::default();
         let pre = DataPreprocessor::new();
         let df2 = pre.process_for_training(df, &config, None).await.unwrap();
         assert_eq!(df2.height(), 2);
@@ -32,10 +29,7 @@ mod tests {
     #[tokio::test]
     async fn process_for_training_drop_missing() {
         let mut df = make_df_with_missing();
-        let config = DataConfig {
-            missing_data_strategy: MissingDataStrategy::Drop,
-            ..Default::default()
-        };
+        let config = DataConfig::default();
         let pre = DataPreprocessor::new();
         let df2 = pre.process_for_training(df, &config, None).await.unwrap();
         assert!(df2.height() < 2); // Should drop the row with missing open

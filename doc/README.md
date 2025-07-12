@@ -1,4 +1,4 @@
-# VANGA - Multi-Layer LSTM Cryptocurrency Forecasting System
+# VANGA - Single-Config LSTM Cryptocurrency Forecasting System
 
 ## 📚 **Complete Documentation Index**
 
@@ -6,8 +6,8 @@
 1. **[Introduction](01-introduction.md)** - System overview, features, and concepts
 2. **[Installation](02-installation.md)** - Setup, dependencies, and build instructions
 3. **[Data Preparation](03-data-preparation.md)** - Data format, preprocessing, and validation
-4. **[Training](04-training.md)** - Model training, configuration, and optimization
-5. **[Predictions](05-predictions.md)** - Making predictions, output formats, and evaluation
+4. **[Training](04-training.md)** - Single-config training, optimization, and best practices
+5. **[Configuration Reference](20-configuration.md)** - Complete parameter documentation and tuning guide
 
 ### **🔧 Technical Reference**
 6. **[Technical Indicators](06-technical-indicators.md)** - 50+ indicators implementation and usage
@@ -15,39 +15,39 @@
 8. **[Multi-Target System](08-targets.md)** - Prediction targets and configuration
 9. **[Evaluation](09-evaluation.md)** - Model performance evaluation and metrics
 
-### **✅ Final Implementation**
-10. **[Technical Implementation Guide](10-technical-implementation.md)** - Complete technical specifications
-11. **[Usage Examples](11-usage-examples.md)** - Comprehensive usage guide with real-world examples
-12. **[Quick Start Guide](12-quick-start.md)** - Fast-track setup with intelligent training
-13. **[Complete Usage Guide](13-usage-guide.md)** - Detailed training and custom features guide
+### **✅ Usage Guides**
+10. **[Quick Start Guide](12-quick-start.md)** - Fast-track setup with single-config system
+11. **[Usage Examples](11-usage-examples.md)** - Comprehensive single-config usage patterns
+12. **[Technical Implementation Guide](10-technical-implementation.md)** - Complete technical specifications
 
-### **🧠 Multi-Layer LSTM System**
-- **[Auto-Optimization](05-auto-optimization.md)** - Multi-layer architecture optimization and intelligent training
-- **[Training Guide](04-training.md)** - Multi-layer training with early stopping and adaptive learning rate
+### **🧠 Advanced Features**
+- **[Auto-Optimization](05-auto-optimization.md)** - Architecture optimization and intelligent training
 - **[Attention Guide](15-attention-guide.md)** - Advanced attention mechanisms for enhanced accuracy
-- **[Troubleshooting](14-troubleshooting.md)** - Multi-layer specific issues and solutions
+- **[Troubleshooting](14-troubleshooting.md)** - Common issues and solutions
 
 ## 🎯 **Quick Navigation**
 
 ### **For New Users**
-Start with: [Introduction](01-introduction.md) → [Installation](02-installation.md) → [Usage Examples](11-usage-examples.md)
+Start with: [Introduction](01-introduction.md) → [Installation](02-installation.md) → [Quick Start Guide](12-quick-start.md)
 
-### **For Developers**
-Read: [Technical Implementation Guide](10-technical-implementation.md)
+### **For Configuration**
+Read: [Configuration Reference](20-configuration.md) → [Usage Examples](11-usage-examples.md)
 
 ### **For Production Use**
-Check: [Usage Examples](11-usage-examples.md) → [Technical Indicators](06-technical-indicators.md)
+Check: [Training Guide](04-training.md) → [Technical Indicators](06-technical-indicators.md)
 
 ## 📊 **System Capabilities**
 
 ### **Core Features**
+- ✅ **Single-Config System**: All parameters (training, model, features) in one TOML file
 - ✅ **Multi-Layer LSTM Networks**: 1-4+ layers with intelligent architecture optimization
-- ✅ **Advanced Architecture Support**: MultiLSTM, StackedLSTM, BidirectionalLSTM, CNNLSTM, TransformerLSTM
+- ✅ **Configuration Templates**: Pre-configured templates for different use cases
 - ✅ **Attention Mechanisms**: Multi-head attention for enhanced accuracy (15-20% improvement)
 - ✅ **50+ Technical Indicators**: Professional-grade technical analysis
 - ✅ **Multi-Target Prediction**: Price levels, direction, volatility across multiple horizons
-- ✅ **CLI Interface**: Complete train/predict/manage workflow with attention support
-- ✅ **Model Persistence**: Save/load functionality with attention layer preservation
+- ✅ **Cross-Asset Training**: Multi-asset models with correlation analysis
+- ✅ **CLI Interface**: Complete train/predict/manage workflow
+- ✅ **Model Persistence**: Save/load functionality with full configuration preservation
 - ✅ **Auto-Optimization**: Intelligent layer count, architecture, and attention parameter selection
 - ✅ **Configuration System**: Flexible TOML-based multi-layer and attention configuration
 
