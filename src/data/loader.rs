@@ -66,18 +66,56 @@ impl DataLoader {
     pub async fn load_csv<P: AsRef<Path>>(&self, path: P) -> Result<DataFrame> {
         let path = path.as_ref();
 
+        // Better validation and error messages
         if !path.exists() {
             return Err(VangaError::DataError(format!(
-                "Data file not found: {}",
+                "❌ Data file not found: {}\n💡 Make sure the file exists and the path is correct.",
                 path.display()
             )));
         }
 
-        // Read CSV with Polars (use read_csv directly)
-        let df = polars::prelude::CsvReader::from_path(path)
-            .map_err(|e| VangaError::DataError(format!("Failed to create CSV reader: {}", e)))?
-            .finish()
-            .map_err(|e| VangaError::DataError(format!("Failed to read CSV: {}", e)))?;
+        if path.is_dir() {
+            return Err(VangaError::DataError(format!(
+                "❌ Expected CSV file but got directory: {}\n💡 Use --data-dir for directories or specify a .csv file path.",
+                path.display()
+            )));
+        }
+
+        if let Some(extension) = path.extension() {
+            if extension != "csv" {
+                return Err(VangaError::DataError(format!(
+                    "❌ Expected .csv file but got .{}: {}\n💡 Please provide a CSV file.",
+                    extension.to_string_lossy(),
+                    path.display()
+                )));
+            }
+        } else {
+            return Err(VangaError::DataError(format!(
+                "❌ File has no extension, expected .csv: {}\n💡 Please provide a CSV file.",
+                path.display()
+            )));
+        }
+
+        log::info!("📂 Loading CSV file: {}", path.display());
+
+        // Read CSV with all columns as strings first to avoid schema inference issues
+        let df = {
+            // Use ignore_errors and infer_schema_length to handle problematic values
+            polars::prelude::CsvReader::from_path(path)
+                .map_err(|e| VangaError::DataError(format!(
+                    "❌ Failed to create CSV reader for file: {}\n🔍 Error: {}\n💡 Check if the file is a valid CSV format.",
+                    path.display(), e
+                )))?
+                .with_ignore_errors(true) // Ignore parsing errors and treat as null
+                .finish()
+                .map_err(|e| VangaError::DataError(format!(
+                    "❌ Failed to read CSV file: {}\n🔍 Error: {}\n💡 Check if the file contains valid CSV data with proper headers.",
+                    path.display(), e
+                )))?
+        };
+
+        // Fix data types for custom feature columns (ensure they're Float64)
+        let df = self.fix_custom_feature_types(df)?;
 
         // Validate required columns
         self.validate_required_columns(&df)?;
@@ -286,6 +324,50 @@ impl DataLoader {
         );
 
         Ok((train_df, test_df))
+    }
+
+    /// Fix data types for all columns since they were read as Utf8
+    fn fix_custom_feature_types(&self, df: DataFrame) -> Result<DataFrame> {
+        // Get column names before moving df
+        let column_names: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .map(|&name| name.to_string())
+            .collect();
+
+        let mut lazy_df = df.lazy();
+
+        // Convert each column to its appropriate type
+        for column in column_names {
+            match column.as_str() {
+                "timestamp" => {
+                    // Keep timestamp as Utf8 for now
+                    log::debug!("Keeping timestamp column as Utf8");
+                }
+                "open" | "high" | "low" | "close" | "volume" => {
+                    // Convert standard OHLCV columns to Float64
+                    log::debug!(
+                        "Converting standard column '{}' from Utf8 to Float64",
+                        column
+                    );
+                    lazy_df =
+                        lazy_df.with_columns([col(&column).cast(DataType::Float64).alias(&column)]);
+                }
+                _ => {
+                    // Convert custom feature columns to Float64
+                    log::debug!(
+                        "Converting custom feature column '{}' from Utf8 to Float64",
+                        column
+                    );
+                    lazy_df =
+                        lazy_df.with_columns([col(&column).cast(DataType::Float64).alias(&column)]);
+                }
+            }
+        }
+
+        lazy_df
+            .collect()
+            .map_err(|e| VangaError::DataError(format!("Failed to fix column types: {}", e)))
     }
 }
 

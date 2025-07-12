@@ -16,9 +16,8 @@ struct TrainParams {
     features_config: Option<PathBuf>,
     config: Option<PathBuf>,
     attention: bool,
+    tft: bool,
     batch: bool,
-    data_dir: Option<PathBuf>,
-    symbols: Option<Vec<String>>,
 }
 
 /// Prediction command parameters
@@ -53,11 +52,11 @@ struct Cli {
 enum Commands {
     /// Train LSTM model for cryptocurrency forecasting
     Train {
-        /// Trading symbol (e.g., BTCUSDT)
+        /// Trading symbol(s) - single: BTCUSDT or multiple: BTCUSDT,ETHUSDT,DOTUSDT
         #[arg(short, long)]
         symbol: String,
 
-        /// Path to CSV data file
+        /// Path to CSV data file or directory (auto-detects batch mode for directories)
         #[arg(short, long)]
         data: PathBuf,
 
@@ -85,17 +84,13 @@ enum Commands {
         #[arg(long)]
         attention: bool,
 
-        /// Batch training for multiple symbols
+        /// Enable TFT (Temporal Fusion Transformer) with Variable Selection and Quantile Regression
+        #[arg(long)]
+        tft: bool,
+
+        /// Force batch training mode (optional - auto-detected when --data is directory)
         #[arg(long)]
         batch: bool,
-
-        /// Data directory for batch training
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-
-        /// Symbols for batch training (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        symbols: Option<Vec<String>>,
     },
 
     /// Make predictions using trained model
@@ -258,9 +253,8 @@ async fn main() -> Result<()> {
             features_config,
             config,
             attention,
+            tft,
             batch,
-            data_dir,
-            symbols,
         } => {
             let params = TrainParams {
                 symbol,
@@ -271,9 +265,8 @@ async fn main() -> Result<()> {
                 features_config,
                 config,
                 attention,
+                tft,
                 batch,
-                data_dir,
-                symbols,
             };
             handle_train_command(params).await
         }
@@ -315,58 +308,171 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
     let monitor = PerformanceMonitor::new(&format!("Training {}", params.symbol));
     log::info!("Starting training for symbol: {}", params.symbol);
 
-    if params.batch {
-        // Batch training logic
-        log::info!("Batch training mode enabled");
-        if let (Some(data_dir), Some(symbols)) = (params.data_dir, params.symbols) {
-            for sym in symbols {
-                log::info!(
-                    "Training model for symbol: {} using data from: {}",
-                    sym,
-                    data_dir.display()
-                );
+    // Parse symbols from --symbol parameter (supports comma-separated)
+    let symbols: Vec<String> = params
+        .symbol
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
-                // Create training config for this symbol
-                let symbol_config = TrainingConfig::default()
-                    .symbol(sym.clone())
-                    .data_path(data_dir.join(format!("{}.csv", sym)));
+    log::info!("📋 Parsed {} symbol(s): {:?}", symbols.len(), symbols);
 
-                monitor.checkpoint(&format!("Config prepared for {}", sym));
+    // Determine if this is batch mode (multiple symbols OR directory data path OR explicit --batch)
+    let is_batch_mode = symbols.len() > 1 || params.data.is_dir() || params.batch;
 
-                // Train the model
-                match api::train_model(symbol_config.clone()).await {
-                    Ok(model) => {
-                        monitor.checkpoint(&format!("Model trained for {}", sym));
-                        log::info!("Successfully trained model for {}", sym);
+    if is_batch_mode {
+        log::info!("🔄 Batch training mode detected");
 
-                        // Save model with consistent path
-                        let model_path = vanga::utils::model_path::get_model_path(&sym);
-                        let _ = vanga::utils::model_path::ensure_models_dir_exists();
+        // Validate data path for batch mode
+        if !params.data.exists() {
+            return Err(VangaError::DataError(format!(
+                "❌ Data path not found: {}\n💡 Create the directory or check the path.",
+                params.data.display()
+            )));
+        }
 
-                        if let Err(e) = model.save(&model_path) {
-                            log::error!("Failed to save model for {}: {}", sym, e);
-                        } else {
-                            monitor.checkpoint(&format!("Model saved for {}", sym));
-                            log::info!("💾 Model saved to: {}", model_path.display());
-                        }
-                    }
+        if params.data.is_file() && symbols.len() > 1 {
+            return Err(VangaError::DataError(format!(
+                "❌ Multiple symbols specified but data is a single file: {}\n💡 Use a directory with individual CSV files for each symbol: {}/SYMBOL.csv",
+                params.data.display(),
+                params.data.parent().unwrap_or_else(|| std::path::Path::new(".")).display()
+            )));
+        }
+
+        // Process each symbol
+        for symbol in symbols {
+            log::info!("🚀 Training model for symbol: {}", symbol);
+
+            // Determine data file path
+            let data_file_path = if params.data.is_dir() {
+                // Auto-discovery: look for SYMBOL.csv in directory
+                let csv_path = params.data.join(format!("{}.csv", symbol));
+                if !csv_path.exists() {
+                    log::error!(
+                        "❌ Data file not found for {}: {}",
+                        symbol,
+                        csv_path.display()
+                    );
+                    continue; // Skip this symbol and continue with others
+                }
+                csv_path
+            } else {
+                // Single file for single symbol
+                params.data.clone()
+            };
+
+            log::info!("📂 Using data file: {}", data_file_path.display());
+
+            // Create training config for this symbol
+            let data_path_clone = data_file_path.clone(); // Clone for potential reuse
+            let mut symbol_config = TrainingConfig::default()
+                .symbol(symbol.clone())
+                .data_path(data_file_path);
+
+            // Apply configuration from file if provided
+            symbol_config = if let Some(config_path) = &params.config {
+                log::info!("🔧 Loading training config from: {:?}", config_path);
+                match symbol_config.with_training_params_from_file(config_path) {
+                    Ok(file_config) => file_config,
                     Err(e) => {
-                        log::error!("Failed to train model for {}: {}", sym, e);
+                        log::error!("Failed to load config file for {}: {}", symbol, e);
+                        log::info!("Falling back to default configuration for {}", symbol);
+                        // Create a new default config since the original was moved
+                        TrainingConfig::default()
+                            .symbol(symbol.clone())
+                            .data_path(data_path_clone)
                     }
                 }
+            } else {
+                symbol_config
+            };
+
+            // Apply other parameters
+            if params.fresh {
+                symbol_config = symbol_config.fresh_training(true);
             }
-        } else {
-            return Err(VangaError::ConfigError(
-                "Batch mode requires --data-dir and --symbols".to_string(),
-            ));
+            if params.continue_training {
+                symbol_config = symbol_config.continue_training(true);
+            }
+            if let Some(ref horizons) = params.horizons {
+                symbol_config = symbol_config.horizons(horizons.clone());
+            }
+            if let Some(ref features_config) = params.features_config {
+                symbol_config = symbol_config.features_config_path(features_config.clone());
+            }
+            if params.attention {
+                log::info!("🎯 Attention mechanism enabled for {}", symbol);
+                symbol_config = symbol_config.with_attention_enabled(true);
+            }
+            if params.tft {
+                log::info!(
+                    "🔮 TFT (Temporal Fusion Transformer) enabled for {}",
+                    symbol
+                );
+                symbol_config = symbol_config.with_tft_enabled(true);
+            }
+
+            monitor.checkpoint(&format!("Config prepared for {}", symbol));
+
+            // Train the model
+            match api::train_model(symbol_config.clone()).await {
+                Ok(model) => {
+                    monitor.checkpoint(&format!("Model trained for {}", symbol));
+                    log::info!("✅ Successfully trained model for {}", symbol);
+
+                    // Save model
+                    let model_path = vanga::utils::model_path::get_model_path(&symbol);
+                    let _ = vanga::utils::model_path::ensure_models_dir_exists();
+
+                    if let Err(e) = model.save(&model_path) {
+                        log::error!("❌ Failed to save model for {}: {}", symbol, e);
+                    } else {
+                        monitor.checkpoint(&format!("Model saved for {}", symbol));
+                        log::info!("💾 Model saved to: {}", model_path.display());
+                    }
+                }
+                Err(e) => {
+                    log::error!("❌ Failed to train model for {}: {}", symbol, e);
+                    // Continue with next symbol instead of failing completely
+                }
+            }
         }
     } else {
         // Single symbol training
+        let symbol = &symbols[0];
+        log::info!("🎯 Single symbol training mode: {}", symbol);
+
+        // Validate data file exists
+        if !params.data.exists() {
+            return Err(VangaError::DataError(format!(
+                "❌ Data file not found: {}\n💡 Expected file: {}/{}.csv",
+                params.data.display(),
+                params
+                    .data
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .display(),
+                symbol
+            )));
+        }
+
+        if params.data.is_dir() {
+            return Err(VangaError::DataError(format!(
+                "❌ Directory passed for single symbol training: {}\n💡 For single symbol: use --data {}/{}.csv\n💡 For batch mode: use multiple symbols --symbol BTCUSDT,ETHUSDT",
+                params.data.display(),
+                params.data.display(),
+                symbol
+            )));
+        }
+
+        log::info!("📂 Using data file: {}", params.data.display());
+
+        // Create training config
         let mut config = if let Some(config_path) = params.config {
-            // Load config from file
             log::info!("🔧 Loading training config from: {:?}", config_path);
             match TrainingConfig::default()
-                .symbol(params.symbol.clone())
+                .symbol(symbol.clone())
                 .data_path(params.data.clone())
                 .with_training_params_from_file(&config_path)
             {
@@ -375,54 +481,53 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
                     log::error!("Failed to load config file: {}", e);
                     log::info!("Falling back to default configuration");
                     TrainingConfig::default()
-                        .symbol(params.symbol)
+                        .symbol(symbol.clone())
                         .data_path(params.data)
                 }
             }
         } else {
-            // Use default config
             log::info!("🔧 Using default intelligent training configuration");
             TrainingConfig::default()
-                .symbol(params.symbol)
+                .symbol(symbol.clone())
                 .data_path(params.data)
         };
 
+        // Apply parameters
         if params.fresh {
             config = config.fresh_training(true);
         }
-
         if params.continue_training {
             config = config.continue_training(true);
         }
-
         if let Some(horizons) = params.horizons {
             config = config.horizons(horizons);
         }
-
         if let Some(features_config) = params.features_config {
             config = config.features_config_path(features_config);
         }
-
-        // Configure attention if enabled
         if params.attention {
             log::info!("🎯 Attention mechanism enabled for enhanced accuracy");
             config = config.with_attention_enabled(true);
         }
+        if params.tft {
+            log::info!("🔮 TFT (Temporal Fusion Transformer) enabled for enhanced accuracy");
+            config = config.with_tft_enabled(true);
+        }
 
         monitor.checkpoint("Configuration prepared");
 
-        // Train the model using the API
-        let model = vanga::api::train_model(config.clone()).await?;
+        // Train the model
+        let model = api::train_model(config.clone()).await?;
         monitor.checkpoint("Model training completed");
 
-        // Save model with consistent path
+        // Save model
         let model_path = vanga::utils::model_path::get_model_path(&config.symbol);
         let _ = vanga::utils::model_path::ensure_models_dir_exists();
         model.save(&model_path)?;
         monitor.checkpoint("Model saved to disk");
 
         log::info!("💾 Model saved to: {}", model_path.display());
-        log::info!("Training completed successfully");
+        log::info!("✅ Training completed successfully");
     }
 
     Ok(())

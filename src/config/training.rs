@@ -273,6 +273,24 @@ impl TrainingConfig {
         self
     }
 
+    /// Enable or disable TFT (Temporal Fusion Transformer) features
+    pub fn with_tft_enabled(mut self, enabled: bool) -> Self {
+        if enabled {
+            // Enable TFT Variable Selection attention mechanism
+            self.model_config.attention.enabled = true;
+            self.model_config.attention.mechanism =
+                crate::config::model::AttentionMechanism::VariableSelection;
+            log::info!("✅ TFT Variable Selection attention enabled in model configuration");
+
+            // Enable quantile regression outputs for uncertainty quantification
+            self.model_config.quantile_outputs =
+                Some(crate::config::model::TFTQuantileOutputConfig::default());
+
+            log::info!("✅ TFT (Temporal Fusion Transformer) enabled in model configuration");
+        }
+        self
+    }
+
     /// Load training configuration from TOML file
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
