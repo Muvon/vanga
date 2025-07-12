@@ -179,7 +179,7 @@ impl MultiHeadAttention {
         let attention_scores = self.compute_attention_scores(&queries, &keys, seq_len)?;
 
         // Apply attention to values
-        let attended_values = attention_scores.matmul(&values)?;
+        let attended_values = attention_scores.matmul(&values)?.contiguous()?;
 
         // Reshape back and apply output projection
         let attended_output = self.reshape_from_attention(&attended_values, batch_size, seq_len)?;
@@ -218,6 +218,7 @@ impl MultiHeadAttention {
         // Reshape from [batch, num_heads, seq_len, head_dim] to [batch, seq_len, num_heads * head_dim]
         tensor
             .transpose(1, 2)?
+            .contiguous()?
             .reshape((
                 batch_size,
                 seq_len,
@@ -234,14 +235,13 @@ impl MultiHeadAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
-        let scale = (self.config.head_dim as f64).sqrt();
-        let scaled_queries = queries
-            .broadcast_div(&Tensor::new(scale as f32, &self.device)?)?
-            .contiguous()?;
+        let scale = (self.config.head_dim as f64).sqrt() as f32;
+        let scale_tensor = Tensor::new(scale, &self.device)?;
+        let scaled_queries = queries.div(&scale_tensor)?.contiguous()?;
 
         // Compute attention scores: Q * K^T
         let keys_transposed = keys.transpose(2, 3)?.contiguous()?;
-        let mut attention_scores = scaled_queries.matmul(&keys_transposed)?;
+        let mut attention_scores = scaled_queries.matmul(&keys_transposed)?.contiguous()?;
 
         // Add relative position embeddings for better temporal modeling
         if let Some(ref pos_embeddings) = self.relative_position_embeddings {
@@ -252,14 +252,14 @@ impl MultiHeadAttention {
         // Apply temperature scaling for crypto volatility adaptation
         if self.config.temperature_scaling != 1.0 {
             let temperature = Tensor::new(self.config.temperature_scaling as f32, &self.device)?;
-            attention_scores = attention_scores.div(&temperature)?;
+            attention_scores = attention_scores.div(&temperature)?.contiguous()?;
         }
 
         // Apply causal mask for time series (prevent looking into future)
         attention_scores = self.apply_causal_mask(&attention_scores, seq_len)?;
 
         // Apply softmax to get attention weights
-        let attention_weights = ops::softmax(&attention_scores, 3)?;
+        let attention_weights = ops::softmax(&attention_scores, 3)?.contiguous()?;
 
         // Apply dropout during training (if configured)
         if self.config.dropout_rate > 0.0 {
@@ -281,17 +281,19 @@ impl MultiHeadAttention {
         let start_idx = pos_embeddings.dim(0)? / 2 - seq_len / 2;
         let _end_idx = start_idx + seq_len;
 
-        let relevant_embeddings = pos_embeddings.narrow(0, start_idx, seq_len)?;
+        let relevant_embeddings = pos_embeddings.narrow(0, start_idx, seq_len)?.contiguous()?;
 
         // Add position bias to attention scores
         // This is a simplified implementation - in practice, you'd want more sophisticated position encoding
         let relative_bias = relevant_embeddings
             .matmul(&relevant_embeddings.transpose(0, 1)?.contiguous()?)?
+            .contiguous()?
             .unsqueeze(0)?
             .unsqueeze(0)?;
 
         attention_scores
-            .broadcast_add(&relative_bias)
+            .broadcast_add(&relative_bias)?
+            .contiguous()
             .map_err(|e| VangaError::ModelError(format!("Position bias addition failed: {}", e)))
     }
 
