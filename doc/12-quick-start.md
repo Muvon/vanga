@@ -63,29 +63,41 @@ initial_lr = 0.001
 #### **Fast Training (2-Layer)**
 ```toml
 # configs/fast_training.toml
+[training_params]
+epochs = { Fixed = 100 }
+learning_rate = { Fixed = 0.001 }
+batch_size = { Fixed = 64 }
+validation_split = 0.2
+early_stopping_patience = 20
+
 [model]
-architecture = "MultiLSTM"
-
-[model.architecture_config.MultiLSTM]
-layers = 2
-
-[model.lstm]
-hidden_size = 64
-sequence_length = 30
+architecture = { MultiLSTM = { layers = 2 } }
+hidden_units = { Fixed = 64 }
+sequence_length = { Fixed = 30 }
 ```
 
 #### **Advanced Quality (4-Layer StackedLSTM)**
 ```toml
 # configs/stacked_lstm.toml
+[training_params]
+epochs = { Auto = { max_epochs = 1500 } }
+learning_rate = { Adaptive = { initial_lr = 0.0005 } }
+batch_size = { Auto = { min_size = 16, max_size = 256 } }
+validation_split = 0.2
+test_split = 0.1
+early_stopping_patience = 75
+gradient_clip = 1.0
+
 [model]
-architecture = "StackedLSTM"
+architecture = { StackedLSTM = { layers = 4 } }
+hidden_units = { Fixed = 256 }
+sequence_length = { Fixed = 120 }
 
-[model.architecture_config.StackedLSTM]
-layers = 4
-
-[model.lstm]
-hidden_size = 256
-sequence_length = 120
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.3 }
+variational = true
+recurrent = true
 ```
 
 ### 📊 **Custom Features + Multi-Layer Workflow**
@@ -98,13 +110,27 @@ timestamp,open,high,low,close,volume,social_sentiment,funding_rate,whale_activit
 
 #### 2. **Configure Multi-Layer + Custom Features**
 ```toml
-# configs/custom_multi_layer.toml
+# configs/custom_multi_layer.toml - Training Configuration
+[training_params]
+epochs = { Auto = { max_epochs = 800 } }
+learning_rate = { Adaptive = { initial_lr = 0.001 } }
+batch_size = { Auto = { min_size = 32, max_size = 256 } }
+validation_split = 0.2
+early_stopping_patience = 40
+
 [model]
-architecture = "MultiLSTM"
+architecture = { MultiLSTM = { layers = 3 } }  # Optimal for custom features
+hidden_units = { Auto = { min_units = 128, max_units = 512 } }
+sequence_length = { Auto = { min_length = 60, max_length = 120 } }
 
-[model.architecture_config.MultiLSTM]
-layers = 3  # Optimal for custom features
+[model.attention]
+enabled = true
+mechanism = "SelfAttention"
+heads = 8
+```
 
+Create separate features config `configs/custom_features.toml`:
+```toml
 [custom_features]
 auto_include_all = true
 
@@ -303,3 +329,4 @@ vanga train --symbol BTCUSDT --data data.csv --verbose
 2. 🔧 **Generate config:** `python3 scripts/validate_features.py your_data.csv --generate-config config.toml`
 3. 🚀 **Train model:** `vanga train --symbol SYMBOL --data your_data.csv --features-config config.toml`
 4. 🎯 **Make predictions:** `vanga predict --symbol SYMBOL --input new_data.csv`
+vanga predict --symbol SYMBOL --input new_data.csv`

@@ -366,26 +366,27 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 
             // Create training config for this symbol
             let data_path_clone = data_file_path.clone(); // Clone for potential reuse
-            let mut symbol_config = TrainingConfig::default()
-                .symbol(symbol.clone())
-                .data_path(data_file_path);
-
-            // Apply configuration from file if provided
-            symbol_config = if let Some(config_path) = &params.config {
-                log::info!("🔧 Loading training config from: {:?}", config_path);
-                match symbol_config.with_training_params_from_file(config_path) {
-                    Ok(file_config) => file_config,
+            let mut symbol_config = if let Some(config_path) = &params.config {
+                log::info!("🔧 Loading full training config from: {:?}", config_path);
+                match TrainingConfig::from_file(config_path) {
+                    Ok(mut file_config) => {
+                        // Override file config with CLI parameters
+                        file_config.symbol = symbol.clone();
+                        file_config.data_path = data_file_path;
+                        file_config
+                    }
                     Err(e) => {
                         log::error!("Failed to load config file for {}: {}", symbol, e);
                         log::info!("Falling back to default configuration for {}", symbol);
-                        // Create a new default config since the original was moved
                         TrainingConfig::default()
                             .symbol(symbol.clone())
                             .data_path(data_path_clone)
                     }
                 }
             } else {
-                symbol_config
+                TrainingConfig::default()
+                    .symbol(symbol.clone())
+                    .data_path(data_file_path)
             };
 
             // Apply other parameters

@@ -22,6 +22,25 @@ pub struct FeatureConfig {
     pub selection: FeatureSelectionConfig,
 }
 
+impl FeatureConfig {
+    /// Load feature configuration from TOML file
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::utils::error::VangaError::IoError(format!(
+                "Failed to read features config file: {}",
+                e
+            ))
+        })?;
+
+        toml::from_str(&content).map_err(|e| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "Failed to parse features config file: {}",
+                e
+            ))
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TechnicalIndicatorsConfig {
     pub enabled: bool,

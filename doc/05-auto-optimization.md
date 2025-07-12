@@ -42,23 +42,26 @@ architecture = "Auto"  # Automatically selects best architecture
 
 [model.auto_optimization]
 max_layers = 4
-min_layers = 1
+[training_params]
+epochs = { Auto = { max_epochs = 1000 } }
+learning_rate = { Adaptive = { initial_lr = 0.001 } }  # Optimized for multi-layer training
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+validation_split = 0.2
+test_split = 0.1
+early_stopping_patience = 50  # Layer-specific patience
+gradient_clip = 1.0
+
+[model]
+architecture = { Auto = { min_layers = 1, max_layers = 4 } }
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+
+[optimization_config]
+enabled = true
+trials = 100
+metric = "ValidationLoss"
 complexity_threshold = 0.7
 performance_target = "balanced"  # "speed", "balanced", "quality"
-
-[training]
-[training.epochs]
-type = "Auto"
-max_epochs = 1000
-
-[training.learning_rate]
-type = "Adaptive"
-initial_lr = 0.001  # Optimized for multi-layer training
-
-[training.early_stopping]
-enabled = true
-patience = 50
-layer_specific_patience = true  # Different patience for different layer counts
 ```
 
 ## Multi-Layer Training Strategies

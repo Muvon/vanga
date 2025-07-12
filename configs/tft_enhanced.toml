@@ -1,26 +1,30 @@
-# TFT-Enhanced VANGA Configuration
+# TFT-Enhanced VANGA Training Configuration
 # Temporal Fusion Transformer features built on existing LSTM architecture
+
+[training_params]
+# Training hyperparameters
+epochs = { Auto = { max_epochs = 100 } }
+batch_size = { Auto = { min_size = 16, max_size = 128 } }
+learning_rate = { Auto = { min_rate = 0.0001, max_rate = 0.01 } }
+validation_split = 0.2
+test_split = 0.1
+early_stopping_patience = 10
+gradient_clip = 1.0
 
 [model]
 # Use existing architecture with TFT enhancements
-architecture = "MultiLSTM"
+architecture = { MultiLSTM = { layers = 2 } }
 
-[model.architecture_config.MultiLSTM]
-layers = 2
+# Sequence length configuration
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
 
-[model.sequence_length]
-type = "Auto"
-min_length = 30
-max_length = 120
+# Hidden units configuration
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
 
-[model.hidden_units]
-type = "Auto"
-min_units = 64
-max_units = 512
-
+# Dropout configuration
 [model.dropout]
 enabled = true
-rate = { type = "Auto", min_rate = 0.1, max_rate = 0.5 }
+rate = { Auto = { min_rate = 0.1, max_rate = 0.5 } }
 variational = true
 recurrent = true
 
@@ -70,41 +74,25 @@ quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]  # 90% prediction interval
 loss_weighting = "extreme_weighted"          # Higher weight for extreme quantiles
 uncertainty_calibration = true
 
-# Existing feature configuration (unchanged)
-[features]
-auto_include_all = true
+[data_config]
+# Data preprocessing configuration
+normalization = "Robust"
+sequence_overlap = 0.8
+missing_data_strategy = "Interpolate"
 
-[features.technical]
+[data_config.outlier_handling]
 enabled = true
-sma_periods = [5, 10, 20, 50]
-ema_periods = [12, 26]
-rsi_period = 14
-macd = true
-bollinger_bands = true
-stochastic = true
-atr_period = 14
-volume_sma_periods = [10, 20]
+method = "ModifiedZScore"
+threshold = 3.5
 
-[features.custom]
+[data_config.feature_selection]
 enabled = true
-momentum_periods = [5, 10]
-volume_price_trend = true
-price_acceleration = true
+max_features = 100
+correlation_threshold = 0.95
+importance_threshold = 0.001
 
-# Training configuration (existing)
-[training]
-[training.training_params]
-epochs = { type = "Auto", max_epochs = 100 }
-batch_size = { type = "Auto", min_size = 16, max_size = 128 }
-learning_rate = { type = "Auto", min_rate = 0.0001, max_rate = 0.01 }
-
-[training.early_stopping]
-enabled = true
-patience = 10
-min_delta = 0.001
-restore_best_weights = true
-
-[training.optimization]
-optimizer = "Adam"
-gradient_clipping = 1.0
-weight_decay = 0.0001
+[optimization_config]
+# Hyperparameter optimization settings
+enabled = false
+trials = 50
+metric = "ValidationLoss"

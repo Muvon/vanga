@@ -287,20 +287,35 @@ Use with training:
 
 Create `config/training.toml`:
 ```toml
-[model]
-hidden_size = 256
-num_layers = 3
-dropout = 0.2
-
-[training]
-epochs = 100
-learning_rate = 0.001
-batch_size = 32
+[training_params]
+epochs = { Fixed = 100 }
+learning_rate = { Fixed = 0.001 }
+batch_size = { Fixed = 32 }
+validation_split = 0.2
+test_split = 0.1
 early_stopping_patience = 10
+gradient_clip = 1.0
 
-[prediction]
-horizons = ["1h", "4h", "1d"]
-confidence_threshold = 0.6
+[model]
+architecture = { MultiLSTM = { layers = 3 } }
+hidden_units = { Fixed = 256 }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.2 }
+variational = true
+recurrent = true
+
+[data_config]
+normalization = "Robust"
+sequence_overlap = 0.8
+missing_data_strategy = "Interpolate"
+
+[optimization_config]
+enabled = false
+trials = 50
+metric = "ValidationLoss"
 ```
 
 ---

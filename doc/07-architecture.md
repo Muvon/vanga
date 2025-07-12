@@ -170,34 +170,43 @@ pub struct MultiTargetPredictions {
 
 ### **Multi-Layer LSTM Configuration**
 ```toml
+[training_params]
+epochs = { Auto = { max_epochs = 1000 } }
+learning_rate = { Adaptive = { initial_lr = 0.001 } }
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+validation_split = 0.2
+test_split = 0.1
+early_stopping_patience = 50
+gradient_clip = 1.0
+
 [model]
-architecture = "MultiLSTM"
-
-[model.lstm]
-layers = 3                    # Multi-layer support
-hidden_size = 128            # Auto-optimized based on data
-sequence_length = 60         # Auto-calculated per trading pair
-learning_rate = 0.001        # Adaptive learning rate
-
-[model.architecture_config]
 # MultiLSTM configuration
-[model.architecture_config.MultiLSTM]
-layers = 3
+architecture = { MultiLSTM = { layers = 3 } }
 
-# StackedLSTM configuration
-[model.architecture_config.StackedLSTM]
-layers = 2
+# Alternative architectures:
+# architecture = { StackedLSTM = { layers = 2 } }
+# architecture = { BidirectionalLSTM = { layers = 2 } }
+# architecture = { CNNLSTM = { cnn_layers = 2, lstm_layers = 2 } }
 
-# BidirectionalLSTM configuration
-[model.architecture_config.BidirectionalLSTM]
-layers = 2
+# Auto-optimized parameters
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
 
-# CNNLSTM hybrid configuration
-[model.architecture_config.CNNLSTM]
-cnn_layers = 2
-lstm_layers = 2
+[model.dropout]
+enabled = true
+rate = { Auto = { min_rate = 0.1, max_rate = 0.5 } }
+variational = true
+recurrent = true
 
-# TransformerLSTM configuration
+[data_config]
+normalization = "Robust"
+sequence_overlap = 0.8
+missing_data_strategy = "Interpolate"
+
+[optimization_config]
+enabled = true
+trials = 100
+metric = "ValidationLoss"
 [model.architecture_config.TransformerLSTM]
 attention_heads = 8
 lstm_layers = 2

@@ -145,7 +145,7 @@ Input → LSTM Layers → Attention Layer → Output Layer → Predictions
 ### Common Issues
 
 #### Memory Errors
-```bash
+```toml
 # Reduce batch size
 [training_params]
 batch_size = { Fixed = 64 }
@@ -156,7 +156,7 @@ enabled = false
 ```
 
 #### Slow Training
-```bash
+```toml
 # Reduce number of heads
 [model.attention]
 heads = 4
@@ -167,7 +167,7 @@ sequence_length = { Fixed = 60 }
 ```
 
 #### Poor Performance
-```bash
+```toml
 # Enable visualization to debug
 [model.attention.visualization]
 save_heatmaps = true
