@@ -21,19 +21,20 @@ impl ModelTrainer {
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new();
 
-        // Load and prepare training data
+        // Load and prepare training data with chronological split
         log::info!(
             "Loading training data from: {}",
             self.config.data_path.display()
         );
-        let prepared_data = data_pipeline
+        let (train_data, val_data) = data_pipeline
             .prepare_training_data(&self.config.data_path, &self.config)
             .await?;
 
         log::info!(
-            "Training data prepared: {} sequences, {} features",
-            prepared_data.sequences.shape()[0],
-            prepared_data.sequences.shape()[2]
+            "Training data prepared: {} train sequences, {} validation sequences, {} features",
+            train_data.sequences.shape()[0],
+            val_data.sequences.shape()[0],
+            train_data.sequences.shape()[2]
         );
 
         // Generate targets with training config horizons
@@ -61,30 +62,44 @@ impl ModelTrainer {
         // Skip TargetConverter which expands 3 targets to 14 one-hot encoded outputs
         // MultiTargetLSTMModel expects raw target values, not one-hot encoded
 
-        // Convert raw targets to Array2 format for training
+        // Convert raw targets to Array2 format for training and validation
         let training_targets = convert_raw_targets_to_array2(&targets, &target_names)?;
 
+        // Ensure targets match sequence lengths after chronological split
+        let train_len = train_data.sequences.shape()[0];
+        let val_len = val_data.sequences.shape()[0];
+
+        let train_targets = training_targets
+            .slice(ndarray::s![..train_len, ..])
+            .to_owned();
+        let val_targets = training_targets
+            .slice(ndarray::s![train_len..train_len + val_len, ..])
+            .to_owned();
+
         log::info!(
-            "Training targets prepared: {} samples x {} outputs (raw targets, not one-hot)",
-            training_targets.shape()[0],
-            training_targets.shape()[1]
+            "Training targets prepared: {} train samples x {} outputs, {} validation samples",
+            train_targets.shape()[0],
+            train_targets.shape()[1],
+            val_targets.shape()[0]
         );
 
         // CRITICAL FIX: Use MultiTargetLSTMModel instead of single-target model
         // This eliminates the 93% data loss issue
-        let input_size = prepared_data.sequences.shape()[2]; // Number of features
+        let input_size = train_data.sequences.shape()[2]; // Number of features
 
         let mut model = self
             .get_or_create_multi_target_model(input_size, target_names)
             .await?;
 
-        // Train the multi-target LSTM model with intelligent early stopping
-        log::info!(
-            "🚀 Starting intelligent multi-target training with early stopping - using ALL {} targets (0% data loss)",
-            training_targets.shape()[1]
-        );
+        // Train the model with chronological validation (no data leakage)
         model
-            .train_with_early_stopping(&prepared_data.sequences, &training_targets, &self.config)
+            .train_with_chronological_validation(
+                &train_data.sequences,
+                &train_targets,
+                &val_data.sequences,
+                &val_targets,
+                &self.config,
+            )
             .await?;
 
         // Save the trained multi-target model

@@ -130,6 +130,28 @@ impl DataLoader {
             .collect()
             .map_err(|e| VangaError::DataError(format!("Failed to sort data: {}", e)))?;
 
+        // Debug: Check for timestamp uniqueness after loading and sorting
+        if let Ok(timestamp_col) = df.column("timestamp") {
+            let unique_count = timestamp_col.n_unique().unwrap_or(0);
+            let total_count = df.height();
+
+            log::debug!(
+                "📊 Timestamp validation after loading: {} unique out of {} total timestamps",
+                unique_count,
+                total_count
+            );
+
+            if unique_count != total_count {
+                log::warn!(
+                    "⚠️  POTENTIAL DUPLICATE TIMESTAMPS detected during data loading: {} unique out of {} total",
+                    unique_count, total_count
+                );
+                log::warn!(
+                    "🔍 This suggests the issue is in the data loading/preprocessing pipeline, not the original CSV file"
+                );
+            }
+        }
+
         log::info!(
             "Loaded {} records from {} with {} columns",
             df.height(),

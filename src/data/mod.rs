@@ -38,12 +38,12 @@ impl DataPipeline {
         }
     }
 
-    /// Load and preprocess data for training
+    /// Load and preprocess data for training with chronological train/validation split
     pub async fn prepare_training_data<P: AsRef<Path>>(
         &self,
         data_path: P,
         config: &crate::config::TrainingConfig,
-    ) -> Result<PreparedData> {
+    ) -> Result<(PreparedData, PreparedData)> {
         // Load raw data
         let raw_data = self.loader.load_csv(data_path).await?;
 
@@ -56,13 +56,30 @@ impl DataPipeline {
             .process_for_training(raw_data, &config.data, Some(&config.features))
             .await?;
 
-        // Generate sequences for LSTM
-        let sequences = self
+        // CRITICAL: Use chronological split to prevent data leakage in time series
+        let train_ratio = 1.0 - config.training.validation_split;
+        let (train_df, val_df) = self
+            .loader
+            .split_chronological(&processed_data, train_ratio)?;
+
+        log::info!(
+            "📊 Chronological split: {} train samples, {} validation samples (no data leakage)",
+            train_df.height(),
+            val_df.height()
+        );
+
+        // Generate sequences for both train and validation data
+        let train_sequences = self
             .sequence_generator
-            .generate_training_sequences(processed_data, &config.horizons, &config.model)
+            .generate_training_sequences(train_df, &config.horizons, &config.model)
             .await?;
 
-        Ok(sequences)
+        let val_sequences = self
+            .sequence_generator
+            .generate_training_sequences(val_df, &config.horizons, &config.model)
+            .await?;
+
+        Ok((train_sequences, val_sequences))
     }
 
     /// Load and preprocess data for prediction
