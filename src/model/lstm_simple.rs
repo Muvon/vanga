@@ -28,6 +28,7 @@ struct TrainingConfig {
     epochs: usize,
     print_every: usize,
     clip_gradient: Option<f64>,
+    batch_size: usize,
 }
 
 impl Default for TrainingConfig {
@@ -36,6 +37,7 @@ impl Default for TrainingConfig {
             epochs: 1,
             print_every: 10,
             clip_gradient: Some(1.0),
+            batch_size: 32, // Default batch size for memory safety
         }
     }
 }
@@ -70,6 +72,7 @@ impl LSTMModel {
             epochs: 1, // Placeholder - will be set by configure_training()
             print_every: 10,
             clip_gradient: Some(1.0),
+            batch_size: 32, // Default batch size
         };
 
         Ok(Self {
@@ -319,7 +322,7 @@ impl LSTMModel {
         let batch_size = std::cmp::min(sequences.shape()[0], targets.shape()[0]);
 
         log::debug!(
-            "Converting training data: {} sequences, {} targets, using {} aligned samples",
+            "Converting batch: {} sequences, {} targets, processing {} samples",
             sequences.shape()[0],
             targets.shape()[0],
             batch_size
@@ -360,7 +363,7 @@ impl LSTMModel {
             );
         }
 
-        log::info!(
+        log::debug!(
             "Training data converted: {} samples with sequence length {} (using single target output instead of {})",
             batch_size,
             seq_len,
@@ -564,9 +567,30 @@ impl LSTMModel {
             }
         };
 
-        // Update rust-lstm training config - SAME as original
+        // Extract batch size from config - NEW: Properly utilize batch size configuration
+        let batch_size = match &vanga_config.training.batch_size {
+            crate::config::training::BatchSizeConfig::Fixed(size) => {
+                log::info!("Using FIXED batch size: {}", size);
+                *size as usize
+            }
+            crate::config::training::BatchSizeConfig::Auto { min_size, max_size } => {
+                // For auto batch size, start with min_size for memory safety
+                // TODO: Could implement dynamic batch size optimization based on available memory
+                let chosen_size = *min_size as usize;
+                log::info!(
+                    "Using AUTO batch size: {} (range: {} - {})",
+                    chosen_size,
+                    min_size,
+                    max_size
+                );
+                chosen_size
+            }
+        };
+
+        // Update rust-lstm training config - SAME as original + batch size
         self.training_config.epochs = max_epochs;
         self.training_config.print_every = if use_early_stopping { 10 } else { 50 }; // More frequent logging for early stopping
+        self.training_config.batch_size = batch_size; // Store configured batch size
 
         // Store learning rate for optimizer creation - SAME as original
         self.config.learning_rate = learning_rate;
@@ -578,41 +602,107 @@ impl LSTMModel {
         }
 
         log::info!(
-            "✅ Training configured: epochs={}, lr={:.6}, early_stopping={}, print_every={}, gradient_clip={:?}",
+            "✅ Training configured: epochs={}, lr={:.6}, batch_size={}, early_stopping={}, print_every={}, gradient_clip={:?}",
             max_epochs,
             learning_rate,
+            batch_size,
             use_early_stopping,
             self.training_config.print_every,
             vanga_config.training.gradient_clip
         );
     }
 
-    /// Train model - PRESERVING ALL ORIGINAL LOGIC with Candle
-    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
+    /// Validate batch configuration and provide warnings
+    fn validate_batch_configuration(&self, total_samples: usize, batch_size: usize) -> Result<()> {
+        // Basic validation
+        if batch_size == 0 {
+            return Err(VangaError::ConfigError(
+                "Batch size cannot be zero".to_string(),
+            ));
+        }
+
+        if batch_size > total_samples {
+            log::warn!(
+                "⚠️  Batch size ({}) is larger than total samples ({}). Will use full dataset as single batch.",
+                batch_size, total_samples
+            );
+        }
+
+        // Memory estimation and warnings
+        let estimated_memory_per_batch = self.estimate_batch_memory_usage(batch_size);
+        let estimated_memory_mb = estimated_memory_per_batch / (1024 * 1024);
+
+        if estimated_memory_mb > 1000 {
+            // > 1GB per batch
+            log::warn!(
+                "⚠️  Large batch size detected! Estimated memory per batch: {}MB. Consider reducing batch size if you encounter OOM.",
+                estimated_memory_mb
+            );
+        } else {
+            log::info!(
+                "✅ Batch configuration validated. Estimated memory per batch: {}MB",
+                estimated_memory_mb
+            );
+        }
+
+        let num_batches = total_samples.div_ceil(batch_size);
         log::info!(
-            "Training LSTM model with {} input features",
-            self.config.input_size
+            "📊 Batch processing: {} total samples → {} batches of size {} (last batch: {} samples)",
+            total_samples, num_batches, batch_size,
+            if total_samples % batch_size == 0 { batch_size } else { total_samples % batch_size }
         );
+
+        Ok(())
+    }
+
+    /// Estimate memory usage for a given batch size
+    fn estimate_batch_memory_usage(&self, batch_size: usize) -> usize {
+        let sequence_length = self.config.sequence_length;
+        let input_features = self.config.input_size;
+        let hidden_size = self.config.hidden_size;
+        let num_layers = self.config.num_layers;
+
+        // Rough estimation: input tensor + hidden states + gradients + attention (if enabled)
+        let input_tensor_size = batch_size * sequence_length * input_features * 4; // f32 = 4 bytes
+        let hidden_states_size = batch_size * hidden_size * num_layers * 4 * 2; // forward + backward
+        let attention_multiplier = if self.use_attention { 3 } else { 1 }; // Attention adds ~3x memory
+
+        (input_tensor_size + hidden_states_size) * attention_multiplier
+    }
+
+    /// Train model - PRESERVING ALL ORIGINAL LOGIC with Candle + PROPER BATCH PROCESSING
+    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
+        let total_samples = sequences.shape()[0];
+        let batch_size = self.training_config.batch_size;
+
+        log::info!(
+            "Training LSTM model with {} input features, {} total samples, batch size {}",
+            self.config.input_size,
+            total_samples,
+            batch_size
+        );
+
+        // Memory prevalidation and warnings
+        self.validate_batch_configuration(total_samples, batch_size)?;
+
         log::debug!(
-            "Training config: epochs={}, print_every={}, clip_gradient={:?}",
+            "Training config: epochs={}, print_every={}, clip_gradient={:?}, batch_size={}",
             self.training_config.epochs,
             self.training_config.print_every,
-            self.training_config.clip_gradient
+            self.training_config.clip_gradient,
+            batch_size
         );
 
         // Initialize network if not already done - SAME logic as original
         self.initialize_network()?;
 
-        // Convert Array3 sequences to Candle tensors - equivalent to original convert_sequences_to_training_data
-        let (input_tensor, target_tensor) =
-            self.convert_sequences_to_tensors(sequences, targets)?;
-
         // Update config to reflect actual output size (1 for compatibility) - SAME as original
         self.config.output_size = 1;
 
         log::info!(
-            "Starting LSTM training for {} epochs",
-            self.training_config.epochs
+            "Starting LSTM training for {} epochs with {} batches per epoch",
+            self.training_config.epochs,
+            total_samples.div_ceil(batch_size) // Ceiling division
         );
 
         // Create optimizer for training - using SGD to match original rust-lstm behavior
@@ -620,29 +710,83 @@ impl LSTMModel {
         let mut sgd = <optim::SGD as optim::Optimizer>::new(self.varmap.all_vars(), learning_rate)
             .map_err(|e| VangaError::ModelError(format!("SGD optimizer creation failed: {}", e)))?;
 
-        // Training loop with MSE loss and backpropagation - REAL training like original
+        // Training loop with proper batch processing
         for epoch in 0..self.training_config.epochs {
-            // Forward pass
-            let predictions = self.forward(&input_tensor)?;
+            let mut epoch_loss = 0.0;
+            let mut num_batches = 0;
 
-            // Calculate MSE loss tensor
-            let loss = predictions.sub(&target_tensor)?.sqr()?.mean_all()?;
+            // Process data in batches
+            for batch_start in (0..total_samples).step_by(batch_size) {
+                let batch_end = std::cmp::min(batch_start + batch_size, total_samples);
+                let actual_batch_size = batch_end - batch_start;
 
-            // Backward pass with gradient computation
-            let grads = loss.backward()?;
+                // Extract batch from sequences and targets
+                let batch_sequences = sequences
+                    .slice(ndarray::s![batch_start..batch_end, .., ..])
+                    .to_owned();
+                let batch_targets = targets
+                    .slice(ndarray::s![batch_start..batch_end, ..])
+                    .to_owned();
 
-            // Update parameters using SGD optimizer
-            sgd.step(&grads)?;
+                // Convert batch to tensors
+                let (input_tensor, target_tensor) =
+                    self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
-            if epoch % self.training_config.print_every == 0 {
-                let loss_val = loss.to_scalar::<f32>().map_err(|e| {
+                // Forward pass
+                let predictions = self.forward(&input_tensor)?;
+
+                // Calculate MSE loss tensor
+                let loss = predictions.sub(&target_tensor)?.sqr()?.mean_all()?;
+
+                // Backward pass with gradient computation
+                let grads = loss.backward()?;
+
+                // Apply gradient clipping if configured
+                if let Some(clip_value) = self.training_config.clip_gradient {
+                    // TODO: Implement gradient clipping with Candle
+                    // For now, log that clipping is configured but not yet implemented
+                    if epoch == 0 && num_batches == 1 {
+                        log::debug!(
+                            "Gradient clipping configured: {:.3} (implementation pending)",
+                            clip_value
+                        );
+                    }
+                }
+
+                // Update parameters using SGD optimizer
+                sgd.step(&grads)?;
+
+                // Accumulate loss for epoch reporting
+                let batch_loss = loss.to_scalar::<f32>().map_err(|e| {
                     VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
                 })?;
+                epoch_loss += batch_loss * actual_batch_size as f32; // Weight by batch size
+                num_batches += 1;
+
+                // Log batch progress for first few epochs
+                if epoch < 3 && num_batches % 5 == 0 {
+                    log::debug!(
+                        "Epoch {}, Batch {}/{}: samples {}-{}, loss = {:.6}",
+                        epoch + 1,
+                        num_batches,
+                        total_samples.div_ceil(batch_size),
+                        batch_start,
+                        batch_end - 1,
+                        batch_loss
+                    );
+                }
+            }
+
+            // Calculate average epoch loss
+            let avg_epoch_loss = epoch_loss / total_samples as f32;
+
+            if epoch % self.training_config.print_every == 0 {
                 log::info!(
-                    "Epoch {}/{}: Loss = {:.6}, Learning rate: {:.6}",
+                    "Epoch {}/{}: Avg Loss = {:.6}, Batches processed: {}, Learning rate: {:.6}",
                     epoch + 1,
                     self.training_config.epochs,
-                    loss_val,
+                    avg_epoch_loss,
+                    num_batches,
                     self.config.learning_rate
                 );
             }
@@ -973,14 +1117,20 @@ impl LSTMModel {
     ) -> Result<()> {
         log::info!("🏃 Training with validation monitoring and early stopping");
 
+        let total_train_samples = train_sequences.shape()[0];
+        let total_val_samples = val_sequences.shape()[0];
+        let batch_size = self.training_config.batch_size;
+        
+        log::info!(
+            "📊 Batch training: {} train samples, {} val samples, batch size {}",
+            total_train_samples, total_val_samples, batch_size
+        );
+        
+        // Memory prevalidation for both training and validation
+        self.validate_batch_configuration(total_train_samples, batch_size)?;
+
         // Initialize network if not already done
         self.initialize_network()?;
-
-        // Convert training and validation data to tensors
-        let (train_input_tensor, train_target_tensor) =
-            self.convert_sequences_to_tensors(train_sequences, train_targets)?;
-        let (val_input_tensor, val_target_tensor) =
-            self.convert_sequences_to_tensors(val_sequences, val_targets)?;
 
         // Update config to reflect actual output size
         self.config.output_size = 1;
@@ -1002,26 +1152,72 @@ impl LSTMModel {
 
         // Training loop with early stopping
         for epoch in 0..self.training_config.epochs {
-            // Forward pass on training data
-            let train_predictions = self.forward(&train_input_tensor)?;
+            // BATCH PROCESSING: Process training data in batches
+            let mut epoch_train_loss = 0.0;
+            
+            for batch_start in (0..total_train_samples).step_by(batch_size) {
+                let batch_end = std::cmp::min(batch_start + batch_size, total_train_samples);
+                let actual_batch_size = batch_end - batch_start;
+                
+                // Extract training batch
+                let batch_train_sequences = train_sequences.slice(ndarray::s![batch_start..batch_end, .., ..]).to_owned();
+                let batch_train_targets = train_targets.slice(ndarray::s![batch_start..batch_end, ..]).to_owned();
+                
+                // Convert batch to tensors
+                let (train_input_tensor, train_target_tensor) =
+                    self.convert_sequences_to_tensors(&batch_train_sequences, &batch_train_targets)?;
+                
+                // Forward pass on training batch
+                let train_predictions = self.forward(&train_input_tensor)?;
 
-            // Calculate training loss
-            let train_loss = train_predictions
-                .sub(&train_target_tensor)?
-                .sqr()?
-                .mean_all()?;
+                // Calculate training loss
+                let train_loss = train_predictions
+                    .sub(&train_target_tensor)?
+                    .sqr()?
+                    .mean_all()?;
 
-            // Backward pass and parameter update
-            let grads = train_loss.backward()?;
-            sgd.step(&grads)?;
+                // Backward pass and parameter update
+                let grads = train_loss.backward()?;
+                sgd.step(&grads)?;
+                
+                // Accumulate loss for epoch reporting
+                let batch_loss = train_loss.to_scalar::<f32>().map_err(|e| {
+                    VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
+                })?;
+                epoch_train_loss += batch_loss * actual_batch_size as f32;
+            }
+            
+            let avg_train_loss = epoch_train_loss / total_train_samples as f32;
 
-            // Validation evaluation every epoch
-            let val_predictions = self.forward(&val_input_tensor)?;
-            let val_loss = val_predictions.sub(&val_target_tensor)?.sqr()?.mean_all()?;
-
-            let val_loss_val = val_loss.to_scalar::<f32>().map_err(|e| {
-                VangaError::ModelError(format!("Validation loss scalar conversion failed: {}", e))
-            })?;
+            // BATCH PROCESSING: Process validation data in batches
+            let mut epoch_val_loss = 0.0;
+            
+            for batch_start in (0..total_val_samples).step_by(batch_size) {
+                let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
+                let actual_batch_size = batch_end - batch_start;
+                
+                // Extract validation batch
+                let batch_val_sequences = val_sequences.slice(ndarray::s![batch_start..batch_end, .., ..]).to_owned();
+                let batch_val_targets = val_targets.slice(ndarray::s![batch_start..batch_end, ..]).to_owned();
+                
+                // Convert batch to tensors
+                let (val_input_tensor, val_target_tensor) =
+                    self.convert_sequences_to_tensors(&batch_val_sequences, &batch_val_targets)?;
+                
+                // Forward pass on validation batch (no gradient computation)
+                let val_predictions = self.forward(&val_input_tensor)?;
+                let val_loss = val_predictions
+                    .sub(&val_target_tensor)?
+                    .sqr()?
+                    .mean_all()?;
+                
+                let batch_val_loss = val_loss.to_scalar::<f32>().map_err(|e| {
+                    VangaError::ModelError(format!("Validation loss scalar conversion failed: {}", e))
+                })?;
+                epoch_val_loss += batch_val_loss * actual_batch_size as f32;
+            }
+            
+            let val_loss_val = epoch_val_loss / total_val_samples as f32;
 
             // Check for improvement in validation loss
             if val_loss_val < best_val_loss {
@@ -1039,7 +1235,7 @@ impl LSTMModel {
 
                 if patience_counter >= patience {
                     log::info!("🛑 EARLY STOPPING triggered at {} total epochs! Best validation loss: {:.6}",
-                              epoch + 1, best_val_loss);
+                        epoch + 1, best_val_loss);
                     break;
                 }
 
@@ -1065,11 +1261,8 @@ impl LSTMModel {
 
             // Logging
             if epoch % self.training_config.print_every == 0 {
-                let train_loss_val = train_loss.to_scalar::<f32>().map_err(|e| {
-                    VangaError::ModelError(format!("Training loss scalar conversion failed: {}", e))
-                })?;
                 log::info!("📈 Epoch {}/{}: Train Loss = {:.6}, Validation loss: {:.6}, Learning rate: {:.6}",
-                          epoch + 1, self.training_config.epochs, train_loss_val, val_loss_val, learning_rate);
+                    epoch + 1, self.training_config.epochs, avg_train_loss, val_loss_val, learning_rate);
             }
         }
 
