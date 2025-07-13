@@ -118,7 +118,9 @@ impl CryptoDataSchema {
         Self::validate_ohlc_relationships(df)?;
 
         // Check for duplicate timestamps
+        log::debug!("🔍 Starting timestamp uniqueness validation...");
         Self::validate_unique_timestamps(df)?;
+        log::debug!("✅ Timestamp uniqueness validation passed");
 
         Ok(())
     }
@@ -173,14 +175,102 @@ impl CryptoDataSchema {
         })?;
 
         if unique_count != df.height() {
+            // Find and report the actual duplicate timestamps with row numbers
+            let mut duplicate_info = Vec::new();
+
+            // Create a temporary DataFrame with row indices for duplicate detection
+            let df_with_index = df
+                .clone()
+                .lazy()
+                .with_row_count("row_index", Some(1)) // 1-based indexing
+                .collect()
+                .map_err(|e| {
+                    VangaError::DataValidation(DataValidationError::InvalidData {
+                        column: "timestamp".to_string(),
+                        issue: format!("Failed to add row indices for duplicate detection: {}", e),
+                    })
+                })?;
+
+            // Group by timestamp and find groups with more than one row
+            let duplicates = df_with_index
+                .lazy()
+                .group_by([col("timestamp")])
+                .agg([
+                    col("row_index").alias("rows"),
+                    col("row_index").count().alias("count"),
+                ])
+                .filter(col("count").gt(lit(1)))
+                .sort("timestamp", SortOptions::default())
+                .collect()
+                .map_err(|e| {
+                    VangaError::DataValidation(DataValidationError::InvalidData {
+                        column: "timestamp".to_string(),
+                        issue: format!("Failed to detect duplicate timestamps: {}", e),
+                    })
+                })?;
+
+            // Extract duplicate information
+            if duplicates.height() > 0 {
+                let timestamp_series = duplicates.column("timestamp")?;
+                let rows_series = duplicates.column("rows")?;
+                let count_series = duplicates.column("count")?;
+
+                for i in 0..duplicates.height() {
+                    let timestamp = timestamp_series.get(i).map_err(|e| {
+                        VangaError::DataValidation(DataValidationError::InvalidData {
+                            column: "timestamp".to_string(),
+                            issue: format!("Failed to get timestamp value: {}", e),
+                        })
+                    })?;
+
+                    let rows_list = rows_series.get(i).map_err(|e| {
+                        VangaError::DataValidation(DataValidationError::InvalidData {
+                            column: "timestamp".to_string(),
+                            issue: format!("Failed to get row indices: {}", e),
+                        })
+                    })?;
+
+                    let count = count_series.get(i).map_err(|e| {
+                        VangaError::DataValidation(DataValidationError::InvalidData {
+                            column: "timestamp".to_string(),
+                            issue: format!("Failed to get duplicate count: {}", e),
+                        })
+                    })?;
+
+                    duplicate_info.push(format!(
+                        "  • Timestamp '{}' appears {} times at rows: {}",
+                        timestamp, count, rows_list
+                    ));
+                }
+            }
+
+            let detailed_message = if duplicate_info.is_empty() {
+                format!(
+                    "❌ DUPLICATE TIMESTAMPS DETECTED\n\
+                     📊 Statistics: {} unique timestamps out of {} total rows\n\
+                     🔍 Unable to extract specific duplicate details (this may indicate a data processing bug)",
+                    unique_count, df.height()
+                )
+            } else {
+                format!(
+                    "❌ DUPLICATE TIMESTAMPS DETECTED\n\
+                     📊 Statistics: {} unique timestamps out of {} total rows\n\
+                     🔍 Duplicate timestamps found:\n{}\n\
+                     💡 This error may be caused by:\n\
+                     • Data processing bug introducing duplicates during loading/preprocessing\n\
+                     • Timestamp parsing/conversion issues\n\
+                     • Sorting or merging operations creating duplicates\n\
+                     • Check the data loading pipeline in src/data/loader.rs",
+                    unique_count,
+                    df.height(),
+                    duplicate_info.join("\n")
+                )
+            };
+
             return Err(VangaError::DataValidation(
                 DataValidationError::InvalidData {
                     column: "timestamp".to_string(),
-                    issue: format!(
-                        "Duplicate timestamps detected: {} unique out of {} total",
-                        unique_count,
-                        df.height()
-                    ),
+                    issue: detailed_message,
                 },
             ));
         }

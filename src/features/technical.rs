@@ -308,7 +308,7 @@ fn calculate_rsi(data: &[f64], period: usize) -> Vec<f64> {
         };
 
         // Validate final RSI value
-        if !rsi_value.is_finite() || rsi_value < 0.0 || rsi_value > 100.0 {
+        if !rsi_value.is_finite() || !(0.0..=100.0).contains(&rsi_value) {
             log::error!(
                 "RSI calculation: invalid RSI value {} (avg_gain: {}, avg_loss: {}) at index {}",
                 rsi_value,

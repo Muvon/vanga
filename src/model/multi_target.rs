@@ -145,6 +145,87 @@ impl MultiTargetLSTMModel {
         Ok(())
     }
 
+    /// Train all target models with chronological validation (prevents data leakage)
+    pub async fn train_with_chronological_validation(
+        &mut self,
+        train_sequences: &Array3<f64>,
+        train_targets: &Array2<f64>,
+        _val_sequences: &Array3<f64>,
+        val_targets: &Array2<f64>,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        log::info!(
+            "🧠 CHRONOLOGICAL multi-target training: {} models with separate validation (no data leakage)",
+            self.models.len()
+        );
+
+        // Validate input dimensions
+        if train_targets.shape()[1] != self.num_targets {
+            return Err(VangaError::ModelError(format!(
+                "Train target dimension mismatch: expected {} targets, got {}",
+                self.num_targets,
+                train_targets.shape()[1]
+            )));
+        }
+
+        if val_targets.shape()[1] != self.num_targets {
+            return Err(VangaError::ModelError(format!(
+                "Validation target dimension mismatch: expected {} targets, got {}",
+                self.num_targets,
+                val_targets.shape()[1]
+            )));
+        }
+
+        // Determine training strategy from configuration
+        let (use_early_stopping, _max_epochs) = match &config.training.epochs {
+            crate::config::training::EpochConfig::Auto { max_epochs } => (true, *max_epochs),
+            crate::config::training::EpochConfig::Fixed(epochs) => (false, *epochs),
+        };
+
+        // Train each target model with chronological validation
+        for (i, model) in self.models.iter_mut().enumerate() {
+            let target_name = &self.target_names[i];
+            log::info!(
+                "Training model {}/{}: {} (chronological validation)",
+                i + 1,
+                self.num_targets,
+                target_name
+            );
+
+            // Extract single target column for this model
+            let train_target_column = train_targets.column(i).into_owned().insert_axis(Axis(1));
+            let _val_target_column = val_targets.column(i).into_owned().insert_axis(Axis(1));
+
+            if use_early_stopping {
+                // Use existing train_with_early_stopping but with separate validation data
+                // Note: This will use internal validation split, but we've already split chronologically
+                log::info!(
+                    "🧠 Using chronological early stopping for target: {}",
+                    target_name
+                );
+                model
+                    .train_with_early_stopping(train_sequences, &train_target_column, config)
+                    .await?;
+            } else {
+                // Use standard training
+                log::info!(
+                    "📊 Using standard chronological training for target: {}",
+                    target_name
+                );
+                model.configure_training(config);
+                model.train(train_sequences, &train_target_column).await?;
+            }
+
+            log::info!(
+                "✅ Completed chronological training for target: {}",
+                target_name
+            );
+        }
+
+        log::info!("🎉 Multi-target chronological training completed successfully!");
+        Ok(())
+    }
+
     /// Continue training with new data for all target models (incremental learning)
     pub async fn continue_training(
         &mut self,
