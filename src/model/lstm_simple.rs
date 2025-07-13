@@ -1120,12 +1120,14 @@ impl LSTMModel {
         let total_train_samples = train_sequences.shape()[0];
         let total_val_samples = val_sequences.shape()[0];
         let batch_size = self.training_config.batch_size;
-        
+
         log::info!(
             "📊 Batch training: {} train samples, {} val samples, batch size {}",
-            total_train_samples, total_val_samples, batch_size
+            total_train_samples,
+            total_val_samples,
+            batch_size
         );
-        
+
         // Memory prevalidation for both training and validation
         self.validate_batch_configuration(total_train_samples, batch_size)?;
 
@@ -1154,19 +1156,23 @@ impl LSTMModel {
         for epoch in 0..self.training_config.epochs {
             // BATCH PROCESSING: Process training data in batches
             let mut epoch_train_loss = 0.0;
-            
+
             for batch_start in (0..total_train_samples).step_by(batch_size) {
                 let batch_end = std::cmp::min(batch_start + batch_size, total_train_samples);
                 let actual_batch_size = batch_end - batch_start;
-                
+
                 // Extract training batch
-                let batch_train_sequences = train_sequences.slice(ndarray::s![batch_start..batch_end, .., ..]).to_owned();
-                let batch_train_targets = train_targets.slice(ndarray::s![batch_start..batch_end, ..]).to_owned();
-                
+                let batch_train_sequences = train_sequences
+                    .slice(ndarray::s![batch_start..batch_end, .., ..])
+                    .to_owned();
+                let batch_train_targets = train_targets
+                    .slice(ndarray::s![batch_start..batch_end, ..])
+                    .to_owned();
+
                 // Convert batch to tensors
-                let (train_input_tensor, train_target_tensor) =
-                    self.convert_sequences_to_tensors(&batch_train_sequences, &batch_train_targets)?;
-                
+                let (train_input_tensor, train_target_tensor) = self
+                    .convert_sequences_to_tensors(&batch_train_sequences, &batch_train_targets)?;
+
                 // Forward pass on training batch
                 let train_predictions = self.forward(&train_input_tensor)?;
 
@@ -1179,44 +1185,48 @@ impl LSTMModel {
                 // Backward pass and parameter update
                 let grads = train_loss.backward()?;
                 sgd.step(&grads)?;
-                
+
                 // Accumulate loss for epoch reporting
                 let batch_loss = train_loss.to_scalar::<f32>().map_err(|e| {
                     VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
                 })?;
                 epoch_train_loss += batch_loss * actual_batch_size as f32;
             }
-            
+
             let avg_train_loss = epoch_train_loss / total_train_samples as f32;
 
             // BATCH PROCESSING: Process validation data in batches
             let mut epoch_val_loss = 0.0;
-            
+
             for batch_start in (0..total_val_samples).step_by(batch_size) {
                 let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
                 let actual_batch_size = batch_end - batch_start;
-                
+
                 // Extract validation batch
-                let batch_val_sequences = val_sequences.slice(ndarray::s![batch_start..batch_end, .., ..]).to_owned();
-                let batch_val_targets = val_targets.slice(ndarray::s![batch_start..batch_end, ..]).to_owned();
-                
+                let batch_val_sequences = val_sequences
+                    .slice(ndarray::s![batch_start..batch_end, .., ..])
+                    .to_owned();
+                let batch_val_targets = val_targets
+                    .slice(ndarray::s![batch_start..batch_end, ..])
+                    .to_owned();
+
                 // Convert batch to tensors
                 let (val_input_tensor, val_target_tensor) =
                     self.convert_sequences_to_tensors(&batch_val_sequences, &batch_val_targets)?;
-                
+
                 // Forward pass on validation batch (no gradient computation)
                 let val_predictions = self.forward(&val_input_tensor)?;
-                let val_loss = val_predictions
-                    .sub(&val_target_tensor)?
-                    .sqr()?
-                    .mean_all()?;
-                
+                let val_loss = val_predictions.sub(&val_target_tensor)?.sqr()?.mean_all()?;
+
                 let batch_val_loss = val_loss.to_scalar::<f32>().map_err(|e| {
-                    VangaError::ModelError(format!("Validation loss scalar conversion failed: {}", e))
+                    VangaError::ModelError(format!(
+                        "Validation loss scalar conversion failed: {}",
+                        e
+                    ))
                 })?;
                 epoch_val_loss += batch_val_loss * actual_batch_size as f32;
             }
-            
+
             let val_loss_val = epoch_val_loss / total_val_samples as f32;
 
             // Check for improvement in validation loss

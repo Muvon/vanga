@@ -9,9 +9,6 @@ pub struct PredictionConfig {
     /// Path to input data CSV file or directory containing symbol files
     pub input_path: PathBuf,
 
-    /// Whether this is cross-asset prediction (auto-computed from symbols.len() > 1)
-    pub is_cross_asset: bool,
-
     /// Specific prediction horizon (if not all)
     pub horizon: Option<String>,
 
@@ -130,7 +127,6 @@ impl Default for PredictionConfig {
         Self {
             symbols: vec![],
             input_path: PathBuf::new(),
-            is_cross_asset: false,
             horizon: None,
             all_horizons: false,
             output_path: None,
