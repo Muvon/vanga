@@ -26,17 +26,51 @@ impl ModelTrainer {
             "Loading training data from: {}",
             self.config.data_path.display()
         );
-        let (train_data, val_data) = data_pipeline
+        let windows = data_pipeline
             .prepare_training_data(&self.config.data_path, &self.config)
             .await?;
 
         log::info!(
-            "Training data prepared: {} train sequences, {} validation sequences, {} features",
-            train_data.sequences.shape()[0],
-            val_data.sequences.shape()[0],
-            train_data.sequences.shape()[2]
+            "Walk-forward training: {} windows prepared for progressive learning",
+            windows.len()
         );
 
+        // Train model using walk-forward analysis
+        let mut model = None;
+
+        for (i, window) in windows.iter().enumerate() {
+            log::info!(
+                "🔄 Walk-forward window {}/{}: {} train samples → {} validation samples",
+                i + 1,
+                windows.len(),
+                window.train_samples,
+                window.val_samples
+            );
+
+            if i == 0 {
+                // First window: train from scratch
+                model = Some(self.train_window_from_scratch(window).await?);
+            } else {
+                // Subsequent windows: continue training on expanded data
+                model = Some(
+                    self.continue_training_window(model.unwrap(), window)
+                        .await?,
+                );
+            }
+        }
+
+        let final_model = model.unwrap();
+
+        // Save the trained multi-target model
+        log::info!("✅ Walk-forward multi-target model training completed successfully!");
+        Ok(final_model)
+    }
+
+    /// Train model from scratch on first window
+    async fn train_window_from_scratch(
+        &self,
+        window: &crate::data::TrainingWindow,
+    ) -> Result<MultiTargetLSTMModel> {
         // Generate targets with training config horizons
         let target_config = crate::targets::MultiTargetConfig {
             price_level_config: crate::targets::PriceLevelConfig::default(),
@@ -58,16 +92,12 @@ impl ModelTrainer {
             target_names
         );
 
-        // CRITICAL FIX: Use raw targets directly for multi-target model
-        // Skip TargetConverter which expands 3 targets to 14 one-hot encoded outputs
-        // MultiTargetLSTMModel expects raw target values, not one-hot encoded
-
         // Convert raw targets to Array2 format for training and validation
         let training_targets = convert_raw_targets_to_array2(&targets, &target_names)?;
 
-        // Ensure targets match sequence lengths after chronological split
-        let train_len = train_data.sequences.shape()[0];
-        let val_len = val_data.sequences.shape()[0];
+        // Ensure targets match sequence lengths for this window
+        let train_len = window.train_data.sequences.shape()[0];
+        let val_len = window.val_data.sequences.shape()[0];
 
         let train_targets = training_targets
             .slice(ndarray::s![..train_len, ..])
@@ -77,33 +107,87 @@ impl ModelTrainer {
             .to_owned();
 
         log::info!(
-            "Training targets prepared: {} train samples x {} outputs, {} validation samples",
+            "Window {} training targets: {} train samples x {} outputs, {} validation samples",
+            window.window_id + 1,
             train_targets.shape()[0],
             train_targets.shape()[1],
             val_targets.shape()[0]
         );
 
-        // CRITICAL FIX: Use MultiTargetLSTMModel instead of single-target model
-        // This eliminates the 93% data loss issue
-        let input_size = train_data.sequences.shape()[2]; // Number of features
-
+        // Create multi-target model
+        let input_size = window.train_data.sequences.shape()[2];
         let mut model = self
             .get_or_create_multi_target_model(input_size, target_names)
             .await?;
 
-        // Train the model with chronological validation (no data leakage)
+        // Train the model with chronological validation
         model
             .train_with_chronological_validation(
-                &train_data.sequences,
+                &window.train_data.sequences,
                 &train_targets,
-                &val_data.sequences,
+                &window.val_data.sequences,
                 &val_targets,
                 &self.config,
             )
             .await?;
 
-        // Save the trained multi-target model
-        log::info!("✅ Multi-target model training completed successfully!");
+        log::info!("✅ Window {} training completed", window.window_id + 1);
+        Ok(model)
+    }
+
+    /// Continue training existing model on new window
+    async fn continue_training_window(
+        &self,
+        mut model: MultiTargetLSTMModel,
+        window: &crate::data::TrainingWindow,
+    ) -> Result<MultiTargetLSTMModel> {
+        // Generate targets for new window
+        let target_config = crate::targets::MultiTargetConfig {
+            price_level_config: crate::targets::PriceLevelConfig::default(),
+            direction_config: crate::targets::DirectionConfig::default(),
+            volatility_config: crate::targets::VolatilityConfig::default(),
+            horizons: self.config.horizons.clone(),
+        };
+        let target_generator = TargetGenerator::new(target_config);
+        let df = crate::data::loader::DataLoader::new()
+            .load_csv(&self.config.data_path)
+            .await?;
+        let targets = target_generator.generate_all_targets(&df).await?;
+        let target_names = target_generator.get_target_names();
+
+        // Convert targets for this window
+        let training_targets = convert_raw_targets_to_array2(&targets, &target_names)?;
+        let train_len = window.train_data.sequences.shape()[0];
+        let val_len = window.val_data.sequences.shape()[0];
+
+        // Calculate offset for this window's targets
+        let window_offset = window.train_samples - train_len;
+        let train_targets = training_targets
+            .slice(ndarray::s![window_offset..window_offset + train_len, ..])
+            .to_owned();
+        let val_targets = training_targets
+            .slice(ndarray::s![
+                window_offset + train_len..window_offset + train_len + val_len,
+                ..
+            ])
+            .to_owned();
+
+        log::info!(
+            "Window {} continue training: {} new train samples, {} validation samples",
+            window.window_id + 1,
+            train_targets.shape()[0],
+            val_targets.shape()[0]
+        );
+
+        // Continue training with new data
+        model
+            .continue_training(&window.train_data.sequences, &train_targets, &self.config)
+            .await?;
+
+        log::info!(
+            "✅ Window {} continue training completed",
+            window.window_id + 1
+        );
         Ok(model)
     }
 

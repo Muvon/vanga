@@ -38,12 +38,12 @@ impl DataPipeline {
         }
     }
 
-    /// Load and preprocess data for training with chronological train/validation split
+    /// Load and preprocess data for training with walk-forward analysis (default)
     pub async fn prepare_training_data<P: AsRef<Path>>(
         &self,
         data_path: P,
         config: &crate::config::TrainingConfig,
-    ) -> Result<(PreparedData, PreparedData)> {
+    ) -> Result<Vec<TrainingWindow>> {
         // Load raw data
         let raw_data = self.loader.load_csv(data_path).await?;
 
@@ -56,30 +56,84 @@ impl DataPipeline {
             .process_for_training(raw_data, &config.data, Some(&config.features))
             .await?;
 
-        // CRITICAL: Use chronological split to prevent data leakage in time series
-        let train_ratio = 1.0 - config.training.validation_split;
-        let (train_df, val_df) = self
-            .loader
-            .split_chronological(&processed_data, train_ratio)?;
+        // CRITICAL: Use walk-forward analysis to maximize data utilization
+        let windows = self
+            .create_walk_forward_windows(&processed_data, config)
+            .await?;
 
         log::info!(
-            "📊 Chronological split: {} train samples, {} validation samples (no data leakage)",
-            train_df.height(),
-            val_df.height()
+            "📊 Walk-forward analysis: {} windows created for progressive training",
+            windows.len()
         );
 
-        // Generate sequences for both train and validation data
-        let train_sequences = self
-            .sequence_generator
-            .generate_training_sequences(train_df, &config.horizons, &config.model)
-            .await?;
+        Ok(windows)
+    }
 
-        let val_sequences = self
-            .sequence_generator
-            .generate_training_sequences(val_df, &config.horizons, &config.model)
-            .await?;
+    /// Create walk-forward analysis windows using existing validation_split config
+    async fn create_walk_forward_windows(
+        &self,
+        df: &polars::prelude::DataFrame,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<Vec<TrainingWindow>> {
+        let total_samples = df.height();
+        let validation_size = (total_samples as f64 * config.training.validation_split) as usize;
+        let min_train_size = total_samples / 2; // Start with at least 50% for initial training
 
-        Ok((train_sequences, val_sequences))
+        if validation_size == 0 || min_train_size + validation_size > total_samples {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Insufficient data for walk-forward analysis".to_string(),
+            ));
+        }
+
+        let mut windows = Vec::new();
+        let mut train_end = min_train_size;
+
+        // Create progressive windows
+        while train_end + validation_size <= total_samples {
+            let val_start = train_end;
+            let val_end = train_end + validation_size;
+
+            let train_df = df.slice(0, train_end);
+            let val_df = df.slice(val_start as i64, validation_size);
+
+            // Generate sequences for this window
+            let train_sequences = self
+                .sequence_generator
+                .generate_training_sequences(train_df, &config.horizons, &config.model)
+                .await?;
+
+            let val_sequences = self
+                .sequence_generator
+                .generate_training_sequences(val_df, &config.horizons, &config.model)
+                .await?;
+
+            windows.push(TrainingWindow {
+                train_data: train_sequences,
+                val_data: val_sequences,
+                window_id: windows.len(),
+                train_samples: train_end,
+                val_samples: validation_size,
+            });
+
+            log::debug!(
+                "📊 Window {}: Train[0-{}] → Val[{}-{}]",
+                windows.len(),
+                train_end,
+                val_start,
+                val_end
+            );
+
+            // Move window forward by validation_size (no overlap in test sets)
+            train_end = val_end;
+        }
+
+        log::info!(
+            "📊 Created {} walk-forward windows (validation_split: {:.1}%)",
+            windows.len(),
+            config.training.validation_split * 100.0
+        );
+
+        Ok(windows)
     }
 
     /// Load and preprocess data for prediction
@@ -196,4 +250,14 @@ pub struct DataMetadata {
     pub feature_count: usize,
     pub sequence_length: usize,
     pub horizons: Vec<String>,
+}
+
+/// Walk-forward training window
+#[derive(Debug)]
+pub struct TrainingWindow {
+    pub train_data: PreparedData,
+    pub val_data: PreparedData,
+    pub window_id: usize,
+    pub train_samples: usize,
+    pub val_samples: usize,
 }

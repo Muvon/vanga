@@ -574,11 +574,10 @@ impl LSTMModel {
                 *size as usize
             }
             crate::config::training::BatchSizeConfig::Auto { min_size, max_size } => {
-                // For auto batch size, start with min_size for memory safety
-                // TODO: Could implement dynamic batch size optimization based on available memory
-                let chosen_size = *min_size as usize;
+                // Memory-aware batch size optimization
+                let chosen_size = self.optimize_batch_size(*min_size as usize, *max_size as usize);
                 log::info!(
-                    "Using AUTO batch size: {} (range: {} - {})",
+                    "Using AUTO batch size: {} (optimized from range: {} - {})",
                     chosen_size,
                     min_size,
                     max_size
@@ -668,6 +667,69 @@ impl LSTMModel {
         let attention_multiplier = if self.use_attention { 3 } else { 1 }; // Attention adds ~3x memory
 
         (input_tensor_size + hidden_states_size) * attention_multiplier
+    }
+
+    /// Optimize batch size based on available memory and model complexity
+    fn optimize_batch_size(&self, min_size: usize, max_size: usize) -> usize {
+        // Get available memory (rough estimation)
+        let available_memory_gb = self.get_available_memory_gb();
+
+        // Memory-based batch size selection following VANGA guidelines
+        let memory_based_size = match available_memory_gb {
+            gb if gb < 1.0 => 16,
+            gb if gb < 4.0 => 32,
+            gb if gb < 8.0 => 64,
+            gb if gb < 16.0 => 128,
+            _ => 256,
+        };
+
+        // Start with memory-based size, then test within range
+        let mut optimal_size = memory_based_size.max(min_size).min(max_size);
+
+        // Test if we can use a larger batch size within the range
+        for test_size in (optimal_size..=max_size).step_by(16) {
+            let estimated_memory_mb = self.estimate_batch_memory_usage(test_size) / (1024 * 1024);
+            let memory_limit_mb = (available_memory_gb * 1024.0 * 0.7) as usize; // Use 70% of available memory
+
+            if estimated_memory_mb <= memory_limit_mb {
+                optimal_size = test_size;
+            } else {
+                break;
+            }
+        }
+
+        log::debug!(
+            "Batch size optimization: available_memory={}GB, memory_based={}, optimal={}",
+            available_memory_gb,
+            memory_based_size,
+            optimal_size
+        );
+
+        optimal_size
+    }
+
+    /// Get available memory in GB (rough estimation)
+    fn get_available_memory_gb(&self) -> f64 {
+        // For macOS, try to get memory info
+        if let Ok(output) = std::process::Command::new("vm_stat").output() {
+            if let Ok(vm_stat) = String::from_utf8(output.stdout) {
+                // Parse vm_stat output to get free memory
+                if let Some(free_line) = vm_stat.lines().find(|line| line.contains("Pages free:")) {
+                    if let Some(free_pages_str) = free_line.split_whitespace().nth(2) {
+                        if let Ok(free_pages) = free_pages_str.trim_end_matches('.').parse::<u64>()
+                        {
+                            // macOS page size is typically 16KB
+                            let free_memory_gb =
+                                (free_pages * 16384) as f64 / (1024.0 * 1024.0 * 1024.0);
+                            return free_memory_gb.max(1.0); // Minimum 1GB assumption
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: assume reasonable memory based on system
+        4.0 // Default to 4GB assumption for batch size calculation
     }
 
     /// Train model - PRESERVING ALL ORIGINAL LOGIC with Candle + PROPER BATCH PROCESSING
