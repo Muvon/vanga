@@ -49,6 +49,15 @@ pub struct TrainingParams {
     /// Learning rate configuration
     pub learning_rate: LearningRateConfig,
 
+    /// Optimizer type selection
+    pub optimizer: OptimizerType,
+
+    /// Warmup epochs for gradual learning rate increase
+    pub warmup_epochs: u32,
+
+    /// Learning rate schedule configuration
+    pub learning_schedule: Option<LearningScheduleConfig>,
+
     /// Validation split ratio
     pub validation_split: f64,
 
@@ -107,8 +116,23 @@ pub enum BatchSizeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LearningRateConfig {
     Auto { min_lr: f64, max_lr: f64 },
-    Adaptive { initial_lr: f64 },
+    Adaptive { initial_lr: f64, patience: u32, factor: f64 },
     Fixed(f64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OptimizerType {
+    SGD { momentum: Option<f64> },
+    AdamW { weight_decay: f64, beta1: f64, beta2: f64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LearningScheduleConfig {
+    Constant,
+    LinearDecay { decay_rate: f64 },
+    ExponentialDecay { decay_rate: f64 },
+    CosineAnnealing { t_max: u32 },
+    WarmRestarts { t_0: u32, t_mult: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,7 +315,18 @@ impl Default for TrainingParams {
                 min_size: 32,
                 max_size: 512,
             },
-            learning_rate: LearningRateConfig::Adaptive { initial_lr: 0.001 }, // Adaptive by default
+            learning_rate: LearningRateConfig::Adaptive { 
+                initial_lr: 0.001,
+                patience: 10,
+                factor: 0.5,
+            }, // Adaptive by default
+            optimizer: OptimizerType::AdamW {
+                weight_decay: 0.01,
+                beta1: 0.9,
+                beta2: 0.999,
+            }, // AdamW by default for better performance
+            warmup_epochs: 5, // 5 epochs warmup by default
+            learning_schedule: None, // No schedule by default
             validation_split: 0.2, // 20% validation for early stopping
             test_split: 0.1,
             early_stopping_patience: 50, // Reasonable patience

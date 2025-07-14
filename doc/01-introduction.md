@@ -2,7 +2,7 @@
 
 ## Introduction
 
-VANGA is a **production-ready** multi-layer LSTM-based cryptocurrency forecasting system built in Rust. It combines advanced multi-layer neural networks with comprehensive technical analysis to deliver professional-grade cryptocurrency market predictions with intelligent architecture optimization.
+VANGA is a **production-ready** multi-layer LSTM-based cryptocurrency forecasting system built in Rust. It combines advanced multi-layer neural networks with comprehensive technical analysis and **state-of-the-art learning rate optimization** to deliver professional-grade cryptocurrency market predictions with intelligent architecture optimization.
 
 ## Key Features
 
@@ -101,6 +101,17 @@ vanga train --symbol BTCUSDT --data data/btc_historical.csv
 
 # Make predictions
 vanga predict --symbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
+
+# List models
+vanga models list
+```
+
+### **Next Steps**
+1. **[Installation](02-installation.md)** - Set up your development environment
+2. **[Data Preparation](03-data-preparation.md)** - Format your cryptocurrency data
+3. **[Training](04-training.md)** - Train your first LSTM model
+4. **[Usage Examples](11-usage-examples.md)** - Comprehensive usage guide
+mbol BTCUSDT --input data/btc_recent.csv --output predictions.csv
 
 # List models
 vanga models list

@@ -40,7 +40,7 @@ vanga train --symbol BTCUSDT --data btc_data.csv --config configs/advanced_custo
 # Fresh training: Always create new model
 vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training.toml --fresh
 
-# Continue training: Add new data to existing model
+# Continue training: Add new data to existing model (uses unified training method)
 vanga train --symbol BTCUSDT --data btc_data.csv --config configs/training.toml --continue-training
 ```
 
@@ -445,6 +445,26 @@ vanga train --symbol BTCUSDT --data data.csv --verbose
 ├── examples/
 │   ├── btc_with_sentiment.csv    # Sample sentiment data
 │   ├── btc_with_onchain.csv      # Sample on-chain data
+│   ├── sentiment_features.toml   # Sentiment config
+│   ├── onchain_features.toml     # On-chain config
+│   └── run_examples.sh           # Complete workflow demo
+├── scripts/
+│   ├── validate_features.py      # Data validation tool
+│   └── test_validation.sh        # Validation testing
+├── models/                       # Trained models (auto-created)
+└── predictions/                  # Prediction outputs (auto-created)
+```
+
+---
+
+**Ready to get started?**
+
+1. 📊 **Validate your data:** `python3 scripts/validate_features.py your_data.csv`
+2. 🔧 **Generate config:** `python3 scripts/validate_features.py your_data.csv --generate-config config.toml`
+3. 🚀 **Train model:** `vanga train --symbol SYMBOL --data your_data.csv --features-config config.toml`
+4. 🎯 **Make predictions:** `vanga predict --symbol SYMBOL --input new_data.csv`
+vanga predict --symbol SYMBOL --input new_data.csv`
+  # Sample on-chain data
 │   ├── sentiment_features.toml   # Sentiment config
 │   ├── onchain_features.toml     # On-chain config
 │   └── run_examples.sh           # Complete workflow demo

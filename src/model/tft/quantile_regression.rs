@@ -143,7 +143,7 @@ impl QuantileMultiTargetModel {
     ) -> Result<()> {
         // First train the base multi-target model
         self.base_model
-            .train_with_early_stopping(sequences, targets, config)
+            .train(sequences, targets, config)
             .await?;
 
         // If quantile regression is enabled, train quantile heads

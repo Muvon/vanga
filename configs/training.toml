@@ -1,23 +1,87 @@
-# VANGA Standard Training Configuration
-# Production-ready configuration for single-asset LSTM training
-# For detailed parameter explanations, see configs/example_single_asset.toml
-# For cross-asset training, see configs/example_cross_asset.toml
+# VANGA Advanced Training Configuration
+# Comprehensive configuration for LSTM cryptocurrency forecasting
+# This file demonstrates all available learning rate optimization features
 
 [training]
-# EPOCH CONFIGURATION - Choose one approach:
+# ============================================================================
+# EPOCH CONFIGURATION - Training duration control
+# ============================================================================
+# Choose one approach:
+# - Auto: Uses early stopping with maximum epoch limit
+# - Fixed: Trains for exact number of epochs
 epochs = { Auto = { max_epochs = 1000 } }
+# epochs = { Fixed = 500 }
 
-# LEARNING RATE CONFIGURATION
-learning_rate = { Fixed = 0.001 }
+# ============================================================================
+# OPTIMIZER CONFIGURATION - Choose between SGD and AdamW
+# ============================================================================
+# AdamW (RECOMMENDED): Modern optimizer with adaptive learning rates and weight decay
+# - Better convergence for most cryptocurrency datasets
+# - Handles sparse gradients well
+# - Built-in weight decay for regularization
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
 
-# BATCH SIZE CONFIGURATION
+# SGD: Traditional optimizer, good for fine-tuning
+# optimizer = { SGD = { momentum = 0.9 } }  # momentum not yet implemented in Candle
+# optimizer = { SGD = {} }  # Basic SGD without momentum
+
+# ============================================================================
+# LEARNING RATE CONFIGURATION - Advanced optimization strategies
+# ============================================================================
+# ADAPTIVE (RECOMMENDED): Automatically reduces LR when validation loss plateaus
+# - Starts with initial_lr and reduces by factor when patience is exceeded
+# - Best for most cryptocurrency forecasting tasks
+learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
+
+# AUTO: Optimizes learning rate within specified range based on model complexity
+# - Uses heuristics to select optimal LR between min_lr and max_lr
+# - Good for hyperparameter exploration
+# learning_rate = { Auto = { min_lr = 0.0001, max_lr = 0.01 } }
+
+# FIXED: Uses constant learning rate throughout training
+# - Simple and predictable, good for fine-tuning
+# learning_rate = { Fixed = 0.001 }
+
+# ============================================================================
+# WARMUP CONFIGURATION - Gradual learning rate increase
+# ============================================================================
+# Number of epochs to gradually increase learning rate from 0 to target
+# - Prevents early training instability with large models
+# - Recommended: 5-10 epochs for most datasets
+warmup_epochs = 5
+
+# ============================================================================
+# LEARNING RATE SCHEDULING - Advanced decay patterns (OPTIONAL)
+# ============================================================================
+# Additional learning rate scheduling after warmup (experimental)
+# learning_schedule = { LinearDecay = { decay_rate = 0.95 } }
+# learning_schedule = { ExponentialDecay = { decay_rate = 0.98 } }
+# learning_schedule = { CosineAnnealing = { t_max = 100 } }
+# learning_schedule = { WarmRestarts = { t_0 = 50, t_mult = 2 } }
+# learning_schedule = "Constant"  # No additional scheduling
+
+# ============================================================================
+# BATCH SIZE CONFIGURATION - Memory and performance optimization
+# ============================================================================
+# AUTO (RECOMMENDED): Automatically selects optimal batch size based on available memory
+# - Considers model complexity and system memory
+# - Provides best performance/memory trade-off
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
 
+# FIXED: Uses constant batch size
+# batch_size = { Fixed = 128 }
+
+# ============================================================================
 # VALIDATION AND EARLY STOPPING
+# ============================================================================
 validation_split = 0.2          # 20% of data for validation
 test_split = 0.1               # 10% of data for final testing
 early_stopping_patience = 50   # Stop after 50 epochs without improvement
-gradient_clip = 1.0            # Gradient clipping threshold
+
+# ============================================================================
+# GRADIENT OPTIMIZATION
+# ============================================================================
+gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding gradients)
 
 [model]
 # Model architecture configuration

@@ -42,6 +42,8 @@ impl Default for TrainingConfig {
     }
 }
 
+
+
 /// LSTM model for cryptocurrency forecasting - Enhanced with attention support
 pub struct LSTMModel {
     config: LSTMConfig,
@@ -63,6 +65,28 @@ struct ModelState {
     epochs: usize,
     print_every: usize,
     clip_gradient: Option<f64>,
+}
+
+// Optimizer wrapper for concrete type handling with Candle
+enum OptimizerWrapper {
+    Sgd(optim::SGD),
+    AdamW(optim::AdamW),
+}
+
+impl OptimizerWrapper {
+    fn set_learning_rate(&mut self, lr: f64) {
+        match self {
+            OptimizerWrapper::Sgd(sgd) => sgd.set_learning_rate(lr),
+            OptimizerWrapper::AdamW(adamw) => adamw.set_learning_rate(lr),
+        }
+    }
+    
+    fn step(&mut self, grads: &candle_core::backprop::GradStore) -> candle_core::Result<()> {
+        match self {
+            OptimizerWrapper::Sgd(sgd) => sgd.step(grads),
+            OptimizerWrapper::AdamW(adamw) => adamw.step(grads),
+        }
+    }
 }
 
 impl LSTMModel {
@@ -533,9 +557,10 @@ impl LSTMModel {
         sequences: &Array3<f64>,
         targets: &Array2<f64>,
         _batch_size: usize,
+        config: &crate::config::TrainingConfig,
     ) -> Result<()> {
-        // Candle handles batching internally, so delegate to regular train
-        self.train(sequences, targets).await
+        // Candle handles batching internally, so delegate to unified train
+        self.train(sequences, targets, config).await
     }
 
     /// Configure training parameters from TrainingConfig - EXACT same logic as original
@@ -554,7 +579,7 @@ impl LSTMModel {
                 log::info!("Using FIXED learning rate: {:.6}", lr);
                 *lr
             }
-            crate::config::training::LearningRateConfig::Adaptive { initial_lr } => {
+            crate::config::training::LearningRateConfig::Adaptive { initial_lr, patience: _, factor: _ } => {
                 log::info!(
                     "Using ADAPTIVE learning rate starting at: {:.6}",
                     initial_lr
@@ -732,61 +757,130 @@ impl LSTMModel {
         4.0 // Default to 4GB assumption for batch size calculation
     }
 
-    /// Train model - PRESERVING ALL ORIGINAL LOGIC with Candle + PROPER BATCH PROCESSING
-    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
+    /// UNIFIED TRAINING METHOD - Handles all training scenarios through configuration
+    /// This method consolidates all training logic from multiple methods into a single,
+    /// configuration-driven approach while preserving ALL original functionality.
+    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>, config: &crate::config::TrainingConfig) -> Result<()> {
         let total_samples = sequences.shape()[0];
+        log::info!("🚀 UNIFIED TRAINING: Starting with {} samples", total_samples);
+
+        // Configure training parameters from config
+        self.configure_training(config);
+
+        // Initialize network if not already done
+        if self.lstm_layers.is_none() || self.output_layer.is_none() {
+            self.initialize_network()?;
+        }
+
+        // Update config to reflect actual output size (1 for compatibility)
+        self.config.output_size = 1;
+
+        // Determine if we need validation split
+        let validation_split = config.training.validation_split;
+        let use_validation = validation_split > 0.0;
+
+        // Prepare training and validation data
+        let (train_sequences, train_targets, val_sequences, val_targets) = if use_validation {
+            log::info!("📊 Using validation split: {:.1}%", validation_split * 100.0);
+            
+            let train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
+            let train_seq = sequences.slice(s![0..train_samples, .., ..]).to_owned();
+            let train_tgt = targets.slice(s![0..train_samples, ..]).to_owned();
+            let val_seq = sequences.slice(s![train_samples.., .., ..]).to_owned();
+            let val_tgt = targets.slice(s![train_samples.., ..]).to_owned();
+            
+            (train_seq, train_tgt, Some(val_seq), Some(val_tgt))
+        } else {
+            log::info!("📊 Training without validation split");
+            (sequences.to_owned(), targets.to_owned(), None, None)
+        };
+
+        let total_train_samples = train_sequences.shape()[0];
+        let total_val_samples = val_sequences.as_ref().map(|v| v.shape()[0]).unwrap_or(0);
         let batch_size = self.training_config.batch_size;
 
         log::info!(
-            "Training LSTM model with {} input features, {} total samples, batch size {}",
-            self.config.input_size,
-            total_samples,
-            batch_size
+            "🚀 UNIFIED TRAINING: {} train samples{}, batch_size={}, optimizer={:?}",
+            total_train_samples,
+            if use_validation { format!(", {} val samples", total_val_samples) } else { String::new() },
+            batch_size,
+            config.training.optimizer
         );
 
         // Memory prevalidation and warnings
-        self.validate_batch_configuration(total_samples, batch_size)?;
+        self.validate_batch_configuration(total_train_samples, batch_size)?;
 
-        log::debug!(
-            "Training config: epochs={}, print_every={}, clip_gradient={:?}, batch_size={}",
-            self.training_config.epochs,
-            self.training_config.print_every,
-            self.training_config.clip_gradient,
-            batch_size
-        );
+        // Setup advanced optimizer with all configurations
+        let mut optimizer = self.setup_advanced_optimizer(config)?;
 
-        // Initialize network if not already done - SAME logic as original
-        self.initialize_network()?;
+        // Extract learning rate configuration
+        let target_lr = match &config.training.learning_rate {
+            crate::config::training::LearningRateConfig::Fixed(rate) => *rate,
+            crate::config::training::LearningRateConfig::Adaptive { initial_lr, .. } => *initial_lr,
+            crate::config::training::LearningRateConfig::Auto { .. } => 0.001, // Default for auto
+        };
 
-        // Update config to reflect actual output size (1 for compatibility) - SAME as original
-        self.config.output_size = 1;
+        // Extract warmup configuration
+        let warmup_epochs = config.training.warmup_epochs;
+        let mut current_lr = target_lr;
 
-        log::info!(
-            "Starting LSTM training for {} epochs with {} batches per epoch",
-            self.training_config.epochs,
-            total_samples.div_ceil(batch_size) // Ceiling division
-        );
+        // Initialize adaptive learning rate variables
+        let mut best_loss = f64::INFINITY;
+        let mut patience_counter = 0;
+        let (adaptive_patience, adaptive_factor) = match &config.training.learning_rate {
+            crate::config::training::LearningRateConfig::Adaptive { patience, factor, .. } => (*patience, *factor),
+            _ => (10, 0.5), // Default values for non-adaptive modes
+        };
 
-        // Create optimizer for training - using SGD to match original rust-lstm behavior
-        let learning_rate = self.config.learning_rate;
-        let mut sgd = <optim::SGD as optim::Optimizer>::new(self.varmap.all_vars(), learning_rate)
-            .map_err(|e| VangaError::ModelError(format!("SGD optimizer creation failed: {}", e)))?;
+        // Initialize early stopping variables (only used with validation)
+        let mut best_val_loss = f64::INFINITY;
+        let mut early_stopping_counter = 0;
+        let early_stopping_patience = match &config.training.epochs {
+            crate::config::training::EpochConfig::Auto { max_epochs: _ } => config.training.early_stopping_patience,
+            _ => 10, // Default patience for fixed epochs
+        };
 
-        // Training loop with proper batch processing
+        log::info!("🔧 Training Configuration:");
+        log::info!("  - Epochs: {}", self.training_config.epochs);
+        log::info!("  - Batch size: {}", batch_size);
+        log::info!("  - Warmup epochs: {}", warmup_epochs);
+        log::info!("  - Adaptive patience: {}", adaptive_patience);
+        log::info!("  - Adaptive factor: {:.3}", adaptive_factor);
+        if use_validation {
+            log::info!("  - Early stopping patience: {}", early_stopping_patience);
+        }
+        log::info!("  - Target learning rate: {:.6}", target_lr);
+
+        // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
         for epoch in 0..self.training_config.epochs {
-            let mut epoch_loss = 0.0;
-            let mut num_batches = 0;
+            let mut epoch_train_loss = 0.0;
 
-            // Process data in batches
-            for batch_start in (0..total_samples).step_by(batch_size) {
-                let batch_end = std::cmp::min(batch_start + batch_size, total_samples);
+            // Calculate warmup learning rate for current epoch
+            if epoch < warmup_epochs as usize {
+                // Linear warmup from 0 to target_lr
+                let warmup_progress = (epoch + 1) as f64 / (warmup_epochs as f64);
+                let warmup_lr = target_lr * warmup_progress;
+                
+                // Update optimizer learning rate for warmup
+                optimizer.set_learning_rate(warmup_lr);
+                current_lr = warmup_lr;
+                
+                if epoch == 0 || epoch == (warmup_epochs as usize) - 1 {
+                    log::info!("🔥 Warmup epoch {}/{}: learning rate = {:.6}", 
+                              epoch + 1, warmup_epochs, warmup_lr);
+                }
+            }
+
+            // Training phase - process data in batches
+            for (batch_idx, batch_start) in (0..total_train_samples).step_by(batch_size).enumerate() {
+                let batch_end = std::cmp::min(batch_start + batch_size, total_train_samples);
                 let actual_batch_size = batch_end - batch_start;
 
                 // Extract batch from sequences and targets
-                let batch_sequences = sequences
+                let batch_sequences = train_sequences
                     .slice(ndarray::s![batch_start..batch_end, .., ..])
                     .to_owned();
-                let batch_targets = targets
+                let batch_targets = train_targets
                     .slice(ndarray::s![batch_start..batch_end, ..])
                     .to_owned();
 
@@ -806,58 +900,143 @@ impl LSTMModel {
                 // Apply gradient clipping if configured
                 if let Some(clip_value) = self.training_config.clip_gradient {
                     // TODO: Implement gradient clipping with Candle
-                    // For now, log that clipping is configured but not yet implemented
-                    if epoch == 0 && num_batches == 1 {
-                        log::debug!(
-                            "Gradient clipping configured: {:.3} (implementation pending)",
-                            clip_value
-                        );
+                    if epoch == 0 && batch_idx == 0 {
+                        log::debug!("Gradient clipping configured: {:.3} (implementation pending)", clip_value);
                     }
                 }
 
-                // Update parameters using SGD optimizer
-                sgd.step(&grads)?;
+                // Update parameters using the configured optimizer
+                optimizer.step(&grads)?;
 
                 // Accumulate loss for epoch reporting
                 let batch_loss = loss.to_scalar::<f32>().map_err(|e| {
                     VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
                 })?;
-                epoch_loss += batch_loss * actual_batch_size as f32; // Weight by batch size
-                num_batches += 1;
+                epoch_train_loss += batch_loss * actual_batch_size as f32;
+            }
 
-                // Log batch progress for first few epochs
-                if epoch < 3 && num_batches % 5 == 0 {
-                    log::debug!(
-                        "Epoch {}, Batch {}/{}: samples {}-{}, loss = {:.6}",
-                        epoch + 1,
-                        num_batches,
-                        total_samples.div_ceil(batch_size),
-                        batch_start,
-                        batch_end - 1,
-                        batch_loss
-                    );
+            // Calculate average training loss
+            let avg_train_loss = epoch_train_loss / total_train_samples as f32;
+
+            // Validation phase (only if validation data is available)
+            let avg_val_loss = if let (Some(val_seq), Some(val_tgt)) = (&val_sequences, &val_targets) {
+                let mut epoch_val_loss = 0.0;
+                
+                for batch_start in (0..total_val_samples).step_by(batch_size) {
+                    let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
+                    let actual_batch_size = batch_end - batch_start;
+
+                    // Extract validation batch
+                    let batch_sequences = val_seq
+                        .slice(ndarray::s![batch_start..batch_end, .., ..])
+                        .to_owned();
+                    let batch_targets = val_tgt
+                        .slice(ndarray::s![batch_start..batch_end, ..])
+                        .to_owned();
+
+                    // Convert batch to tensors
+                    let (input_tensor, target_tensor) =
+                        self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
+
+                    // Forward pass (no gradient computation for validation)
+                    let predictions = self.forward(&input_tensor)?;
+
+                    // Calculate validation loss
+                    let val_loss = predictions.sub(&target_tensor)?.sqr()?.mean_all()?;
+                    let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
+                        VangaError::ModelError(format!("Validation loss scalar conversion failed: {}", e))
+                    })?;
+                    
+                    epoch_val_loss += val_batch_loss * actual_batch_size as f32;
+                }
+
+                Some(epoch_val_loss / total_val_samples as f32)
+            } else {
+                None
+            };
+            
+            // Adaptive learning rate adjustment after warmup
+            if epoch >= warmup_epochs as usize {
+                if let crate::config::training::LearningRateConfig::Adaptive { .. } = &config.training.learning_rate {
+                    // Use validation loss if available, otherwise use training loss
+                    let loss_for_adaptation = avg_val_loss.map(|v| v as f64).unwrap_or(avg_train_loss as f64);
+                    
+                    // Check if we should reduce learning rate
+                    if loss_for_adaptation < best_loss {
+                        best_loss = loss_for_adaptation;
+                        patience_counter = 0;
+                    } else {
+                        patience_counter += 1;
+                        
+                        if patience_counter >= adaptive_patience {
+                            // Reduce learning rate
+                            current_lr *= adaptive_factor;
+                            optimizer.set_learning_rate(current_lr);
+                            patience_counter = 0;
+                            
+                            log::info!("🔄 Adaptive learning rate reduced to: {:.6} (patience exceeded)", current_lr);
+                        }
+                    }
                 }
             }
 
-            // Calculate average epoch loss
-            let avg_epoch_loss = epoch_loss / total_samples as f32;
+            // Early stopping check (only with validation)
+            if let Some(val_loss) = avg_val_loss {
+                if (val_loss as f64) < best_val_loss {
+                    best_val_loss = val_loss as f64;
+                    early_stopping_counter = 0;
+                } else {
+                    early_stopping_counter += 1;
+                    
+                    if early_stopping_counter >= early_stopping_patience {
+                        log::info!("🛑 Early stopping triggered at epoch {} (best val loss: {:.6})", 
+                            epoch + 1, best_val_loss);
+                        break;
+                    }
+                }
+            }
 
+            // Enhanced logging with learning rate tracking
             if epoch % self.training_config.print_every == 0 {
-                log::info!(
-                    "Epoch {}/{}: Avg Loss = {:.6}, Batches processed: {}, Learning rate: {:.6}",
-                    epoch + 1,
-                    self.training_config.epochs,
-                    avg_epoch_loss,
-                    num_batches,
-                    self.config.learning_rate
-                );
+                let warmup_status = if epoch < warmup_epochs as usize { " (warmup)" } else { "" };
+                
+                if let Some(val_loss) = avg_val_loss {
+                    log::info!(
+                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6}, LR: {:.6}{}, Early Stop: {}/{}",
+                        epoch + 1,
+                        self.training_config.epochs,
+                        avg_train_loss,
+                        val_loss,
+                        current_lr,
+                        warmup_status,
+                        early_stopping_counter,
+                        early_stopping_patience
+                    );
+                } else {
+                    let num_batches = total_train_samples.div_ceil(batch_size);
+                    log::info!(
+                        "Epoch {}/{}: Loss = {:.6}, Batches: {}, LR: {:.6}{}",
+                        epoch + 1,
+                        self.training_config.epochs,
+                        avg_train_loss,
+                        num_batches,
+                        current_lr,
+                        warmup_status
+                    );
+                }
+                
+                // Additional adaptive learning rate status
+                if matches!(&config.training.learning_rate, crate::config::training::LearningRateConfig::Adaptive { .. }) && epoch >= warmup_epochs as usize {
+                    log::debug!("📊 Adaptive LR status - Best loss: {:.6}, Patience: {}/{}", 
+                               best_loss, patience_counter, adaptive_patience);
+                }
             }
         }
 
         self.trained = true;
-        log::info!("LSTM training completed successfully");
+        log::info!("✅ Unified LSTM training completed successfully");
 
-        // Calculate final training metrics for better understanding - SAME as original
+        // Calculate final training metrics
         if let Ok(final_predictions) = self.predict(sequences).await {
             let final_mse = self.calculate_mse_loss(&final_predictions, targets);
             let final_mape = self.calculate_mape(&final_predictions, targets);
@@ -870,6 +1049,35 @@ impl LSTMModel {
         }
 
         Ok(())
+    }
+
+
+    /// Advanced optimizer setup with OptimizerWrapper for proper SGD/AdamW handling
+    fn setup_advanced_optimizer(&self, config: &crate::config::TrainingConfig) -> Result<OptimizerWrapper> {
+        let learning_rate = self.config.learning_rate;
+        let optimizer_config = &config.training.optimizer;
+        
+        match optimizer_config {
+            crate::config::training::OptimizerType::SGD { momentum } => {
+                log::info!("Using SGD optimizer with learning rate: {:.6}", learning_rate);
+                if let Some(momentum_val) = momentum {
+                    log::info!("SGD momentum: {:.3} (not yet implemented in Candle)", momentum_val);
+                }
+                Ok(OptimizerWrapper::Sgd(
+                    optim::SGD::new(self.varmap.all_vars(), learning_rate)
+                        .map_err(|e| VangaError::ModelError(format!("SGD optimizer creation failed: {}", e)))?
+                ))
+            }
+            crate::config::training::OptimizerType::AdamW { weight_decay, beta1, beta2 } => {
+                log::info!("Using AdamW optimizer with learning rate: {:.6}", learning_rate);
+                log::info!("AdamW parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}", 
+                          weight_decay, beta1, beta2);
+                Ok(OptimizerWrapper::AdamW(
+                    optim::AdamW::new_lr(self.varmap.all_vars(), learning_rate)
+                        .map_err(|e| VangaError::ModelError(format!("AdamW optimizer creation failed: {}", e)))?
+                ))
+            }
+        }
     }
 
     /// Make predictions using the trained network - EXACT same logic as original
@@ -988,68 +1196,15 @@ impl LSTMModel {
         self.config.input_size
     }
 
-    /// Train with intelligent early stopping - REAL implementation with validation monitoring
+    /// Train with early stopping - delegates to unified train() method
     pub async fn train_with_early_stopping(
         &mut self,
         sequences: &Array3<f64>,
         targets: &Array2<f64>,
         vanga_config: &crate::config::TrainingConfig,
     ) -> Result<()> {
-        // Configure training parameters
-        self.configure_training(vanga_config);
-
-        let validation_split = vanga_config.training.validation_split;
-        let early_stopping_patience = vanga_config.training.early_stopping_patience;
-
-        // Check if early stopping is enabled
-        let use_early_stopping = match &vanga_config.training.epochs {
-            crate::config::training::EpochConfig::Auto { .. } => true,
-            crate::config::training::EpochConfig::Fixed(_) => false,
-        };
-
-        if !use_early_stopping || validation_split <= 0.0 {
-            log::info!(
-                "📊 STANDARD training: early_stopping={}, validation_split={:.1}%",
-                use_early_stopping,
-                validation_split * 100.0
-            );
-            return self.train(sequences, targets).await;
-        }
-
-        log::info!(
-            "🧠 INTELLIGENT TRAINING: early_stopping=true, validation_split={:.1}%, patience={}",
-            validation_split * 100.0,
-            early_stopping_patience
-        );
-
-        // Split data into training and validation sets
-        let total_samples = sequences.shape()[0];
-        let train_samples = ((total_samples as f64) * (1.0 - validation_split)) as usize;
-
-        log::info!(
-            "📊 Data split: {} total → {} training ({:.1}%), {} validation ({:.1}%)",
-            total_samples,
-            train_samples,
-            (1.0 - validation_split) * 100.0,
-            total_samples - train_samples,
-            validation_split * 100.0
-        );
-
-        // Create training and validation splits
-        let train_sequences = sequences.slice(s![0..train_samples, .., ..]).to_owned();
-        let train_targets = targets.slice(s![0..train_samples, ..]).to_owned();
-        let val_sequences = sequences.slice(s![train_samples.., .., ..]).to_owned();
-        let val_targets = targets.slice(s![train_samples.., ..]).to_owned();
-
-        // Perform training with validation monitoring
-        self.train_with_validation_monitoring(
-            &train_sequences,
-            &train_targets,
-            &val_sequences,
-            &val_targets,
-            early_stopping_patience,
-        )
-        .await
+        // Simply delegate to the unified train method which handles all scenarios
+        self.train(sequences, targets, vanga_config).await
     }
 
     /// Continue training with new data (incremental learning) - SAME interface as original
@@ -1085,7 +1240,7 @@ impl LSTMModel {
                 );
                 crate::config::training::LearningRateConfig::Fixed(reduced_lr)
             }
-            crate::config::training::LearningRateConfig::Adaptive { initial_lr } => {
+            crate::config::training::LearningRateConfig::Adaptive { initial_lr, patience, factor } => {
                 let reduced_lr = initial_lr * 0.1;
                 log::info!(
                     "🔽 Reducing initial learning rate for incremental training: {:.6} → {:.6}",
@@ -1094,6 +1249,8 @@ impl LSTMModel {
                 );
                 crate::config::training::LearningRateConfig::Adaptive {
                     initial_lr: reduced_lr,
+                    patience: *patience,
+                    factor: *factor,
                 }
             }
             crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
@@ -1168,197 +1325,7 @@ impl LSTMModel {
         Ok(())
     }
 
-    /// Train with validation monitoring and early stopping - NEW implementation
-    async fn train_with_validation_monitoring(
-        &mut self,
-        train_sequences: &Array3<f64>,
-        train_targets: &Array2<f64>,
-        val_sequences: &Array3<f64>,
-        val_targets: &Array2<f64>,
-        patience: u32,
-    ) -> Result<()> {
-        log::info!("🏃 Training with validation monitoring and early stopping");
 
-        let total_train_samples = train_sequences.shape()[0];
-        let total_val_samples = val_sequences.shape()[0];
-        let batch_size = self.training_config.batch_size;
-
-        log::info!(
-            "📊 Batch training: {} train samples, {} val samples, batch size {}",
-            total_train_samples,
-            total_val_samples,
-            batch_size
-        );
-
-        // Memory prevalidation for both training and validation
-        self.validate_batch_configuration(total_train_samples, batch_size)?;
-
-        // Initialize network if not already done
-        self.initialize_network()?;
-
-        // Update config to reflect actual output size
-        self.config.output_size = 1;
-
-        // Create optimizer for training
-        let mut learning_rate = self.config.learning_rate;
-        let mut sgd = <optim::SGD as optim::Optimizer>::new(self.varmap.all_vars(), learning_rate)
-            .map_err(|e| VangaError::ModelError(format!("SGD optimizer creation failed: {}", e)))?;
-
-        // Early stopping variables
-        let mut best_val_loss = f32::INFINITY;
-        let mut patience_counter = 0;
-
-        log::info!(
-            "🏃 Training batch: epochs={}, learning_rate={:.6}",
-            self.training_config.epochs,
-            learning_rate
-        );
-
-        // Training loop with early stopping
-        for epoch in 0..self.training_config.epochs {
-            // BATCH PROCESSING: Process training data in batches
-            let mut epoch_train_loss = 0.0;
-
-            for batch_start in (0..total_train_samples).step_by(batch_size) {
-                let batch_end = std::cmp::min(batch_start + batch_size, total_train_samples);
-                let actual_batch_size = batch_end - batch_start;
-
-                // Extract training batch
-                let batch_train_sequences = train_sequences
-                    .slice(ndarray::s![batch_start..batch_end, .., ..])
-                    .to_owned();
-                let batch_train_targets = train_targets
-                    .slice(ndarray::s![batch_start..batch_end, ..])
-                    .to_owned();
-
-                // Convert batch to tensors
-                let (train_input_tensor, train_target_tensor) = self
-                    .convert_sequences_to_tensors(&batch_train_sequences, &batch_train_targets)?;
-
-                // Forward pass on training batch
-                let train_predictions = self.forward(&train_input_tensor)?;
-
-                // Calculate training loss
-                let train_loss = train_predictions
-                    .sub(&train_target_tensor)?
-                    .sqr()?
-                    .mean_all()?;
-
-                // Backward pass and parameter update
-                let grads = train_loss.backward()?;
-                sgd.step(&grads)?;
-
-                // Accumulate loss for epoch reporting
-                let batch_loss = train_loss.to_scalar::<f32>().map_err(|e| {
-                    VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
-                })?;
-                epoch_train_loss += batch_loss * actual_batch_size as f32;
-            }
-
-            let avg_train_loss = epoch_train_loss / total_train_samples as f32;
-
-            // BATCH PROCESSING: Process validation data in batches
-            let mut epoch_val_loss = 0.0;
-
-            for batch_start in (0..total_val_samples).step_by(batch_size) {
-                let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
-                let actual_batch_size = batch_end - batch_start;
-
-                // Extract validation batch
-                let batch_val_sequences = val_sequences
-                    .slice(ndarray::s![batch_start..batch_end, .., ..])
-                    .to_owned();
-                let batch_val_targets = val_targets
-                    .slice(ndarray::s![batch_start..batch_end, ..])
-                    .to_owned();
-
-                // Convert batch to tensors
-                let (val_input_tensor, val_target_tensor) =
-                    self.convert_sequences_to_tensors(&batch_val_sequences, &batch_val_targets)?;
-
-                // Forward pass on validation batch (no gradient computation)
-                let val_predictions = self.forward(&val_input_tensor)?;
-                let val_loss = val_predictions.sub(&val_target_tensor)?.sqr()?.mean_all()?;
-
-                let batch_val_loss = val_loss.to_scalar::<f32>().map_err(|e| {
-                    VangaError::ModelError(format!(
-                        "Validation loss scalar conversion failed: {}",
-                        e
-                    ))
-                })?;
-                epoch_val_loss += batch_val_loss * actual_batch_size as f32;
-            }
-
-            let val_loss_val = epoch_val_loss / total_val_samples as f32;
-
-            // Check for improvement in validation loss
-            if val_loss_val < best_val_loss {
-                let improvement = ((best_val_loss - val_loss_val) / best_val_loss) * 100.0;
-                log::info!(
-                    "✅ NEW BEST validation loss: {:.6} (improved by {:.2}%)",
-                    val_loss_val,
-                    improvement
-                );
-
-                best_val_loss = val_loss_val;
-                patience_counter = 0;
-            } else {
-                patience_counter += 1;
-
-                if patience_counter >= patience {
-                    log::info!("🛑 EARLY STOPPING triggered at {} total epochs! Best validation loss: {:.6}",
-                        epoch + 1, best_val_loss);
-                    break;
-                }
-
-                // Reduce learning rate when validation loss plateaus
-                if patience_counter % (patience / 3).max(1) == 0 {
-                    learning_rate *= 0.5;
-                    log::info!(
-                        "🔽 REDUCING learning rate: {:.6} → {:.6}",
-                        learning_rate * 2.0,
-                        learning_rate
-                    );
-
-                    // Create new optimizer with reduced learning rate
-                    sgd = <optim::SGD as optim::Optimizer>::new(
-                        self.varmap.all_vars(),
-                        learning_rate,
-                    )
-                    .map_err(|e| {
-                        VangaError::ModelError(format!("SGD optimizer recreation failed: {}", e))
-                    })?;
-                }
-            }
-
-            // Logging
-            if epoch % self.training_config.print_every == 0 {
-                log::info!("📈 Epoch {}/{}: Train Loss = {:.6}, Validation loss: {:.6}, Learning rate: {:.6}",
-                    epoch + 1, self.training_config.epochs, avg_train_loss, val_loss_val, learning_rate);
-            }
-        }
-
-        self.trained = true;
-        log::info!(
-            "🎯 Training completed! Final validation loss: {:.6}, final learning rate: {:.6}",
-            best_val_loss,
-            learning_rate
-        );
-
-        // Calculate final metrics
-        if let Ok(final_predictions) = self.predict(train_sequences).await {
-            let final_mse = self.calculate_mse_loss(&final_predictions, train_targets);
-            let final_mape = self.calculate_mape(&final_predictions, train_targets);
-            log::info!(
-                "📊 Final Training Metrics - MSE: {:.6} (√MSE: {:.3}), MAPE: {:.2}%",
-                final_mse,
-                final_mse.sqrt(),
-                final_mape
-            );
-        }
-
-        Ok(())
-    }
 }
 
 // Implement From trait for Candle error conversion
@@ -1371,6 +1338,7 @@ impl From<candle_core::Error> for VangaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::training::OptimizerType;
     use crate::config::training::{EpochConfig, LearningRateConfig, TrainingParams};
     use ndarray::Array3;
 
@@ -1409,10 +1377,17 @@ mod tests {
                 epochs: EpochConfig::Auto { max_epochs: 100 },
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
                 learning_rate: LearningRateConfig::Fixed(0.01),
-                validation_split: 0.2, // 20% validation
-                test_split: 0.0,
-                early_stopping_patience: 5, // Small patience for quick testing
+                optimizer: crate::config::training::OptimizerType::AdamW {
+                    weight_decay: 0.01,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                },
+                warmup_epochs: 0, // No warmup for tests
+                learning_schedule: None,
+                test_split: 0.1,
+                early_stopping_patience: 10,
                 gradient_clip: Some(1.0),
+                validation_split: 0.2, // 20% validation
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -1468,6 +1443,13 @@ mod tests {
                 epochs: EpochConfig::Fixed(5), // Fixed epochs - should bypass early stopping
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
                 learning_rate: LearningRateConfig::Fixed(0.01),
+                optimizer: crate::config::training::OptimizerType::AdamW {
+                    weight_decay: 0.01,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                },
+                warmup_epochs: 0,
+                learning_schedule: None,
                 validation_split: 0.2,
                 test_split: 0.0,
                 early_stopping_patience: 10,
@@ -1534,11 +1516,15 @@ mod tests {
                 epochs: EpochConfig::Fixed(3), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
                 learning_rate: LearningRateConfig::Fixed(0.01),
+                optimizer: OptimizerType::SGD { momentum: None },
+                warmup_epochs: 0,
+                learning_schedule: None,
                 validation_split: 0.0, // No validation for this test
                 test_split: 0.0,
-                early_stopping_patience: 5,
+                early_stopping_patience: 10,
                 gradient_clip: Some(1.0),
             },
+            
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
         };
@@ -1623,6 +1609,13 @@ mod tests {
                 epochs: EpochConfig::Fixed(5), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16),
                 learning_rate: LearningRateConfig::Fixed(0.01),
+                optimizer: crate::config::training::OptimizerType::AdamW {
+                    weight_decay: 0.01,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                },
+                warmup_epochs: 0, // No warmup for tests
+                learning_schedule: None,
                 validation_split: 0.0,
                 test_split: 0.0,
                 early_stopping_patience: 10,

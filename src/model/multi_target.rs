@@ -135,7 +135,7 @@ impl MultiTargetLSTMModel {
                 log::info!("📊 Using STANDARD training for target: {} (early_stopping={}, validation_split={})", target_name, use_early_stopping, validation_split);
                 // Use standard training with configured epochs/learning rate
                 model.configure_training(config);
-                model.train(sequences, &single_target).await?;
+                model.train(sequences, &single_target, config).await?;
             }
 
             log::info!("✅ Completed training for target: {}", target_name);
@@ -197,14 +197,13 @@ impl MultiTargetLSTMModel {
             let _val_target_column = val_targets.column(i).into_owned().insert_axis(Axis(1));
 
             if use_early_stopping {
-                // Use existing train_with_early_stopping but with separate validation data
-                // Note: This will use internal validation split, but we've already split chronologically
+                // Use unified training method with chronological split
                 log::info!(
-                    "🧠 Using chronological early stopping for target: {}",
+                    "🧠 Using chronological training for target: {}",
                     target_name
                 );
                 model
-                    .train_with_early_stopping(train_sequences, &train_target_column, config)
+                    .train(train_sequences, &train_target_column, config)
                     .await?;
             } else {
                 // Use standard training
@@ -213,7 +212,7 @@ impl MultiTargetLSTMModel {
                     target_name
                 );
                 model.configure_training(config);
-                model.train(train_sequences, &train_target_column).await?;
+                model.train(train_sequences, &train_target_column, config).await?;
             }
 
             log::info!(
@@ -280,7 +279,7 @@ impl MultiTargetLSTMModel {
     }
 
     /// Train all target models with the provided data
-    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
+    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>, config: &crate::config::TrainingConfig) -> Result<()> {
         log::info!(
             "Starting multi-target training: {} models for {} targets",
             self.models.len(),
@@ -335,7 +334,7 @@ impl MultiTargetLSTMModel {
             );
 
             // Train individual model
-            match model.train(sequences, &single_target).await {
+            match model.train(sequences, &single_target, config).await {
                 Ok(_) => {
                     log::info!("✅ Successfully trained model for target: {}", target_name);
                 }
@@ -572,11 +571,40 @@ mod tests {
             MultiTargetLSTMModel::new(&model_config, 5, target_names, vec!["1h".to_string()])
                 .unwrap();
 
+        // Create a test config
+        let config = crate::config::TrainingConfig {
+            symbol: "BTCUSDT".to_string(),
+            data_path: std::path::PathBuf::from("test.csv"),
+            fresh_training: true,
+            continue_training: false,
+            horizons: vec!["1h".to_string()],
+            features: crate::config::FeatureConfig::default(),
+            model: ModelConfig::default(),
+            training: crate::config::training::TrainingParams {
+                epochs: crate::config::training::EpochConfig::Fixed(1),
+                batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
+                learning_rate: crate::config::training::LearningRateConfig::Fixed(0.01),
+                optimizer: crate::config::training::OptimizerType::AdamW {
+                    weight_decay: 0.01,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                },
+                warmup_epochs: 0,
+                learning_schedule: None,
+                validation_split: 0.0,
+                test_split: 0.0,
+                early_stopping_patience: 10,
+                gradient_clip: Some(1.0),
+            },
+            data: crate::config::training::DataConfig::default(),
+            optimization: crate::config::training::OptimizationConfig::default(),
+        };
+
         // Create test data with wrong target dimensions
         let sequences = Array3::zeros((10, 30, 5)); // [batch, seq_len, features]
         let wrong_targets = Array2::zeros((10, 3)); // Wrong: 3 targets instead of 2
 
-        let result = model.train(&sequences, &wrong_targets).await;
+        let result = model.train(&sequences, &wrong_targets, &config).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
