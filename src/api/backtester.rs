@@ -226,6 +226,13 @@ impl Backtester {
                 epochs: crate::config::training::EpochConfig::Fixed(5), // Very short training for testing
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16), // Smaller batch size
                 learning_rate: crate::config::training::LearningRateConfig::Fixed(0.001),
+                optimizer: crate::config::training::OptimizerType::AdamW {
+                    weight_decay: 0.01,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                },
+                warmup_epochs: 0, // No warmup for short backtesting
+                learning_schedule: None,
                 validation_split: 0.2,
                 test_split: 0.0, // No separate test split since we handle this in backtesting
                 early_stopping_patience: 3, // Quick early stopping

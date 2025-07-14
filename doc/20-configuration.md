@@ -10,6 +10,47 @@ VANGA uses a **unified configuration system** where all parameters (training, mo
 - **Self-Documenting**: Comprehensive parameter explanations in example files
 - **Validated**: Automatic parameter validation with clear error messages
 
+## 🚀 **NEW: Advanced Learning Rate Optimization**
+
+VANGA now features **professional-grade learning rate optimization** with modern optimizers and intelligent scheduling:
+
+### **Modern Optimizers**
+- **AdamW**: Modern optimizer with weight decay and adaptive learning rates (RECOMMENDED)
+- **SGD**: Traditional optimizer with optional momentum support
+
+### **Intelligent Learning Rate Modes**
+- **Auto**: Optimizes learning rate within specified ranges based on model complexity
+- **Adaptive**: ReduceLROnPlateau with configurable patience and reduction factor
+- **Fixed**: Constant learning rate for fine-tuning and controlled training
+
+### **Warmup Support**
+- **Linear warmup** from 0 to target learning rate over specified epochs
+- **Prevents early training instability** with large models
+- **Configurable warmup duration** (0-20 epochs recommended)
+
+### **Enhanced Training Configuration**
+```toml
+[training]
+# Modern optimizer with adaptive learning (RECOMMENDED)
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
+warmup_epochs = 5
+
+# Auto-optimization for exploration
+# learning_rate = { Auto = { min_lr = 0.0001, max_lr = 0.01 } }
+
+# Traditional SGD for fine-tuning
+# optimizer = { SGD = {} }  # Basic SGD
+# optimizer = { SGD = { momentum = 0.9 } }  # SGD with momentum (when implemented)
+# learning_rate = { Fixed = 0.001 }
+# warmup_epochs = 0
+
+# Unified training handles all scenarios through configuration
+# - Validation split automatically enables early stopping
+# - Warmup epochs provide gradual LR increase
+# - Adaptive LR reduces when validation loss plateaus
+```
+
 ---
 
 ## 🗂️ **Configuration Templates**
