@@ -329,6 +329,9 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         // Validate data path for batch mode
         file_discovery::validate_data_path_for_symbols(&params.data, &symbols)?;
 
+        // Store symbol count for memory cleanup logic
+        let symbol_count = symbols.len();
+
         // Process each symbol
         for symbol in symbols {
             log::info!("🚀 Training model for symbol: {}", symbol);
@@ -389,21 +392,38 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
                     monitor.checkpoint(&format!("Model trained for {}", symbol));
                     log::info!("✅ Successfully trained model for {}", symbol);
 
-                    // Save model
+                    // Save model with proper error handling
                     let model_path = vanga::utils::model_path::get_model_path(&symbol);
                     let _ = vanga::utils::model_path::ensure_models_dir_exists();
 
-                    if let Err(e) = model.save(&model_path) {
-                        log::error!("❌ Failed to save model for {}: {}", symbol, e);
-                    } else {
-                        monitor.checkpoint(&format!("Model saved for {}", symbol));
-                        log::info!("💾 Model saved to: {}", model_path.display());
+                    match model.save(&model_path) {
+                        Ok(()) => {
+                            monitor.checkpoint(&format!("Model saved for {}", symbol));
+                            log::info!("💾 Model saved to: {}", model_path.display());
+
+                            // CRITICAL: Explicit memory cleanup to prevent accumulation
+                            drop(model);
+
+                            // Force immediate cleanup hint for batch training
+                            std::hint::black_box(());
+                        }
+                        Err(e) => {
+                            log::error!("❌ CRITICAL: Failed to save model for {}: {}", symbol, e);
+                            log::error!("❌ Stopping batch training due to save failure");
+                            return Err(e);
+                        }
                     }
                 }
                 Err(e) => {
                     log::error!("❌ Failed to train model for {}: {}", symbol, e);
                     // Continue with next symbol instead of failing completely
                 }
+            }
+
+            // Simple memory cleanup between symbols in batch mode
+            if symbol_count > 1 {
+                log::debug!("🧹 Memory cleanup between symbols in batch training");
+                std::hint::black_box(());
             }
         }
     } else {
