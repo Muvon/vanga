@@ -136,12 +136,20 @@ batch_size = { Auto = { min_size = 32, max_size = 512 } }
 # ============================================================================
 validation_split = 0.2          # 20% of data for validation
 test_split = 0.1               # 10% of data for final testing
-early_stopping = { patience = 50, min_delta = 0.00005 }   # Stop after 50 epochs without improvement >= min_delta
+early_stopping = { patience = 50, min_delta = 0.001 }   # Stop after 50 epochs without improvement >= min_delta (adjusted for new loss scale)
 
 # ============================================================================
 # GRADIENT OPTIMIZATION
 # ============================================================================
 gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding gradients)
+
+# ============================================================================
+# LOSS FUNCTION CONFIGURATION
+# ============================================================================
+# Multi-target loss function with crypto-specific weighting
+# Direction prediction is most important for trading signals
+[model.loss_function]
+CryptoComposite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
 
 # ============================================================================
 # TRAINING MONITORING

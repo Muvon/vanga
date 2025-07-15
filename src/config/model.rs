@@ -1,3 +1,4 @@
+use crate::model::loss::CryptoLossFunction;
 use serde::{Deserialize, Serialize};
 
 /// TFT Variable Selection configuration for model config
@@ -64,6 +65,9 @@ pub struct ModelConfig {
 
     /// TFT Quantile regression configuration
     pub quantile_outputs: Option<TFTQuantileOutputConfig>,
+
+    /// Loss function configuration for multi-target training
+    pub loss_function: Option<CryptoLossFunction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +263,7 @@ impl Default for ModelConfig {
                 },
             },
             quantile_outputs: None, // Disabled by default for backward compatibility
+            loss_function: None,    // Use default MSE if not specified
         }
     }
 }

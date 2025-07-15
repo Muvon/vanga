@@ -7,7 +7,6 @@ use crate::optimization::objective::MarketRegime;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Crypto-specific loss functions for LSTM training
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +195,7 @@ impl CryptoLossFunction {
     }
 
     /// Comprehensive crypto-specific composite loss
+    #[allow(clippy::too_many_arguments)]
     fn calculate_crypto_composite_loss(
         &self,
         predictions: &Array2<f64>,
@@ -258,14 +258,30 @@ impl CryptoLossFunction {
     ) -> Result<f64> {
         let base_loss = self.calculate_mse_loss(predictions, targets)?;
 
-        // Apply volatility penalty based on regime
+        // Calculate actual volatility from predictions (standard deviation)
+        let pred_mean = predictions.mean().unwrap_or(0.0);
+        let pred_variance = predictions
+            .iter()
+            .map(|&x| (x - pred_mean).powi(2))
+            .sum::<f64>()
+            / predictions.len() as f64;
+        let actual_volatility = pred_variance.sqrt();
+
+        // Apply volatility penalty based on regime and threshold
         let volatility_penalty = match market_regime {
             MarketRegime::HighVolatility => penalty_factor,
             MarketRegime::MediumVolatility => penalty_factor * 0.5,
             _ => 0.0,
         };
 
-        Ok(base_loss * (1.0 + volatility_penalty))
+        // Additional penalty if actual volatility exceeds threshold
+        let threshold_penalty = if actual_volatility > volatility_threshold {
+            penalty_factor * (actual_volatility - volatility_threshold)
+        } else {
+            0.0
+        };
+
+        Ok(base_loss * (1.0 + volatility_penalty + threshold_penalty))
     }
 
     /// Helper: Calculate basic MSE loss

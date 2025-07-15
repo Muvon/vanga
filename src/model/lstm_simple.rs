@@ -1,6 +1,8 @@
 // LSTM model implementation with Candle framework - PRESERVING ALL ORIGINAL LOGIC
 use crate::config::ModelConfig;
 use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
+use crate::model::loss::CryptoLossFunction;
+use crate::optimization::objective::MarketRegime;
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::{DType, Device, Tensor};
@@ -67,6 +69,7 @@ pub struct LSTMModel {
     varmap: VarMap,
     training_config: TrainingConfig,
     trained: bool,
+    loss_function: Option<CryptoLossFunction>, // Multi-target loss function
 }
 
 /// Serializable model state for persistence - SAME as original
@@ -143,6 +146,7 @@ impl LSTMModel {
             varmap: VarMap::new(),
             training_config,
             trained: false,
+            loss_function: None, // Default to MSE if not configured
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -199,6 +203,9 @@ impl LSTMModel {
 
         // Configure attention if enabled
         model.configure_attention(&model_config.attention, None)?;
+
+        // Configure loss function if specified
+        model.loss_function = model_config.loss_function.clone();
 
         Ok(model)
     }
@@ -1049,8 +1056,8 @@ impl LSTMModel {
                 // Forward pass
                 let predictions = self.forward(&input_tensor)?;
 
-                // Calculate MSE loss tensor
-                let loss = predictions.sub(&target_tensor)?.sqr()?.mean_all()?;
+                // Calculate loss using configured loss function or default MSE
+                let loss = self.calculate_loss(&predictions, &target_tensor)?;
 
                 // Backward pass with gradient computation
                 let grads = loss.backward()?;
@@ -1104,8 +1111,8 @@ impl LSTMModel {
                     // Forward pass (no gradient computation for validation)
                     let predictions = self.forward(&input_tensor)?;
 
-                    // Calculate validation loss
-                    let val_loss = predictions.sub(&target_tensor)?.sqr()?.mean_all()?;
+                    // Calculate validation loss using configured loss function
+                    let val_loss = self.calculate_loss(&predictions, &target_tensor)?;
                     let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
                         VangaError::ModelError(format!(
                             "Validation loss scalar conversion failed: {}",
@@ -1690,6 +1697,36 @@ impl LSTMModel {
 impl From<candle_core::Error> for VangaError {
     fn from(err: candle_core::Error) -> Self {
         VangaError::ModelError(format!("Candle error: {}", err))
+    }
+}
+
+impl LSTMModel {
+    /// Calculate loss using configured loss function or default MSE
+    fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        if let Some(ref loss_fn) = self.loss_function {
+            // Convert tensors to Array2 for CryptoLossFunction
+            let pred_array = self.tensor_to_array2(predictions)?;
+            let target_array = self.tensor_to_array2(targets)?;
+
+            // Use default market regime for now - could be enhanced to detect actual regime
+            let market_regime = MarketRegime::MediumVolatility;
+
+            // Calculate loss using CryptoLossFunction
+            let loss_value = loss_fn.calculate_loss(&pred_array, &target_array, market_regime)?;
+
+            // Convert back to tensor for backpropagation
+            let loss_tensor = Tensor::new(&[loss_value as f32], &self.device).map_err(|e| {
+                VangaError::ModelError(format!("Loss tensor creation failed: {}", e))
+            })?;
+            Ok(loss_tensor)
+        } else {
+            // Default MSE loss
+            predictions
+                .sub(targets)?
+                .sqr()?
+                .mean_all()
+                .map_err(|e| VangaError::ModelError(format!("MSE loss calculation failed: {}", e)))
+        }
     }
 }
 
