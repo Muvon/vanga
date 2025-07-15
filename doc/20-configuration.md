@@ -125,6 +125,12 @@ optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
 
 ```toml
 [training]
+# Device configuration - hardware acceleration settings
+device = "Auto"                               # Auto-detect best device (RECOMMENDED)
+# device = "CPU"                             # Force CPU usage
+# device = "GPU:0"                           # Use first NVIDIA CUDA GPU
+# device = "Metal:0"                         # Use first Apple Silicon GPU (macOS)
+
 # Epoch configuration - controls training duration
 epochs = { Auto = { max_epochs = 1000 } }     # Auto early stopping (RECOMMENDED)
 # epochs = { Fixed = 200 }                    # Fixed epoch count
@@ -149,6 +155,29 @@ gradient_clip = 1.0                           # Clipping threshold (0.5-2.0 rang
 ```
 
 ### **Parameter Tuning Guidelines**
+
+#### **Device Configuration**
+```toml
+# Auto device selection (RECOMMENDED)
+device = "Auto"
+# EFFECT: Automatically selects best available device (CUDA > Metal > CPU)
+# TUNING: Use for optimal performance across different hardware
+
+# CPU device (compatibility)
+device = "CPU"
+# EFFECT: Forces CPU usage, slower but always available
+# TUNING: Use for development, testing, or when GPU drivers unavailable
+
+# NVIDIA CUDA GPU (high performance)
+device = "GPU:0"
+# EFFECT: Uses first NVIDIA CUDA GPU for acceleration
+# TUNING: Requires CUDA drivers, best performance for NVIDIA GPUs
+
+# Apple Silicon GPU (macOS)
+device = "Metal:0"
+# EFFECT: Uses first Apple Silicon GPU for acceleration
+# TUNING: macOS only, best performance for M1/M2/M3 Macs
+```
 
 #### **Epochs Configuration**
 ```toml

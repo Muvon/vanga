@@ -98,6 +98,28 @@ warmup_epochs = 5
 # learning_schedule = { WarmRestarts = { t_0 = 50, t_mult = 2 } }
 # learning_schedule = "Constant"  # No additional scheduling
 
+
+# ============================================================================
+# DEVICE CONFIGURATION - Hardware acceleration settings
+# ============================================================================
+# Device selection for training and prediction
+# - Auto: Automatically selects best available device (CUDA > Metal > CPU)
+# - CPU: Forces CPU usage (slower but always available)
+# - GPU: Uses NVIDIA CUDA GPU at specified index (requires CUDA drivers)
+# - Metal: Uses Apple Silicon GPU at specified index (macOS only)
+device = "Auto"  # Options: "Auto", "CPU", "GPU:0", "Metal:0"
+
+# Device selection examples:
+# device = "Auto"     # RECOMMENDED: Auto-detect best device (CUDA > Metal > CPU)
+# device = "CPU"      # Force CPU usage (compatible but slower)
+# device = "GPU:0"    # Use first NVIDIA CUDA GPU (requires CUDA drivers)
+# device = "Metal:0"  # Use first Apple Silicon GPU (macOS only)
+
+# Performance notes:
+# - CUDA GPU: Best performance for NVIDIA GPUs with CUDA support
+# - Metal GPU: Best performance for Apple Silicon Macs (M1/M2/M3)
+# - CPU: Slowest but most compatible, good for development/testing
+# - Auto: Intelligently selects fastest available option
 # ============================================================================
 # BATCH SIZE CONFIGURATION - Memory and performance optimization
 # ============================================================================
@@ -129,6 +151,18 @@ print_every = 1                # Print training progress every N epochs (1 = eve
                               # - 5: Print every 5 epochs (balanced)
                               # - 10: Print every 10 epochs (less verbose)
 
+
+# ============================================================================
+# DEVICE CONFIGURATION - Select training device (CPU, GPU, Metal)
+# =================================s===========================================
+# - Auto: (RECOMMENDED) Automatically selects the best available device
+# - CPU: Forces CPU usage
+# - GPU(0): Uses a specific CUDA device (e.g., GPU(0) for the first GPU)
+# - Metal(0): Uses a specific Apple Silicon GPU (e.g., Metal(0) for the first MPS device)
+device = "Auto"
+# device = "CPU"
+# device = { GPU = 0 }
+# device = { Metal = 0 }
 [model]
 # Model architecture configuration
 architecture = { MultiLSTM = { layers = 2 } }

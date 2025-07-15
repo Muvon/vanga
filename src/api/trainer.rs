@@ -19,6 +19,19 @@ impl ModelTrainer {
     pub async fn train(&self) -> Result<MultiTargetLSTMModel> {
         log::info!("Starting model training for symbol: {}", self.config.symbol);
 
+        // Initialize device from configuration
+        let device_string = self.config.training.device.to_device_string();
+        let device = crate::utils::device::DeviceManager::new(&device_string)?;
+        log::info!(
+            "🔧 Using device: {} ({})",
+            device_string,
+            match device {
+                candle_core::Device::Cpu => "CPU",
+                candle_core::Device::Cuda(_) => "NVIDIA CUDA GPU",
+                candle_core::Device::Metal(_) => "Apple Metal GPU",
+            }
+        );
+
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new();
 

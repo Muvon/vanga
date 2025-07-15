@@ -2,6 +2,7 @@
 use crate::config::ModelConfig;
 use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
 use crate::utils::error::{Result, VangaError};
+
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{
     linear, lstm,
@@ -1748,7 +1749,8 @@ mod tests {
                 },
                 gradient_clip: Some(1.0),
                 validation_split: 0.2, // 20% validation
-                print_every: 1,        // Add missing print_every field
+                device: crate::config::training::DeviceConfig::Auto,
+                print_every: 1, // Add missing print_every field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -1812,6 +1814,7 @@ mod tests {
                 warmup_epochs: 0,
                 learning_schedule: None,
                 validation_split: 0.2,
+                device: crate::config::training::DeviceConfig::Auto,
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 10,
@@ -1891,6 +1894,7 @@ mod tests {
                     min_delta: 0.0001,
                 },
                 gradient_clip: Some(1.0),
+                device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
             },
 
@@ -1985,7 +1989,8 @@ mod tests {
                 },
                 warmup_epochs: 0, // No warmup for tests
                 learning_schedule: None,
-                validation_split: 0.0,
+                validation_split: 0.2,
+                device: crate::config::training::DeviceConfig::Auto,
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 10,

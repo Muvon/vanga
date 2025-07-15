@@ -1,4 +1,5 @@
 pub mod backtest_reporter;
+pub mod device;
 pub mod error;
 pub mod file_discovery;
 pub mod metrics;

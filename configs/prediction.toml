@@ -1,0 +1,69 @@
+# VANGA Prediction Configuration
+# Configuration for making predictions with trained LSTM models
+
+[prediction]
+# ============================================================================
+# DEVICE CONFIGURATION - Hardware acceleration settings
+# ============================================================================
+# Device selection for prediction inference
+# - Auto: Automatically selects best available device (CUDA > Metal > CPU)
+# - CPU: Forces CPU usage (slower but always available)
+# - GPU: Uses NVIDIA CUDA GPU at specified index (requires CUDA drivers)
+# - Metal: Uses Apple Silicon GPU at specified index (macOS only)
+device = "Auto"  # Options: "Auto", "CPU", "GPU:0", "Metal:0"
+
+# Device selection examples:
+# device = "Auto"     # RECOMMENDED: Auto-detect best device (CUDA > Metal > CPU)
+# device = "CPU"      # Force CPU usage (compatible but slower)
+# device = "GPU:0"    # Use first NVIDIA CUDA GPU (requires CUDA drivers)
+# device = "Metal:0"  # Use first Apple Silicon GPU (macOS only)
+
+# Performance notes:
+# - CUDA GPU: Best performance for NVIDIA GPUs with CUDA support
+# - Metal GPU: Best performance for Apple Silicon Macs (M1/M2/M3)
+# - CPU: Slowest but most compatible, good for development/testing
+# - Auto: Intelligently selects fastest available option
+
+# ============================================================================
+# PREDICTION PARAMETERS
+# ============================================================================
+# Trading symbols for prediction
+symbols = ["BTCUSDT"]
+
+# Input data path
+input_path = "data/prediction_data.csv"
+
+# Prediction horizon (must match training)
+# horizon = "1h"  # Uncomment to specify single horizon
+
+# Predict all available horizons
+all_horizons = true
+
+# Minimum confidence threshold for predictions
+min_confidence = 0.7
+
+# Output configuration
+[prediction.output_config]
+format = "ProbabilityDistribution"
+confidence_levels = [0.8, 0.9, 0.95]
+include_feature_importance = false
+include_metadata = true
+
+# Ensemble configuration
+[prediction.ensemble_config]
+method = "WeightedAverage"
+dynamic_weighting = true
+
+# Post-processing configuration
+[prediction.post_processing]
+steps = ["VolatilityAdjustment", "TrendSmoothing"]
+
+[prediction.post_processing.volatility_adjustment]
+enabled = true
+method = "RealizedVolatility"
+lookback_periods = 24
+
+[prediction.post_processing.regime_detection]
+enabled = true
+method = "VolatilityBased"
+sensitivity = 0.5
