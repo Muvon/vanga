@@ -1640,9 +1640,23 @@ impl LSTMModel {
             .map_err(|e| VangaError::ModelError(format!("Failed to create Array2: {}", e)))
     }
 
-    /// Save model to file - SAME interface as original
+    /// Save model to file - Enhanced to save both config and weights
     pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
-        // Create a serializable model state - SAME as original
+        let path = path.as_ref();
+
+        // Create directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| VangaError::IoError(format!("Failed to create directory: {}", e)))?;
+        }
+
+        // Save model weights using VarMap's safetensors format
+        let weights_path = path.with_extension("safetensors");
+        self.varmap.save(&weights_path).map_err(|e| {
+            VangaError::SerializationError(format!("Failed to save model weights: {}", e))
+        })?;
+
+        // Save model configuration and metadata
         let model_state = ModelState {
             config: self.config.clone(),
             epochs: self.training_config.epochs,
@@ -1650,40 +1664,57 @@ impl LSTMModel {
             clip_gradient: self.training_config.clip_gradient,
         };
 
-        // Serialize to binary format using bincode - SAME as original
-        let encoded = bincode::serialize(&model_state)
-            .map_err(|e| VangaError::SerializationError(format!("Serialization failed: {}", e)))?;
+        let config_path = path.with_extension("config");
+        let encoded = bincode::serialize(&model_state).map_err(|e| {
+            VangaError::SerializationError(format!("Config serialization failed: {}", e))
+        })?;
 
-        // Write to file - SAME as original
-        std::fs::write(path, encoded)
-            .map_err(|e| VangaError::IoError(format!("Failed to write model file: {}", e)))?;
+        std::fs::write(&config_path, encoded)
+            .map_err(|e| VangaError::IoError(format!("Failed to write config file: {}", e)))?;
 
-        log::info!("Model saved successfully");
+        log::info!(
+            "Model saved successfully: weights={}, config={}",
+            weights_path.display(),
+            config_path.display()
+        );
         Ok(())
     }
 
-    /// Load model from file - SAME interface as original
+    /// Load model from file - Enhanced to load both config and weights
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        // Read the model file - SAME as original
-        let data = std::fs::read(&path)
-            .map_err(|e| VangaError::IoError(format!("Failed to read model file: {}", e)))?;
+        let path = path.as_ref();
 
-        // Deserialize the model state - SAME as original
+        // Load model configuration
+        let config_path = path.with_extension("config");
+        let data = std::fs::read(&config_path)
+            .map_err(|e| VangaError::IoError(format!("Failed to read config file: {}", e)))?;
+
         let model_state: ModelState = bincode::deserialize(&data).map_err(|e| {
-            VangaError::SerializationError(format!("Deserialization failed: {}", e))
+            VangaError::SerializationError(format!("Config deserialization failed: {}", e))
         })?;
 
-        // Create a new LSTM model with the loaded configuration - SAME as original
+        // Create model with loaded configuration
         let mut model = Self::new(model_state.config)?;
         model.training_config.epochs = model_state.epochs;
         model.training_config.print_every = model_state.print_every;
         model.training_config.clip_gradient = model_state.clip_gradient;
 
-        // CRITICAL: Initialize the network for predictions - MISSING in original migration
+        // Initialize the network structure
         model.initialize_network()?;
+
+        // Load model weights from safetensors
+        let weights_path = path.with_extension("safetensors");
+        model.varmap.load(&weights_path).map_err(|e| {
+            VangaError::SerializationError(format!("Failed to load model weights: {}", e))
+        })?;
+
         model.trained = true;
 
-        log::info!("Model loaded successfully with initialized network");
+        log::info!(
+            "Model loaded successfully: weights={}, config={}",
+            weights_path.display(),
+            config_path.display()
+        );
         Ok(model)
     }
 
