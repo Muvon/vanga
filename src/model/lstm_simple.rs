@@ -1714,8 +1714,8 @@ impl LSTMModel {
             // Calculate loss using CryptoLossFunction
             let loss_value = loss_fn.calculate_loss(&pred_array, &target_array, market_regime)?;
 
-            // Convert back to tensor for backpropagation
-            let loss_tensor = Tensor::new(&[loss_value as f32], &self.device).map_err(|e| {
+            // Convert back to scalar tensor for backpropagation
+            let loss_tensor = Tensor::new(loss_value as f32, &self.device).map_err(|e| {
                 VangaError::ModelError(format!("Loss tensor creation failed: {}", e))
             })?;
             Ok(loss_tensor)
