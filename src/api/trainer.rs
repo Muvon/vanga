@@ -21,7 +21,7 @@ impl ModelTrainer {
 
         // Initialize device from configuration
         let device_string = self.config.training.device.to_device_string();
-        let device = crate::utils::device::DeviceManager::new(&device_string)?;
+        let device = crate::utils::device::DeviceManager::create_device(&device_string)?;
         log::info!(
             "🔧 Using device: {} ({})",
             device_string,

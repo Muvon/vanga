@@ -76,8 +76,9 @@ pub struct TrainingParams {
     pub print_every: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum DeviceConfig {
+    #[default]
     Auto,
     CPU,
     GPU(usize),
@@ -99,12 +100,6 @@ impl DeviceConfig {
 impl std::fmt::Display for DeviceConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_device_string())
-    }
-}
-
-impl Default for DeviceConfig {
-    fn default() -> Self {
-        DeviceConfig::Auto
     }
 }
 
