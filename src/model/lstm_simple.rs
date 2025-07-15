@@ -591,18 +591,6 @@ impl LSTMModel {
         }
     }
 
-    /// PARALLELIZED: Train model in parallel batches for maximum CPU utilization - SAME interface as original
-    pub async fn train_parallel_batches(
-        &mut self,
-        sequences: &Array3<f64>,
-        targets: &Array2<f64>,
-        _batch_size: usize,
-        config: &crate::config::TrainingConfig,
-    ) -> Result<()> {
-        // Candle handles batching internally, so delegate to unified train
-        self.train(sequences, targets, config, None, None).await
-    }
-
     /// Configure training parameters from TrainingConfig - EXACT same logic as original
     pub fn configure_training(&mut self, vanga_config: &crate::config::TrainingConfig) {
         // Extract epochs from config - SAME logic as original
@@ -828,8 +816,73 @@ impl LSTMModel {
             );
         }
 
-        // Configure training parameters from config
-        self.configure_training(config);
+        // INCREMENTAL TRAINING DETECTION AND OPTIMIZATION - SAME logic as original continue_training
+        let final_config = if self.trained {
+            log::info!(
+                "🔄 INCREMENTAL TRAINING: Adding {} new samples to existing model",
+                total_samples
+            );
+
+            // Configure training with typically lower learning rate for incremental training - SAME logic as original
+            let mut incremental_config = config.clone();
+
+            // Reduce learning rate for incremental training to preserve existing knowledge - SAME logic as original
+            incremental_config.training.learning_rate = match &config.training.learning_rate {
+                crate::config::training::LearningRateConfig::Fixed(lr) => {
+                    let reduced_lr = lr * 0.1; // 10x smaller for incremental
+                    log::info!(
+                        "🔽 Reducing learning rate for incremental training: {:.6} → {:.6}",
+                        lr,
+                        reduced_lr
+                    );
+                    crate::config::training::LearningRateConfig::Fixed(reduced_lr)
+                }
+                crate::config::training::LearningRateConfig::Adaptive {
+                    initial_lr,
+                    patience,
+                    factor,
+                } => {
+                    let reduced_lr = initial_lr * 0.1;
+                    log::info!(
+                        "🔽 Reducing initial learning rate for incremental training: {:.6} → {:.6}",
+                        initial_lr,
+                        reduced_lr
+                    );
+                    crate::config::training::LearningRateConfig::Adaptive {
+                        initial_lr: reduced_lr,
+                        patience: *patience,
+                        factor: *factor,
+                    }
+                }
+                crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
+                    let reduced_max = max_lr * 0.1;
+                    let reduced_min = min_lr * 0.1;
+                    log::info!("🔽 Reducing learning rate range for incremental training: {:.6}-{:.6} → {:.6}-{:.6}",
+                        min_lr, max_lr, reduced_min, reduced_max);
+                    crate::config::training::LearningRateConfig::Auto {
+                        min_lr: reduced_min,
+                        max_lr: reduced_max,
+                    }
+                }
+            };
+
+            // Use smaller patience for incremental training (faster convergence expected) - SAME logic as original
+            incremental_config.training.early_stopping.patience =
+                (config.training.early_stopping.patience / 2).max(10);
+
+            log::info!(
+                "⚙️  Incremental training config: patience={}, min_delta={:.6}, reduced_lr=true",
+                incremental_config.training.early_stopping.patience,
+                incremental_config.training.early_stopping.min_delta
+            );
+
+            incremental_config
+        } else {
+            config.clone()
+        };
+
+        // Configure training parameters from final config (original or incremental)
+        self.configure_training(&final_config);
 
         // Initialize network if not already done
         if self.lstm_layers.is_none() || self.output_layer.is_none() {
@@ -1630,141 +1683,6 @@ impl LSTMModel {
     pub fn get_input_size(&self) -> usize {
         self.config.input_size
     }
-
-    /// Train with early stopping - delegates to unified train() method
-    pub async fn train_with_early_stopping(
-        &mut self,
-        sequences: &Array3<f64>,
-        targets: &Array2<f64>,
-        vanga_config: &crate::config::TrainingConfig,
-    ) -> Result<()> {
-        // Simply delegate to the unified train method which handles all scenarios
-        self.train(sequences, targets, vanga_config, None, None)
-            .await
-    }
-
-    /// Continue training with new data (incremental learning) - SAME interface as original
-    pub async fn continue_training(
-        &mut self,
-        new_sequences: &Array3<f64>,
-        new_targets: &Array2<f64>,
-        vanga_config: &crate::config::TrainingConfig,
-    ) -> Result<()> {
-        log::info!(
-            "🔄 INCREMENTAL TRAINING: Adding {} new samples to existing model",
-            new_sequences.shape()[0]
-        );
-
-        // Check if model is already trained - SAME logic as original
-        if !self.trained {
-            return Err(VangaError::ModelError(
-                "Cannot continue training: model not initialized. Use train_with_early_stopping() first.".to_string()
-            ));
-        }
-
-        // Configure training with typically lower learning rate for incremental training - SAME logic as original
-        let mut incremental_config = vanga_config.clone();
-
-        // Reduce learning rate for incremental training to preserve existing knowledge - SAME logic as original
-        incremental_config.training.learning_rate = match &vanga_config.training.learning_rate {
-            crate::config::training::LearningRateConfig::Fixed(lr) => {
-                let reduced_lr = lr * 0.1; // 10x smaller for incremental
-                log::info!(
-                    "🔽 Reducing learning rate for incremental training: {:.6} → {:.6}",
-                    lr,
-                    reduced_lr
-                );
-                crate::config::training::LearningRateConfig::Fixed(reduced_lr)
-            }
-            crate::config::training::LearningRateConfig::Adaptive {
-                initial_lr,
-                patience,
-                factor,
-            } => {
-                let reduced_lr = initial_lr * 0.1;
-                log::info!(
-                    "🔽 Reducing initial learning rate for incremental training: {:.6} → {:.6}",
-                    initial_lr,
-                    reduced_lr
-                );
-                crate::config::training::LearningRateConfig::Adaptive {
-                    initial_lr: reduced_lr,
-                    patience: *patience,
-                    factor: *factor,
-                }
-            }
-            crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
-                let reduced_max = max_lr * 0.1;
-                let reduced_min = min_lr * 0.1;
-                log::info!("🔽 Reducing learning rate range for incremental training: {:.6}-{:.6} → {:.6}-{:.6}",
-                    min_lr, max_lr, reduced_min, reduced_max);
-                crate::config::training::LearningRateConfig::Auto {
-                    min_lr: reduced_min,
-                    max_lr: reduced_max,
-                }
-            }
-        };
-
-        // Use smaller patience for incremental training (faster convergence expected) - SAME logic as original
-        incremental_config.training.early_stopping.patience =
-            (vanga_config.training.early_stopping.patience / 2).max(10);
-
-        log::info!(
-            "⚙️  Incremental training config: patience={}, min_delta={:.6}, reduced_lr=true",
-            incremental_config.training.early_stopping.patience,
-            incremental_config.training.early_stopping.min_delta
-        );
-
-        // Train with the new data using reduced learning rate - SAME logic as original
-        self.train_with_early_stopping(new_sequences, new_targets, &incremental_config)
-            .await?;
-
-        log::info!("✅ Incremental training completed successfully!");
-        Ok(())
-    }
-
-    /// Append new data to existing training data and retrain (alternative approach) - SAME interface as original
-    pub async fn retrain_with_appended_data(
-        &mut self,
-        existing_sequences: &Array3<f64>,
-        existing_targets: &Array2<f64>,
-        new_sequences: &Array3<f64>,
-        new_targets: &Array2<f64>,
-        vanga_config: &crate::config::TrainingConfig,
-    ) -> Result<()> {
-        log::info!(
-            "🔄 RETRAIN WITH APPENDED DATA: {} existing + {} new = {} total samples",
-            existing_sequences.shape()[0],
-            new_sequences.shape()[0],
-            existing_sequences.shape()[0] + new_sequences.shape()[0]
-        );
-
-        // Combine existing and new data - SAME logic as original
-        let combined_sequences = ndarray::concatenate(
-            ndarray::Axis(0),
-            &[existing_sequences.view(), new_sequences.view()],
-        )
-        .map_err(|e| VangaError::DataError(format!("Failed to concatenate sequences: {}", e)))?;
-        let combined_targets = ndarray::concatenate(
-            ndarray::Axis(0),
-            &[existing_targets.view(), new_targets.view()],
-        )
-        .map_err(|e| VangaError::DataError(format!("Failed to concatenate targets: {}", e)))?;
-
-        log::info!(
-            "📊 Combined dataset: {} samples x {} features x {} sequence_length",
-            combined_sequences.shape()[0],
-            combined_sequences.shape()[2],
-            combined_sequences.shape()[1]
-        );
-
-        // Train on combined dataset (this preserves all historical patterns) - SAME logic as original
-        self.train_with_early_stopping(&combined_sequences, &combined_targets, vanga_config)
-            .await?;
-
-        log::info!("✅ Retrain with appended data completed successfully!");
-        Ok(())
-    }
 }
 
 // Implement From trait for Candle error conversion
@@ -1838,7 +1756,7 @@ mod tests {
 
         // Test that early stopping training completes without errors
         let result = model
-            .train_with_early_stopping(&sequences, &targets, &training_config)
+            .train(&sequences, &targets, &training_config, None, None)
             .await;
 
         assert!(
@@ -1908,7 +1826,7 @@ mod tests {
 
         // Test that fixed epochs training completes without errors
         let result = model
-            .train_with_early_stopping(&sequences, &targets, &training_config)
+            .train(&sequences, &targets, &training_config, None, None)
             .await;
 
         assert!(
@@ -1981,7 +1899,7 @@ mod tests {
         };
 
         model
-            .train_with_early_stopping(&sequences, &targets, &training_config)
+            .train(&sequences, &targets, &training_config, None, None)
             .await
             .expect("Training should complete successfully");
 
@@ -2082,7 +2000,7 @@ mod tests {
 
         // Test multi-layer training
         let result = model
-            .train_with_early_stopping(&sequences, &targets, &training_config)
+            .train(&sequences, &targets, &training_config, None, None)
             .await;
 
         assert!(

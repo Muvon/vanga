@@ -2,6 +2,7 @@
 use crate::config::TrainingConfig;
 use crate::data::DataPipeline;
 use crate::model::multi_target::MultiTargetLSTMModel;
+use crate::model::multi_target::TrainingContext;
 use crate::targets::{PreparedTargets, TargetGenerator};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
@@ -121,12 +122,15 @@ impl ModelTrainer {
             .await?;
 
         // Train the model with chronological validation
+        // Train the model with chronological validation
         model
-            .train_with_chronological_validation(
-                &window.train_data.sequences,
-                &train_targets,
-                &window.val_data.sequences,
-                &val_targets,
+            .train(
+                TrainingContext::Standard {
+                    sequences: &window.train_data.sequences,
+                    targets: &train_targets,
+                    val_sequences: Some(&window.val_data.sequences),
+                    val_targets: Some(&val_targets),
+                },
                 &self.config,
             )
             .await?;
@@ -180,8 +184,15 @@ impl ModelTrainer {
         );
 
         // Continue training with new data
+        // Continue training with new data
         model
-            .continue_training(&window.train_data.sequences, &train_targets, &self.config)
+            .train(
+                TrainingContext::Continue {
+                    new_sequences: &window.train_data.sequences,
+                    new_targets: &train_targets,
+                },
+                &self.config,
+            )
             .await?;
 
         log::info!(
