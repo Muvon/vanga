@@ -83,6 +83,14 @@ early_stopping_patience = 50   # Stop after 50 epochs without improvement
 # ============================================================================
 gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding gradients)
 
+# ============================================================================
+# TRAINING MONITORING
+# ============================================================================
+print_every = 1                # Print training progress every N epochs (1 = every epoch, 10 = every 10 epochs)
+                              # - 1: Print every epoch (recommended for monitoring)
+                              # - 5: Print every 5 epochs (balanced)
+                              # - 10: Print every 10 epochs (less verbose)
+
 [model]
 # Model architecture configuration
 architecture = { MultiLSTM = { layers = 2 } }

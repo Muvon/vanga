@@ -237,6 +237,7 @@ impl Backtester {
                 test_split: 0.0, // No separate test split since we handle this in backtesting
                 early_stopping_patience: 3, // Quick early stopping
                 gradient_clip: Some(1.0),
+                print_every: 1, // Add missing print_every field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),

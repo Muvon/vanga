@@ -69,6 +69,9 @@ pub struct TrainingParams {
 
     /// Gradient clipping threshold
     pub gradient_clip: Option<f64>,
+
+    /// Print training progress every N epochs (1 = every epoch, 10 = every 10 epochs)
+    pub print_every: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,15 +118,28 @@ pub enum BatchSizeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LearningRateConfig {
-    Auto { min_lr: f64, max_lr: f64 },
-    Adaptive { initial_lr: f64, patience: u32, factor: f64 },
+    Auto {
+        min_lr: f64,
+        max_lr: f64,
+    },
+    Adaptive {
+        initial_lr: f64,
+        patience: u32,
+        factor: f64,
+    },
     Fixed(f64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OptimizerType {
-    SGD { momentum: Option<f64> },
-    AdamW { weight_decay: f64, beta1: f64, beta2: f64 },
+    SGD {
+        momentum: Option<f64>,
+    },
+    AdamW {
+        weight_decay: f64,
+        beta1: f64,
+        beta2: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,7 +331,7 @@ impl Default for TrainingParams {
                 min_size: 32,
                 max_size: 512,
             },
-            learning_rate: LearningRateConfig::Adaptive { 
+            learning_rate: LearningRateConfig::Adaptive {
                 initial_lr: 0.001,
                 patience: 10,
                 factor: 0.5,
@@ -325,12 +341,13 @@ impl Default for TrainingParams {
                 beta1: 0.9,
                 beta2: 0.999,
             }, // AdamW by default for better performance
-            warmup_epochs: 5, // 5 epochs warmup by default
+            warmup_epochs: 5,        // 5 epochs warmup by default
             learning_schedule: None, // No schedule by default
-            validation_split: 0.2, // 20% validation for early stopping
+            validation_split: 0.2,   // 20% validation for early stopping
             test_split: 0.1,
             early_stopping_patience: 50, // Reasonable patience
             gradient_clip: Some(1.0),    // Prevent exploding gradients
+            print_every: 1,              // Print every epoch by default for better monitoring
         }
     }
 }

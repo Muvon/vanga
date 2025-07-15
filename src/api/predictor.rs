@@ -41,17 +41,23 @@ impl Predictor {
             prepared_data.sequences.shape()[2]
         );
 
+        // Extract current price from the most recent data point (before cleanup)
+        let current_price = self.extract_current_price_from_data(&prepared_data)?;
+
         // Make predictions
         log::info!("Generating predictions...");
         let raw_predictions = model.predict(&prepared_data.sequences).await?;
 
         log::info!("Generated {} predictions", raw_predictions.nrows());
 
+        // Generate targets for confidence calculation (before cleanup)
+        let targets_config = self.generate_targets_for_confidence(&prepared_data).await?;
+
+        // Explicit memory cleanup after prediction and data extraction
+        drop(prepared_data);
+
         // Format predictions using output formatter
         let formatter = OutputFormatter::new(self.config.output_config.clone());
-
-        // Extract current price from the most recent data point
-        let current_price = self.extract_current_price_from_data(&prepared_data)?;
 
         // Determine horizon
         let horizon = self
@@ -61,8 +67,6 @@ impl Predictor {
             .unwrap_or_else(|| "1h".to_string());
 
         // Generate targets for the prediction data to enable confidence calculation
-        let targets_config = self.generate_targets_for_confidence(&prepared_data).await?;
-
         let formatted_predictions = formatter.format_predictions(
             &raw_predictions,
             &self.config.symbols[0],

@@ -212,7 +212,9 @@ impl MultiTargetLSTMModel {
                     target_name
                 );
                 model.configure_training(config);
-                model.train(train_sequences, &train_target_column, config).await?;
+                model
+                    .train(train_sequences, &train_target_column, config)
+                    .await?;
             }
 
             log::info!(
@@ -279,7 +281,12 @@ impl MultiTargetLSTMModel {
     }
 
     /// Train all target models with the provided data
-    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>, config: &crate::config::TrainingConfig) -> Result<()> {
+    pub async fn train(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &Array2<f64>,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
         log::info!(
             "Starting multi-target training: {} models for {} targets",
             self.models.len(),
@@ -355,7 +362,7 @@ impl MultiTargetLSTMModel {
         Ok(())
     }
 
-    /// Make predictions using all trained models
+    /// Make predictions using all trained models (memory-optimized)
     pub async fn predict(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
         log::info!(
             "Making multi-target predictions for {} sequences using {} models",
@@ -366,10 +373,15 @@ impl MultiTargetLSTMModel {
         let batch_size = sequences.shape()[0];
         let mut all_predictions = Array2::zeros((batch_size, self.num_targets));
 
-        // Get predictions from each model
+        // Process each model sequentially to avoid memory accumulation
         for (i, model) in self.models.iter().enumerate() {
             let target_name = &self.target_names[i];
-            log::debug!("Getting predictions from model {}: {}", i + 1, target_name);
+            log::debug!(
+                "Processing model {}/{}: {}",
+                i + 1,
+                self.num_targets,
+                target_name
+            );
 
             match model.predict(sequences).await {
                 Ok(predictions) => {
@@ -392,6 +404,14 @@ impl MultiTargetLSTMModel {
                         predictions.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
                         predictions.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
                     );
+
+                    // Explicit memory cleanup after each model prediction
+                    drop(predictions);
+
+                    // Force garbage collection hint between models
+                    if i < self.models.len() - 1 {
+                        std::hint::black_box(());
+                    }
                 }
                 Err(e) => {
                     log::error!("Prediction failed for model {}: {}", target_name, e);
@@ -595,6 +615,7 @@ mod tests {
                 test_split: 0.0,
                 early_stopping_patience: 10,
                 gradient_clip: Some(1.0),
+                print_every: 1, // Add missing print_every field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
