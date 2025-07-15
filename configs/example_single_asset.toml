@@ -41,7 +41,7 @@ batch_size = { Auto = { min_size = 32, max_size = 512 } }
 # EFFECT: Higher validation split = better overfitting detection but less training data
 validation_split = 0.2          # 20% of data reserved for validation monitoring
 test_split = 0.1               # 10% of data reserved for final evaluation
-early_stopping_patience = 50   # Stop training after 50 epochs without validation improvement
+early_stopping = { patience = 50, min_delta = 0.00005 }   # Stop after 50 epochs without improvement >= min_delta
 gradient_clip = 1.0            # Prevent exploding gradients (important for crypto volatility)
 
 # ============================================================================

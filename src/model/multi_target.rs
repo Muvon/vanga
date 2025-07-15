@@ -630,7 +630,10 @@ mod tests {
                 learning_schedule: None,
                 validation_split: 0.0,
                 test_split: 0.0,
-                early_stopping_patience: 10,
+                early_stopping: crate::config::training::EarlyStoppingConfig {
+                    patience: 10,
+                    min_delta: 0.0001,
+                },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
             },

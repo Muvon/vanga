@@ -30,7 +30,7 @@ batch_size = { Auto = { min_size = 64, max_size = 1024 } }
 # Longer patience needed for cross-asset convergence
 validation_split = 0.2          # 20% validation split
 test_split = 0.1               # 10% test split
-early_stopping_patience = 75   # Increased patience for cross-asset complexity
+early_stopping = { patience = 75, min_delta = 0.00005 }   # Increased patience for cross-asset complexity
 gradient_clip = 1.5            # Higher clipping for cross-asset volatility
 
 # ============================================================================

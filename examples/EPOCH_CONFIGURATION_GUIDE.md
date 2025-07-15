@@ -17,7 +17,7 @@ VANGA's epoch configuration is completely driven by your config files with **zer
 [training]
 epochs = { Auto = { max_epochs = 500 } }  # Your custom limit
 validation_split = 0.2                    # Required for early stopping
-early_stopping_patience = 25              # Your custom patience
+early_stopping = { patience = 25, min_delta = 0.00005 }  # Your custom patience and improvement threshold
 ```
 
 ### 2. Fixed Mode (Exact Control)
@@ -37,7 +37,7 @@ cat > quick_training.toml << EOF
 epochs = { Auto = { max_epochs = 50 } }
 learning_rate = { Fixed = 0.001 }
 validation_split = 0.2
-early_stopping_patience = 10
+early_stopping = { patience = 10, min_delta = 0.0001 }
 batch_size = { Fixed = 32 }
 EOF
 
@@ -68,7 +68,7 @@ cat > high_perf_training.toml << EOF
 epochs = { Auto = { max_epochs = 2000 } }
 learning_rate = { Adaptive = { initial_lr = 0.01 } }
 validation_split = 0.2
-early_stopping_patience = 100
+early_stopping = { patience = 100, min_delta = 0.00005 }
 batch_size = { Auto = { min_size = 64, max_size = 512 } }
 EOF
 

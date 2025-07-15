@@ -235,7 +235,10 @@ impl Backtester {
                 learning_schedule: None,
                 validation_split: 0.2,
                 test_split: 0.0, // No separate test split since we handle this in backtesting
-                early_stopping_patience: 3, // Quick early stopping
+                early_stopping: crate::config::training::EarlyStoppingConfig {
+                    patience: 3, // Quick early stopping
+                    min_delta: 0.0001,
+                },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
             },

@@ -64,14 +64,22 @@ pub struct TrainingParams {
     /// Test split ratio
     pub test_split: f64,
 
-    /// Early stopping patience
-    pub early_stopping_patience: u32,
+    /// Early stopping configuration
+    pub early_stopping: EarlyStoppingConfig,
 
     /// Gradient clipping threshold
     pub gradient_clip: Option<f64>,
 
     /// Print training progress every N epochs (1 = every epoch, 10 = every 10 epochs)
     pub print_every: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EarlyStoppingConfig {
+    /// Number of epochs to wait for improvement before stopping
+    pub patience: u32,
+    /// Minimum improvement required to reset patience counter
+    pub min_delta: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +348,9 @@ impl TrainingParams {
 
         // Validate optimizer parameters
         self.validate_optimizer()?;
+
+        // Validate early stopping parameters
+        self.validate_early_stopping()?;
 
         Ok(())
     }
@@ -617,6 +628,24 @@ impl TrainingParams {
         }
         Ok(())
     }
+
+    /// Validate early stopping configuration parameters
+    fn validate_early_stopping(&self) -> Result<()> {
+        if self.early_stopping.patience == 0 {
+            return Err(VangaError::ConfigError(
+                "early_stopping.patience must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.early_stopping.min_delta < 0.0 {
+            return Err(VangaError::ConfigError(format!(
+                "early_stopping.min_delta must be non-negative, got: {}",
+                self.early_stopping.min_delta
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 impl OptimizationConfig {
@@ -681,9 +710,12 @@ impl Default for TrainingParams {
             learning_schedule: None, // No schedule by default
             validation_split: 0.2,   // 20% validation for early stopping
             test_split: 0.1,
-            early_stopping_patience: 50, // Reasonable patience
-            gradient_clip: Some(1.0),    // Prevent exploding gradients
-            print_every: 1,              // Print every epoch by default for better monitoring
+            early_stopping: EarlyStoppingConfig {
+                patience: 50,
+                min_delta: 0.00005,
+            },
+            gradient_clip: Some(1.0), // Prevent exploding gradients
+            print_every: 1,           // Print every epoch by default for better monitoring
         }
     }
 }

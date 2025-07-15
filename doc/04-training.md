@@ -122,7 +122,7 @@ vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/quick_start
 epochs = { Auto = { max_epochs = 1000 } }
 learning_rate = { Fixed = 0.001 }
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
-early_stopping_patience = 50
+early_stopping = { patience = 50, min_delta = 0.00005 }
 
 [model]
 architecture = { MultiLSTM = { layers = 2 } }

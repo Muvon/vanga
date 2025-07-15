@@ -8,7 +8,7 @@ batch_size = { Auto = { min_size = 16, max_size = 128 } }
 learning_rate = { Auto = { min_rate = 0.0001, max_rate = 0.01 } }
 validation_split = 0.2
 test_split = 0.1
-early_stopping_patience = 10
+early_stopping = { patience = 10, min_delta = 0.00005 }
 gradient_clip = 1.0
 
 [model]

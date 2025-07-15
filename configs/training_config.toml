@@ -32,7 +32,7 @@ batch_size = { Auto = { min_size = 32, max_size = 512 } }
 # VALIDATION AND EARLY STOPPING
 validation_split = 0.2          # 20% of data for validation (0.0 to disable)
 test_split = 0.1               # 10% of data for final testing
-early_stopping_patience = 50   # Stop after 50 epochs without improvement
+early_stopping = { patience = 50, min_delta = 0.00005 }   # Stop after 50 epochs without improvement >= min_delta
 gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding gradients)
 
 [model]
