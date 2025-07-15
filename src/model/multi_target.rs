@@ -135,7 +135,9 @@ impl MultiTargetLSTMModel {
                 log::info!("📊 Using STANDARD training for target: {} (early_stopping={}, validation_split={})", target_name, use_early_stopping, validation_split);
                 // Use standard training with configured epochs/learning rate
                 model.configure_training(config);
-                model.train(sequences, &single_target, config).await?;
+                model
+                    .train(sequences, &single_target, config, None, None)
+                    .await?;
             }
 
             log::info!("✅ Completed training for target: {}", target_name);
@@ -194,26 +196,32 @@ impl MultiTargetLSTMModel {
 
             // Extract single target column for this model
             let train_target_column = train_targets.column(i).into_owned().insert_axis(Axis(1));
-            let _val_target_column = val_targets.column(i).into_owned().insert_axis(Axis(1));
+            let val_target_column = val_targets.column(i).into_owned().insert_axis(Axis(1));
 
             if use_early_stopping {
-                // Use unified training method with chronological split
+                // Use unified training method with pre-split chronological validation
                 log::info!(
-                    "🧠 Using chronological training for target: {}",
+                    "🧠 Using chronological training with validation for target: {}",
                     target_name
                 );
                 model
-                    .train(train_sequences, &train_target_column, config)
+                    .train(
+                        train_sequences,
+                        &train_target_column,
+                        config,
+                        Some(_val_sequences),
+                        Some(&val_target_column),
+                    )
                     .await?;
             } else {
-                // Use standard training
+                // Use unified training method without validation
                 log::info!(
-                    "📊 Using standard chronological training for target: {}",
+                    "📊 Using training without validation for target: {}",
                     target_name
                 );
                 model.configure_training(config);
                 model
-                    .train(train_sequences, &train_target_column, config)
+                    .train(train_sequences, &train_target_column, config, None, None)
                     .await?;
             }
 
@@ -341,7 +349,10 @@ impl MultiTargetLSTMModel {
             );
 
             // Train individual model
-            match model.train(sequences, &single_target, config).await {
+            match model
+                .train(sequences, &single_target, config, None, None)
+                .await
+            {
                 Ok(_) => {
                     log::info!("✅ Successfully trained model for target: {}", target_name);
                 }
