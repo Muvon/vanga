@@ -27,20 +27,10 @@ impl DeviceManager {
             "cpu" => Self::cpu_device(),
             "gpu:0" => Self::specific_gpu_device(0),
             device_str if device_str.starts_with("metal:") => {
-                #[cfg(target_os = "macos")]
-                {
-                    let index = device_str[6..].parse::<usize>().map_err(|_| {
-                        VangaError::ConfigError(format!("Invalid Metal index in device config: {}", device_str))
-                    })?;
-                    Self::specific_metal_device(index)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    Err(VangaError::ConfigError(format!(
-                        "Metal device '{}' not supported on this platform. Metal is only available on macOS.",
-                        device_str
-                    )))
-                }
+                let index = device_str[6..].parse::<usize>().map_err(|_| {
+                    VangaError::ConfigError(format!("Invalid Metal index in device config: {}", device_str))
+                })?;
+                Self::specific_metal_device(index)
             }
             _ => Err(VangaError::ConfigError(format!(
                 "Invalid device configuration: '{}'. Supported options: 'auto', 'cpu', 'gpu:0', 'metal:0'.",
@@ -97,16 +87,25 @@ impl DeviceManager {
     }
 
     /// Selects a specific Apple Metal device by index (macOS only).
-    #[cfg(target_os = "macos")]
     fn specific_metal_device(ordinal: usize) -> Result<Device> {
-        if let Ok(device) = Device::new_metal(ordinal) {
-            log::info!("✅ Selected specific Apple Metal device: metal:{}", ordinal);
-            return Ok(device);
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(device) = Device::new_metal(ordinal) {
+                log::info!("✅ Selected specific Apple Metal device: metal:{}", ordinal);
+                return Ok(device);
+            }
+            Err(VangaError::ModelError(format!(
+                "Metal device at index {} not found. Ensure you're on macOS with Apple Silicon.",
+                ordinal
+            )))
         }
-        Err(VangaError::ModelError(format!(
-            "Metal device at index {} not found. Ensure you're on macOS with Apple Silicon.",
-            ordinal
-        )))
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(VangaError::ModelError(format!(
+                "Metal device not supported on this platform. Metal is only available on macOS."
+            )))
+        }
     }
 }
 
