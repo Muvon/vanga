@@ -141,8 +141,8 @@ batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto sizing (RECOMM
 validation_split = 0.2                        # 20% for validation (0.1-0.3 range)
 test_split = 0.1                              # 10% for testing (0.05-0.2 range)
 
-# Early stopping - prevents overfitting
-early_stopping_patience = 50                  # Stop after N epochs without improvement
+# Early stopping - prevents overfitting with min_delta threshold
+early_stopping = { patience = 50, min_delta = 0.00005 }  # Stop after N epochs without >= min_delta improvement
 
 # Gradient clipping - prevents exploding gradients
 gradient_clip = 1.0                           # Clipping threshold (0.5-2.0 range)

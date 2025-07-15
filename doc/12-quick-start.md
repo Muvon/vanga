@@ -76,7 +76,7 @@ epochs = { Auto = { max_epochs = 1000 } }        # Auto early stopping (RECOMMEN
 learning_rate = { Fixed = 0.001 }                # Fixed learning rate
 batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto batch sizing
 validation_split = 0.2                           # 20% validation split
-early_stopping_patience = 50                     # Stop after 50 epochs without improvement
+early_stopping = { patience = 50, min_delta = 0.00005 }  # Stop after 50 epochs without >= min_delta improvement
 gradient_clip = 1.0                              # Gradient clipping (prevents exploding gradients)
 ```
 
@@ -84,7 +84,7 @@ gradient_clip = 1.0                              # Gradient clipping (prevents e
 - **epochs**: Use `Auto` for production, `Fixed` for reproducible experiments
 - **learning_rate**: Start with 0.001, reduce to 0.0001 for fine-tuning
 - **batch_size**: `Auto` optimizes memory usage, `Fixed` for consistent behavior
-- **early_stopping_patience**: Increase (75-100) for complex models, decrease (25-40) for simple models
+- **early_stopping**: Increase patience (75-100) for complex models, decrease (25-40) for simple models. Set min_delta (0.00001-0.001) based on expected improvement scale
 
 #### **Model Architecture**
 ```toml
@@ -150,7 +150,7 @@ correlation_window = 50                         # Rolling correlation window
 - **correlation_window**: Shorter (20-30) for dynamic correlations, longer (100+) for stable
 - **required_symbols**: Always include BTCUSDT for market context
 validation_split = 0.2                # Data split validation (0.0 < x < 1.0)
-early_stopping_patience = 10          # Early stopping (validated > 0)
+early_stopping = { patience = 10, min_delta = 0.0001 }  # Early stopping (validated > 0)
 
 [optimization]
 method = "Bayesian"                   # Optimization method (validated)
@@ -202,7 +202,7 @@ epochs = { Fixed = 100 }
 learning_rate = { Fixed = 0.001 }
 batch_size = { Fixed = 64 }
 validation_split = 0.2
-early_stopping_patience = 20
+early_stopping = { patience = 20, min_delta = 0.00005 }
 
 [model]
 architecture = { MultiLSTM = { layers = 2 } }
@@ -219,7 +219,7 @@ learning_rate = { Adaptive = { initial_lr = 0.0005 } }
 batch_size = { Auto = { min_size = 16, max_size = 256 } }
 validation_split = 0.2
 test_split = 0.1
-early_stopping_patience = 75
+early_stopping = { patience = 75, min_delta = 0.00005 }
 gradient_clip = 1.0
 
 [model]
@@ -250,7 +250,7 @@ epochs = { Auto = { max_epochs = 800 } }
 learning_rate = { Adaptive = { initial_lr = 0.001 } }
 batch_size = { Auto = { min_size = 32, max_size = 256 } }
 validation_split = 0.2
-early_stopping_patience = 40
+early_stopping = { patience = 40, min_delta = 0.0001 }
 
 [model]
 architecture = { MultiLSTM = { layers = 3 } }  # Optimal for custom features

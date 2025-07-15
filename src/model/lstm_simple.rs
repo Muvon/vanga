@@ -920,10 +920,11 @@ impl LSTMModel {
         let mut early_stopping_counter = 0;
         let early_stopping_patience = match &config.training.epochs {
             crate::config::training::EpochConfig::Auto { max_epochs: _ } => {
-                config.training.early_stopping_patience
+                config.training.early_stopping.patience
             }
             _ => 10, // Default patience for fixed epochs
         };
+        let early_stopping_min_delta = config.training.early_stopping.min_delta;
 
         log::info!("🔧 Training Configuration:");
         log::info!("  - Epochs: {}", self.training_config.epochs);
@@ -932,7 +933,11 @@ impl LSTMModel {
         log::info!("  - Adaptive patience: {}", adaptive_patience);
         log::info!("  - Adaptive factor: {:.3}", adaptive_factor);
         if use_validation {
-            log::info!("  - Early stopping patience: {}", early_stopping_patience);
+            log::info!(
+                "  - Early stopping patience: {}, min_delta: {:.6}",
+                early_stopping_patience,
+                early_stopping_min_delta
+            );
         }
         log::info!("  - Target learning rate: {:.6}", target_lr);
 
@@ -1084,19 +1089,33 @@ impl LSTMModel {
                 }
             }
 
-            // Early stopping check (only with validation)
+            // Early stopping check with min_delta threshold (only with validation)
             if let Some(val_loss) = avg_val_loss {
-                if (val_loss as f64) < best_val_loss {
+                let improvement = best_val_loss - (val_loss as f64);
+                if improvement > early_stopping_min_delta {
                     best_val_loss = val_loss as f64;
                     early_stopping_counter = 0;
+                    log::debug!(
+                        "✅ Validation improved by {:.6} (> {:.6}), resetting patience counter",
+                        improvement,
+                        early_stopping_min_delta
+                    );
                 } else {
                     early_stopping_counter += 1;
+                    log::debug!(
+                        "⏳ No significant improvement ({:.6} <= {:.6}), patience: {}/{}",
+                        improvement,
+                        early_stopping_min_delta,
+                        early_stopping_counter,
+                        early_stopping_patience
+                    );
 
                     if early_stopping_counter >= early_stopping_patience {
                         log::info!(
-                            "🛑 Early stopping triggered at epoch {} (best val loss: {:.6})",
+                            "🛑 Early stopping triggered at epoch {} (best val loss: {:.6}, min_delta: {:.6})",
                             epoch + 1,
-                            best_val_loss
+                            best_val_loss,
+                            early_stopping_min_delta
                         );
                         break;
                     }
@@ -1677,12 +1696,13 @@ impl LSTMModel {
         };
 
         // Use smaller patience for incremental training (faster convergence expected) - SAME logic as original
-        incremental_config.training.early_stopping_patience =
-            (vanga_config.training.early_stopping_patience / 2).max(10);
+        incremental_config.training.early_stopping.patience =
+            (vanga_config.training.early_stopping.patience / 2).max(10);
 
         log::info!(
-            "⚙️  Incremental training config: patience={}, reduced_lr=true",
-            incremental_config.training.early_stopping_patience
+            "⚙️  Incremental training config: patience={}, min_delta={:.6}, reduced_lr=true",
+            incremental_config.training.early_stopping.patience,
+            incremental_config.training.early_stopping.min_delta
         );
 
         // Train with the new data using reduced learning rate - SAME logic as original
@@ -1794,7 +1814,10 @@ mod tests {
                 warmup_epochs: 0, // No warmup for tests
                 learning_schedule: None,
                 test_split: 0.1,
-                early_stopping_patience: 10,
+                early_stopping: crate::config::training::EarlyStoppingConfig {
+                    patience: 10,
+                    min_delta: 0.0001,
+                },
                 gradient_clip: Some(1.0),
                 validation_split: 0.2, // 20% validation
                 print_every: 1,        // Add missing print_every field
@@ -1862,7 +1885,10 @@ mod tests {
                 learning_schedule: None,
                 validation_split: 0.2,
                 test_split: 0.0,
-                early_stopping_patience: 10,
+                early_stopping: crate::config::training::EarlyStoppingConfig {
+                    patience: 10,
+                    min_delta: 0.0001,
+                },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
             },
@@ -1932,7 +1958,10 @@ mod tests {
                 learning_schedule: None,
                 validation_split: 0.0, // No validation for this test
                 test_split: 0.0,
-                early_stopping_patience: 10,
+                early_stopping: crate::config::training::EarlyStoppingConfig {
+                    patience: 10,
+                    min_delta: 0.0001,
+                },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
             },
@@ -2030,7 +2059,10 @@ mod tests {
                 learning_schedule: None,
                 validation_split: 0.0,
                 test_split: 0.0,
-                early_stopping_patience: 10,
+                early_stopping: crate::config::training::EarlyStoppingConfig {
+                    patience: 10,
+                    min_delta: 0.0001,
+                },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
             },

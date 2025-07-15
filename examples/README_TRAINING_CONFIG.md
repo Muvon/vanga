@@ -71,7 +71,7 @@ vanga train --symbol BTCUSDT --data data.csv --config examples/research_training
 
 ### Validation & Early Stopping
 - `validation_split` - Fraction of data for validation (0.0-1.0)
-- `early_stopping_patience` - Epochs to wait for improvement before stopping
+- `early_stopping` - Early stopping configuration with patience and min_delta threshold
 - `gradient_clip` - Gradient clipping threshold (optional)
 
 ## Key Differences
@@ -96,7 +96,7 @@ epochs = { Auto = { max_epochs = 1000 } }
 learning_rate = { Adaptive = { initial_lr = 0.01 } }
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
 validation_split = 0.2
-early_stopping_patience = 50
+early_stopping = { patience = 50, min_delta = 0.00005 }
 ```
 
 ### Research Paper (Reproducible)
