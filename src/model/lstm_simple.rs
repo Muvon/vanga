@@ -819,6 +819,15 @@ impl LSTMModel {
             total_samples
         );
 
+        // Log validation data usage for tracking
+        if let (Some(val_seq), Some(_val_tgt)) = (val_sequences, val_targets) {
+            log::info!(
+                "📊 Using pre-split chronological validation: {} train, {} val samples (no data leakage)",
+                total_samples,
+                val_seq.shape()[0]
+            );
+        }
+
         // Configure training parameters from config
         self.configure_training(config);
 
@@ -835,7 +844,7 @@ impl LSTMModel {
         let use_validation = validation_split > 0.0;
 
         // Prepare training and validation data - handle pre-split vs internal split
-        let (train_sequences, train_targets, _val_sequences_final, _val_targets_final) =
+        let (train_sequences, train_targets, val_sequences_final, val_targets_final) =
             if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
                 // Use pre-split chronological validation data (prevents data leakage)
                 log::info!(
@@ -870,7 +879,7 @@ impl LSTMModel {
             };
 
         let total_train_samples = train_sequences.shape()[0];
-        let total_val_samples = _val_sequences_final
+        let total_val_samples = val_sequences_final
             .as_ref()
             .map(|v| v.shape()[0])
             .unwrap_or(0);
@@ -1017,45 +1026,46 @@ impl LSTMModel {
             let avg_train_loss = epoch_train_loss / total_train_samples as f32;
 
             // Validation phase (only if validation data is available)
-            let avg_val_loss =
-                if let (Some(val_seq), Some(val_tgt)) = (&val_sequences, &val_targets) {
-                    let mut epoch_val_loss = 0.0;
+            let avg_val_loss = if let (Some(val_seq), Some(val_tgt)) =
+                (&val_sequences_final, &val_targets_final)
+            {
+                let mut epoch_val_loss = 0.0;
 
-                    for batch_start in (0..total_val_samples).step_by(batch_size) {
-                        let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
-                        let actual_batch_size = batch_end - batch_start;
+                for batch_start in (0..total_val_samples).step_by(batch_size) {
+                    let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
+                    let actual_batch_size = batch_end - batch_start;
 
-                        // Extract validation batch
-                        let batch_sequences = val_seq
-                            .slice(ndarray::s![batch_start..batch_end, .., ..])
-                            .to_owned();
-                        let batch_targets = val_tgt
-                            .slice(ndarray::s![batch_start..batch_end, ..])
-                            .to_owned();
+                    // Extract validation batch
+                    let batch_sequences = val_seq
+                        .slice(ndarray::s![batch_start..batch_end, .., ..])
+                        .to_owned();
+                    let batch_targets = val_tgt
+                        .slice(ndarray::s![batch_start..batch_end, ..])
+                        .to_owned();
 
-                        // Convert batch to tensors
-                        let (input_tensor, target_tensor) =
-                            self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
+                    // Convert batch to tensors
+                    let (input_tensor, target_tensor) =
+                        self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
-                        // Forward pass (no gradient computation for validation)
-                        let predictions = self.forward(&input_tensor)?;
+                    // Forward pass (no gradient computation for validation)
+                    let predictions = self.forward(&input_tensor)?;
 
-                        // Calculate validation loss
-                        let val_loss = predictions.sub(&target_tensor)?.sqr()?.mean_all()?;
-                        let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
-                            VangaError::ModelError(format!(
-                                "Validation loss scalar conversion failed: {}",
-                                e
-                            ))
-                        })?;
+                    // Calculate validation loss
+                    let val_loss = predictions.sub(&target_tensor)?.sqr()?.mean_all()?;
+                    let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
+                        VangaError::ModelError(format!(
+                            "Validation loss scalar conversion failed: {}",
+                            e
+                        ))
+                    })?;
 
-                        epoch_val_loss += val_batch_loss * actual_batch_size as f32;
-                    }
+                    epoch_val_loss += val_batch_loss * actual_batch_size as f32;
+                }
 
-                    Some(epoch_val_loss / total_val_samples as f32)
-                } else {
-                    None
-                };
+                Some(epoch_val_loss / total_val_samples as f32)
+            } else {
+                None
+            };
 
             // Adaptive learning rate adjustment after warmup
             if epoch >= warmup_epochs as usize {
