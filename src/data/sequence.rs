@@ -7,7 +7,9 @@ use ndarray::{s, Array2, Array3, Axis};
 use polars::prelude::*;
 use rayon::prelude::*;
 
-pub struct SequenceGenerator;
+pub struct SequenceGenerator {
+    // Sequence generation logic - overlap controlled via DataConfig
+}
 
 impl Default for SequenceGenerator {
     fn default() -> Self {
@@ -17,7 +19,7 @@ impl Default for SequenceGenerator {
 
 impl SequenceGenerator {
     pub fn new() -> Self {
-        Self
+        Self {}
     }
 
     pub async fn generate_training_sequences(
@@ -25,6 +27,7 @@ impl SequenceGenerator {
         df: DataFrame,
         horizons: &[String],
         model_config: &crate::config::ModelConfig,
+        data_config: &crate::config::training::DataConfig,
     ) -> Result<PreparedData> {
         log::info!(
             "Generating training sequences for LSTM with {} horizons...",
@@ -75,9 +78,9 @@ impl SequenceGenerator {
         // Extract feature data as matrix
         let feature_data = self.extract_feature_matrix(&df, &feature_columns)?;
 
-        // Generate sequences using sliding window
+        // Generate sequences using sliding window with config overlap
         let (sequences, targets) = self
-            .create_sliding_windows(&feature_data, sequence_length, horizons, &df)
+            .create_sliding_windows(&feature_data, sequence_length, horizons, &df, data_config)
             .await?;
 
         // Calculate normalization statistics
@@ -227,6 +230,7 @@ impl SequenceGenerator {
         sequence_length: usize,
         horizons: &[String],
         df: &DataFrame,
+        data_config: &crate::config::training::DataConfig,
     ) -> Result<(Array3<f64>, PreparedTargets)> {
         let total_rows = feature_data.nrows();
         let feature_count = feature_data.ncols();
@@ -246,23 +250,42 @@ impl SequenceGenerator {
             .max()
             .unwrap_or(1);
 
-        // Adjust sequence count to account for multi-horizon targets
+        // Calculate step size based on config overlap ratio
+        let sequence_overlap = data_config.sequence_overlap;
+        let step_size = if sequence_overlap == 0.0 {
+            sequence_length // No overlap - sequences don't share data
+        } else {
+            std::cmp::max(
+                1,
+                (sequence_length as f64 * (1.0 - sequence_overlap)) as usize,
+            )
+        };
+
+        // Adjust sequence count to account for multi-horizon targets and step size
         let effective_rows = total_rows.saturating_sub(max_horizon_steps);
-        let num_sequences = effective_rows.saturating_sub(sequence_length);
+        let max_start_idx = effective_rows.saturating_sub(sequence_length);
+
+        // Calculate number of sequences with step_size (prevents 99% overlap!)
+        let num_sequences = if max_start_idx == 0 {
+            0
+        } else {
+            (max_start_idx / step_size) + 1
+        };
 
         if num_sequences == 0 {
             return Err(VangaError::DataError(format!(
-                "Insufficient data for multi-horizon sequences: {} total rows, {} max horizon steps, {} sequence length",
-                total_rows, max_horizon_steps, sequence_length
+                "Insufficient data for sequences: {} total rows, {} max horizon steps, {} sequence length, {} step size",
+                total_rows, max_horizon_steps, sequence_length, step_size
             )));
         }
 
         log::info!(
-            "Creating {} sequences with {} features for {} horizons (max offset: {} steps)",
+            "Creating {} sequences with {} features for {} horizons (step_size={}, overlap={:.1}%)",
             num_sequences,
             feature_count,
             horizons.len(),
-            max_horizon_steps
+            step_size,
+            sequence_overlap * 100.0
         );
 
         // Generate targets using DataFrame for all horizons
@@ -270,12 +293,13 @@ impl SequenceGenerator {
 
         let mut sequences = Array3::zeros((num_sequences, sequence_length, feature_count));
 
-        // PARALLELIZED: Create sequences using sliding window
+        // FIXED: Create sequences with configurable step size (no more 99% overlap!)
         let sequences_vec: Vec<Array2<f64>> = (0..num_sequences)
             .into_par_iter()
             .map(|i| {
+                let start_idx = i * step_size;
                 feature_data
-                    .slice(s![i..i + sequence_length, ..])
+                    .slice(s![start_idx..start_idx + sequence_length, ..])
                     .to_owned()
             })
             .collect();

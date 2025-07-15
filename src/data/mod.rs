@@ -34,7 +34,7 @@ impl DataPipeline {
         Self {
             loader: DataLoader::new(),
             preprocessor: DataPreprocessor::new(),
-            sequence_generator: SequenceGenerator::new(),
+            sequence_generator: SequenceGenerator::default(), // Uses no overlap by default
         }
     }
 
@@ -99,12 +99,17 @@ impl DataPipeline {
             // Generate sequences for this window
             let train_sequences = self
                 .sequence_generator
-                .generate_training_sequences(train_df, &config.horizons, &config.model)
+                .generate_training_sequences(
+                    train_df,
+                    &config.horizons,
+                    &config.model,
+                    &config.data,
+                )
                 .await?;
 
             let val_sequences = self
                 .sequence_generator
-                .generate_training_sequences(val_df, &config.horizons, &config.model)
+                .generate_training_sequences(val_df, &config.horizons, &config.model, &config.data)
                 .await?;
 
             windows.push(TrainingWindow {
