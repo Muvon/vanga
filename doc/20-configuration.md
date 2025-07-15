@@ -148,7 +148,16 @@ validation_split = 0.2                        # 20% for validation (0.1-0.3 rang
 test_split = 0.1                              # 10% for testing (0.05-0.2 range)
 
 # Early stopping - prevents overfitting with min_delta threshold
-early_stopping = { patience = 50, min_delta = 0.00005 }  # Stop after N epochs without >= min_delta improvement
+early_stopping = { patience = 50, min_delta = 0.001 }   # Stop after 50 epochs without improvement >= min_delta (adjusted for new loss scale)
+
+# Loss function configuration - NEW: Multi-target loss weighting
+[model.loss_function]
+# CryptoComposite loss with trading-optimized weights (RECOMMENDED)
+CryptoComposite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
+# Alternative loss functions:
+# MultiObjective = { horizon_weights = [0.4, 0.3, 0.3] }  # Balance across prediction horizons
+# RegimeAware = { volatility_penalty = 0.1 }              # Adjust based on market conditions
+# DirectionalFocused = { direction_penalty = 0.3 }        # Emphasize directional accuracy
 
 # Gradient clipping - prevents exploding gradients
 gradient_clip = 1.0                           # Clipping threshold (0.5-2.0 range)

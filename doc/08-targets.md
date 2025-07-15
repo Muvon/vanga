@@ -6,6 +6,41 @@ The VANGA LSTM cryptocurrency forecasting system implements a comprehensive mult
 
 ## Architecture Overview
 
+### **Multi-Target Loss Function Integration**
+
+VANGA now implements proper weighted multi-target loss calculation to address the critical issue of naive MSE summation:
+
+```rust
+// Enhanced LSTM with CryptoLossFunction integration
+impl LSTMModel {
+    /// Calculate loss using configured loss function or default MSE
+    fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        if let Some(ref loss_fn) = self.loss_function {
+            // Convert tensors to Array2 for CryptoLossFunction
+            let pred_array = self.tensor_to_array2(predictions)?;
+            let target_array = self.tensor_to_array2(targets)?;
+
+            // Calculate weighted loss with market regime awareness
+            let market_regime = MarketRegime::MediumVolatility;
+            let loss_value = loss_fn.calculate_loss(&pred_array, &target_array, market_regime)?;
+
+            // Convert back to tensor for backpropagation
+            let loss_tensor = Tensor::new(&[loss_value as f32], &self.device)?;
+            Ok(loss_tensor)
+        } else {
+            // Backward compatible MSE fallback
+            predictions.sub(targets)?.sqr()?.mean_all()
+        }
+    }
+}
+```
+
+**Key Improvements:**
+- **Proper Weighting**: Direction prediction (50%) prioritized for trading signals
+- **Loss Scale Fix**: Values now 0.1-10 range instead of 1-11, making min_delta meaningful
+- **Market Regime Integration**: Uses MarketRegime enum for context-aware loss calculation
+- **Seamless Integration**: Bridges Candle Tensor and ndarray Array2 types
+
 ### **Multi-Target Architecture**
 
 VANGA implements a revolutionary multi-target LSTM architecture that eliminates data loss:

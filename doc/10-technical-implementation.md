@@ -28,6 +28,38 @@ This document provides detailed technical specifications for the fully implement
 
 ## 🏗️ **Implementation Details**
 
+### **Loss Function System** (`src/model/loss.rs`)
+
+#### **CryptoLossFunction Enum - Multi-Target Loss Calculation**
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CryptoLossFunction {
+    /// Multi-objective loss balancing accuracy across different prediction horizons
+    MultiObjective { horizon_weights: Vec<f64> },
+    /// Regime-aware loss that adjusts based on market volatility conditions
+    RegimeAware { volatility_penalty: f64 },
+    /// Risk-adjusted loss incorporating Sharpe ratio and maximum drawdown
+    RiskAdjusted { sharpe_weight: f64, drawdown_weight: f64 },
+    /// Composite crypto loss combining multiple factors (RECOMMENDED)
+    CryptoComposite {
+        accuracy_weight: f64,    // Price level accuracy (20%)
+        direction_weight: f64,   // Direction prediction (50% - most important)
+        volatility_weight: f64,  // Volatility prediction (20%)
+        risk_weight: f64,        // Risk metrics (10%)
+    },
+    /// Directional accuracy focused loss
+    DirectionalFocused { direction_penalty: f64 },
+    /// Volatility-aware loss that penalizes predictions during high volatility
+    VolatilityAware { volatility_threshold: f64, penalty_factor: f64 },
+}
+```
+
+#### **Integration with LSTM Training**
+- **Tensor Conversion**: `tensor_to_array2()` helper bridges Candle Tensor ↔ ndarray Array2
+- **Loss Calculation**: `calculate_loss()` method integrates CryptoLossFunction with training loop
+- **Market Regime**: Uses `MarketRegime` enum for context-aware loss adjustment
+- **Error Handling**: Comprehensive VangaError conversion and propagation
+
 ### **1. Error Handling System**
 
 #### **VangaError Enum** (`src/utils/error.rs`)

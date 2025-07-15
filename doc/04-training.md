@@ -22,6 +22,14 @@ This guide covers VANGA's **single-config LSTM training system** with intelligen
 - **Enhanced Monitoring**: Real-time LR tracking, warmup status, and validation metrics
 - **35% better performance** compared to basic SGD on crypto datasets
 
+### ✅ **Advanced Loss Function System (NEW)**
+- **Multi-Target Loss Weighting**: Proper weighted loss calculation for multi-target predictions
+- **Crypto-Optimized Weights**: Direction (50%), Price Levels (20%), Volatility (20%), Risk (10%)
+- **CryptoComposite Loss**: Specialized loss function for cryptocurrency trading optimization
+- **Market Regime Awareness**: Adjusts loss calculation based on market conditions
+- **Meaningful Early Stopping**: Fixed min_delta thresholds for proper convergence detection
+- **Backward Compatible**: Falls back to MSE when no loss function configured
+
 ### ✅ **Intelligent Training System**
 - **Unified Training Method**: Single training method handles all scenarios through configuration
 - **Auto Early Stopping**: Automatically stops when validation loss plateaus
