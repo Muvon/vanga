@@ -140,9 +140,14 @@ impl TensorCryptoLossFunction {
 
     /// Base MSE loss using tensor operations
     fn calculate_mse_tensor_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        predictions.sub(targets)?.sqr()?.mean_all().map_err(|e| {
-            VangaError::ModelError(format!("MSE tensor loss calculation failed: {}", e))
-        })
+        predictions
+            .sub(targets)?
+            .contiguous()?
+            .sqr()?
+            .mean_all()
+            .map_err(|e| {
+                VangaError::ModelError(format!("MSE tensor loss calculation failed: {}", e))
+            })
     }
 
     /// Directional accuracy loss using tensor operations
@@ -166,26 +171,39 @@ impl TensorCryptoLossFunction {
 
         // Calculate directional agreement using sign comparison
         // If both positive or both negative, agreement = 1, otherwise 0
-        let pred_positive = pred_direction.gt(&Tensor::zeros_like(&pred_direction)?)?;
-        let target_positive = target_direction.gt(&Tensor::zeros_like(&target_direction)?)?;
+        let pred_positive = pred_direction
+            .gt(&Tensor::zeros_like(&pred_direction)?)?
+            .contiguous()?;
+        let target_positive = target_direction
+            .gt(&Tensor::zeros_like(&target_direction)?)?
+            .contiguous()?;
+
+        // FIXED: Convert boolean tensors to f32 before arithmetic operations
+        // Boolean tensors (u8) don't support unary operations like neg() in candle-core
+        let pred_positive_f32 = pred_positive
+            .to_dtype(candle_core::DType::F32)?
+            .contiguous()?;
+        let target_positive_f32 = target_positive
+            .to_dtype(candle_core::DType::F32)?
+            .contiguous()?;
 
         // Agreement when both positive or both negative
-        let both_positive = pred_positive.mul(&target_positive)?;
-        let both_negative = pred_positive
-            .neg()?
-            .add(&Tensor::ones_like(&pred_positive)?)?
-            .mul(
-                &target_positive
-                    .neg()?
-                    .add(&Tensor::ones_like(&target_positive)?)?,
-            )?;
+        let both_positive = pred_positive_f32.mul(&target_positive_f32)?;
+
+        // Calculate negative cases: (1 - pred_positive) * (1 - target_positive)
+        let ones_tensor = Tensor::ones_like(&pred_positive_f32)?;
+        let pred_negative = ones_tensor.sub(&pred_positive_f32)?;
+        let target_negative = ones_tensor.sub(&target_positive_f32)?;
+        let both_negative = pred_negative.mul(&target_negative)?;
+
         let agreement = both_positive.add(&both_negative)?;
 
         // Directional loss = 1 - agreement_rate
-        let one_tensor = Tensor::ones_like(&agreement)?;
+        // Use mean_all() to get scalar accuracy, then subtract from 1.0
         let directional_accuracy = agreement.mean_all()?;
+        let one_scalar = Tensor::new(1.0f32, predictions.device())?;
 
-        one_tensor.sub(&directional_accuracy).map_err(|e| {
+        one_scalar.sub(&directional_accuracy).map_err(|e| {
             VangaError::ModelError(format!("Directional tensor loss calculation failed: {}", e))
         })
     }
@@ -198,12 +216,22 @@ impl TensorCryptoLossFunction {
     ) -> Result<Tensor> {
         // Calculate prediction volatility (standard deviation)
         let pred_mean = predictions.mean_all()?;
-        let pred_variance = predictions.sub(&pred_mean)?.sqr()?.mean_all()?;
+        let pred_mean_broadcast = pred_mean.broadcast_as(predictions.shape())?;
+        let pred_variance = predictions
+            .sub(&pred_mean_broadcast)?
+            .contiguous()?
+            .sqr()?
+            .mean_all()?;
         let pred_volatility = pred_variance.sqrt()?;
 
         // Calculate target volatility
         let target_mean = targets.mean_all()?;
-        let target_variance = targets.sub(&target_mean)?.sqr()?.mean_all()?;
+        let target_mean_broadcast = target_mean.broadcast_as(targets.shape())?;
+        let target_variance = targets
+            .sub(&target_mean_broadcast)?
+            .contiguous()?
+            .sqr()?
+            .mean_all()?;
         let target_volatility = target_variance.sqrt()?;
 
         // Volatility difference as penalty
@@ -221,7 +249,8 @@ impl TensorCryptoLossFunction {
         let slice2 = tensor.narrow(0, 1, len - 1)?;
 
         slice2
-            .sub(&slice1)
+            .sub(&slice1)?
+            .contiguous()
             .map_err(|e| VangaError::ModelError(format!("Tensor diff calculation failed: {}", e)))
     }
 
@@ -435,7 +464,9 @@ impl TensorCryptoLossFunction {
         // Penalty = 1 + penalty_factor if volatility > threshold, else 1
         let volatility_penalty = volatility_loss
             .gt(&threshold_tensor)?
-            .where_cond(&one_tensor.add(&penalty_tensor)?, &one_tensor)?;
+            .contiguous()?
+            .where_cond(&one_tensor.add(&penalty_tensor)?, &one_tensor)?
+            .contiguous()?;
 
         base_loss.mul(&volatility_penalty).map_err(|e| {
             VangaError::ModelError(format!("Volatility-aware tensor loss failed: {}", e))
