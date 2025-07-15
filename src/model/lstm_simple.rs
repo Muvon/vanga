@@ -11,6 +11,18 @@ use candle_nn::{
 use ndarray::{s, Array2, Array3};
 use serde::{Deserialize, Serialize};
 
+// Import candle-optimisers for extended optimizer support
+use candle_optimisers::{
+    adadelta::{Adadelta, ParamsAdaDelta},
+    adagrad::{Adagrad, ParamsAdaGrad},
+    adam::{Adam, ParamsAdam},
+    adamax::{Adamax, ParamsAdaMax},
+    nadam::{NAdam, ParamsNAdam},
+    radam::{ParamsRAdam, RAdam},
+    rmsprop::{ParamsRMSprop, RMSprop},
+    Decay,
+};
+
 /// LSTM network configuration - EXACT same as original
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LSTMConfig {
@@ -69,6 +81,14 @@ struct ModelState {
 enum OptimizerWrapper {
     Sgd(optim::SGD),
     AdamW(optim::AdamW),
+    // New optimizers from candle-optimisers crate
+    Adam(candle_optimisers::adam::Adam),
+    AdaDelta(candle_optimisers::adadelta::Adadelta),
+    AdaGrad(candle_optimisers::adagrad::Adagrad),
+    AdaMax(candle_optimisers::adamax::Adamax),
+    NAdam(candle_optimisers::nadam::NAdam),
+    RAdam(candle_optimisers::radam::RAdam),
+    RMSprop(candle_optimisers::rmsprop::RMSprop),
 }
 
 impl OptimizerWrapper {
@@ -76,6 +96,13 @@ impl OptimizerWrapper {
         match self {
             OptimizerWrapper::Sgd(sgd) => sgd.set_learning_rate(lr),
             OptimizerWrapper::AdamW(adamw) => adamw.set_learning_rate(lr),
+            OptimizerWrapper::Adam(adam) => adam.set_learning_rate(lr),
+            OptimizerWrapper::AdaDelta(adadelta) => adadelta.set_learning_rate(lr),
+            OptimizerWrapper::AdaGrad(adagrad) => adagrad.set_learning_rate(lr),
+            OptimizerWrapper::AdaMax(adamax) => adamax.set_learning_rate(lr),
+            OptimizerWrapper::NAdam(nadam) => nadam.set_learning_rate(lr),
+            OptimizerWrapper::RAdam(radam) => radam.set_learning_rate(lr),
+            OptimizerWrapper::RMSprop(rmsprop) => rmsprop.set_learning_rate(lr),
         }
     }
 
@@ -83,6 +110,13 @@ impl OptimizerWrapper {
         match self {
             OptimizerWrapper::Sgd(sgd) => sgd.step(grads),
             OptimizerWrapper::AdamW(adamw) => adamw.step(grads),
+            OptimizerWrapper::Adam(adam) => adam.step(grads),
+            OptimizerWrapper::AdaDelta(adadelta) => adadelta.step(grads),
+            OptimizerWrapper::AdaGrad(adagrad) => adagrad.step(grads),
+            OptimizerWrapper::AdaMax(adamax) => adamax.step(grads),
+            OptimizerWrapper::NAdam(nadam) => nadam.step(grads),
+            OptimizerWrapper::RAdam(radam) => radam.step(grads),
+            OptimizerWrapper::RMSprop(rmsprop) => rmsprop.step(grads),
         }
     }
 }
@@ -1136,7 +1170,7 @@ impl LSTMModel {
         Ok(())
     }
 
-    /// Advanced optimizer setup with OptimizerWrapper for proper SGD/AdamW handling
+    /// Advanced optimizer setup with OptimizerWrapper for proper optimizer handling
     fn setup_advanced_optimizer(
         &self,
         config: &crate::config::TrainingConfig,
@@ -1180,6 +1214,226 @@ impl LSTMModel {
                 Ok(OptimizerWrapper::AdamW(
                     optim::AdamW::new_lr(self.varmap.all_vars(), learning_rate).map_err(|e| {
                         VangaError::ModelError(format!("AdamW optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            // New optimizers from candle-optimisers crate
+            crate::config::training::OptimizerType::Adam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                amsgrad,
+            } => {
+                log::info!(
+                    "Using Adam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "Adam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}, amsgrad: {}",
+                    beta1,
+                    beta2,
+                    eps,
+                    amsgrad
+                );
+
+                let params = ParamsAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                    amsgrad: *amsgrad,
+                };
+
+                Ok(OptimizerWrapper::Adam(
+                    Adam::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("Adam optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::AdaDelta {
+                rho,
+                eps,
+                weight_decay,
+            } => {
+                log::info!(
+                    "Using AdaDelta optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!("AdaDelta parameters - rho: {:.3}, eps: {:.2e}", rho, eps);
+
+                let params = ParamsAdaDelta {
+                    lr: learning_rate,
+                    rho: *rho,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                };
+
+                Ok(OptimizerWrapper::AdaDelta(
+                    Adadelta::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("AdaDelta optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::AdaGrad {
+                lr_decay,
+                weight_decay,
+                initial_accumulator_value,
+                eps,
+            } => {
+                log::info!(
+                    "Using AdaGrad optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "AdaGrad parameters - lr_decay: {:.3}, eps: {:.2e}, init_acc: {:.3}",
+                    lr_decay,
+                    eps,
+                    initial_accumulator_value
+                );
+
+                let params = ParamsAdaGrad {
+                    lr: learning_rate,
+                    lr_decay: *lr_decay,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                    eps: *eps,
+                    initial_acc: *initial_accumulator_value,
+                };
+                Ok(OptimizerWrapper::AdaGrad(
+                    Adagrad::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("AdaGrad optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::AdaMax {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => {
+                log::info!(
+                    "Using AdaMax optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "AdaMax parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+
+                let params = ParamsAdaMax {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                };
+
+                Ok(OptimizerWrapper::AdaMax(
+                    Adamax::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("AdaMax optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::NAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+            } => {
+                log::info!(
+                    "Using NAdam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "NAdam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}, momentum_decay: {:.3}",
+                    beta1, beta2, eps, momentum_decay
+                );
+
+                let params = ParamsNAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                    momentum_decay: *momentum_decay,
+                };
+
+                Ok(OptimizerWrapper::NAdam(
+                    NAdam::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("NAdam optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::RAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => {
+                log::info!(
+                    "Using RAdam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "RAdam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+
+                let params = ParamsRAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                };
+
+                Ok(OptimizerWrapper::RAdam(
+                    RAdam::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("RAdam optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::RMSprop {
+                alpha,
+                eps,
+                weight_decay,
+                momentum,
+                centered,
+            } => {
+                log::info!(
+                    "Using RMSprop optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "RMSprop parameters - alpha: {:.3}, eps: {:.2e}, momentum: {:.3}, centered: {}",
+                    alpha,
+                    eps,
+                    momentum,
+                    centered
+                );
+
+                let params = ParamsRMSprop {
+                    lr: learning_rate,
+                    alpha: *alpha,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    momentum: if *momentum > 0.0 {
+                        Some(*momentum)
+                    } else {
+                        None
+                    },
+                    centered: *centered,
+                };
+
+                Ok(OptimizerWrapper::RMSprop(
+                    RMSprop::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("RMSprop optimizer creation failed: {}", e))
                     })?,
                 ))
             }

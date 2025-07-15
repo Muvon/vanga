@@ -15,8 +15,15 @@ VANGA uses a **unified configuration system** where all parameters (training, mo
 VANGA now features **professional-grade learning rate optimization** with modern optimizers and intelligent scheduling:
 
 ### **Modern Optimizers**
-- **AdamW**: Modern optimizer with weight decay and adaptive learning rates (RECOMMENDED)
-- **SGD**: Traditional optimizer with optional momentum support
+- **AdamW**: Modern optimizer with weight decay (RECOMMENDED for crypto - handles volatility well)
+- **Adam**: Classic adaptive optimizer, good general-purpose choice
+- **SGD**: Traditional optimizer with optional momentum, good for fine-tuning
+- **AdaDelta**: Adaptive without manual tuning, excellent for sparse crypto data
+- **AdaGrad**: Accumulates gradients, good for sparse features but can slow down
+- **AdaMax**: More stable than Adam for problems with large gradients (crypto spikes)
+- **NAdam**: Nesterov-accelerated Adam, often converges faster than standard Adam
+- **RAdam**: Rectified Adam with variance correction, more stable early training
+- **RMSprop**: Excellent for RNNs and non-stationary objectives (perfect for crypto markets)
 
 ### **Intelligent Learning Rate Modes**
 - **Auto**: Optimizes learning rate within specified ranges based on model complexity
@@ -31,17 +38,18 @@ VANGA now features **professional-grade learning rate optimization** with modern
 ### **Enhanced Training Configuration**
 ```toml
 [training]
-# Modern optimizer with adaptive learning (RECOMMENDED)
+# Modern optimizer with adaptive learning (RECOMMENDED for crypto)
 optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
-learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
-warmup_epochs = 5
 
-# Auto-optimization for exploration
-# learning_rate = { Auto = { min_lr = 0.0001, max_lr = 0.01 } }
+# Alternative optimizers for different crypto scenarios:
+# optimizer = { Adam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, amsgrad = false } }
+# optimizer = { NAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, momentum_decay = 0.004 } }
+# optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
+# optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.01, momentum = 0.0, centered = false } }
 
 # Traditional SGD for fine-tuning
 # optimizer = { SGD = {} }  # Basic SGD
-# optimizer = { SGD = { momentum = 0.9 } }  # SGD with momentum (when implemented)
+# optimizer = { SGD = { momentum = 0.9 } }  # SGD with momentum
 # learning_rate = { Fixed = 0.001 }
 # warmup_epochs = 0
 

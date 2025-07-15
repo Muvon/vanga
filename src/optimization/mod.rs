@@ -12,6 +12,7 @@
 pub mod feature_selection;
 pub mod hyperparameter;
 pub mod objective;
+pub mod optimizer_selector;
 
 // Re-export main optimization components
 pub use feature_selection::{
@@ -19,6 +20,10 @@ pub use feature_selection::{
 };
 pub use hyperparameter::{HyperparameterOptimizer, OptimizationMethod, SearchSpace};
 pub use objective::{ObjectiveFunction, OptimizationMetric};
+pub use optimizer_selector::{
+    apply_optimizer_recommendation, recommend_optimizer_for_data, DataCharacteristics,
+    MarketRegime, OptimizerRecommendation, OptimizerSelector, PerformanceExpectation,
+};
 
 use crate::utils::error::Result;
 use polars::prelude::*;

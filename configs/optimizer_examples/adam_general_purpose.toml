@@ -1,0 +1,58 @@
+# VANGA Adam Optimizer Configuration - General Purpose
+# Classic adaptive optimizer for standard crypto training scenarios
+# Best for: General crypto forecasting without specific requirements
+
+[training]
+# Adam: Classic adaptive optimizer
+# - Good general-purpose choice for most scenarios
+# - Similar to AdamW but without built-in weight decay
+# - Reliable convergence on diverse crypto datasets
+optimizer = { Adam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0, amsgrad = false } }
+
+# Standard adaptive learning rate
+learning_rate = { Adaptive = { initial_lr = 0.001, patience = 8, factor = 0.6 } }
+
+# Standard training parameters
+epochs = 80
+batch_size = 32
+warmup_epochs = 3
+early_stopping = { patience = 12, min_delta = 0.0001 }
+
+# Standard validation settings
+validation_split = 0.2
+shuffle_training = false
+
+# Manual regularization (since Adam doesn't have built-in weight decay)
+dropout_rate = 0.25
+l2_regularization = 0.002
+
+[model]
+# Balanced architecture for general use
+hidden_units = 96
+num_layers = 2
+sequence_length = 48  # ~48 minutes of data
+bidirectional = false
+
+[features]
+# Comprehensive technical indicators
+technical_indicators = [
+    "sma_10", "sma_20", "ema_12", "ema_26", "rsi_14", "macd",
+    "bollinger_bands", "volume_sma", "atr_14", "stoch_k", "stoch_d"
+]
+
+# Standard cross-asset features
+cross_asset_features = [
+    "btc_dominance", "eth_btc_ratio"
+]
+
+[data]
+# Standard preprocessing
+normalize_features = true
+handle_outliers = true
+outlier_threshold = 3.0
+
+[targets]
+# Balanced target configuration
+price_targets = ["close_1h", "close_4h"]
+direction_targets = ["direction_1h", "direction_4h"]
+volatility_targets = ["volatility_1h"]

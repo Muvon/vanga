@@ -78,13 +78,15 @@ src/
 
 #### `src/config/training.rs`
 - **Training parameters**: Epochs, learning rate, batch size, validation splits
-- **Validation methods**: `validate()` and `validate_for_symbols()`
+- **Optimizer configuration**: 9 available optimizers (AdamW, SGD, Adam, AdaDelta, AdaGrad, AdaMax, NAdam, RAdam, RMSprop)
+- **Validation methods**: `validate()` and `validate_for_symbols()` with optimizer parameter validation
 - **Auto-optimization**: Intelligent parameter tuning configurations
 
 #### `configs/*.toml`
 - **Configuration templates**: Different scenarios (training, prediction, features)
 - **Symbol-specific**: Each trading pair can have specialized configs
 - **Feature flags**: Enable/disable functionality via configuration
+- **Optimizer examples**: All 9 optimizers with crypto-specific recommendations
 
 ## 🔧 Common Task Patterns
 
