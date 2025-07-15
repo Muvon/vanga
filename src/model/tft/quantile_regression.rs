@@ -142,9 +142,7 @@ impl QuantileMultiTargetModel {
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         // First train the base multi-target model
-        self.base_model
-            .train(sequences, targets, config)
-            .await?;
+        self.base_model.train(sequences, targets, config).await?;
 
         // If quantile regression is enabled, train quantile heads
         if self.quantile_config.enabled && !self.quantile_heads.is_empty() {
