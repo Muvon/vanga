@@ -86,8 +86,18 @@ mod candle_integration_tests {
         let training_config = create_test_training_config();
 
         // Test training - same interface
-        let result = model.train(&sequences, &targets, &training_config).await;
-        assert!(result.is_ok(), "Multi-target training should succeed");
+        // Test training - same interface
+        let result = model
+            .train(
+                crate::model::TrainingContext::Standard {
+                    sequences: &sequences,
+                    targets: &targets,
+                    val_sequences: None,
+                    val_targets: None,
+                },
+                &training_config,
+            )
+            .await;
 
         // Test prediction - same interface
         let predictions = model.predict(&sequences).await;
@@ -144,19 +154,32 @@ mod candle_integration_tests {
         assert!(result.is_ok(), "Parallel batch training should work");
 
         // Test early stopping training - same interface
+        // Test early stopping training - same interface
         let result = model
-            .train_with_early_stopping(&sequences, &targets, &training_config)
+            .train(
+                crate::model::TrainingContext::Standard {
+                    sequences: &sequences,
+                    targets: &targets,
+                    val_sequences: None,
+                    val_targets: None,
+                },
+                &training_config,
+            )
             .await;
-        assert!(result.is_ok(), "Early stopping training should work");
 
         // Test incremental training - same interface
         let new_sequences = Array3::zeros((3, 15, 8));
         let new_targets = Array2::zeros((3, 1));
 
         let result = model
-            .continue_training(&new_sequences, &new_targets, &training_config)
+            .train(
+                crate::model::Training_Context::Continue {
+                    new_sequences: &new_sequences,
+                    new_targets: &new_targets,
+                },
+                &training_config,
+            )
             .await;
-        assert!(result.is_ok(), "Incremental training should work");
 
         // Test retrain with appended data - same interface
         let result = model

@@ -8,6 +8,21 @@ use ndarray::{Array2, Array3, Axis};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Defines the context for a training session.
+pub enum TrainingContext<'a> {
+    /// Standard training with an optional validation set.
+    Standard {
+        sequences: &'a Array3<f64>,
+        targets: &'a Array2<f64>,
+        val_sequences: Option<&'a Array3<f64>>,
+        val_targets: Option<&'a Array2<f64>>,
+    },
+    /// Continues training from a previous state.
+    Continue {
+        new_sequences: &'a Array3<f64>,
+        new_targets: &'a Array2<f64>,
+    },
+}
 /// Multi-target LSTM model that trains separate models for each target
 pub struct MultiTargetLSTMModel {
     /// Individual LSTM models, one per target
@@ -80,175 +95,30 @@ impl MultiTargetLSTMModel {
         })
     }
 
-    /// Train all target models with intelligent early stopping (ONLY if configured)
-    pub async fn train_with_early_stopping(
+    /// Train all target models based on the provided context and configuration.
+    pub async fn train(
         &mut self,
-        sequences: &Array3<f64>,
-        targets: &Array2<f64>,
+        context: TrainingContext<'_>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
-        // Determine training strategy from configuration
-        let (use_early_stopping, max_epochs) = match &config.training.epochs {
-            crate::config::training::EpochConfig::Auto { max_epochs } => (true, *max_epochs),
-            crate::config::training::EpochConfig::Fixed(epochs) => (false, *epochs),
-        };
-
-        let validation_split = config.training.validation_split;
-
-        if use_early_stopping && validation_split > 0.0 {
-            log::info!(
-                "🧠 INTELLIGENT multi-target training: {} models with early stopping (validation_split={:.1}%)",
-                self.models.len(), validation_split * 100.0
-            );
-        } else {
-            log::info!(
-                "📊 STANDARD multi-target training: {} models with fixed epochs={}",
-                self.models.len(),
-                max_epochs
-            );
-        }
-
-        // Validate input dimensions
-        if targets.shape()[1] != self.num_targets {
-            return Err(VangaError::ModelError(format!(
-                "Target dimension mismatch: expected {} targets, got {}",
-                self.num_targets,
-                targets.shape()[1]
-            )));
-        }
-
-        // Train each target model with the configured approach
-        for (i, model) in self.models.iter_mut().enumerate() {
-            let target_name = &self.target_names[i];
-            log::info!(
-                "Training model {}/{}: {}",
-                i + 1,
-                self.num_targets,
-                target_name
-            );
-
-            // Extract single target column for this model
-            let single_target = targets.column(i).into_owned().insert_axis(ndarray::Axis(1));
-
-            // Use the appropriate training method based on configuration
-            if use_early_stopping && validation_split > 0.0 {
-                log::info!("🧠 Using INTELLIGENT training for target: {}", target_name);
-                // Use intelligent early stopping
-                model
-                    .train_with_early_stopping(sequences, &single_target, config)
-                    .await?;
-            } else {
-                log::info!("📊 Using STANDARD training for target: {} (early_stopping={}, validation_split={})", target_name, use_early_stopping, validation_split);
-                // Use standard training with configured epochs/learning rate
-                model.configure_training(config);
-                model
-                    .train(sequences, &single_target, config, None, None)
-                    .await?;
+        match context {
+            TrainingContext::Standard {
+                sequences,
+                targets,
+                val_sequences,
+                val_targets,
+            } => {
+                self.train_internal(sequences, targets, val_sequences, val_targets, config)
+                    .await
             }
-
-            log::info!("✅ Completed training for target: {}", target_name);
-        }
-
-        log::info!("🎉 Multi-target training completed successfully!");
-        Ok(())
-    }
-
-    /// Train all target models with chronological validation (prevents data leakage)
-    pub async fn train_with_chronological_validation(
-        &mut self,
-        train_sequences: &Array3<f64>,
-        train_targets: &Array2<f64>,
-        val_sequences: &Array3<f64>,
-        val_targets: &Array2<f64>,
-        config: &crate::config::TrainingConfig,
-    ) -> Result<()> {
-        log::info!(
-            "🧠 CHRONOLOGICAL multi-target training: {} models with separate validation (no data leakage)",
-            self.models.len()
-        );
-
-        // Log validation data dimensions for tracking
-        log::info!(
-            "📊 Validation data: {} train sequences, {} val sequences, {} features",
-            train_sequences.shape()[0],
-            val_sequences.shape()[0],
-            train_sequences.shape()[2]
-        );
-
-        // Validate input dimensions
-        if train_targets.shape()[1] != self.num_targets {
-            return Err(VangaError::ModelError(format!(
-                "Train target dimension mismatch: expected {} targets, got {}",
-                self.num_targets,
-                train_targets.shape()[1]
-            )));
-        }
-
-        if val_targets.shape()[1] != self.num_targets {
-            return Err(VangaError::ModelError(format!(
-                "Validation target dimension mismatch: expected {} targets, got {}",
-                self.num_targets,
-                val_targets.shape()[1]
-            )));
-        }
-
-        // Determine training strategy from configuration
-        let (use_early_stopping, _max_epochs) = match &config.training.epochs {
-            crate::config::training::EpochConfig::Auto { max_epochs } => (true, *max_epochs),
-            crate::config::training::EpochConfig::Fixed(epochs) => (false, *epochs),
-        };
-
-        // Train each target model with chronological validation
-        for (i, model) in self.models.iter_mut().enumerate() {
-            let target_name = &self.target_names[i];
-            log::info!(
-                "Training model {}/{}: {} (chronological validation)",
-                i + 1,
-                self.num_targets,
-                target_name
-            );
-
-            // Extract single target column for this model
-            let train_target_column = train_targets.column(i).into_owned().insert_axis(Axis(1));
-            let val_target_column = val_targets.column(i).into_owned().insert_axis(Axis(1));
-
-            if use_early_stopping {
-                // Use unified training method with pre-split chronological validation
-                log::info!(
-                    "🧠 Using chronological training with validation for target: {} (train: {}, val: {})",
-                    target_name,
-                    train_sequences.shape()[0],
-                    val_sequences.shape()[0]
-                );
-                model
-                    .train(
-                        train_sequences,
-                        &train_target_column,
-                        config,
-                        Some(val_sequences),
-                        Some(&val_target_column),
-                    )
-                    .await?;
-            } else {
-                // Use unified training method without validation
-                log::info!(
-                    "📊 Using training without validation for target: {}",
-                    target_name
-                );
-                model.configure_training(config);
-                model
-                    .train(train_sequences, &train_target_column, config, None, None)
-                    .await?;
+            TrainingContext::Continue {
+                new_sequences,
+                new_targets,
+            } => {
+                self.continue_training(new_sequences, new_targets, config)
+                    .await
             }
-
-            log::info!(
-                "✅ Completed chronological training for target: {}",
-                target_name
-            );
         }
-
-        log::info!("🎉 Multi-target chronological training completed successfully!");
-        Ok(())
     }
 
     /// Continue training with new data for all target models (incremental learning)
@@ -291,7 +161,7 @@ impl MultiTargetLSTMModel {
 
             // Continue training with new data
             model
-                .continue_training(new_sequences, &single_target, config)
+                .train(new_sequences, &single_target, config, None, None)
                 .await?;
 
             log::info!(
@@ -304,11 +174,13 @@ impl MultiTargetLSTMModel {
         Ok(())
     }
 
-    /// Train all target models with the provided data
-    pub async fn train(
+    /// Internal training logic for all target models.
+    async fn train_internal(
         &mut self,
         sequences: &Array3<f64>,
         targets: &Array2<f64>,
+        val_sequences: Option<&Array3<f64>>,
+        val_targets: Option<&Array2<f64>>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!(
@@ -353,6 +225,8 @@ impl MultiTargetLSTMModel {
 
             // Extract single target column for this model
             let single_target = targets.column(i).to_owned().insert_axis(Axis(1));
+            let val_single_target =
+                val_targets.map(|vt| vt.column(i).to_owned().insert_axis(Axis(1)));
 
             log::debug!(
                 "Target {} shape: {:?}, values range: [{:.4}, {:.4}]",
@@ -366,7 +240,13 @@ impl MultiTargetLSTMModel {
 
             // Train individual model
             match model
-                .train(sequences, &single_target, config, None, None)
+                .train(
+                    sequences,
+                    &single_target,
+                    config,
+                    val_sequences,
+                    val_single_target.as_ref(),
+                )
                 .await
             {
                 Ok(_) => {
@@ -655,7 +535,17 @@ mod tests {
         let sequences = Array3::zeros((10, 30, 5)); // [batch, seq_len, features]
         let wrong_targets = Array2::zeros((10, 3)); // Wrong: 3 targets instead of 2
 
-        let result = model.train(&sequences, &wrong_targets, &config).await;
+        let result = model
+            .train(
+                TrainingContext::Standard {
+                    sequences: &sequences,
+                    targets: &wrong_targets,
+                    val_sequences: None,
+                    val_targets: None,
+                },
+                &config,
+            )
+            .await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
