@@ -163,9 +163,7 @@ impl LSTMModel {
         let mut model = Self::new(lstm_config)?;
 
         // Configure attention if enabled
-        if let Some(model_config) = Some(model_config) {
-            model.configure_attention(&model_config.attention)?;
-        }
+        model.configure_attention(&model_config.attention, None)?;
 
         Ok(model)
     }
@@ -174,6 +172,7 @@ impl LSTMModel {
     pub fn configure_attention(
         &mut self,
         attention_config: &crate::config::model::AttentionConfig,
+        context: Option<&str>,
     ) -> Result<()> {
         if !attention_config.enabled {
             self.use_attention = false;
@@ -193,11 +192,20 @@ impl LSTMModel {
         self.attention_config = Some(module_config);
         self.use_attention = true;
 
-        log::info!(
-            "✅ Attention configured: {} heads, head_dim={}",
-            attention_config.heads,
-            attention_config.head_dim.unwrap_or(64)
-        );
+        // Log with context if provided, otherwise use generic message
+        match context {
+            Some(ctx) => log::info!(
+                "✅ Attention configured for {}: {} heads, head_dim={}",
+                ctx,
+                attention_config.heads,
+                attention_config.head_dim.unwrap_or(64)
+            ),
+            None => log::debug!(
+                "✅ Attention configured: {} heads, head_dim={}",
+                attention_config.heads,
+                attention_config.head_dim.unwrap_or(64)
+            ),
+        }
 
         Ok(())
     }
@@ -214,7 +222,7 @@ impl LSTMModel {
 
             self.attention_layers = Some(attention);
 
-            log::info!(
+            log::debug!(
                 "✅ Attention layers initialized: {} heads, hidden_size={}",
                 attention_config.num_heads,
                 self.config.hidden_size

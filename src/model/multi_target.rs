@@ -60,7 +60,13 @@ impl MultiTargetLSTMModel {
             log::debug!("Creating LSTM model {} for target: {}", i + 1, target_name);
 
             // Each model has single output (1) since rust-lstm limitation
-            let model = LSTMModel::from_model_config(model_config, input_size, 1)?;
+            let mut model = LSTMModel::from_model_config(model_config, input_size, 1)?;
+
+            // Reconfigure attention with target context for better logging
+            if model_config.attention.enabled {
+                model.configure_attention(&model_config.attention, Some(target_name))?;
+            }
+
             models.push(model);
         }
 
