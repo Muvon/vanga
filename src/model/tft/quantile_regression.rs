@@ -235,7 +235,7 @@ impl QuantilePredictions {
             let upper_quantile = 1.0 - alpha / 2.0;
 
             // Find closest quantile indices
-            let _lower_idx = levels
+            let lower_idx = levels
                 .iter()
                 .position(|&q| (q - lower_quantile).abs() < 0.01)
                 .ok_or_else(|| {
@@ -245,7 +245,7 @@ impl QuantilePredictions {
                     ))
                 })?;
 
-            let _upper_idx = levels
+            let upper_idx = levels
                 .iter()
                 .position(|&q| (q - upper_quantile).abs() < 0.01)
                 .ok_or_else(|| {
@@ -255,7 +255,17 @@ impl QuantilePredictions {
                     ))
                 })?;
 
-            // Extract prediction intervals (simplified - would need proper tensor slicing)
+            // Extract prediction intervals using the found indices
+            // TODO: Implement proper tensor slicing to extract quantile values at lower_idx and upper_idx
+            log::debug!(
+                "Prediction interval indices: lower={} (q={}), upper={} (q={})",
+                lower_idx,
+                lower_quantile,
+                upper_idx,
+                upper_quantile
+            );
+
+            // For now, return the full quantiles - proper implementation would slice at indices
             Ok(Some((quantiles.clone(), quantiles.clone())))
         } else {
             Ok(None)

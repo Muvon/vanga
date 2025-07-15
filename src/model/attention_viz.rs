@@ -104,7 +104,17 @@ impl AttentionVisualizer {
         attention_weights: &Tensor,
         prediction_step: usize,
     ) -> Result<AttentionAnalysis> {
-        let _sequence_features = attention_weights.dims2()?.1;
+        let sequence_features = attention_weights.dims2()?.1;
+
+        // Validate dimensions
+        if sequence_features != self.feature_names.len() {
+            return Err(VangaError::ModelError(format!(
+                "Attention weights feature dimension {} doesn't match expected {}",
+                sequence_features,
+                self.feature_names.len()
+            )));
+        }
+
         // Convert tensor to ndarray for processing
         let attention_array = self.tensor_to_array2(attention_weights)?;
 

@@ -120,8 +120,20 @@ impl Backtester {
             .await?;
 
         // Step 8: Clean up temporary files
-        let _ = std::fs::remove_file(&train_path);
-        let _ = std::fs::remove_file(&test_path);
+        if let Err(e) = std::fs::remove_file(&train_path) {
+            log::warn!(
+                "Failed to remove temporary train file {}: {}",
+                train_path.display(),
+                e
+            );
+        }
+        if let Err(e) = std::fs::remove_file(&test_path) {
+            log::warn!(
+                "Failed to remove temporary test file {}: {}",
+                test_path.display(),
+                e
+            );
+        }
 
         let results = BacktestResults {
             symbol: self.config.symbol.clone(),

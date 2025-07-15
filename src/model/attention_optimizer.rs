@@ -289,8 +289,15 @@ impl OptimizedAttention {
     ) -> Result<(Tensor, Tensor)> {
         let seq_len = input.dim(1)?;
         let input_shape = input.shape();
-        let _batch_size = input_shape.dims()[0];
-        let _feature_dim = input_shape.dims()[2];
+        let batch_size = input_shape.dims()[0];
+        let feature_dim = input_shape.dims()[2];
+
+        // Validate input dimensions
+        if batch_size == 0 || feature_dim == 0 {
+            return Err(VangaError::ModelError(
+                "Invalid input dimensions: batch_size and feature_dim must be > 0".to_string(),
+            ));
+        }
 
         let mut outputs = Vec::new();
         let mut all_weights = Vec::new();
@@ -585,17 +592,25 @@ impl HierarchicalAttention {
         // Level 1: Full resolution (recent data)
         let recent_len = std::cmp::min(64, seq_len);
         let recent_data = input.narrow(1, seq_len - recent_len, recent_len)?;
+        let recent_indices: Vec<usize> = (seq_len - recent_len..seq_len).collect();
 
         // Level 2: Half resolution (medium-term data)
         let medium_len = std::cmp::min(128, seq_len / 2);
-        let _medium_indices: Vec<usize> = (recent_len..medium_len).collect();
+        let medium_indices: Vec<usize> = (recent_len..medium_len).collect();
 
         // Level 3: Quarter resolution (long-term data)
         let long_len = std::cmp::min(64, seq_len / 4);
-        let _long_indices: Vec<usize> = (medium_len..long_len).collect();
+        let long_indices: Vec<usize> = (medium_len..long_len).collect();
 
         // For simplicity, just return the recent data
         // In a full implementation, would combine all levels
+        // TODO: Implement proper multi-resolution processing using medium_indices and long_indices
+        log::debug!(
+            "Multi-resolution levels: recent={}, medium={}, long={}",
+            recent_indices.len(),
+            medium_indices.len(),
+            long_indices.len()
+        );
         Ok((recent_data.clone(), recent_data))
     }
 }
