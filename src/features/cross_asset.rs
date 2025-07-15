@@ -458,15 +458,19 @@ impl CrossAssetFeatureGenerator {
                 })?
                 .clone();
         }
-        df = df
-            .with_column(Series::new(
-                "cross_market_sentiment",
-                market_sentiment_values,
-            ))
-            .map_err(|e| {
-                VangaError::FeatureError(format!("Failed to add cross_market_sentiment: {}", e))
-            })?
-            .clone();
+        
+        // Only add cross_market_sentiment if sentiment analysis is enabled
+        if self.config.sentiment_analysis.enabled {
+            df = df
+                .with_column(Series::new(
+                    "cross_market_sentiment",
+                    market_sentiment_values,
+                ))
+                .map_err(|e| {
+                    VangaError::FeatureError(format!("Failed to add cross_market_sentiment: {}", e))
+                })?
+                .clone();
+        }
         if self.config.eth_btc_ratio_enabled {
             df = df
                 .with_column(Series::new("cross_eth_btc_ratio", eth_btc_ratio_values))

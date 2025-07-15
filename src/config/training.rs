@@ -231,56 +231,6 @@ impl TrainingParams {
 
         Ok(())
     }
-
-    /// Validate training parameters for correctness with symbol context
-    pub fn validate_for_symbols(&self, _symbols: &[String]) -> Result<()> {
-        // First run basic validation
-        self.validate()?;
-        // Validate validation split
-        if self.validation_split <= 0.0 || self.validation_split >= 1.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(format!(
-                "validation_split must be between 0.0 and 1.0, got: {}",
-                self.validation_split
-            )));
-        }
-
-        // Validate test split
-        if self.test_split < 0.0 || self.test_split >= 1.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(format!(
-                "test_split must be between 0.0 and 1.0, got: {}",
-                self.test_split
-            )));
-        }
-
-        // Validate combined splits don't exceed 1.0
-        if self.validation_split + self.test_split >= 1.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(format!(
-                "validation_split + test_split must be < 1.0, got: {} + {} = {}",
-                self.validation_split,
-                self.test_split,
-                self.validation_split + self.test_split
-            )));
-        }
-
-        // Validate gradient clipping
-        if let Some(clip) = self.gradient_clip {
-            if clip <= 0.0 {
-                return Err(crate::utils::error::VangaError::ConfigError(format!(
-                    "gradient_clip must be positive, got: {}",
-                    clip
-                )));
-            }
-        }
-
-        // Validate early stopping patience
-        if self.early_stopping_patience == 0 {
-            return Err(crate::utils::error::VangaError::ConfigError(
-                "early_stopping_patience must be greater than 0".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
 }
 
 impl OptimizationConfig {
