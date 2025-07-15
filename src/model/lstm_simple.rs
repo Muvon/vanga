@@ -558,7 +558,7 @@ impl LSTMModel {
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         // Candle handles batching internally, so delegate to unified train
-        self.train(sequences, targets, config).await
+        self.train(sequences, targets, config, None, None).await
     }
 
     /// Configure training parameters from TrainingConfig - EXACT same logic as original
@@ -767,6 +767,9 @@ impl LSTMModel {
         sequences: &Array3<f64>,
         targets: &Array2<f64>,
         config: &crate::config::TrainingConfig,
+        // Optional pre-split validation data (prevents data leakage)
+        val_sequences: Option<&Array3<f64>>,
+        val_targets: Option<&Array2<f64>>,
     ) -> Result<()> {
         let total_samples = sequences.shape()[0];
         log::info!(
@@ -789,27 +792,46 @@ impl LSTMModel {
         let validation_split = config.training.validation_split;
         let use_validation = validation_split > 0.0;
 
-        // Prepare training and validation data
-        let (train_sequences, train_targets, val_sequences, val_targets) = if use_validation {
-            log::info!(
-                "📊 Using validation split: {:.1}%",
-                validation_split * 100.0
-            );
+        // Prepare training and validation data - handle pre-split vs internal split
+        let (train_sequences, train_targets, _val_sequences_final, _val_targets_final) =
+            if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
+                // Use pre-split chronological validation data (prevents data leakage)
+                log::info!(
+                    "📊 Using pre-split chronological validation: {} train, {} val samples",
+                    sequences.shape()[0],
+                    val_seq.shape()[0]
+                );
+                (
+                    sequences.to_owned(),
+                    targets.to_owned(),
+                    Some(val_seq.to_owned()),
+                    Some(val_tgt.to_owned()),
+                )
+            } else if use_validation {
+                // Create internal validation split
+                log::info!(
+                    "📊 Using internal validation split: {:.1}%",
+                    validation_split * 100.0
+                );
 
-            let train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
-            let train_seq = sequences.slice(s![0..train_samples, .., ..]).to_owned();
-            let train_tgt = targets.slice(s![0..train_samples, ..]).to_owned();
-            let val_seq = sequences.slice(s![train_samples.., .., ..]).to_owned();
-            let val_tgt = targets.slice(s![train_samples.., ..]).to_owned();
+                let train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
+                let train_seq = sequences.slice(s![0..train_samples, .., ..]).to_owned();
+                let train_tgt = targets.slice(s![0..train_samples, ..]).to_owned();
+                let val_seq = sequences.slice(s![train_samples.., .., ..]).to_owned();
+                let val_tgt = targets.slice(s![train_samples.., ..]).to_owned();
 
-            (train_seq, train_tgt, Some(val_seq), Some(val_tgt))
-        } else {
-            log::info!("📊 Training without validation split");
-            (sequences.to_owned(), targets.to_owned(), None, None)
-        };
+                (train_seq, train_tgt, Some(val_seq), Some(val_tgt))
+            } else {
+                // No validation
+                log::info!("📊 Training without validation");
+                (sequences.to_owned(), targets.to_owned(), None, None)
+            };
 
         let total_train_samples = train_sequences.shape()[0];
-        let total_val_samples = val_sequences.as_ref().map(|v| v.shape()[0]).unwrap_or(0);
+        let total_val_samples = _val_sequences_final
+            .as_ref()
+            .map(|v| v.shape()[0])
+            .unwrap_or(0);
         let batch_size = self.training_config.batch_size;
 
         log::info!(
@@ -1326,7 +1348,8 @@ impl LSTMModel {
         vanga_config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         // Simply delegate to the unified train method which handles all scenarios
-        self.train(sequences, targets, vanga_config).await
+        self.train(sequences, targets, vanga_config, None, None)
+            .await
     }
 
     /// Continue training with new data (incremental learning) - SAME interface as original

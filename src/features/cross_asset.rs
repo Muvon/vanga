@@ -458,7 +458,7 @@ impl CrossAssetFeatureGenerator {
                 })?
                 .clone();
         }
-        
+
         // Only add cross_market_sentiment if sentiment analysis is enabled
         if self.config.sentiment_analysis.enabled {
             df = df
