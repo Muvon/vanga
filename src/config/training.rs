@@ -103,8 +103,7 @@ pub struct OptimizationConfig {
     /// Optimization metric to maximize
     pub metric: OptimizationMetric,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Eq, Ord, PartialEq, PartialOrd, Debug, Clone, Serialize, Deserialize)]
 pub enum EpochConfig {
     Auto { max_epochs: u32 },
     Fixed(u32),
@@ -140,6 +139,116 @@ pub enum OptimizerType {
         beta1: f64,
         beta2: f64,
     },
+    // New optimizers from candle-optimisers crate
+    Adam {
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+        amsgrad: bool,
+    },
+    AdaDelta {
+        rho: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+    },
+    AdaGrad {
+        lr_decay: f64,
+        weight_decay: Option<f64>,
+        initial_accumulator_value: f64,
+        eps: f64,
+    },
+    AdaMax {
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+    },
+    NAdam {
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+        momentum_decay: f64,
+    },
+    RAdam {
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+    },
+    RMSprop {
+        alpha: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+        momentum: f64,
+        centered: bool,
+    },
+}
+
+impl OptimizerType {
+    /// Get default parameters for each optimizer type
+    pub fn default_for_type(optimizer_name: &str) -> Self {
+        match optimizer_name {
+            "SGD" => OptimizerType::SGD {
+                momentum: Some(0.9),
+            },
+            "AdamW" => OptimizerType::AdamW {
+                weight_decay: 0.01,
+                beta1: 0.9,
+                beta2: 0.999,
+            },
+            "Adam" => OptimizerType::Adam {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: None,
+                amsgrad: false,
+            },
+            "AdaDelta" => OptimizerType::AdaDelta {
+                rho: 0.9,
+                eps: 1e-6,
+                weight_decay: None,
+            },
+            "AdaGrad" => OptimizerType::AdaGrad {
+                lr_decay: 0.0,
+                weight_decay: None,
+                initial_accumulator_value: 0.0,
+                eps: 1e-10,
+            },
+            "AdaMax" => OptimizerType::AdaMax {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: None,
+            },
+            "NAdam" => OptimizerType::NAdam {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: None,
+                momentum_decay: 0.004,
+            },
+            "RAdam" => OptimizerType::RAdam {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: None,
+            },
+            "RMSprop" => OptimizerType::RMSprop {
+                alpha: 0.99,
+                eps: 1e-8,
+                weight_decay: None,
+                momentum: 0.0,
+                centered: false,
+            },
+            _ => OptimizerType::AdamW {
+                weight_decay: 0.01,
+                beta1: 0.9,
+                beta2: 0.999,
+            }, // Default to AdamW
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +338,283 @@ impl TrainingParams {
             )));
         }
 
+        // Validate optimizer parameters
+        self.validate_optimizer()?;
+
+        Ok(())
+    }
+
+    /// Validate optimizer-specific parameters
+    fn validate_optimizer(&self) -> Result<()> {
+        match &self.optimizer {
+            OptimizerType::SGD { momentum } => {
+                if let Some(m) = momentum {
+                    if *m < 0.0 || *m >= 1.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "SGD momentum must be between 0.0 and 1.0, got: {}",
+                            m
+                        )));
+                    }
+                }
+            }
+            OptimizerType::AdamW {
+                weight_decay,
+                beta1,
+                beta2,
+            } => {
+                if *weight_decay < 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdamW weight_decay must be non-negative, got: {}",
+                        weight_decay
+                    )));
+                }
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdamW beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdamW beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+            }
+            OptimizerType::Adam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                amsgrad: _,
+            } => {
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Adam beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Adam beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Adam eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "Adam weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+            }
+            OptimizerType::AdaDelta {
+                rho,
+                eps,
+                weight_decay,
+            } => {
+                if *rho <= 0.0 || *rho >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaDelta rho must be between 0.0 and 1.0, got: {}",
+                        rho
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaDelta eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "AdaDelta weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+            }
+            OptimizerType::AdaGrad {
+                lr_decay,
+                weight_decay,
+                initial_accumulator_value,
+                eps,
+            } => {
+                if *lr_decay < 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaGrad lr_decay must be non-negative, got: {}",
+                        lr_decay
+                    )));
+                }
+                if *initial_accumulator_value < 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaGrad initial_accumulator_value must be non-negative, got: {}",
+                        initial_accumulator_value
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaGrad eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "AdaGrad weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+            }
+            OptimizerType::AdaMax {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => {
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaMax beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaMax beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdaMax eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "AdaMax weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+            }
+            OptimizerType::NAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+            } => {
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "NAdam beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "NAdam beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "NAdam eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if *momentum_decay < 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "NAdam momentum_decay must be non-negative, got: {}",
+                        momentum_decay
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "NAdam weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+            }
+            OptimizerType::RAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => {
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "RAdam beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "RAdam beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "RAdam eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "RAdam weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+            }
+            OptimizerType::RMSprop {
+                alpha,
+                eps,
+                weight_decay,
+                momentum,
+                centered: _,
+            } => {
+                if *alpha <= 0.0 || *alpha >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "RMSprop alpha must be between 0.0 and 1.0, got: {}",
+                        alpha
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "RMSprop eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if *momentum < 0.0 || *momentum >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "RMSprop momentum must be between 0.0 and 1.0, got: {}",
+                        momentum
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "RMSprop weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

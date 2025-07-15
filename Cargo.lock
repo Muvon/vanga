@@ -382,6 +382,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-optimisers"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e83284c45ed1264237f61b3a079b4be53e55e0920625f90dd47a44ce1d73c1f"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "log",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3640,6 +3651,7 @@ dependencies = [
  "bincode",
  "candle-core",
  "candle-nn",
+ "candle-optimisers",
  "chrono",
  "clap",
  "config",

@@ -13,7 +13,7 @@ epochs = { Auto = { max_epochs = 1000 } }
 # epochs = { Fixed = 500 }
 
 # ============================================================================
-# OPTIMIZER CONFIGURATION - Choose between SGD and AdamW
+# OPTIMIZER CONFIGURATION - Choose from 9 available optimizers
 # ============================================================================
 # AdamW (RECOMMENDED): Modern optimizer with adaptive learning rates and weight decay
 # - Better convergence for most cryptocurrency datasets
@@ -24,6 +24,44 @@ optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
 # SGD: Traditional optimizer, good for fine-tuning
 # optimizer = { SGD = { momentum = 0.9 } }  # momentum not yet implemented in Candle
 # optimizer = { SGD = {} }  # Basic SGD without momentum
+
+# ============================================================================
+# EXTENDED OPTIMIZER OPTIONS - Advanced optimizers from candle-optimisers
+# ============================================================================
+
+# Adam: Classic adaptive optimizer, good general-purpose choice
+# - Similar to AdamW but without weight decay regularization
+# optimizer = { Adam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0, amsgrad = false } }
+
+# AdaDelta: Adaptive learning rate without manual tuning
+# - Good for sparse gradients and noisy data
+# - Automatically adapts learning rate based on gradient history
+# optimizer = { AdaDelta = { rho = 0.95, eps = 1e-6, weight_decay = 0.0 } }
+
+# AdaGrad: Adaptive gradient algorithm for sparse features
+# - Accumulates squared gradients for adaptive learning rates
+# - Good for sparse data but can slow down over time
+# optimizer = { AdaGrad = { lr_decay = 0.0, weight_decay = 0.0, initial_accumulator_value = 0.0, eps = 1e-10 } }
+
+# AdaMax: Variant of Adam based on infinity norm
+# - More stable than Adam for some problems
+# - Good for problems with large gradients
+# optimizer = { AdaMax = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0 } }
+
+# NAdam: Nesterov-accelerated Adam
+# - Combines Adam with Nesterov momentum
+# - Often converges faster than standard Adam
+# optimizer = { NAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0, momentum_decay = 0.004 } }
+
+# RAdam: Rectified Adam with variance rectification
+# - Addresses the variance issue in Adam's early training stages
+# - More stable convergence than Adam
+# optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0 } }
+
+# RMSprop: Root Mean Square Propagation
+# - Good for RNNs and non-stationary objectives
+# - Adapts learning rate based on recent gradient magnitudes
+# optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.0, momentum = 0.0, centered = false } }
 
 # ============================================================================
 # LEARNING RATE CONFIGURATION - Advanced optimization strategies

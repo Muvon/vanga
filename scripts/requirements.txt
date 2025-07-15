@@ -1,0 +1,23 @@
+# Python Requirements for VANGA Optimizer Benchmarking
+# Install with: pip install -r scripts/requirements.txt
+
+# Core data processing
+pandas>=1.5.0
+numpy>=1.21.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Configuration parsing
+toml>=0.10.0
+
+# Optional: Enhanced plotting
+plotly>=5.0.0
+
+# Optional: Statistical analysis
+scipy>=1.7.0
+scikit-learn>=1.0.0
+
+# Optional: Progress bars
+tqdm>=4.60.0

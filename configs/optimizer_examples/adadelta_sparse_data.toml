@@ -1,0 +1,59 @@
+# VANGA AdaDelta Optimizer Configuration - Sparse Data Specialist
+# Optimized for sparse gradients and automatic learning rate adaptation
+# Best for: Sparse features, low-frequency trading, automatic LR tuning
+
+[training]
+# AdaDelta: Adaptive learning rate without manual tuning
+# - Automatically adapts learning rate based on gradient history
+# - Good for sparse gradients and noisy data
+# - No manual learning rate tuning required
+optimizer = { AdaDelta = { rho = 0.95, eps = 1e-6, weight_decay = 0.01 } }
+
+# Fixed learning rate (AdaDelta adapts automatically)
+learning_rate = { Fixed = 1.0 }  # AdaDelta doesn't use external LR
+
+# Extended training for automatic adaptation
+epochs = 120
+batch_size = 28  # Smaller batches for sparse data
+warmup_epochs = 0  # No warmup needed for AdaDelta
+early_stopping = { patience = 20, min_delta = 0.0002 }
+
+# Larger validation for sparse data stability
+validation_split = 0.25
+shuffle_training = false
+
+# Moderate regularization for sparse features
+dropout_rate = 0.22
+l2_regularization = 0.0012
+
+[model]
+# Architecture optimized for sparse features
+hidden_units = 96
+num_layers = 2
+sequence_length = 45
+bidirectional = false
+
+[features]
+# Sparse-friendly technical indicators
+technical_indicators = [
+    "sma_20", "ema_12", "rsi_14", "macd", "bollinger_bands",
+    "volume_sma", "atr_14", "obv", "mfi_14", "cci_20"
+]
+
+# Essential cross-asset features
+cross_asset_features = [
+    "btc_dominance", "eth_btc_ratio"
+]
+
+[data]
+# Preprocessing optimized for sparse data
+normalize_features = true
+handle_outliers = true
+outlier_threshold = 3.0
+fill_missing_method = "forward_fill"  # Good for sparse data
+
+[targets]
+# Conservative targets for sparse data
+price_targets = ["close_4h", "close_1d"]
+direction_targets = ["direction_4h", "direction_1d"]
+volatility_targets = ["volatility_4h"]

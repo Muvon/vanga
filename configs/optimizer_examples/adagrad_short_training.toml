@@ -1,0 +1,61 @@
+# VANGA AdaGrad Optimizer Configuration - Early Training Specialist
+# Optimized for early training phases and sparse features (USE WITH CAUTION)
+# Best for: Short training runs, sparse feature sets, initial exploration
+
+[training]
+# AdaGrad: Adaptive gradient algorithm for sparse features
+# WARNING: Learning rate decays over time - not suitable for long training
+# - Accumulates squared gradients for adaptive learning rates
+# - Good for sparse data but can slow down significantly over time
+# - Use only for short training runs or initial exploration
+optimizer = { AdaGrad = { lr_decay = 0.0, weight_decay = 0.005, initial_acc = 0.0, eps = 1e-10 } }
+
+# Higher initial learning rate (will decay automatically)
+learning_rate = { Fixed = 0.01 }  # AdaGrad handles decay internally
+
+# SHORT training to avoid learning rate decay issues
+epochs = 30  # CRITICAL: Keep short to avoid LR decay problems
+batch_size = 16  # Smaller batches for stability
+warmup_epochs = 0  # No warmup needed
+early_stopping = { patience = 8, min_delta = 0.001 }
+
+# Smaller validation split for short training
+validation_split = 0.15
+shuffle_training = false
+
+# Lower regularization for short training
+dropout_rate = 0.15
+l2_regularization = 0.0005
+
+[model]
+# Simpler architecture for short training
+hidden_units = 64
+num_layers = 1
+sequence_length = 30  # Shorter sequences for quick training
+bidirectional = false
+
+[features]
+# Essential indicators only for quick training
+technical_indicators = [
+    "sma_20", "ema_12", "rsi_14", "macd", "volume_sma"
+]
+
+# Minimal cross-asset features
+cross_asset_features = ["btc_dominance"]
+
+[data]
+# Simple preprocessing for quick training
+normalize_features = true
+handle_outliers = true
+outlier_threshold = 3.0
+
+[targets]
+# Single primary target for quick training
+price_targets = ["close_1h"]
+direction_targets = ["direction_1h"]
+
+# WARNING NOTES:
+# - AdaGrad learning rate decays over time - not suitable for long training
+# - Use only for initial exploration or very short training runs
+# - Consider switching to AdamW or RMSprop for production training
+# - Monitor training loss carefully - if it plateaus early, stop training
