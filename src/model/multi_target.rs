@@ -524,6 +524,7 @@ mod tests {
                     patience: 10,
                     min_delta: 0.0001,
                 },
+                device: crate::config::training::DeviceConfig::Auto,
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
             },

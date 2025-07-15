@@ -223,6 +223,7 @@ impl Backtester {
             continue_training: false,
             features: FeatureConfig::default(),
             training: crate::config::training::TrainingParams {
+                device: crate::config::training::DeviceConfig::Auto,
                 epochs: crate::config::training::EpochConfig::Fixed(5), // Very short training for testing
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16), // Smaller batch size
                 learning_rate: crate::config::training::LearningRateConfig::Fixed(0.001),

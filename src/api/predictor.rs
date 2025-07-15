@@ -18,6 +18,19 @@ impl Predictor {
         let symbol = &self.config.symbols[0]; // Use first symbol for single-symbol prediction
         log::info!("Starting prediction for symbol: {}", symbol);
 
+        // Initialize device from configuration
+        let device_string = self.config.device.to_device_string();
+        let device = crate::utils::device::DeviceManager::new(&device_string)?;
+        log::info!(
+            "🔧 Using device: {} ({})",
+            device_string,
+            match device {
+                candle_core::Device::Cpu => "CPU",
+                candle_core::Device::Cuda(_) => "NVIDIA CUDA GPU",
+                candle_core::Device::Metal(_) => "Apple Metal GPU",
+            }
+        );
+
         // Resolve data file path using the same logic as training
         let data_file_path = crate::utils::file_discovery::resolve_symbol_data_path(
             &self.config.input_path,

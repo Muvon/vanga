@@ -15,6 +15,7 @@ struct TrainParams {
     continue_training: bool,
     horizons: Option<Vec<String>>,
     config: Option<PathBuf>,
+    device: String,
     attention: bool,
     tft: bool,
     batch: bool,
@@ -33,6 +34,7 @@ struct PredictParams {
     realtime: bool,
     source: Option<String>,
     interval: Option<String>,
+    device: String,
 }
 
 #[derive(Parser)]
@@ -75,6 +77,10 @@ enum Commands {
         /// Training configuration file (includes all features and settings)
         #[arg(long)]
         config: Option<PathBuf>,
+
+        /// Device to use for training (auto, cpu, gpu:0, metal:0)
+        #[arg(long, default_value = "auto")]
+        device: String,
 
         /// Enable attention mechanism for enhanced accuracy
         #[arg(long)]
@@ -148,6 +154,10 @@ enum Commands {
         /// Update interval for real-time mode
         #[arg(long)]
         interval: Option<String>,
+
+        /// Device to use for prediction (auto, cpu, gpu:0, metal:0)
+        #[arg(long, default_value = "auto")]
+        device: String,
     },
 
     /// Model management commands
@@ -255,6 +265,7 @@ async fn main() -> Result<()> {
             continue_training,
             horizons,
             config,
+            device,
             attention,
             tft,
             batch,
@@ -266,6 +277,7 @@ async fn main() -> Result<()> {
                 continue_training,
                 horizons,
                 config,
+                device,
                 attention,
                 tft,
                 batch,
@@ -285,6 +297,7 @@ async fn main() -> Result<()> {
             realtime,
             source,
             interval,
+            device,
         } => {
             let params = PredictParams {
                 symbol,
@@ -298,6 +311,7 @@ async fn main() -> Result<()> {
                 realtime,
                 source,
                 interval,
+                device,
             };
             handle_predict_command(params).await
         }
@@ -371,6 +385,9 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             if let Some(ref horizons) = params.horizons {
                 symbol_config = symbol_config.horizons(horizons.clone());
             }
+
+            // Apply device configuration
+            symbol_config = symbol_config.with_device_config(&params.device)?;
 
             if params.attention {
                 log::info!("🎯 Attention mechanism enabled for {}", symbol);
@@ -490,6 +507,9 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         if let Some(horizons) = params.horizons {
             config = config.horizons(horizons);
         }
+
+        // Apply device configuration
+        config = config.with_device_config(&params.device)?;
         // Features are now part of the main config, no separate handling needed
         if params.attention {
             log::info!("🎯 Attention mechanism enabled for enhanced accuracy");
@@ -614,6 +634,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
             if let Some(min_confidence) = params.min_confidence {
                 config = config.min_confidence(min_confidence);
             }
+
+            // Apply device configuration
+            config = config.with_device_config(&params.device)?;
 
             // Resolve data file path
             let data_file_path =

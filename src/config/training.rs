@@ -40,6 +40,8 @@ pub struct TrainingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingParams {
+    /// Device to use for training
+    pub device: DeviceConfig,
     /// Maximum number of epochs ("auto" for early stopping)
     pub epochs: EpochConfig,
 
@@ -72,6 +74,38 @@ pub struct TrainingParams {
 
     /// Print training progress every N epochs (1 = every epoch, 10 = every 10 epochs)
     pub print_every: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DeviceConfig {
+    Auto,
+    CPU,
+    GPU(usize),
+    Metal(usize),
+}
+
+impl DeviceConfig {
+    /// Convert DeviceConfig to string format expected by DeviceManager
+    pub fn to_device_string(&self) -> String {
+        match self {
+            DeviceConfig::Auto => "auto".to_string(),
+            DeviceConfig::CPU => "cpu".to_string(),
+            DeviceConfig::GPU(index) => format!("gpu:{}", index),
+            DeviceConfig::Metal(index) => format!("metal:{}", index),
+        }
+    }
+}
+
+impl std::fmt::Display for DeviceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_device_string())
+    }
+}
+
+impl Default for DeviceConfig {
+    fn default() -> Self {
+        DeviceConfig::Auto
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -694,6 +728,7 @@ impl Default for TrainingParams {
             epochs: EpochConfig::Auto { max_epochs: 1000 }, // Auto early stopping by default
             batch_size: BatchSizeConfig::Auto {
                 min_size: 32,
+
                 max_size: 512,
             },
             learning_rate: LearningRateConfig::Adaptive {
@@ -710,6 +745,7 @@ impl Default for TrainingParams {
             learning_schedule: None, // No schedule by default
             validation_split: 0.2,   // 20% validation for early stopping
             test_split: 0.1,
+            device: DeviceConfig::Auto,
             early_stopping: EarlyStoppingConfig {
                 patience: 50,
                 min_delta: 0.00005,
@@ -838,6 +874,32 @@ impl TrainingConfig {
             symbols
         );
         Ok(())
+    }
+
+    /// Set device configuration from string
+    pub fn with_device_config(mut self, device_str: &str) -> Result<Self> {
+        self.training.device = match device_str.to_lowercase().as_str() {
+            "auto" => DeviceConfig::Auto,
+            "cpu" => DeviceConfig::CPU,
+            device_str if device_str.starts_with("gpu:") => {
+                let index = device_str[4..].parse::<usize>().map_err(|_| {
+                    VangaError::ConfigError(format!("Invalid GPU index in device config: {}", device_str))
+                })?;
+                DeviceConfig::GPU(index)
+            }
+            device_str if device_str.starts_with("metal:") => {
+                let index = device_str[6..].parse::<usize>().map_err(|_| {
+                    VangaError::ConfigError(format!("Invalid Metal index in device config: {}", device_str))
+                })?;
+                DeviceConfig::Metal(index)
+            }
+            _ => return Err(VangaError::ConfigError(format!(
+                "Invalid device configuration: '{}'. Supported options: 'auto', 'cpu', 'gpu:0', 'metal:0'",
+                device_str
+            ))),
+        };
+        log::info!("🔧 Device configuration set to: {}", self.training.device);
+        Ok(self)
     }
 
     /// Enable or disable attention mechanism

@@ -21,6 +21,9 @@ pub struct PredictionConfig {
     /// Minimum confidence threshold for predictions
     pub min_confidence: f64,
 
+    /// Device configuration for prediction (CPU, GPU, Metal, or Auto)
+    pub device: crate::config::training::DeviceConfig,
+
     /// Prediction output configuration
     pub output_config: OutputConfig,
 
@@ -131,6 +134,7 @@ impl Default for PredictionConfig {
             all_horizons: false,
             output_path: None,
             min_confidence: 0.7,
+            device: crate::config::training::DeviceConfig::Auto,
             output_config: OutputConfig::default(),
             ensemble_config: EnsembleConfig::default(),
             post_processing: PostProcessingConfig::default(),
@@ -217,6 +221,32 @@ impl PredictionConfig {
     pub fn min_confidence(mut self, confidence: f64) -> Self {
         self.min_confidence = confidence;
         self
+    }
+
+    /// Set device configuration from string
+    pub fn with_device_config(mut self, device_str: &str) -> crate::utils::error::Result<Self> {
+        self.device = match device_str.to_lowercase().as_str() {
+            "auto" => crate::config::training::DeviceConfig::Auto,
+            "cpu" => crate::config::training::DeviceConfig::CPU,
+            device_str if device_str.starts_with("gpu:") => {
+                let index = device_str[4..].parse::<usize>().map_err(|_| {
+                    crate::utils::error::VangaError::ConfigError(format!("Invalid GPU index in device config: {}", device_str))
+                })?;
+                crate::config::training::DeviceConfig::GPU(index)
+            }
+            device_str if device_str.starts_with("metal:") => {
+                let index = device_str[6..].parse::<usize>().map_err(|_| {
+                    crate::utils::error::VangaError::ConfigError(format!("Invalid Metal index in device config: {}", device_str))
+                })?;
+                crate::config::training::DeviceConfig::Metal(index)
+            }
+            _ => return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "Invalid device configuration: '{}'. Supported options: 'auto', 'cpu', 'gpu:0', 'metal:0'",
+                device_str
+            ))),
+        };
+        log::info!("🔧 Prediction device configuration set to: {}", self.device);
+        Ok(self)
     }
 
     /// Check if this is multi-symbol prediction
