@@ -26,6 +26,7 @@ impl DeviceManager {
             "auto" | "gpu:auto" => Self::auto_select_device(),
             "cpu" => Self::cpu_device(),
             "gpu:0" => Self::specific_gpu_device(0),
+            #[cfg(target_os = "macos")]
             device_str if device_str.starts_with("metal:") => {
                 let index = device_str[6..].parse::<usize>().map_err(|_| {
                     VangaError::ConfigError(format!("Invalid Metal index in device config: {}", device_str))
@@ -87,6 +88,7 @@ impl DeviceManager {
     }
 
     /// Selects a specific Apple Metal device by index (macOS only).
+    #[cfg(target_os = "macos")]
     fn specific_metal_device(ordinal: usize) -> Result<Device> {
         #[cfg(target_os = "macos")]
         {
