@@ -2,7 +2,7 @@
 use crate::config::ModelConfig;
 use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
 use crate::model::loss::CryptoLossFunction;
-// use crate::optimization::objective::MarketRegime; // TODO: Re-enable when CryptoLossFunction is implemented with tensors
+// MarketRegime imported in calculate_loss method
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::{DType, Device, Tensor};

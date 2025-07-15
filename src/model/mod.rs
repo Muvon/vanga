@@ -5,6 +5,7 @@ pub mod attention_viz;
 pub mod loss;
 pub mod lstm_simple;
 pub mod multi_target;
+pub mod tensor_crypto_loss;
 pub mod tft;
 
 pub use attention::{AttentionFactory, AttentionModule, MultiHeadAttention};

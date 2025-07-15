@@ -77,3 +77,20 @@ path = "src/main.rs"
 [lib]
 name = "vanga"
 path = "src/lib.rs"
+
+[profile.dev]
+opt-level = 1          # Basic optimizations without slowing compilation too much
+debug = true           # Keep debug symbols for backtraces
+debug-assertions = true # Keep runtime checks
+overflow-checks = true  # Keep overflow checks
+lto = false            # Disable Link Time Optimization to speed up builds
+codegen-units = 256    # Use more codegen units for faster parallel compilation
+incremental = true     # Enable incremental compilation
+rpath = false          # Disable runtime search path
+
+# Enable static linking
+[profile.release]
+lto = true        # Enable Link Time Optimization
+codegen-units = 1 # Reduce parallel code generation units for better optimization
+panic = "abort"  # Abort on panic for smaller binary size
+strip = true      # Strip symbols from binary
