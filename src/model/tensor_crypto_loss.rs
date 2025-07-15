@@ -8,29 +8,75 @@ use crate::optimization::objective::MarketRegime;
 use crate::utils::error::{Result, VangaError};
 use candle_core::Tensor;
 
-/// Weight configuration for crypto composite loss function
+/// Cached weight tensors for performance optimization
 #[derive(Debug, Clone)]
-struct CryptoCompositeWeights {
+struct CachedWeightTensors {
+    accuracy: Tensor,
+    direction: Tensor,
+    volatility: Tensor,
+    risk: Tensor,
+    regime_multiplier: Tensor,
+}
+
+impl CachedWeightTensors {
+    /// Create cached weight tensors for given device
+    fn new(
+        accuracy_weight: f64,
+        direction_weight: f64,
+        volatility_weight: f64,
+        risk_weight: f64,
+        regime_multiplier: f64,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
+        Ok(Self {
+            accuracy: Tensor::new(accuracy_weight as f32, device).map_err(|e| {
+                VangaError::ModelError(format!("Failed to create accuracy tensor: {}", e))
+            })?,
+            direction: Tensor::new(direction_weight as f32, device).map_err(|e| {
+                VangaError::ModelError(format!("Failed to create direction tensor: {}", e))
+            })?,
+            volatility: Tensor::new(volatility_weight as f32, device).map_err(|e| {
+                VangaError::ModelError(format!("Failed to create volatility tensor: {}", e))
+            })?,
+            risk: Tensor::new(risk_weight as f32, device).map_err(|e| {
+                VangaError::ModelError(format!("Failed to create risk tensor: {}", e))
+            })?,
+            regime_multiplier: Tensor::new(regime_multiplier as f32, device).map_err(|e| {
+                VangaError::ModelError(format!("Failed to create regime tensor: {}", e))
+            })?,
+        })
+    }
+}
+
+/// Configuration for crypto composite loss weights
+#[derive(Debug, Clone, PartialEq)]
+struct CryptoCompositeConfig {
     accuracy_weight: f64,
     direction_weight: f64,
     volatility_weight: f64,
     risk_weight: f64,
 }
 
-/// Tensor-based implementation of crypto loss functions
+/// Tensor-based implementation of crypto loss functions with caching
 pub struct TensorCryptoLossFunction {
     loss_type: CryptoLossFunction,
+    cached_weights: Option<CachedWeightTensors>,
+    last_config: Option<CryptoCompositeConfig>,
 }
 
 impl TensorCryptoLossFunction {
     /// Create new tensor-based crypto loss function
     pub fn new(loss_type: CryptoLossFunction) -> Self {
-        Self { loss_type }
+        Self {
+            loss_type,
+            cached_weights: None,
+            last_config: None,
+        }
     }
 
     /// Calculate loss using tensor operations that maintain gradients
     pub fn calculate_tensor_loss(
-        &self,
+        &mut self,
         predictions: &Tensor,
         targets: &Tensor,
         market_regime: MarketRegime,
@@ -61,7 +107,7 @@ impl TensorCryptoLossFunction {
                 volatility_weight,
                 risk_weight,
             } => {
-                let weights = CryptoCompositeWeights {
+                let composite_config = CryptoCompositeConfig {
                     accuracy_weight: *accuracy_weight,
                     direction_weight: *direction_weight,
                     volatility_weight: *volatility_weight,
@@ -70,7 +116,7 @@ impl TensorCryptoLossFunction {
                 self.calculate_crypto_composite_tensor_loss(
                     predictions,
                     targets,
-                    &weights,
+                    &composite_config,
                     market_regime,
                 )
             }
@@ -114,14 +160,9 @@ impl TensorCryptoLossFunction {
             });
         }
 
-        // Get consecutive differences for direction calculation
-        let pred_slice1 = predictions.narrow(0, 0, pred_shape.dims()[0] - 1)?;
-        let pred_slice2 = predictions.narrow(0, 1, pred_shape.dims()[0] - 1)?;
-        let target_slice1 = targets.narrow(0, 0, pred_shape.dims()[0] - 1)?;
-        let target_slice2 = targets.narrow(0, 1, pred_shape.dims()[0] - 1)?;
-
-        let pred_direction = pred_slice2.sub(&pred_slice1)?;
-        let target_direction = target_slice2.sub(&target_slice1)?;
+        // Optimized: Get consecutive differences for direction calculation
+        let pred_direction = self.calculate_tensor_diff(predictions)?;
+        let target_direction = self.calculate_tensor_diff(targets)?;
 
         // Calculate directional agreement using sign comparison
         // If both positive or both negative, agreement = 1, otherwise 0
@@ -169,6 +210,19 @@ impl TensorCryptoLossFunction {
         pred_volatility.sub(&target_volatility)?.abs().map_err(|e| {
             VangaError::ModelError(format!("Volatility tensor loss calculation failed: {}", e))
         })
+    }
+
+    /// Efficient tensor difference calculation
+    fn calculate_tensor_diff(&self, tensor: &Tensor) -> Result<Tensor> {
+        let shape = tensor.shape();
+        let len = shape.dims()[0];
+
+        let slice1 = tensor.narrow(0, 0, len - 1)?;
+        let slice2 = tensor.narrow(0, 1, len - 1)?;
+
+        slice2
+            .sub(&slice1)
+            .map_err(|e| VangaError::ModelError(format!("Tensor diff calculation failed: {}", e)))
     }
 
     /// Multi-objective loss with horizon weighting
@@ -245,53 +299,105 @@ impl TensorCryptoLossFunction {
             .map_err(|e| VangaError::ModelError(format!("Risk-adjusted tensor loss failed: {}", e)))
     }
 
-    /// Crypto composite loss combining multiple factors
-    fn calculate_crypto_composite_tensor_loss(
-        &self,
-        predictions: &Tensor,
-        targets: &Tensor,
-        weights: &CryptoCompositeWeights,
-        market_regime: MarketRegime,
-    ) -> Result<Tensor> {
-        // Calculate individual loss components
-        let mse_loss = self.calculate_mse_tensor_loss(predictions, targets)?;
-        let directional_loss = self.calculate_directional_tensor_loss(predictions, targets)?;
-        let volatility_loss = self.calculate_volatility_tensor_loss(predictions, targets)?;
+    /// Get or create cached weight tensors for composite loss
+    fn get_cached_weights(
+        &mut self,
+        config: &CryptoCompositeConfig,
+        regime_multiplier: f64,
+        device: &candle_core::Device,
+    ) -> Result<&CachedWeightTensors> {
+        // Check if we need to update cache
+        let needs_update =
+            self.last_config.as_ref() != Some(config) || self.cached_weights.is_none();
 
-        // Create weight tensors
-        let accuracy_tensor = Tensor::new(weights.accuracy_weight as f32, predictions.device())?;
-        let direction_tensor = Tensor::new(weights.direction_weight as f32, predictions.device())?;
-        let volatility_tensor =
-            Tensor::new(weights.volatility_weight as f32, predictions.device())?;
-        let risk_tensor = Tensor::new(weights.risk_weight as f32, predictions.device())?;
+        if needs_update {
+            self.cached_weights = Some(CachedWeightTensors::new(
+                config.accuracy_weight,
+                config.direction_weight,
+                config.volatility_weight,
+                config.risk_weight,
+                regime_multiplier,
+                device,
+            )?);
+            self.last_config = Some(config.clone());
+        }
 
-        // Market regime adjustment
-        let regime_multiplier = match market_regime {
+        Ok(self.cached_weights.as_ref().unwrap())
+    }
+
+    /// Get regime multiplier for market conditions
+    fn get_regime_multiplier(&self, market_regime: MarketRegime) -> f64 {
+        match market_regime {
             MarketRegime::LowVolatility => 0.9,
             MarketRegime::MediumVolatility => 1.0,
             MarketRegime::HighVolatility => 1.2,
             MarketRegime::BullMarket => 1.1,
             MarketRegime::BearMarket => 1.3,
             MarketRegime::RangeBound => 0.8,
-        };
-        let regime_tensor = Tensor::new(regime_multiplier as f32, predictions.device())?;
+        }
+    }
 
-        // Weighted combination
-        let weighted_loss = mse_loss
-            .mul(&accuracy_tensor)?
-            .add(&directional_loss.mul(&direction_tensor)?)?
-            .add(&volatility_loss.mul(&volatility_tensor)?)?
-            .add(&volatility_loss.mul(&risk_tensor)?)?; // Use volatility as risk proxy
+    /// Crypto composite loss combining multiple factors with caching
+    fn calculate_crypto_composite_tensor_loss(
+        &mut self,
+        predictions: &Tensor,
+        targets: &Tensor,
+        config: &CryptoCompositeConfig,
+        market_regime: MarketRegime,
+    ) -> Result<Tensor> {
+        // Calculate all needed loss components first to avoid borrowing issues
+        let mse_loss = if config.accuracy_weight > 0.0 {
+            Some(self.calculate_mse_tensor_loss(predictions, targets)?)
+        } else {
+            None
+        };
+
+        let directional_loss = if config.direction_weight > 0.0 {
+            Some(self.calculate_directional_tensor_loss(predictions, targets)?)
+        } else {
+            None
+        };
+
+        let volatility_loss = if config.volatility_weight > 0.0 || config.risk_weight > 0.0 {
+            Some(self.calculate_volatility_tensor_loss(predictions, targets)?)
+        } else {
+            None
+        };
+
+        // Now get cached weights after all immutable borrows are done
+        let regime_multiplier = self.get_regime_multiplier(market_regime);
+        let weights = self.get_cached_weights(config, regime_multiplier, predictions.device())?;
+
+        // Calculate loss components conditionally (only if weight > 0)
+        let mut total_loss = Tensor::new(0.0f32, predictions.device())?;
+
+        // Now combine them using cached weights
+        if let Some(mse) = mse_loss {
+            total_loss = total_loss.add(&mse.mul(&weights.accuracy)?)?;
+        }
+
+        if let Some(directional) = directional_loss {
+            total_loss = total_loss.add(&directional.mul(&weights.direction)?)?;
+        }
+
+        if let Some(volatility) = volatility_loss {
+            if config.volatility_weight > 0.0 {
+                total_loss = total_loss.add(&volatility.mul(&weights.volatility)?)?;
+            }
+            if config.risk_weight > 0.0 {
+                total_loss = total_loss.add(&volatility.mul(&weights.risk)?)?;
+            }
+        }
 
         // Apply regime adjustment
-        weighted_loss.mul(&regime_tensor).map_err(|e| {
+        total_loss.mul(&weights.regime_multiplier).map_err(|e| {
             VangaError::ModelError(format!("Crypto composite tensor loss failed: {}", e))
         })
     }
 
     /// Directional focused loss
     fn calculate_directional_focused_tensor_loss(
-        &self,
+        &mut self,
         predictions: &Tensor,
         targets: &Tensor,
         direction_penalty: f64,

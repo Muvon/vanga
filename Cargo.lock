@@ -3817,6 +3817,7 @@ dependencies = [
  "csv-async",
  "env_logger",
  "futures",
+ "lazy_static",
  "linemux",
  "linfa",
  "linfa-preprocessing",

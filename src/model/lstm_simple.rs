@@ -1703,21 +1703,16 @@ impl From<candle_core::Error> for VangaError {
 impl LSTMModel {
     /// Calculate loss using configured loss function or default MSE
     fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        if let Some(ref _loss_fn) = self.loss_function {
-            // FIXED: Use tensor operations to maintain gradient computation
-            // Instead of converting to arrays and back, implement loss directly with tensors
+        if let Some(ref loss_fn) = self.loss_function {
+            // OPTIMIZED: Use tensor-based CryptoLossFunction with caching
+            use crate::model::tensor_crypto_loss::TensorCryptoLossFunction;
 
-            // For now, fall back to MSE loss to maintain gradient flow
-            // TODO: Implement CryptoLossFunction with native tensor operations
-            log::debug!(
-                "CryptoLossFunction configured but falling back to MSE to maintain gradients"
-            );
+            let mut tensor_loss_fn = TensorCryptoLossFunction::new(loss_fn.clone());
 
-            predictions
-                .sub(targets)?
-                .sqr()?
-                .mean_all()
-                .map_err(|e| VangaError::ModelError(format!("MSE loss calculation failed: {}", e)))
+            // Use default market regime for now - could be enhanced to detect actual regime
+            let market_regime = crate::optimization::objective::MarketRegime::MediumVolatility;
+
+            tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime)
         } else {
             // Default MSE loss
             predictions
