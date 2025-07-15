@@ -158,13 +158,21 @@ impl MultiTargetLSTMModel {
         &mut self,
         train_sequences: &Array3<f64>,
         train_targets: &Array2<f64>,
-        _val_sequences: &Array3<f64>,
+        val_sequences: &Array3<f64>,
         val_targets: &Array2<f64>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!(
             "🧠 CHRONOLOGICAL multi-target training: {} models with separate validation (no data leakage)",
             self.models.len()
+        );
+
+        // Log validation data dimensions for tracking
+        log::info!(
+            "📊 Validation data: {} train sequences, {} val sequences, {} features",
+            train_sequences.shape()[0],
+            val_sequences.shape()[0],
+            train_sequences.shape()[2]
         );
 
         // Validate input dimensions
@@ -207,15 +215,17 @@ impl MultiTargetLSTMModel {
             if use_early_stopping {
                 // Use unified training method with pre-split chronological validation
                 log::info!(
-                    "🧠 Using chronological training with validation for target: {}",
-                    target_name
+                    "🧠 Using chronological training with validation for target: {} (train: {}, val: {})",
+                    target_name,
+                    train_sequences.shape()[0],
+                    val_sequences.shape()[0]
                 );
                 model
                     .train(
                         train_sequences,
                         &train_target_column,
                         config,
-                        Some(_val_sequences),
+                        Some(val_sequences),
                         Some(&val_target_column),
                     )
                     .await?;
