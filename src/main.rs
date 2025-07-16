@@ -526,8 +526,8 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         let mut model = api::train_model(config.clone()).await?;
         monitor.checkpoint("Model training completed");
 
-        // Set feature configuration in model metadata for prediction use
-        model.set_feature_config(config.features.clone());
+        // Set complete training configuration in model metadata for prediction use
+        model.set_training_config(config.clone());
 
         // Save model
         let model_path = vanga::utils::model_path::get_model_path(&config.symbol);

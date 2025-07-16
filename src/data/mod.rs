@@ -197,21 +197,47 @@ impl DataPipeline {
         // Validate schema
         CryptoDataSchema::validate(&raw_data)?;
 
-        // Preprocess data using training statistics
-        let processed_data = self
-            .preprocessor
-            .process_for_prediction(raw_data, &config.symbols[0])
-            .await?;
+        // Load model to get training config
+        let model_path = crate::utils::model_path::get_model_path(&config.symbols[0]);
+        let model = crate::model::multi_target::MultiTargetLSTMModel::load(&model_path)?;
 
-        // Generate prediction sequences (use default model config for now)
-        let default_model_config = crate::config::ModelConfig::default();
+        // Use stored training config for consistent preprocessing
+        let processed_data = if let Some(training_config) = model.get_training_config() {
+            log::info!("Using stored training config for consistent preprocessing");
+
+            // Apply SAME preprocessing as training
+            let df = self
+                .preprocessor
+                .process_for_training(
+                    raw_data,
+                    &training_config.data,
+                    Some(&training_config.features),
+                )
+                .await?;
+
+            // Apply SAME feature engineering as training
+            let feature_engineer =
+                crate::features::FeatureEngineer::new(training_config.features.clone());
+            feature_engineer.generate_features(df).await?
+        } else {
+            // Fallback for old models without stored training config
+            log::warn!("No training config found in model - using basic preprocessing (may cause feature mismatch)");
+            self.preprocessor
+                .process_for_prediction(raw_data, &config.symbols[0])
+                .await?
+        };
+
+        // Generate prediction sequences using model config from training
+        let model_config = if let Some(training_config) = model.get_training_config() {
+            &training_config.model
+        } else {
+            // Fallback for old models
+            &crate::config::ModelConfig::default()
+        };
+
         let sequences = self
             .sequence_generator
-            .generate_prediction_sequences(
-                processed_data,
-                &config.symbols[0],
-                &default_model_config,
-            )
+            .generate_prediction_sequences(processed_data, &config.symbols[0], model_config)
             .await?;
 
         Ok(sequences)
