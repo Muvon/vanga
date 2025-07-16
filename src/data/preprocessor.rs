@@ -22,27 +22,187 @@ impl DataPreprocessor {
         config: &DataConfig,
         features_config: Option<&crate::config::FeatureConfig>,
     ) -> Result<DataFrame> {
+        log::info!(
+            "Starting data preprocessing for training with {} rows and {} columns",
+            df.height(),
+            df.width()
+        );
+
+        // Validate input DataFrame
+        if df.height() == 0 {
+            return Err(VangaError::DataError(
+                "Cannot process empty DataFrame for training".to_string(),
+            ));
+        }
+
+        // Apply outlier removal if enabled
         df = if config.outlier_handling.enabled {
-            self.remove_outliers(df)? // Reuse existing method
+            log::info!(
+                "Outlier handling enabled: method={:?}, threshold={}",
+                config.outlier_handling.method,
+                config.outlier_handling.threshold
+            );
+
+            let original_rows = df.height();
+
+            let processed_df = match config.outlier_handling.method {
+                crate::config::training::OutlierMethod::IQR => {
+                    self.remove_outliers_iqr(df, config.outlier_handling.threshold)?
+                }
+                crate::config::training::OutlierMethod::ZScore => {
+                    self.remove_outliers_zscore(df, config.outlier_handling.threshold)?
+                }
+                crate::config::training::OutlierMethod::ModifiedZScore => {
+                    self.remove_outliers_modified_zscore(df, config.outlier_handling.threshold)?
+                }
+            };
+
+            let remaining_rows = processed_df.height();
+            if remaining_rows == 0 {
+                return Err(VangaError::DataError(
+                    "All rows were removed during outlier detection. Consider adjusting the threshold or disabling outlier handling.".to_string()
+                ));
+            }
+
+            if remaining_rows < original_rows / 2 {
+                log::warn!("Outlier removal eliminated more than 50% of data ({} -> {} rows). Consider adjusting threshold.",
+                          original_rows, remaining_rows);
+            }
+
+            processed_df
         } else {
+            log::info!(
+                "Outlier handling disabled, keeping all {} rows",
+                df.height()
+            );
             df
         };
 
         // Apply feature engineering if config provided
         if let Some(config) = features_config {
             log::info!("Applying feature engineering from config");
+
             let feature_engineer = crate::features::FeatureEngineer::new(config.clone());
-            df = feature_engineer.generate_features(df).await?;
+
+            match feature_engineer.generate_features(df).await {
+                Ok(engineered_df) => {
+                    df = engineered_df;
+                    log::info!(
+                        "Feature engineering completed: {} columns after processing",
+                        df.width()
+                    );
+                }
+                Err(e) => {
+                    log::error!("Feature engineering failed: {}", e);
+                    return Err(VangaError::DataError(format!(
+                        "Feature engineering failed: {}. Check your feature configuration.",
+                        e
+                    )));
+                }
+            }
 
             // Remove rows with NaN values instead of failing
-            df = self.remove_nan_rows(df)?;
+            match self.remove_nan_rows(df) {
+                Ok(clean_df) => {
+                    df = clean_df;
+                    if df.height() == 0 {
+                        return Err(VangaError::DataError(
+                            "All rows contain NaN values after feature engineering. This indicates a problem with feature calculation.".to_string()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    log::error!("NaN removal failed: {}", e);
+                    return Err(e);
+                }
+            }
 
             // Validate that all remaining data is clean
-            self.validate_features(&df, "after feature engineering and NaN removal")?;
+            if let Err(e) = self.validate_features(&df, "after feature engineering and NaN removal")
+            {
+                log::error!("Feature validation failed: {}", e);
+                return Err(VangaError::DataError(format!(
+                    "Data validation failed after feature engineering: {}. Check feature calculation logic.", e
+                )));
+            }
         }
-        // Apply normalization
-        df = self.normalize_features(df)?;
 
+        // Apply normalization based on configuration
+        log::info!(
+            "Applying {:?} normalization to {} columns",
+            config.normalization,
+            df.width()
+        );
+
+        let original_columns = df.width();
+        df = match config.normalization {
+            crate::config::training::NormalizationMethod::Robust => {
+                match self.normalize_features_robust(df) {
+                    Ok(normalized_df) => normalized_df,
+                    Err(e) => {
+                        log::error!("Robust normalization failed: {}", e);
+                        return Err(VangaError::DataError(format!(
+                            "Robust normalization failed: {}. Check for constant columns or invalid data.", e
+                        )));
+                    }
+                }
+            }
+            crate::config::training::NormalizationMethod::MinMax => {
+                match self.normalize_features_minmax(df) {
+                    Ok(normalized_df) => normalized_df,
+                    Err(e) => {
+                        log::error!("MinMax normalization failed: {}", e);
+                        return Err(VangaError::DataError(format!(
+                            "MinMax normalization failed: {}. Check for constant columns or invalid data.", e
+                        )));
+                    }
+                }
+            }
+            crate::config::training::NormalizationMethod::Standard => {
+                match self.normalize_features_standard(df) {
+                    Ok(normalized_df) => normalized_df,
+                    Err(e) => {
+                        log::error!("Standard normalization failed: {}", e);
+                        return Err(VangaError::DataError(format!(
+                            "Standard normalization failed: {}. Check for constant columns or invalid data.", e
+                        )));
+                    }
+                }
+            }
+            crate::config::training::NormalizationMethod::Quantile => {
+                match self.normalize_features_quantile(df) {
+                    Ok(normalized_df) => normalized_df,
+                    Err(e) => {
+                        log::error!("Quantile normalization failed: {}", e);
+                        return Err(VangaError::DataError(format!(
+                            "Quantile normalization failed: {}. Check for constant columns or invalid data.", e
+                        )));
+                    }
+                }
+            }
+        };
+
+        // Final validation
+        if df.width() != original_columns {
+            log::warn!(
+                "Column count changed during normalization: {} -> {}",
+                original_columns,
+                df.width()
+            );
+        }
+
+        if df.height() == 0 {
+            return Err(VangaError::DataError(
+                "No data remaining after preprocessing. Check your data quality and configuration."
+                    .to_string(),
+            ));
+        }
+
+        log::info!(
+            "Data preprocessing completed successfully: {} rows, {} columns",
+            df.height(),
+            df.width()
+        );
         Ok(df)
     }
 
@@ -51,14 +211,76 @@ impl DataPreprocessor {
         mut df: DataFrame,
         symbol: &str,
     ) -> Result<DataFrame> {
-        log::info!("Processing data for prediction on symbol: {}", symbol);
+        log::info!(
+            "Processing data for prediction on symbol: {} ({} rows, {} columns)",
+            symbol,
+            df.height(),
+            df.width()
+        );
+
+        // Validate input DataFrame
+        if df.height() == 0 {
+            return Err(VangaError::DataError(format!(
+                "Cannot process empty DataFrame for prediction on symbol {}",
+                symbol
+            )));
+        }
 
         // Basic validation for prediction data
-        df = self.validate_prediction_data(df, symbol)?;
+        match self.validate_prediction_data(df, symbol) {
+            Ok(validated_df) => {
+                df = validated_df;
+                log::info!("Prediction data validation passed for symbol {}", symbol);
+            }
+            Err(e) => {
+                log::error!(
+                    "Prediction data validation failed for symbol {}: {}",
+                    symbol,
+                    e
+                );
+                return Err(VangaError::DataError(format!(
+                    "Prediction data validation failed for symbol {}: {}. Ensure required columns (open, high, low, close, volume) are present.",
+                    symbol, e
+                )));
+            }
+        }
 
         // Apply same preprocessing as training (without target-specific operations)
-        df = self.normalize_features(df)?;
+        // For prediction, we should use stored normalization parameters from training
+        // For now, we'll use Robust normalization as default
+        match self.normalize_features_robust(df) {
+            Ok(normalized_df) => {
+                df = normalized_df;
+                log::info!(
+                    "Prediction data normalization completed for symbol {} ({} rows, {} columns)",
+                    symbol,
+                    df.height(),
+                    df.width()
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "Prediction data normalization failed for symbol {}: {}",
+                    symbol,
+                    e
+                );
+                return Err(VangaError::DataError(format!(
+                    "Prediction data normalization failed for symbol {}: {}. Check for constant columns or invalid data.",
+                    symbol, e
+                )));
+            }
+        }
 
+        // Final validation
+        if df.height() == 0 {
+            return Err(VangaError::DataError(format!(
+                "No data remaining after preprocessing for prediction on symbol {}. Check your data quality.",
+                symbol
+            )));
+        }
+
+        log::info!("Prediction data preprocessing completed successfully for symbol {}: {} rows, {} columns",
+                  symbol, df.height(), df.width());
         Ok(df)
     }
 
@@ -73,53 +295,1047 @@ impl DataPreprocessor {
             symbol_data.len()
         );
 
+        // Validate input data
+        if symbol_data.is_empty() {
+            return Err(VangaError::DataError(
+                "Cannot process empty symbol data for cross-asset prediction".to_string(),
+            ));
+        }
+
+        // Validate each symbol's data
+        for (symbol, df) in &symbol_data {
+            if df.height() == 0 {
+                return Err(VangaError::DataError(format!(
+                    "Symbol {} has empty DataFrame for cross-asset prediction",
+                    symbol
+                )));
+            }
+            log::debug!(
+                "Symbol {}: {} rows, {} columns",
+                symbol,
+                df.height(),
+                df.width()
+            );
+        }
+
         // Apply cross-asset feature engineering if enabled
         if features_config.cross_asset.enabled {
+            log::info!(
+                "Cross-asset feature engineering enabled, processing {} symbols",
+                symbol_data.len()
+            );
+
             let cross_asset_generator = crate::features::CrossAssetFeatureGenerator::new(
                 features_config.cross_asset.clone(),
             );
-            cross_asset_generator
+
+            match cross_asset_generator
                 .generate_cross_asset_features(&symbol_data)
                 .await
+            {
+                Ok(processed_data) => {
+                    log::info!(
+                        "Cross-asset feature engineering completed for {} symbols",
+                        processed_data.len()
+                    );
+
+                    // Validate processed data
+                    for (symbol, df) in &processed_data {
+                        if df.height() == 0 {
+                            log::warn!(
+                                "Symbol {} has no data after cross-asset processing",
+                                symbol
+                            );
+                        } else {
+                            log::debug!(
+                                "Symbol {} after cross-asset processing: {} rows, {} columns",
+                                symbol,
+                                df.height(),
+                                df.width()
+                            );
+                        }
+                    }
+
+                    Ok(processed_data)
+                }
+                Err(e) => {
+                    log::error!("Cross-asset feature engineering failed: {}", e);
+                    Err(VangaError::DataError(format!(
+                        "Cross-asset feature engineering failed: {}. Check your cross-asset configuration and ensure all required symbols are present.",
+                        e
+                    )))
+                }
+            }
         } else {
+            log::info!("Cross-asset feature engineering disabled, processing symbols individually");
+
             // Process each symbol individually
             let mut processed_data = std::collections::HashMap::new();
+            let mut processing_errors = Vec::new();
+
             for (symbol, df) in symbol_data {
-                let processed_df = self.process_for_prediction(df, &symbol).await?;
-                processed_data.insert(symbol, processed_df);
+                match self.process_for_prediction(df, &symbol).await {
+                    Ok(processed_df) => {
+                        log::debug!(
+                            "Individual processing completed for symbol {}: {} rows, {} columns",
+                            symbol,
+                            processed_df.height(),
+                            processed_df.width()
+                        );
+                        processed_data.insert(symbol, processed_df);
+                    }
+                    Err(e) => {
+                        log::error!("Individual processing failed for symbol {}: {}", symbol, e);
+                        processing_errors.push(format!("Symbol {}: {}", symbol, e));
+                    }
+                }
             }
+
+            if !processing_errors.is_empty() {
+                return Err(VangaError::DataError(format!(
+                    "Individual symbol processing failed for {} symbols: {}",
+                    processing_errors.len(),
+                    processing_errors.join("; ")
+                )));
+            }
+
+            if processed_data.is_empty() {
+                return Err(VangaError::DataError(
+                    "No symbols were successfully processed for cross-asset prediction".to_string(),
+                ));
+            }
+
+            log::info!(
+                "Individual symbol processing completed for {} symbols",
+                processed_data.len()
+            );
             Ok(processed_data)
         }
     }
 
-    /// Remove outliers using IQR method
-    fn remove_outliers(&self, df: DataFrame) -> Result<DataFrame> {
-        // Simple outlier removal for numeric columns
-        // This is a placeholder - in production you'd want more sophisticated methods
+    fn remove_outliers_iqr(&self, mut df: DataFrame, threshold: f64) -> Result<DataFrame> {
+        log::info!(
+            "Removing outliers using IQR method with threshold: {}",
+            threshold
+        );
+
+        let original_len = df.height();
+        let mut outlier_mask = vec![true; original_len]; // true = keep row
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() {
+                    if let Ok(float_series) = series.f64() {
+                        // Calculate Q1, Q3, and IQR
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            continue;
+                        }
+
+                        let mut sorted_values = values.clone();
+                        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                        let q1 = self.calculate_percentile(&sorted_values, 0.25);
+                        let q3 = self.calculate_percentile(&sorted_values, 0.75);
+                        let iqr = q3 - q1;
+
+                        let lower_bound = q1 - threshold * iqr;
+                        let upper_bound = q3 + threshold * iqr;
+
+                        // Mark outliers
+                        for (i, value) in float_series.into_iter().enumerate() {
+                            if let Some(v) = value {
+                                if v.is_finite() && (v < lower_bound || v > upper_bound) {
+                                    outlier_mask[i] = false;
+                                }
+                            }
+                        }
+
+                        log::debug!(
+                            "Column '{}': Q1={:.4}, Q3={:.4}, IQR={:.4}, bounds=[{:.4}, {:.4}]",
+                            column_name,
+                            q1,
+                            q3,
+                            iqr,
+                            lower_bound,
+                            upper_bound
+                        );
+                    }
+                }
+            }
+        }
+
+        // Filter DataFrame to remove outlier rows
+        let removed_count = outlier_mask.iter().filter(|&&keep| !keep).count();
+
+        if removed_count > 0 {
+            log::info!(
+                "Removed {} outlier rows ({:.1}% of data), keeping {} rows",
+                removed_count,
+                (removed_count as f64 / original_len as f64) * 100.0,
+                original_len - removed_count
+            );
+
+            // Create new DataFrame with only non-outlier rows using slice approach
+            let mut result_rows = Vec::new();
+
+            for (row_idx, keep) in outlier_mask.iter().enumerate() {
+                if *keep {
+                    // Extract this row from the DataFrame
+                    let row_df = df.slice(row_idx as i64, 1);
+                    result_rows.push(row_df);
+                }
+            }
+
+            if !result_rows.is_empty() {
+                // Concatenate all kept rows
+                let mut combined_df = result_rows[0].clone();
+                for row_df in result_rows.into_iter().skip(1) {
+                    combined_df = combined_df.vstack(&row_df)?;
+                }
+                df = combined_df;
+            }
+        } else {
+            log::info!("No outliers detected, keeping all {} rows", original_len);
+        }
+
         Ok(df)
     }
 
-    /// Normalize features for training/prediction
-    fn normalize_features(&self, df: DataFrame) -> Result<DataFrame> {
-        // Apply feature normalization (z-score, min-max, etc.)
-        // This is a placeholder - actual normalization would be implemented here
+    /// Remove outliers using Z-Score method
+    fn remove_outliers_zscore(&self, mut df: DataFrame, threshold: f64) -> Result<DataFrame> {
+        log::info!(
+            "Removing outliers using Z-Score method with threshold: {}",
+            threshold
+        );
+
+        let original_len = df.height();
+        let mut outlier_mask = vec![true; original_len];
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() {
+                    if let Ok(float_series) = series.f64() {
+                        // Calculate mean and standard deviation
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            continue;
+                        }
+
+                        let mean = values.iter().sum::<f64>() / values.len() as f64;
+                        let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                            / values.len() as f64;
+                        let std_dev = variance.sqrt();
+
+                        if std_dev == 0.0 {
+                            continue; // Skip constant columns
+                        }
+
+                        // Mark outliers based on Z-score
+                        for (i, value) in float_series.into_iter().enumerate() {
+                            if let Some(v) = value {
+                                if v.is_finite() {
+                                    let z_score = (v - mean).abs() / std_dev;
+                                    if z_score > threshold {
+                                        outlier_mask[i] = false;
+                                    }
+                                }
+                            }
+                        }
+
+                        log::debug!(
+                            "Column '{}': mean={:.4}, std={:.4}, threshold={:.2}",
+                            column_name,
+                            mean,
+                            std_dev,
+                            threshold
+                        );
+                    }
+                }
+            }
+        }
+
+        // Filter DataFrame
+        let keep_indices: Vec<usize> = outlier_mask
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, keep)| if keep { Some(i) } else { None })
+            .collect();
+
+        let removed_count = original_len - keep_indices.len();
+
+        if removed_count > 0 {
+            log::info!(
+                "Removed {} outlier rows ({:.1}% of data), keeping {} rows",
+                removed_count,
+                (removed_count as f64 / original_len as f64) * 100.0,
+                keep_indices.len()
+            );
+
+            // Create new DataFrame by selecting rows
+            // Create new DataFrame using slice approach
+            let mut result_rows = Vec::new();
+
+            for &row_idx in &keep_indices {
+                let row_df = df.slice(row_idx as i64, 1);
+                result_rows.push(row_df);
+            }
+
+            if !result_rows.is_empty() {
+                let mut combined_df = result_rows[0].clone();
+                for row_df in result_rows.into_iter().skip(1) {
+                    combined_df = combined_df.vstack(&row_df)?;
+                }
+                df = combined_df;
+            }
+        } else {
+            log::info!("No outliers detected, keeping all {} rows", original_len);
+        }
+
+        Ok(df)
+    }
+
+    /// Remove outliers using Modified Z-Score method (more robust)
+    fn remove_outliers_modified_zscore(
+        &self,
+        mut df: DataFrame,
+        threshold: f64,
+    ) -> Result<DataFrame> {
+        log::info!(
+            "Removing outliers using Modified Z-Score method with threshold: {}",
+            threshold
+        );
+
+        let original_len = df.height();
+        let mut outlier_mask = vec![true; original_len];
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() {
+                    if let Ok(float_series) = series.f64() {
+                        // Calculate median and MAD (Median Absolute Deviation)
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            continue;
+                        }
+
+                        let mut sorted_values = values.clone();
+                        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let median = self.calculate_percentile(&sorted_values, 0.5);
+
+                        // Calculate MAD
+                        let mut deviations: Vec<f64> =
+                            values.iter().map(|x| (x - median).abs()).collect();
+                        deviations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let mad = self.calculate_percentile(&deviations, 0.5);
+
+                        if mad == 0.0 {
+                            continue; // Skip constant columns
+                        }
+
+                        // Modified Z-score = 0.6745 * (x - median) / MAD
+                        let scale_factor = 0.6745;
+
+                        // Mark outliers based on Modified Z-score
+                        for (i, value) in float_series.into_iter().enumerate() {
+                            if let Some(v) = value {
+                                if v.is_finite() {
+                                    let modified_z_score = scale_factor * (v - median).abs() / mad;
+                                    if modified_z_score > threshold {
+                                        outlier_mask[i] = false;
+                                    }
+                                }
+                            }
+                        }
+
+                        log::debug!(
+                            "Column '{}': median={:.4}, MAD={:.4}, threshold={:.2}",
+                            column_name,
+                            median,
+                            mad,
+                            threshold
+                        );
+                    }
+                }
+            }
+        }
+
+        // Filter DataFrame
+        let keep_indices: Vec<usize> = outlier_mask
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, keep)| if keep { Some(i) } else { None })
+            .collect();
+
+        let removed_count = original_len - keep_indices.len();
+
+        if removed_count > 0 {
+            log::info!(
+                "Removed {} outlier rows ({:.1}% of data), keeping {} rows",
+                removed_count,
+                (removed_count as f64 / original_len as f64) * 100.0,
+                keep_indices.len()
+            );
+
+            // Create new DataFrame by selecting rows
+            // Create new DataFrame using slice approach
+            let mut result_rows = Vec::new();
+
+            for &row_idx in &keep_indices {
+                let row_df = df.slice(row_idx as i64, 1);
+                result_rows.push(row_df);
+            }
+
+            if !result_rows.is_empty() {
+                let mut combined_df = result_rows[0].clone();
+                for row_df in result_rows.into_iter().skip(1) {
+                    combined_df = combined_df.vstack(&row_df)?;
+                }
+                df = combined_df;
+            }
+        } else {
+            log::info!("No outliers detected, keeping all {} rows", original_len);
+        }
+
+        Ok(df)
+    }
+
+    /// Calculate percentile from sorted values
+    fn calculate_percentile(&self, sorted_values: &[f64], percentile: f64) -> f64 {
+        if sorted_values.is_empty() {
+            return 0.0;
+        }
+
+        let index = (percentile * (sorted_values.len() - 1) as f64).round() as usize;
+        sorted_values[index.min(sorted_values.len() - 1)]
+    }
+
+    /// Calculate comprehensive statistics for all numeric columns
+    pub fn calculate_statistics(&self, df: &DataFrame) -> Result<crate::data::NormalizationStats> {
+        log::info!(
+            "Calculating comprehensive statistics for {} columns",
+            df.width()
+        );
+
+        let mut means = Vec::new();
+        let mut stds = Vec::new();
+        let mut mins = Vec::new();
+        let mut maxs = Vec::new();
+        let mut medians = Vec::new();
+        let mut q25 = Vec::new();
+        let mut q75 = Vec::new();
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() && column_name != "timestamp" {
+                    if let Ok(float_series) = series.f64() {
+                        // Extract valid values
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            log::warn!(
+                                "Column '{}' has no valid values, using default statistics",
+                                column_name
+                            );
+                            means.push(0.0);
+                            stds.push(1.0);
+                            mins.push(0.0);
+                            maxs.push(1.0);
+                            medians.push(0.0);
+                            q25.push(0.0);
+                            q75.push(1.0);
+                            continue;
+                        }
+
+                        // Calculate basic statistics
+                        let mean = values.iter().sum::<f64>() / values.len() as f64;
+                        let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                            / values.len() as f64;
+                        let std_dev = variance.sqrt();
+                        let min_val = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                        let max_val = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+                        // Calculate quantiles
+                        let mut sorted_values = values.clone();
+                        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                        let median = self.calculate_percentile(&sorted_values, 0.5);
+                        let q1 = self.calculate_percentile(&sorted_values, 0.25);
+                        let q3 = self.calculate_percentile(&sorted_values, 0.75);
+
+                        // Store statistics
+                        means.push(mean);
+                        stds.push(std_dev);
+                        mins.push(min_val);
+                        maxs.push(max_val);
+                        medians.push(median);
+                        q25.push(q1);
+                        q75.push(q3);
+
+                        log::debug!("Column '{}': mean={:.4}, std={:.4}, min={:.4}, max={:.4}, median={:.4}, Q1={:.4}, Q3={:.4}",
+                                   column_name, mean, std_dev, min_val, max_val, median, q1, q3);
+                    }
+                }
+            }
+        }
+
+        let stats = crate::data::NormalizationStats {
+            means,
+            stds,
+            mins,
+            maxs,
+            medians,
+            q25,
+            q75,
+        };
+
+        log::info!(
+            "Statistics calculated for {} numeric columns",
+            stats.means.len()
+        );
+        Ok(stats)
+    }
+
+    /// Apply normalization using pre-calculated statistics
+    pub fn apply_normalization_with_stats(
+        &self,
+        df: DataFrame,
+        stats: &crate::data::NormalizationStats,
+        method: &crate::config::training::NormalizationMethod,
+    ) -> Result<DataFrame> {
+        log::info!(
+            "Applying {:?} normalization using pre-calculated statistics",
+            method
+        );
+
+        let mut normalized_columns = Vec::new();
+        let mut stats_index = 0;
+
+        // Process each column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() && column_name != "timestamp" {
+                    if stats_index >= stats.means.len() {
+                        return Err(crate::utils::error::VangaError::DataError(
+                            "Statistics index out of bounds - mismatch between training and prediction data".to_string()
+                        ));
+                    }
+
+                    if let Ok(float_series) = series.f64() {
+                        let normalized_values: Vec<Option<f64>> = match method {
+                            crate::config::training::NormalizationMethod::Robust => {
+                                let median = stats.medians[stats_index];
+                                let iqr = stats.q75[stats_index] - stats.q25[stats_index];
+
+                                if iqr == 0.0 {
+                                    log::warn!(
+                                        "Column '{}' has zero IQR, skipping normalization",
+                                        column_name
+                                    );
+                                    float_series.into_iter().collect()
+                                } else {
+                                    float_series
+                                        .into_iter()
+                                        .map(|v| {
+                                            v.filter(|x| x.is_finite()).map(|x| (x - median) / iqr)
+                                        })
+                                        .collect()
+                                }
+                            }
+                            crate::config::training::NormalizationMethod::MinMax => {
+                                let min_val = stats.mins[stats_index];
+                                let range = stats.maxs[stats_index] - min_val;
+
+                                if range == 0.0 {
+                                    log::warn!(
+                                        "Column '{}' has zero range, skipping normalization",
+                                        column_name
+                                    );
+                                    float_series.into_iter().collect()
+                                } else {
+                                    float_series
+                                        .into_iter()
+                                        .map(|v| {
+                                            v.filter(|x| x.is_finite())
+                                                .map(|x| (x - min_val) / range)
+                                        })
+                                        .collect()
+                                }
+                            }
+                            crate::config::training::NormalizationMethod::Standard => {
+                                let mean = stats.means[stats_index];
+                                let std_dev = stats.stds[stats_index];
+
+                                if std_dev == 0.0 {
+                                    log::warn!(
+                                        "Column '{}' has zero std dev, skipping normalization",
+                                        column_name
+                                    );
+                                    float_series.into_iter().collect()
+                                } else {
+                                    float_series
+                                        .into_iter()
+                                        .map(|v| {
+                                            v.filter(|x| x.is_finite())
+                                                .map(|x| (x - mean) / std_dev)
+                                        })
+                                        .collect()
+                                }
+                            }
+                            crate::config::training::NormalizationMethod::Quantile => {
+                                // For quantile normalization, we would need to store the sorted values
+                                // For now, fall back to robust normalization
+                                log::warn!("Quantile normalization with pre-calculated stats not fully implemented, using robust");
+                                let median = stats.medians[stats_index];
+                                let iqr = stats.q75[stats_index] - stats.q25[stats_index];
+
+                                if iqr == 0.0 {
+                                    float_series.into_iter().collect()
+                                } else {
+                                    float_series
+                                        .into_iter()
+                                        .map(|v| {
+                                            v.filter(|x| x.is_finite()).map(|x| (x - median) / iqr)
+                                        })
+                                        .collect()
+                                }
+                            }
+                        };
+
+                        let normalized_series = Series::new(column_name, normalized_values);
+                        normalized_columns.push(normalized_series);
+                        stats_index += 1;
+
+                        log::debug!(
+                            "Column '{}' normalized using {:?} method",
+                            column_name,
+                            method
+                        );
+                    }
+                } else {
+                    // Keep non-numeric columns as-is
+                    normalized_columns.push(series.clone());
+                }
+            }
+        }
+
+        let normalized_df = DataFrame::new(normalized_columns)?;
+        log::info!(
+            "Normalization completed using pre-calculated statistics for {} columns",
+            stats_index
+        );
+
+        Ok(normalized_df)
+    }
+
+    /// Validate that DataFrame has expected structure for normalization
+    pub fn validate_normalization_compatibility(
+        &self,
+        df: &DataFrame,
+        stats: &crate::data::NormalizationStats,
+    ) -> Result<()> {
+        let numeric_columns: Vec<&str> = df
+            .get_column_names()
+            .into_iter()
+            .filter(|&name| {
+                if let Ok(series) = df.column(name) {
+                    series.dtype().is_numeric() && name != "timestamp"
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        if numeric_columns.len() != stats.means.len() {
+            return Err(crate::utils::error::VangaError::DataError(format!(
+                "Column count mismatch: DataFrame has {} numeric columns, but statistics were calculated for {} columns",
+                numeric_columns.len(),
+                stats.means.len()
+            )));
+        }
+
+        log::info!(
+            "Normalization compatibility validated: {} numeric columns match statistics",
+            numeric_columns.len()
+        );
+        Ok(())
+    }
+
+    /// Apply Robust normalization (uses median and IQR - handles outliers well)
+    fn normalize_features_robust(&self, mut df: DataFrame) -> Result<DataFrame> {
+        log::info!("Applying Robust normalization (median and IQR-based)");
+
+        let mut normalized_columns = Vec::new();
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() && column_name != "timestamp" {
+                    if let Ok(float_series) = series.f64() {
+                        // Calculate robust statistics
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            log::warn!(
+                                "Column '{}' has no valid values, skipping normalization",
+                                column_name
+                            );
+                            continue;
+                        }
+
+                        let mut sorted_values = values.clone();
+                        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                        let median = self.calculate_percentile(&sorted_values, 0.5);
+                        let q1 = self.calculate_percentile(&sorted_values, 0.25);
+                        let q3 = self.calculate_percentile(&sorted_values, 0.75);
+                        let iqr = q3 - q1;
+
+                        if iqr == 0.0 {
+                            log::warn!("Column '{}' has zero IQR (constant values), skipping normalization", column_name);
+                            continue;
+                        }
+
+                        // Apply robust normalization: (x - median) / IQR
+                        let normalized_values: Vec<Option<f64>> = float_series
+                            .into_iter()
+                            .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - median) / iqr))
+                            .collect();
+
+                        let normalized_series = Series::new(column_name, normalized_values);
+                        normalized_columns.push(normalized_series);
+
+                        log::debug!(
+                            "Column '{}': median={:.4}, Q1={:.4}, Q3={:.4}, IQR={:.4}",
+                            column_name,
+                            median,
+                            q1,
+                            q3,
+                            iqr
+                        );
+                    }
+                } else {
+                    // Keep non-numeric columns as-is
+                    normalized_columns.push(series.clone());
+                }
+            }
+        }
+
+        // Create new DataFrame with normalized columns
+        df = DataFrame::new(normalized_columns)?;
+        log::info!("Robust normalization completed for {} columns", df.width());
+
+        Ok(df)
+    }
+
+    /// Apply MinMax normalization (scales to [0,1] range)
+    fn normalize_features_minmax(&self, mut df: DataFrame) -> Result<DataFrame> {
+        log::info!("Applying MinMax normalization (scaling to [0,1] range)");
+
+        let mut normalized_columns = Vec::new();
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() && column_name != "timestamp" {
+                    if let Ok(float_series) = series.f64() {
+                        // Calculate min and max
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            log::warn!(
+                                "Column '{}' has no valid values, skipping normalization",
+                                column_name
+                            );
+                            continue;
+                        }
+
+                        let min_val = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                        let max_val = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                        let range = max_val - min_val;
+
+                        if range == 0.0 {
+                            log::warn!("Column '{}' has zero range (constant values), skipping normalization", column_name);
+                            continue;
+                        }
+
+                        // Apply MinMax normalization: (x - min) / (max - min)
+                        let normalized_values: Vec<Option<f64>> = float_series
+                            .into_iter()
+                            .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - min_val) / range))
+                            .collect();
+
+                        let normalized_series = Series::new(column_name, normalized_values);
+                        normalized_columns.push(normalized_series);
+
+                        log::debug!(
+                            "Column '{}': min={:.4}, max={:.4}, range={:.4}",
+                            column_name,
+                            min_val,
+                            max_val,
+                            range
+                        );
+                    }
+                } else {
+                    // Keep non-numeric columns as-is
+                    normalized_columns.push(series.clone());
+                }
+            }
+        }
+
+        // Create new DataFrame with normalized columns
+        df = DataFrame::new(normalized_columns)?;
+        log::info!("MinMax normalization completed for {} columns", df.width());
+
+        Ok(df)
+    }
+
+    /// Apply Standard normalization (Z-score: mean=0, std=1)
+    fn normalize_features_standard(&self, mut df: DataFrame) -> Result<DataFrame> {
+        log::info!("Applying Standard normalization (Z-score: mean=0, std=1)");
+
+        let mut normalized_columns = Vec::new();
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() && column_name != "timestamp" {
+                    if let Ok(float_series) = series.f64() {
+                        // Calculate mean and standard deviation
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            log::warn!(
+                                "Column '{}' has no valid values, skipping normalization",
+                                column_name
+                            );
+                            continue;
+                        }
+
+                        let mean = values.iter().sum::<f64>() / values.len() as f64;
+                        let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                            / values.len() as f64;
+                        let std_dev = variance.sqrt();
+
+                        if std_dev == 0.0 {
+                            log::warn!("Column '{}' has zero standard deviation (constant values), skipping normalization", column_name);
+                            continue;
+                        }
+
+                        // Apply Standard normalization: (x - mean) / std
+                        let normalized_values: Vec<Option<f64>> = float_series
+                            .into_iter()
+                            .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - mean) / std_dev))
+                            .collect();
+
+                        let normalized_series = Series::new(column_name, normalized_values);
+                        normalized_columns.push(normalized_series);
+
+                        log::debug!(
+                            "Column '{}': mean={:.4}, std={:.4}",
+                            column_name,
+                            mean,
+                            std_dev
+                        );
+                    }
+                } else {
+                    // Keep non-numeric columns as-is
+                    normalized_columns.push(series.clone());
+                }
+            }
+        }
+
+        // Create new DataFrame with normalized columns
+        df = DataFrame::new(normalized_columns)?;
+        log::info!(
+            "Standard normalization completed for {} columns",
+            df.width()
+        );
+
+        Ok(df)
+    }
+
+    /// Apply Quantile normalization (uses quantile transformation)
+    fn normalize_features_quantile(&self, mut df: DataFrame) -> Result<DataFrame> {
+        log::info!("Applying Quantile normalization (quantile transformation)");
+
+        let mut normalized_columns = Vec::new();
+
+        // Process each numeric column
+        for column_name in df.get_column_names() {
+            if let Ok(series) = df.column(column_name) {
+                if series.dtype().is_numeric() && column_name != "timestamp" {
+                    if let Ok(float_series) = series.f64() {
+                        // Calculate quantiles for transformation
+                        let values: Vec<f64> = float_series
+                            .into_iter()
+                            .filter_map(|v| v.filter(|x| x.is_finite()))
+                            .collect();
+
+                        if values.is_empty() {
+                            log::warn!(
+                                "Column '{}' has no valid values, skipping normalization",
+                                column_name
+                            );
+                            continue;
+                        }
+
+                        let mut sorted_values = values.clone();
+                        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                        // Apply quantile transformation
+                        let normalized_values: Vec<Option<f64>> = float_series
+                            .into_iter()
+                            .map(|v| {
+                                v.filter(|x| x.is_finite()).map(|x| {
+                                    // Find the quantile rank of this value
+                                    let rank = sorted_values
+                                        .iter()
+                                        .position(|&val| val >= x)
+                                        .unwrap_or(sorted_values.len() - 1);
+
+                                    // Convert to quantile (0 to 1)
+                                    rank as f64 / (sorted_values.len() - 1) as f64
+                                })
+                            })
+                            .collect();
+
+                        let normalized_series = Series::new(column_name, normalized_values);
+                        normalized_columns.push(normalized_series);
+
+                        log::debug!(
+                            "Column '{}': quantile transformation applied with {} unique values",
+                            column_name,
+                            sorted_values.len()
+                        );
+                    }
+                } else {
+                    // Keep non-numeric columns as-is
+                    normalized_columns.push(series.clone());
+                }
+            }
+        }
+
+        // Create new DataFrame with normalized columns
+        df = DataFrame::new(normalized_columns)?;
+        log::info!(
+            "Quantile normalization completed for {} columns",
+            df.width()
+        );
+
         Ok(df)
     }
 
     /// Validate prediction data format and completeness
     fn validate_prediction_data(&self, df: DataFrame, symbol: &str) -> Result<DataFrame> {
+        log::debug!(
+            "Validating prediction data for symbol {}: {} rows, {} columns",
+            symbol,
+            df.height(),
+            df.width()
+        );
+
         // Validate that required columns exist for the symbol
         let required_columns = ["open", "high", "low", "close", "volume"];
+        let available_columns: Vec<&str> = df.get_column_names();
+        let mut missing_columns = Vec::new();
 
         for col in required_columns {
-            if !df.get_column_names().contains(&col) {
-                return Err(crate::utils::error::VangaError::DataError(format!(
-                    "Missing required column '{}' for symbol {}",
-                    col, symbol
-                )));
+            if !available_columns.contains(&col) {
+                missing_columns.push(col);
             }
         }
 
+        if !missing_columns.is_empty() {
+            return Err(crate::utils::error::VangaError::DataError(format!(
+                "Missing required columns for symbol {}: {}. Available columns: {}. Required columns: {}",
+                symbol,
+                missing_columns.join(", "),
+                available_columns.join(", "),
+                required_columns.join(", ")
+            )));
+        }
+
+        // Validate that required columns have valid data
+        for col in required_columns {
+            if let Ok(series) = df.column(col) {
+                if series.dtype().is_numeric() {
+                    if let Ok(float_series) = series.f64() {
+                        let valid_count = float_series
+                            .into_iter()
+                            .filter(|v| v.is_some_and(|x| x.is_finite()))
+                            .count();
+
+                        if valid_count == 0 {
+                            return Err(crate::utils::error::VangaError::DataError(format!(
+                                "Column '{}' for symbol {} contains no valid numeric values",
+                                col, symbol
+                            )));
+                        }
+
+                        let total_count = float_series.len();
+                        let valid_percentage = (valid_count as f64 / total_count as f64) * 100.0;
+
+                        if valid_percentage < 50.0 {
+                            log::warn!(
+                                "Column '{}' for symbol {} has only {:.1}% valid values ({}/{})",
+                                col,
+                                symbol,
+                                valid_percentage,
+                                valid_count,
+                                total_count
+                            );
+                        }
+
+                        log::debug!(
+                            "Column '{}' for symbol {}: {}/{} valid values ({:.1}%)",
+                            col,
+                            symbol,
+                            valid_count,
+                            total_count,
+                            valid_percentage
+                        );
+                    }
+                } else {
+                    return Err(crate::utils::error::VangaError::DataError(format!(
+                        "Column '{}' for symbol {} is not numeric (type: {:?})",
+                        col,
+                        symbol,
+                        series.dtype()
+                    )));
+                }
+            }
+        }
+
+        log::debug!("Prediction data validation passed for symbol {}", symbol);
         Ok(df)
     }
 
@@ -220,31 +1436,117 @@ impl DataPreprocessor {
 
         Ok(df)
     }
+    /// Validate that all numeric features are finite and log detailed information
     fn validate_features(&self, df: &DataFrame, stage: &str) -> Result<()> {
+        log::debug!(
+            "Validating features at stage: '{}' ({} rows, {} columns)",
+            stage,
+            df.height(),
+            df.width()
+        );
+
         let mut nan_rows = Vec::new();
+        let mut column_stats = Vec::new();
 
         for series in df.get_columns() {
+            let column_name = series.name();
+
             if series.dtype().is_numeric() {
                 if let Ok(float_series) = series.f64() {
+                    let mut valid_count = 0;
+                    let mut nan_count = 0;
+                    let mut inf_count = 0;
+
                     for (i, value) in float_series.into_iter().enumerate() {
-                        if let Some(v) = value {
-                            if !v.is_finite() {
+                        match value {
+                            Some(v) => {
+                                if v.is_finite() {
+                                    valid_count += 1;
+                                } else if v.is_nan() {
+                                    nan_count += 1;
+                                    nan_rows.push(i);
+                                } else {
+                                    inf_count += 1;
+                                    nan_rows.push(i);
+                                }
+                            }
+                            None => {
+                                nan_count += 1;
                                 nan_rows.push(i);
                             }
                         }
                     }
+
+                    let total_count = float_series.len();
+                    let valid_percentage = (valid_count as f64 / total_count as f64) * 100.0;
+
+                    column_stats.push(format!(
+                        "{}: {}/{} valid ({:.1}%), {} NaN, {} Inf",
+                        column_name,
+                        valid_count,
+                        total_count,
+                        valid_percentage,
+                        nan_count,
+                        inf_count
+                    ));
+
+                    if valid_percentage < 90.0 {
+                        log::warn!(
+                            "Column '{}' at stage '{}' has low data quality: {:.1}% valid values",
+                            column_name,
+                            stage,
+                            valid_percentage
+                        );
+                    }
                 }
+            } else {
+                log::debug!(
+                    "Skipping non-numeric column '{}' (type: {:?})",
+                    column_name,
+                    series.dtype()
+                );
             }
         }
 
+        // Log column statistics
+        if !column_stats.is_empty() {
+            log::debug!(
+                "Feature validation statistics at stage '{}': {}",
+                stage,
+                column_stats.join("; ")
+            );
+        }
+
+        // Handle NaN rows
         if !nan_rows.is_empty() {
             nan_rows.sort_unstable();
             nan_rows.dedup();
-            log::warn!("Found {} rows with NaN values at stage '{}'. These rows will be excluded from training.",
-                      nan_rows.len(), stage);
+
+            let nan_percentage = (nan_rows.len() as f64 / df.height() as f64) * 100.0;
+
+            if nan_percentage > 50.0 {
+                return Err(crate::utils::error::VangaError::DataError(format!(
+                    "Too many rows with invalid values at stage '{}': {}/{} rows ({:.1}%) have NaN/Inf values. This indicates a serious data quality issue.",
+                    stage, nan_rows.len(), df.height(), nan_percentage
+                )));
+            } else if nan_percentage > 10.0 {
+                log::warn!("High number of rows with invalid values at stage '{}': {}/{} rows ({:.1}%) have NaN/Inf values",
+                          stage, nan_rows.len(), df.height(), nan_percentage);
+            } else {
+                log::info!("Found {} rows with invalid values at stage '{}' ({:.1}% of data). These rows will be excluded from training.",
+                          nan_rows.len(), stage, nan_percentage);
+            }
+
             log::debug!(
-                "NaN rows indices: {:?}",
+                "Invalid value row indices at stage '{}': {:?}",
+                stage,
                 &nan_rows[..nan_rows.len().min(10)]
+            );
+        } else {
+            log::info!(
+                "All {} rows have valid values at stage '{}'",
+                df.height(),
+                stage
             );
         }
 
