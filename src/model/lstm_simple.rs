@@ -2084,20 +2084,94 @@ impl LSTMModel {
     /// Returns the original gradient norm for monitoring
     fn clip_gradients(
         &self,
-        _grads: &candle_core::backprop::GradStore,
+        grads: &candle_core::backprop::GradStore,
         clip_value: f64,
     ) -> Result<f64> {
-        // For now, implement a simplified version that works with current Candle API
-        // This is a placeholder that logs the clipping request
+        // Calculate gradient norm across all parameters using VarMap
+        let mut total_norm_squared = 0.0f64;
+        let mut param_count = 0;
 
-        log::debug!(
-            "Gradient clipping requested with threshold {:.3} - using original gradients (implementation pending full Candle API support)",
-            clip_value
-        );
+        // Get all variables from the VarMap
+        let all_vars = self.varmap.all_vars();
 
-        // Return a placeholder norm
-        // This maintains the interface while we wait for proper Candle gradient manipulation API
-        Ok(1.0)
+        for var in all_vars.iter() {
+            if let Some(grad) = grads.get(var) {
+                total_norm_squared += self.calculate_tensor_norm_squared(grad)?;
+                param_count += 1;
+            }
+        }
+
+        // Calculate the L2 norm
+        let grad_norm = if total_norm_squared > 0.0 {
+            total_norm_squared.sqrt()
+        } else {
+            0.0
+        };
+
+        // Log gradient statistics
+        if param_count > 0 {
+            log::debug!(
+                "Gradient norm calculated: {:.6} from {} parameters (threshold: {:.3})",
+                grad_norm,
+                param_count,
+                clip_value
+            );
+
+            if grad_norm > clip_value && grad_norm > 0.0 {
+                let clip_ratio = clip_value / grad_norm;
+                log::debug!(
+                    "Gradient clipping would be applied: norm={:.6} > threshold={:.6} (clip ratio: {:.3})",
+                    grad_norm,
+                    clip_value,
+                    clip_ratio
+                );
+            }
+        } else {
+            log::warn!("No gradients found for norm calculation - this may indicate a problem with the model");
+            return Ok(0.0);
+        }
+
+        // Note: Actual gradient clipping would require modifying the gradients in-place
+        // which is not directly supported by the current Candle API.
+        // The optimizer will use the original gradients, but we return the true norm
+        // for monitoring and early stopping decisions.
+
+        Ok(grad_norm)
+    }
+
+    /// Calculate the squared L2 norm of a tensor
+    fn calculate_tensor_norm_squared(&self, tensor: &Tensor) -> Result<f64> {
+        let squared = tensor.sqr().map_err(|e| {
+            VangaError::ModelError(format!(
+                "Failed to square tensor for norm calculation: {}",
+                e
+            ))
+        })?;
+
+        let sum = squared.sum_all().map_err(|e| {
+            VangaError::ModelError(format!("Failed to sum tensor for norm calculation: {}", e))
+        })?;
+
+        // Handle both F32 and F64 tensors
+        let norm_squared: f64 = match sum.dtype() {
+            candle_core::DType::F32 => {
+                let val: f32 = sum.to_scalar().map_err(|e| {
+                    VangaError::ModelError(format!("Failed to convert F32 norm to scalar: {}", e))
+                })?;
+                val as f64
+            }
+            candle_core::DType::F64 => sum.to_scalar().map_err(|e| {
+                VangaError::ModelError(format!("Failed to convert F64 norm to scalar: {}", e))
+            })?,
+            _ => {
+                return Err(VangaError::ModelError(format!(
+                    "Unsupported tensor dtype for norm calculation: {:?}",
+                    sum.dtype()
+                )));
+            }
+        };
+
+        Ok(norm_squared)
     }
 }
 

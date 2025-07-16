@@ -258,8 +258,8 @@ impl OptimizerSelector {
         // Determine market regime
         let market_regime = self.classify_market_regime(volatility, trend_strength, &returns);
 
-        // Calculate feature sparsity (placeholder - would need actual feature data)
-        let feature_sparsity = 0.1; // Assume low sparsity for OHLCV data
+        // Calculate feature sparsity from actual data
+        let feature_sparsity = self.calculate_feature_sparsity(df)?;
 
         // Check for extreme values
         let has_extreme_values = self.detect_extreme_values(&returns);
@@ -704,6 +704,181 @@ impl OptimizerSelector {
             / (returns.len() - 1) as f64;
 
         covariance / variance
+    }
+
+    /// Calculate feature sparsity from DataFrame
+    /// Returns a value between 0.0 (dense) and 1.0 (very sparse)
+    fn calculate_feature_sparsity(&self, df: &DataFrame) -> Result<f64> {
+        let _total_columns = df.width();
+
+        // Skip non-numeric columns and essential OHLCV columns
+        let essential_columns = ["timestamp", "open", "high", "low", "close", "volume"];
+        let mut numeric_columns = Vec::new();
+        let mut total_values = 0usize;
+        let mut zero_or_near_zero_values = 0usize;
+
+        for column_name in df.get_column_names() {
+            // Skip essential columns as they're not considered for sparsity
+            if essential_columns.contains(&column_name) {
+                continue;
+            }
+
+            if let Ok(column) = df.column(column_name) {
+                // Check if column is numeric
+                match column.dtype() {
+                    DataType::Float64 | DataType::Float32 | DataType::Int64 | DataType::Int32 => {
+                        numeric_columns.push(column_name);
+
+                        // Count values and near-zero values
+                        if let Ok(float_series) = column.cast(&DataType::Float64) {
+                            if let Ok(float_chunked) = float_series.f64() {
+                                for value in float_chunked.into_iter().flatten() {
+                                    total_values += 1;
+
+                                    // Consider values close to zero as sparse
+                                    // Use a threshold appropriate for financial data
+                                    if value.abs() < 1e-8 {
+                                        zero_or_near_zero_values += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {} // Skip non-numeric columns
+                }
+            }
+        }
+
+        // Calculate basic sparsity ratio
+        let basic_sparsity = if total_values > 0 {
+            zero_or_near_zero_values as f64 / total_values as f64
+        } else {
+            0.0 // No numeric features means dense (OHLCV only)
+        };
+
+        // Adjust sparsity based on feature count relative to data size
+        let data_size = df.height();
+        let feature_count = numeric_columns.len();
+
+        // High feature-to-sample ratio indicates potential sparsity issues
+        let feature_ratio_penalty = if data_size > 0 {
+            (feature_count as f64 / data_size as f64).min(1.0) * 0.3
+        } else {
+            0.0
+        };
+
+        // Calculate effective sparsity considering correlation
+        let effective_sparsity = if feature_count > 10 {
+            // For many features, estimate correlation-based effective sparsity
+            let correlation_sparsity = self.estimate_correlation_sparsity(df, &numeric_columns)?;
+            (basic_sparsity + correlation_sparsity + feature_ratio_penalty) / 3.0
+        } else {
+            // For few features, use basic sparsity with ratio penalty
+            (basic_sparsity + feature_ratio_penalty) / 2.0
+        };
+
+        let final_sparsity = effective_sparsity.clamp(0.0, 1.0);
+
+        log::debug!(
+            "Feature sparsity calculated: {:.3} (basic: {:.3}, features: {}, samples: {}, zero_values: {}/{})",
+            final_sparsity,
+            basic_sparsity,
+            feature_count,
+            data_size,
+            zero_or_near_zero_values,
+            total_values
+        );
+
+        Ok(final_sparsity)
+    }
+
+    /// Estimate sparsity based on feature correlation patterns
+    fn estimate_correlation_sparsity(
+        &self,
+        df: &DataFrame,
+        numeric_columns: &[&str],
+    ) -> Result<f64> {
+        if numeric_columns.len() < 2 {
+            return Ok(0.0);
+        }
+
+        let mut high_correlation_count = 0;
+        let mut total_pairs = 0;
+
+        // Sample a subset of columns for performance (max 20 columns)
+        let sample_columns: Vec<&str> = if numeric_columns.len() > 20 {
+            numeric_columns
+                .iter()
+                .step_by(numeric_columns.len() / 20)
+                .cloned()
+                .collect()
+        } else {
+            numeric_columns.to_vec()
+        };
+
+        // Calculate correlations between feature pairs
+        for (i, &col1) in sample_columns.iter().enumerate() {
+            for &col2 in sample_columns.iter().skip(i + 1) {
+                if let (Ok(series1), Ok(series2)) = (df.column(col1), df.column(col2)) {
+                    if let (Ok(f1), Ok(f2)) = (
+                        series1.cast(&DataType::Float64),
+                        series2.cast(&DataType::Float64),
+                    ) {
+                        if let (Ok(arr1), Ok(arr2)) = (f1.f64(), f2.f64()) {
+                            let correlation = self.calculate_simple_correlation(arr1, arr2);
+                            total_pairs += 1;
+
+                            // High correlation (>0.8) suggests redundant/sparse effective features
+                            if correlation.abs() > 0.8 {
+                                high_correlation_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // High correlation ratio suggests effective sparsity
+        let correlation_sparsity = if total_pairs > 0 {
+            (high_correlation_count as f64 / total_pairs as f64) * 0.5 // Scale to reasonable range
+        } else {
+            0.0
+        };
+
+        Ok(correlation_sparsity)
+    }
+
+    /// Calculate simple correlation between two float arrays
+    fn calculate_simple_correlation(&self, arr1: &Float64Chunked, arr2: &Float64Chunked) -> f64 {
+        let values1: Vec<f64> = arr1.into_iter().flatten().collect();
+        let values2: Vec<f64> = arr2.into_iter().flatten().collect();
+
+        if values1.len() != values2.len() || values1.len() < 2 {
+            return 0.0;
+        }
+
+        let n = values1.len() as f64;
+        let mean1 = values1.iter().sum::<f64>() / n;
+        let mean2 = values2.iter().sum::<f64>() / n;
+
+        let mut numerator = 0.0;
+        let mut sum_sq1 = 0.0;
+        let mut sum_sq2 = 0.0;
+
+        for (v1, v2) in values1.iter().zip(values2.iter()) {
+            let diff1 = v1 - mean1;
+            let diff2 = v2 - mean2;
+            numerator += diff1 * diff2;
+            sum_sq1 += diff1 * diff1;
+            sum_sq2 += diff2 * diff2;
+        }
+
+        let denominator = (sum_sq1 * sum_sq2).sqrt();
+        if denominator > 1e-10 {
+            numerator / denominator
+        } else {
+            0.0
+        }
     }
 }
 

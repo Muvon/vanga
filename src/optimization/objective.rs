@@ -3,6 +3,9 @@
 //! Defines optimization metrics and objective functions specifically designed
 //! for cryptocurrency forecasting performance evaluation.
 
+use crate::output::structures::{
+    DirectionPrediction, OrderConfig, PriceLevelPrediction, TradingOrders, VolatilityPrediction,
+};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
@@ -416,29 +419,234 @@ impl ObjectiveFunction {
 
         let mut returns = Vec::new();
 
-        // Simple return calculation (this is a placeholder)
-        // In production, this would use actual prediction-based trading signals
+        // Sophisticated trading strategy using TradingOrders infrastructure
+        // Extract multi-target predictions and generate trading signals
         for i in 1..prices.len().min(predictions.nrows()) {
             let price_return = (prices[i] - prices[i - 1]) / prices[i - 1];
+            let current_price = prices[i];
 
-            // Use prediction direction to determine position
-            let prediction_direction = if predictions.ncols() > 0 {
-                predictions[[i, 0]] > 0.5 // Assuming binary prediction
+            // Extract predictions from multi-target array
+            let direction_pred = if predictions.ncols() > 0 {
+                let up_prob = predictions[[i, 0]].clamp(0.0, 1.0);
+                let down_prob = 1.0 - up_prob;
+                let confidence = (up_prob - 0.5).abs() * 2.0; // Convert to 0-1 confidence
+
+                DirectionPrediction {
+                    up_probability: up_prob,
+                    down_probability: down_prob,
+                    prediction: if up_prob > 0.5 {
+                        "UP".to_string()
+                    } else {
+                        "DOWN".to_string()
+                    },
+                    confidence,
+                }
             } else {
-                true
+                // Default neutral prediction
+                DirectionPrediction {
+                    up_probability: 0.5,
+                    down_probability: 0.5,
+                    prediction: "SIDEWAYS".to_string(),
+                    confidence: 0.0,
+                }
             };
 
-            // Calculate strategy return
-            let strategy_return = if prediction_direction {
-                price_return // Long position
+            // Extract volatility prediction (column 1 if available)
+            let volatility_pred = if predictions.ncols() > 1 {
+                let vol_value = predictions[[i, 1]].clamp(0.0, 1.0);
+
+                // Convert prediction value to actual volatility using proper financial scaling
+                // Assume vol_value is a normalized prediction (0-1) that needs to be mapped to realistic volatility
+                let base_daily_vol = 0.02 + (vol_value * 0.08); // Maps 0-1 to 2%-10% daily volatility range
+
+                // Apply proper time horizon scaling using square root of time rule
+                // Formula: σ(t) = σ(daily) × √(t_hours/24)
+                let expected_1h = base_daily_vol * (1.0 / 24.0_f64).sqrt(); // 1h = √(1/24) × daily
+                let expected_4h = base_daily_vol * (4.0 / 24.0_f64).sqrt(); // 4h = √(4/24) × daily
+                let expected_24h = base_daily_vol; // 24h = daily base
+
+                // Classify regime using VANGA's percentile-based thresholds
+                // Based on src/targets/volatility.rs: (0.33, 0.67) percentiles
+                let regime = if vol_value <= 0.33 {
+                    "LOW"
+                } else if vol_value <= 0.67 {
+                    "MEDIUM"
+                } else {
+                    "HIGH"
+                };
+
+                VolatilityPrediction {
+                    expected_1h,
+                    expected_4h,
+                    expected_24h,
+                    regime: regime.to_string(),
+                    confidence: 0.8, // High confidence in volatility estimates
+                }
             } else {
-                -price_return // Short position
+                // Default medium volatility using realistic crypto values
+                VolatilityPrediction {
+                    expected_1h: 0.02 * (1.0 / 24.0_f64).sqrt(), // ~0.41% hourly
+                    expected_4h: 0.02 * (4.0 / 24.0_f64).sqrt(), // ~0.82% 4-hourly
+                    expected_24h: 0.02,                          // 2% daily
+                    regime: "MEDIUM".to_string(),
+                    confidence: 0.5,
+                }
             };
 
-            returns.push(strategy_return);
+            // Extract price level predictions (columns 2+ if available)
+            let price_levels = if predictions.ncols() > 2 {
+                let mut bins = HashMap::new();
+
+                // Create price bins around current price
+                let range_pct = 0.05; // 5% range
+                let lower_bound = current_price * (1.0 - range_pct);
+                let upper_bound = current_price * (1.0 + range_pct);
+
+                bins.insert(
+                    "support".to_string(),
+                    crate::output::structures::PriceBin {
+                        range: [lower_bound, current_price],
+                        price: [lower_bound, current_price],
+                        probability: predictions[[i, 2]].clamp(0.0, 1.0),
+                    },
+                );
+
+                bins.insert(
+                    "resistance".to_string(),
+                    crate::output::structures::PriceBin {
+                        range: [current_price, upper_bound],
+                        price: [current_price, upper_bound],
+                        probability: if predictions.ncols() > 3 {
+                            predictions[[i, 3]].clamp(0.0, 1.0)
+                        } else {
+                            0.5
+                        },
+                    },
+                );
+
+                PriceLevelPrediction {
+                    bins,
+                    most_likely_range: [lower_bound, upper_bound],
+                    confidence: 0.7,
+                }
+            } else {
+                // Default price levels
+                let range_pct = 0.03;
+                let mut bins = HashMap::new();
+                bins.insert(
+                    "support".to_string(),
+                    crate::output::structures::PriceBin {
+                        range: [current_price * (1.0 - range_pct), current_price],
+                        price: [current_price * (1.0 - range_pct), current_price],
+                        probability: 0.5,
+                    },
+                );
+                bins.insert(
+                    "resistance".to_string(),
+                    crate::output::structures::PriceBin {
+                        range: [current_price, current_price * (1.0 + range_pct)],
+                        price: [current_price, current_price * (1.0 + range_pct)],
+                        probability: 0.5,
+                    },
+                );
+
+                PriceLevelPrediction {
+                    bins,
+                    most_likely_range: [
+                        current_price * (1.0 - range_pct),
+                        current_price * (1.0 + range_pct),
+                    ],
+                    confidence: 0.5,
+                }
+            };
+
+            // Calculate ATR from recent price data
+            let atr_value = self.calculate_atr_from_prices(&prices[..i + 1]);
+
+            // Generate trading orders using sophisticated signal generation
+            let config = OrderConfig::default();
+            match TradingOrders::generate(
+                current_price,
+                &direction_pred,
+                &volatility_pred,
+                &price_levels,
+                atr_value,
+                &config,
+            ) {
+                Ok(orders) => {
+                    // Calculate strategy return based on trading orders
+                    let strategy_return = self.calculate_return_from_orders(&orders, price_return);
+                    returns.push(strategy_return);
+                }
+                Err(_) => {
+                    // Fallback to neutral position on order generation failure
+                    returns.push(0.0);
+                }
+            }
         }
 
         Ok(returns)
+    }
+
+    /// Calculate ATR from price data using simple moving average
+    fn calculate_atr_from_prices(&self, prices: &[f64]) -> f64 {
+        if prices.len() < 3 {
+            return prices.last().unwrap_or(&1.0) * 0.02; // Default 2% of price
+        }
+
+        let period = 14.min(prices.len() - 1);
+        let mut true_ranges = Vec::new();
+
+        // Calculate true ranges (simplified - using price changes as proxy)
+        for i in 1..prices.len() {
+            let price_change = (prices[i] - prices[i - 1]).abs();
+            let price_pct = price_change / prices[i - 1];
+            true_ranges.push(price_pct * prices[i]); // Convert back to absolute terms
+        }
+
+        // Calculate simple moving average of true ranges
+        if true_ranges.len() >= period {
+            let recent_ranges: Vec<f64> = true_ranges.iter().rev().take(period).cloned().collect();
+            recent_ranges.iter().sum::<f64>() / recent_ranges.len() as f64
+        } else {
+            true_ranges.iter().sum::<f64>() / true_ranges.len() as f64
+        }
+    }
+
+    /// Calculate strategy return from trading orders
+    fn calculate_return_from_orders(&self, orders: &TradingOrders, price_return: f64) -> f64 {
+        // If no valid trading direction, return neutral
+        if orders.direction == "NEUTRAL" || orders.entry_levels.is_empty() {
+            return 0.0;
+        }
+
+        // Calculate position size based on confidence and risk management
+        let base_position_size = orders.total_position_size;
+
+        // Apply risk-reward adjustment
+        let risk_adjusted_size = if orders.risk_reward_ratio > 2.0 {
+            base_position_size * (1.0 + (orders.risk_reward_ratio - 2.0) * 0.1).min(2.0)
+        } else {
+            base_position_size * 0.5 // Reduce size for poor risk-reward
+        };
+
+        // Calculate directional return
+        let directional_return = match orders.direction.as_str() {
+            "LONG" => price_return * risk_adjusted_size,
+            "SHORT" => -price_return * risk_adjusted_size,
+            _ => 0.0,
+        };
+
+        // Apply volatility-based scaling
+        let volatility_scaling = if orders.atr_multiplier > 2.5 {
+            0.8 // Reduce exposure in high volatility
+        } else if orders.atr_multiplier < 1.5 {
+            1.2 // Increase exposure in low volatility
+        } else {
+            1.0
+        };
+
+        directional_return * volatility_scaling
     }
 
     /// Detect market regime from price data
