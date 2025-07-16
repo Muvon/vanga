@@ -67,7 +67,7 @@ pub struct ModelConfig {
     pub quantile_outputs: Option<TFTQuantileOutputConfig>,
 
     /// Loss function configuration for multi-target training
-    pub loss_function: Option<CryptoLossFunction>,
+    pub loss_function: CryptoLossFunction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +263,7 @@ impl Default for ModelConfig {
                 },
             },
             quantile_outputs: None, // Disabled by default for backward compatibility
-            loss_function: None,    // Use default MSE if not specified
+            loss_function: CryptoLossFunction::MSE, // Use explicit MSE default
         }
     }
 }

@@ -26,7 +26,7 @@ pub enum OptimizationMetric {
     /// Multi-objective combining multiple metrics
     MultiObjective { weights: HashMap<String, f64> },
     /// Crypto-specific composite metric
-    CryptoComposite,
+    Composite,
 }
 
 /// Market regime classification for regime-aware optimization
@@ -75,7 +75,7 @@ impl ObjectiveFunction {
         horizon_weights.insert("7d".to_string(), 0.2);
 
         Self {
-            primary_metric: OptimizationMetric::CryptoComposite,
+            primary_metric: OptimizationMetric::Composite,
             secondary_metrics: vec![
                 OptimizationMetric::SharpeRatio,
                 OptimizationMetric::MaxDrawdown,
@@ -163,7 +163,7 @@ impl ObjectiveFunction {
             OptimizationMetric::MultiObjective { weights } => {
                 self.calculate_multi_objective(predictions, targets, prices, weights)
             }
-            OptimizationMetric::CryptoComposite => {
+            OptimizationMetric::Composite => {
                 self.calculate_crypto_composite(predictions, targets, prices, market_regime)
             }
         }

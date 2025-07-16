@@ -153,10 +153,10 @@ gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding
 # Comment out or remove the [model.loss_function] section entirely to use MSE
 # This is the DEFAULT behavior when no loss function is configured
 
-# OPTION 2: CryptoComposite - Multi-objective crypto-optimized loss (RECOMMENDED)
+# OPTION 2: Composite - Multi-objective crypto-optimized loss (RECOMMENDED)
 # Balances accuracy, direction prediction, volatility awareness, and risk
 [model.loss_function]
-CryptoComposite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
+Composite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
 
 # OPTION 3: DirectionalFocused - Emphasizes directional accuracy for trading
 # [model.loss_function]
@@ -181,7 +181,7 @@ CryptoComposite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_we
 # ============================================================================
 # LOSS FUNCTION WEIGHT EXPLANATIONS
 # ============================================================================
-# CryptoComposite weights:
+# Composite weights:
 #   - accuracy_weight: Base MSE loss weight (0.1-0.4 recommended)
 #   - direction_weight: Directional prediction importance (0.3-0.6 for trading)
 #   - volatility_weight: Volatility prediction weight (0.1-0.3)

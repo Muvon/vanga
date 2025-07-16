@@ -4,7 +4,7 @@
 //! mathematical behavior across different market regimes and data patterns.
 
 use crate::model::loss::CryptoLossFunction;
-use crate::model::tensor_crypto_loss::TensorCryptoLossFunction;
+use crate::model::loss::TensorCryptoLossFunction;
 use crate::optimization::objective::MarketRegime;
 use crate::utils::error::{Result, VangaError};
 use candle_core::{Device, Tensor};
@@ -55,7 +55,7 @@ async fn test_mse_loss_baseline() -> Result<()> {
     let mse_expected = diff.sqr()?.mean_all()?.to_scalar::<f32>()?;
 
     // Test with no loss function (should use MSE)
-    let mut loss_fn = TensorCryptoLossFunction::new(CryptoLossFunction::CryptoComposite {
+    let mut loss_fn = TensorCryptoLossFunction::new(CryptoLossFunction::Composite {
         accuracy_weight: 1.0,
         direction_weight: 0.0,
         volatility_weight: 0.0,
@@ -70,7 +70,7 @@ async fn test_mse_loss_baseline() -> Result<()> {
     let difference = (composite_loss - mse_expected).abs();
     assert!(
         difference < 0.01,
-        "CryptoComposite with accuracy_weight=1.0 should approximate MSE. Expected: {:.6}, Got: {:.6}, Diff: {:.6}",
+        "Composite with accuracy_weight=1.0 should approximate MSE. Expected: {:.6}, Got: {:.6}, Diff: {:.6}",
         mse_expected, composite_loss, difference
     );
 
@@ -178,7 +178,7 @@ async fn test_loss_normalization() -> Result<()> {
     let device = Device::Cpu;
     let (predictions, targets) = create_test_tensors(&device)?;
 
-    // Test CryptoComposite with different weight combinations
+    // Test Composite with different weight combinations
     let configs = vec![
         (1.0, 0.0, 0.0, 0.0),     // Pure MSE
         (0.0, 1.0, 0.0, 0.0),     // Pure directional
@@ -188,7 +188,7 @@ async fn test_loss_normalization() -> Result<()> {
     ];
 
     for (acc_w, dir_w, vol_w, risk_w) in configs {
-        let mut loss_fn = TensorCryptoLossFunction::new(CryptoLossFunction::CryptoComposite {
+        let mut loss_fn = TensorCryptoLossFunction::new(CryptoLossFunction::Composite {
             accuracy_weight: acc_w,
             direction_weight: dir_w,
             volatility_weight: vol_w,
@@ -231,7 +231,7 @@ async fn test_gradient_flow() -> Result<()> {
     // Test gradient flow by computing loss and checking it's differentiable
     // Note: Simplified test without explicit gradient tracking
 
-    let mut loss_fn = TensorCryptoLossFunction::new(CryptoLossFunction::CryptoComposite {
+    let mut loss_fn = TensorCryptoLossFunction::new(CryptoLossFunction::Composite {
         accuracy_weight: 0.3,
         direction_weight: 0.5,
         volatility_weight: 0.2,
@@ -302,8 +302,8 @@ async fn test_loss_scale_consistency() -> Result<()> {
             },
         ),
         (
-            "CryptoComposite",
-            CryptoLossFunction::CryptoComposite {
+            "Composite",
+            CryptoLossFunction::Composite {
                 accuracy_weight: 0.3,
                 direction_weight: 0.5,
                 volatility_weight: 0.2,
@@ -373,7 +373,7 @@ async fn test_array_tensor_consistency() -> Result<()> {
     })?;
 
     // Test with array-based loss function
-    let array_loss_fn = CryptoLossFunction::CryptoComposite {
+    let array_loss_fn = CryptoLossFunction::Composite {
         accuracy_weight: 0.3,
         direction_weight: 0.5,
         volatility_weight: 0.2,

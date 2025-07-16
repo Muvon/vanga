@@ -69,7 +69,7 @@ pub struct LSTMModel {
     varmap: VarMap,
     training_config: TrainingConfig,
     trained: bool,
-    loss_function: Option<CryptoLossFunction>, // Multi-target loss function
+    loss_function: CryptoLossFunction, // Multi-target loss function
 }
 
 /// Serializable model state for persistence - SAME as original
@@ -146,7 +146,7 @@ impl LSTMModel {
             varmap: VarMap::new(),
             training_config,
             trained: false,
-            loss_function: None, // Default to MSE if not configured
+            loss_function: CryptoLossFunction::MSE, // Default to MSE
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -204,7 +204,7 @@ impl LSTMModel {
         // Configure attention if enabled
         model.configure_attention(&model_config.attention, None)?;
 
-        // Configure loss function if specified
+        // Configure loss function
         model.loss_function = model_config.loss_function.clone();
 
         Ok(model)
@@ -1742,26 +1742,16 @@ impl From<candle_core::Error> for VangaError {
 }
 
 impl LSTMModel {
-    /// Calculate loss using configured loss function or default MSE
+    /// Calculate loss using configured loss function
     fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        if let Some(ref loss_fn) = self.loss_function {
-            // FIXED: Use tensor-based CryptoLossFunction with dynamic market regime detection
-            use crate::model::tensor_crypto_loss::TensorCryptoLossFunction;
+        use crate::model::loss::TensorCryptoLossFunction;
 
-            let mut tensor_loss_fn = TensorCryptoLossFunction::new(loss_fn.clone());
+        let mut tensor_loss_fn = TensorCryptoLossFunction::new(self.loss_function.clone());
 
-            // FIXED: Detect actual market regime from data instead of hardcoding
-            let market_regime = self.detect_market_regime(predictions, targets)?;
+        // Detect market regime for crypto-specific losses (MSE ignores this)
+        let market_regime = self.detect_market_regime(predictions, targets)?;
 
-            tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime)
-        } else {
-            // Default MSE loss
-            predictions
-                .sub(targets)?
-                .sqr()?
-                .mean_all()
-                .map_err(|e| VangaError::ModelError(format!("MSE loss calculation failed: {}", e)))
-        }
+        tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime)
     }
 
     /// Detect market regime from prediction and target data patterns
@@ -1827,17 +1817,17 @@ impl LSTMModel {
     /// Get adaptive min_delta for early stopping based on loss function type
     fn get_adaptive_min_delta(&self, base_min_delta: f64) -> f64 {
         match &self.loss_function {
-            Some(crate::model::loss::CryptoLossFunction::CryptoComposite { .. }) => {
-                // CryptoComposite loss has higher scale, need larger min_delta
+            crate::model::loss::CryptoLossFunction::Composite { .. } => {
+                // Composite loss has higher scale, need larger min_delta
                 let adaptive_delta = base_min_delta * 20.0; // 20x larger for composite loss
                 log::debug!(
-                    "🔧 CryptoComposite loss detected: min_delta scaled from {:.6} to {:.6}",
+                    "🔧 Composite loss detected: min_delta scaled from {:.6} to {:.6}",
                     base_min_delta,
                     adaptive_delta
                 );
                 adaptive_delta
             }
-            Some(crate::model::loss::CryptoLossFunction::DirectionalFocused { .. }) => {
+            crate::model::loss::CryptoLossFunction::DirectionalFocused { .. } => {
                 // DirectionalFocused has moderate scale increase
                 let adaptive_delta = base_min_delta * 10.0;
                 log::debug!(
@@ -1847,7 +1837,7 @@ impl LSTMModel {
                 );
                 adaptive_delta
             }
-            Some(crate::model::loss::CryptoLossFunction::RiskAdjusted { .. }) => {
+            crate::model::loss::CryptoLossFunction::RiskAdjusted { .. } => {
                 // RiskAdjusted has moderate scale increase
                 let adaptive_delta = base_min_delta * 15.0;
                 log::debug!(
@@ -1857,7 +1847,7 @@ impl LSTMModel {
                 );
                 adaptive_delta
             }
-            Some(crate::model::loss::CryptoLossFunction::VolatilityAware { .. }) => {
+            crate::model::loss::CryptoLossFunction::VolatilityAware { .. } => {
                 // VolatilityAware can have variable scale
                 let adaptive_delta = base_min_delta * 12.0;
                 log::debug!(
@@ -1867,7 +1857,15 @@ impl LSTMModel {
                 );
                 adaptive_delta
             }
-            Some(_) => {
+            crate::model::loss::CryptoLossFunction::MSE => {
+                // MSE loss uses original min_delta
+                log::debug!(
+                    "🔧 MSE loss detected: min_delta unchanged at {:.6}",
+                    base_min_delta
+                );
+                base_min_delta
+            }
+            _ => {
                 // Other crypto loss functions get moderate scaling
                 let adaptive_delta = base_min_delta * 8.0;
                 log::debug!(
@@ -1877,140 +1875,127 @@ impl LSTMModel {
                 );
                 adaptive_delta
             }
-            None => {
-                // MSE loss uses original min_delta
-                log::debug!(
-                    "🔧 MSE loss detected: min_delta unchanged at {:.6}",
-                    base_min_delta
-                );
-                base_min_delta
-            }
         }
     }
 
     /// Validate loss function configuration and mathematical correctness
     pub fn validate_loss_function(&self) -> Result<()> {
-        if let Some(ref loss_fn) = self.loss_function {
-            match loss_fn {
-                crate::model::loss::CryptoLossFunction::CryptoComposite {
-                    accuracy_weight,
-                    direction_weight,
-                    volatility_weight,
-                    risk_weight,
-                } => {
-                    // Validate weights are non-negative
-                    if *accuracy_weight < 0.0
-                        || *direction_weight < 0.0
-                        || *volatility_weight < 0.0
-                        || *risk_weight < 0.0
-                    {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "CryptoComposite loss weights must be non-negative".to_string(),
-                        ));
-                    }
-
-                    // Validate at least one weight is positive
-                    let total_weight =
-                        accuracy_weight + direction_weight + volatility_weight + risk_weight;
-                    if total_weight <= 0.0 {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "CryptoComposite loss must have at least one positive weight"
-                                .to_string(),
-                        ));
-                    }
-
-                    // Log configuration for debugging
-                    log::info!(
-                        "✅ CryptoComposite loss validated: acc={:.2}, dir={:.2}, vol={:.2}, risk={:.2} (total={:.2})",
-                        accuracy_weight, direction_weight, volatility_weight, risk_weight, total_weight
-                    );
-                }
-                crate::model::loss::CryptoLossFunction::DirectionalFocused {
-                    direction_penalty,
-                } => {
-                    if *direction_penalty <= 0.0 {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "DirectionalFocused direction_penalty must be positive".to_string(),
-                        ));
-                    }
-                    log::info!(
-                        "✅ DirectionalFocused loss validated: penalty={:.2}",
-                        direction_penalty
-                    );
-                }
-                crate::model::loss::CryptoLossFunction::RiskAdjusted {
-                    sharpe_weight,
-                    drawdown_weight,
-                } => {
-                    if *sharpe_weight < 0.0 || *drawdown_weight < 0.0 {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "RiskAdjusted loss weights must be non-negative".to_string(),
-                        ));
-                    }
-                    if *sharpe_weight + *drawdown_weight <= 0.0 {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "RiskAdjusted loss must have at least one positive weight".to_string(),
-                        ));
-                    }
-                    log::info!(
-                        "✅ RiskAdjusted loss validated: sharpe={:.2}, drawdown={:.2}",
-                        sharpe_weight,
-                        drawdown_weight
-                    );
-                }
-                crate::model::loss::CryptoLossFunction::VolatilityAware {
-                    volatility_threshold,
-                    penalty_factor,
-                } => {
-                    if *volatility_threshold < 0.0 || *penalty_factor < 0.0 {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "VolatilityAware loss parameters must be non-negative".to_string(),
-                        ));
-                    }
-                    log::info!(
-                        "✅ VolatilityAware loss validated: threshold={:.4}, penalty={:.2}",
-                        volatility_threshold,
-                        penalty_factor
-                    );
-                }
-                crate::model::loss::CryptoLossFunction::RegimeAware { volatility_penalty } => {
-                    if *volatility_penalty < 0.0 {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "RegimeAware volatility_penalty must be non-negative".to_string(),
-                        ));
-                    }
-                    log::info!(
-                        "✅ RegimeAware loss validated: penalty={:.2}",
-                        volatility_penalty
-                    );
-                }
-                crate::model::loss::CryptoLossFunction::MultiObjective { horizon_weights } => {
-                    if horizon_weights.is_empty() {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "MultiObjective loss must have at least one horizon weight".to_string(),
-                        ));
-                    }
-                    if horizon_weights.iter().any(|&w| w < 0.0) {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "MultiObjective horizon weights must be non-negative".to_string(),
-                        ));
-                    }
-                    let total_weight: f64 = horizon_weights.iter().sum();
-                    if total_weight <= 0.0 {
-                        return Err(crate::utils::error::VangaError::ConfigError(
-                            "MultiObjective loss must have at least one positive weight"
-                                .to_string(),
-                        ));
-                    }
-                    log::info!(
-                        "✅ MultiObjective loss validated: {} horizons, total_weight={:.2}",
-                        horizon_weights.len(),
-                        total_weight
-                    );
-                }
+        match &self.loss_function {
+            crate::model::loss::CryptoLossFunction::MSE => {
+                log::info!("✅ Using MSE loss function");
             }
-        } else {
-            log::info!("✅ Using default MSE loss function");
+            crate::model::loss::CryptoLossFunction::Composite {
+                accuracy_weight,
+                direction_weight,
+                volatility_weight,
+                risk_weight,
+            } => {
+                // Validate weights are non-negative
+                if *accuracy_weight < 0.0
+                    || *direction_weight < 0.0
+                    || *volatility_weight < 0.0
+                    || *risk_weight < 0.0
+                {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "Composite loss weights must be non-negative".to_string(),
+                    ));
+                }
+
+                // Validate at least one weight is positive
+                let total_weight =
+                    accuracy_weight + direction_weight + volatility_weight + risk_weight;
+                if total_weight <= 0.0 {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "Composite loss must have at least one positive weight".to_string(),
+                    ));
+                }
+
+                // Log configuration for debugging
+                log::info!(
+                    "✅ Composite loss validated: acc={:.2}, dir={:.2}, vol={:.2}, risk={:.2} (total={:.2})",
+                    accuracy_weight, direction_weight, volatility_weight, risk_weight, total_weight
+                );
+            }
+            crate::model::loss::CryptoLossFunction::DirectionalFocused { direction_penalty } => {
+                if *direction_penalty <= 0.0 {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "DirectionalFocused direction_penalty must be positive".to_string(),
+                    ));
+                }
+                log::info!(
+                    "✅ DirectionalFocused loss validated: penalty={:.2}",
+                    direction_penalty
+                );
+            }
+            crate::model::loss::CryptoLossFunction::RiskAdjusted {
+                sharpe_weight,
+                drawdown_weight,
+            } => {
+                if *sharpe_weight < 0.0 || *drawdown_weight < 0.0 {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "RiskAdjusted loss weights must be non-negative".to_string(),
+                    ));
+                }
+                if *sharpe_weight + *drawdown_weight <= 0.0 {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "RiskAdjusted loss must have at least one positive weight".to_string(),
+                    ));
+                }
+                log::info!(
+                    "✅ RiskAdjusted loss validated: sharpe={:.2}, drawdown={:.2}",
+                    sharpe_weight,
+                    drawdown_weight
+                );
+            }
+            crate::model::loss::CryptoLossFunction::VolatilityAware {
+                volatility_threshold,
+                penalty_factor,
+            } => {
+                if *volatility_threshold < 0.0 || *penalty_factor < 0.0 {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "VolatilityAware loss parameters must be non-negative".to_string(),
+                    ));
+                }
+                log::info!(
+                    "✅ VolatilityAware loss validated: threshold={:.4}, penalty={:.2}",
+                    volatility_threshold,
+                    penalty_factor
+                );
+            }
+            crate::model::loss::CryptoLossFunction::RegimeAware { volatility_penalty } => {
+                if *volatility_penalty < 0.0 {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "RegimeAware volatility_penalty must be non-negative".to_string(),
+                    ));
+                }
+                log::info!(
+                    "✅ RegimeAware loss validated: penalty={:.2}",
+                    volatility_penalty
+                );
+            }
+            crate::model::loss::CryptoLossFunction::MultiObjective { horizon_weights } => {
+                if horizon_weights.is_empty() {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "MultiObjective loss must have at least one horizon weight".to_string(),
+                    ));
+                }
+                if horizon_weights.iter().any(|&w| w < 0.0) {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "MultiObjective horizon weights must be non-negative".to_string(),
+                    ));
+                }
+                let total_weight: f64 = horizon_weights.iter().sum();
+                if total_weight <= 0.0 {
+                    return Err(crate::utils::error::VangaError::ConfigError(
+                        "MultiObjective loss must have at least one positive weight".to_string(),
+                    ));
+                }
+                log::info!(
+                    "✅ MultiObjective loss validated: {} horizons, total_weight={:.2}",
+                    horizon_weights.len(),
+                    total_weight
+                );
+            }
         }
 
         Ok(())

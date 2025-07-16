@@ -5,7 +5,6 @@ pub mod attention_viz;
 pub mod loss;
 pub mod lstm_simple;
 pub mod multi_target;
-pub mod tensor_crypto_loss;
 pub mod tft;
 
 #[cfg(test)]
@@ -17,7 +16,7 @@ pub use attention_optimizer::{
     OptimizedAttention, OptimizedAttentionConfig, OptimizedAttentionFactory,
 };
 pub use attention_viz::{AttentionAnalysis, AttentionVisualizationConfig, AttentionVisualizer};
-pub use loss::CryptoLossFunction;
+pub use loss::{CryptoLossFunction, TensorCryptoLossFunction};
 pub use lstm_simple::LSTMModel;
 pub use multi_target::MultiTargetLSTMModel;
 pub use tft::{
