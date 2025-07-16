@@ -90,10 +90,10 @@ impl MultiHeadAttention {
 
         log::info!(
             "✅ MultiHeadAttention initialized: {} heads, {} head_dim, input_dim={}, total_dim={}",
-            "Created MultiHeadAttention: input_dim={}, num_heads={}, head_dim={}",
-            input_dim,
             config.num_heads,
-            head_dim
+            head_dim,
+            input_dim,
+            config.num_heads * head_dim
         );
 
         Ok(Self {

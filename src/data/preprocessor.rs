@@ -1380,7 +1380,12 @@ impl DataPreprocessor {
                         let iqr = q3 - q1;
 
                         if iqr == 0.0 {
-                            log::warn!("Column '{}' has zero IQR (constant values), skipping normalization", column_name);
+                            log::warn!("Column '{}' has zero IQR (constant values), keeping original values", column_name);
+                            // Keep original values instead of skipping column to maintain feature count consistency
+                            let original_values: Vec<Option<f64>> =
+                                float_series.into_iter().collect();
+                            let normalized_series = Series::new(column_name, original_values);
+                            normalized_columns.push(normalized_series);
                             continue;
                         }
 
@@ -1443,7 +1448,12 @@ impl DataPreprocessor {
                         let range = max_val - min_val;
 
                         if range == 0.0 {
-                            log::warn!("Column '{}' has zero range (constant values), skipping normalization", column_name);
+                            log::warn!("Column '{}' has zero range (constant values), keeping original values", column_name);
+                            // Keep original values instead of skipping column to maintain feature count consistency
+                            let original_values: Vec<Option<f64>> =
+                                float_series.into_iter().collect();
+                            let normalized_series = Series::new(column_name, original_values);
+                            normalized_columns.push(normalized_series);
                             continue;
                         }
 
@@ -1509,7 +1519,12 @@ impl DataPreprocessor {
                         let std_dev = variance.sqrt();
 
                         if std_dev == 0.0 {
-                            log::warn!("Column '{}' has zero standard deviation (constant values), skipping normalization", column_name);
+                            log::warn!("Column '{}' has zero standard deviation (constant values), keeping original values", column_name);
+                            // Keep original values instead of skipping column to maintain feature count consistency
+                            let original_values: Vec<Option<f64>> =
+                                float_series.into_iter().collect();
+                            let normalized_series = Series::new(column_name, original_values);
+                            normalized_columns.push(normalized_series);
                             continue;
                         }
 

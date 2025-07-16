@@ -50,11 +50,52 @@ impl MultiTargetPredictor {
         let sequence_length = prepared_data.sequences.shape()[1];
 
         // Validate input compatibility with model
-        if prepared_data.sequences.shape()[2] != model.get_input_size() {
+        let expected_features = model.get_input_size();
+        let actual_features = prepared_data.sequences.shape()[2];
+
+        if actual_features != expected_features {
+            // Get training configuration from model for debugging
+            let config_info = if let Some(training_config) = model.get_training_config() {
+                format!(
+                    "Technical indicators: {}, Custom features: {}",
+                    training_config.features.technical_indicators.enabled,
+                    training_config.features.custom_features.auto_include_all
+                )
+            } else {
+                "No training config stored (old model format)".to_string()
+            };
+
+            log::error!("🚨 FEATURE MISMATCH DETECTED:");
+            log::error!(
+                "   Expected: {} features (from trained model)",
+                expected_features
+            );
+            log::error!(
+                "   Received: {} features (from current data)",
+                actual_features
+            );
+            log::error!("   Config: {}", config_info);
+            log::error!(
+                "   Generated features: {}",
+                prepared_data.feature_names.len()
+            );
+
+            // Show first 10 and last 10 features for debugging
+            let feature_preview = if prepared_data.feature_names.len() > 20 {
+                format!(
+                    "First 10: {:?} ... Last 10: {:?}",
+                    &prepared_data.feature_names[..10],
+                    &prepared_data.feature_names[prepared_data.feature_names.len() - 10..]
+                )
+            } else {
+                format!("All features: {:?}", prepared_data.feature_names)
+            };
+            log::error!("   {}", feature_preview);
+
             return Err(VangaError::ModelError(format!(
-                "Input feature size mismatch: model expects {}, data has {}",
-                model.get_input_size(),
-                prepared_data.sequences.shape()[2]
+                "Feature count mismatch: model expects {} features but data has {}. This indicates inconsistent feature processing between training and prediction. Check logs above for details.",
+                expected_features,
+                actual_features
             )));
         }
 
