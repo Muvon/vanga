@@ -29,7 +29,7 @@ async fn test_attention_model_creation() -> Result<()> {
 
     if let Some(attention_config) = &model.attention_config {
         assert_eq!(attention_config.num_heads, 4);
-        assert_eq!(attention_config.head_dim, 32);
+        assert_eq!(attention_config.head_dim, Some(32));
         assert_eq!(attention_config.dropout_rate, 0.1);
         assert_eq!(attention_config.temperature_scaling, 1.0);
         assert!(attention_config.use_relative_position);
@@ -154,7 +154,7 @@ fn test_attention_config_validation() {
     // Test valid attention configuration
     let config = AttentionModuleConfig {
         num_heads: 8,
-        head_dim: 64,
+        head_dim: Some(64),
         dropout_rate: 0.1,
         temperature_scaling: 1.0,
         use_relative_position: true,
@@ -162,7 +162,7 @@ fn test_attention_config_validation() {
     };
 
     assert!(config.num_heads > 0);
-    assert!(config.head_dim > 0);
+    assert!(config.head_dim.unwrap_or(0) > 0);
     assert!(config.dropout_rate >= 0.0 && config.dropout_rate <= 1.0);
     assert!(config.temperature_scaling > 0.0);
     assert!(config.max_sequence_length > 0);

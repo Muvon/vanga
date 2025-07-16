@@ -224,7 +224,7 @@ impl LSTMModel {
         // Convert config AttentionConfig to module AttentionConfig
         let module_config = AttentionModuleConfig {
             num_heads: attention_config.heads as usize,
-            head_dim: attention_config.head_dim.unwrap_or(64) as usize, // Auto-optimized default
+            head_dim: Some(attention_config.head_dim.unwrap_or(64) as usize),
             dropout_rate: attention_config.dropout_rate,
             temperature_scaling: attention_config.temperature_scaling,
             use_relative_position: attention_config.use_relative_position,

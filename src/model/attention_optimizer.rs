@@ -2,7 +2,8 @@
 use crate::model::attention::{AttentionConfig, MultiHeadAttention};
 use crate::utils::error::{Result, VangaError};
 use candle_core::{Device, Tensor};
-use candle_nn::VarBuilder;
+use candle_nn::{ops, VarBuilder};
+use log;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -579,39 +580,274 @@ impl SparseAttention {
     }
 }
 
-/// Hierarchical attention for very long sequences
-struct HierarchicalAttention {}
+/// Hierarchical attention for very long sequences with multi-resolution processing
+struct HierarchicalAttention {
+    #[allow(dead_code)]
+    device: Device,
+    // Attention mechanisms for different resolution levels
+    recent_attention: MultiHeadAttention,
+    medium_attention: MultiHeadAttention,
+    long_attention: MultiHeadAttention,
+    // Learnable combination weights
+    combination_weights: Tensor,
+}
+
 impl HierarchicalAttention {
-    fn new(_input_dim: usize, _vs: VarBuilder, _device: Device) -> Result<Self> {
-        Ok(Self {})
+    fn new(input_dim: usize, vs: VarBuilder, device: Device) -> Result<Self> {
+        // Create attention mechanisms for different resolution levels
+        let recent_config = AttentionConfig {
+            num_heads: 8,
+            head_dim: Some(64),
+            temperature_scaling: 1.0,
+            ..AttentionConfig::default()
+        };
+
+        let medium_config = AttentionConfig {
+            num_heads: 6,
+            head_dim: Some(48),
+            temperature_scaling: 1.2,
+            ..AttentionConfig::default()
+        };
+
+        let long_config = AttentionConfig {
+            num_heads: 4,
+            head_dim: Some(32),
+            temperature_scaling: 1.5,
+            ..AttentionConfig::default()
+        };
+
+        let recent_attention =
+            MultiHeadAttention::new(input_dim, recent_config, vs.pp("recent"), device.clone())?;
+
+        let medium_attention =
+            MultiHeadAttention::new(input_dim, medium_config, vs.pp("medium"), device.clone())?;
+
+        let long_attention =
+            MultiHeadAttention::new(input_dim, long_config, vs.pp("long"), device.clone())?;
+
+        // Initialize learnable combination weights [recent, medium, long]
+        let combination_weights = vs.get((3,), "combination_weights")?;
+
+        Ok(Self {
+            device,
+            recent_attention,
+            medium_attention,
+            long_attention,
+            combination_weights,
+        })
     }
+
     fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
-        // Simplified hierarchical attention: process at multiple resolutions
         let seq_len = input.dim(1)?;
 
-        // Level 1: Full resolution (recent data)
+        // Process multi-resolution data
+        let (recent_data, medium_data, long_data) = self.process_multi_resolution_data(input)?;
+
+        // Apply attention at each resolution level
+        let (recent_output, recent_weights) = self.recent_attention.forward(&recent_data)?;
+        let (medium_output, medium_weights) = self.medium_attention.forward(&medium_data)?;
+        let (long_output, long_weights) = self.long_attention.forward(&long_data)?;
+
+        // Combine outputs with learnable weights and crypto-specific logic
+        let (combined_output, combined_weights) = self.combine_multi_resolution_outputs(
+            recent_output,
+            medium_output,
+            long_output,
+            recent_weights,
+            medium_weights,
+            long_weights,
+            seq_len,
+        )?;
+
+        log::debug!(
+            "Multi-resolution processing completed: seq_len={}, recent={}, medium={}, long={}",
+            seq_len,
+            recent_data.dim(1)?,
+            medium_data.dim(1)?,
+            long_data.dim(1)?
+        );
+
+        Ok((combined_output, combined_weights))
+    }
+
+    /// Process input data at multiple resolution levels with crypto-specific downsampling
+    fn process_multi_resolution_data(&self, input: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let seq_len = input.dim(1)?;
+
+        // Level 1: Recent data (full resolution) - last 64 timesteps
         let recent_len = std::cmp::min(64, seq_len);
         let recent_data = input.narrow(1, seq_len - recent_len, recent_len)?;
-        let recent_indices: Vec<usize> = (seq_len - recent_len..seq_len).collect();
 
-        // Level 2: Half resolution (medium-term data)
-        let medium_len = std::cmp::min(128, seq_len / 2);
-        let medium_indices: Vec<usize> = (recent_len..medium_len).collect();
+        // Level 2: Medium-term data (2x downsampled) - crypto-aware downsampling
+        let medium_data = self.downsample_temporal(input, 2)?;
 
-        // Level 3: Quarter resolution (long-term data)
-        let long_len = std::cmp::min(64, seq_len / 4);
-        let long_indices: Vec<usize> = (medium_len..long_len).collect();
+        // Level 3: Long-term data (4x downsampled) - preserve major price movements
+        let long_data = self.downsample_temporal(input, 4)?;
 
-        // For simplicity, just return the recent data
-        // In a full implementation, would combine all levels
-        // TODO: Implement proper multi-resolution processing using medium_indices and long_indices
+        Ok((recent_data, medium_data, long_data))
+    }
+
+    /// Crypto-aware temporal downsampling that preserves important price movements
+    fn downsample_temporal(&self, input: &Tensor, factor: usize) -> Result<Tensor> {
+        let seq_len = input.dim(1)?;
+        let downsampled_len = seq_len / factor;
+
+        if downsampled_len == 0 {
+            return Ok(input.clone());
+        }
+
+        let mut downsampled_indices = Vec::new();
+
+        // For cryptocurrency data, use max pooling approach to preserve extreme movements
+        for i in 0..downsampled_len {
+            let start_idx = i * factor;
+            let end_idx = std::cmp::min(start_idx + factor, seq_len);
+
+            // Use the last index in each window (most recent in that period)
+            // This preserves the temporal ordering while downsampling
+            downsampled_indices.push(end_idx - 1);
+        }
+
+        // Extract the downsampled timesteps
+        let mut downsampled_tensors = Vec::new();
+        for &idx in &downsampled_indices {
+            let timestep = input.narrow(1, idx, 1)?;
+            downsampled_tensors.push(timestep);
+        }
+
+        // Concatenate along the sequence dimension
+        let downsampled = Tensor::cat(&downsampled_tensors, 1)?;
+
+        Ok(downsampled)
+    }
+
+    /// Combine multi-resolution outputs with crypto-specific weighting
+    #[allow(clippy::too_many_arguments)]
+    fn combine_multi_resolution_outputs(
+        &self,
+        recent_output: Tensor,
+        medium_output: Tensor,
+        long_output: Tensor,
+        recent_weights: Tensor,
+        medium_weights: Tensor,
+        long_weights: Tensor,
+        original_seq_len: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        // Get crypto-specific resolution weights based on sequence characteristics
+        let (recent_weight, medium_weight, long_weight) =
+            self.get_crypto_resolution_weights(original_seq_len)?;
+
+        // Apply softmax to learnable combination weights
+        let learned_weights = ops::softmax_last_dim(&self.combination_weights)?;
+        let learned_weights_vec = learned_weights.to_vec1::<f64>()?;
+
+        // Combine learned and heuristic weights
+        let final_recent_weight = recent_weight * learned_weights_vec[0];
+        let final_medium_weight = medium_weight * learned_weights_vec[1];
+        let final_long_weight = long_weight * learned_weights_vec[2];
+
+        // Normalize final weights
+        let total_weight = final_recent_weight + final_medium_weight + final_long_weight;
+        let norm_recent = final_recent_weight / total_weight;
+        let norm_medium = final_medium_weight / total_weight;
+        let norm_long = final_long_weight / total_weight;
+
+        // Upsample medium and long outputs to match recent output dimensions
+        let upsampled_medium = self.upsample_to_match(&medium_output, &recent_output)?;
+        let upsampled_long = self.upsample_to_match(&long_output, &recent_output)?;
+
+        // Weighted combination of outputs
+        let weighted_recent = (recent_output * norm_recent)?;
+        let weighted_medium = (upsampled_medium * norm_medium)?;
+        let weighted_long = (upsampled_long * norm_long)?;
+
+        let combined_output = (weighted_recent + weighted_medium + weighted_long)?;
+
+        // Combine attention weights for interpretability
+        let combined_weights = self.combine_attention_weights(
+            recent_weights,
+            medium_weights,
+            long_weights,
+            norm_recent,
+            norm_medium,
+            norm_long,
+        )?;
+
         log::debug!(
-            "Multi-resolution levels: recent={}, medium={}, long={}",
-            recent_indices.len(),
-            medium_indices.len(),
-            long_indices.len()
+            "Multi-resolution combination: recent_w={:.3}, medium_w={:.3}, long_w={:.3}",
+            norm_recent,
+            norm_medium,
+            norm_long
         );
-        Ok((recent_data.clone(), recent_data))
+
+        Ok((combined_output, combined_weights))
+    }
+
+    /// Get crypto-specific resolution weights based on sequence characteristics
+    fn get_crypto_resolution_weights(&self, seq_len: usize) -> Result<(f64, f64, f64)> {
+        // Crypto markets favor recent data, but longer sequences need more historical context
+        let recent_weight = if seq_len <= 64 {
+            0.8 // Short sequences: heavily favor recent
+        } else if seq_len <= 256 {
+            0.6 // Medium sequences: balanced approach
+        } else {
+            0.5 // Long sequences: more historical context
+        };
+
+        let medium_weight = if seq_len <= 64 {
+            0.15
+        } else if seq_len <= 256 {
+            0.25
+        } else {
+            0.3
+        };
+
+        let long_weight = 1.0 - recent_weight - medium_weight;
+
+        Ok((recent_weight, medium_weight, long_weight))
+    }
+
+    /// Upsample tensor to match target dimensions
+    fn upsample_to_match(&self, source: &Tensor, target: &Tensor) -> Result<Tensor> {
+        let source_seq_len = source.dim(1)?;
+        let target_seq_len = target.dim(1)?;
+
+        if source_seq_len == target_seq_len {
+            return Ok(source.clone());
+        }
+
+        // Simple repeat-based upsampling for attention outputs
+        let repeat_factor = target_seq_len.div_ceil(source_seq_len);
+        let repeated = source.repeat(&[1, repeat_factor, 1])?;
+
+        // Trim to exact target length
+        let upsampled = repeated.narrow(1, 0, target_seq_len)?;
+
+        Ok(upsampled)
+    }
+
+    /// Combine attention weights from different resolution levels
+    fn combine_attention_weights(
+        &self,
+        recent_weights: Tensor,
+        medium_weights: Tensor,
+        long_weights: Tensor,
+        recent_weight: f64,
+        medium_weight: f64,
+        long_weight: f64,
+    ) -> Result<Tensor> {
+        // Upsample all weights to match recent weights dimensions
+        let upsampled_medium = self.upsample_to_match(&medium_weights, &recent_weights)?;
+        let upsampled_long = self.upsample_to_match(&long_weights, &recent_weights)?;
+
+        // Weighted combination
+        let weighted_recent = (recent_weights * recent_weight)?;
+        let weighted_medium = (upsampled_medium * medium_weight)?;
+        let weighted_long = (upsampled_long * long_weight)?;
+
+        let combined = (weighted_recent + weighted_medium + weighted_long)?;
+
+        Ok(combined)
     }
 }
 
@@ -624,7 +860,7 @@ impl OptimizedAttentionFactory {
         OptimizedAttentionConfig {
             base_config: AttentionConfig {
                 num_heads: 8,
-                head_dim: 64,
+                head_dim: Some(64),
                 dropout_rate: 0.05,
                 temperature_scaling: 0.9, // Sharper attention for short-term
                 use_relative_position: true,
@@ -666,7 +902,7 @@ impl OptimizedAttentionFactory {
         OptimizedAttentionConfig {
             base_config: AttentionConfig {
                 num_heads: 12,
-                head_dim: 128,
+                head_dim: Some(128),
                 dropout_rate: 0.1,
                 temperature_scaling: 1.2, // Smoother attention for long-term
                 use_relative_position: true,

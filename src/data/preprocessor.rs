@@ -1924,7 +1924,7 @@ mod tests {
     #[test]
     fn test_interpolation_strategy_selection() {
         let preprocessor = DataPreprocessor;
-        
+
         // Test that interpolation is selected for price-derived features
         assert!(matches!(
             preprocessor.get_replacement_strategy("price_return"),
@@ -1938,7 +1938,7 @@ mod tests {
             preprocessor.get_replacement_strategy("volatility_10"),
             ReplacementStrategy::Interpolate
         ));
-        
+
         // Test that median is selected for technical indicators
         assert!(matches!(
             preprocessor.get_replacement_strategy("rsi_14"),
@@ -1948,7 +1948,7 @@ mod tests {
             preprocessor.get_replacement_strategy("sma_20"),
             ReplacementStrategy::Median
         ));
-        
+
         // Test that cap is selected for volume and other features
         assert!(matches!(
             preprocessor.get_replacement_strategy("volume"),
@@ -1963,14 +1963,14 @@ mod tests {
     #[test]
     fn test_interpolation_logic() {
         let preprocessor = DataPreprocessor;
-        
+
         // Create test series: [1.0, 2.0, OUTLIER, 4.0, 5.0]
         let values = vec![Some(1.0), Some(2.0), Some(100.0), Some(4.0), Some(5.0)];
         let series = Series::new("test", values).f64().unwrap().clone();
-        
+
         // Test interpolation at index 2 (outlier value 100.0)
         let interpolated = preprocessor.interpolate_outlier_value(&series, 2, 100.0, 3.0);
-        
+
         // Should interpolate between 2.0 and 4.0, giving 3.0
         assert!((interpolated - 3.0).abs() < 0.001);
     }

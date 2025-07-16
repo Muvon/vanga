@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttentionConfig {
     pub num_heads: usize,
-    pub head_dim: usize,
+    pub head_dim: Option<usize>,
     pub dropout_rate: f64,
     pub temperature_scaling: f64,
     pub use_relative_position: bool,
@@ -19,7 +19,7 @@ impl Default for AttentionConfig {
     fn default() -> Self {
         Self {
             num_heads: 8,                // Auto-optimized default for crypto sequences
-            head_dim: 64,                // Optimal for most crypto features (50-100)
+            head_dim: Some(64),          // Optimal for most crypto features (50-100)
             dropout_rate: 0.1,           // Conservative dropout for attention
             temperature_scaling: 1.0,    // Standard temperature
             use_relative_position: true, // Better for time series
@@ -31,6 +31,7 @@ impl Default for AttentionConfig {
 /// Multi-Head Self-Attention layer optimized for cryptocurrency time series
 pub struct MultiHeadAttention {
     config: AttentionConfig,
+    head_dim: usize,
     query_projection: Linear,
     key_projection: Linear,
     value_projection: Linear,
@@ -47,43 +48,40 @@ impl MultiHeadAttention {
         vs: VarBuilder,
         device: Device,
     ) -> Result<Self> {
-        let _total_dim = config.num_heads * config.head_dim;
+        let head_dim = config
+            .head_dim
+            .unwrap_or(Self::optimize_head_dimension(input_dim, config.num_heads));
+        let _total_dim = config.num_heads * head_dim;
 
         // Auto-optimize head dimension based on input size
-        let optimized_head_dim = Self::optimize_head_dimension(input_dim, config.num_heads);
-        let optimized_config = AttentionConfig {
-            head_dim: optimized_head_dim,
-            ..config
-        };
-
-        let total_optimized_dim = optimized_config.num_heads * optimized_config.head_dim;
+        let head_dim = config
+            .head_dim
+            .unwrap_or_else(|| Self::optimize_head_dimension(input_dim, config.num_heads));
+        let total_dim = config.num_heads * head_dim;
 
         // Create projection layers
-        let query_projection = linear(input_dim, total_optimized_dim, vs.pp("query_proj"))
-            .map_err(|e| {
-                VangaError::ModelError(format!("Query projection creation failed: {}", e))
-            })?;
+        let query_projection = linear(input_dim, total_dim, vs.pp("query_proj")).map_err(|e| {
+            VangaError::ModelError(format!("Query projection creation failed: {}", e))
+        })?;
 
-        let key_projection =
-            linear(input_dim, total_optimized_dim, vs.pp("key_proj")).map_err(|e| {
-                VangaError::ModelError(format!("Key projection creation failed: {}", e))
-            })?;
+        let key_projection = linear(input_dim, total_dim, vs.pp("key_proj")).map_err(|e| {
+            VangaError::ModelError(format!("Key projection creation failed: {}", e))
+        })?;
 
-        let value_projection = linear(input_dim, total_optimized_dim, vs.pp("value_proj"))
-            .map_err(|e| {
-                VangaError::ModelError(format!("Value projection creation failed: {}", e))
-            })?;
+        let value_projection = linear(input_dim, total_dim, vs.pp("value_proj")).map_err(|e| {
+            VangaError::ModelError(format!("Value projection creation failed: {}", e))
+        })?;
 
-        let output_projection = linear(total_optimized_dim, input_dim, vs.pp("output_proj"))
-            .map_err(|e| {
+        let output_projection =
+            linear(total_dim, input_dim, vs.pp("output_proj")).map_err(|e| {
                 VangaError::ModelError(format!("Output projection creation failed: {}", e))
             })?;
 
         // Create relative position embeddings for time series
-        let relative_position_embeddings = if optimized_config.use_relative_position {
+        let relative_position_embeddings = if config.use_relative_position {
             Some(Self::create_relative_position_embeddings(
-                optimized_config.max_sequence_length,
-                optimized_config.head_dim,
+                config.max_sequence_length,
+                head_dim,
                 &device,
             )?)
         } else {
@@ -92,14 +90,15 @@ impl MultiHeadAttention {
 
         log::info!(
             "✅ MultiHeadAttention initialized: {} heads, {} head_dim, input_dim={}, total_dim={}",
-            optimized_config.num_heads,
-            optimized_config.head_dim,
+            "Created MultiHeadAttention: input_dim={}, num_heads={}, head_dim={}",
             input_dim,
-            total_optimized_dim
+            config.num_heads,
+            head_dim
         );
 
         Ok(Self {
-            config: optimized_config,
+            config,
+            head_dim,
             query_projection,
             key_projection,
             value_projection,
@@ -198,12 +197,7 @@ impl MultiHeadAttention {
     ) -> Result<Tensor> {
         // Reshape from [batch, seq_len, num_heads * head_dim] to [batch, num_heads, seq_len, head_dim]
         tensor
-            .reshape((
-                batch_size,
-                seq_len,
-                self.config.num_heads,
-                self.config.head_dim,
-            ))?
+            .reshape((batch_size, seq_len, self.config.num_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()
             .map_err(|e| VangaError::ModelError(format!("Attention reshape failed: {}", e)))
@@ -219,11 +213,7 @@ impl MultiHeadAttention {
         tensor
             .transpose(1, 2)?
             .contiguous()?
-            .reshape((
-                batch_size,
-                seq_len,
-                self.config.num_heads * self.config.head_dim,
-            ))
+            .reshape((batch_size, seq_len, self.config.num_heads * self.head_dim))
             .map_err(|e| VangaError::ModelError(format!("Attention reshape back failed: {}", e)))
     }
 
@@ -235,7 +225,7 @@ impl MultiHeadAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
-        let scale = (self.config.head_dim as f64).sqrt() as f32;
+        let scale = (self.head_dim as f64).sqrt() as f32;
         let scale_tensor = Tensor::new(scale, &self.device)?;
         let scaled_queries = queries.broadcast_div(&scale_tensor)?.contiguous()?;
 
@@ -358,14 +348,15 @@ impl AttentionFactory {
                 Ok(Box::new(attention))
             }
             crate::config::model::AttentionMechanism::AdditiveAttention => {
-                // For now, use multi-head with different config
-                // TODO: Implement proper additive attention
+                // Create proper additive attention mechanism
                 let config = AttentionConfig {
-                    num_heads: 4,
-                    head_dim: 32,
+                    num_heads: 1,                  // Additive attention typically uses single head
+                    head_dim: Some(input_dim / 2), // Hidden dimension for additive scoring
+                    temperature_scaling: 1.0,
+                    use_relative_position: true,
                     ..AttentionConfig::default()
                 };
-                let attention = MultiHeadAttention::new(input_dim, config, vs, device)?;
+                let attention = AdditiveAttention::new(input_dim, config, vs, device)?;
                 Ok(Box::new(attention))
             }
             crate::config::model::AttentionMechanism::VariableSelection => {
@@ -382,6 +373,213 @@ impl AttentionFactory {
                 "Cannot create attention mechanism for 'None' type".to_string(),
             )),
         }
+    }
+}
+
+/// Additive Attention mechanism (Bahdanau-style) optimized for cryptocurrency sequences
+pub struct AdditiveAttention {
+    #[allow(dead_code)]
+    input_dim: usize,
+    hidden_dim: usize,
+    config: AttentionConfig,
+
+    // Learnable parameters for additive attention: score = v^T * tanh(W1*h + W2*s)
+    w_query: Linear,     // W1 projection
+    w_key: Linear,       // W2 projection
+    v_attention: Linear, // v scoring vector
+
+    // Crypto-specific optimizations
+    position_bias: Option<Tensor>,
+    device: Device,
+}
+
+impl AdditiveAttention {
+    /// Create new additive attention layer with crypto-specific optimizations
+    pub fn new(
+        input_dim: usize,
+        config: AttentionConfig,
+        vs: VarBuilder,
+        device: Device,
+    ) -> Result<Self> {
+        let hidden_dim = config.head_dim.unwrap_or(input_dim / 2);
+
+        // Initialize learnable parameters
+        let w_query = linear(input_dim, hidden_dim, vs.pp("w_query"))?;
+        let w_key = linear(input_dim, hidden_dim, vs.pp("w_key"))?;
+        let v_attention = linear(hidden_dim, 1, vs.pp("v_attention"))?;
+
+        // Create crypto-specific position bias for recency weighting
+        let position_bias = if config.use_relative_position {
+            Some(Self::create_crypto_position_bias(
+                config.max_sequence_length,
+                &device,
+            )?)
+        } else {
+            None
+        };
+
+        log::info!(
+            "Created AdditiveAttention: input_dim={}, hidden_dim={}, position_bias={}",
+            input_dim,
+            hidden_dim,
+            position_bias.is_some()
+        );
+
+        Ok(Self {
+            input_dim,
+            hidden_dim,
+            config,
+            w_query,
+            w_key,
+            v_attention,
+            position_bias,
+            device,
+        })
+    }
+
+    /// Forward pass with additive attention mechanism
+    pub fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (batch_size, seq_len, _) = input.dims3()?;
+
+        // Compute additive attention scores: score = v^T * tanh(W1*h + W2*s)
+        let scores = self.compute_additive_scores(input)?;
+
+        // Apply crypto-specific optimizations
+        let optimized_scores = self.apply_crypto_optimizations(&scores, seq_len)?;
+
+        // Apply softmax to get attention weights
+        let attention_weights = ops::softmax_last_dim(&optimized_scores)?;
+
+        // Apply attention weights to input values
+        let output = self.apply_attention_weights(input, &attention_weights)?;
+
+        log::debug!(
+            "AdditiveAttention forward: batch_size={}, seq_len={}, output_shape={:?}",
+            batch_size,
+            seq_len,
+            output.shape()
+        );
+
+        Ok((output, attention_weights))
+    }
+
+    /// Compute additive attention scores using the formula: score = v^T * tanh(W1*h + W2*s)
+    fn compute_additive_scores(&self, input: &Tensor) -> Result<Tensor> {
+        let (batch_size, seq_len, _) = input.dims3()?;
+
+        // Project input through query and key transformations
+        let query_projection = self.w_query.forward(input)?; // [batch, seq, hidden]
+        let key_projection = self.w_key.forward(input)?; // [batch, seq, hidden]
+
+        // For additive attention, we compute attention between each position and all others
+        // Expand dimensions for pairwise computation
+        let query_expanded = query_projection.unsqueeze(2)?; // [batch, seq, 1, hidden]
+        let key_expanded = key_projection.unsqueeze(1)?; // [batch, 1, seq, hidden]
+
+        // Broadcast addition: each query position with each key position
+        let query_broadcast =
+            query_expanded.broadcast_as(&[batch_size, seq_len, seq_len, self.hidden_dim])?;
+        let key_broadcast =
+            key_expanded.broadcast_as(&[batch_size, seq_len, seq_len, self.hidden_dim])?;
+
+        // Add projections and apply tanh activation
+        let combined = (query_broadcast + key_broadcast)?.tanh()?;
+
+        // Apply final scoring transformation with v vector
+        let scores = self.v_attention.forward(&combined)?; // [batch, seq, seq, 1]
+        let scores = scores.squeeze(candle_core::D::Minus1)?; // [batch, seq, seq]
+
+        Ok(scores)
+    }
+
+    /// Apply cryptocurrency-specific optimizations to attention scores
+    fn apply_crypto_optimizations(&self, scores: &Tensor, seq_len: usize) -> Result<Tensor> {
+        let mut optimized_scores = scores.clone();
+
+        // Apply position bias for cryptocurrency recency preference
+        if let Some(ref position_bias) = self.position_bias {
+            let bias = position_bias.narrow(0, 0, seq_len)?;
+            let bias_expanded = bias.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, seq]
+            optimized_scores = (optimized_scores + bias_expanded)?;
+        }
+
+        // Apply temperature scaling for crypto volatility adaptation
+        if self.config.temperature_scaling != 1.0 {
+            optimized_scores = (optimized_scores / self.config.temperature_scaling)?;
+        }
+
+        // Apply causal mask to prevent attention to future positions
+        optimized_scores = self.apply_causal_mask(&optimized_scores)?;
+
+        Ok(optimized_scores)
+    }
+
+    /// Apply causal mask to prevent attention to future positions
+    fn apply_causal_mask(&self, scores: &Tensor) -> Result<Tensor> {
+        let seq_len = scores.dim(candle_core::D::Minus1)?;
+
+        // Create lower triangular mask
+        let mut mask_data = vec![-1e9; seq_len * seq_len];
+        for i in 0..seq_len {
+            for j in 0..=i {
+                mask_data[i * seq_len + j] = 0.0;
+            }
+        }
+
+        let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &self.device)?;
+        let mask_expanded = mask.unsqueeze(0)?; // [1, seq, seq]
+
+        let masked_scores = (scores + mask_expanded)?;
+
+        Ok(masked_scores)
+    }
+
+    /// Apply attention weights to input values
+    fn apply_attention_weights(&self, input: &Tensor, weights: &Tensor) -> Result<Tensor> {
+        // weights: [batch, seq, seq], input: [batch, seq, input_dim]
+        let output = weights.matmul(input)?; // [batch, seq, input_dim]
+
+        Ok(output)
+    }
+
+    /// Create cryptocurrency-specific position bias for recency weighting
+    fn create_crypto_position_bias(max_length: usize, device: &Device) -> Result<Tensor> {
+        // Create exponential decay bias favoring recent positions
+        let positions: Vec<f64> = (0..max_length)
+            .map(|i| {
+                let position_ratio = i as f64 / max_length as f64;
+                // Exponential decay: more recent positions get higher bias
+                let decay_factor = 0.1; // Adjust for stronger/weaker recency bias
+                (position_ratio * decay_factor).exp() - 1.0
+            })
+            .collect();
+
+        Tensor::from_slice(&positions, (max_length,), device)
+            .map_err(|e| VangaError::ModelError(format!("Position bias creation failed: {}", e)))
+    }
+
+    /// Get attention configuration
+    pub fn get_config(&self) -> &AttentionConfig {
+        &self.config
+    }
+
+    /// Update temperature scaling for dynamic adaptation to market volatility
+    pub fn update_temperature(&mut self, new_temperature: f64) {
+        self.config.temperature_scaling = new_temperature;
+        log::debug!(
+            "Updated AdditiveAttention temperature scaling to {:.2}",
+            new_temperature
+        );
+    }
+}
+
+impl AttentionModule for AdditiveAttention {
+    fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+        self.forward(input)
+    }
+
+    fn get_config(&self) -> &AttentionConfig {
+        self.get_config()
     }
 }
 
@@ -411,7 +609,7 @@ mod tests {
     fn test_attention_config_defaults() {
         let config = AttentionConfig::default();
         assert_eq!(config.num_heads, 8);
-        assert_eq!(config.head_dim, 64);
+        assert_eq!(config.head_dim, Some(64));
         assert!(config.use_relative_position);
     }
 
