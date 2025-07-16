@@ -8,6 +8,9 @@ pub mod multi_target;
 pub mod tensor_crypto_loss;
 pub mod tft;
 
+#[cfg(test)]
+pub mod loss_validation_tests;
+
 pub use attention::{AttentionFactory, AttentionModule, MultiHeadAttention};
 pub use attention_loss::{AttentionLossConfig, AttentionLossFactory, AttentionWeightedLoss};
 pub use attention_optimizer::{

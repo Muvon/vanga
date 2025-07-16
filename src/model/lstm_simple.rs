@@ -988,13 +988,30 @@ impl LSTMModel {
         // Initialize early stopping variables (only used with validation)
         let mut best_val_loss = f64::INFINITY;
         let mut early_stopping_counter = 0;
-        let early_stopping_patience = match &config.training.epochs {
-            crate::config::training::EpochConfig::Auto { max_epochs: _ } => {
-                config.training.early_stopping.patience
-            }
-            _ => 10, // Default patience for fixed epochs
-        };
-        let early_stopping_min_delta = config.training.early_stopping.min_delta;
+
+        // FIXED: Adaptive early stopping configuration based on loss function type
+        let (early_stopping_patience, early_stopping_min_delta) =
+            if use_validation {
+                let base_patience = match &config.training.epochs {
+                    crate::config::training::EpochConfig::Auto { max_epochs: _ } => {
+                        config.training.early_stopping.patience
+                    }
+                    _ => 10, // Default patience for fixed epochs
+                };
+                let base_min_delta = config.training.early_stopping.min_delta;
+
+                // FIXED: Adjust min_delta based on loss function type and expected scale
+                let adaptive_min_delta = self.get_adaptive_min_delta(base_min_delta);
+
+                log::info!(
+                "🎯 Early stopping configured: patience={}, min_delta={:.6} (adaptive from {:.6})",
+                base_patience, adaptive_min_delta, base_min_delta
+            );
+
+                (base_patience, adaptive_min_delta)
+            } else {
+                (u32::MAX, 0.0) // Disable early stopping without validation
+            };
 
         log::info!("🔧 Training Configuration:");
         log::info!("  - Epochs: {}", self.training_config.epochs);
@@ -1002,13 +1019,6 @@ impl LSTMModel {
         log::info!("  - Warmup epochs: {}", warmup_epochs);
         log::info!("  - Adaptive patience: {}", adaptive_patience);
         log::info!("  - Adaptive factor: {:.3}", adaptive_factor);
-        if use_validation {
-            log::info!(
-                "  - Early stopping patience: {}, min_delta: {:.6}",
-                early_stopping_patience,
-                early_stopping_min_delta
-            );
-        }
         log::info!("  - Target learning rate: {:.6}", target_lr);
 
         // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
@@ -1735,13 +1745,13 @@ impl LSTMModel {
     /// Calculate loss using configured loss function or default MSE
     fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
         if let Some(ref loss_fn) = self.loss_function {
-            // OPTIMIZED: Use tensor-based CryptoLossFunction with caching
+            // FIXED: Use tensor-based CryptoLossFunction with dynamic market regime detection
             use crate::model::tensor_crypto_loss::TensorCryptoLossFunction;
 
             let mut tensor_loss_fn = TensorCryptoLossFunction::new(loss_fn.clone());
 
-            // Use default market regime for now - could be enhanced to detect actual regime
-            let market_regime = crate::optimization::objective::MarketRegime::MediumVolatility;
+            // FIXED: Detect actual market regime from data instead of hardcoding
+            let market_regime = self.detect_market_regime(predictions, targets)?;
 
             tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime)
         } else {
@@ -1752,6 +1762,258 @@ impl LSTMModel {
                 .mean_all()
                 .map_err(|e| VangaError::ModelError(format!("MSE loss calculation failed: {}", e)))
         }
+    }
+
+    /// Detect market regime from prediction and target data patterns
+    fn detect_market_regime(
+        &self,
+        _predictions: &Tensor,
+        targets: &Tensor,
+    ) -> Result<crate::optimization::objective::MarketRegime> {
+        use crate::optimization::objective::MarketRegime;
+
+        // Calculate volatility from targets (actual market data)
+        let target_mean = targets.mean_all()?;
+        let target_mean_broadcast = target_mean.broadcast_as(targets.shape())?;
+        let target_variance = targets
+            .sub(&target_mean_broadcast)?
+            .contiguous()?
+            .sqr()?
+            .mean_all()?;
+        let volatility =
+            target_variance.sqrt()?.to_scalar::<f32>().map_err(|e| {
+                VangaError::ModelError(format!("Volatility calculation failed: {}", e))
+            })? as f64;
+
+        // Calculate trend strength from targets
+        let target_shape = targets.shape();
+        let trend_strength = if target_shape.dims()[0] > 1 {
+            let first_half = targets.narrow(0, 0, target_shape.dims()[0] / 2)?;
+            let second_half =
+                targets.narrow(0, target_shape.dims()[0] / 2, target_shape.dims()[0] / 2)?;
+
+            let first_mean = first_half.mean_all()?.to_scalar::<f32>().map_err(|e| {
+                VangaError::ModelError(format!("First half mean calculation failed: {}", e))
+            })? as f64;
+            let second_mean = second_half.mean_all()?.to_scalar::<f32>().map_err(|e| {
+                VangaError::ModelError(format!("Second half mean calculation failed: {}", e))
+            })? as f64;
+
+            (second_mean - first_mean) / first_mean.abs().max(1e-8)
+        } else {
+            0.0
+        };
+
+        // Classify market regime based on volatility and trend
+        let regime = match (volatility, trend_strength) {
+            (v, _) if v > 0.05 => MarketRegime::HighVolatility,
+            (v, t) if v < 0.02 && t.abs() < 0.01 => MarketRegime::LowVolatility,
+            (_, t) if t > 0.03 => MarketRegime::BullMarket,
+            (_, t) if t < -0.03 => MarketRegime::BearMarket,
+            (v, _) if v < 0.02 => MarketRegime::RangeBound,
+            _ => MarketRegime::MediumVolatility,
+        };
+
+        log::debug!(
+            "Market regime detected: {:?} (volatility: {:.4}, trend: {:.4})",
+            regime,
+            volatility,
+            trend_strength
+        );
+
+        Ok(regime)
+    }
+
+    /// Get adaptive min_delta for early stopping based on loss function type
+    fn get_adaptive_min_delta(&self, base_min_delta: f64) -> f64 {
+        match &self.loss_function {
+            Some(crate::model::loss::CryptoLossFunction::CryptoComposite { .. }) => {
+                // CryptoComposite loss has higher scale, need larger min_delta
+                let adaptive_delta = base_min_delta * 20.0; // 20x larger for composite loss
+                log::debug!(
+                    "🔧 CryptoComposite loss detected: min_delta scaled from {:.6} to {:.6}",
+                    base_min_delta,
+                    adaptive_delta
+                );
+                adaptive_delta
+            }
+            Some(crate::model::loss::CryptoLossFunction::DirectionalFocused { .. }) => {
+                // DirectionalFocused has moderate scale increase
+                let adaptive_delta = base_min_delta * 10.0;
+                log::debug!(
+                    "🔧 DirectionalFocused loss detected: min_delta scaled from {:.6} to {:.6}",
+                    base_min_delta,
+                    adaptive_delta
+                );
+                adaptive_delta
+            }
+            Some(crate::model::loss::CryptoLossFunction::RiskAdjusted { .. }) => {
+                // RiskAdjusted has moderate scale increase
+                let adaptive_delta = base_min_delta * 15.0;
+                log::debug!(
+                    "🔧 RiskAdjusted loss detected: min_delta scaled from {:.6} to {:.6}",
+                    base_min_delta,
+                    adaptive_delta
+                );
+                adaptive_delta
+            }
+            Some(crate::model::loss::CryptoLossFunction::VolatilityAware { .. }) => {
+                // VolatilityAware can have variable scale
+                let adaptive_delta = base_min_delta * 12.0;
+                log::debug!(
+                    "🔧 VolatilityAware loss detected: min_delta scaled from {:.6} to {:.6}",
+                    base_min_delta,
+                    adaptive_delta
+                );
+                adaptive_delta
+            }
+            Some(_) => {
+                // Other crypto loss functions get moderate scaling
+                let adaptive_delta = base_min_delta * 8.0;
+                log::debug!(
+                    "🔧 Crypto loss function detected: min_delta scaled from {:.6} to {:.6}",
+                    base_min_delta,
+                    adaptive_delta
+                );
+                adaptive_delta
+            }
+            None => {
+                // MSE loss uses original min_delta
+                log::debug!(
+                    "🔧 MSE loss detected: min_delta unchanged at {:.6}",
+                    base_min_delta
+                );
+                base_min_delta
+            }
+        }
+    }
+
+    /// Validate loss function configuration and mathematical correctness
+    pub fn validate_loss_function(&self) -> Result<()> {
+        if let Some(ref loss_fn) = self.loss_function {
+            match loss_fn {
+                crate::model::loss::CryptoLossFunction::CryptoComposite {
+                    accuracy_weight,
+                    direction_weight,
+                    volatility_weight,
+                    risk_weight,
+                } => {
+                    // Validate weights are non-negative
+                    if *accuracy_weight < 0.0
+                        || *direction_weight < 0.0
+                        || *volatility_weight < 0.0
+                        || *risk_weight < 0.0
+                    {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "CryptoComposite loss weights must be non-negative".to_string(),
+                        ));
+                    }
+
+                    // Validate at least one weight is positive
+                    let total_weight =
+                        accuracy_weight + direction_weight + volatility_weight + risk_weight;
+                    if total_weight <= 0.0 {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "CryptoComposite loss must have at least one positive weight"
+                                .to_string(),
+                        ));
+                    }
+
+                    // Log configuration for debugging
+                    log::info!(
+                        "✅ CryptoComposite loss validated: acc={:.2}, dir={:.2}, vol={:.2}, risk={:.2} (total={:.2})",
+                        accuracy_weight, direction_weight, volatility_weight, risk_weight, total_weight
+                    );
+                }
+                crate::model::loss::CryptoLossFunction::DirectionalFocused {
+                    direction_penalty,
+                } => {
+                    if *direction_penalty <= 0.0 {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "DirectionalFocused direction_penalty must be positive".to_string(),
+                        ));
+                    }
+                    log::info!(
+                        "✅ DirectionalFocused loss validated: penalty={:.2}",
+                        direction_penalty
+                    );
+                }
+                crate::model::loss::CryptoLossFunction::RiskAdjusted {
+                    sharpe_weight,
+                    drawdown_weight,
+                } => {
+                    if *sharpe_weight < 0.0 || *drawdown_weight < 0.0 {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "RiskAdjusted loss weights must be non-negative".to_string(),
+                        ));
+                    }
+                    if *sharpe_weight + *drawdown_weight <= 0.0 {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "RiskAdjusted loss must have at least one positive weight".to_string(),
+                        ));
+                    }
+                    log::info!(
+                        "✅ RiskAdjusted loss validated: sharpe={:.2}, drawdown={:.2}",
+                        sharpe_weight,
+                        drawdown_weight
+                    );
+                }
+                crate::model::loss::CryptoLossFunction::VolatilityAware {
+                    volatility_threshold,
+                    penalty_factor,
+                } => {
+                    if *volatility_threshold < 0.0 || *penalty_factor < 0.0 {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "VolatilityAware loss parameters must be non-negative".to_string(),
+                        ));
+                    }
+                    log::info!(
+                        "✅ VolatilityAware loss validated: threshold={:.4}, penalty={:.2}",
+                        volatility_threshold,
+                        penalty_factor
+                    );
+                }
+                crate::model::loss::CryptoLossFunction::RegimeAware { volatility_penalty } => {
+                    if *volatility_penalty < 0.0 {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "RegimeAware volatility_penalty must be non-negative".to_string(),
+                        ));
+                    }
+                    log::info!(
+                        "✅ RegimeAware loss validated: penalty={:.2}",
+                        volatility_penalty
+                    );
+                }
+                crate::model::loss::CryptoLossFunction::MultiObjective { horizon_weights } => {
+                    if horizon_weights.is_empty() {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "MultiObjective loss must have at least one horizon weight".to_string(),
+                        ));
+                    }
+                    if horizon_weights.iter().any(|&w| w < 0.0) {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "MultiObjective horizon weights must be non-negative".to_string(),
+                        ));
+                    }
+                    let total_weight: f64 = horizon_weights.iter().sum();
+                    if total_weight <= 0.0 {
+                        return Err(crate::utils::error::VangaError::ConfigError(
+                            "MultiObjective loss must have at least one positive weight"
+                                .to_string(),
+                        ));
+                    }
+                    log::info!(
+                        "✅ MultiObjective loss validated: {} horizons, total_weight={:.2}",
+                        horizon_weights.len(),
+                        total_weight
+                    );
+                }
+            }
+        } else {
+            log::info!("✅ Using default MSE loss function");
+        }
+
+        Ok(())
     }
 }
 

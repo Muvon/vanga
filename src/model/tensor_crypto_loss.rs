@@ -165,42 +165,31 @@ impl TensorCryptoLossFunction {
             });
         }
 
-        // Optimized: Get consecutive differences for direction calculation
-        let pred_direction = self.calculate_tensor_diff(predictions)?;
-        let target_direction = self.calculate_tensor_diff(targets)?;
+        // FIXED: Use proper tensor operations for directional calculation
+        let pred_diff = self.calculate_tensor_diff(predictions)?;
+        let target_diff = self.calculate_tensor_diff(targets)?;
 
-        // Calculate directional agreement using sign comparison
-        // If both positive or both negative, agreement = 1, otherwise 0
-        let pred_positive = pred_direction
-            .gt(&Tensor::zeros_like(&pred_direction)?)?
-            .contiguous()?;
-        let target_positive = target_direction
-            .gt(&Tensor::zeros_like(&target_direction)?)?
-            .contiguous()?;
+        // FIXED: Calculate directional agreement using sign-based comparison
+        // Get signs: -1 for negative, 0 for zero, +1 for positive
+        let pred_signs = pred_diff.sign()?;
+        let target_signs = target_diff.sign()?;
 
-        // FIXED: Convert boolean tensors to f32 before arithmetic operations
-        // Boolean tensors (u8) don't support unary operations like neg() in candle-core
-        let pred_positive_f32 = pred_positive
+        // Calculate agreement: same sign = agreement (positive product)
+        let sign_product = pred_signs.mul(&target_signs)?;
+
+        // Agreement when product > 0 (same signs), disagreement when product <= 0
+        let zero_tensor = Tensor::zeros_like(&sign_product)?;
+        let agreement_mask = sign_product.gt(&zero_tensor)?;
+
+        // FIXED: Convert boolean mask to f32 properly for arithmetic
+        let agreement_f32 = agreement_mask
             .to_dtype(candle_core::DType::F32)?
             .contiguous()?;
-        let target_positive_f32 = target_positive
-            .to_dtype(candle_core::DType::F32)?
-            .contiguous()?;
 
-        // Agreement when both positive or both negative
-        let both_positive = pred_positive_f32.mul(&target_positive_f32)?;
+        // Calculate directional accuracy (proportion of agreements)
+        let directional_accuracy = agreement_f32.mean_all()?;
 
-        // Calculate negative cases: (1 - pred_positive) * (1 - target_positive)
-        let ones_tensor = Tensor::ones_like(&pred_positive_f32)?;
-        let pred_negative = ones_tensor.sub(&pred_positive_f32)?;
-        let target_negative = ones_tensor.sub(&target_positive_f32)?;
-        let both_negative = pred_negative.mul(&target_negative)?;
-
-        let agreement = both_positive.add(&both_negative)?;
-
-        // Directional loss = 1 - agreement_rate
-        // Use mean_all() to get scalar accuracy, then subtract from 1.0
-        let directional_accuracy = agreement.mean_all()?;
+        // FIXED: Return directional loss as (1 - accuracy) for proper loss semantics
         let one_scalar = Tensor::new(1.0f32, predictions.device())?;
 
         one_scalar.sub(&directional_accuracy).map_err(|e| {
@@ -303,7 +292,7 @@ impl TensorCryptoLossFunction {
             .map_err(|e| VangaError::ModelError(format!("Regime-aware tensor loss failed: {}", e)))
     }
 
-    /// Risk-adjusted loss incorporating trading metrics
+    /// Risk-adjusted loss incorporating trading metrics with normalization
     fn calculate_risk_adjusted_tensor_loss(
         &self,
         predictions: &Tensor,
@@ -311,19 +300,26 @@ impl TensorCryptoLossFunction {
         sharpe_weight: f64,
         drawdown_weight: f64,
     ) -> Result<Tensor> {
-        let base_loss = self.calculate_mse_tensor_loss(predictions, targets)?;
+        let base_mse_loss = self.calculate_mse_tensor_loss(predictions, targets)?;
         let volatility_loss = self.calculate_volatility_tensor_loss(predictions, targets)?;
 
-        // Simplified risk adjustment using volatility as proxy
+        // FIXED: Normalize volatility loss to MSE scale for risk adjustment
+        let epsilon = Tensor::new(1e-8f32, predictions.device())?;
+        let mse_scale = base_mse_loss.add(&epsilon)?;
+        let normalized_volatility = volatility_loss
+            .div(&volatility_loss.add(&epsilon)?)?
+            .mul(&mse_scale)?;
+
+        // Simplified risk adjustment using normalized volatility as proxy
         let sharpe_tensor = Tensor::new(sharpe_weight as f32, predictions.device())?;
         let drawdown_tensor = Tensor::new(drawdown_weight as f32, predictions.device())?;
 
-        // Risk-adjusted loss: base_loss + sharpe_weight * volatility + drawdown_weight * volatility
-        let risk_penalty = volatility_loss
+        // Risk-adjusted loss: base_mse + normalized_risk_penalties
+        let risk_penalty = normalized_volatility
             .mul(&sharpe_tensor)?
-            .add(&volatility_loss.mul(&drawdown_tensor)?)?;
+            .add(&normalized_volatility.mul(&drawdown_tensor)?)?;
 
-        base_loss
+        base_mse_loss
             .add(&risk_penalty)
             .map_err(|e| VangaError::ModelError(format!("Risk-adjusted tensor loss failed: {}", e)))
     }
@@ -366,7 +362,7 @@ impl TensorCryptoLossFunction {
         }
     }
 
-    /// Crypto composite loss combining multiple factors with caching
+    /// Crypto composite loss combining multiple factors with caching and normalization
     fn calculate_crypto_composite_tensor_loss(
         &mut self,
         predictions: &Tensor,
@@ -374,13 +370,10 @@ impl TensorCryptoLossFunction {
         config: &CryptoCompositeConfig,
         market_regime: MarketRegime,
     ) -> Result<Tensor> {
-        // Calculate all needed loss components first to avoid borrowing issues
-        let mse_loss = if config.accuracy_weight > 0.0 {
-            Some(self.calculate_mse_tensor_loss(predictions, targets)?)
-        } else {
-            None
-        };
+        // FIXED: Calculate base MSE loss first for normalization reference
+        let base_mse_loss = self.calculate_mse_tensor_loss(predictions, targets)?;
 
+        // Calculate all needed loss components conditionally
         let directional_loss = if config.direction_weight > 0.0 {
             Some(self.calculate_directional_tensor_loss(predictions, targets)?)
         } else {
@@ -393,53 +386,74 @@ impl TensorCryptoLossFunction {
             None
         };
 
-        // Now get cached weights after all immutable borrows are done
+        // FIXED: Normalize all loss components relative to MSE scale
+        let epsilon = Tensor::new(1e-8f32, predictions.device())?; // Prevent division by zero
+        let mse_scale = base_mse_loss.add(&epsilon)?; // Use MSE as reference scale
+
+        // Normalize directional loss to MSE scale
+        let normalized_directional_loss = if let Some(dir_loss) = directional_loss {
+            // Directional loss is 0-1 range, scale it to MSE magnitude
+            Some(dir_loss.mul(&mse_scale)?)
+        } else {
+            None
+        };
+
+        // Normalize volatility loss to MSE scale
+        let normalized_volatility_loss = if let Some(vol_loss) = volatility_loss {
+            // Volatility loss can be large, normalize it relative to MSE
+            let vol_normalized = vol_loss.div(&vol_loss.add(&epsilon)?)?.mul(&mse_scale)?;
+            Some(vol_normalized)
+        } else {
+            None
+        };
+
+        // Get regime multiplier and cached weights
         let regime_multiplier = self.get_regime_multiplier(market_regime);
         let weights = self.get_cached_weights(config, regime_multiplier, predictions.device())?;
 
-        // Calculate loss components conditionally (only if weight > 0)
-        let mut total_loss = Tensor::new(0.0f32, predictions.device())?;
+        // FIXED: Combine normalized components with proper weighting
+        let mut total_loss = base_mse_loss.mul(&weights.accuracy)?;
 
-        // Now combine them using cached weights
-        if let Some(mse) = mse_loss {
-            total_loss = total_loss.add(&mse.mul(&weights.accuracy)?)?;
+        if let Some(norm_directional) = normalized_directional_loss {
+            total_loss = total_loss.add(&norm_directional.mul(&weights.direction)?)?;
         }
 
-        if let Some(directional) = directional_loss {
-            total_loss = total_loss.add(&directional.mul(&weights.direction)?)?;
-        }
-
-        if let Some(volatility) = volatility_loss {
+        if let Some(norm_volatility) = normalized_volatility_loss {
             if config.volatility_weight > 0.0 {
-                total_loss = total_loss.add(&volatility.mul(&weights.volatility)?)?;
+                total_loss = total_loss.add(&norm_volatility.mul(&weights.volatility)?)?;
             }
             if config.risk_weight > 0.0 {
-                total_loss = total_loss.add(&volatility.mul(&weights.risk)?)?;
+                total_loss = total_loss.add(&norm_volatility.mul(&weights.risk)?)?;
             }
         }
 
-        // Apply regime adjustment
+        // FIXED: Apply regime adjustment as multiplier, not additive
         total_loss.mul(&weights.regime_multiplier).map_err(|e| {
             VangaError::ModelError(format!("Crypto composite tensor loss failed: {}", e))
         })
     }
 
-    /// Directional focused loss
+    /// Directional focused loss with normalization
     fn calculate_directional_focused_tensor_loss(
         &mut self,
         predictions: &Tensor,
         targets: &Tensor,
         direction_penalty: f64,
     ) -> Result<Tensor> {
-        let base_loss = self.calculate_mse_tensor_loss(predictions, targets)?;
+        let base_mse_loss = self.calculate_mse_tensor_loss(predictions, targets)?;
         let directional_loss = self.calculate_directional_tensor_loss(predictions, targets)?;
+
+        // FIXED: Normalize directional loss to MSE scale
+        let epsilon = Tensor::new(1e-8f32, predictions.device())?;
+        let mse_scale = base_mse_loss.add(&epsilon)?;
+        let normalized_directional = directional_loss.mul(&mse_scale)?;
 
         let base_weight = Tensor::new(0.3f32, predictions.device())?;
         let direction_weight = Tensor::new(direction_penalty as f32, predictions.device())?;
 
-        base_loss
+        base_mse_loss
             .mul(&base_weight)?
-            .add(&directional_loss.mul(&direction_weight)?)
+            .add(&normalized_directional.mul(&direction_weight)?)
             .map_err(|e| {
                 VangaError::ModelError(format!("Directional focused tensor loss failed: {}", e))
             })

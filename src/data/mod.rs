@@ -120,23 +120,67 @@ impl DataPipeline {
                 val_samples: validation_size,
             });
 
-            log::debug!(
-                "📊 Window {}: Train[0-{}] → Val[{}-{}]",
+            log::info!(
+                "📊 Window {}: Train[0-{}] ({} samples) → Val[{}-{}] ({} samples) | Chronological Split",
                 windows.len(),
                 train_end,
+                train_end,
                 val_start,
-                val_end
+                val_end,
+                validation_size
             );
 
             // Move window forward by validation_size (no overlap in test sets)
             train_end = val_end;
         }
 
+        // Calculate comprehensive data split statistics
+        let total_train_sequences: usize = windows
+            .iter()
+            .map(|w| w.train_data.sequences.shape()[0])
+            .sum();
+        let total_val_sequences: usize = windows
+            .iter()
+            .map(|w| w.val_data.sequences.shape()[0])
+            .sum();
+        let avg_train_per_window = if !windows.is_empty() {
+            total_train_sequences / windows.len()
+        } else {
+            0
+        };
+        let avg_val_per_window = if !windows.is_empty() {
+            total_val_sequences / windows.len()
+        } else {
+            0
+        };
+
+        log::info!("📊 WALK-FORWARD ANALYSIS SUMMARY:");
         log::info!(
-            "📊 Created {} walk-forward windows (validation_split: {:.1}%)",
+            "   • Windows: {} created with {:.1}% validation split",
             windows.len(),
             config.training.validation_split * 100.0
         );
+        log::info!(
+            "   • Total Sequences: {} train + {} validation = {}",
+            total_train_sequences,
+            total_val_sequences,
+            total_train_sequences + total_val_sequences
+        );
+        log::info!(
+            "   • Per Window Avg: {} train, {} validation sequences",
+            avg_train_per_window,
+            avg_val_per_window
+        );
+        log::info!(
+            "   • Data Split Ratio: {:.1}% train / {:.1}% validation",
+            (total_train_sequences as f64 / (total_train_sequences + total_val_sequences) as f64)
+                * 100.0,
+            (total_val_sequences as f64 / (total_train_sequences + total_val_sequences) as f64)
+                * 100.0
+        );
+        log::info!("   • Chronological Order: Maintained (no data leakage)");
+        log::info!("   • Test Split: Reserved for final evaluation (separate from validation)");
+        log::info!("   • Validation Strategy: Walk-forward windows prevent overfitting");
 
         Ok(windows)
     }

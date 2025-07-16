@@ -239,6 +239,30 @@ impl MultiTargetLSTMModel {
             );
 
             // Train individual model
+            log::info!("📊 TARGET {} TRAINING SUMMARY:", target_name.to_uppercase());
+            log::info!(
+                "   • Training Data: {} sequences × {} features",
+                sequences.shape()[0],
+                sequences.shape()[2]
+            );
+            log::info!("   • Target Shape: {:?}", single_target.shape());
+            if let Some(val_seq) = val_sequences {
+                log::info!(
+                    "   • Validation Data: {} sequences (chronological split)",
+                    val_seq.shape()[0]
+                );
+            }
+            log::info!(
+                "   • Optimization: {}",
+                if config.optimization.method != crate::config::training::OptimizationMethod::None {
+                    format!(
+                        "{:?} with {} trials",
+                        config.optimization.method, config.optimization.n_trials
+                    )
+                } else {
+                    "Disabled (using default parameters)".to_string()
+                }
+            );
             match model
                 .train(
                     sequences,

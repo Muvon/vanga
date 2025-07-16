@@ -146,10 +146,61 @@ gradient_clip = 1.0            # Gradient clipping threshold (prevents exploding
 # ============================================================================
 # LOSS FUNCTION CONFIGURATION
 # ============================================================================
-# Multi-target loss function with crypto-specific weighting
-# Direction prediction is most important for trading signals
+# Choose ONE loss function by uncommenting the desired option
+# Default: MSE (Mean Squared Error) when no [model.loss_function] section is present
+
+# OPTION 1: Use MSE (Mean Squared Error) - Standard regression loss
+# Comment out or remove the [model.loss_function] section entirely to use MSE
+# This is the DEFAULT behavior when no loss function is configured
+
+# OPTION 2: CryptoComposite - Multi-objective crypto-optimized loss (RECOMMENDED)
+# Balances accuracy, direction prediction, volatility awareness, and risk
 [model.loss_function]
 CryptoComposite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
+
+# OPTION 3: DirectionalFocused - Emphasizes directional accuracy for trading
+# [model.loss_function]
+# DirectionalFocused = { direction_penalty = 2.0 }
+
+# OPTION 4: RiskAdjusted - Incorporates Sharpe ratio and drawdown metrics
+# [model.loss_function]
+# RiskAdjusted = { sharpe_weight = 0.3, drawdown_weight = 0.7 }
+
+# OPTION 5: VolatilityAware - Adapts to market volatility conditions
+# [model.loss_function]
+# VolatilityAware = { volatility_threshold = 0.02, penalty_factor = 1.5 }
+
+# OPTION 6: RegimeAware - Adjusts based on market regime detection
+# [model.loss_function]
+# RegimeAware = { volatility_penalty = 1.2 }
+
+# OPTION 7: MultiObjective - Custom horizon-based weighting
+# [model.loss_function]
+# MultiObjective = { horizon_weights = [1.0, 0.8, 0.6] }
+
+# ============================================================================
+# LOSS FUNCTION WEIGHT EXPLANATIONS
+# ============================================================================
+# CryptoComposite weights:
+#   - accuracy_weight: Base MSE loss weight (0.1-0.4 recommended)
+#   - direction_weight: Directional prediction importance (0.3-0.6 for trading)
+#   - volatility_weight: Volatility prediction weight (0.1-0.3)
+#   - risk_weight: Risk-adjusted metrics weight (0.0-0.2)
+#   - Weights should sum to 1.0 for balanced scaling
+#
+# DirectionalFocused:
+#   - direction_penalty: Multiplier for wrong direction predictions (1.0-3.0)
+#
+# RiskAdjusted:
+#   - sharpe_weight: Sharpe ratio importance (0.2-0.5)
+#   - drawdown_weight: Maximum drawdown penalty (0.5-0.8)
+#
+# VolatilityAware:
+#   - volatility_threshold: Volatility level to trigger penalties (0.01-0.05)
+#   - penalty_factor: Penalty multiplier during high volatility (1.2-2.0)
+#
+# RegimeAware:
+#   - volatility_penalty: Market regime adjustment factor (1.0-1.5)
 
 # ============================================================================
 # TRAINING MONITORING

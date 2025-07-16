@@ -335,7 +335,7 @@ pub struct FeatureSelectionConfig {
     pub importance_threshold: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum OptimizationMethod {
     Bayesian,
     Grid,
@@ -743,7 +743,7 @@ impl Default for TrainingParams {
             device: DeviceConfig::Auto,
             early_stopping: EarlyStoppingConfig {
                 patience: 50,
-                min_delta: 0.00005,
+                min_delta: 0.001, // Updated for CryptoComposite loss scale compatibility
             },
             gradient_clip: Some(1.0), // Prevent exploding gradients
             print_every: 1,           // Print every epoch by default for better monitoring

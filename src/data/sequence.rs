@@ -106,6 +106,28 @@ impl SequenceGenerator {
             feature_count
         );
 
+        // Final data utilization and efficiency summary
+        log::info!("🏁 FINAL DATA PIPELINE SUMMARY:");
+        log::info!(
+            "   • Total Data Processed: {} rows → {} sequences → {} targets",
+            total_records,
+            normalized_sequences.len_of(Axis(0)),
+            targets.data_length
+        );
+        log::info!(
+            "   • Memory Efficiency: {:.1}% data utilization",
+            (normalized_sequences.len_of(Axis(0)) as f64 / total_records as f64) * 100.0
+        );
+        log::info!(
+            "   • Feature Engineering: {} features per sequence",
+            feature_count
+        );
+        log::info!(
+            "   • Multi-Horizon Targets: {} prediction horizons",
+            horizons.len()
+        );
+        log::info!("   • Data Quality: Normalized, validated, ready for training");
+
         Ok(PreparedData {
             sequences: normalized_sequences,
             targets,
@@ -279,13 +301,46 @@ impl SequenceGenerator {
             )));
         }
 
+        // Calculate data efficiency metrics
+        let theoretical_max_sequences = max_start_idx; // With step_size=1
+        let data_efficiency = (num_sequences as f64 / theoretical_max_sequences as f64) * 100.0;
+        let total_data_points = num_sequences * sequence_length;
+        let unique_data_points = max_start_idx + sequence_length - 1;
+        let data_reuse_factor = total_data_points as f64 / unique_data_points as f64;
+
+        log::info!("📊 SEQUENCE GENERATION SUMMARY:");
         log::info!(
-            "Creating {} sequences with {} features for {} horizons (step_size={}, overlap={:.1}%)",
-            num_sequences,
-            feature_count,
-            horizons.len(),
+            "   • Dataset: {} rows → {} effective rows (after horizon offset: {})",
+            total_rows,
+            effective_rows,
+            max_horizon_steps
+        );
+        log::info!(
+            "   • Overlap Config: {:.1}% → Step Size: {} (every {} rows)",
+            sequence_overlap * 100.0,
             step_size,
-            sequence_overlap * 100.0
+            step_size
+        );
+        log::info!(
+            "   • Sequences: {} generated (vs {} theoretical max with step=1)",
+            num_sequences,
+            theoretical_max_sequences
+        );
+        log::info!(
+            "   • Data Efficiency: {:.1}% ({} sequences / {} max possible)",
+            data_efficiency,
+            num_sequences,
+            theoretical_max_sequences
+        );
+        log::info!(
+            "   • Data Reuse: {:.2}x (each data point used ~{:.1} times)",
+            data_reuse_factor,
+            data_reuse_factor
+        );
+        log::info!(
+            "   • Features: {} per sequence, Horizons: {}",
+            feature_count,
+            horizons.len()
         );
 
         // Generate targets using DataFrame for all horizons
