@@ -3,7 +3,7 @@ use crate::model::multi_target::MultiTargetLSTMModel;
 use crate::utils::error::{Result, VangaError};
 use candle_core::Tensor;
 use candle_nn::{linear, Linear, Module, VarBuilder};
-use ndarray::{Array2, Array3};
+use ndarray::{s, Array2, Array3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -256,17 +256,47 @@ impl QuantilePredictions {
                 })?;
 
             // Extract prediction intervals using the found indices
-            // TODO: Implement proper tensor slicing to extract quantile values at lower_idx and upper_idx
             log::debug!(
-                "Prediction interval indices: lower={} (q={}), upper={} (q={})",
+                "Extracting quantile intervals: lower_idx={} (q={:.3}), upper_idx={} (q={:.3})",
                 lower_idx,
                 lower_quantile,
                 upper_idx,
                 upper_quantile
             );
 
-            // For now, return the full quantiles - proper implementation would slice at indices
-            Ok(Some((quantiles.clone(), quantiles.clone())))
+            // For Array2<f64> quantiles, we need to understand the structure
+            // Assuming quantiles shape is [samples, quantile_levels]
+            let quantile_shape = quantiles.shape();
+            let _num_samples = quantile_shape[0]; // Prefix with underscore to indicate intentional unused
+            let num_quantiles = quantile_shape[1];
+
+            // Validate indices are within bounds
+            if lower_idx >= num_quantiles || upper_idx >= num_quantiles {
+                return Err(VangaError::PredictionError(format!(
+                    "Quantile indices out of bounds: lower_idx={}, upper_idx={}, num_quantiles={}",
+                    lower_idx, upper_idx, num_quantiles
+                )));
+            }
+
+            // Extract lower quantile values by slicing the specific column
+            let lower_quantiles = quantiles
+                .slice(s![.., lower_idx])
+                .to_owned()
+                .insert_axis(ndarray::Axis(1)); // Convert to 2D [samples, 1]
+
+            // Extract upper quantile values by slicing the specific column
+            let upper_quantiles = quantiles
+                .slice(s![.., upper_idx])
+                .to_owned()
+                .insert_axis(ndarray::Axis(1)); // Convert to 2D [samples, 1]
+
+            log::debug!(
+                "Quantile intervals extracted: lower_shape={:?}, upper_shape={:?}",
+                lower_quantiles.shape(),
+                upper_quantiles.shape()
+            );
+
+            Ok(Some((lower_quantiles, upper_quantiles)))
         } else {
             Ok(None)
         }
