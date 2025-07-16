@@ -1804,87 +1804,91 @@ impl LSTMModel {
 
         let mut tensor_loss_fn = TensorCryptoLossFunction::new(self.loss_function.clone());
 
-        let market_regime = self.detect_market_regime(predictions, targets)?;
+        // Only calculate regime for loss functions that actually use it
+        let market_regime = match &self.loss_function {
+            crate::model::loss::CryptoLossFunction::RegimeAware { .. }
+            | crate::model::loss::CryptoLossFunction::Composite { .. } => {
+                // These loss functions use market regime - calculate it properly
+                let regime = self.detect_market_regime(predictions, targets)?;
+                log::debug!("🔍 REGIME DETECTION - Calculated regime: {:?}", regime);
+                regime
+            }
+            _ => {
+                // MSE and other loss functions ignore market regime - use default, no logging
+                crate::optimization::objective::MarketRegime::MediumVolatility
+            }
+        };
 
         let loss_result =
             tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime.clone())?;
         let loss_value = loss_result.to_scalar::<f32>().unwrap_or(0.0);
-        log::debug!(
-            "🔍 LOSS RESULT - Value: {:.6}, Regime: {:?} (FIXED REGIME DETECTION)",
-            loss_value,
-            market_regime
-        );
+
+        // Only log regime for loss functions that actually use it
+        match &self.loss_function {
+            crate::model::loss::CryptoLossFunction::RegimeAware { .. }
+            | crate::model::loss::CryptoLossFunction::Composite { .. } => {
+                log::debug!(
+                    "🔍 LOSS RESULT - Value: {:.6}, Regime: {:?}",
+                    loss_value,
+                    market_regime
+                );
+            }
+            _ => {
+                log::debug!("🔍 LOSS RESULT - Value: {:.6}", loss_value);
+            }
+        }
 
         Ok(loss_result)
     }
 
-    /// Detect market regime from prediction and target data patterns
-    /// Detect market regime from input sequences (NOT targets) for consistency
+    /// Detect market regime using mathematically sound approach
+    /// Uses target statistics to determine market conditions for regime-aware loss functions
     fn detect_market_regime(
         &self,
-        predictions: &Tensor,
-        _targets: &Tensor,
+        _predictions: &Tensor,
+        targets: &Tensor,
     ) -> Result<crate::optimization::objective::MarketRegime> {
         use crate::optimization::objective::MarketRegime;
 
-        // FIXED: Use predictions (derived from input sequences) instead of targets
-        // This ensures regime detection is based on input data, not ground truth
-        let batch_size = predictions.shape().dims()[0];
-        log::debug!(
-            "🔍 REGIME DETECTION - Batch size: {}, Using predictions shape: {:?}",
-            batch_size,
-            predictions.shape()
-        );
+        // Use targets for regime detection - they represent actual market conditions
+        // targets shape: [batch_size, num_targets] where num_targets = 9
 
-        // Calculate volatility from predictions (sequence-derived data)
-        let pred_mean = predictions.mean_all()?;
-        let pred_mean_broadcast = pred_mean.broadcast_as(predictions.shape())?;
-        let pred_variance = predictions
-            .sub(&pred_mean_broadcast)?
+        // Calculate adaptive statistics from the actual target data
+        let target_mean = targets.mean_all()?;
+        let target_mean_broadcast = target_mean.broadcast_as(targets.shape())?;
+        let target_variance = targets
+            .sub(&target_mean_broadcast)?
             .contiguous()?
             .sqr()?
             .mean_all()?;
         let volatility =
-            pred_variance.sqrt()?.to_scalar::<f32>().map_err(|e| {
+            target_variance.sqrt()?.to_scalar::<f32>().map_err(|e| {
                 VangaError::ModelError(format!("Volatility calculation failed: {}", e))
             })? as f64;
 
-        // Calculate trend strength from predictions (more stable than targets)
-        let pred_shape = predictions.shape();
-        let trend_strength = if pred_shape.dims()[0] > 1 && pred_shape.dims().len() > 1 {
-            // Use temporal dimension if available (sequence-based trend)
-            let seq_len = pred_shape.dims()[1];
-            if seq_len > 1 {
-                let first_half = predictions.narrow(1, 0, seq_len / 2)?;
-                let second_half = predictions.narrow(1, seq_len / 2, seq_len / 2)?;
+        let target_mean_value = target_mean.to_scalar::<f32>().unwrap_or(0.0) as f64;
 
-                let first_mean = first_half.mean_all()?.to_scalar::<f32>().unwrap_or(0.0) as f64;
-                let second_mean = second_half.mean_all()?.to_scalar::<f32>().unwrap_or(0.0) as f64;
+        // Calculate adaptive thresholds based on actual data distribution
+        let target_std = volatility; // Standard deviation
+        let target_abs_mean = target_mean_value.abs();
 
-                (second_mean - first_mean) / first_mean.abs().max(1e-8)
-            } else {
-                0.0
+        // Dynamic thresholds based on data characteristics
+        let high_vol_threshold = target_std * 2.0; // 2 standard deviations
+        let low_vol_threshold = target_std * 0.5; // 0.5 standard deviations
+        let trend_threshold = target_abs_mean * 0.1 + target_std * 0.5; // Adaptive trend detection
+        let range_threshold = target_std * 1.0; // 1 standard deviation for range-bound
+
+        // Classify market regime using adaptive thresholds
+        let regime = match (volatility, target_mean_value) {
+            (v, _) if v > high_vol_threshold => MarketRegime::HighVolatility,
+            (v, t) if v < low_vol_threshold && t.abs() < trend_threshold * 0.5 => {
+                MarketRegime::LowVolatility
             }
-        } else {
-            0.0
-        };
-
-        // Classify market regime with crypto-appropriate thresholds
-        let regime = match (volatility, trend_strength) {
-            (v, _) if v > 0.1 => MarketRegime::HighVolatility, // Crypto: higher volatility threshold
-            (v, t) if v < 0.02 && t.abs() < 0.005 => MarketRegime::LowVolatility,
-            (_, t) if t > 0.02 => MarketRegime::BullMarket, // Crypto: lower trend threshold
-            (_, t) if t < -0.02 => MarketRegime::BearMarket,
-            (v, _) if v < 0.05 => MarketRegime::RangeBound,
+            (_, t) if t > trend_threshold => MarketRegime::BullMarket,
+            (_, t) if t < -trend_threshold => MarketRegime::BearMarket,
+            (v, _) if v < range_threshold => MarketRegime::RangeBound,
             _ => MarketRegime::MediumVolatility,
         };
-
-        log::debug!(
-            "🔍 FIXED REGIME - Regime: {:?}, Volatility: {:.6}, Trend: {:.6} (from predictions)",
-            regime,
-            volatility,
-            trend_strength
-        );
 
         Ok(regime)
     }
