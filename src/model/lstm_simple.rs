@@ -905,39 +905,78 @@ impl LSTMModel {
         let use_validation = validation_split > 0.0;
 
         // Prepare training and validation data - handle pre-split vs internal split
-        let (train_sequences, train_targets, val_sequences_final, val_targets_final) =
-            if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
-                // Use pre-split chronological validation data (prevents data leakage)
-                log::info!(
-                    "📊 Using pre-split chronological validation: {} train, {} val samples",
-                    sequences.shape()[0],
-                    val_seq.shape()[0]
-                );
-                (
-                    sequences.to_owned(),
-                    targets.to_owned(),
-                    Some(val_seq.to_owned()),
-                    Some(val_tgt.to_owned()),
-                )
-            } else if use_validation {
-                // Create internal validation split
-                log::info!(
-                    "📊 Using internal validation split: {:.1}%",
-                    validation_split * 100.0
-                );
+        let (train_sequences, train_targets, val_sequences_final, val_targets_final) = if let (
+            Some(val_seq),
+            Some(val_tgt),
+        ) =
+            (val_sequences, val_targets)
+        {
+            // Use pre-split chronological validation data (prevents data leakage)
+            log::info!(
+                "📊 Using pre-split chronological validation: {} train, {} val samples",
+                sequences.shape()[0],
+                val_seq.shape()[0]
+            );
+            (
+                sequences.to_owned(),
+                targets.to_owned(),
+                Some(val_seq.to_owned()),
+                Some(val_tgt.to_owned()),
+            )
+        } else if use_validation {
+            // Create internal validation split with gap to prevent data leakage
+            log::info!(
+                "📊 Using internal validation split: {:.1}%",
+                validation_split * 100.0
+            );
 
-                let train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
-                let train_seq = sequences.slice(s![0..train_samples, .., ..]).to_owned();
-                let train_tgt = targets.slice(s![0..train_samples, ..]).to_owned();
-                let val_seq = sequences.slice(s![train_samples.., .., ..]).to_owned();
-                let val_tgt = targets.slice(s![train_samples.., ..]).to_owned();
-
-                (train_seq, train_tgt, Some(val_seq), Some(val_tgt))
+            // Calculate gap size to prevent data leakage based on prediction horizon
+            // Gap should be max_horizon_steps to ensure targets don't overlap
+            let gap_size = if !config.horizons.is_empty() {
+                // Calculate max horizon steps from training config horizons
+                config
+                    .horizons
+                    .iter()
+                    .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+                    .max()
+                    .unwrap_or(72)
             } else {
-                // No validation
-                log::info!("📊 Training without validation");
-                (sequences.to_owned(), targets.to_owned(), None, None)
+                72 // Fallback to 3d horizon if no horizons specified
             };
+
+            // Calculate training samples, then add gap before validation
+            let base_train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
+            let train_samples = base_train_samples.min(total_samples.saturating_sub(gap_size));
+            let val_start = train_samples + gap_size;
+
+            // Ensure we have enough samples for validation after the gap
+            if val_start >= total_samples {
+                return Err(VangaError::DataError(format!(
+                        "Not enough data for validation after gap: {} total samples, {} train + {} gap = {} start, need at least {} for validation",
+                        total_samples, train_samples, gap_size, val_start, val_start + 1
+                    )));
+            }
+
+            let train_seq = sequences.slice(s![0..train_samples, .., ..]).to_owned();
+            let train_tgt = targets.slice(s![0..train_samples, ..]).to_owned();
+            let val_seq = sequences.slice(s![val_start.., .., ..]).to_owned();
+            let val_tgt = targets.slice(s![val_start.., ..]).to_owned();
+
+            log::info!(
+                    "🔒 Data leakage prevention: {} train samples, {} gap (max horizon: {}), {} val samples (starting at {})",
+                    train_samples,
+                    gap_size,
+                    config.horizons.iter().max().unwrap_or(&"3d".to_string()),
+                    val_seq.shape()[0],
+                    val_start
+                );
+
+            (train_seq, train_tgt, Some(val_seq), Some(val_tgt))
+        } else {
+            // No validation
+            log::info!("📊 Training without validation");
+            (sequences.to_owned(), targets.to_owned(), None, None)
+        };
 
         let total_train_samples = train_sequences.shape()[0];
         let total_val_samples = val_sequences_final
@@ -1756,66 +1795,92 @@ impl LSTMModel {
     fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
         use crate::model::loss::TensorCryptoLossFunction;
 
+        // Log loss calculation context
+        log::debug!(
+            "🔍 LOSS CALCULATION - Pred shape: {:?}, Target shape: {:?}",
+            predictions.shape(),
+            targets.shape()
+        );
+
         let mut tensor_loss_fn = TensorCryptoLossFunction::new(self.loss_function.clone());
 
-        // Detect market regime for crypto-specific losses (MSE ignores this)
         let market_regime = self.detect_market_regime(predictions, targets)?;
 
-        tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime)
+        let loss_result =
+            tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime.clone())?;
+        let loss_value = loss_result.to_scalar::<f32>().unwrap_or(0.0);
+        log::debug!(
+            "🔍 LOSS RESULT - Value: {:.6}, Regime: {:?} (FIXED REGIME DETECTION)",
+            loss_value,
+            market_regime
+        );
+
+        Ok(loss_result)
     }
 
     /// Detect market regime from prediction and target data patterns
+    /// Detect market regime from input sequences (NOT targets) for consistency
     fn detect_market_regime(
         &self,
-        _predictions: &Tensor,
-        targets: &Tensor,
+        predictions: &Tensor,
+        _targets: &Tensor,
     ) -> Result<crate::optimization::objective::MarketRegime> {
         use crate::optimization::objective::MarketRegime;
 
-        // Calculate volatility from targets (actual market data)
-        let target_mean = targets.mean_all()?;
-        let target_mean_broadcast = target_mean.broadcast_as(targets.shape())?;
-        let target_variance = targets
-            .sub(&target_mean_broadcast)?
+        // FIXED: Use predictions (derived from input sequences) instead of targets
+        // This ensures regime detection is based on input data, not ground truth
+        let batch_size = predictions.shape().dims()[0];
+        log::debug!(
+            "🔍 REGIME DETECTION - Batch size: {}, Using predictions shape: {:?}",
+            batch_size,
+            predictions.shape()
+        );
+
+        // Calculate volatility from predictions (sequence-derived data)
+        let pred_mean = predictions.mean_all()?;
+        let pred_mean_broadcast = pred_mean.broadcast_as(predictions.shape())?;
+        let pred_variance = predictions
+            .sub(&pred_mean_broadcast)?
             .contiguous()?
             .sqr()?
             .mean_all()?;
         let volatility =
-            target_variance.sqrt()?.to_scalar::<f32>().map_err(|e| {
+            pred_variance.sqrt()?.to_scalar::<f32>().map_err(|e| {
                 VangaError::ModelError(format!("Volatility calculation failed: {}", e))
             })? as f64;
 
-        // Calculate trend strength from targets
-        let target_shape = targets.shape();
-        let trend_strength = if target_shape.dims()[0] > 1 {
-            let first_half = targets.narrow(0, 0, target_shape.dims()[0] / 2)?;
-            let second_half =
-                targets.narrow(0, target_shape.dims()[0] / 2, target_shape.dims()[0] / 2)?;
+        // Calculate trend strength from predictions (more stable than targets)
+        let pred_shape = predictions.shape();
+        let trend_strength = if pred_shape.dims()[0] > 1 && pred_shape.dims().len() > 1 {
+            // Use temporal dimension if available (sequence-based trend)
+            let seq_len = pred_shape.dims()[1];
+            if seq_len > 1 {
+                let first_half = predictions.narrow(1, 0, seq_len / 2)?;
+                let second_half = predictions.narrow(1, seq_len / 2, seq_len / 2)?;
 
-            let first_mean = first_half.mean_all()?.to_scalar::<f32>().map_err(|e| {
-                VangaError::ModelError(format!("First half mean calculation failed: {}", e))
-            })? as f64;
-            let second_mean = second_half.mean_all()?.to_scalar::<f32>().map_err(|e| {
-                VangaError::ModelError(format!("Second half mean calculation failed: {}", e))
-            })? as f64;
+                let first_mean = first_half.mean_all()?.to_scalar::<f32>().unwrap_or(0.0) as f64;
+                let second_mean = second_half.mean_all()?.to_scalar::<f32>().unwrap_or(0.0) as f64;
 
-            (second_mean - first_mean) / first_mean.abs().max(1e-8)
+                (second_mean - first_mean) / first_mean.abs().max(1e-8)
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
 
-        // Classify market regime based on volatility and trend
+        // Classify market regime with crypto-appropriate thresholds
         let regime = match (volatility, trend_strength) {
-            (v, _) if v > 0.05 => MarketRegime::HighVolatility,
-            (v, t) if v < 0.02 && t.abs() < 0.01 => MarketRegime::LowVolatility,
-            (_, t) if t > 0.03 => MarketRegime::BullMarket,
-            (_, t) if t < -0.03 => MarketRegime::BearMarket,
-            (v, _) if v < 0.02 => MarketRegime::RangeBound,
+            (v, _) if v > 0.1 => MarketRegime::HighVolatility, // Crypto: higher volatility threshold
+            (v, t) if v < 0.02 && t.abs() < 0.005 => MarketRegime::LowVolatility,
+            (_, t) if t > 0.02 => MarketRegime::BullMarket, // Crypto: lower trend threshold
+            (_, t) if t < -0.02 => MarketRegime::BearMarket,
+            (v, _) if v < 0.05 => MarketRegime::RangeBound,
             _ => MarketRegime::MediumVolatility,
         };
 
         log::debug!(
-            "Market regime detected: {:?} (volatility: {:.4}, trend: {:.4})",
+            "🔍 FIXED REGIME - Regime: {:?}, Volatility: {:.6}, Trend: {:.6} (from predictions)",
             regime,
             volatility,
             trend_strength

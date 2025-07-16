@@ -73,10 +73,15 @@ impl ModelTrainer {
             }
         }
 
-        let final_model = model.unwrap();
+        let mut final_model = model.unwrap();
+
+        // CRITICAL FIX: Set complete training config on model before saving
+        // This ensures prediction can regenerate the same features and settings as training
+        final_model.set_training_config(self.config.clone());
 
         // Save the trained multi-target model
         log::info!("✅ Walk-forward multi-target model training completed successfully!");
+        log::info!("🔧 Complete training config saved with model for consistent prediction");
         Ok(final_model)
     }
 
