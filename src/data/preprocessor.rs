@@ -5,13 +5,12 @@ use polars::prelude::*;
 
 /// Strategy for replacing outlier values in time-series data
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Interpolate is for future enhancement
 enum ReplacementStrategy {
     /// Cap outliers to bounds (preserves direction, limits magnitude)
     Cap,
     /// Replace with median/center value (maximum stability)
     Median,
-    /// Interpolate from surrounding values (future enhancement)
+    /// Interpolate from surrounding values (now implemented)
     Interpolate,
 }
 
@@ -785,19 +784,29 @@ impl DataPreprocessor {
 
         let processed_values: Vec<Option<f64>> = float_series
             .into_iter()
-            .map(|value| {
+            .enumerate()
+            .map(|(index, value)| {
                 if let Some(v) = value {
                     if v.is_finite() && (v < lower_bound || v > upper_bound) {
                         outlier_count += 1;
                         // Replace outlier with appropriate value based on strategy
-                        Some(self.get_replacement_value(
-                            v,
-                            &replacement_strategy,
-                            q1,
-                            q3,
-                            lower_bound,
-                            upper_bound,
-                        ))
+                        let replacement_value = match replacement_strategy {
+                            ReplacementStrategy::Interpolate => self.interpolate_outlier_value(
+                                float_series,
+                                index,
+                                v,
+                                (q1 + q3) / 2.0,
+                            ),
+                            _ => self.get_replacement_value(
+                                v,
+                                &replacement_strategy,
+                                (q1 + q3) / 2.0,
+                                q1,
+                                lower_bound,
+                                upper_bound,
+                            ),
+                        };
+                        Some(replacement_value)
                     } else {
                         Some(v)
                     }
@@ -825,7 +834,8 @@ impl DataPreprocessor {
 
         let processed_values: Vec<Option<f64>> = float_series
             .into_iter()
-            .map(|value| {
+            .enumerate()
+            .map(|(index, value)| {
                 if let Some(v) = value {
                     if v.is_finite() {
                         let z_score = (v - mean).abs() / std_dev;
@@ -834,14 +844,20 @@ impl DataPreprocessor {
                             // Replace outlier with appropriate value based on strategy
                             let lower_bound = mean - threshold * std_dev;
                             let upper_bound = mean + threshold * std_dev;
-                            Some(self.get_replacement_value(
-                                v,
-                                &replacement_strategy,
-                                mean,
-                                mean,
-                                lower_bound,
-                                upper_bound,
-                            ))
+                            let replacement_value = match replacement_strategy {
+                                ReplacementStrategy::Interpolate => {
+                                    self.interpolate_outlier_value(float_series, index, v, mean)
+                                }
+                                _ => self.get_replacement_value(
+                                    v,
+                                    &replacement_strategy,
+                                    mean,
+                                    mean,
+                                    lower_bound,
+                                    upper_bound,
+                                ),
+                            };
+                            Some(replacement_value)
                         } else {
                             Some(v)
                         }
@@ -873,7 +889,8 @@ impl DataPreprocessor {
 
         let processed_values: Vec<Option<f64>> = float_series
             .into_iter()
-            .map(|value| {
+            .enumerate()
+            .map(|(index, value)| {
                 if let Some(v) = value {
                     if v.is_finite() {
                         let modified_z_score = scale_factor * (v - median).abs() / mad;
@@ -883,14 +900,20 @@ impl DataPreprocessor {
                             let bound_range = threshold * mad / scale_factor;
                             let lower_bound = median - bound_range;
                             let upper_bound = median + bound_range;
-                            Some(self.get_replacement_value(
-                                v,
-                                &replacement_strategy,
-                                median,
-                                median,
-                                lower_bound,
-                                upper_bound,
-                            ))
+                            let replacement_value = match replacement_strategy {
+                                ReplacementStrategy::Interpolate => {
+                                    self.interpolate_outlier_value(float_series, index, v, median)
+                                }
+                                _ => self.get_replacement_value(
+                                    v,
+                                    &replacement_strategy,
+                                    median,
+                                    median,
+                                    lower_bound,
+                                    upper_bound,
+                                ),
+                            };
+                            Some(replacement_value)
                         } else {
                             Some(v)
                         }
@@ -909,8 +932,8 @@ impl DataPreprocessor {
 
     /// Determine replacement strategy based on column type
     fn get_replacement_strategy(&self, column_name: &str) -> ReplacementStrategy {
-        match column_name {
-            // Volume: Cap to reasonable bounds
+        let strategy = match column_name {
+            // Volume: Cap to reasonable bounds (preserve market structure)
             "volume" => ReplacementStrategy::Cap,
             // Technical indicators: Use median for stability
             name if name.contains("rsi")
@@ -922,9 +945,26 @@ impl DataPreprocessor {
             {
                 ReplacementStrategy::Median
             }
+            // Price-derived features: Use interpolation for smooth time-series continuity
+            name if name.contains("return")
+                || name.contains("change")
+                || name.contains("momentum")
+                || name.contains("velocity")
+                || name.contains("acceleration")
+                || name.contains("volatility") =>
+            {
+                ReplacementStrategy::Interpolate
+            }
             // Other features: Use bounds capping
             _ => ReplacementStrategy::Cap,
-        }
+        };
+
+        log::debug!(
+            "Column '{}' using {:?} replacement strategy",
+            column_name,
+            strategy
+        );
+        strategy
     }
 
     /// Get replacement value based on strategy and outlier characteristics
@@ -953,8 +993,99 @@ impl DataPreprocessor {
                 center_value
             }
             ReplacementStrategy::Interpolate => {
-                // For now, use median - could be enhanced with actual interpolation
-                center_value
+                // Interpolation now fully implemented with surrounding values
+                log::debug!("Using interpolation strategy for outlier replacement");
+                center_value // This path should not be reached as interpolation is handled in replacement methods
+            }
+        }
+    }
+
+    /// Interpolate outlier value using surrounding valid values
+    fn interpolate_outlier_value(
+        &self,
+        series: &polars::chunked_array::ChunkedArray<polars::datatypes::Float64Type>,
+        outlier_index: usize,
+        outlier_value: f64,
+        fallback_value: f64,
+    ) -> f64 {
+        let series_len = series.len();
+
+        // Handle edge cases
+        if series_len <= 2 {
+            log::debug!("Series too short for interpolation, using fallback value");
+            return fallback_value;
+        }
+
+        // Find previous valid value
+        let mut prev_value = None;
+        let mut prev_index = None;
+        for i in (0..outlier_index).rev() {
+            if let Some(val) = series.get(i) {
+                if val.is_finite() {
+                    prev_value = Some(val);
+                    prev_index = Some(i);
+                    break;
+                }
+            }
+        }
+
+        // Find next valid value
+        let mut next_value = None;
+        let mut next_index = None;
+        for i in (outlier_index + 1)..series_len {
+            if let Some(val) = series.get(i) {
+                if val.is_finite() {
+                    next_value = Some(val);
+                    next_index = Some(i);
+                    break;
+                }
+            }
+        }
+
+        // Perform interpolation based on available surrounding values
+        match (prev_value, next_value, prev_index, next_index) {
+            (Some(prev), Some(next), Some(prev_idx), Some(next_idx)) => {
+                // Linear interpolation between previous and next values
+                let distance_from_prev = (outlier_index - prev_idx) as f64;
+                let total_distance = (next_idx - prev_idx) as f64;
+                let interpolation_ratio = distance_from_prev / total_distance;
+
+                let interpolated = prev + (next - prev) * interpolation_ratio;
+
+                log::debug!(
+                    "Interpolated outlier at index {} (value={:.4}) between prev={:.4} and next={:.4} -> {:.4}",
+                    outlier_index, outlier_value, prev, next, interpolated
+                );
+
+                interpolated
+            }
+            (Some(prev), Some(_), None, _)
+            | (Some(prev), None, _, _)
+            | (Some(prev), Some(_), Some(_), None) => {
+                // Only previous value available or index issues, use previous value
+                log::debug!(
+                    "Using previous value {:.4} for outlier at index {} (no next value or index issues)",
+                    prev, outlier_index
+                );
+                prev
+            }
+            (None, Some(next), _, _) => {
+                // Only next value available, use it
+                log::debug!(
+                    "Using next value {:.4} for outlier at index {} (no previous value)",
+                    next,
+                    outlier_index
+                );
+                next
+            }
+            (None, None, _, _) => {
+                // No surrounding values available, use fallback
+                log::debug!(
+                    "No surrounding values for interpolation at index {}, using fallback {:.4}",
+                    outlier_index,
+                    fallback_value
+                );
+                fallback_value
             }
         }
     }
@@ -1783,5 +1914,64 @@ impl DataPreprocessor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interpolation_strategy_selection() {
+        let preprocessor = DataPreprocessor;
+        
+        // Test that interpolation is selected for price-derived features
+        assert!(matches!(
+            preprocessor.get_replacement_strategy("price_return"),
+            ReplacementStrategy::Interpolate
+        ));
+        assert!(matches!(
+            preprocessor.get_replacement_strategy("momentum_5"),
+            ReplacementStrategy::Interpolate
+        ));
+        assert!(matches!(
+            preprocessor.get_replacement_strategy("volatility_10"),
+            ReplacementStrategy::Interpolate
+        ));
+        
+        // Test that median is selected for technical indicators
+        assert!(matches!(
+            preprocessor.get_replacement_strategy("rsi_14"),
+            ReplacementStrategy::Median
+        ));
+        assert!(matches!(
+            preprocessor.get_replacement_strategy("sma_20"),
+            ReplacementStrategy::Median
+        ));
+        
+        // Test that cap is selected for volume and other features
+        assert!(matches!(
+            preprocessor.get_replacement_strategy("volume"),
+            ReplacementStrategy::Cap
+        ));
+        assert!(matches!(
+            preprocessor.get_replacement_strategy("some_other_feature"),
+            ReplacementStrategy::Cap
+        ));
+    }
+
+    #[test]
+    fn test_interpolation_logic() {
+        let preprocessor = DataPreprocessor;
+        
+        // Create test series: [1.0, 2.0, OUTLIER, 4.0, 5.0]
+        let values = vec![Some(1.0), Some(2.0), Some(100.0), Some(4.0), Some(5.0)];
+        let series = Series::new("test", values).f64().unwrap().clone();
+        
+        // Test interpolation at index 2 (outlier value 100.0)
+        let interpolated = preprocessor.interpolate_outlier_value(&series, 2, 100.0, 3.0);
+        
+        // Should interpolate between 2.0 and 4.0, giving 3.0
+        assert!((interpolated - 3.0).abs() < 0.001);
     }
 }
