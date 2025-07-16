@@ -183,6 +183,7 @@ pub struct PriceLevelHead {
     pub bins: u32,
     pub range_percent: f64,
     pub distribution_type: DistributionType,
+    pub target_strategy: PriceLevelTargetStrategy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +205,27 @@ pub enum DistributionType {
     Categorical,
     Beta,
     Dirichlet,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PriceLevelTargetStrategy {
+    /// Current approach: single future price point
+    Current,
+
+    /// Standard VWAP over horizon period
+    StandardVWAP,
+
+    /// Momentum-aware VWAP with directional bias
+    MomentumVWAP {
+        momentum_window: usize,
+        bias_strength: f64,
+    },
+}
+
+impl Default for PriceLevelTargetStrategy {
+    fn default() -> Self {
+        Self::Current // Backward compatibility
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +272,7 @@ impl Default for ModelConfig {
                     bins: 10,
                     range_percent: 5.0,
                     distribution_type: DistributionType::Categorical,
+                    target_strategy: PriceLevelTargetStrategy::default(),
                 },
                 direction: DirectionHead {
                     enabled: true,

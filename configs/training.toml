@@ -262,6 +262,12 @@ enabled = true
 bins = 10
 range_percent = 0.05
 distribution_type = "Categorical"
+target_strategy = "Current"  # Options: "Current", "StandardVWAP", "MomentumVWAP"
+
+# Momentum VWAP configuration (only used when target_strategy = "MomentumVWAP")
+[model.output_heads.price_levels.momentum_vwap]
+momentum_window = 20
+bias_strength = 0.3
 
 [model.output_heads.direction]
 enabled = true

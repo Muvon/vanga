@@ -196,6 +196,7 @@ mod tests {
                 bins: 5,
                 range_percent: 0.1,
                 distribution_type: crate::config::model::DistributionType::Categorical,
+                target_strategy: crate::config::model::PriceLevelTargetStrategy::Current,
             },
             direction: DirectionHead {
                 enabled: true,

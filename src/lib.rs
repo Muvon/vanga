@@ -56,6 +56,7 @@ pub use api::trainer::train_model;
 // 4. Prediction with structured JSON output
 #[cfg(test)]
 mod integration_tests {
+    use crate::config::model::PriceLevelTargetStrategy;
     use crate::config::model::{
         DirectionHead, DistributionType, OutputHeadsConfig, PriceLevelHead, VolatilityHead,
         VolatilityPredictionMethod,
@@ -73,6 +74,7 @@ mod integration_tests {
                 bins: 5,
                 range_percent: 0.1,
                 distribution_type: DistributionType::Categorical,
+                target_strategy: PriceLevelTargetStrategy::Current,
             },
             direction: DirectionHead {
                 enabled: true,
@@ -477,6 +479,7 @@ mod integration_tests {
                 bins: 5,
                 range_percent: 0.1,
                 distribution_type: DistributionType::Categorical,
+                target_strategy: PriceLevelTargetStrategy::Current,
             },
             direction: DirectionHead {
                 enabled: false,

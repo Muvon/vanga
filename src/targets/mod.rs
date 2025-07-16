@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 // Re-export configurations
 pub use direction::{generate_direction_targets, Direction, DirectionConfig};
-pub use price_levels::{generate_price_level_targets, PriceLevelConfig};
+pub use price_levels::{
+    generate_price_level_targets, generate_price_level_targets_from_model_config, PriceLevelConfig,
+};
 pub use volatility::{generate_volatility_targets, VolatilityConfig, VolatilityRegime};
 
 /// Comprehensive target configuration
@@ -521,5 +523,19 @@ impl TargetGenerator {
         }
 
         Ok(result)
+    }
+
+    /// Generate price level targets using model configuration
+    pub async fn generate_price_level_targets_with_model_config(
+        &self,
+        df: &DataFrame,
+        model_config: &crate::config::model::ModelConfig,
+    ) -> Result<HashMap<String, Vec<i32>>> {
+        log::info!(
+            "Generating price level targets for {} horizons using model config",
+            self.config.horizons.len()
+        );
+
+        generate_price_level_targets_from_model_config(df, &self.config.horizons, model_config)
     }
 }
