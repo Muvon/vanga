@@ -8,6 +8,12 @@
 - **Unified interfaces**: Prefer single methods with optional parameters over multiple specialized methods
 - **Tensor-first architecture**: All operations use Candle tensors with proper broadcasting and gradient flow
 
+### CRITICAL: Global vs Per-Batch Calculations
+- **Global calculations**: Class weights, quantiles, normalization parameters must be calculated ONCE from entire training dataset
+- **Per-batch calculations**: Only use for gradient updates, loss accumulation, and batch-specific operations
+- **Loss consistency**: Training and validation must use SAME global parameters for comparable losses
+- **Chronological integrity**: Preserve time-series order - no shuffling in crypto/financial data
+
 ### Code Quality Standards
 - **Zero warnings**: All code must pass `cargo clippy --all-features --all-targets -- -D warnings`
 - **No hidden variables**: Never use `_variable` to silence warnings - fix the root cause

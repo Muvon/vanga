@@ -74,6 +74,9 @@ pub struct LSTMModel {
     /// Target context for this individual model (e.g., "price_level_1h", "direction_4h")
     /// This allows proper target type detection without assumptions
     target_context: Option<(String, crate::targets::TargetType)>, // (target_name, target_type)
+    /// Global class weights calculated once from entire training dataset
+    /// Used for consistent loss calculation across all batches (training and validation)
+    global_class_weights: Option<Vec<f32>>,
 }
 
 /// Serializable model state for persistence - SAME as original
@@ -152,6 +155,7 @@ impl LSTMModel {
             trained: false,
             loss_function: CryptoLossFunction::MSE, // Default to MSE
             target_context: None,                   // No target context by default
+            global_class_weights: None,             // No global weights initially
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -1062,6 +1066,19 @@ impl LSTMModel {
             (u32::MAX, 0.0) // Disable early stopping without validation
         };
 
+        // Calculate global class weights for consistent loss calculation across all batches
+        if let Some((_, target_type)) = &self.target_context {
+            if target_type == &TargetType::PriceLevel {
+                let num_classes = config.model.output_heads.price_levels.bins as usize;
+                log::info!(
+                    "🌍 Calculating global class weights from {} training samples for {} classes",
+                    train_targets.shape()[0],
+                    num_classes
+                );
+                self.calculate_global_class_weights(&train_targets, num_classes)?;
+            }
+        }
+
         log::info!("🔧 Training Configuration:");
         log::info!("  - Epochs: {}", self.training_config.epochs);
         log::info!("  - Batch size: {}", batch_size);
@@ -1957,10 +1974,16 @@ impl LSTMModel {
             )));
         }
 
-        // Calculate class weights for imbalanced price level targets
+        // Use global class weights if available, otherwise calculate per-batch (fallback)
         let class_weights = if let Some((_target_name, target_type)) = &self.target_context {
             if target_type == &TargetType::PriceLevel {
-                self.calculate_class_weights(targets, num_classes)?
+                if let Some(ref global_weights) = self.global_class_weights {
+                    log::debug!("🌍 Using global class weights: {:?}", global_weights);
+                    Some(global_weights.clone())
+                } else {
+                    log::debug!("⚠️ Global weights not available, calculating per-batch");
+                    self.calculate_class_weights_from_tensor(targets, num_classes)?
+                }
             } else {
                 None // No weighting for direction/volatility targets
             }
@@ -2048,8 +2071,58 @@ impl LSTMModel {
         Ok(loss)
     }
 
-    /// Calculate class weights for imbalanced datasets
-    fn calculate_class_weights(
+    /// Calculate global class weights from entire training dataset
+    /// This ensures consistent loss calculation across all batches
+    pub fn calculate_global_class_weights(
+        &mut self,
+        train_targets: &Array2<f64>,
+        num_classes: usize,
+    ) -> Result<()> {
+        // Only calculate for price level targets
+        if let Some((_, target_type)) = &self.target_context {
+            if target_type != &TargetType::PriceLevel {
+                log::debug!(
+                    "🎯 Skipping global class weights for non-price-level target: {:?}",
+                    target_type
+                );
+                self.global_class_weights = None;
+                return Ok(());
+            }
+        } else {
+            log::debug!("🎯 No target context set, skipping global class weights");
+            self.global_class_weights = None;
+            return Ok(());
+        }
+
+        // Convert to tensor for consistent processing - ensure F32 dtype
+        let targets_f32: Vec<f32> = train_targets
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&x| x as f32)
+            .collect();
+        let targets_tensor = Tensor::from_slice(&targets_f32, train_targets.dim(), &self.device)?;
+
+        // Calculate global class weights from entire training dataset
+        let weights = self.calculate_class_weights_from_tensor(&targets_tensor, num_classes)?;
+
+        if let Some(weights) = weights {
+            log::info!(
+                "🌍 Global class weights calculated from {} training samples: {:?}",
+                train_targets.shape()[0],
+                weights
+            );
+            self.global_class_weights = Some(weights);
+        } else {
+            log::warn!("⚠️ Failed to calculate global class weights, using per-batch calculation");
+            self.global_class_weights = None;
+        }
+
+        Ok(())
+    }
+
+    /// Calculate class weights for imbalanced datasets (helper method)
+    fn calculate_class_weights_from_tensor(
         &self,
         targets: &Tensor,
         num_classes: usize,
