@@ -1721,12 +1721,110 @@ impl LSTMModel {
         // Forward pass through network
         let predictions_tensor = self.forward(&input_tensor)?;
 
+        // CRITICAL FIX: Handle multi-class outputs for categorical targets
+        let final_predictions_tensor = if let Some((_, target_type)) = &self.target_context {
+            log::debug!("Target context found: {:?}", target_type);
+            match target_type {
+                TargetType::PriceLevel => {
+                    // For Price Levels: Convert multi-class probabilities to class indices
+                    let tensor_shape = predictions_tensor.shape();
+                    log::debug!("Price Level prediction shape: {:?}", tensor_shape);
+                    if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
+                        log::info!(
+                            "Converting Price Level multi-class output {:?} to class indices",
+                            tensor_shape
+                        );
+
+                        // Get argmax (predicted class) for each sample
+                        let class_indices = predictions_tensor.argmax(1)?;
+
+                        // Convert to f32 and add dimension to make it [batch, 1]
+                        class_indices
+                            .to_dtype(candle_core::DType::F32)?
+                            .unsqueeze(1)?
+                    } else {
+                        log::debug!(
+                            "Price Level output already in correct shape: {:?}",
+                            tensor_shape
+                        );
+                        predictions_tensor
+                    }
+                }
+                TargetType::Direction => {
+                    // For Direction: Convert multi-class probabilities to class indices
+                    let tensor_shape = predictions_tensor.shape();
+                    log::debug!("Direction prediction shape: {:?}", tensor_shape);
+                    if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
+                        log::info!(
+                            "Converting Direction multi-class output {:?} to class indices",
+                            tensor_shape
+                        );
+
+                        // Get argmax (predicted class) for each sample
+                        let class_indices = predictions_tensor.argmax(1)?;
+
+                        // Convert to f32 and add dimension to make it [batch, 1]
+                        class_indices
+                            .to_dtype(candle_core::DType::F32)?
+                            .unsqueeze(1)?
+                    } else {
+                        predictions_tensor
+                    }
+                }
+                TargetType::Volatility => {
+                    // For Volatility: Convert multi-class probabilities to class indices
+                    let tensor_shape = predictions_tensor.shape();
+                    log::debug!("Volatility prediction shape: {:?}", tensor_shape);
+                    if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
+                        log::info!(
+                            "Converting Volatility multi-class output {:?} to class indices",
+                            tensor_shape
+                        );
+
+                        // Get argmax (predicted class) for each sample
+                        let class_indices = predictions_tensor.argmax(1)?;
+
+                        // Convert to f32 and add dimension to make it [batch, 1]
+                        class_indices
+                            .to_dtype(candle_core::DType::F32)?
+                            .unsqueeze(1)?
+                    } else {
+                        predictions_tensor
+                    }
+                }
+            }
+        } else {
+            // No target context - detect multi-class output automatically
+            let tensor_shape = predictions_tensor.shape();
+            log::warn!(
+                "No target context set during prediction! Tensor shape: {:?}",
+                tensor_shape
+            );
+
+            if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
+                log::info!(
+                    "Auto-detecting multi-class output {:?}, converting to class indices",
+                    tensor_shape
+                );
+
+                // Get argmax (predicted class) for each sample
+                let class_indices = predictions_tensor.argmax(1)?;
+
+                // Convert to f32 and add dimension to make it [batch, 1]
+                class_indices
+                    .to_dtype(candle_core::DType::F32)?
+                    .unsqueeze(1)?
+            } else {
+                predictions_tensor
+            }
+        };
+
         // Convert back to ndarray
-        let predictions = self.tensor_to_array2(&predictions_tensor)?;
+        let predictions = self.tensor_to_array2(&final_predictions_tensor)?;
 
         // Explicit memory cleanup for prediction tensors
         drop(input_tensor);
-        drop(predictions_tensor);
+        // Note: predictions_tensor and final_predictions_tensor are dropped automatically
 
         log::info!("Generated {} predictions", predictions.nrows());
         Ok(predictions)

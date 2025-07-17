@@ -100,6 +100,13 @@ bins = 12                     # More bins for cross-asset granularity
 range_percent = 0.06         # Slightly wider range for cross-asset volatility
 distribution_type = "Categorical"
 
+# TARGET STRATEGY: For cross-asset training, momentum VWAP often works better
+# Option 1: Current strategy (default)
+target_strategy = { type = "current" }
+
+# Option 2: Momentum VWAP (recommended for cross-asset)
+# target_strategy = { type = "momentum_vwap", momentum_window = 25, bias_strength = 0.4 }
+
 [model.output_heads.direction]
 enabled = true
 threshold = 0.008            # Lower threshold for cross-asset sensitivity

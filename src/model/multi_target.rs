@@ -514,7 +514,21 @@ impl MultiTargetLSTMModel {
             let model_path = format!("{}_{}.bin", base_path.to_string_lossy(), i);
             log::debug!("Loading model {} from: {}", i + 1, model_path);
 
-            let model = LSTMModel::load(&model_path)?;
+            let mut model = LSTMModel::load(&model_path)?;
+
+            // CRITICAL FIX: Restore target context after loading
+            // The target_context is lost during serialization/deserialization
+            let target_name = &state.target_names[i];
+            let target_type = Self::get_target_type_from_name(target_name);
+            model.set_target_context(target_name.clone(), target_type);
+
+            log::debug!(
+                "Restored target context for model {}: {} -> {:?}",
+                i + 1,
+                target_name,
+                target_type
+            );
+
             models.push(model);
         }
 

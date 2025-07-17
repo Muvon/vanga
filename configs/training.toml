@@ -262,12 +262,27 @@ enabled = true
 bins = 10
 range_percent = 0.05
 distribution_type = "Categorical"
-target_strategy = "Current"  # Options: "Current", "StandardVWAP", "MomentumVWAP"
 
-# Momentum VWAP configuration (only used when target_strategy = "MomentumVWAP")
-[model.output_heads.price_levels.momentum_vwap]
-momentum_window = 20
-bias_strength = 0.3
+# ✅ CONSISTENT: All strategies use same format with internally tagged enum
+# See docs/target_strategy_configuration.md for detailed guide
+# Option 1: Current strategy (simple future price point)
+target_strategy = { type = "current" }
+
+# Option 2: Standard VWAP strategy (volume-weighted average price)
+# target_strategy = { type = "standard_vwap" }
+
+# Option 3: Momentum VWAP strategy (momentum-aware VWAP with directional bias)
+# target_strategy = { type = "momentum_vwap", momentum_window = 20, bias_strength = 0.3 }
+
+# Parameter explanations for momentum_vwap:
+# - momentum_window: Number of periods to calculate momentum (5-50, default: 20)
+#   * Conservative: 25-40 (stable, less noise)
+#   * Balanced: 15-25 (good responsiveness)
+#   * Aggressive: 5-15 (high responsiveness, more noise)
+# - bias_strength: Strength of directional bias (0.1-1.0, default: 0.3)
+#   * Conservative: 0.1-0.3 (subtle momentum bias)
+#   * Balanced: 0.3-0.6 (moderate momentum bias)
+#   * Aggressive: 0.6-1.0 (strong momentum bias)
 
 [model.output_heads.direction]
 enabled = true

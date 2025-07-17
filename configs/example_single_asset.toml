@@ -126,6 +126,16 @@ bins = 10                    # Number of price change bins (5-20 typical range)
 range_percent = 0.05         # Price change range (±5% = ±0.05)
 distribution_type = "Categorical"  # Output type (Categorical for probability distribution)
 
+# TARGET STRATEGY: Choose how to calculate target prices
+# Option 1: Current strategy (default) - simple future price point
+target_strategy = { type = "current" }
+
+# Option 2: Standard VWAP strategy - volume-weighted average price
+# target_strategy = { type = "standard_vwap" }
+
+# Option 3: Momentum VWAP strategy - momentum-aware VWAP with directional bias
+# target_strategy = { type = "momentum_vwap", momentum_window = 20, bias_strength = 0.3 }
+
 # DIRECTION PREDICTION
 # Predicts whether price will go up or down
 [model.output_heads.direction]

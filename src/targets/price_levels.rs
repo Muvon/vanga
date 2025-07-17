@@ -118,10 +118,10 @@ fn apply_quantiles_to_targets(
         // Calculate target price based on strategy
         let target_price = match &config.target_strategy {
             crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
-            crate::config::model::PriceLevelTargetStrategy::StandardVWAP => {
+            crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
                 calculate_standard_vwap(prices, i, horizon_steps)?
             }
-            crate::config::model::PriceLevelTargetStrategy::MomentumVWAP {
+            crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
                 momentum_window,
                 bias_strength,
             } => {
@@ -240,11 +240,11 @@ fn calculate_price_level_targets(
         let target_price = match &config.target_strategy {
             crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
 
-            crate::config::model::PriceLevelTargetStrategy::StandardVWAP => {
+            crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
                 calculate_standard_vwap(prices, i, horizon_steps)?
             }
 
-            crate::config::model::PriceLevelTargetStrategy::MomentumVWAP {
+            crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
                 momentum_window,
                 bias_strength,
             } => {
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn test_standard_vwap_strategy() {
         let prices = create_test_prices();
-        let config = create_test_config(PriceLevelTargetStrategy::StandardVWAP);
+        let config = create_test_config(PriceLevelTargetStrategy::StandardVwap);
 
         let result = calculate_price_level_targets(&prices, 2, &config).unwrap();
 
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn test_momentum_vwap_strategy() {
         let prices = create_test_prices();
-        let config = create_test_config(PriceLevelTargetStrategy::MomentumVWAP {
+        let config = create_test_config(PriceLevelTargetStrategy::MomentumVwap {
             momentum_window: 3,
             bias_strength: 0.5,
         });
@@ -719,5 +719,102 @@ mod tests {
 
         // Should work without errors
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_config_parsing_consistency() {
+        use crate::config::model::{PriceLevelHead, PriceLevelTargetStrategy};
+
+        // Test current strategy parsing
+        let current_toml = r#"
+enabled = true
+bins = 10
+range_percent = 0.05
+distribution_type = "Categorical"
+target_strategy = { type = "current" }
+"#;
+        let current_head: PriceLevelHead = toml::from_str(current_toml).unwrap();
+        assert!(matches!(
+            current_head.target_strategy,
+            PriceLevelTargetStrategy::Current
+        ));
+        assert!(current_head.validate().is_ok());
+
+        // Test standard VWAP strategy parsing
+        let standard_toml = r#"
+enabled = true
+bins = 10
+range_percent = 0.05
+distribution_type = "Categorical"
+target_strategy = { type = "standard_vwap" }
+"#;
+        let standard_head: PriceLevelHead = toml::from_str(standard_toml).unwrap();
+        assert!(matches!(
+            standard_head.target_strategy,
+            PriceLevelTargetStrategy::StandardVwap
+        ));
+        assert!(standard_head.validate().is_ok());
+
+        // Test momentum VWAP strategy parsing
+        let momentum_toml = r#"
+enabled = true
+bins = 10
+range_percent = 0.05
+distribution_type = "Categorical"
+target_strategy = { type = "momentum_vwap", momentum_window = 20, bias_strength = 0.3 }
+"#;
+        let momentum_head: PriceLevelHead = toml::from_str(momentum_toml).unwrap();
+        match momentum_head.target_strategy {
+            PriceLevelTargetStrategy::MomentumVwap {
+                momentum_window,
+                bias_strength,
+            } => {
+                assert_eq!(momentum_window, 20);
+                assert_eq!(bias_strength, 0.3);
+            }
+            _ => panic!("Expected MomentumVwap variant"),
+        }
+        assert!(momentum_head.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validation_errors() {
+        use crate::config::model::{DistributionType, PriceLevelHead, PriceLevelTargetStrategy};
+
+        // Test invalid momentum_window
+        let invalid_head = PriceLevelHead {
+            enabled: true,
+            bins: 10,
+            range_percent: 0.05,
+            distribution_type: DistributionType::Categorical,
+            target_strategy: PriceLevelTargetStrategy::MomentumVwap {
+                momentum_window: 0, // Invalid!
+                bias_strength: 0.3,
+            },
+        };
+        assert!(invalid_head.validate().is_err());
+
+        // Test invalid bias_strength
+        let invalid_head2 = PriceLevelHead {
+            enabled: true,
+            bins: 10,
+            range_percent: 0.05,
+            distribution_type: DistributionType::Categorical,
+            target_strategy: PriceLevelTargetStrategy::MomentumVwap {
+                momentum_window: 20,
+                bias_strength: 1.5, // Invalid!
+            },
+        };
+        assert!(invalid_head2.validate().is_err());
+
+        // Test invalid bins
+        let invalid_head3 = PriceLevelHead {
+            enabled: true,
+            bins: 1, // Invalid!
+            range_percent: 0.05,
+            distribution_type: DistributionType::Categorical,
+            target_strategy: PriceLevelTargetStrategy::Current,
+        };
+        assert!(invalid_head3.validate().is_err());
     }
 }

@@ -186,6 +186,37 @@ pub struct PriceLevelHead {
     pub target_strategy: PriceLevelTargetStrategy,
 }
 
+impl PriceLevelHead {
+    /// Validate the price level head configuration
+    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+        if self.bins < 2 {
+            return Err(crate::utils::error::VangaError::config(
+                "Price level bins must be at least 2",
+            ));
+        }
+        if self.bins > 50 {
+            return Err(crate::utils::error::VangaError::config(
+                "Price level bins should be <= 50 for reasonable performance",
+            ));
+        }
+        if self.range_percent <= 0.0 {
+            return Err(crate::utils::error::VangaError::config(
+                "Price level range_percent must be greater than 0.0",
+            ));
+        }
+        if self.range_percent > 1.0 {
+            return Err(crate::utils::error::VangaError::config(
+                "Price level range_percent should be <= 1.0 (100%)",
+            ));
+        }
+
+        // Validate the target strategy
+        self.target_strategy.validate()?;
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionHead {
     pub enabled: bool,
@@ -208,15 +239,16 @@ pub enum DistributionType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum PriceLevelTargetStrategy {
     /// Current approach: single future price point
     Current,
 
     /// Standard VWAP over horizon period
-    StandardVWAP,
+    StandardVwap,
 
     /// Momentum-aware VWAP with directional bias
-    MomentumVWAP {
+    MomentumVwap {
         momentum_window: usize,
         bias_strength: f64,
     },
@@ -225,6 +257,46 @@ pub enum PriceLevelTargetStrategy {
 impl Default for PriceLevelTargetStrategy {
     fn default() -> Self {
         Self::Current // Backward compatibility
+    }
+}
+
+impl PriceLevelTargetStrategy {
+    /// Validate the target strategy configuration
+    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+        match self {
+            Self::Current => Ok(()),
+            Self::StandardVwap => Ok(()),
+            Self::MomentumVwap {
+                momentum_window,
+                bias_strength,
+            } => {
+                if *momentum_window == 0 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "MomentumVwap momentum_window must be greater than 0",
+                    ));
+                }
+                if *momentum_window > 100 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "MomentumVwap momentum_window should be <= 100 for reasonable performance",
+                    ));
+                }
+                if *bias_strength < 0.0 || *bias_strength > 1.0 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "MomentumVwap bias_strength must be between 0.0 and 1.0",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Get a human-readable description of the strategy
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Current => "Current: Uses simple future price point",
+            Self::StandardVwap => "Standard VWAP: Volume-weighted average price over horizon",
+            Self::MomentumVwap { .. } => "Momentum VWAP: Momentum-aware VWAP with directional bias",
+        }
     }
 }
 
@@ -288,6 +360,105 @@ impl Default for ModelConfig {
             quantile_outputs: None, // Disabled by default for backward compatibility
             loss_function: CryptoLossFunction::MSE, // Use explicit MSE default
         }
+    }
+}
+
+impl ModelConfig {
+    /// Validate the model configuration
+    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+        // Validate output heads
+        if self.output_heads.price_levels.enabled {
+            self.output_heads.price_levels.validate()?;
+        }
+
+        // Validate sequence length
+        match &self.sequence_length {
+            SequenceLengthConfig::Fixed(length) => {
+                if *length == 0 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Fixed sequence length must be greater than 0",
+                    ));
+                }
+                if *length > 1000 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Fixed sequence length should be <= 1000 for reasonable performance",
+                    ));
+                }
+            }
+            SequenceLengthConfig::Auto {
+                min_length,
+                max_length,
+            } => {
+                if *min_length == 0 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Auto sequence min_length must be greater than 0",
+                    ));
+                }
+                if *min_length >= *max_length {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Auto sequence min_length must be less than max_length",
+                    ));
+                }
+                if *max_length > 1000 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Auto sequence max_length should be <= 1000 for reasonable performance",
+                    ));
+                }
+            }
+            SequenceLengthConfig::Adaptive => {
+                // Adaptive is always valid
+            }
+        }
+
+        // Validate hidden units
+        match &self.hidden_units {
+            HiddenUnitsConfig::Fixed(units) => {
+                if units.is_empty() {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Fixed hidden units cannot be empty",
+                    ));
+                }
+                for &unit_count in units {
+                    if unit_count == 0 {
+                        return Err(crate::utils::error::VangaError::config(
+                            "Fixed hidden units must be greater than 0",
+                        ));
+                    }
+                }
+            }
+            HiddenUnitsConfig::Auto {
+                min_units,
+                max_units,
+            } => {
+                if *min_units == 0 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Auto hidden min_units must be greater than 0",
+                    ));
+                }
+                if *min_units >= *max_units {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Auto hidden min_units must be less than max_units",
+                    ));
+                }
+            }
+            HiddenUnitsConfig::Pyramid {
+                base_units,
+                reduction_factor,
+            } => {
+                if *base_units == 0 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Pyramid base_units must be greater than 0",
+                    ));
+                }
+                if *reduction_factor <= 0.0 || *reduction_factor >= 1.0 {
+                    return Err(crate::utils::error::VangaError::config(
+                        "Pyramid reduction_factor must be between 0.0 and 1.0",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
