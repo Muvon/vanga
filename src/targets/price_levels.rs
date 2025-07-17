@@ -7,6 +7,9 @@ use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
+/// Type alias for price level targets with quantile boundaries
+type PriceLevelTargetsWithBoundaries = (HashMap<String, Vec<i32>>, HashMap<String, Vec<f64>>);
+
 /// Configuration for price level target generation
 #[derive(Debug, Clone)]
 pub struct PriceLevelConfig {
@@ -32,6 +35,98 @@ impl Default for PriceLevelConfig {
             min_price_change: 0.001, // 0.1% minimum change
         }
     }
+}
+
+/// Generate price level targets with consistent global boundaries
+/// This ensures training and validation use the same class boundaries
+pub fn generate_price_level_targets_with_global_boundaries(
+    df: &DataFrame,
+    horizons: &[String],
+    config: &crate::config::model::PriceLevelHead,
+    train_val_split_idx: Option<usize>, // Split point for consistent boundaries
+) -> Result<PriceLevelTargetsWithBoundaries> {
+    let mut all_targets = HashMap::new();
+    let mut global_quantiles = HashMap::new();
+
+    // Extract price column
+    let prices = df
+        .column("close")?
+        .f64()?
+        .into_no_null_iter()
+        .collect::<Vec<f64>>();
+
+    if prices.len() < 2 {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Insufficient price data for target generation".to_string(),
+        ));
+    }
+
+    for horizon in horizons {
+        let horizon_steps = parse_horizon_to_steps(horizon)?;
+
+        // Calculate global quantiles from training portion only
+        let train_prices = if let Some(split_idx) = train_val_split_idx {
+            &prices[..split_idx.min(prices.len())]
+        } else {
+            &prices // Use all data if no split specified
+        };
+
+        // Calculate consistent quantiles using fixed method for stability
+        let quantiles = calculate_quantiles(
+            train_prices,
+            config.bins,
+            &QuantileMethod::Fixed, // Use fixed method for consistency
+        )?;
+
+        // Apply same quantiles to entire dataset
+        let targets = apply_quantiles_to_targets(&prices, horizon_steps, &quantiles, config)?;
+
+        all_targets.insert(horizon.clone(), targets);
+        global_quantiles.insert(horizon.clone(), quantiles);
+    }
+
+    Ok((all_targets, global_quantiles))
+}
+
+/// Apply pre-calculated quantiles to generate targets
+fn apply_quantiles_to_targets(
+    prices: &[f64],
+    horizon_steps: usize,
+    quantiles: &[f64],
+    config: &crate::config::model::PriceLevelHead,
+) -> Result<Vec<i32>> {
+    let mut targets = vec![-1; prices.len()]; // Initialize with invalid targets
+
+    for i in 0..(prices.len().saturating_sub(horizon_steps)) {
+        let current_price = prices[i];
+
+        // Calculate target price based on strategy
+        let target_price = match &config.target_strategy {
+            crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
+            crate::config::model::PriceLevelTargetStrategy::StandardVWAP => {
+                calculate_standard_vwap(prices, i, horizon_steps)?
+            }
+            crate::config::model::PriceLevelTargetStrategy::MomentumVWAP {
+                momentum_window,
+                bias_strength,
+            } => {
+                calculate_momentum_vwap(prices, i, horizon_steps, *momentum_window, *bias_strength)?
+            }
+        };
+
+        let price_change = (target_price - current_price) / current_price;
+
+        // Skip if price change is too small
+        if price_change.abs() < config.range_percent {
+            targets[i] = config.bins as i32 / 2; // Neutral class
+            continue;
+        }
+
+        // Classify using global quantiles
+        targets[i] = classify_price_to_level(target_price, quantiles);
+    }
+
+    Ok(targets)
 }
 
 /// Generate price level targets for multiple horizons
@@ -198,7 +293,8 @@ fn classify_price_to_level(price: f64, quantiles: &[f64]) -> i32 {
             return i as i32;
         }
     }
-    quantiles.len() as i32
+    // Clamp to highest valid index (quantiles.len() - 1) to prevent out-of-bounds
+    (quantiles.len() - 1) as i32
 }
 
 /// Calculate price volatility for adaptive quantiles

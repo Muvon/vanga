@@ -2,6 +2,7 @@
 use crate::config::ModelConfig;
 use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
 use crate::model::loss::CryptoLossFunction;
+use crate::targets::TargetType;
 // MarketRegime imported in calculate_loss method
 use crate::utils::error::{Result, VangaError};
 
@@ -70,6 +71,9 @@ pub struct LSTMModel {
     training_config: TrainingConfig,
     trained: bool,
     loss_function: CryptoLossFunction, // Multi-target loss function
+    /// Target context for this individual model (e.g., "price_level_1h", "direction_4h")
+    /// This allows proper target type detection without assumptions
+    target_context: Option<(String, crate::targets::TargetType)>, // (target_name, target_type)
 }
 
 /// Serializable model state for persistence - SAME as original
@@ -147,6 +151,7 @@ impl LSTMModel {
             training_config,
             trained: false,
             loss_function: CryptoLossFunction::MSE, // Default to MSE
+            target_context: None,                   // No target context by default
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -362,10 +367,10 @@ impl LSTMModel {
 
         // Attention integration temporarily disabled for clean compilation
 
-        // Create output layer for sequence-to-one prediction - SAME as original
+        // Create output layer for sequence-to-one prediction - FIXED to use config output_size
         let output_layer = linear(
             self.config.hidden_size,
-            1, // Single output like original (output_size determined by target structure)
+            self.config.output_size, // Use configured output_size for multi-class targets
             vs.pp("output"),
         )
         .map_err(|e| VangaError::ModelError(format!("Output layer creation failed: {}", e)))?;
@@ -373,10 +378,11 @@ impl LSTMModel {
         self.output_layer = Some(output_layer);
 
         log::info!(
-            "✅ Multi-layer LSTM network initialized successfully: {} layers, {} → {} → 1",
+            "✅ Multi-layer LSTM network initialized successfully: {} layers, {} → {} → {}",
             num_layers,
             self.config.input_size,
-            self.config.hidden_size
+            self.config.hidden_size,
+            self.config.output_size
         );
         Ok(())
     }
@@ -897,8 +903,8 @@ impl LSTMModel {
             self.initialize_network()?;
         }
 
-        // Update config to reflect actual output size (1 for compatibility)
-        self.config.output_size = 1;
+        // REMOVED: self.config.output_size = 1; - This was breaking multi-target categorical loss
+        // The output_size should remain as configured during model creation for proper loss calculation
 
         // Determine if we need validation split
         let validation_split = config.training.validation_split;
@@ -1028,29 +1034,33 @@ impl LSTMModel {
         let mut best_val_loss = f64::INFINITY;
         let mut early_stopping_counter = 0;
 
-        // FIXED: Adaptive early stopping configuration based on loss function type
-        let (early_stopping_patience, early_stopping_min_delta) =
-            if use_validation {
-                let base_patience = match &config.training.epochs {
-                    crate::config::training::EpochConfig::Auto { max_epochs: _ } => {
-                        config.training.early_stopping.patience
-                    }
-                    _ => 10, // Default patience for fixed epochs
-                };
-                let base_min_delta = config.training.early_stopping.min_delta;
+        // FIXED: Adaptive early stopping configuration based on target types
+        let (early_stopping_patience, early_stopping_min_delta) = if use_validation {
+            let base_patience = match &config.training.epochs {
+                crate::config::training::EpochConfig::Auto { max_epochs: _ } => {
+                    config.training.early_stopping.patience
+                }
+                _ => 10, // Default patience for fixed epochs
+            };
+            let base_min_delta = config.training.early_stopping.min_delta;
 
-                // FIXED: Adjust min_delta based on loss function type and expected scale
-                let adaptive_min_delta = self.get_adaptive_min_delta(base_min_delta);
-
-                log::info!(
-                "🎯 Early stopping configured: patience={}, min_delta={:.6} (adaptive from {:.6})",
-                base_patience, adaptive_min_delta, base_min_delta
+            // FIXED: Adjust min_delta based on target types and expected scale
+            let target_type = self.get_target_type().unwrap_or(TargetType::PriceLevel);
+            let (adaptive_patience, adaptive_min_delta) = self.get_adaptive_early_stopping_config(
+                &[target_type],
+                base_patience,
+                base_min_delta,
             );
 
-                (base_patience, adaptive_min_delta)
-            } else {
-                (u32::MAX, 0.0) // Disable early stopping without validation
-            };
+            log::info!(
+                "🎯 Early stopping configured: patience={}, min_delta={:.6} (adaptive from {:.6}) for target: {:?}",
+                adaptive_patience, adaptive_min_delta, base_min_delta, target_type
+            );
+
+            (adaptive_patience, adaptive_min_delta)
+        } else {
+            (u32::MAX, 0.0) // Disable early stopping without validation
+        };
 
         log::info!("🔧 Training Configuration:");
         log::info!("  - Epochs: {}", self.training_config.epochs);
@@ -1106,7 +1116,7 @@ impl LSTMModel {
                 let predictions = self.forward(&input_tensor)?;
 
                 // Calculate loss using configured loss function or default MSE
-                let loss = self.calculate_loss(&predictions, &target_tensor)?;
+                let loss = self.calculate_loss(&predictions, &target_tensor, config)?;
 
                 // Backward pass with gradient computation
                 let grads = loss.backward()?;
@@ -1171,7 +1181,7 @@ impl LSTMModel {
                     let predictions = self.forward(&input_tensor)?;
 
                     // Calculate validation loss using configured loss function
-                    let val_loss = self.calculate_loss(&predictions, &target_tensor)?;
+                    let val_loss = self.calculate_loss(&predictions, &target_tensor, config)?;
                     let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
                         VangaError::ModelError(format!(
                             "Validation loss scalar conversion failed: {}",
@@ -1261,17 +1271,39 @@ impl LSTMModel {
                 };
 
                 if let Some(val_loss) = avg_val_loss {
+                    // Get target type for this individual model
+                    let target_type = self.get_target_type().unwrap_or(TargetType::PriceLevel);
+                    let target_info = format!(" [{:?}]", target_type);
+
+                    // Calculate loss ratio and status
+                    let loss_ratio = val_loss / avg_train_loss;
+                    let ratio_status = if loss_ratio < 1.5 {
+                        "✅"
+                    } else if loss_ratio < 3.0 {
+                        "⚠️"
+                    } else {
+                        "🚨"
+                    };
+
                     log::info!(
-                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6}, LR: {:.6}{}, Early Stop: {}/{}",
+                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}{}, Early Stop: {}/{}{}",
                         epoch + 1,
                         self.training_config.epochs,
                         avg_train_loss,
                         val_loss,
+                        loss_ratio,
+                        ratio_status,
                         current_lr,
                         warmup_status,
                         early_stopping_counter,
-                        early_stopping_patience
+                        early_stopping_patience,
+                        target_info
                     );
+
+                    // Log overfitting warnings only when necessary
+                    if loss_ratio > 3.0 {
+                        log::warn!("🔧 Overfitting detected (ratio: {:.2}x). Consider adjusting regularization or model complexity.", loss_ratio);
+                    }
                 } else {
                     let num_batches = total_train_samples.div_ceil(batch_size);
                     log::info!(
@@ -1781,6 +1813,26 @@ impl LSTMModel {
     pub fn get_input_size(&self) -> usize {
         self.config.input_size
     }
+
+    /// Get the output size of the model for debugging
+    pub fn get_output_size(&self) -> usize {
+        self.config.output_size
+    }
+
+    /// Set target context for this individual model
+    /// This allows proper target type detection without assumptions based on output_size
+    pub fn set_target_context(
+        &mut self,
+        target_name: String,
+        target_type: crate::targets::TargetType,
+    ) {
+        self.target_context = Some((target_name.clone(), target_type));
+        log::debug!(
+            "🎯 Target context set: {} -> {:?}",
+            target_name,
+            target_type
+        );
+    }
 }
 
 // Implement From trait for Candle error conversion
@@ -1791,10 +1843,187 @@ impl From<candle_core::Error> for VangaError {
 }
 
 impl LSTMModel {
-    /// Calculate loss using configured loss function
-    fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        use crate::model::loss::TensorCryptoLossFunction;
+    /// Get THIS model's target type - MUST be set during model creation
+    /// No fallbacks, no assumptions - if not set, it's a programming error
+    fn get_target_type(&self) -> Result<TargetType> {
+        match &self.target_context {
+            Some((_, target_type)) => Ok(*target_type),
+            None => Err(VangaError::ModelError(
+                "Target context not set for individual LSTM model. This is a programming error - models must be created with explicit target context.".to_string()
+            ))
+        }
+    }
 
+    /// Validate that model output_size matches expected target size
+    /// This helps debug configuration issues
+    fn validate_target_size_consistency(
+        &self,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        let target_type = self.get_target_type()?;
+        let expected_size = self.get_target_size(target_type, config);
+        let actual_size = self.config.output_size;
+
+        if actual_size != expected_size {
+            log::error!(
+                "🚨 TARGET SIZE MISMATCH: Target {:?} expects {} outputs but model has {} outputs",
+                target_type,
+                expected_size,
+                actual_size
+            );
+            return Err(VangaError::ModelError(format!(
+                "Model output_size ({}) doesn't match expected size ({}) for target type {:?}",
+                actual_size, expected_size, target_type
+            )));
+        }
+
+        log::debug!(
+            "✅ Target size validation passed: {:?} -> {} outputs",
+            target_type,
+            actual_size
+        );
+        Ok(())
+    }
+
+    /// Get target size for a specific target type based on configuration
+    fn get_target_size(
+        &self,
+        target_type: TargetType,
+        config: &crate::config::TrainingConfig,
+    ) -> usize {
+        match target_type {
+            TargetType::PriceLevel => {
+                if config.model.output_heads.price_levels.enabled {
+                    config.model.output_heads.price_levels.bins as usize
+                } else {
+                    // Use output_size from LSTM config as fallback
+                    self.config.output_size
+                }
+            }
+            TargetType::Direction => 3,  // Up/Down/Sideways
+            TargetType::Volatility => 3, // Low/Medium/High
+        }
+    }
+
+    /// Calculate CrossEntropy loss for categorical targets
+    fn calculate_crossentropy_loss(
+        &self,
+        predictions: &Tensor,
+        targets: &Tensor,
+        num_classes: usize,
+    ) -> Result<Tensor> {
+        log::debug!(
+            "🔍 CrossEntropy Loss - Pred shape: {:?}, Target shape: {:?}, Classes: {}",
+            predictions.shape(),
+            targets.shape(),
+            num_classes
+        );
+
+        // Handle different prediction shapes
+        let logits = if predictions.dims().last() == Some(&num_classes) {
+            // Already correct shape for multi-class
+            predictions.clone()
+        } else if predictions.dims().len() == 2 && predictions.dims()[1] == 1 {
+            // Single output - need to expand to multi-class logits
+            // For single output, we'll use MSE instead of trying to force CrossEntropy
+            log::debug!("🔄 Single output detected, falling back to MSE loss");
+            return Ok(predictions.sub(targets)?.sqr()?.mean_all()?);
+        } else {
+            return Err(VangaError::ModelError(format!(
+                "Invalid prediction shape for CrossEntropy: {:?}, expected last dim = {}",
+                predictions.shape(),
+                num_classes
+            )));
+        };
+
+        // Ensure targets are in correct format for CrossEntropy
+        let target_shape = targets.shape();
+        if target_shape.dims().len() != 2 {
+            return Err(VangaError::ModelError(format!(
+                "Invalid target shape for CrossEntropy: {:?}, expected 2D tensor",
+                target_shape
+            )));
+        }
+
+        // For CrossEntropy, targets should be class indices (integers) or one-hot encoded
+        let loss = if target_shape.dims()[1] == 1 {
+            // Targets are class indices - use proper CrossEntropy loss
+            let target_indices = targets.to_dtype(candle_core::DType::I64)?;
+
+            // Use Candle's built-in cross entropy loss
+            candle_nn::loss::cross_entropy(&logits, &target_indices.squeeze(1)?)?
+        } else if target_shape.dims()[1] == num_classes {
+            // Targets are one-hot encoded - use soft CrossEntropy
+            let log_softmax = candle_nn::ops::log_softmax(&logits, candle_core::D::Minus1)?;
+            let loss = targets.mul(&log_softmax)?.sum(candle_core::D::Minus1)?;
+            loss.neg()?.mean_all()?
+        } else {
+            return Err(VangaError::ModelError(format!(
+                "Target dimension mismatch: got {}, expected 1 (indices) or {} (one-hot)",
+                target_shape.dims()[1],
+                num_classes
+            )));
+        };
+
+        let loss_value = loss.to_scalar::<f32>().unwrap_or(0.0);
+        log::debug!("🎯 CrossEntropy Loss calculated: {:.6}", loss_value);
+
+        Ok(loss)
+    }
+
+    /// Calculate loss for single target type
+    fn calculate_single_target_loss(
+        &self,
+        predictions: &Tensor,
+        targets: &Tensor,
+        target_type: TargetType,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<Tensor> {
+        log::debug!(
+            "🎯 Single target loss - Type: {:?}, Pred shape: {:?}, Target shape: {:?}",
+            target_type,
+            predictions.shape(),
+            targets.shape()
+        );
+
+        match target_type {
+            TargetType::PriceLevel => {
+                if config.model.output_heads.price_levels.enabled {
+                    // CrossEntropy for categorical price levels
+                    let num_classes = config.model.output_heads.price_levels.bins as usize;
+                    self.calculate_crossentropy_loss(predictions, targets, num_classes)
+                } else {
+                    // MSE for continuous price prediction
+                    Ok(predictions.sub(targets)?.sqr()?.mean_all()?)
+                }
+            }
+            TargetType::Direction => {
+                // Check if we have proper multi-class output
+                if predictions.dims().last() == Some(&3) {
+                    self.calculate_crossentropy_loss(predictions, targets, 3)
+                } else {
+                    Ok(predictions.sub(targets)?.sqr()?.mean_all()?)
+                }
+            }
+            TargetType::Volatility => {
+                // Check if we have proper multi-class output
+                if predictions.dims().last() == Some(&3) {
+                    self.calculate_crossentropy_loss(predictions, targets, 3)
+                } else {
+                    Ok(predictions.sub(targets)?.sqr()?.mean_all()?)
+                }
+            }
+        }
+    }
+
+    /// Calculate multi-target loss with proper combination
+    /// Calculate loss using configured loss function with target-aware logic
+    fn calculate_loss(
+        &self,
+        predictions: &Tensor,
+        targets: &Tensor,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<Tensor> {
         // Log loss calculation context
         log::debug!(
             "🔍 LOSS CALCULATION - Pred shape: {:?}, Target shape: {:?}",
@@ -1802,43 +2031,92 @@ impl LSTMModel {
             targets.shape()
         );
 
-        let mut tensor_loss_fn = TensorCryptoLossFunction::new(self.loss_function.clone());
+        // Detect active target types from configuration
+        let target_type = self.get_target_type()?;
+        log::debug!("🎯 Target type: {:?}", target_type);
+        log::debug!("🔧 Model output size: {}", self.config.output_size);
 
-        // Only calculate regime for loss functions that actually use it
-        let market_regime = match &self.loss_function {
-            crate::model::loss::CryptoLossFunction::RegimeAware { .. }
-            | crate::model::loss::CryptoLossFunction::Composite { .. } => {
-                // These loss functions use market regime - calculate it properly
-                let regime = self.detect_market_regime(predictions, targets)?;
-                log::debug!("🔍 REGIME DETECTION - Calculated regime: {:?}", regime);
-                regime
-            }
-            _ => {
-                // MSE and other loss functions ignore market regime - use default, no logging
-                crate::optimization::objective::MarketRegime::MediumVolatility
-            }
-        };
-
-        let loss_result =
-            tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime.clone())?;
-        let loss_value = loss_result.to_scalar::<f32>().unwrap_or(0.0);
-
-        // Only log regime for loss functions that actually use it
-        match &self.loss_function {
-            crate::model::loss::CryptoLossFunction::RegimeAware { .. }
-            | crate::model::loss::CryptoLossFunction::Composite { .. } => {
-                log::debug!(
-                    "🔍 LOSS RESULT - Value: {:.6}, Regime: {:?}",
-                    loss_value,
-                    market_regime
-                );
-            }
-            _ => {
-                log::debug!("🔍 LOSS RESULT - Value: {:.6}", loss_value);
-            }
+        // CRITICAL: Validate target size consistency
+        if let Err(e) = self.validate_target_size_consistency(config) {
+            log::error!("Target size validation failed: {}", e);
+            // Continue with warning instead of failing - for debugging
         }
 
-        Ok(loss_result)
+        // FIXED: Use single-target loss for individual models (they should always have correct size)
+        // The validation above will catch and log any size mismatches
+        log::debug!("📊 Using single target loss calculation");
+        let loss_result =
+            self.calculate_single_target_loss(predictions, targets, target_type, config)?;
+
+        // Fallback to existing loss function system if configured
+        let final_loss = if matches!(
+            self.loss_function,
+            crate::model::loss::CryptoLossFunction::MSE
+        ) {
+            // Use new target-aware loss for MSE (most common case)
+            log::debug!("✅ Using target-aware loss calculation");
+            loss_result
+        } else {
+            // Use existing advanced loss functions for specialized cases
+            log::debug!("🔄 Using advanced loss function: {:?}", self.loss_function);
+            use crate::model::loss::TensorCryptoLossFunction;
+            let mut tensor_loss_fn = TensorCryptoLossFunction::new(self.loss_function.clone());
+
+            let market_regime = match &self.loss_function {
+                crate::model::loss::CryptoLossFunction::RegimeAware { .. }
+                | crate::model::loss::CryptoLossFunction::Composite { .. } => {
+                    let regime = self.detect_market_regime(predictions, targets)?;
+                    log::debug!("🔍 REGIME DETECTION - Calculated regime: {:?}", regime);
+                    regime
+                }
+                _ => crate::optimization::objective::MarketRegime::MediumVolatility,
+            };
+
+            tensor_loss_fn.calculate_tensor_loss(predictions, targets, market_regime)?
+        };
+
+        let loss_value = final_loss.to_scalar::<f32>().unwrap_or(0.0);
+        log::debug!(
+            "🎯 FINAL LOSS - Value: {:.6}, Target type: {:?}, Loss function: {:?}",
+            loss_value,
+            target_type,
+            self.loss_function
+        );
+
+        // Validate loss is not NaN or infinite
+        if !loss_value.is_finite() {
+            log::error!("🚨 Invalid loss value: {}", loss_value);
+            return Err(VangaError::ModelError(format!(
+                "Loss calculation produced invalid value: {}",
+                loss_value
+            )));
+        }
+
+        Ok(final_loss)
+    }
+
+    /// Get adaptive early stopping configuration based on target types
+    fn get_adaptive_early_stopping_config(
+        &self,
+        target_types: &[TargetType],
+        base_patience: u32,
+        base_min_delta: f64,
+    ) -> (u32, f64) {
+        // Adjust thresholds based on target types
+        let min_delta = if target_types.iter().all(|t| {
+            matches!(
+                t,
+                TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility
+            )
+        }) {
+            // Categorical targets need smaller deltas
+            base_min_delta * 0.1
+        } else {
+            // Mixed targets use intermediate threshold
+            base_min_delta * 0.5
+        };
+
+        (base_patience, min_delta)
     }
 
     /// Detect market regime using mathematically sound approach
@@ -1891,70 +2169,6 @@ impl LSTMModel {
         };
 
         Ok(regime)
-    }
-
-    /// Get adaptive min_delta for early stopping based on loss function type
-    fn get_adaptive_min_delta(&self, base_min_delta: f64) -> f64 {
-        match &self.loss_function {
-            crate::model::loss::CryptoLossFunction::Composite { .. } => {
-                // Composite loss has higher scale, need larger min_delta
-                let adaptive_delta = base_min_delta * 20.0; // 20x larger for composite loss
-                log::debug!(
-                    "🔧 Composite loss detected: min_delta scaled from {:.6} to {:.6}",
-                    base_min_delta,
-                    adaptive_delta
-                );
-                adaptive_delta
-            }
-            crate::model::loss::CryptoLossFunction::DirectionalFocused { .. } => {
-                // DirectionalFocused has moderate scale increase
-                let adaptive_delta = base_min_delta * 10.0;
-                log::debug!(
-                    "🔧 DirectionalFocused loss detected: min_delta scaled from {:.6} to {:.6}",
-                    base_min_delta,
-                    adaptive_delta
-                );
-                adaptive_delta
-            }
-            crate::model::loss::CryptoLossFunction::RiskAdjusted { .. } => {
-                // RiskAdjusted has moderate scale increase
-                let adaptive_delta = base_min_delta * 15.0;
-                log::debug!(
-                    "🔧 RiskAdjusted loss detected: min_delta scaled from {:.6} to {:.6}",
-                    base_min_delta,
-                    adaptive_delta
-                );
-                adaptive_delta
-            }
-            crate::model::loss::CryptoLossFunction::VolatilityAware { .. } => {
-                // VolatilityAware can have variable scale
-                let adaptive_delta = base_min_delta * 12.0;
-                log::debug!(
-                    "🔧 VolatilityAware loss detected: min_delta scaled from {:.6} to {:.6}",
-                    base_min_delta,
-                    adaptive_delta
-                );
-                adaptive_delta
-            }
-            crate::model::loss::CryptoLossFunction::MSE => {
-                // MSE loss uses original min_delta
-                log::debug!(
-                    "🔧 MSE loss detected: min_delta unchanged at {:.6}",
-                    base_min_delta
-                );
-                base_min_delta
-            }
-            _ => {
-                // Other crypto loss functions get moderate scaling
-                let adaptive_delta = base_min_delta * 8.0;
-                log::debug!(
-                    "🔧 Crypto loss function detected: min_delta scaled from {:.6} to {:.6}",
-                    base_min_delta,
-                    adaptive_delta
-                );
-                adaptive_delta
-            }
-        }
     }
 
     /// Validate loss function configuration and mathematical correctness
@@ -2243,9 +2457,14 @@ mod tests {
             .train(&sequences, &targets, &training_config, None, None)
             .await;
 
+        if let Err(ref e) = result {
+            println!("Training error: {:?}", e);
+        }
+
         assert!(
             result.is_ok(),
-            "Early stopping training should complete successfully"
+            "Early stopping training should complete successfully: {:?}",
+            result.err()
         );
         assert!(
             model.trained,

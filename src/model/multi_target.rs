@@ -3,6 +3,7 @@
 
 use crate::config::ModelConfig;
 use crate::model::lstm_simple::LSTMModel;
+use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3, Axis};
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,48 @@ struct MultiTargetModelState {
 }
 
 impl MultiTargetLSTMModel {
+    /// Calculate output size for individual target model based on configuration
+    /// Each target gets its own separate LSTM model with appropriate output size
+    fn get_output_size_for_target(target_type: TargetType, model_config: &ModelConfig) -> usize {
+        match target_type {
+            TargetType::PriceLevel => {
+                let bins = model_config.output_heads.price_levels.bins as usize;
+                log::debug!(
+                    "PriceLevel target: {} output classes (bins from config)",
+                    bins
+                );
+                bins
+            }
+            TargetType::Direction => {
+                log::debug!("Direction target: 3 output classes (Up/Down/Sideways)");
+                3 // Fixed: Up, Down, Sideways
+            }
+            TargetType::Volatility => {
+                log::debug!("Volatility target: 3 output classes (Low/Medium/High)");
+                3 // Fixed: Low, Medium, High volatility regimes
+            }
+        }
+    }
+
+    /// Determine target type from target name based on actual naming convention
+    /// Target names follow pattern: "price_level_1h", "direction_4h", "volatility_1d"
+    fn get_target_type_from_name(target_name: &str) -> TargetType {
+        if target_name.starts_with("price_level_") {
+            TargetType::PriceLevel
+        } else if target_name.starts_with("direction_") {
+            TargetType::Direction
+        } else if target_name.starts_with("volatility_") {
+            TargetType::Volatility
+        } else {
+            // Fallback for unknown patterns - log warning and default to PriceLevel
+            log::warn!(
+                "Unknown target name pattern '{}', defaulting to PriceLevel",
+                target_name
+            );
+            TargetType::PriceLevel
+        }
+    }
+
     /// Create new multi-target LSTM model
     pub fn new(
         model_config: &ModelConfig,
@@ -74,18 +117,51 @@ impl MultiTargetLSTMModel {
         let num_targets = target_names.len();
 
         log::info!(
-            "Creating multi-target LSTM model with {} targets: {:?}",
-            num_targets,
-            target_names
+            "🏗️  Creating multi-target LSTM model with {} targets",
+            num_targets
         );
 
         // Create individual LSTM model for each target
         let mut models = Vec::with_capacity(num_targets);
-        for (i, target_name) in target_names.iter().enumerate() {
-            log::debug!("Creating LSTM model {} for target: {}", i + 1, target_name);
+        for target_name in target_names.iter() {
+            // Determine target type and calculate proper output size
+            let target_type = Self::get_target_type_from_name(target_name);
+            let output_size = Self::get_output_size_for_target(target_type, model_config);
 
-            // Each model has single output (1) since rust-lstm limitation
-            let mut model = LSTMModel::from_model_config(model_config, input_size, 1)?;
+            // Create model with proper output size for target type
+            let mut model = LSTMModel::from_model_config(model_config, input_size, output_size)?;
+
+            // CRITICAL: Verify the model was created with correct output_size
+            let actual_output_size = model.get_output_size();
+
+            // Set target context for proper loss calculation
+            model.set_target_context(target_name.clone(), target_type);
+
+            // Compact structured logging per target
+            let config_info = match target_type {
+                TargetType::PriceLevel => {
+                    format!("bins={}", model_config.output_heads.price_levels.bins)
+                }
+                TargetType::Direction => "classes=3".to_string(),
+                TargetType::Volatility => "classes=3".to_string(),
+            };
+
+            log::info!(
+                "📊 {} [{:?}] → output_size={} ({})",
+                target_name,
+                target_type,
+                actual_output_size,
+                config_info
+            );
+
+            if actual_output_size != output_size {
+                log::error!(
+                    "🚨 SIZE MISMATCH: {} expected {} but got {}",
+                    target_name,
+                    output_size,
+                    actual_output_size
+                );
+            }
 
             // Reconfigure attention with target context for better logging
             if model_config.attention.enabled {

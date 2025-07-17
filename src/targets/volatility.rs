@@ -9,6 +9,9 @@ use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
+/// Type alias for volatility targets with regime boundaries
+type VolatilityTargetsWithBoundaries = (HashMap<String, Vec<i32>>, (f64, f64));
+
 /// Configuration for volatility target generation
 #[derive(Debug, Clone)]
 pub struct VolatilityConfig {
@@ -39,6 +42,96 @@ pub enum VolatilityRegime {
     High = 2,
 }
 
+/// Generate volatility targets with consistent regime boundaries
+/// Ensures training and validation use the same volatility thresholds
+pub fn generate_volatility_targets_with_consistent_boundaries(
+    df: &DataFrame,
+    horizons: &[String],
+    config: &VolatilityConfig,
+    train_val_split_idx: Option<usize>,
+) -> Result<VolatilityTargetsWithBoundaries> {
+    let close_prices = extract_close_prices(df)?;
+    let high_prices = extract_high_prices(df)?;
+    let low_prices = extract_low_prices(df)?;
+
+    // Calculate proper volatility using high/low prices for better accuracy
+    let volatility = if config.use_garch_features {
+        // Use range-based volatility for higher precision
+        calculate_range_based_volatility(
+            &close_prices,
+            &high_prices,
+            &low_prices,
+            config.volatility_periods[0],
+        )?
+    } else {
+        // Use close-to-close volatility as fallback
+        calculate_realized_volatility(&close_prices, config.volatility_periods[0])?
+    };
+
+    // Calculate regime boundaries from training data only
+    let train_volatility = if let Some(split_idx) = train_val_split_idx {
+        &volatility[..split_idx.min(volatility.len())]
+    } else {
+        &volatility
+    };
+
+    let regime_boundaries = calculate_volatility_regime_boundaries(train_volatility, config)?;
+
+    // Apply same boundaries to entire dataset for all horizons
+    let mut all_targets = HashMap::new();
+    for horizon in horizons {
+        let targets = apply_volatility_boundaries(&volatility, &regime_boundaries)?;
+        all_targets.insert(horizon.clone(), targets);
+    }
+
+    Ok((all_targets, regime_boundaries))
+}
+
+/// Calculate volatility regime boundaries from training data
+fn calculate_volatility_regime_boundaries(
+    train_volatility: &[f64],
+    config: &VolatilityConfig,
+) -> Result<(f64, f64)> {
+    if train_volatility.is_empty() {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Empty volatility data for regime boundary calculation".to_string(),
+        ));
+    }
+
+    let mut sorted_vol = train_volatility.to_vec();
+    sorted_vol.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let (low_percentile, high_percentile) = config.regime_thresholds;
+
+    let low_idx = (sorted_vol.len() as f64 * low_percentile) as usize;
+    let high_idx = (sorted_vol.len() as f64 * high_percentile) as usize;
+
+    let low_threshold = sorted_vol[low_idx.min(sorted_vol.len() - 1)];
+    let high_threshold = sorted_vol[high_idx.min(sorted_vol.len() - 1)];
+
+    Ok((low_threshold, high_threshold))
+}
+
+/// Apply volatility boundaries to generate targets
+fn apply_volatility_boundaries(volatility: &[f64], boundaries: &(f64, f64)) -> Result<Vec<i32>> {
+    let (low_threshold, high_threshold) = *boundaries;
+
+    let targets = volatility
+        .iter()
+        .map(|&vol| {
+            if vol <= low_threshold {
+                0 // Low volatility
+            } else if vol >= high_threshold {
+                2 // High volatility
+            } else {
+                1 // Medium volatility
+            }
+        })
+        .collect();
+
+    Ok(targets)
+}
+
 /// Generate volatility targets for multiple horizons
 pub fn generate_volatility_targets(
     df: &DataFrame,
@@ -46,17 +139,17 @@ pub fn generate_volatility_targets(
     config: &VolatilityConfig,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
-    let high_prices = extract_high_prices(df)?;
-    let low_prices = extract_low_prices(df)?;
+    let high_prices = extract_high_prices(df).ok();
+    let low_prices = extract_low_prices(df).ok();
 
     let mut targets = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
-        let volatility_targets = calculate_volatility_targets(
+        let volatility_targets = calculate_volatility_targets_with_optimal_method(
             &close_prices,
-            &high_prices,
-            &low_prices,
+            high_prices.as_deref(),
+            low_prices.as_deref(),
             horizon_steps,
             config,
         )?;
@@ -66,11 +159,11 @@ pub fn generate_volatility_targets(
     Ok(targets)
 }
 
-/// Calculate volatility targets for a specific horizon
-fn calculate_volatility_targets(
+/// Calculate volatility targets for a specific horizon with optimal method selection
+fn calculate_volatility_targets_with_optimal_method(
     close_prices: &[f64],
-    high_prices: &[f64],
-    low_prices: &[f64],
+    high_prices: Option<&[f64]>,
+    low_prices: Option<&[f64]>,
     horizon_steps: usize,
     config: &VolatilityConfig,
 ) -> Result<Vec<i32>> {
@@ -80,19 +173,14 @@ fn calculate_volatility_targets(
         ));
     }
 
-    // Calculate realized volatility using range-based estimators for better accuracy
-    let realized_vol = if config.use_garch_features {
-        // Use range-based volatility for higher precision with GARCH features
-        calculate_range_based_volatility(
-            close_prices,
-            high_prices,
-            low_prices,
-            config.volatility_periods[0],
-        )?
-    } else {
-        // Standard close-to-close volatility
-        calculate_realized_volatility(close_prices, config.volatility_periods[0])?
-    };
+    // Calculate realized volatility using optimal method
+    let realized_vol = calculate_optimal_volatility(
+        close_prices,
+        high_prices,
+        low_prices,
+        config.volatility_periods[0],
+        config.use_garch_features,
+    )?;
 
     // Calculate forward-looking volatility
     let forward_vol =
@@ -117,7 +205,27 @@ fn calculate_volatility_targets(
     Ok(targets)
 }
 
+/// Calculate volatility targets for a specific horizon (legacy function for backward compatibility)
+#[allow(dead_code)]
+fn calculate_volatility_targets(
+    close_prices: &[f64],
+    high_prices: &[f64],
+    low_prices: &[f64],
+    horizon_steps: usize,
+    config: &VolatilityConfig,
+) -> Result<Vec<i32>> {
+    // Use the new optimal method with explicit high/low prices
+    calculate_volatility_targets_with_optimal_method(
+        close_prices,
+        Some(high_prices),
+        Some(low_prices),
+        horizon_steps,
+        config,
+    )
+}
+
 /// Calculate realized volatility using close-to-close returns
+/// For better accuracy in crypto markets, consider using calculate_range_based_volatility instead
 fn calculate_realized_volatility(prices: &[f64], window: usize) -> Result<Vec<f64>> {
     if prices.len() < window + 1 {
         return Err(crate::utils::error::VangaError::DataError(
@@ -352,8 +460,9 @@ fn calculate_range_based_volatility(
         )));
     }
 
-    let mut volatility = Vec::new();
+    let mut volatility = vec![f64::NAN; close_prices.len()];
 
+    #[allow(clippy::needless_range_loop)]
     for i in window..close_prices.len() {
         let mut range_variance = 0.0;
 
@@ -369,8 +478,28 @@ fn calculate_range_based_volatility(
         let range_vol = (range_variance / window as f64).sqrt();
 
         // Annualize for 24/7 crypto trading (8760 hours per year)
-        volatility.push(range_vol * (8760.0_f64).sqrt());
+        volatility[i] = range_vol * (8760.0_f64).sqrt();
     }
 
     Ok(volatility)
+}
+
+/// Choose optimal volatility calculation method based on available data and configuration
+fn calculate_optimal_volatility(
+    close_prices: &[f64],
+    high_prices: Option<&[f64]>,
+    low_prices: Option<&[f64]>,
+    window: usize,
+    use_range_based: bool,
+) -> Result<Vec<f64>> {
+    match (high_prices, low_prices, use_range_based) {
+        (Some(highs), Some(lows), true) => {
+            // Use range-based volatility for better accuracy
+            calculate_range_based_volatility(close_prices, highs, lows, window)
+        }
+        _ => {
+            // Fallback to close-to-close volatility
+            calculate_realized_volatility(close_prices, window)
+        }
+    }
 }

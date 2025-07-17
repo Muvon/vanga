@@ -12,6 +12,7 @@ use std::collections::HashMap;
 /// Configuration for direction target generation
 #[derive(Debug, Clone)]
 pub struct DirectionConfig {
+    pub threshold: f64, // Single threshold for symmetric up/down
     pub up_threshold: f64,
     pub down_threshold: f64,
     pub use_adaptive_thresholds: bool,
@@ -22,6 +23,7 @@ pub struct DirectionConfig {
 impl Default for DirectionConfig {
     fn default() -> Self {
         Self {
+            threshold: 0.02,       // 2% symmetric threshold
             up_threshold: 0.02,    // 2% increase
             down_threshold: -0.02, // 2% decrease
             use_adaptive_thresholds: true,
@@ -37,6 +39,95 @@ pub enum Direction {
     Down = 0,
     Sideways = 1,
     Up = 2,
+}
+
+/// Generate direction targets with consistent thresholds
+/// Ensures training and validation use the same classification boundaries
+pub fn generate_direction_targets_with_consistent_thresholds(
+    prices: &[f64],
+    horizon_steps: usize,
+    config: &DirectionConfig,
+    train_val_split_idx: Option<usize>,
+) -> Result<(Vec<i32>, (f64, f64))> {
+    if prices.len() < horizon_steps + 1 {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Insufficient price data for direction target generation".to_string(),
+        ));
+    }
+
+    // Calculate thresholds from training data only
+    let train_prices = if let Some(split_idx) = train_val_split_idx {
+        &prices[..split_idx.min(prices.len())]
+    } else {
+        prices
+    };
+
+    let thresholds = calculate_adaptive_thresholds_from_training(train_prices, config)?;
+
+    // Apply same thresholds to entire dataset
+    let targets = apply_direction_thresholds(prices, horizon_steps, &thresholds)?;
+
+    Ok((targets, thresholds))
+}
+
+/// Calculate adaptive thresholds from training data only
+fn calculate_adaptive_thresholds_from_training(
+    train_prices: &[f64],
+    config: &DirectionConfig,
+) -> Result<(f64, f64)> {
+    // Calculate price changes in training data
+    let mut price_changes = Vec::new();
+    for i in 1..train_prices.len() {
+        let change = (train_prices[i] - train_prices[i - 1]) / train_prices[i - 1];
+        price_changes.push(change);
+    }
+
+    if price_changes.is_empty() {
+        return Ok((config.threshold, -config.threshold));
+    }
+
+    // Sort changes to find percentiles
+    price_changes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Use percentile-based thresholds for better balance
+    let up_threshold_idx = (price_changes.len() as f64 * 0.7) as usize;
+    let down_threshold_idx = (price_changes.len() as f64 * 0.3) as usize;
+
+    let up_threshold = price_changes[up_threshold_idx.min(price_changes.len() - 1)];
+    let down_threshold = price_changes[down_threshold_idx];
+
+    // Ensure minimum threshold magnitude
+    let min_threshold = config.threshold;
+    let final_up_threshold = up_threshold.max(min_threshold);
+    let final_down_threshold = down_threshold.min(-min_threshold);
+
+    Ok((final_up_threshold, final_down_threshold))
+}
+
+/// Apply direction thresholds to generate targets
+fn apply_direction_thresholds(
+    prices: &[f64],
+    horizon_steps: usize,
+    thresholds: &(f64, f64),
+) -> Result<Vec<i32>> {
+    let mut targets = vec![-1; prices.len()];
+    let (up_threshold, down_threshold) = *thresholds;
+
+    for i in 0..(prices.len().saturating_sub(horizon_steps)) {
+        let current_price = prices[i];
+        let future_price = prices[i + horizon_steps];
+        let price_change = (future_price - current_price) / current_price;
+
+        targets[i] = if price_change >= up_threshold {
+            2 // Up
+        } else if price_change <= down_threshold {
+            0 // Down
+        } else {
+            1 // Sideways
+        };
+    }
+
+    Ok(targets)
 }
 
 /// Generate direction targets for multiple horizons
