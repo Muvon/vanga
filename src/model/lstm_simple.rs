@@ -2302,7 +2302,13 @@ impl LSTMModel {
         Ok(())
     }
 
-    /// Calculate class weights for imbalanced datasets (helper method)
+    /// Calculate class weights for imbalanced datasets using inverse frequency weighting
+    ///
+    /// This method calculates proper class weights to handle imbalanced datasets:
+    /// - Frequent classes get low weights (0.001-0.1) to reduce their loss contribution
+    /// - Rare classes get high weights (1.0-100.0) to amplify their loss contribution
+    /// - Uses inverse frequency: weight = total_samples / (num_classes * class_count)
+    /// - Normalized and clamped to prevent extreme values while preserving balance
     fn calculate_class_weights_from_tensor(
         &self,
         targets: &Tensor,
@@ -2312,17 +2318,48 @@ impl LSTMModel {
         let target_data = targets.to_vec2::<f32>()?;
         let mut class_counts = vec![0usize; num_classes];
         let mut total_samples = 0;
+        let mut invalid_samples = 0;
+        let mut sample_values = Vec::new(); // For debugging
 
-        // Count class occurrences
+        // Count class occurrences - FILTER OUT INVALID TARGETS (-1)
         for row in &target_data {
             if let Some(&target_val) = row.first() {
+                sample_values.push(target_val); // Collect first few values for debugging
+
+                // Skip invalid targets (initialized as -1)
+                if target_val < 0.0 {
+                    continue;
+                }
+
                 let class_idx = target_val as usize;
                 if class_idx < num_classes {
                     class_counts[class_idx] += 1;
                     total_samples += 1;
+                } else {
+                    invalid_samples += 1;
+                    log::warn!("⚠️ Invalid class index: {} (>= {})", class_idx, num_classes);
                 }
             }
         }
+
+        // Debug logging for target values
+        let sample_preview: Vec<f32> = sample_values.iter().take(10).cloned().collect();
+        let invalid_count = sample_values.iter().filter(|&&v| v < 0.0).count();
+        log::info!(
+            "🔍 Target value analysis:\n  \
+            Total rows: {}\n  \
+            Invalid targets (-1): {}\n  \
+            Valid samples: {}\n  \
+            Out-of-bounds samples: {}\n  \
+            Expected classes: 0-{}\n  \
+            Sample values: {:?}",
+            target_data.len(),
+            invalid_count,
+            total_samples,
+            invalid_samples,
+            num_classes - 1,
+            sample_preview
+        );
 
         if total_samples == 0 {
             return Ok(None);
@@ -2343,19 +2380,37 @@ impl LSTMModel {
             }
         }
 
+        // Store weights before normalization for logging
+        let raw_weights = weights.clone();
+
         // Normalize weights to prevent extreme values
         let weight_sum: f32 = weights.iter().sum();
         if weight_sum > 0.0 {
             for weight in &mut weights {
                 *weight = (*weight / weight_sum) * num_classes as f32;
-                *weight = weight.clamp(0.1, 10.0); // Clamp to reasonable range
             }
         }
 
-        log::debug!(
-            "📊 Class weights calculated: {:?} (from counts: {:?})",
-            weights,
-            class_counts
+        // Store normalized weights before clamping for logging
+        let normalized_weights = weights.clone();
+
+        // Apply proper clamping bounds for class weighting
+        // - Frequent classes: Allow very low weights (0.001) for proper downweighting
+        // - Rare classes: Allow high weights (100.0) for proper upweighting
+        for weight in &mut weights {
+            *weight = weight.clamp(0.001, 100.0);
+        }
+
+        log::info!(
+            "📊 Class weight calculation details:\n  \
+            Class counts: {:?}\n  \
+            Raw weights: {:?}\n  \
+            Normalized: {:?}\n  \
+            Final (clamped): {:?}",
+            class_counts,
+            raw_weights,
+            normalized_weights,
+            weights
         );
 
         Ok(Some(weights))

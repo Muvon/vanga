@@ -79,17 +79,49 @@ pub fn generate_price_level_targets_with_global_boundaries(
             ));
         }
 
+        // FIXED: Calculate quantiles from price returns, not absolute prices
+        // This ensures consistency with the fixed calculate_price_level_targets function
+        let mut all_price_changes = Vec::new();
+        for i in train_start_idx..train_end_idx {
+            let current_price = prices[i];
+            let target_price = match &config.target_strategy {
+                crate::config::model::PriceLevelTargetStrategy::Current => {
+                    prices[i + horizon_steps]
+                }
+                crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
+                    calculate_standard_vwap(&prices, i, horizon_steps)?
+                }
+                crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
+                    momentum_window,
+                    bias_strength,
+                } => calculate_momentum_vwap(
+                    &prices,
+                    i,
+                    horizon_steps,
+                    *momentum_window,
+                    *bias_strength,
+                )?,
+            };
+
+            let price_change = (target_price - current_price) / current_price;
+
+            // Only include significant price changes for quantile calculation
+            if price_change.abs() >= config.range_percent {
+                all_price_changes.push(price_change);
+            }
+        }
+
         // FIXED: Use consistent Fixed quantile method for stable boundaries
         let quantiles = calculate_quantiles(
-            &prices[train_start_idx..train_end_idx],
+            &all_price_changes, // ✅ Now uses price returns instead of absolute prices
             config.bins,
             &QuantileMethod::Fixed, // Always use Fixed for consistency
         )?;
 
         log::debug!(
-            "🎯 Global boundaries [{}]: {} training samples, quantiles: {:?}",
+            "🎯 Global boundaries [{}]: {} price changes, quantiles: {:?}",
             horizon,
-            train_end_idx - train_start_idx,
+            all_price_changes.len(),
             quantiles
         );
 
@@ -137,8 +169,8 @@ fn apply_quantiles_to_targets(
             continue;
         }
 
-        // Classify using global quantiles
-        targets[i] = classify_price_to_level(target_price, quantiles);
+        // FIXED: Use price_change (return) for classification, not absolute target_price
+        targets[i] = classify_price_to_level(price_change, quantiles);
     }
 
     Ok(targets)
@@ -218,17 +250,42 @@ fn calculate_price_level_targets(
         ));
     }
 
-    // Use all available training prices for consistent quantile calculation
+    // Calculate all price changes (returns) for quantile calculation
+    let mut all_price_changes = Vec::new();
+    for i in training_data_start..training_data_end {
+        let current_price = prices[i];
+        let target_price = match &config.target_strategy {
+            crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
+            crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
+                calculate_standard_vwap(prices, i, horizon_steps)?
+            }
+            crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
+                momentum_window,
+                bias_strength,
+            } => {
+                calculate_momentum_vwap(prices, i, horizon_steps, *momentum_window, *bias_strength)?
+            }
+        };
+
+        let price_change = (target_price - current_price) / current_price;
+
+        // Only include significant price changes for quantile calculation
+        if price_change.abs() >= config.range_percent {
+            all_price_changes.push(price_change);
+        }
+    }
+
+    // Use price changes (returns) for consistent quantile calculation
     let global_quantiles = calculate_quantiles(
-        &prices[training_data_start..training_data_end],
+        &all_price_changes,
         config.bins,
         &QuantileMethod::Fixed, // Use Fixed method for consistency across train/val
     )?;
 
     log::debug!(
-        "🎯 Global quantiles calculated for {} bins using {} samples: {:?}",
+        "🎯 Global quantiles calculated for {} bins using {} price changes: {:?}",
         config.bins,
-        training_data_end - training_data_start,
+        all_price_changes.len(),
         global_quantiles
     );
 
@@ -260,8 +317,8 @@ fn calculate_price_level_targets(
             continue;
         }
 
-        // FIXED: Use consistent global quantiles for all classifications
-        targets[i] = classify_price_to_level(target_price, &global_quantiles);
+        // FIXED: Use price_change (return) for classification, not absolute target_price
+        targets[i] = classify_price_to_level(price_change, &global_quantiles);
     }
 
     Ok(targets)
@@ -316,18 +373,59 @@ fn calculate_quantiles(prices: &[f64], bins: u32, method: &QuantileMethod) -> Re
         }
     }
 
+    log::debug!(
+        "🎯 Quantile calculation complete: {} bins, {} prices, quantiles={:?}",
+        bins,
+        prices.len(),
+        quantiles
+    );
+
     Ok(quantiles)
 }
 
 /// Classify a price into a quantile level
 fn classify_price_to_level(price: f64, quantiles: &[f64]) -> i32 {
+    // Debug logging for first few classifications
+    static mut DEBUG_COUNT: usize = 0;
+    unsafe {
+        if DEBUG_COUNT < 5 {
+            log::debug!(
+                "🔍 Price classification: price={:.6}, quantiles={:?}",
+                price,
+                quantiles
+            );
+            DEBUG_COUNT += 1;
+        }
+    }
+
     for (i, &threshold) in quantiles.iter().enumerate() {
         if price <= threshold {
+            unsafe {
+                if DEBUG_COUNT <= 5 {
+                    log::debug!(
+                        "  → Classified as class {} (price {:.6} <= threshold {:.6})",
+                        i,
+                        price,
+                        threshold
+                    );
+                }
+            }
             return i as i32;
         }
     }
+
     // Clamp to highest valid index (quantiles.len() - 1) to prevent out-of-bounds
-    (quantiles.len() - 1) as i32
+    let final_class = (quantiles.len() - 1) as i32;
+    unsafe {
+        if DEBUG_COUNT <= 5 {
+            log::debug!(
+                "  → Classified as final class {} (price {:.6} > all thresholds)",
+                final_class,
+                price
+            );
+        }
+    }
+    final_class
 }
 
 /// Calculate price volatility for adaptive quantiles
