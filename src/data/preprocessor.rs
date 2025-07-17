@@ -1717,8 +1717,8 @@ impl DataPreprocessor {
         Ok(df)
     }
 
-    /// Validate that all numeric features are finite
-    /// Remove rows containing NaN values from DataFrame with proper validation
+    /// Remove rows containing NaN values from DataFrame for training data
+    /// This validates the ENTIRE dataset from first valid row onwards
     pub fn remove_nan_rows(&self, mut df: DataFrame) -> Result<DataFrame> {
         log::info!("Removing rows with NaN values to ensure clean training data");
 
@@ -1814,6 +1814,83 @@ impl DataPreprocessor {
 
         Ok(df)
     }
+
+    /// Extract most recent clean data for prediction
+    /// This works backwards from the end to find sufficient clean data
+    pub fn extract_recent_clean_data(
+        &self,
+        df: DataFrame,
+        required_rows: usize,
+    ) -> Result<DataFrame> {
+        log::info!(
+            "Extracting {} most recent clean rows for prediction",
+            required_rows
+        );
+
+        let original_len = df.height();
+
+        if original_len < required_rows {
+            return Err(VangaError::DataError(format!(
+                "Insufficient data: {} rows available, {} required for prediction",
+                original_len, required_rows
+            )));
+        }
+
+        // Work backwards from the end to find required_rows of clean data
+        // Find the last clean segment of required_rows
+        for start_candidate in (0..=(original_len - required_rows)).rev() {
+            let mut all_clean = true;
+
+            // Check if this segment has all clean data
+            for row_idx in start_candidate..(start_candidate + required_rows) {
+                for series in df.get_columns() {
+                    if series.dtype().is_numeric() {
+                        if let Ok(float_series) = series.f64() {
+                            if let Some(value) = float_series.get(row_idx) {
+                                if !value.is_finite() {
+                                    all_clean = false;
+                                    break;
+                                }
+                            } else {
+                                all_clean = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !all_clean {
+                    break;
+                }
+            }
+
+            if all_clean {
+                // Found a clean segment - extract it
+                let clean_df = df.slice(start_candidate as i64, required_rows);
+
+                log::info!(
+                    "✅ Found {} clean rows starting from index {} (out of {} total rows)",
+                    required_rows,
+                    start_candidate,
+                    original_len
+                );
+                log::info!("   • Using most recent clean data for prediction");
+                log::info!(
+                    "   • Skipped {} rows at the end due to NaN values",
+                    original_len - (start_candidate + required_rows)
+                );
+
+                return Ok(clean_df);
+            }
+        }
+
+        // If we get here, we couldn't find a clean segment
+        Err(VangaError::DataError(format!(
+            "Could not find {} consecutive clean rows in dataset of {} rows. \
+             The most recent data contains too many NaN values for prediction.",
+            required_rows, original_len
+        )))
+    }
+
     /// Validate that all numeric features are finite and log detailed information
     fn validate_features(&self, df: &DataFrame, stage: &str) -> Result<()> {
         log::debug!(
@@ -1988,5 +2065,54 @@ mod tests {
 
         // Should interpolate between 2.0 and 4.0, giving 3.0
         assert!((interpolated - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_extract_recent_clean_data() {
+        use polars::prelude::*;
+
+        let preprocessor = DataPreprocessor::new();
+
+        // Create test data with NaN in middle but clean at end
+        let data = vec![
+            1.0,
+            2.0,
+            f64::NAN,
+            4.0,
+            5.0,
+            6.0,
+            7.0,
+            8.0,
+            9.0,
+            10.0, // 10 rows
+        ];
+        let df = DataFrame::new(vec![
+            Series::new("price", data),
+            Series::new("volume", vec![100.0; 10]),
+        ])
+        .unwrap();
+
+        // Extract 5 most recent clean rows
+        let result = preprocessor.extract_recent_clean_data(df, 5).unwrap();
+
+        // Should get rows 5-9 (6.0, 7.0, 8.0, 9.0, 10.0)
+        assert_eq!(result.height(), 5);
+        let price_col = result.column("price").unwrap().f64().unwrap();
+        assert_eq!(price_col.get(0).unwrap(), 6.0);
+        assert_eq!(price_col.get(4).unwrap(), 10.0);
+    }
+
+    #[test]
+    fn test_extract_recent_clean_data_insufficient() {
+        use polars::prelude::*;
+
+        let preprocessor = DataPreprocessor::new();
+
+        // Create test data with only 3 rows
+        let df = DataFrame::new(vec![Series::new("price", vec![1.0, 2.0, 3.0])]).unwrap();
+
+        // Try to extract 5 rows - should fail
+        let result = preprocessor.extract_recent_clean_data(df, 5);
+        assert!(result.is_err());
     }
 }

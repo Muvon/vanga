@@ -14,10 +14,16 @@ pub async fn generate_volatility_features(
     let high_prices = crate::features::technical::extract_numeric_column(&df, "high")?;
     let low_prices = crate::features::technical::extract_numeric_column(&df, "low")?;
 
-    // Calculate realized volatility (close-to-close)
+    // Calculate realized volatility (close-to-close) with NaN handling
     let returns: Vec<f64> = close_prices
         .windows(2)
-        .map(|w| (w[1] / w[0]).ln())
+        .map(|w| {
+            if w[0] > 0.0 && w[1] > 0.0 && w[0].is_finite() && w[1].is_finite() {
+                (w[1] / w[0]).ln()
+            } else {
+                f64::NAN
+            }
+        })
         .collect();
 
     let mut realized_vol = calculate_rolling_volatility(&returns, 24)?; // 24-period rolling
@@ -106,7 +112,7 @@ fn calculate_rolling_volatility(returns: &[f64], window: usize) -> Result<Vec<f6
 
 /// Calculate GARCH-like volatility (simplified)
 fn calculate_garch_volatility(returns: &[f64]) -> Result<Vec<f64>> {
-    let mut volatility = vec![0.0; returns.len()];
+    let mut volatility = vec![f64::NAN; returns.len()];
 
     if returns.is_empty() {
         return Ok(volatility);
@@ -117,17 +123,53 @@ fn calculate_garch_volatility(returns: &[f64]) -> Result<Vec<f64>> {
     let alpha = 0.1;
     let beta = 0.85;
 
-    // Initialize with first squared return
-    let mut variance = if !returns.is_empty() {
-        returns[0].powi(2)
-    } else {
-        0.0
-    };
-    volatility[0] = variance.sqrt();
+    // Find first valid return to initialize
+    let mut first_valid_idx = None;
+    for (i, &ret) in returns.iter().enumerate() {
+        if ret.is_finite() {
+            first_valid_idx = Some(i);
+            break;
+        }
+    }
 
-    for i in 1..returns.len() {
-        variance = omega + alpha * returns[i - 1].powi(2) + beta * variance;
-        volatility[i] = variance.sqrt() * (24.0_f64).sqrt(); // Annualized
+    let start_idx = match first_valid_idx {
+        Some(idx) => idx,
+        None => {
+            log::warn!("No valid returns found for GARCH calculation");
+            return Ok(volatility);
+        }
+    };
+
+    // Initialize with first valid squared return
+    let mut variance = returns[start_idx].powi(2);
+    if !variance.is_finite() || variance < 0.0 {
+        variance = 0.000001; // Fallback to small positive value
+    }
+
+    volatility[start_idx] = variance.sqrt();
+
+    // Calculate GARCH volatility for remaining valid returns
+    for i in (start_idx + 1)..returns.len() {
+        let prev_return = returns[i - 1];
+
+        // Skip if previous return is not finite
+        if !prev_return.is_finite() {
+            continue;
+        }
+
+        variance = omega + alpha * prev_return.powi(2) + beta * variance;
+
+        // Ensure variance is positive and finite
+        if !variance.is_finite() || variance < 0.0 {
+            variance = 0.000001; // Reset to small positive value
+        }
+
+        let vol = variance.sqrt() * (24.0_f64).sqrt(); // Annualized
+
+        // Only set if result is finite
+        if vol.is_finite() {
+            volatility[i] = vol;
+        }
     }
 
     Ok(volatility)

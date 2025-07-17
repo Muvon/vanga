@@ -48,14 +48,13 @@ impl SequenceGenerator {
             crate::config::model::SequenceLengthConfig::Adaptive => 60,
         };
 
-        // Ensure we have enough data
-        if total_records < sequence_length + 10 {
-            return Err(VangaError::DataError(format!(
-                "Not enough data: {} records, need at least {}",
-                total_records,
-                sequence_length + 10
-            )));
-        }
+        // NEW: Validate feature window requirements
+        self.validate_feature_window_requirements(
+            total_records,
+            sequence_length,
+            horizons,
+            data_config,
+        )?;
 
         // Extract feature columns (exclude timestamp and target columns)
         let feature_columns: Vec<String> = df
@@ -162,10 +161,12 @@ impl SequenceGenerator {
         log::debug!("Input data shape: {} rows, {} columns", num_rows, num_cols);
         log::debug!("Using sequence length: {}", sequence_length);
 
-        // Ensure we have enough data for at least one sequence
+        // Validate feature window requirements for prediction sequences
+        // Note: This is a secondary check - primary validation should happen in prepare_prediction_data
         if num_rows < sequence_length {
             return Err(VangaError::DataError(format!(
-                "Not enough data for prediction: {} rows < {} required",
+                "Not enough data for prediction sequences: {} rows < {} sequence_length required\n\
+                 This suggests the data wasn't properly validated in prepare_prediction_data()",
                 num_rows, sequence_length
             )));
         }
@@ -576,5 +577,64 @@ impl SequenceGenerator {
 
         let target_generator = crate::targets::TargetGenerator::new(config);
         target_generator.generate_all_targets(df).await
+    }
+
+    /// Validate feature window requirements for training data
+    fn validate_feature_window_requirements(
+        &self,
+        total_records: usize,
+        sequence_length: usize,
+        horizons: &[String],
+        _data_config: &crate::config::training::DataConfig,
+    ) -> Result<()> {
+        // Calculate actual feature window from config if available
+        // TODO: Pass feature config to this method for accurate calculation
+        let estimated_max_window = 200; // Conservative estimate - should be replaced with actual config
+
+        // Calculate minimum data requirements
+        let max_horizon_steps = horizons
+            .iter()
+            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+            .max()
+            .unwrap_or(1);
+
+        let min_required = estimated_max_window + sequence_length + max_horizon_steps;
+
+        if total_records < min_required {
+            return Err(VangaError::DataError(format!(
+                "Insufficient data for training: {} records available, {} required\n\
+                 Breakdown:\n\
+                 • Feature window: {} periods (for technical indicators like SMA, EMA)\n\
+                 • Sequence length: {} periods (for LSTM input)\n\
+                 • Horizon buffer: {} periods (for target calculation)\n\
+                 • Total required: {} periods\n\
+                 \n\
+                 Solution: Provide at least {} rows of historical data",
+                total_records,
+                min_required,
+                estimated_max_window,
+                sequence_length,
+                max_horizon_steps,
+                min_required,
+                min_required
+            )));
+        }
+
+        log::info!("📊 TRAINING DATA VALIDATION:");
+        log::info!("   • Dataset size: {} rows", total_records);
+        log::info!(
+            "   • Feature window: {} periods (estimated)",
+            estimated_max_window
+        );
+        log::info!("   • Sequence length: {} periods", sequence_length);
+        log::info!("   • Horizon buffer: {} periods", max_horizon_steps);
+        log::info!("   • Total required: {} periods", min_required);
+        log::info!(
+            "   • Effective training data: {} rows",
+            total_records.saturating_sub(estimated_max_window)
+        );
+        log::info!("   ✅ Sufficient data available");
+
+        Ok(())
     }
 }

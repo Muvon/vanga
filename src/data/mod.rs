@@ -218,7 +218,93 @@ impl DataPipeline {
             // Apply SAME feature engineering as training
             let feature_engineer =
                 crate::features::FeatureEngineer::new(training_config.features.clone());
-            feature_engineer.generate_features(df).await?
+            let mut df = feature_engineer.generate_features(df).await?;
+
+            // CRITICAL: Use SAME logic as training - remove initial NaN rows
+            // This removes the initial rows where technical indicators are NaN (e.g., first 200 rows)
+            // But does NOT validate the entire dataset like training does
+            let original_len = df.height();
+
+            // Find the first row where ALL columns have valid values (same as training)
+            let mut first_valid_row = None;
+            for row_idx in 0..original_len {
+                let mut all_valid = true;
+                for series in df.get_columns() {
+                    if series.dtype().is_numeric() {
+                        if let Ok(float_series) = series.f64() {
+                            if let Some(value) = float_series.get(row_idx) {
+                                if !value.is_finite() {
+                                    all_valid = false;
+                                    break;
+                                }
+                            } else {
+                                all_valid = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if all_valid {
+                    first_valid_row = Some(row_idx);
+                    break;
+                }
+            }
+
+            let first_valid_idx = match first_valid_row {
+                Some(idx) => idx,
+                None => {
+                    return Err(crate::utils::error::VangaError::DataError(
+                        "No rows found with all valid (non-NaN) values after feature engineering."
+                            .to_string(),
+                    ));
+                }
+            };
+
+            // Remove initial NaN rows (same as training)
+            let clean_data_len = original_len - first_valid_idx;
+            df = df.slice(first_valid_idx as i64, clean_data_len);
+
+            log::info!(
+                "Removed {} initial NaN rows, {} clean rows remaining",
+                first_valid_idx,
+                clean_data_len
+            );
+
+            // Calculate required rows for prediction
+            let sequence_length = match &training_config.model.sequence_length {
+                crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+                crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => {
+                    *min_length as usize
+                }
+                crate::config::model::SequenceLengthConfig::Adaptive => 60,
+            };
+
+            let required_rows = sequence_length + 1; // Only need sequence + buffer after NaN removal
+
+            // Validate we have enough clean data
+            if df.height() < required_rows {
+                return Err(crate::utils::error::VangaError::DataError(format!(
+                    "Insufficient clean data for prediction: {} rows available, {} required",
+                    df.height(),
+                    required_rows
+                )));
+            }
+
+            // Take most recent data for prediction
+            let start_idx = df.height() - required_rows;
+            df = df.slice(start_idx as i64, required_rows);
+
+            log::info!("Using most recent {} rows for prediction", required_rows);
+
+            log::info!("🔍 PREDICTION DATA PROCESSING:");
+            log::info!("   • Original dataset: {} rows", original_len);
+            log::info!("   • Removed initial NaN rows: {} rows", first_valid_idx);
+            log::info!("   • Clean data available: {} rows", clean_data_len);
+            log::info!("   • Using most recent: {} rows", required_rows);
+            log::info!("   • Sequence length: {} periods", sequence_length);
+            log::info!("   ✅ Using same logic as training (no extra validation)");
+
+            df
         } else {
             // Fallback for old models without stored training config
             log::warn!("No training config found in model - using basic preprocessing (may cause feature mismatch)");
