@@ -6,12 +6,14 @@
 - **One method, one purpose**: Don't create `train_a`, `train_b`, `train_with_xyz` - enhance the existing method
 - **Configuration-driven**: Use TOML configs and conditional logic, not method proliferation
 - **Unified interfaces**: Prefer single methods with optional parameters over multiple specialized methods
+- **Tensor-first architecture**: All operations use Candle tensors with proper broadcasting and gradient flow
 
 ### Code Quality Standards
 - **Zero warnings**: All code must pass `cargo clippy --all-features --all-targets -- -D warnings`
 - **No hidden variables**: Never use `_variable` to silence warnings - fix the root cause
 - **No dead code**: Don't use `#[allow(dead_code)]` - remove unused code or fix the issue
 - **DRY principle**: Don't repeat yourself - extract common logic into shared functions
+- **Tensor safety**: Always use `broadcast_as()` for shape matching, ensure `.contiguous()` for operations
 
 ## 🚀 Quick Start Checklist
 
@@ -29,15 +31,17 @@ remember(["task context", "similar issues"])
 
 ### 2. Code Analysis
 - **Find existing patterns**: Look for similar implementations before creating new ones
-- **Check configuration**: Verify TOML configs in `configs/` directory
+- **Check configuration**: Verify TOML configs in `configs/` directory (20+ available configs)
 - **Understand data flow**: Trace from input → processing → output
 - **Identify integration points**: How does this fit with existing code?
+- **Tensor operations**: Check for proper broadcasting and gradient flow
 
 ### 3. Implementation Strategy
 - **Enhance, don't duplicate**: Modify existing methods with conditional logic
 - **Configuration first**: Add new parameters to TOML configs
 - **Test-driven**: Ensure changes work with existing tests
 - **Error handling**: Use `Result<T>` and proper error propagation
+- **Tensor safety**: Use `broadcast_as()` for shape matching, `.contiguous()` for operations
 
 ## 📁 Project Structure Deep Dive
 
@@ -70,6 +74,8 @@ src/
 - **Never create**: `train_with_xyz()` methods - use conditional logic inside `train()`
 - **Validation logic**: Handles both internal splits and pre-split chronological data
 - **Configuration-driven**: All behavior controlled by `TrainingConfig`
+- **Tensor operations**: Contains critical broadcasting fixes (lines 2240-2250)
+- **Loss calculation**: Multi-target aware with class weighting and label smoothing
 
 #### `src/model/multi_target.rs`
 - **Wrapper around lstm_simple**: Trains multiple models for different targets
@@ -82,11 +88,18 @@ src/
 - **Validation methods**: `validate()` and `validate_for_symbols()` with optimizer parameter validation
 - **Auto-optimization**: Intelligent parameter tuning configurations
 
-#### `configs/*.toml`
+#### `src/targets/price_levels.rs` - RECENTLY UPDATED
+- **Price level classification**: Quantile-based categorical targets (4-6 bins)
+- **Class distribution analysis**: `analyze_class_distribution()` for imbalance detection
+- **Global quantiles**: Fixed quantile calculation for consistency
+- **Integration**: Works with class weighting and label smoothing
+
+#### `configs/*.toml` - 20+ CONFIGURATIONS
 - **Configuration templates**: Different scenarios (training, prediction, features)
 - **Symbol-specific**: Each trading pair can have specialized configs
 - **Feature flags**: Enable/disable functionality via configuration
 - **Optimizer examples**: All 9 optimizers with crypto-specific recommendations
+- **Recent additions**: Cross-asset training, TFT enhanced, backtest configs
 
 ## 🔧 Common Task Patterns
 
@@ -117,6 +130,26 @@ pub async fn train(
         // Standard behavior
     }
 }
+```
+
+### Fixing Tensor Broadcasting Issues (CRITICAL PATTERN)
+
+#### Common Problem: Shape Mismatch
+```rust
+// ❌ WRONG - Direct multiplication without broadcasting
+let result = tensor_a.mul(&tensor_b)?; // Fails with [16,6] × [1,6]
+
+// ✅ CORRECT - Use broadcast_as for explicit shape matching
+let tensor_b_broadcast = tensor_b.broadcast_as(tensor_a.shape())?;
+let result = tensor_a.mul(&tensor_b_broadcast)?.contiguous()?;
+```
+
+#### Tensor Safety Pattern (MANDATORY)
+```rust
+// Always follow this pattern for tensor operations:
+let tensor_contiguous = input_tensor.contiguous()?;
+let broadcast_tensor = weight_tensor.broadcast_as(tensor_contiguous.shape())?;
+let result = tensor_contiguous.mul(&broadcast_tensor)?.contiguous()?;
 ```
 
 ### Fixing Validation Issues
@@ -198,6 +231,16 @@ if let Some(val_data) = validation_data {
 }
 ```
 
+### Tensor Broadcasting Errors (CRITICAL)
+```rust
+// ❌ NEVER DO THIS - Direct multiplication without shape checking
+let result = targets.mul(&weights)?; // FAILS with shape mismatch
+
+// ✅ DO THIS INSTEAD - Always use broadcast_as
+let weights_broadcast = weights.broadcast_as(targets.shape())?;
+let result = targets.mul(&weights_broadcast)?.contiguous()?;
+```
+
 ### Dead Code Allowance
 ```rust
 // ❌ NEVER DO THIS
@@ -212,9 +255,21 @@ fn unused_function() { ... }
 ```rust
 // ❌ NEVER DO THIS
 let batch_size = 32;  // Hardcoded!
+let num_classes = 6;  // Hardcoded!
 
 // ✅ DO THIS INSTEAD
 let batch_size = config.training.batch_size;
+let num_classes = self.get_num_classes_for_target(target_type);
+```
+
+### Gradient Flow Breaking
+```rust
+// ❌ NEVER DO THIS - Manual loss calculation breaks gradients
+let loss_value = manual_calculation(predictions, targets);
+let loss_tensor = Tensor::new(loss_value, device)?;
+
+// ✅ DO THIS INSTEAD - Use tensor operations throughout
+let loss_tensor = predictions.sub(targets)?.sqr()?.mean_all()?;
 ```
 
 ## 🔍 Debugging & Investigation
@@ -234,6 +289,12 @@ let batch_size = config.training.batch_size;
 - **Configuration**: `src/config/training.rs`
 - **Data loading**: `src/data/loader.rs`
 
+#### Tensor Broadcasting Issues (CRITICAL)
+- **Price level loss**: `src/model/lstm_simple.rs::calculate_weighted_soft_crossentropy_loss()` (lines 2240-2250)
+- **Attention mechanism**: `src/model/attention.rs` (uses broadcast_div pattern)
+- **Loss functions**: `src/model/loss.rs` (uses broadcast_as pattern)
+- **Pattern**: Always use `broadcast_as()` before tensor operations
+
 #### Feature Engineering Issues
 - **Technical indicators**: `src/features/technical.rs`
 - **Cross-asset features**: `src/features/cross_asset.rs`
@@ -243,6 +304,12 @@ let batch_size = config.training.batch_size;
 - **Early stopping logic**: `src/model/lstm_simple.rs` (lines ~1020-1040)
 - **Validation splits**: `src/model/lstm_simple.rs` (lines ~790-830)
 - **Chronological validation**: `src/model/multi_target.rs::train_with_chronological_validation()`
+
+#### Price Level Target Issues (RECENTLY FIXED)
+- **Class imbalance**: `src/targets/price_levels.rs::analyze_class_distribution()`
+- **Quantile consistency**: `src/targets/price_levels.rs::calculate_price_level_targets()`
+- **Class weighting**: `src/model/lstm_simple.rs::calculate_class_weights()`
+- **Label smoothing**: `src/model/lstm_simple.rs::apply_label_smoothing()`
 
 ## 📋 Development Workflow
 
@@ -362,6 +429,10 @@ ast-grep --pattern "pattern" --lang rust
 
 # Training example
 cargo run -- train --symbol BTCUSDT --data data.csv --config configs/training.toml
+
+# Available configurations (20+ configs)
+ls configs/
+ls configs/optimizer_examples/
 ```
 
 ### Key Files for Common Tasks
@@ -371,12 +442,37 @@ cargo run -- train --symbol BTCUSDT --data data.csv --config configs/training.to
 - **Configuration**: `src/config/training.rs`, `configs/*.toml`
 - **Data loading**: `src/data/loader.rs`
 - **Error handling**: `src/utils/error.rs`
+- **Tensor operations**: `src/model/loss.rs`, `src/model/attention.rs`
+- **Price level targets**: `src/targets/price_levels.rs`
 
 ### Configuration Hierarchy
 1. **Default values**: In `Default` trait implementations
-2. **TOML files**: `configs/*.toml` templates
+2. **TOML files**: `configs/*.toml` templates (20+ available)
 3. **Command line**: Override via CLI arguments
 4. **Runtime**: Dynamic adjustments during training
+
+### Recent Critical Fixes (Memorized)
+- **Tensor Broadcasting**: Fixed `[16,6] × [1,6]` multiplication using `broadcast_as()`
+- **Price Level Targets**: Implemented class weighting and label smoothing
+- **Global Quantiles**: Fixed quantile calculation consistency
+- **Categorical Metrics**: Added accuracy, precision, recall, F1 scores
+
+### Build Performance Guidelines
+```bash
+# MANDATORY: Fast development cycle
+cargo check --message-format=short  # PREFERRED for development
+
+# MANDATORY: Code quality (before any commits)
+cargo clippy --all-features --all-targets -- -D warnings
+
+# Testing
+cargo test
+
+# Debug build (only when needed)
+cargo build
+
+# NEVER use --release during development (extremely slow)
+```
 
 ---
 
@@ -387,198 +483,13 @@ cargo run -- train --symbol BTCUSDT --data data.csv --config configs/training.to
 - **Configure before hardcoding**: Make behavior configurable
 - **Test before committing**: Ensure code quality standards
 - **Document before forgetting**: Update relevant documentation
+- **Broadcast before multiplying**: Always use `broadcast_as()` for tensor operations
 
 **The goal is maintainable, high-quality code that follows VANGA's architectural principles.**
 
-#### Best Practices for Model Usage
+## 🔧 Development Performance Tips
 
-```rust
-// ✅ GOOD: Use the optimized training pipeline
-let model = train_model(config).await?;
-
-// ✅ GOOD: Leverage automatic feature engineering
-let features = process_features(df, &config.features).await?;
-
-// ✅ GOOD: Use multi-target prediction
-let predictions = predict_multi_target(config, &model).await?;
-
-// ❌ AVOID: Manual hyperparameter tuning (optimizer handles this)
-// config.hidden_units = 128; // Don't hardcode
-
-// ❌ AVOID: Fixed sequence lengths (optimizer calculates optimal values)
-// config.sequence_length = 60; // Don't hardcode
-```
-
-#### Performance Characteristics
-- **Small datasets (< 1K rows)**: Simple LSTM with basic features
-- **Medium datasets (1K-10K rows)**: Multi-layer LSTM with technical indicators
-- **Large datasets (> 10K rows)**: Advanced ensemble with all features
-- **Training**: Automatic early stopping with validation monitoring
-
-## Project Structure
-
-### Core Modules
-- `src/api/` - High-level training and prediction APIs
-- `src/model/` - LSTM model implementations and architectures
-- `src/features/` - Feature engineering and technical indicators
-- `src/data/` - Data loading, preprocessing, and sequence generation
-- `src/targets/` - Multi-target prediction system (price levels, direction, volatility)
-- `src/config/` - Configuration management and validation
-- `src/utils/` - Error handling, logging, and utilities
-
-### CLI Command Structure
-- **Training Mode**: `vanga train --symbol BTCUSDT --data path.csv`
-- **Prediction Mode**: `vanga predict --symbol BTCUSDT --input recent.csv`
-- **Model Management**: `vanga models list|evaluate|export`
-- **Batch Processing**: `vanga train --batch --data-dir ./data/`
-
-### Key Files
-- `configs/*.toml` - Configuration templates for different scenarios
-- `src/main.rs` - CLI entry point and command routing
-- `src/api/trainer.rs` - Training pipeline orchestration
-- `src/api/predictor.rs` - Prediction pipeline orchestration
-- `src/model/lstm_simple.rs` - Core LSTM implementation
-
-## Development Patterns
-
-!!! NEVER SILENCE WARNINGS with undefined variables like _var INSTEAD Find the REAL reaon why worning appears and FIX it
-!!! NEVER hiding unused functions/methods with #[allow(dead_code)]
-
-### Adding New Technical Indicators
-1. Add indicator logic to `src/features/technical.rs`
-2. Update `TechnicalConfig` struct in `src/config/features.rs`
-3. Add configuration to `configs/crypto_features.toml`
-4. Update feature processing pipeline
-
-### Adding New Prediction Targets
-1. Create target module in `src/targets/{target}.rs`
-2. Implement `TargetGenerator` trait
-3. Add to `MultiTargetGenerator` in `src/targets/mod.rs`
-4. Update target configuration schema
-
-### Adding New Model Architectures
-1. Implement model in `src/model/{architecture}.rs`
-2. Add to model factory in `src/model/mod.rs`
-3. Update `ModelConfig` enum
-4. Add architecture-specific configuration
-
-### Configuration Management
-1. Update struct in relevant `src/config/*.rs`
-2. Add defaults in `Default` impl
-3. **MANDATORY**: Update corresponding `configs/*.toml` template
-4. Add validation logic if needed
-
-### Data Pipeline Integration
-1. **CSV Loading**: Use `DataLoader` with automatic schema detection
-2. **Feature Engineering**: Apply `FeatureEngineer` pipeline
-3. **Sequence Generation**: Use `SequenceGenerator` for LSTM input
-4. **Target Creation**: Apply `MultiTargetGenerator` for labels
-
-## Performance Guidelines
-
-### Training Optimization
-- **Batch Size**: Auto-optimized based on available memory and data size
-- **Sequence Length**: Automatically calculated per trading pair
-- **Feature Selection**: Automatic correlation analysis and importance scoring
-- **Early Stopping**: Validation-based with patience parameter
-
-### Memory Management
-- **Lazy Loading**: Progressive data loading during training
-- **Feature Caching**: Cache computed technical indicators
-- **Model Checkpointing**: Regular model saves during training
-- **Sequence Batching**: Efficient batch processing for large datasets
-
-### Model Efficiency
-- **Symbol-Specific Models**: One model per trading pair for optimal performance
-- **Incremental Training**: Support for continuing training with new data
-- **Model Compression**: Automatic pruning of less important weights
-- **Prediction Caching**: Cache recent predictions for repeated queries
-
-## Error Handling & Logging
-
-### Error Handling Pattern
-```rust
-// Always use the Result type alias
-use crate::utils::error::Result;
-
-// Return descriptive errors with context
-Err(VangaError::DataError("Missing required column 'close' in CSV".to_string()))
-
-// Use ? operator for error propagation
-let processed_data = data_loader.load(path)?.validate()?;
-
-// Handle specific error types
-match result {
-    Err(VangaError::ModelNotFound { symbol }) => {
-        log::warn!("No trained model found for {}, starting fresh training", symbol);
-        train_new_model(symbol).await?
-    }
-    Err(e) => return Err(e),
-    Ok(model) => model,
-}
-```
-
-### Logging Guidelines
-```rust
-// Use structured logging with context
-log::info!("Starting training for symbol: {} with {} samples", symbol, data_len);
-log::warn!("Low data quality detected: {}% missing values", missing_pct);
-log::error!("Training failed for {}: {}", symbol, error);
-
-// Performance logging
-let start = std::time::Instant::now();
-let result = expensive_operation().await?;
-log::debug!("Operation completed in {:?}", start.elapsed());
-```
-
-## Quick Start Checklist
-
-1. **Config First**: Always update relevant `configs/*.toml` template
-2. **Symbol-Specific**: Each trading pair needs its own model and configuration
-3. **Feature Pipeline**: Use established feature engineering patterns
-4. **Auto-Optimization**: Leverage automatic parameter tuning
-5. **Error Handling**: Comprehensive error management with descriptive messages
-6. **Testing**: Verify with end-to-end train→predict→evaluate workflow
-
-## Advanced Topics
-
-### LSTM Model Performance Troubleshooting
-
-#### Training Issues
-- Check logs for "Training started" and convergence messages
-- Verify data quality: no excessive missing values or outliers
-- Monitor validation loss for overfitting signs
-- Ensure sufficient training data (minimum 1000 samples recommended)
-
-#### Prediction Accuracy Issues
-- Verify feature consistency between training and prediction data
-- Check for data leakage in feature engineering
-- Validate target distribution balance
-- Monitor prediction confidence scores
-
-#### Memory and Performance Issues
-- Enable batch processing for large datasets
-- Use sequence length optimization for memory efficiency
-- Monitor GPU/CPU utilization during training
-- Check for memory leaks in long-running processes
-
-### Cryptocurrency-Specific Optimizations
-
-#### Market Regime Detection
-- Automatic detection of trending vs ranging markets
-- Regime-specific model parameters
-- Volatility clustering adaptation
-- Cross-asset correlation analysis
-
-#### Feature Engineering Best Practices
-- **Required Columns**: timestamp, open, high, low, close, volume
-- **Optional Columns**: All additional numeric columns automatically included
-- **Technical Indicators**: 50+ crypto-optimized indicators
-- **Market Microstructure**: Price velocity, VWAP deviations, trade intensity
-
-### Development Performance Tips
-
-#### MANDATORY BUILD COMMANDS:
+### MANDATORY BUILD COMMANDS:
 ```bash
 # Fast compilation check (PREFERRED for development)
 cargo check --message-format=short
@@ -595,65 +506,21 @@ cargo build
 # NEVER use --release during development (extremely slow)
 ```
 
-#### Code Quality Standards
+### Code Quality Standards
 - **Zero clippy warnings** - All code must pass clippy without warnings
 - **Comprehensive error handling** - Use `Result<T>` everywhere
 - **Configuration-driven** - Avoid hardcoded parameters
 - **Symbol-agnostic** - Code should work for any trading pair
 - **Async-first** - Use tokio throughout for non-blocking operations
+- **Tensor safety** - Always use `broadcast_as()` for shape matching
 
-#### Testing Approach
-- **Unit tests** for individual components (feature engineering, targets)
-- **Integration tests** for full training/prediction pipelines
-- **End-to-end tests** with sample cryptocurrency data
-- **Performance tests** for large dataset handling
-
-#### Architecture Decisions
-- **Configuration-first** - All features configurable via TOML files
-- **Modular design** - Independent feature engineering, model training, and prediction
-- **Symbol-specific models** - One model per trading pair for optimal performance
-- **Multi-target prediction** - Price levels, direction, and volatility in one framework
-- **Auto-optimization** - Minimal manual parameter tuning required
-
-### Cryptocurrency Data Requirements
-
-#### Required Data Format
-```csv
-timestamp,open,high,low,close,volume
-2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56
-```
-
-#### Optional Enhancements
-- `volume_quote` - Quote asset volume
-- `trades_count` - Number of trades
-- `buy_volume` - Buyer volume
-- Custom indicators - Any additional numeric columns
-
-#### Data Quality Guidelines
-- **Minimum frequency**: 1-minute to 1-day intervals supported
-- **Minimum history**: 1000+ samples for reliable training
-- **Missing data**: Automatic interpolation and forward-fill
-- **Outlier handling**: Automatic detection and treatment
-
-ANTI-PATTERNS
-
-NEVER DO THIS:
-- Hardcode model parameters instead of using auto-optimization
-- Create symbol-agnostic models (each pair needs its own model)
-- Skip feature engineering pipeline
-- Use manual hyperparameter tuning
-- Ignore error handling in async functions
-- Hardcode file paths or configuration values
-- Skip validation of input data quality
-- Use synchronous operations for I/O-heavy tasks
-- Assume data format without validation
-- Create models without proper target generation
-
-⚡ MANDATORY PRE-DEVELOPMENT CHECK:
-□ Using auto-optimization instead of manual tuning?
-□ Symbol-specific model architecture?
-□ Comprehensive error handling with Result<T>?
-□ Configuration-driven instead of hardcoded?
-□ Following established feature engineering patterns?
+## ✅ PRE-RESPONSE CHECK
+- □ Maximum parallel tools in one block?
+- □ Using plan() for implementations?
+- □ Batch file operations when possible?
+- □ Only doing what was asked?
+- □ Need explicit confirmation for execution?
+- □ Tensor operations use broadcast_as()?
+- □ All tensors are .contiguous()?
 
 UNCHECKED = STOP & FIX
