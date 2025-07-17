@@ -2695,19 +2695,105 @@ impl LSTMModel {
                 }
             }
             TargetType::Direction => {
-                // Check if we have proper multi-class output
+                // Direction targets are ALWAYS 3-class classification (Down=0, Sideways=1, Up=2)
+                // Use CrossEntropy loss regardless of model output size configuration
+                log::debug!(
+                    "🎯 Direction target: Using CrossEntropy loss for 3-class classification"
+                );
+
+                // Check if model output matches Direction classes (3)
                 if predictions.dims().last() == Some(&3) {
+                    // Perfect match - use CrossEntropy directly
                     self.calculate_crossentropy_loss(predictions, targets, 3)
                 } else {
-                    Ok(predictions.sub(targets)?.sqr()?.mean_all()?)
+                    // Model output size mismatch - this indicates configuration issue
+                    // but we should still use proper classification loss, not MSE
+                    log::warn!(
+                        "⚠️ Direction target with model output size {} instead of 3. Using first 3 outputs.",
+                        predictions.dims().last().unwrap_or(&0)
+                    );
+
+                    // Take first 3 outputs for Direction classification
+                    let direction_predictions =
+                        if predictions.dims().len() >= 2 && predictions.dims()[1] >= 3 {
+                            predictions.narrow(1, 0, 3)?
+                        } else {
+                            // Fallback: if we can't extract 3 outputs, use binary classification
+                            // Convert to binary: Up vs Down (ignore Sideways for now)
+                            log::warn!(
+                                "🔄 Falling back to binary classification for Direction targets"
+                            );
+
+                            // For binary classification, we need to convert 3-class targets to binary
+                            // Direction: Down=0, Sideways=1, Up=2 -> Binary: Down/Sideways=0, Up=1
+                            let threshold = Tensor::new(&[1.5f32], predictions.device())?;
+                            let binary_targets =
+                                targets.ge(&threshold)?.to_dtype(candle_core::DType::F32)?;
+
+                            // Use binary cross-entropy (sigmoid + BCE)
+                            let sigmoid_preds = candle_nn::ops::sigmoid(predictions)?;
+                            let ones = Tensor::new(&[1.0f32], predictions.device())?;
+                            let log_sigmoid = sigmoid_preds.log()?;
+                            let log_one_minus_sigmoid = ones.sub(&sigmoid_preds)?.log()?;
+
+                            let bce_loss = binary_targets
+                                .mul(&log_sigmoid)?
+                                .add(&ones.sub(&binary_targets)?.mul(&log_one_minus_sigmoid)?)?;
+                            return Ok(bce_loss.neg()?.mean_all()?);
+                        };
+
+                    self.calculate_crossentropy_loss(&direction_predictions, targets, 3)
                 }
             }
             TargetType::Volatility => {
-                // Check if we have proper multi-class output
+                // Volatility targets are ALWAYS 3-class classification (Low=0, Medium=1, High=2)
+                // Use CrossEntropy loss regardless of model output size configuration
+                log::debug!(
+                    "🎯 Volatility target: Using CrossEntropy loss for 3-class classification"
+                );
+
+                // Check if model output matches Volatility classes (3)
                 if predictions.dims().last() == Some(&3) {
+                    // Perfect match - use CrossEntropy directly
                     self.calculate_crossentropy_loss(predictions, targets, 3)
                 } else {
-                    Ok(predictions.sub(targets)?.sqr()?.mean_all()?)
+                    // Model output size mismatch - this indicates configuration issue
+                    // but we should still use proper classification loss, not MSE
+                    log::warn!(
+                        "⚠️ Volatility target with model output size {} instead of 3. Using first 3 outputs.",
+                        predictions.dims().last().unwrap_or(&0)
+                    );
+
+                    // Take first 3 outputs for Volatility classification
+                    let volatility_predictions =
+                        if predictions.dims().len() >= 2 && predictions.dims()[1] >= 3 {
+                            predictions.narrow(1, 0, 3)?
+                        } else {
+                            // Fallback: if we can't extract 3 outputs, use binary classification
+                            // Convert to binary: Low/Medium vs High volatility
+                            log::warn!(
+                                "🔄 Falling back to binary classification for Volatility targets"
+                            );
+
+                            // For binary classification, we need to convert 3-class targets to binary
+                            // Volatility: Low=0, Medium=1, High=2 -> Binary: Low/Medium=0, High=1
+                            let threshold = Tensor::new(&[1.5f32], predictions.device())?;
+                            let binary_targets =
+                                targets.ge(&threshold)?.to_dtype(candle_core::DType::F32)?;
+
+                            // Use binary cross-entropy (sigmoid + BCE)
+                            let sigmoid_preds = candle_nn::ops::sigmoid(predictions)?;
+                            let ones = Tensor::new(&[1.0f32], predictions.device())?;
+                            let log_sigmoid = sigmoid_preds.log()?;
+                            let log_one_minus_sigmoid = ones.sub(&sigmoid_preds)?.log()?;
+
+                            let bce_loss = binary_targets
+                                .mul(&log_sigmoid)?
+                                .add(&ones.sub(&binary_targets)?.mul(&log_one_minus_sigmoid)?)?;
+                            return Ok(bce_loss.neg()?.mean_all()?);
+                        };
+
+                    self.calculate_crossentropy_loss(&volatility_predictions, targets, 3)
                 }
             }
         }
