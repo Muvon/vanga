@@ -820,9 +820,44 @@ impl LSTMModel {
         val_targets: Option<&Array2<f64>>,
     ) -> Result<()> {
         let total_samples = sequences.shape()[0];
+
+        // ADDED: Validate dataset size for proper training with gap
+        let sequence_length = self.config.sequence_length;
+        let max_horizon_steps = if !config.horizons.is_empty() {
+            config
+                .horizons
+                .iter()
+                .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+                .max()
+                .unwrap_or(72)
+        } else {
+            72
+        };
+
+        let required_gap = sequence_length + max_horizon_steps;
+        let min_required_samples = required_gap + sequence_length + 10; // Minimum viable dataset
+
+        if total_samples < min_required_samples {
+            log::warn!(
+                "⚠️  SMALL DATASET WARNING: {} samples < {} recommended minimum",
+                total_samples,
+                min_required_samples
+            );
+            log::warn!(
+                "   • Sequence length: {}, Horizon steps: {}, Required gap: {}",
+                sequence_length,
+                max_horizon_steps,
+                required_gap
+            );
+            log::warn!(
+                "   • Consider: reducing sequence_length, shorter horizons, or collecting more data"
+            );
+        }
+
         log::info!(
-            "🚀 UNIFIED TRAINING: Starting with {} samples",
-            total_samples
+            "🚀 UNIFIED TRAINING: Starting with {} samples (min recommended: {})",
+            total_samples,
+            min_required_samples
         );
 
         // Log validation data usage for tracking
@@ -940,9 +975,10 @@ impl LSTMModel {
                 validation_split * 100.0
             );
 
-            // Calculate gap size to prevent data leakage based on prediction horizon
-            // Gap should be max_horizon_steps to ensure targets don't overlap
-            let gap_size = if !config.horizons.is_empty() {
+            // FIXED: Calculate proper gap size to prevent data leakage
+            // Gap must be sequence_length + max_horizon_steps to ensure no overlap between
+            // the last training sequence and first validation target
+            let max_horizon_steps = if !config.horizons.is_empty() {
                 // Calculate max horizon steps from training config horizons
                 config
                     .horizons
@@ -953,6 +989,16 @@ impl LSTMModel {
             } else {
                 72 // Fallback to 3d horizon if no horizons specified
             };
+
+            // CRITICAL FIX: Proper gap calculation
+            let gap_size = self.config.sequence_length + max_horizon_steps;
+
+            log::info!(
+                "🔒 Gap calculation: sequence_length({}) + max_horizon_steps({}) = {} total gap",
+                self.config.sequence_length,
+                max_horizon_steps,
+                gap_size
+            );
 
             // Calculate training samples, then add gap before validation
             let base_train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;

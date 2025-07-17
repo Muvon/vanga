@@ -91,10 +91,39 @@ impl DataPipeline {
         let mut windows = Vec::new();
         let mut train_end = min_train_size;
 
-        // Create progressive windows
-        while train_end + validation_size <= total_samples {
-            let val_start = train_end;
-            let val_end = train_end + validation_size;
+        // CRITICAL FIX: Calculate proper gap for walk-forward validation to prevent data leakage
+        let sequence_length = match &config.model.sequence_length {
+            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+            crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => {
+                *min_length as usize
+            }
+            crate::config::model::SequenceLengthConfig::Adaptive => 60,
+        };
+
+        let max_horizon_steps = if !config.horizons.is_empty() {
+            config
+                .horizons
+                .iter()
+                .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+                .max()
+                .unwrap_or(72)
+        } else {
+            72
+        };
+
+        let gap_size = sequence_length + max_horizon_steps;
+
+        log::info!(
+            "🔒 Walk-forward gap calculation: sequence_length({}) + max_horizon_steps({}) = {} total gap",
+            sequence_length,
+            max_horizon_steps,
+            gap_size
+        );
+
+        // Create progressive windows with proper gap to prevent data leakage
+        while train_end + gap_size + validation_size <= total_samples {
+            let val_start = train_end + gap_size; // PROPER GAP ADDED
+            let val_end = val_start + validation_size;
 
             let train_df = df.slice(0, train_end);
             let val_df = df.slice(val_start as i64, validation_size);
@@ -131,13 +160,14 @@ impl DataPipeline {
             });
 
             log::info!(
-                "📊 Window {}: Train[0-{}] ({} samples) → Val[{}-{}] ({} samples) | Chronological Split",
+                "📊 Window {}: Train[0-{}] → Gap[{}-{}] → Val[{}-{}] | Gap: {} steps (prevents data leakage)",
                 windows.len(),
                 train_end,
                 train_end,
                 val_start,
+                val_start,
                 val_end,
-                validation_size
+                gap_size
             );
 
             // Move window forward by validation_size (no overlap in test sets)
