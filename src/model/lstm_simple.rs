@@ -1192,7 +1192,19 @@ impl LSTMModel {
                     epoch_val_loss += val_batch_loss * actual_batch_size as f32;
                 }
 
-                Some(epoch_val_loss / total_val_samples as f32)
+                let avg_val_loss = epoch_val_loss / total_val_samples as f32;
+
+                // Calculate categorical metrics for price level targets
+                if let Some((_, target_type)) = &self.target_context {
+                    if target_type == &TargetType::PriceLevel {
+                        self.calculate_categorical_validation_metrics(
+                            val_seq, val_tgt, batch_size, epoch, config,
+                        )
+                        .await?;
+                    }
+                }
+
+                Some(avg_val_loss)
             } else {
                 None
             };
@@ -1905,7 +1917,7 @@ impl LSTMModel {
         }
     }
 
-    /// Calculate CrossEntropy loss for categorical targets
+    /// Calculate CrossEntropy loss for categorical targets with optional class weighting
     fn calculate_crossentropy_loss(
         &self,
         predictions: &Tensor,
@@ -1945,22 +1957,87 @@ impl LSTMModel {
             )));
         }
 
-        // For CrossEntropy, targets should be class indices (integers) or one-hot encoded
-        let loss = if target_shape.dims()[1] == 1 {
-            // Targets are class indices - use proper CrossEntropy loss
-            let target_indices = targets.to_dtype(candle_core::DType::I64)?;
+        // Calculate class weights for imbalanced price level targets
+        let class_weights = if let Some((_target_name, target_type)) = &self.target_context {
+            if target_type == &TargetType::PriceLevel {
+                self.calculate_class_weights(targets, num_classes)?
+            } else {
+                None // No weighting for direction/volatility targets
+            }
+        } else {
+            None
+        };
 
-            // Use Candle's built-in cross entropy loss
-            candle_nn::loss::cross_entropy(&logits, &target_indices.squeeze(1)?)?
-        } else if target_shape.dims()[1] == num_classes {
-            // Targets are one-hot encoded - use soft CrossEntropy
-            let log_softmax = candle_nn::ops::log_softmax(&logits, candle_core::D::Minus1)?;
-            let loss = targets.mul(&log_softmax)?.sum(candle_core::D::Minus1)?;
-            loss.neg()?.mean_all()?
+        // Apply label smoothing for price level targets
+        let smoothed_targets = if let Some((_, target_type)) = &self.target_context {
+            if target_type == &TargetType::PriceLevel {
+                self.apply_label_smoothing(targets, num_classes, 0.1)? // 10% smoothing for price levels
+            } else {
+                targets.clone() // No smoothing for direction/volatility
+            }
+        } else {
+            targets.clone()
+        };
+
+        // Check the smoothed targets shape to determine loss calculation path
+        let smoothed_target_shape = smoothed_targets.shape();
+
+        log::debug!(
+            "🎯 Loss calculation: Original targets {:?} → Smoothed targets {:?}, Classes: {}",
+            target_shape,
+            smoothed_target_shape,
+            num_classes
+        );
+
+        // For CrossEntropy, targets should be class indices (integers) or one-hot encoded
+        let loss = if smoothed_target_shape.dims()[1] == 1 {
+            log::debug!("📊 Using class indices path (no label smoothing applied)");
+            // Targets are class indices - use proper CrossEntropy loss
+            let target_indices = smoothed_targets.to_dtype(candle_core::DType::I64)?;
+
+            if let Some(weights) = class_weights {
+                log::debug!("⚖️ Applying class weights to indices");
+                // Use weighted CrossEntropy for imbalanced classes
+                self.calculate_weighted_crossentropy_loss(
+                    &logits,
+                    &target_indices.squeeze(1)?,
+                    &weights,
+                )?
+            } else {
+                log::debug!("📈 Using standard CrossEntropy for indices");
+                // Use standard CrossEntropy loss
+                candle_nn::loss::cross_entropy(&logits, &target_indices.squeeze(1)?)?
+            }
+        } else if smoothed_target_shape.dims()[1] == num_classes {
+            log::debug!("🎯 Using one-hot path (label smoothing applied)");
+            // Targets are one-hot encoded (from label smoothing) - use soft CrossEntropy
+            let log_softmax =
+                candle_nn::ops::log_softmax(&logits, candle_core::D::Minus1)?.contiguous()?;
+
+            // For one-hot targets with class weights, we need to apply weights differently
+            if let Some(weights) = class_weights {
+                log::debug!("⚖️ Applying class weights to one-hot targets");
+                // Apply class weights to one-hot encoded targets
+                self.calculate_weighted_soft_crossentropy_loss(
+                    &logits,
+                    &smoothed_targets,
+                    &weights,
+                )?
+            } else {
+                log::debug!("📈 Using standard soft CrossEntropy for one-hot");
+                // Standard soft CrossEntropy for one-hot targets - ensure all tensors are contiguous
+                let smoothed_contiguous = smoothed_targets.contiguous()?;
+                let loss = smoothed_contiguous
+                    .mul(&log_softmax)?
+                    .contiguous()?
+                    .sum(candle_core::D::Minus1)?
+                    .contiguous()?;
+                loss.neg()?.mean_all()?
+            }
         } else {
             return Err(VangaError::ModelError(format!(
                 "Target dimension mismatch: got {}, expected 1 (indices) or {} (one-hot)",
-                target_shape.dims()[1],
+                smoothed_target_shape.dims()[1],
                 num_classes
             )));
         };
@@ -1969,6 +2046,507 @@ impl LSTMModel {
         log::debug!("🎯 CrossEntropy Loss calculated: {:.6}", loss_value);
 
         Ok(loss)
+    }
+
+    /// Calculate class weights for imbalanced datasets
+    fn calculate_class_weights(
+        &self,
+        targets: &Tensor,
+        num_classes: usize,
+    ) -> Result<Option<Vec<f32>>> {
+        // Extract target values to calculate class distribution
+        let target_data = targets.to_vec2::<f32>()?;
+        let mut class_counts = vec![0usize; num_classes];
+        let mut total_samples = 0;
+
+        // Count class occurrences
+        for row in &target_data {
+            if let Some(&target_val) = row.first() {
+                let class_idx = target_val as usize;
+                if class_idx < num_classes {
+                    class_counts[class_idx] += 1;
+                    total_samples += 1;
+                }
+            }
+        }
+
+        if total_samples == 0 {
+            return Ok(None);
+        }
+
+        // Calculate inverse frequency weights
+        let mut weights = Vec::new();
+        let mut max_weight = 0.0f32;
+
+        for &count in &class_counts {
+            if count > 0 {
+                let weight = total_samples as f32 / (num_classes as f32 * count as f32);
+                weights.push(weight);
+                max_weight = max_weight.max(weight);
+            } else {
+                // Handle empty classes with high weight
+                weights.push(max_weight * 2.0);
+            }
+        }
+
+        // Normalize weights to prevent extreme values
+        let weight_sum: f32 = weights.iter().sum();
+        if weight_sum > 0.0 {
+            for weight in &mut weights {
+                *weight = (*weight / weight_sum) * num_classes as f32;
+                *weight = weight.clamp(0.1, 10.0); // Clamp to reasonable range
+            }
+        }
+
+        log::debug!(
+            "📊 Class weights calculated: {:?} (from counts: {:?})",
+            weights,
+            class_counts
+        );
+
+        Ok(Some(weights))
+    }
+
+    /// Calculate weighted CrossEntropy loss for imbalanced classes
+    fn calculate_weighted_crossentropy_loss(
+        &self,
+        logits: &Tensor,
+        targets: &Tensor,
+        class_weights: &[f32],
+    ) -> Result<Tensor> {
+        // Calculate standard CrossEntropy loss per sample
+        let log_softmax =
+            candle_nn::ops::log_softmax(logits, candle_core::D::Minus1)?.contiguous()?;
+
+        // Validate tensor dimensions
+        let batch_size = targets.dim(0)?;
+        let logits_batch_size = logits.dim(0)?;
+        let num_classes = class_weights.len();
+
+        if batch_size != logits_batch_size {
+            return Err(VangaError::ModelError(format!(
+                "Batch size mismatch: targets {} vs logits {}",
+                batch_size, logits_batch_size
+            )));
+        }
+
+        let mut weighted_losses = Vec::with_capacity(batch_size);
+        let target_data = targets.contiguous()?.to_vec1::<i64>()?;
+        let log_softmax_data = log_softmax.to_vec2::<f32>()?;
+
+        // Validate data consistency
+        if target_data.len() != batch_size {
+            return Err(VangaError::ModelError(format!(
+                "Target data length {} doesn't match batch size {}",
+                target_data.len(),
+                batch_size
+            )));
+        }
+
+        if log_softmax_data.len() != batch_size {
+            return Err(VangaError::ModelError(format!(
+                "Log softmax data length {} doesn't match batch size {}",
+                log_softmax_data.len(),
+                batch_size
+            )));
+        }
+
+        for (i, &target_class) in target_data.iter().enumerate() {
+            let class_idx = target_class as usize;
+            if class_idx < num_classes {
+                let log_prob = log_softmax_data[i][class_idx];
+                let weight = class_weights[class_idx];
+                let weighted_loss = -log_prob * weight;
+                weighted_losses.push(weighted_loss);
+            } else {
+                log::warn!(
+                    "Invalid class index {} >= {}, skipping sample {}",
+                    class_idx,
+                    num_classes,
+                    i
+                );
+            }
+        }
+
+        if weighted_losses.is_empty() {
+            return Err(VangaError::ModelError(
+                "No valid samples for weighted loss calculation".to_string(),
+            ));
+        }
+
+        // Convert back to tensor and calculate mean
+        let loss_values = weighted_losses.clone(); // Clone before move
+        let loss_tensor = Tensor::from_vec(weighted_losses, (loss_values.len(),), logits.device())?
+            .contiguous()?;
+        let mean_loss = loss_tensor.mean_all()?;
+
+        log::debug!(
+            "⚖️ Weighted CrossEntropy: {:.6} (vs unweighted: {:.6}) for {} samples",
+            mean_loss.to_scalar::<f32>().unwrap_or(0.0),
+            candle_nn::loss::cross_entropy(logits, targets)?
+                .to_scalar::<f32>()
+                .unwrap_or(0.0),
+            batch_size
+        );
+
+        Ok(mean_loss)
+    }
+
+    /// Calculate weighted soft CrossEntropy loss for one-hot encoded targets
+    fn calculate_weighted_soft_crossentropy_loss(
+        &self,
+        logits: &Tensor,
+        one_hot_targets: &Tensor,
+        class_weights: &[f32],
+    ) -> Result<Tensor> {
+        // Ensure ALL input tensors are contiguous from the start
+        let logits_contiguous = logits.contiguous()?;
+        let targets_contiguous = one_hot_targets.contiguous()?;
+
+        let log_softmax = candle_nn::ops::log_softmax(&logits_contiguous, candle_core::D::Minus1)?
+            .contiguous()?;
+
+        // Validate tensor dimensions
+        let batch_size = targets_contiguous.dim(0)?;
+        let num_classes = class_weights.len();
+
+        if targets_contiguous.dim(1)? != num_classes {
+            return Err(VangaError::ModelError(format!(
+                "One-hot targets dimension {} doesn't match class weights {}",
+                targets_contiguous.dim(1)?,
+                num_classes
+            )));
+        }
+
+        log::debug!(
+            "🔍 Weighted soft CrossEntropy shapes: targets {:?}, logits {:?}, weights len {}",
+            targets_contiguous.shape(),
+            logits_contiguous.shape(),
+            num_classes
+        );
+
+        // Create weight tensor with shape [1, num_classes] and ensure contiguous
+        let weight_tensor = Tensor::from_vec(
+            class_weights.to_vec(),
+            (1, num_classes),
+            logits_contiguous.device(),
+        )?
+        .contiguous()?;
+
+        log::debug!(
+            "🔍 Broadcasting shapes: targets {:?} × weights {:?}",
+            targets_contiguous.shape(),
+            weight_tensor.shape()
+        );
+
+        // Use broadcast_as to explicitly match tensor shapes before multiplication
+        // Broadcasting: [1, num_classes] -> [batch_size, num_classes]
+        let weight_tensor_broadcast = weight_tensor.broadcast_as(targets_contiguous.shape())?;
+
+        log::debug!(
+            "🔍 After broadcast_as: targets {:?} × weights {:?}",
+            targets_contiguous.shape(),
+            weight_tensor_broadcast.shape()
+        );
+
+        // Now multiply tensors with matching shapes and ensure result is contiguous
+        let weighted_targets = targets_contiguous
+            .mul(&weight_tensor_broadcast)?
+            .contiguous()?;
+
+        // Calculate weighted soft CrossEntropy loss - ensure all intermediate results are contiguous
+        let weighted_log_loss = weighted_targets.mul(&log_softmax)?.contiguous()?;
+        let loss_per_sample = weighted_log_loss
+            .sum(candle_core::D::Minus1)?
+            .contiguous()?;
+        let mean_loss = loss_per_sample.neg()?.mean_all()?.contiguous()?;
+
+        log::debug!(
+            "⚖️ Weighted Soft CrossEntropy: {:.6} for {} samples with {} classes",
+            mean_loss.to_scalar::<f32>().unwrap_or(0.0),
+            batch_size,
+            num_classes
+        );
+
+        Ok(mean_loss)
+    }
+
+    /// Apply label smoothing to reduce overconfidence in categorical predictions
+    fn apply_label_smoothing(
+        &self,
+        targets: &Tensor,
+        num_classes: usize,
+        smoothing: f32,
+    ) -> Result<Tensor> {
+        let target_shape = targets.shape();
+
+        if target_shape.dims()[1] == 1 {
+            // Convert class indices to smoothed one-hot encoding
+            let batch_size = target_shape.dims()[0];
+            let target_data = targets.to_vec2::<f32>()?;
+
+            let mut smoothed_data = Vec::new();
+
+            for row in &target_data {
+                if let Some(&target_class) = row.first() {
+                    let class_idx = target_class as usize;
+
+                    // Create smoothed one-hot vector
+                    let mut one_hot = vec![smoothing / (num_classes - 1) as f32; num_classes];
+                    if class_idx < num_classes {
+                        one_hot[class_idx] = 1.0 - smoothing;
+                    }
+
+                    smoothed_data.extend(one_hot);
+                }
+            }
+
+            let smoothed_tensor =
+                Tensor::from_vec(smoothed_data, (batch_size, num_classes), targets.device())?
+                    .contiguous()?; // Ensure contiguity
+
+            log::debug!(
+                "🎯 Label smoothing applied: {:.1}% smoothing for {} classes",
+                smoothing * 100.0,
+                num_classes
+            );
+
+            Ok(smoothed_tensor)
+        } else if target_shape.dims()[1] == num_classes {
+            // Already one-hot encoded - apply smoothing
+            let uniform_dist = smoothing / num_classes as f32;
+
+            // Ensure ALL intermediate tensors are contiguous
+            let targets_contiguous = targets.contiguous()?;
+            let scale_tensor =
+                Tensor::from_slice(&[1.0 - smoothing], (1,), targets.device())?.contiguous()?;
+            let uniform_tensor =
+                Tensor::from_slice(&[uniform_dist], (1,), targets.device())?.contiguous()?;
+
+            let scaled = targets_contiguous.mul(&scale_tensor)?.contiguous()?;
+            let smoothed = scaled.add(&uniform_tensor)?.contiguous()?;
+
+            log::debug!(
+                "🎯 Label smoothing applied to one-hot targets: {:.1}% smoothing",
+                smoothing * 100.0
+            );
+
+            Ok(smoothed)
+        } else {
+            // Invalid target format - return original
+            log::warn!(
+                "⚠️ Cannot apply label smoothing to targets with shape: {:?}",
+                target_shape
+            );
+            Ok(targets.clone())
+        }
+    }
+
+    /// Calculate categorical validation metrics for price level targets
+    async fn calculate_categorical_validation_metrics(
+        &self,
+        val_sequences: &Array3<f64>,
+        val_targets: &Array2<f64>,
+        _batch_size: usize,
+        epoch: usize,
+        _config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        // Only calculate detailed metrics every 10 epochs to avoid overhead
+        if epoch % 10 != 0 {
+            return Ok(());
+        }
+
+        let total_val_samples = val_sequences.shape()[0];
+        let validation_batch_size = 64; // Fixed batch size for validation metrics
+        let mut all_predictions = Vec::new();
+        let mut all_targets = Vec::new();
+
+        // Collect all predictions and targets
+        for batch_start in (0..total_val_samples).step_by(validation_batch_size) {
+            let batch_end = std::cmp::min(batch_start + validation_batch_size, total_val_samples);
+
+            let batch_sequences = val_sequences
+                .slice(ndarray::s![batch_start..batch_end, .., ..])
+                .to_owned();
+            let batch_targets = val_targets
+                .slice(ndarray::s![batch_start..batch_end, ..])
+                .to_owned();
+
+            let (input_tensor, target_tensor) =
+                self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
+
+            let predictions = self.forward(&input_tensor)?;
+
+            // Convert predictions to class indices
+            let pred_data = predictions.to_vec2::<f32>()?;
+            let target_data = target_tensor.to_vec2::<f32>()?;
+
+            for (pred_row, target_row) in pred_data.iter().zip(target_data.iter()) {
+                // Get predicted class (argmax)
+                let predicted_class = pred_row
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(idx, _)| idx as i32)
+                    .unwrap_or(0);
+
+                // Get true class
+                let true_class = if target_row.len() == 1 {
+                    target_row[0] as i32
+                } else {
+                    // One-hot encoded - find max index
+                    target_row
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(idx, _)| idx as i32)
+                        .unwrap_or(0)
+                };
+
+                all_predictions.push(predicted_class);
+                all_targets.push(true_class);
+            }
+        }
+
+        // Calculate categorical metrics
+        let accuracy = self.calculate_accuracy(&all_predictions, &all_targets);
+        let (precision, recall, f1) =
+            self.calculate_precision_recall_f1(&all_predictions, &all_targets);
+        let class_distribution =
+            self.analyze_prediction_distribution(&all_predictions, &all_targets);
+
+        // Log categorical metrics
+        log::info!(
+            "📊 Categorical Metrics [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}",
+            epoch, accuracy, precision, recall, f1
+        );
+
+        log::debug!(
+            "📈 Class Distribution: Pred: {:?}, True: {:?}",
+            class_distribution.0,
+            class_distribution.1
+        );
+
+        Ok(())
+    }
+
+    /// Calculate accuracy for categorical predictions
+    fn calculate_accuracy(&self, predictions: &[i32], targets: &[i32]) -> f32 {
+        if predictions.len() != targets.len() || predictions.is_empty() {
+            return 0.0;
+        }
+
+        let correct = predictions
+            .iter()
+            .zip(targets.iter())
+            .filter(|(pred, target)| pred == target)
+            .count();
+
+        correct as f32 / predictions.len() as f32
+    }
+
+    /// Calculate precision, recall, and F1 score (macro-averaged)
+    fn calculate_precision_recall_f1(
+        &self,
+        predictions: &[i32],
+        targets: &[i32],
+    ) -> (f32, f32, f32) {
+        if predictions.len() != targets.len() || predictions.is_empty() {
+            return (0.0, 0.0, 0.0);
+        }
+
+        // Find unique classes
+        let mut classes = std::collections::HashSet::new();
+        for &pred in predictions {
+            classes.insert(pred);
+        }
+        for &target in targets {
+            classes.insert(target);
+        }
+
+        let mut total_precision = 0.0;
+        let mut total_recall = 0.0;
+        let mut valid_classes = 0;
+
+        for &class in &classes {
+            let tp = predictions
+                .iter()
+                .zip(targets.iter())
+                .filter(|(pred, target)| **pred == class && **target == class)
+                .count() as f32;
+
+            let fp = predictions
+                .iter()
+                .zip(targets.iter())
+                .filter(|(pred, target)| **pred == class && **target != class)
+                .count() as f32;
+
+            let fn_count = predictions
+                .iter()
+                .zip(targets.iter())
+                .filter(|(pred, target)| **pred != class && **target == class)
+                .count() as f32;
+
+            let precision = if tp + fp > 0.0 { tp / (tp + fp) } else { 0.0 };
+            let recall = if tp + fn_count > 0.0 {
+                tp / (tp + fn_count)
+            } else {
+                0.0
+            };
+
+            if precision > 0.0 || recall > 0.0 {
+                total_precision += precision;
+                total_recall += recall;
+                valid_classes += 1;
+            }
+        }
+
+        let avg_precision = if valid_classes > 0 {
+            total_precision / valid_classes as f32
+        } else {
+            0.0
+        };
+        let avg_recall = if valid_classes > 0 {
+            total_recall / valid_classes as f32
+        } else {
+            0.0
+        };
+        let f1 = if avg_precision + avg_recall > 0.0 {
+            2.0 * (avg_precision * avg_recall) / (avg_precision + avg_recall)
+        } else {
+            0.0
+        };
+
+        (avg_precision, avg_recall, f1)
+    }
+
+    /// Analyze prediction and target class distributions
+    fn analyze_prediction_distribution(
+        &self,
+        predictions: &[i32],
+        targets: &[i32],
+    ) -> (Vec<usize>, Vec<usize>) {
+        let max_class = predictions.iter().chain(targets.iter()).max().unwrap_or(&0);
+        let num_classes = (*max_class + 1) as usize;
+
+        let mut pred_counts = vec![0; num_classes];
+        let mut target_counts = vec![0; num_classes];
+
+        for &pred in predictions {
+            if pred >= 0 && (pred as usize) < num_classes {
+                pred_counts[pred as usize] += 1;
+            }
+        }
+
+        for &target in targets {
+            if target >= 0 && (target as usize) < num_classes {
+                target_counts[target as usize] += 1;
+            }
+        }
+
+        (pred_counts, target_counts)
     }
 
     /// Calculate loss for single target type

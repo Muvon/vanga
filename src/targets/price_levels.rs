@@ -64,21 +64,36 @@ pub fn generate_price_level_targets_with_global_boundaries(
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
 
-        // Calculate global quantiles from training portion only
-        let train_prices = if let Some(split_idx) = train_val_split_idx {
-            &prices[..split_idx.min(prices.len())]
+        // Calculate global quantiles from training portion only for consistency
+        let train_end_idx = if let Some(split_idx) = train_val_split_idx {
+            split_idx.min(prices.len().saturating_sub(horizon_steps))
         } else {
-            &prices // Use all data if no split specified
+            prices.len().saturating_sub(horizon_steps)
         };
 
-        // Calculate consistent quantiles using fixed method for stability
+        let train_start_idx = 100; // Skip initial lookback period
+
+        if train_end_idx <= train_start_idx {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Insufficient training data for global quantile calculation".to_string(),
+            ));
+        }
+
+        // FIXED: Use consistent Fixed quantile method for stable boundaries
         let quantiles = calculate_quantiles(
-            train_prices,
+            &prices[train_start_idx..train_end_idx],
             config.bins,
-            &QuantileMethod::Fixed, // Use fixed method for consistency
+            &QuantileMethod::Fixed, // Always use Fixed for consistency
         )?;
 
-        // Apply same quantiles to entire dataset
+        log::debug!(
+            "🎯 Global boundaries [{}]: {} training samples, quantiles: {:?}",
+            horizon,
+            train_end_idx - train_start_idx,
+            quantiles
+        );
+
+        // Apply same quantiles to entire dataset (both training and validation)
         let targets = apply_quantiles_to_targets(&prices, horizon_steps, &quantiles, config)?;
 
         all_targets.insert(horizon.clone(), targets);
@@ -159,6 +174,10 @@ pub fn generate_price_level_targets_with_head(
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let price_targets = calculate_price_level_targets(&close_prices, horizon_steps, config)?;
+
+        // Analyze and log class distribution
+        analyze_class_distribution(&price_targets, horizon, config.bins)?;
+
         targets.insert(horizon.clone(), price_targets);
     }
 
@@ -174,14 +193,13 @@ pub fn generate_price_level_targets_from_model_config(
     generate_price_level_targets_with_head(df, horizons, &model_config.output_heads.price_levels)
 }
 
-/// Calculate price level targets for a specific horizon
+/// Calculate price level targets for a specific horizon with consistent global quantiles
 fn calculate_price_level_targets(
     prices: &[f64],
     horizon_steps: usize,
     config: &crate::config::model::PriceLevelHead,
 ) -> Result<Vec<i32>> {
     if prices.len() < horizon_steps + 100 {
-        // Use fixed lookback for now
         return Err(crate::utils::error::VangaError::DataError(
             "Insufficient data for price level target generation".to_string(),
         ));
@@ -189,16 +207,38 @@ fn calculate_price_level_targets(
 
     let mut targets = vec![-1; prices.len()];
 
-    for i in 100..(prices.len() - horizon_steps) {
-        // Use fixed lookback
+    // CRITICAL FIX: Calculate global quantiles once using all available training data
+    // This ensures consistent class boundaries throughout training and validation
+    let training_data_start = 100; // Skip initial lookback period
+    let training_data_end = prices.len() - horizon_steps; // Ensure we have future data
+
+    if training_data_end <= training_data_start {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Insufficient data range for global quantile calculation".to_string(),
+        ));
+    }
+
+    // Use all available training prices for consistent quantile calculation
+    let global_quantiles = calculate_quantiles(
+        &prices[training_data_start..training_data_end],
+        config.bins,
+        &QuantileMethod::Fixed, // Use Fixed method for consistency across train/val
+    )?;
+
+    log::debug!(
+        "🎯 Global quantiles calculated for {} bins using {} samples: {:?}",
+        config.bins,
+        training_data_end - training_data_start,
+        global_quantiles
+    );
+
+    // Apply consistent quantiles to all samples
+    for i in training_data_start..training_data_end {
         let current_price = prices[i];
 
-        // NEW: Calculate target price based on strategy
+        // Calculate target price based on strategy
         let target_price = match &config.target_strategy {
-            crate::config::model::PriceLevelTargetStrategy::Current => {
-                // Existing logic: single future price
-                prices[i + horizon_steps]
-            }
+            crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
 
             crate::config::model::PriceLevelTargetStrategy::StandardVWAP => {
                 calculate_standard_vwap(prices, i, horizon_steps)?
@@ -220,15 +260,8 @@ fn calculate_price_level_targets(
             continue;
         }
 
-        // Calculate quantiles for price level classification
-        let quantiles = calculate_quantiles(
-            &prices[i.saturating_sub(100)..=i], // Use fixed lookback
-            config.bins,
-            &QuantileMethod::Rolling { window: 1000 }, // Use default method
-        )?;
-
-        // Classify target price into quantile bins
-        targets[i] = classify_price_to_level(target_price, &quantiles);
+        // FIXED: Use consistent global quantiles for all classifications
+        targets[i] = classify_price_to_level(target_price, &global_quantiles);
     }
 
     Ok(targets)
@@ -313,6 +346,92 @@ fn calculate_price_volatility(prices: &[f64]) -> f64 {
         / returns.len() as f64;
 
     variance.sqrt()
+}
+
+/// Analyze class distribution and log insights for debugging
+fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Result<()> {
+    let mut class_counts = vec![0usize; bins as usize];
+    let mut valid_targets = 0;
+
+    // Count class occurrences
+    for &target in targets {
+        if target >= 0 && target < bins as i32 {
+            class_counts[target as usize] += 1;
+            valid_targets += 1;
+        }
+    }
+
+    if valid_targets == 0 {
+        log::warn!(
+            "📊 Price Level Analysis [{}]: No valid targets found",
+            horizon
+        );
+        return Ok(());
+    }
+
+    // Calculate class distribution statistics
+    let total_samples = valid_targets as f64;
+    let mut class_percentages = Vec::new();
+    let mut min_class_size = usize::MAX;
+    let mut max_class_size = 0;
+
+    for &count in class_counts.iter() {
+        let percentage = (count as f64 / total_samples) * 100.0;
+        class_percentages.push(percentage);
+
+        if count > 0 {
+            min_class_size = min_class_size.min(count);
+            max_class_size = max_class_size.max(count);
+        }
+    }
+
+    // Calculate imbalance ratio
+    let imbalance_ratio = if min_class_size != usize::MAX && min_class_size > 0 {
+        max_class_size as f64 / min_class_size as f64
+    } else {
+        f64::INFINITY
+    };
+
+    // Log compact class distribution analysis
+    log::info!(
+        "📊 Price Level Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        horizon,
+        valid_targets,
+        imbalance_ratio,
+        class_percentages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("{}:{:.1}%", i, p))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Warn about severe imbalance
+    if imbalance_ratio > 10.0 {
+        log::warn!(
+            "⚠️  Severe class imbalance detected for {} ({}x ratio) - consider class weighting",
+            horizon,
+            imbalance_ratio
+        );
+    }
+
+    // Warn about empty classes
+    let empty_classes: Vec<usize> = class_counts
+        .iter()
+        .enumerate()
+        .filter(|(_, &count)| count == 0)
+        .map(|(idx, _)| idx)
+        .collect();
+
+    if !empty_classes.is_empty() {
+        log::warn!(
+            "⚠️  Empty classes detected for {}: {:?} - may cause training instability",
+            horizon,
+            empty_classes
+        );
+    }
+
+    Ok(())
 }
 
 /// Extract close prices from DataFrame
