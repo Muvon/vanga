@@ -1,5 +1,5 @@
 // Sequence generator for LSTM training and prediction
-use crate::data::{DataMetadata, NormalizationStats, PreparedData, PreparedPredictionData};
+use crate::data::{DataMetadata, PreparedData, PreparedPredictionData};
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use chrono::Utc;
@@ -25,6 +25,7 @@ impl SequenceGenerator {
     pub async fn generate_training_sequences(
         &self,
         df: DataFrame,
+        normalization_stats: crate::data::NormalizationStats,
         horizons: &[String],
         model_config: &crate::config::ModelConfig,
         data_config: &crate::config::training::DataConfig,
@@ -82,11 +83,9 @@ impl SequenceGenerator {
             .create_sliding_windows(&feature_data, sequence_length, horizons, &df, data_config)
             .await?;
 
-        // Calculate normalization statistics
-        let normalization_stats = self.calculate_normalization_stats(&feature_data)?;
-
-        // Apply normalization to sequences
-        let normalized_sequences = self.normalize_sequences(&sequences, &normalization_stats)?;
+        // FIXED: Use normalization stats passed from preprocessor (calculated from raw data)
+        // Data is already normalized by preprocessor, so sequences are already normalized
+        log::info!("✅ Using normalization stats from preprocessor (calculated from raw data before normalization)");
 
         // Create metadata
         let metadata = DataMetadata {
@@ -101,7 +100,7 @@ impl SequenceGenerator {
 
         log::info!(
             "Generated {} sequences with {} features",
-            normalized_sequences.len_of(Axis(0)),
+            sequences.len_of(Axis(0)),
             feature_count
         );
 
@@ -110,12 +109,12 @@ impl SequenceGenerator {
         log::info!(
             "   • Total Data Processed: {} rows → {} sequences → {} targets",
             total_records,
-            normalized_sequences.len_of(Axis(0)),
+            sequences.len_of(Axis(0)),
             targets.data_length
         );
         log::info!(
             "   • Memory Efficiency: {:.1}% data utilization",
-            (normalized_sequences.len_of(Axis(0)) as f64 / total_records as f64) * 100.0
+            (sequences.len_of(Axis(0)) as f64 / total_records as f64) * 100.0
         );
         log::info!(
             "   • Feature Engineering: {} features per sequence",
@@ -128,7 +127,7 @@ impl SequenceGenerator {
         log::info!("   • Data Quality: Normalized, validated, ready for training");
 
         Ok(PreparedData {
-            sequences: normalized_sequences,
+            sequences,
             targets,
             feature_names: feature_columns,
             normalization_stats,
@@ -367,102 +366,6 @@ impl SequenceGenerator {
 
         // Return both sequences and the actual generated targets
         Ok((sequences, prepared_targets))
-    }
-
-    fn calculate_normalization_stats(
-        &self,
-        feature_data: &Array2<f64>,
-    ) -> Result<NormalizationStats> {
-        let feature_count = feature_data.ncols();
-        let mut means = Vec::with_capacity(feature_count);
-        let mut stds = Vec::with_capacity(feature_count);
-        let mut mins = Vec::with_capacity(feature_count);
-        let mut maxs = Vec::with_capacity(feature_count);
-        let mut medians = Vec::with_capacity(feature_count);
-        let mut q25 = Vec::with_capacity(feature_count);
-        let mut q75 = Vec::with_capacity(feature_count);
-
-        for col_idx in 0..feature_count {
-            let column = feature_data.column(col_idx);
-            // Filter out NaN values before sorting and statistics
-            let mut sorted_values: Vec<f64> = column
-                .to_vec()
-                .into_iter()
-                .filter(|x| x.is_finite())
-                .collect();
-            sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-            let mean = column.mean().unwrap_or(0.0);
-            let std = column.std(0.0);
-            let min_val = sorted_values.first().copied().unwrap_or(0.0);
-            let max_val = sorted_values.last().copied().unwrap_or(0.0);
-
-            let len = sorted_values.len();
-            let (median, q25_val, q75_val) = if len == 0 {
-                // Handle case where all values were NaN
-                (0.0, 0.0, 0.0)
-            } else {
-                let median = if len % 2 == 0 && len > 1 {
-                    (sorted_values[len / 2 - 1] + sorted_values[len / 2]) / 2.0
-                } else {
-                    sorted_values[len / 2]
-                };
-
-                let q25_val = if len > 4 {
-                    sorted_values[len / 4]
-                } else {
-                    sorted_values[0]
-                };
-                let q75_val = if len > 4 {
-                    sorted_values[3 * len / 4]
-                } else {
-                    sorted_values[len - 1]
-                };
-
-                (median, q25_val, q75_val)
-            };
-
-            means.push(mean);
-            stds.push(std);
-            mins.push(min_val);
-            maxs.push(max_val);
-            medians.push(median);
-            q25.push(q25_val);
-            q75.push(q75_val);
-        }
-
-        Ok(NormalizationStats {
-            means,
-            stds,
-            mins,
-            maxs,
-            medians,
-            q25,
-            q75,
-        })
-    }
-
-    fn normalize_sequences(
-        &self,
-        sequences: &Array3<f64>,
-        stats: &NormalizationStats,
-    ) -> Result<Array3<f64>> {
-        let mut normalized = sequences.clone();
-        let feature_count = sequences.len_of(Axis(2));
-
-        for feature_idx in 0..feature_count {
-            let mean = stats.means[feature_idx];
-            let std = stats.stds[feature_idx];
-
-            if std > 0.0 {
-                // Z-score normalization
-                normalized
-                    .slice_mut(s![.., .., feature_idx])
-                    .mapv_inplace(|x| (x - mean) / std);
-            }
-        }
-
-        Ok(normalized)
     }
 
     /// Create prediction sequences from feature data

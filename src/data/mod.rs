@@ -5,6 +5,8 @@ pub mod sequence;
 pub mod structures;
 pub mod target_converter;
 
+use serde::{Deserialize, Serialize};
+
 pub use loader::DataLoader;
 pub use preprocessor::DataPreprocessor;
 pub use schema::{CryptoDataSchema, DataValidationError};
@@ -51,14 +53,14 @@ impl DataPipeline {
         CryptoDataSchema::validate(&raw_data)?;
 
         // Preprocess data (features, normalization, etc.)
-        let processed_data = self
+        let (processed_data, normalization_stats) = self
             .preprocessor
             .process_for_training(raw_data, &config.data, Some(&config.features))
             .await?;
 
         // CRITICAL: Use walk-forward analysis to maximize data utilization
         let windows = self
-            .create_walk_forward_windows(&processed_data, config)
+            .create_walk_forward_windows(&processed_data, &normalization_stats, config)
             .await?;
 
         log::info!(
@@ -73,6 +75,7 @@ impl DataPipeline {
     async fn create_walk_forward_windows(
         &self,
         df: &polars::prelude::DataFrame,
+        normalization_stats: &NormalizationStats,
         config: &crate::config::TrainingConfig,
     ) -> Result<Vec<TrainingWindow>> {
         let total_samples = df.height();
@@ -101,6 +104,7 @@ impl DataPipeline {
                 .sequence_generator
                 .generate_training_sequences(
                     train_df,
+                    normalization_stats.clone(),
                     &config.horizons,
                     &config.model,
                     &config.data,
@@ -109,7 +113,13 @@ impl DataPipeline {
 
             let val_sequences = self
                 .sequence_generator
-                .generate_training_sequences(val_df, &config.horizons, &config.model, &config.data)
+                .generate_training_sequences(
+                    val_df,
+                    normalization_stats.clone(),
+                    &config.horizons,
+                    &config.model,
+                    &config.data,
+                )
                 .await?;
 
             windows.push(TrainingWindow {
@@ -205,8 +215,8 @@ impl DataPipeline {
         let processed_data = if let Some(training_config) = model.get_training_config() {
             log::info!("Using stored training config for consistent preprocessing");
 
-            // Apply SAME preprocessing as training
-            let df = self
+            // STEP 1: Apply EXACT same preprocessing as training
+            let (mut df, _normalization_stats) = self
                 .preprocessor
                 .process_for_training(
                     raw_data,
@@ -215,62 +225,30 @@ impl DataPipeline {
                 )
                 .await?;
 
-            // Apply SAME feature engineering as training
-            let feature_engineer =
-                crate::features::FeatureEngineer::new(training_config.features.clone());
-            let mut df = feature_engineer.generate_features(df).await?;
-
-            // CRITICAL: Use SAME logic as training - remove initial NaN rows
-            // This removes the initial rows where technical indicators are NaN (e.g., first 200 rows)
-            // But does NOT validate the entire dataset like training does
-            let original_len = df.height();
-
-            // Find the first row where ALL columns have valid values (same as training)
-            let mut first_valid_row = None;
-            for row_idx in 0..original_len {
-                let mut all_valid = true;
-                for series in df.get_columns() {
-                    if series.dtype().is_numeric() {
-                        if let Ok(float_series) = series.f64() {
-                            if let Some(value) = float_series.get(row_idx) {
-                                if !value.is_finite() {
-                                    all_valid = false;
-                                    break;
-                                }
-                            } else {
-                                all_valid = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if all_valid {
-                    first_valid_row = Some(row_idx);
-                    break;
-                }
-            }
-
-            let first_valid_idx = match first_valid_row {
-                Some(idx) => idx,
-                None => {
-                    return Err(crate::utils::error::VangaError::DataError(
-                        "No rows found with all valid (non-NaN) values after feature engineering."
-                            .to_string(),
-                    ));
-                }
-            };
-
-            // Remove initial NaN rows (same as training)
-            let clean_data_len = original_len - first_valid_idx;
-            df = df.slice(first_valid_idx as i64, clean_data_len);
-
             log::info!(
-                "Removed {} initial NaN rows, {} clean rows remaining",
-                first_valid_idx,
-                clean_data_len
+                "✅ Applied same preprocessing as training: {} rows, {} columns",
+                df.height(),
+                df.width()
             );
 
-            // Calculate required rows for prediction
+            // STEP 2: CRITICAL - Apply normalization using stored training stats
+            // This is the missing step that caused the bug!
+            if let Some(normalization_stats) = model.get_normalization_stats() {
+                log::info!("🔧 Applying normalization using stored training statistics");
+
+                df = self.preprocessor.apply_normalization_with_stats(
+                    df,
+                    normalization_stats,
+                    &training_config.data.normalization,
+                )?;
+
+                log::info!("✅ Normalization applied - model will receive properly scaled inputs");
+            } else {
+                log::warn!("⚠️  No normalization stats found in model - model may receive wrong input scale");
+                log::warn!("    This suggests the model was trained with an older version that didn't store normalization stats");
+            }
+
+            // STEP 3: Extract most recent data for prediction (AFTER normalization)
             let sequence_length = match &training_config.model.sequence_length {
                 crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
                 crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => {
@@ -279,12 +257,12 @@ impl DataPipeline {
                 crate::config::model::SequenceLengthConfig::Adaptive => 60,
             };
 
-            let required_rows = sequence_length + 1; // Only need sequence + buffer after NaN removal
+            let required_rows = sequence_length + 1;
 
-            // Validate we have enough clean data
+            // Validate we have enough data after preprocessing
             if df.height() < required_rows {
                 return Err(crate::utils::error::VangaError::DataError(format!(
-                    "Insufficient clean data for prediction: {} rows available, {} required",
+                    "Insufficient data after preprocessing: {} rows available, {} required for prediction",
                     df.height(),
                     required_rows
                 )));
@@ -294,15 +272,14 @@ impl DataPipeline {
             let start_idx = df.height() - required_rows;
             df = df.slice(start_idx as i64, required_rows);
 
-            log::info!("Using most recent {} rows for prediction", required_rows);
-
-            log::info!("🔍 PREDICTION DATA PROCESSING:");
-            log::info!("   • Original dataset: {} rows", original_len);
-            log::info!("   • Removed initial NaN rows: {} rows", first_valid_idx);
-            log::info!("   • Clean data available: {} rows", clean_data_len);
-            log::info!("   • Using most recent: {} rows", required_rows);
-            log::info!("   • Sequence length: {} periods", sequence_length);
-            log::info!("   ✅ Using same logic as training (no extra validation)");
+            log::info!("🔍 PREDICTION PIPELINE SUMMARY:");
+            log::info!("   ✅ Used exact same preprocessing as training");
+            log::info!("   ✅ Applied normalization with stored training stats");
+            log::info!(
+                "   ✅ Extracted {} most recent rows for prediction",
+                required_rows
+            );
+            log::info!("   ✅ Model will receive properly normalized inputs");
 
             df
         } else {
@@ -390,7 +367,7 @@ pub struct PreparedPredictionData {
 }
 
 /// Normalization statistics for features
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizationStats {
     pub means: Vec<f64>,
     pub stds: Vec<f64>,

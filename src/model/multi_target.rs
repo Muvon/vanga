@@ -39,6 +39,8 @@ pub struct MultiTargetLSTMModel {
     training_config: Option<crate::config::TrainingConfig>,
     /// Feature configuration used during training (kept for backward compatibility)
     feature_config: Option<crate::config::FeatureConfig>,
+    /// Normalization statistics used during training (for consistent prediction preprocessing)
+    normalization_stats: Option<crate::data::NormalizationStats>,
 }
 
 /// Serializable state for multi-target model persistence
@@ -56,6 +58,9 @@ struct MultiTargetModelState {
     /// Feature configuration used during training (kept for backward compatibility)
     #[serde(default)]
     feature_config: Option<crate::config::FeatureConfig>,
+    /// Normalization statistics used during training (for consistent prediction preprocessing)
+    #[serde(default)]
+    normalization_stats: Option<crate::data::NormalizationStats>,
 }
 
 impl MultiTargetLSTMModel {
@@ -96,8 +101,9 @@ impl MultiTargetLSTMModel {
             input_size,
             num_targets,
             trained_horizons,
-            training_config: None, // Will be set during training
-            feature_config: None,  // Will be set during training
+            training_config: None,     // Will be set during training
+            feature_config: None,      // Will be set during training
+            normalization_stats: None, // Will be set during training
         })
     }
 
@@ -389,6 +395,7 @@ impl MultiTargetLSTMModel {
             trained_horizons: Some(self.trained_horizons.clone()),
             training_config: self.training_config.clone(),
             feature_config: self.feature_config.clone(),
+            normalization_stats: self.normalization_stats.clone(),
         };
 
         let metadata_path = base_path.with_extension("meta");
@@ -453,6 +460,7 @@ impl MultiTargetLSTMModel {
             trained_horizons,
             training_config: state.training_config,
             feature_config: state.feature_config,
+            normalization_stats: state.normalization_stats,
         })
     }
 
@@ -494,6 +502,16 @@ impl MultiTargetLSTMModel {
     /// Set training configuration (used during training)
     pub fn set_training_config(&mut self, config: crate::config::TrainingConfig) {
         self.training_config = Some(config);
+    }
+
+    /// Set normalization statistics (used during training)
+    pub fn set_normalization_stats(&mut self, stats: crate::data::NormalizationStats) {
+        self.normalization_stats = Some(stats);
+    }
+
+    /// Get normalization statistics (used during prediction)
+    pub fn get_normalization_stats(&self) -> Option<&crate::data::NormalizationStats> {
+        self.normalization_stats.as_ref()
     }
 
     /// Check if all models are trained (have networks)

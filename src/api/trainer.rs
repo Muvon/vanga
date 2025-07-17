@@ -79,6 +79,18 @@ impl ModelTrainer {
         // This ensures prediction can regenerate the same features and settings as training
         final_model.set_training_config(self.config.clone());
 
+        // CRITICAL FIX: Set normalization stats from training data
+        // This ensures prediction uses the same normalization as training
+        if let Some(first_window) = windows.first() {
+            final_model
+                .set_normalization_stats(first_window.train_data.normalization_stats.clone());
+            log::info!(
+                "✅ Normalization stats saved with model for consistent prediction preprocessing"
+            );
+        } else {
+            log::warn!("⚠️  No training windows available - normalization stats not saved");
+        }
+
         // Save the trained multi-target model
         log::info!("✅ Walk-forward multi-target model training completed successfully!");
         log::info!("🔧 Complete training config saved with model for consistent prediction");
