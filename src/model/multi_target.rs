@@ -351,6 +351,7 @@ impl MultiTargetLSTMModel {
                     "Disabled (using default parameters)".to_string()
                 }
             );
+
             match model
                 .train(
                     sequences,

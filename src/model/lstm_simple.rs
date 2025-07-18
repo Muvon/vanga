@@ -2236,8 +2236,8 @@ impl LSTMModel {
         };
 
         let loss_value = loss.to_scalar::<f32>().unwrap_or(0.0);
-        log::debug!("🎯 CrossEntropy Loss calculated: {:.6}", loss_value);
 
+        log::debug!("🎯 CrossEntropy Loss: {:.6}", loss_value);
         Ok(loss)
     }
 

@@ -207,8 +207,8 @@ fn calculate_price_level_targets(
 
     let mut targets = vec![-1; prices.len()];
 
-    // CRITICAL FIX: Calculate global quantiles once using all available training data
-    // This ensures consistent class boundaries throughout training and validation
+    // CRITICAL FIX: Calculate global quantiles from PERCENTAGE CHANGES, not absolute prices
+    // This ensures consistent class boundaries across all symbols regardless of price level
     let training_data_start = 100; // Skip initial lookback period
     let training_data_end = prices.len() - horizon_steps; // Ensure we have future data
 
@@ -218,21 +218,44 @@ fn calculate_price_level_targets(
         ));
     }
 
-    // Use all available training prices for consistent quantile calculation
+    // Calculate percentage changes for quantile calculation
+    let mut percentage_changes = Vec::new();
+    for i in training_data_start..training_data_end {
+        let current_price = prices[i];
+        let target_price = match &config.target_strategy {
+            crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
+            crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
+                calculate_standard_vwap(prices, i, horizon_steps)?
+            }
+            crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
+                momentum_window,
+                bias_strength,
+            } => {
+                calculate_momentum_vwap(prices, i, horizon_steps, *momentum_window, *bias_strength)?
+            }
+        };
+
+        if current_price != 0.0 {
+            let price_change = (target_price - current_price) / current_price;
+            percentage_changes.push(price_change);
+        }
+    }
+
+    // Calculate quantiles from percentage changes (symbol-agnostic)
     let global_quantiles = calculate_quantiles(
-        &prices[training_data_start..training_data_end],
+        &percentage_changes,
         config.bins,
         &QuantileMethod::Fixed, // Use Fixed method for consistency across train/val
     )?;
 
     log::debug!(
-        "🎯 Global quantiles calculated for {} bins using {} samples: {:?}",
+        "🎯 Global quantiles calculated for {} bins using {} percentage changes: {:?}",
         config.bins,
-        training_data_end - training_data_start,
+        percentage_changes.len(),
         global_quantiles
     );
 
-    // Apply consistent quantiles to all samples
+    // Apply consistent quantiles to all samples using percentage changes
     for i in training_data_start..training_data_end {
         let current_price = prices[i];
 
@@ -252,6 +275,11 @@ fn calculate_price_level_targets(
             }
         };
 
+        if current_price == 0.0 {
+            targets[i] = config.bins as i32 / 2; // Neutral class for invalid prices
+            continue;
+        }
+
         let price_change = (target_price - current_price) / current_price;
 
         // Skip if price change is too small
@@ -260,8 +288,8 @@ fn calculate_price_level_targets(
             continue;
         }
 
-        // FIXED: Use consistent global quantiles for all classifications
-        targets[i] = classify_price_to_level(target_price, &global_quantiles);
+        // FIXED: Classify percentage change against percentage quantiles
+        targets[i] = classify_price_to_level(price_change, &global_quantiles);
     }
 
     Ok(targets)
@@ -319,15 +347,15 @@ fn calculate_quantiles(prices: &[f64], bins: u32, method: &QuantileMethod) -> Re
     Ok(quantiles)
 }
 
-/// Classify a price into a quantile level
-fn classify_price_to_level(price: f64, quantiles: &[f64]) -> i32 {
+/// Classify a value into a quantile level (works for both prices and percentage changes)
+fn classify_price_to_level(value: f64, quantiles: &[f64]) -> i32 {
     for (i, &threshold) in quantiles.iter().enumerate() {
-        if price <= threshold {
+        if value <= threshold {
             return i as i32;
         }
     }
-    // Clamp to highest valid index (quantiles.len() - 1) to prevent out-of-bounds
-    (quantiles.len() - 1) as i32
+    // Return highest class for values above all quantiles
+    quantiles.len() as i32
 }
 
 /// Calculate price volatility for adaptive quantiles
@@ -435,7 +463,7 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
 }
 
 /// Extract close prices from DataFrame
-fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
+pub fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
     let close_series = df.column("close").map_err(|e| {
         crate::utils::error::VangaError::DataError(format!("Failed to get close column: {}", e))
     })?;
