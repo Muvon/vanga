@@ -594,6 +594,8 @@ pub struct TensorCryptoLossFunction {
     loss_type: CryptoLossFunction,
     cached_weights: Option<CachedWeightTensors>,
     last_config: Option<CryptoCompositeConfig>,
+    /// Global class weights for categorical targets (matches LSTM implementation)
+    global_class_weights: Option<Vec<f32>>,
 }
 
 impl TensorCryptoLossFunction {
@@ -603,6 +605,20 @@ impl TensorCryptoLossFunction {
             loss_type,
             cached_weights: None,
             last_config: None,
+            global_class_weights: None,
+        }
+    }
+
+    /// Create new tensor-based crypto loss function with global class weights
+    pub fn new_with_class_weights(
+        loss_type: CryptoLossFunction,
+        class_weights: Option<Vec<f32>>,
+    ) -> Self {
+        Self {
+            loss_type,
+            cached_weights: None,
+            last_config: None,
+            global_class_weights: class_weights,
         }
     }
 
@@ -671,6 +687,131 @@ impl TensorCryptoLossFunction {
         }
     }
 
+    /// Detect if targets are categorical (class indices) or regression (continuous values)
+    fn is_categorical_target(&self, predictions: &Tensor, targets: &Tensor) -> bool {
+        // If predictions have more dimensions than targets, it's likely categorical
+        // Categorical: predictions=[batch, num_classes], targets=[batch, 1] or [batch]
+        // Regression: predictions=[batch, num_targets], targets=[batch, num_targets]
+
+        let pred_dims = predictions.dims();
+        let target_dims = targets.dims();
+
+        // Check if predictions have more features than targets (logits vs class indices)
+        if pred_dims.len() >= 2 && target_dims.len() >= 2 {
+            pred_dims[pred_dims.len() - 1] > target_dims[target_dims.len() - 1]
+        } else if pred_dims.len() >= 2 && target_dims.len() == 1 {
+            // predictions=[batch, classes], targets=[batch] - definitely categorical
+            true
+        } else {
+            // Default to regression for same-shape tensors
+            false
+        }
+    }
+
+    /// Calculate appropriate base loss based on target type
+    fn calculate_base_tensor_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        if self.is_categorical_target(predictions, targets) {
+            // Use stabilized CrossEntropy for categorical targets (matching LSTM implementation)
+            log::debug!(
+                "🎯 Using stabilized CrossEntropy base loss for categorical targets: pred {:?}, target {:?}",
+                predictions.shape(),
+                targets.shape()
+            );
+
+            // Apply label smoothing for stability (10% smoothing like LSTM implementation)
+            let num_classes = predictions.dims()[predictions.dims().len() - 1];
+            let smoothed_targets = self.apply_simple_label_smoothing(targets, num_classes, 0.1)?;
+
+            log::debug!(
+                "🔧 Applied label smoothing: {} classes, 10% smoothing",
+                num_classes
+            );
+
+            // Use log_softmax for numerical stability
+            let log_softmax =
+                candle_nn::ops::log_softmax(predictions, candle_core::D::Minus1)?.contiguous()?;
+
+            // Apply class weights if available (matching LSTM behavior)
+            if let Some(ref class_weights) = self.global_class_weights {
+                if class_weights.len() == num_classes {
+                    log::debug!("🌍 Applying global class weights: {:?}", class_weights);
+
+                    // Use the same weighted soft crossentropy as LSTM
+                    self.calculate_weighted_soft_crossentropy_loss(
+                        predictions,
+                        &smoothed_targets,
+                        class_weights,
+                    )
+                } else {
+                    log::warn!(
+                        "⚠️ Class weights length {} doesn't match num_classes {}, using unweighted loss",
+                        class_weights.len(),
+                        num_classes
+                    );
+                    // Fallback to unweighted soft CrossEntropy
+                    let cross_entropy = smoothed_targets
+                        .mul(&log_softmax)?
+                        .sum(candle_core::D::Minus1)?
+                        .neg()?
+                        .mean_all()?;
+                    Ok(cross_entropy)
+                }
+            } else {
+                log::debug!("📊 No class weights available, using unweighted CrossEntropy");
+                // Calculate soft CrossEntropy with smoothed targets
+                let cross_entropy = smoothed_targets
+                    .mul(&log_softmax)?
+                    .sum(candle_core::D::Minus1)?
+                    .neg()?
+                    .mean_all()?;
+                Ok(cross_entropy)
+            }
+        } else {
+            // Use MSE for regression targets
+            log::debug!(
+                "📊 Using MSE base loss for regression targets: pred {:?}, target {:?}",
+                predictions.shape(),
+                targets.shape()
+            );
+            self.calculate_mse_tensor_loss(predictions, targets)
+        }
+    }
+
+    /// Simple label smoothing implementation for stability
+    fn apply_simple_label_smoothing(
+        &self,
+        targets: &Tensor,
+        num_classes: usize,
+        smoothing: f32,
+    ) -> Result<Tensor> {
+        // Convert target indices to one-hot with label smoothing
+        let targets_indices = if targets.dims().len() == 2 && targets.dims()[1] == 1 {
+            targets.squeeze(1)?
+        } else {
+            targets.clone()
+        };
+
+        let batch_size = targets_indices.dims()[0];
+        let targets_data = targets_indices.to_vec1::<f32>().map_err(|e| {
+            VangaError::ModelError(format!("Failed to extract target indices: {}", e))
+        })?;
+
+        // Create smoothed one-hot encoding
+        let smooth_value = smoothing / (num_classes as f32 - 1.0);
+        let target_value = 1.0 - smoothing;
+
+        let mut one_hot_data = vec![smooth_value; batch_size * num_classes];
+        for (i, &class_idx) in targets_data.iter().enumerate() {
+            if class_idx >= 0.0 && (class_idx as usize) < num_classes {
+                one_hot_data[i * num_classes + class_idx as usize] = target_value;
+            }
+        }
+
+        Tensor::from_vec(one_hot_data, (batch_size, num_classes), targets.device()).map_err(|e| {
+            VangaError::ModelError(format!("Failed to create smoothed targets: {}", e))
+        })
+    }
+
     /// Base MSE loss using tensor operations
     fn calculate_mse_tensor_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
         predictions
@@ -736,10 +877,37 @@ impl TensorCryptoLossFunction {
         predictions: &Tensor,
         targets: &Tensor,
     ) -> Result<Tensor> {
+        // ADDED: Validate tensor shapes and log for debugging
+        log::debug!(
+            "🔍 Volatility loss calculation - Predictions shape: {:?}, Targets shape: {:?}",
+            predictions.shape(),
+            targets.shape()
+        );
+
+        // Validate tensor shapes match
+        if predictions.shape() != targets.shape() {
+            return Err(VangaError::ModelError(format!(
+                "Shape mismatch in volatility loss: predictions {:?} vs targets {:?}",
+                predictions.shape(),
+                targets.shape()
+            )));
+        }
         // Calculate prediction volatility (standard deviation)
-        let pred_mean = predictions.mean_all()?;
-        let pred_mean_broadcast = pred_mean.broadcast_as(predictions.shape())?;
-        let pred_variance = predictions
+        let predictions_contiguous = predictions.contiguous()?;
+        let pred_mean = predictions_contiguous.mean_all()?;
+
+        // FIXED: Proper scalar broadcasting for tensor subtraction
+        let pred_mean_scalar = pred_mean.to_scalar::<f32>().map_err(|e| {
+            VangaError::ModelError(format!("Failed to extract prediction mean scalar: {}", e))
+        })?;
+        let pred_mean_broadcast = Tensor::full(
+            pred_mean_scalar,
+            predictions_contiguous.shape(),
+            predictions_contiguous.device(),
+        )?
+        .contiguous()?;
+
+        let pred_variance = predictions_contiguous
             .sub(&pred_mean_broadcast)?
             .contiguous()?
             .sqr()?
@@ -747,9 +915,21 @@ impl TensorCryptoLossFunction {
         let pred_volatility = pred_variance.sqrt()?;
 
         // Calculate target volatility
-        let target_mean = targets.mean_all()?;
-        let target_mean_broadcast = target_mean.broadcast_as(targets.shape())?;
-        let target_variance = targets
+        let targets_contiguous = targets.contiguous()?;
+        let target_mean = targets_contiguous.mean_all()?;
+
+        // FIXED: Proper scalar broadcasting for tensor subtraction
+        let target_mean_scalar = target_mean.to_scalar::<f32>().map_err(|e| {
+            VangaError::ModelError(format!("Failed to extract target mean scalar: {}", e))
+        })?;
+        let target_mean_broadcast = Tensor::full(
+            target_mean_scalar,
+            targets_contiguous.shape(),
+            targets_contiguous.device(),
+        )?
+        .contiguous()?;
+
+        let target_variance = targets_contiguous
             .sub(&target_mean_broadcast)?
             .contiguous()?
             .sqr()?
@@ -903,67 +1083,121 @@ impl TensorCryptoLossFunction {
         config: &CryptoCompositeConfig,
         market_regime: MarketRegime,
     ) -> Result<Tensor> {
-        // FIXED: Calculate base MSE loss first for normalization reference
-        let base_mse_loss = self.calculate_mse_tensor_loss(predictions, targets)?;
+        // ADDED: Validate tensor shapes and log for debugging
+        log::debug!(
+            "🔍 Composite loss calculation - Predictions shape: {:?}, Targets shape: {:?}",
+            predictions.shape(),
+            targets.shape()
+        );
+
+        // Validate minimum tensor dimensions
+        if predictions.dims().is_empty() || targets.dims().is_empty() {
+            return Err(VangaError::ModelError(format!(
+                "Invalid tensor dimensions for composite loss: predictions {:?}, targets {:?}",
+                predictions.shape(),
+                targets.shape()
+            )));
+        }
+
+        // FIXED: Use appropriate base loss based on target type (categorical vs regression)
+        let base_loss = self.calculate_base_tensor_loss(predictions, targets)?;
 
         // Calculate all needed loss components conditionally
-        let directional_loss = if config.direction_weight > 0.0 {
+        // FIXED: Skip directional and volatility losses for categorical targets
+        let is_categorical = self.is_categorical_target(predictions, targets);
+
+        let directional_loss = if config.direction_weight > 0.0 && !is_categorical {
+            // Directional loss only makes sense for regression targets
             Some(self.calculate_directional_tensor_loss(predictions, targets)?)
         } else {
+            if is_categorical && config.direction_weight > 0.0 {
+                log::debug!("⚠️ Skipping directional loss for categorical targets");
+            }
             None
         };
 
-        let volatility_loss = if config.volatility_weight > 0.0 || config.risk_weight > 0.0 {
-            Some(self.calculate_volatility_tensor_loss(predictions, targets)?)
-        } else {
-            None
-        };
+        let volatility_loss =
+            if (config.volatility_weight > 0.0 || config.risk_weight > 0.0) && !is_categorical {
+                // Volatility loss only makes sense for regression targets
+                Some(self.calculate_volatility_tensor_loss(predictions, targets)?)
+            } else {
+                if is_categorical && (config.volatility_weight > 0.0 || config.risk_weight > 0.0) {
+                    log::debug!("⚠️ Skipping volatility loss for categorical targets");
+                }
+                None
+            };
 
-        // FIXED: Normalize all loss components relative to MSE scale
-        let epsilon = Tensor::new(1e-8f32, predictions.device())?; // Prevent division by zero
-        let mse_scale = base_mse_loss.add(&epsilon)?; // Use MSE as reference scale
+        // FIXED: Simplified and mathematically correct loss combination
+        // No complex normalization - just weighted combination of loss components
 
-        // Normalize directional loss to MSE scale
-        let normalized_directional_loss = if let Some(dir_loss) = directional_loss {
-            // Directional loss is 0-1 range, scale it to MSE magnitude
-            Some(dir_loss.mul(&mse_scale)?)
-        } else {
-            None
-        };
-
-        // Normalize volatility loss to MSE scale
-        let normalized_volatility_loss = if let Some(vol_loss) = volatility_loss {
-            // Volatility loss can be large, normalize it relative to MSE
-            let vol_normalized = vol_loss.div(&vol_loss.add(&epsilon)?)?.mul(&mse_scale)?;
-            Some(vol_normalized)
-        } else {
-            None
-        };
+        // Check if we have multiple components before consuming the values
+        let has_directional = directional_loss.is_some();
+        let has_volatility = volatility_loss.is_some();
+        let has_multiple_components = has_directional || has_volatility;
 
         // Get regime multiplier and cached weights
         let regime_multiplier = self.get_regime_multiplier(market_regime);
         let weights = self.get_cached_weights(config, regime_multiplier, predictions.device())?;
 
-        // FIXED: Combine normalized components with proper weighting
-        let mut total_loss = base_mse_loss.mul(&weights.accuracy)?;
+        // FIXED: For categorical targets with only base loss, normalize accuracy weight to 1.0
+        // This prevents severe loss downscaling that causes train/val mismatch
+        //
+        // Problem: With accuracy_weight=0.2, categorical loss becomes: 3.93 * 0.2 = 0.785
+        // This creates 75% loss reduction compared to standard MSE path, causing:
+        // - Training sees tiny gradients (0.785)
+        // - Validation uses full-scale loss (~3.93)
+        // - Result: Severe train/val mismatch and instability
+        //
+        // Solution: For single-component loss, use weight=1.0 to maintain loss magnitude
+        let effective_accuracy_weight = if has_multiple_components {
+            // Multiple components: use configured weight
+            weights.accuracy.clone()
+        } else {
+            // Single component (categorical): normalize to maintain loss magnitude
+            log::debug!(
+                "🔧 Normalizing accuracy weight to 1.0 for single-component categorical loss"
+            );
+            Tensor::new(1.0f32, predictions.device())?
+        };
 
-        if let Some(norm_directional) = normalized_directional_loss {
-            total_loss = total_loss.add(&norm_directional.mul(&weights.direction)?)?;
+        // Start with base loss weighted by effective accuracy weight
+        let mut total_loss = base_loss.mul(&effective_accuracy_weight)?;
+
+        log::debug!(
+            "🔍 Composite loss components - Base: {:.6}, Effective accuracy weight: {:.3}",
+            base_loss.to_scalar::<f32>().unwrap_or(0.0),
+            effective_accuracy_weight.to_scalar::<f32>().unwrap_or(0.0)
+        );
+
+        // Add directional component if available (no additional scaling needed)
+        if let Some(dir_loss) = directional_loss {
+            let weighted_directional = dir_loss.mul(&weights.direction)?;
+            total_loss = total_loss.add(&weighted_directional)?;
         }
 
-        if let Some(norm_volatility) = normalized_volatility_loss {
+        // Add volatility component if available (no additional scaling needed)
+        if let Some(vol_loss) = volatility_loss {
             if config.volatility_weight > 0.0 {
-                total_loss = total_loss.add(&norm_volatility.mul(&weights.volatility)?)?;
+                let weighted_volatility = vol_loss.mul(&weights.volatility)?;
+                total_loss = total_loss.add(&weighted_volatility)?;
             }
             if config.risk_weight > 0.0 {
-                total_loss = total_loss.add(&norm_volatility.mul(&weights.risk)?)?;
+                let weighted_risk = vol_loss.mul(&weights.risk)?;
+                total_loss = total_loss.add(&weighted_risk)?;
             }
         }
 
-        // FIXED: Apply regime adjustment as multiplier, not additive
-        total_loss.mul(&weights.regime_multiplier).map_err(|e| {
-            VangaError::ModelError(format!("Crypto composite tensor loss failed: {}", e))
-        })
+        // Apply regime adjustment only if we have multiple components
+        // For categorical targets with only base loss, skip regime multiplier to prevent instability
+        if has_multiple_components {
+            total_loss.mul(&weights.regime_multiplier).map_err(|e| {
+                VangaError::ModelError(format!("Crypto composite tensor loss failed: {}", e))
+            })
+        } else {
+            // For single component (categorical targets), return weighted base loss without regime multiplier
+            log::debug!("🎯 Using simplified loss for categorical targets (no regime multiplier)");
+            Ok(total_loss)
+        }
     }
 
     /// Directional focused loss with normalization
@@ -1018,5 +1252,84 @@ impl TensorCryptoLossFunction {
         base_loss.mul(&volatility_penalty).map_err(|e| {
             VangaError::ModelError(format!("Volatility-aware tensor loss failed: {}", e))
         })
+    }
+
+    /// Calculate weighted soft CrossEntropy loss for one-hot encoded targets (matches LSTM implementation)
+    fn calculate_weighted_soft_crossentropy_loss(
+        &self,
+        logits: &Tensor,
+        one_hot_targets: &Tensor,
+        class_weights: &[f32],
+    ) -> Result<Tensor> {
+        // Ensure ALL input tensors are contiguous from the start
+        let logits_contiguous = logits.contiguous()?;
+        let targets_contiguous = one_hot_targets.contiguous()?;
+
+        let log_softmax = candle_nn::ops::log_softmax(&logits_contiguous, candle_core::D::Minus1)?
+            .contiguous()?;
+
+        // Validate tensor dimensions
+        let batch_size = targets_contiguous.dim(0)?;
+        let num_classes = class_weights.len();
+
+        if targets_contiguous.dim(1)? != num_classes {
+            return Err(VangaError::ModelError(format!(
+                "One-hot targets dimension {} doesn't match class weights {}",
+                targets_contiguous.dim(1)?,
+                num_classes
+            )));
+        }
+
+        log::debug!(
+            "🔍 Composite weighted soft CrossEntropy shapes: targets {:?}, logits {:?}, weights len {}",
+            targets_contiguous.shape(),
+            logits_contiguous.shape(),
+            num_classes
+        );
+
+        // Create weight tensor with shape [1, num_classes] and ensure contiguous
+        let weight_tensor = Tensor::from_vec(
+            class_weights.to_vec(),
+            (1, num_classes),
+            logits_contiguous.device(),
+        )?
+        .contiguous()?;
+
+        log::debug!(
+            "🔍 Composite broadcasting shapes: targets {:?} × weights {:?}",
+            targets_contiguous.shape(),
+            weight_tensor.shape()
+        );
+
+        // Use broadcast_as to explicitly match tensor shapes before multiplication
+        // Broadcasting: [1, num_classes] -> [batch_size, num_classes]
+        let weight_tensor_broadcast = weight_tensor.broadcast_as(targets_contiguous.shape())?;
+
+        log::debug!(
+            "🔍 Composite after broadcast_as: targets {:?} × weights {:?}",
+            targets_contiguous.shape(),
+            weight_tensor_broadcast.shape()
+        );
+
+        // Now multiply tensors with matching shapes and ensure result is contiguous
+        let weighted_targets = targets_contiguous
+            .mul(&weight_tensor_broadcast)?
+            .contiguous()?;
+
+        // Calculate weighted soft CrossEntropy loss - ensure all intermediate results are contiguous
+        let weighted_log_loss = weighted_targets.mul(&log_softmax)?.contiguous()?;
+        let loss_per_sample = weighted_log_loss
+            .sum(candle_core::D::Minus1)?
+            .contiguous()?;
+        let mean_loss = loss_per_sample.neg()?.mean_all()?.contiguous()?;
+
+        log::debug!(
+            "⚖️ Composite Weighted Soft CrossEntropy: {:.6} for {} samples with {} classes",
+            mean_loss.to_scalar::<f32>().unwrap_or(0.0),
+            batch_size,
+            num_classes
+        );
+
+        Ok(mean_loss)
     }
 }

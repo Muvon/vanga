@@ -3219,7 +3219,10 @@ impl LSTMModel {
             // Use existing advanced loss functions for specialized cases
             log::debug!("🔄 Using advanced loss function: {:?}", self.loss_function);
             use crate::model::loss::TensorCryptoLossFunction;
-            let mut tensor_loss_fn = TensorCryptoLossFunction::new(self.loss_function.clone());
+            let mut tensor_loss_fn = TensorCryptoLossFunction::new_with_class_weights(
+                self.loss_function.clone(),
+                self.global_class_weights.clone(),
+            );
 
             let market_regime = match &self.loss_function {
                 crate::model::loss::CryptoLossFunction::RegimeAware { .. }
@@ -3287,13 +3290,47 @@ impl LSTMModel {
     ) -> Result<crate::optimization::objective::MarketRegime> {
         use crate::optimization::objective::MarketRegime;
 
+        // ADDED: Validate tensor shapes and log for debugging
+        log::debug!(
+            "🔍 Market regime detection - Input targets shape: {:?}",
+            targets.shape()
+        );
+
+        // Validate minimum tensor dimensions
+        if targets.dims().len() < 2 {
+            return Err(VangaError::ModelError(format!(
+                "Invalid targets tensor for regime detection: expected 2D tensor, got shape {:?}",
+                targets.shape()
+            )));
+        }
+
         // Use targets for regime detection - they represent actual market conditions
         // targets shape: [batch_size, num_targets] where num_targets = 9
 
         // Calculate adaptive statistics from the actual target data
-        let target_mean = targets.mean_all()?;
-        let target_mean_broadcast = target_mean.broadcast_as(targets.shape())?;
-        let target_variance = targets
+        let targets_contiguous = targets.contiguous()?;
+        let target_mean = targets_contiguous.mean_all()?;
+
+        // FIXED: Proper scalar broadcasting for tensor subtraction
+        // Create a tensor with the same shape as targets filled with the mean value
+        let target_mean_scalar = target_mean
+            .to_scalar::<f32>()
+            .map_err(|e| VangaError::ModelError(format!("Failed to extract mean scalar: {}", e)))?;
+
+        let target_mean_broadcast = Tensor::full(
+            target_mean_scalar,
+            targets_contiguous.shape(),
+            targets_contiguous.device(),
+        )?
+        .contiguous()?;
+
+        log::debug!(
+            "🔍 Market regime detection shapes: targets {:?}, mean_broadcast {:?}",
+            targets_contiguous.shape(),
+            target_mean_broadcast.shape()
+        );
+
+        let target_variance = targets_contiguous
             .sub(&target_mean_broadcast)?
             .contiguous()?
             .sqr()?

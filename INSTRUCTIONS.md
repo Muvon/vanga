@@ -343,10 +343,18 @@ let loss_tensor = predictions.sub(targets)?.sqr()?.mean_all()?;
 - **Data loading**: `src/data/loader.rs`
 
 #### Tensor Broadcasting Issues (CRITICAL)
-- **Price level loss**: `src/model/lstm_simple.rs::calculate_weighted_soft_crossentropy_loss()` (lines 2240-2250)
+- **Price level loss**: `src/model/lstm_simple.rs::calculate_weighted_soft_crossentropy_loss()` (lines 2628-2705)
+- **Composite loss**: `src/model/loss.rs::calculate_weighted_soft_crossentropy_loss()` (matches LSTM implementation)
 - **Attention mechanism**: `src/model/attention.rs` (uses broadcast_div pattern)
 - **Loss functions**: `src/model/loss.rs` (uses broadcast_as pattern)
 - **Pattern**: Always use `broadcast_as()` before tensor operations
+
+#### Loss Function Consistency (CRITICAL)
+- **Class weighting**: Both MSE and Composite must use identical class weights for categorical targets
+- **MSE path**: Uses LSTM's `calculate_weighted_soft_crossentropy_loss()` with global class weights
+- **Composite path**: Uses `TensorCryptoLossFunction::calculate_weighted_soft_crossentropy_loss()` (same logic)
+- **Critical**: Extreme class imbalance (248x weight for rare classes) requires sophisticated weighting
+- **Debug logs**: Look for `🌍 Applying global class weights` and `⚖️ Composite Weighted Soft CrossEntropy`
 
 #### Feature Engineering Issues
 - **Technical indicators**: `src/features/technical.rs`
@@ -539,10 +547,11 @@ ls configs/optimizer_examples/
 6. **Tensor Safety**: Always use `broadcast_as()` for shape matching
 
 ### Recent Critical Fixes (Architecture Impact)
+- **Composite Loss Class Weighting**: Fixed missing class weights in `TensorCryptoLossFunction` causing severe overfitting
 - **Target Generation**: Fixed symbol-specific loss scaling using percentage-based quantiles
 - **Normalization Consistency**: Ensured prediction uses training normalization parameters
 - **Tensor Broadcasting**: Fixed `[16,6] × [1,6]` multiplication using `broadcast_as()`
-- **Loss Comparability**: All symbols now have comparable validation losses
+- **Loss Comparability**: All loss functions now use identical class weighting for categorical targets
 - **Categorical Metrics**: Added accuracy, precision, recall, F1 scores for classification
 
 ### Build Performance Guidelines
@@ -572,6 +581,7 @@ cargo build
 - **Test before committing**: Ensure code quality standards
 - **Document before forgetting**: Update relevant documentation
 - **Broadcast before multiplying**: Always use `broadcast_as()` for tensor operations
+- **Weight before loss**: Ensure all loss functions use identical class weighting for categorical targets
 
 **The goal is maintainable, high-quality code that follows VANGA's architectural principles.**
 
