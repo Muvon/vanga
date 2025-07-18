@@ -1504,7 +1504,7 @@ impl DataPreprocessor {
 
         let mut normalized_columns = Vec::new();
 
-        // Process each numeric column
+        // Process each numeric column with SEMANTIC-AWARE normalization
         for column_name in df.get_column_names() {
             if let Ok(series) = df.column(column_name) {
                 if series.dtype().is_numeric() && column_name != "timestamp" {
