@@ -618,6 +618,51 @@ impl LSTMModel {
         }
     }
 
+    /// Calculate categorical MAPE - handles class 0 by using modified percentage calculation
+    /// For categorical targets, treats class differences as ordinal distances
+    ///
+    /// Example interpretation for categorical targets:
+    /// - Predicted: [0, 1, 2], Actual: [0, 1, 1]
+    /// - Class 0: |0-0|/(0+1) = 0% error
+    /// - Class 1: |1-1|/(1+1) = 0% error
+    /// - Class 2: |2-1|/(2+1) = 33.3% error
+    /// - Average MAPE: 11.1%
+    fn calculate_categorical_mape(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
+        // CRITICAL FIX: Validate shapes before operations
+        if predictions.shape() != targets.shape() {
+            log::error!(
+                "Shape mismatch in categorical MAPE calculation: predictions={:?}, targets={:?}",
+                predictions.shape(),
+                targets.shape()
+            );
+            return f64::INFINITY;
+        }
+
+        let mut total_percentage_error = 0.0;
+        let mut total_samples = 0;
+
+        for i in 0..predictions.nrows() {
+            for j in 0..predictions.ncols() {
+                let actual = targets[[i, j]];
+                let predicted = predictions[[i, j]];
+
+                // For categorical data, calculate percentage error differently
+                // Use (actual + 1) to avoid division by zero for class 0
+                let adjusted_actual = actual.abs() + 1.0;
+                let percentage_error = ((actual - predicted).abs() / adjusted_actual) * 100.0;
+
+                total_percentage_error += percentage_error;
+                total_samples += 1;
+            }
+        }
+
+        if total_samples > 0 {
+            total_percentage_error / total_samples as f64
+        } else {
+            f64::INFINITY
+        }
+    }
+
     /// Configure training parameters from TrainingConfig - EXACT same logic as original
     pub fn configure_training(&mut self, vanga_config: &crate::config::TrainingConfig) {
         // Extract epochs from config - SAME logic as original
@@ -1009,9 +1054,10 @@ impl LSTMModel {
                 gap_size
             );
 
-            // Calculate training samples, then add gap before validation
-            let base_train_samples = ((1.0 - validation_split) * total_samples as f64) as usize;
-            let train_samples = base_train_samples.min(total_samples.saturating_sub(gap_size));
+            // FIXED: Account for gap in validation split calculation
+            let effective_samples = total_samples.saturating_sub(gap_size);
+            let base_train_samples = ((1.0 - validation_split) * effective_samples as f64) as usize;
+            let train_samples = base_train_samples;
             let val_start = train_samples + gap_size;
 
             // Ensure we have enough samples for validation after the gap
@@ -1456,11 +1502,15 @@ impl LSTMModel {
                         } else {
                             0.0
                         };
+
+                        // Calculate additional distance-based metrics for categorical data
+                        let final_mse = self.calculate_mse_loss(&final_predictions, targets);
+                        let final_categorical_mape =
+                            self.calculate_categorical_mape(&final_predictions, targets);
+
                         log::info!(
-                            "📊 Final Training Metrics - Accuracy: {:.2}% ({}/{} correct)",
-                            accuracy,
-                            correct,
-                            total
+                            "📊 Final Training Metrics - Accuracy: {:.2}% ({}/{} correct), MSE: {:.3}, MAPE: {:.2}%",
+                            accuracy, correct, total, final_mse, final_categorical_mape
                         );
                     }
                 }
@@ -2805,6 +2855,32 @@ impl LSTMModel {
         let class_distribution =
             self.analyze_prediction_distribution(&all_predictions, &all_targets);
 
+        // Calculate additional distance-based metrics for categorical data
+        // Convert predictions and targets to Array2<f64> for MSE/MAPE calculation
+        let pred_array = Array2::from_shape_vec(
+            (all_predictions.len(), 1),
+            all_predictions.iter().map(|&x| x as f64).collect(),
+        )
+        .unwrap_or_else(|_| Array2::zeros((0, 1)));
+
+        let target_array = Array2::from_shape_vec(
+            (all_targets.len(), 1),
+            all_targets.iter().map(|&x| x as f64).collect(),
+        )
+        .unwrap_or_else(|_| Array2::zeros((0, 1)));
+
+        let mse = if !pred_array.is_empty() && !target_array.is_empty() {
+            self.calculate_mse_loss(&pred_array, &target_array)
+        } else {
+            f64::INFINITY
+        };
+
+        let categorical_mape = if !pred_array.is_empty() && !target_array.is_empty() {
+            self.calculate_categorical_mape(&pred_array, &target_array)
+        } else {
+            f64::INFINITY
+        };
+
         // Debug logging for first few samples to verify target extraction
         if epoch == 10 {
             log::debug!("🔍 Target extraction verification (first 5 samples):");
@@ -2818,10 +2894,10 @@ impl LSTMModel {
             }
         }
 
-        // Log categorical metrics
+        // Log comprehensive categorical metrics
         log::info!(
-            "📊 Categorical Metrics [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}",
-            epoch, accuracy, precision, recall, f1
+            "📊 Categorical Metrics [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
+            epoch, accuracy, precision, recall, f1, mse, categorical_mape
         );
 
         log::debug!(
