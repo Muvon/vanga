@@ -476,7 +476,7 @@ impl MultiTargetLSTMModel {
         };
 
         let metadata_path = base_path.with_extension("meta");
-        let serialized = bincode::serialize(&state).map_err(|e| {
+        let serialized = serde_json::to_string_pretty(&state).map_err(|e| {
             VangaError::SerializationError(format!("Failed to serialize metadata: {}", e))
         })?;
 
@@ -502,10 +502,10 @@ impl MultiTargetLSTMModel {
 
         // Load metadata
         let metadata_path = base_path.with_extension("meta");
-        let serialized = std::fs::read(&metadata_path)
+        let serialized = std::fs::read_to_string(&metadata_path)
             .map_err(|e| VangaError::DataError(format!("Failed to read metadata: {}", e)))?;
 
-        let state: MultiTargetModelState = bincode::deserialize(&serialized).map_err(|e| {
+        let state: MultiTargetModelState = serde_json::from_str(&serialized).map_err(|e| {
             VangaError::SerializationError(format!("Failed to deserialize metadata: {}", e))
         })?;
 
