@@ -27,7 +27,7 @@ pub enum OptimizationMetric {
     /// Directional Accuracy
     DirectionalAccuracy,
     /// Multi-objective combining multiple metrics
-    MultiObjective { weights: HashMap<String, f64> },
+    MultiObjective { weights: Vec<(String, f64)> },
     /// Crypto-specific composite metric
     Composite,
 }
@@ -348,12 +348,12 @@ impl ObjectiveFunction {
         predictions: &Array2<f64>,
         targets: &Array2<f64>,
         prices: &[f64],
-        weights: &HashMap<String, f64>,
+        weights: &Vec<(String, f64)>,
     ) -> Result<f64> {
         let mut total_score = 0.0;
         let mut total_weight = 0.0;
 
-        for (metric_name, &weight) in weights {
+        for (metric_name, weight) in weights {
             let metric = match metric_name.as_str() {
                 "mae" => OptimizationMetric::MAE,
                 "rmse" => OptimizationMetric::RMSE,
@@ -707,5 +707,40 @@ impl ObjectiveFunction {
 impl Default for ObjectiveFunction {
     fn default() -> Self {
         Self::crypto_specific()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_multi_objective_bincode_serialization() {
+        // Test that MultiObjective variant can be serialized/deserialized with bincode
+        let weights = vec![
+            ("mae".to_string(), 0.3),
+            ("rmse".to_string(), 0.4),
+            ("sharpe".to_string(), 0.3),
+        ];
+
+        let metric = OptimizationMetric::MultiObjective { weights };
+
+        // Serialize
+        let serialized = bincode::serialize(&metric).expect("Failed to serialize MultiObjective");
+
+        // Deserialize
+        let deserialized: OptimizationMetric =
+            bincode::deserialize(&serialized).expect("Failed to deserialize MultiObjective");
+
+        // Verify it matches
+        match deserialized {
+            OptimizationMetric::MultiObjective { weights } => {
+                assert_eq!(weights.len(), 3);
+                assert!(weights.contains(&("mae".to_string(), 0.3)));
+                assert!(weights.contains(&("rmse".to_string(), 0.4)));
+                assert!(weights.contains(&("sharpe".to_string(), 0.3)));
+            }
+            _ => panic!("Deserialized to wrong variant"),
+        }
     }
 }
