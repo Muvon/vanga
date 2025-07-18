@@ -13,6 +13,8 @@
 - **Per-batch calculations**: Only use for gradient updates, loss accumulation, and batch-specific operations
 - **Loss consistency**: Training and validation must use SAME global parameters for comparable losses
 - **Chronological integrity**: Preserve time-series order - no shuffling in crypto/financial data
+- **Target consistency**: Use percentage-based quantiles for symbol-agnostic classification difficulty
+- **Normalization consistency**: Prediction must use training normalization statistics
 
 ### Code Quality Standards
 - **Zero warnings**: All code must pass `cargo clippy --all-features --all-targets -- -D warnings`
@@ -65,13 +67,49 @@ src/
 │   └── cross_asset.rs # Cross-asset features
 ├── data/          # Data loading and preprocessing
 │   ├── loader.rs      # CSV loading and validation
+│   ├── preprocessor.rs # Feature normalization (CRITICAL)
+│   ├── sequence.rs    # Sequence generation
 │   └── schema.rs      # Data schema definitions
+├── targets/       # Target generation (CRITICAL)
+│   ├── mod.rs         # Target orchestration
+│   └── price_levels.rs # Price level classification
 ├── config/        # Configuration management
 │   ├── training.rs    # Training parameters
 │   └── features.rs    # Feature configurations
 └── utils/         # Utilities and error handling
     └── error.rs       # Error types and handling
 ```
+
+## 🔄 CRITICAL: Training vs Prediction Data Flow
+
+### Training Pipeline Architecture
+```
+Raw CSV Data → Target Generation → Feature Engineering → Normalization → Sequences → Training
+     ↓              ↓                    ↓               ↓            ↓         ↓
+  OHLCV Data    Price Levels      Technical Indicators  Stats Saved  LSTM Input  Model
+```
+
+### Prediction Pipeline Architecture
+```
+Raw CSV Data → Feature Engineering → Normalization (SAME STATS) → Sequences → Prediction
+     ↓              ↓                    ↓                        ↓         ↓
+  OHLCV Data    Technical Indicators  Stats Loaded            LSTM Input  Results
+```
+
+### ⚠️ CRITICAL CONSISTENCY REQUIREMENTS
+
+#### Target Generation (Training Only)
+- **Location**: `src/targets/price_levels.rs::calculate_price_level_targets()`
+- **Method**: Uses **percentage-based quantiles** (NOT raw prices)
+- **Why Critical**: Ensures symbol-agnostic classification difficulty
+- **Example**: All symbols use `[-2%, -1%, 0%, +1%, +2%]` boundaries
+- **Result**: Comparable validation losses across all trading pairs
+
+#### Feature Normalization (Both Training & Prediction)
+- **Training**: `src/data/preprocessor.rs` calculates and saves normalization stats
+- **Prediction**: `src/data/preprocessor.rs` loads and applies SAME stats
+- **Critical Rule**: Prediction must use training normalization parameters
+- **Storage**: Normalization stats saved with model for consistency
 
 ### Key Files to Know
 
@@ -94,11 +132,20 @@ src/
 - **Validation methods**: `validate()` and `validate_for_symbols()` with optimizer parameter validation
 - **Auto-optimization**: Intelligent parameter tuning configurations
 
-#### `src/targets/price_levels.rs` - RECENTLY UPDATED
-- **Price level classification**: Quantile-based categorical targets (4-6 bins)
+#### `src/targets/price_levels.rs` - CRITICAL TARGET GENERATION
+- **Price level classification**: Percentage-based quantile targets (4-6 bins)
+- **Symbol-agnostic**: Uses percentage changes, NOT raw prices
+- **Method**: `calculate_price_level_targets()` - THE method for target generation
+- **Critical Fix**: Ensures comparable classification difficulty across all symbols
 - **Class distribution analysis**: `analyze_class_distribution()` for imbalance detection
-- **Global quantiles**: Fixed quantile calculation for consistency
 - **Integration**: Works with class weighting and label smoothing
+
+#### `src/data/preprocessor.rs` - CRITICAL NORMALIZATION
+- **Feature normalization**: Z-score normalization with saved statistics
+- **Training mode**: Calculates and saves normalization parameters
+- **Prediction mode**: Loads and applies SAME normalization parameters
+- **Consistency rule**: Prediction MUST use training normalization stats
+- **Storage**: Normalization stats saved with model for inference consistency
 
 #### `configs/*.toml` - 20+ CONFIGURATIONS
 - **Configuration templates**: Different scenarios (training, prediction, features)
@@ -311,11 +358,20 @@ let loss_tensor = predictions.sub(targets)?.sqr()?.mean_all()?;
 - **Validation splits**: `src/model/lstm_simple.rs` (lines ~790-830)
 - **Chronological validation**: `src/model/multi_target.rs::train_with_chronological_validation()`
 
-#### Price Level Target Issues (RECENTLY FIXED)
+#### Price Level Target Issues (CRITICAL ARCHITECTURE)
+- **Target generation**: `src/targets/price_levels.rs::calculate_price_level_targets()`
+- **Percentage-based quantiles**: Ensures symbol-agnostic classification difficulty
 - **Class imbalance**: `src/targets/price_levels.rs::analyze_class_distribution()`
-- **Quantile consistency**: `src/targets/price_levels.rs::calculate_price_level_targets()`
 - **Class weighting**: `src/model/lstm_simple.rs::calculate_class_weights()`
 - **Label smoothing**: `src/model/lstm_simple.rs::apply_label_smoothing()`
+- **Architecture rule**: Never use raw price quantiles (creates symbol-specific difficulty)
+
+#### Normalization Consistency Issues (CRITICAL)
+- **Training normalization**: `src/data/preprocessor.rs` (calculates and saves stats)
+- **Prediction normalization**: `src/data/preprocessor.rs` (loads and applies same stats)
+- **Consistency rule**: Prediction MUST use training normalization parameters
+- **Common error**: Calculating new normalization stats during prediction
+- **Fix pattern**: Always load saved normalization stats for inference
 
 ## 📋 Development Workflow
 
@@ -413,12 +469,33 @@ graphrag(operation="get-relationships", node_id="src/model/lstm_simple.rs")
 - **Cross-asset analysis**: BTC dominance, ETH/BTC ratio, market sentiment
 - **Volatility clustering**: Crypto-specific volatility patterns
 
-### Data Pipeline
-1. **CSV loading**: Automatic schema detection and validation
-2. **Feature engineering**: Technical indicators and custom features
-3. **Sequence generation**: Convert time series to LSTM input format
-4. **Target creation**: Multi-target labels (price, direction, volatility)
-5. **Chronological splitting**: Prevent data leakage in validation
+### Data Pipeline Architecture
+1. **CSV loading**: Automatic schema detection and validation (`src/data/loader.rs`)
+2. **Target generation**: Percentage-based price level classification (`src/targets/price_levels.rs`)
+3. **Feature engineering**: Technical indicators and custom features (`src/features/`)
+4. **Normalization**: Z-score normalization with saved statistics (`src/data/preprocessor.rs`)
+5. **Sequence generation**: Convert time series to LSTM input format (`src/data/sequence.rs`)
+6. **Chronological splitting**: Prevent data leakage in validation (`src/data/loader.rs`)
+
+### ⚠️ CRITICAL ARCHITECTURE RULES
+
+#### Target Generation Consistency
+- **Training**: Uses percentage-based quantiles for symbol-agnostic classification
+- **Validation**: Uses SAME percentage boundaries for comparable losses
+- **Never**: Use raw price quantiles (creates symbol-specific difficulty)
+- **Result**: All symbols have comparable validation losses (~0.8-1.2 range)
+
+#### Normalization Consistency
+- **Training**: Calculate normalization stats from training data, save with model
+- **Prediction**: Load and apply SAME normalization stats from training
+- **Never**: Calculate new normalization stats during prediction
+- **Result**: Consistent feature scaling between training and inference
+
+#### Loss Function Architecture
+- **Categorical targets**: Cross-entropy loss with class weighting and label smoothing
+- **Regression targets**: MSE/MAE loss with normalized values
+- **Multi-target**: Weighted combination of target-specific losses
+- **Validation**: Uses SAME loss calculation as training for comparability
 
 ## 🚀 Quick Reference
 
@@ -444,24 +521,29 @@ ls configs/optimizer_examples/
 ### Key Files for Common Tasks
 - **Training issues**: `src/model/lstm_simple.rs`
 - **Multi-target problems**: `src/model/multi_target.rs`
+- **Target generation**: `src/targets/price_levels.rs` (percentage-based quantiles)
+- **Feature normalization**: `src/data/preprocessor.rs` (training/prediction consistency)
 - **Feature engineering**: `src/features/technical.rs`, `src/features/cross_asset.rs`
 - **Configuration**: `src/config/training.rs`, `configs/*.toml`
 - **Data loading**: `src/data/loader.rs`
+- **Sequence generation**: `src/data/sequence.rs`
 - **Error handling**: `src/utils/error.rs`
 - **Tensor operations**: `src/model/loss.rs`, `src/model/attention.rs`
-- **Price level targets**: `src/targets/price_levels.rs`
 
-### Configuration Hierarchy
-1. **Default values**: In `Default` trait implementations
-2. **TOML files**: `configs/*.toml` templates (20+ available)
-3. **Command line**: Override via CLI arguments
-4. **Runtime**: Dynamic adjustments during training
+### Critical Architecture Understanding
+1. **Symbol-Agnostic Design**: All code must work for any trading pair
+2. **Percentage-Based Targets**: Price levels use percentage changes, not raw prices
+3. **Normalization Consistency**: Prediction uses training normalization stats
+4. **Chronological Integrity**: Time-series order preserved, no shuffling
+5. **Configuration-Driven**: All behavior controlled via TOML configs
+6. **Tensor Safety**: Always use `broadcast_as()` for shape matching
 
-### Recent Critical Fixes (Memorized)
+### Recent Critical Fixes (Architecture Impact)
+- **Target Generation**: Fixed symbol-specific loss scaling using percentage-based quantiles
+- **Normalization Consistency**: Ensured prediction uses training normalization parameters
 - **Tensor Broadcasting**: Fixed `[16,6] × [1,6]` multiplication using `broadcast_as()`
-- **Price Level Targets**: Implemented class weighting and label smoothing
-- **Global Quantiles**: Fixed quantile calculation consistency
-- **Categorical Metrics**: Added accuracy, precision, recall, F1 scores
+- **Loss Comparability**: All symbols now have comparable validation losses
+- **Categorical Metrics**: Added accuracy, precision, recall, F1 scores for classification
 
 ### Build Performance Guidelines
 ```bash
