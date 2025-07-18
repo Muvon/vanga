@@ -359,7 +359,9 @@ impl DataLoader {
         if train_ratio <= 0.0 || val_ratio <= 0.0 || (train_ratio + val_ratio) >= 1.0 {
             return Err(VangaError::DataError(format!(
                 "Invalid ratios: train_ratio={}, val_ratio={}, sum={} (must be > 0 and sum < 1.0)",
-                train_ratio, val_ratio, train_ratio + val_ratio
+                train_ratio,
+                val_ratio,
+                train_ratio + val_ratio
             )));
         }
 
@@ -370,7 +372,8 @@ impl DataLoader {
 
         if train_rows == 0 || val_rows == 0 || test_rows == 0 {
             return Err(VangaError::DataError(
-                "Insufficient data for three-way split - all splits must have at least 1 row".to_string(),
+                "Insufficient data for three-way split - all splits must have at least 1 row"
+                    .to_string(),
             ));
         }
 
@@ -380,9 +383,7 @@ impl DataLoader {
         let val_df = df.slice(train_rows as i64, val_rows);
         let test_df = df.slice((train_rows + val_rows) as i64, test_rows);
 
-        log::info!(
-            "🎯 CHRONOLOGICAL THREE-WAY SPLIT (SOLUTION FOR VALIDATION LOSS ISSUE):"
-        );
+        log::info!("🎯 CHRONOLOGICAL THREE-WAY SPLIT (SOLUTION FOR VALIDATION LOSS ISSUE):");
         log::info!(
             "📊 Training: {} samples ({:.1}%)",
             train_df.height(),

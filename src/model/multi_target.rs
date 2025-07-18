@@ -17,11 +17,15 @@ pub enum TrainingContext<'a> {
         targets: &'a Array2<f64>,
         val_sequences: Option<&'a Array3<f64>>,
         val_targets: Option<&'a Array2<f64>>,
+        /// Optional per-window class weights for balanced training
+        class_weights: Option<&'a Vec<f32>>,
     },
     /// Continues training from a previous state.
     Continue {
         new_sequences: &'a Array3<f64>,
         new_targets: &'a Array2<f64>,
+        /// Optional per-window class weights for balanced training
+        class_weights: Option<&'a Vec<f32>>,
     },
 }
 /// Multi-target LSTM model that trains separate models for each target
@@ -195,13 +199,22 @@ impl MultiTargetLSTMModel {
                 targets,
                 val_sequences,
                 val_targets,
+                class_weights,
             } => {
-                self.train_internal(sequences, targets, val_sequences, val_targets, config)
-                    .await
+                self.train_internal(
+                    sequences,
+                    targets,
+                    val_sequences,
+                    val_targets,
+                    class_weights,
+                    config,
+                )
+                .await
             }
             TrainingContext::Continue {
                 new_sequences,
                 new_targets,
+                class_weights: _, // Unused in continue training
             } => {
                 self.continue_training(new_sequences, new_targets, config)
                     .await
@@ -249,7 +262,7 @@ impl MultiTargetLSTMModel {
 
             // Continue training with new data
             model
-                .train(new_sequences, &single_target, config, None, None)
+                .train(new_sequences, &single_target, config, None, None, None)
                 .await?;
 
             log::info!(
@@ -269,6 +282,7 @@ impl MultiTargetLSTMModel {
         targets: &Array2<f64>,
         val_sequences: Option<&Array3<f64>>,
         val_targets: Option<&Array2<f64>>,
+        class_weights: Option<&Vec<f32>>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!(
@@ -359,6 +373,7 @@ impl MultiTargetLSTMModel {
                     config,
                     val_sequences,
                     val_single_target.as_ref(),
+                    class_weights,
                 )
                 .await
             {
@@ -678,6 +693,7 @@ mod tests {
                 device: crate::config::training::DeviceConfig::Auto,
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
+                class_weight_strategy: crate::config::training::ClassWeightStrategy::Global, // Add missing class_weight_strategy field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -694,6 +710,7 @@ mod tests {
                     targets: &wrong_targets,
                     val_sequences: None,
                     val_targets: None,
+                    class_weights: None,
                 },
                 &config,
             )

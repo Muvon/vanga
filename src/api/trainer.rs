@@ -152,7 +152,6 @@ impl ModelTrainer {
             .await?;
 
         // Train the model with chronological validation
-        // Train the model with chronological validation
         model
             .train(
                 TrainingContext::Standard {
@@ -160,6 +159,7 @@ impl ModelTrainer {
                     targets: &train_targets,
                     val_sequences: Some(&window.val_data.sequences),
                     val_targets: Some(&val_targets),
+                    class_weights: window.class_weights.as_ref(),
                 },
                 &self.config,
             )
@@ -214,12 +214,12 @@ impl ModelTrainer {
         );
 
         // Continue training with new data
-        // Continue training with new data
         model
             .train(
                 TrainingContext::Continue {
                     new_sequences: &window.train_data.sequences,
                     new_targets: &train_targets,
+                    class_weights: window.class_weights.as_ref(),
                 },
                 &self.config,
             )

@@ -74,6 +74,21 @@ pub struct TrainingParams {
 
     /// Print training progress every N epochs (1 = every epoch, 10 = every 10 epochs)
     pub print_every: u32,
+
+    /// Class weight strategy for handling imbalanced datasets
+    pub class_weight_strategy: ClassWeightStrategy,
+}
+
+/// Strategy for calculating class weights in imbalanced datasets
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum ClassWeightStrategy {
+    /// Calculate class weights once from entire initial training dataset (original behavior)
+    #[default]
+    Global,
+    /// Calculate class weights per walk-forward window for temporal accuracy
+    PerWindow,
+    /// Disable class weighting entirely
+    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -685,8 +700,8 @@ impl TrainingParams {
             match schedule {
                 LearningScheduleConfig::Constant => {
                     // No parameters to validate for constant schedule
-                },
-                
+                }
+
                 LearningScheduleConfig::LinearDecay { decay_rate } => {
                     if *decay_rate <= 0.0 || *decay_rate > 1.0 {
                         return Err(VangaError::ConfigError(format!(
@@ -694,8 +709,8 @@ impl TrainingParams {
                             decay_rate
                         )));
                     }
-                },
-                
+                }
+
                 LearningScheduleConfig::ExponentialDecay { decay_rate } => {
                     if *decay_rate <= 0.0 || *decay_rate > 1.0 {
                         return Err(VangaError::ConfigError(format!(
@@ -703,31 +718,31 @@ impl TrainingParams {
                             decay_rate
                         )));
                     }
-                },
-                
+                }
+
                 LearningScheduleConfig::CosineAnnealing { t_max } => {
                     if *t_max == 0 {
                         return Err(VangaError::ConfigError(
-                            "CosineAnnealing t_max must be greater than 0".to_string()
+                            "CosineAnnealing t_max must be greater than 0".to_string(),
                         ));
                     }
-                },
-                
+                }
+
                 LearningScheduleConfig::WarmRestarts { t_0, t_mult } => {
                     if *t_0 == 0 {
                         return Err(VangaError::ConfigError(
-                            "WarmRestarts t_0 must be greater than 0".to_string()
+                            "WarmRestarts t_0 must be greater than 0".to_string(),
                         ));
                     }
                     if *t_mult == 0 {
                         return Err(VangaError::ConfigError(
-                            "WarmRestarts t_mult must be greater than 0".to_string()
+                            "WarmRestarts t_mult must be greater than 0".to_string(),
                         ));
                     }
-                },
+                }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -802,6 +817,7 @@ impl Default for TrainingParams {
             },
             gradient_clip: Some(1.0), // Prevent exploding gradients
             print_every: 1,           // Print every epoch by default for better monitoring
+            class_weight_strategy: ClassWeightStrategy::Global, // Use global weights by default for backward compatibility
         }
     }
 }

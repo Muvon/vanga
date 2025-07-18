@@ -1,4 +1,5 @@
 // LSTM model implementation with Candle framework - PRESERVING ALL ORIGINAL LOGIC
+use crate::config::training::ClassWeightStrategy;
 use crate::config::ModelConfig;
 use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
 use crate::model::loss::CryptoLossFunction;
@@ -872,6 +873,8 @@ impl LSTMModel {
         // Optional pre-split validation data (prevents data leakage)
         val_sequences: Option<&Array3<f64>>,
         val_targets: Option<&Array2<f64>>,
+        // Optional per-window class weights for balanced training
+        class_weights: Option<&Vec<f32>>,
     ) -> Result<()> {
         let total_samples = sequences.shape()[0];
 
@@ -1168,7 +1171,11 @@ impl LSTMModel {
         };
 
         // Calculate global class weights for consistent loss calculation across all batches
-        if let Some((_, target_type)) = &self.target_context {
+        // Skip if class weighting is disabled via configuration
+        if config.training.class_weight_strategy == ClassWeightStrategy::None {
+            log::info!("🚫 Class weighting disabled via configuration");
+            self.global_class_weights = None;
+        } else if let Some((_, target_type)) = &self.target_context {
             let num_classes = match target_type {
                 TargetType::PriceLevel => {
                     if config.model.output_heads.price_levels.enabled {
@@ -1182,12 +1189,17 @@ impl LSTMModel {
             };
 
             log::info!(
-                "🌍 Calculating global class weights from {} training samples for {:?} with {} classes",
+                "🌍 Calculating class weights from {} training samples for {:?} with {} classes (strategy: {:?})",
                 train_targets.shape()[0],
                 target_type,
-                num_classes
+                num_classes,
+                config.training.class_weight_strategy
             );
-            self.calculate_global_class_weights(&train_targets, num_classes)?;
+            self.calculate_global_class_weights(
+                &train_targets,
+                num_classes,
+                class_weights.cloned(),
+            )?;
         }
 
         log::info!("🔧 Training Configuration:");
@@ -1226,21 +1238,23 @@ impl LSTMModel {
                     let epoch_after_warmup = epoch - warmup_epochs as usize;
                     let total_epochs = match &config.training.epochs {
                         crate::config::training::EpochConfig::Fixed(n) => *n as usize,
-                        crate::config::training::EpochConfig::Auto { max_epochs } => *max_epochs as usize,
+                        crate::config::training::EpochConfig::Auto { max_epochs } => {
+                            *max_epochs as usize
+                        }
                     };
-                    
+
                     let scheduled_lr = Self::calculate_scheduled_learning_rate(
                         schedule_config,
                         epoch_after_warmup,
                         target_lr,
                         total_epochs.saturating_sub(warmup_epochs as usize),
                     );
-                    
+
                     // Only update if there's a meaningful change (avoid unnecessary updates)
                     if (scheduled_lr - current_lr).abs() > 1e-8 {
                         optimizer.set_learning_rate(scheduled_lr);
                         current_lr = scheduled_lr;
-                        
+
                         log::debug!(
                             "📈 Schedule LR update at epoch {}: {:.6} (schedule: {:?})",
                             epoch + 1,
@@ -1439,16 +1453,26 @@ impl LSTMModel {
                 } else {
                     ""
                 };
-                
+
                 // Add schedule status information
                 let schedule_status = if epoch >= warmup_epochs as usize {
                     if let Some(schedule) = &config.training.learning_schedule {
                         match schedule {
-                            crate::config::training::LearningScheduleConfig::Constant => " [Constant]",
-                            crate::config::training::LearningScheduleConfig::LinearDecay { .. } => " [LinearDecay]",
-                            crate::config::training::LearningScheduleConfig::ExponentialDecay { .. } => " [ExpDecay]",
-                            crate::config::training::LearningScheduleConfig::CosineAnnealing { .. } => " [CosineAnn]",
-                            crate::config::training::LearningScheduleConfig::WarmRestarts { .. } => " [WarmRestart]",
+                            crate::config::training::LearningScheduleConfig::Constant => {
+                                " [Constant]"
+                            }
+                            crate::config::training::LearningScheduleConfig::LinearDecay {
+                                ..
+                            } => " [LinearDecay]",
+                            crate::config::training::LearningScheduleConfig::ExponentialDecay {
+                                ..
+                            } => " [ExpDecay]",
+                            crate::config::training::LearningScheduleConfig::CosineAnnealing {
+                                ..
+                            } => " [CosineAnn]",
+                            crate::config::training::LearningScheduleConfig::WarmRestarts {
+                                ..
+                            } => " [WarmRestart]",
                         }
                     } else {
                         ""
@@ -2389,6 +2413,7 @@ impl LSTMModel {
         &mut self,
         train_targets: &Array2<f64>,
         num_classes: usize,
+        provided_weights: Option<Vec<f32>>,
     ) -> Result<()> {
         // Calculate for all categorical targets: PriceLevel, Direction, and Volatility
         if let Some((_, target_type)) = &self.target_context {
@@ -2413,6 +2438,17 @@ impl LSTMModel {
         } else {
             log::debug!("🎯 No target context set, skipping global class weights");
             self.global_class_weights = None;
+            return Ok(());
+        }
+
+        // Check if pre-calculated weights are provided (for per-window class weights)
+        if let Some(weights) = provided_weights {
+            log::info!(
+                "🎯 Using provided per-window class weights for {:?}: {:?}",
+                self.target_context.as_ref().map(|(_, t)| t),
+                weights
+            );
+            self.global_class_weights = Some(weights);
             return Ok(());
         }
 
@@ -3512,7 +3548,7 @@ impl LSTMModel {
     }
 
     /// Calculate learning rate based on schedule configuration
-    /// 
+    ///
     /// This function implements all 5 learning schedule types:
     /// - Constant: Maintains initial learning rate
     /// - LinearDecay: Linear reduction over training epochs
@@ -3526,51 +3562,51 @@ impl LSTMModel {
         total_epochs: usize,
     ) -> f64 {
         use crate::config::training::LearningScheduleConfig;
-        
+
         match schedule_config {
             LearningScheduleConfig::Constant => {
                 // Maintain constant learning rate
                 initial_lr
-            },
-            
+            }
+
             LearningScheduleConfig::LinearDecay { decay_rate } => {
                 // Linear decay: lr = initial_lr * (1 - decay_rate * progress)
                 let progress = epoch_after_warmup as f64 / total_epochs.max(1) as f64;
                 let decay_factor = 1.0 - (decay_rate * progress);
                 initial_lr * decay_factor.max(0.001) // Minimum LR threshold
-            },
-            
+            }
+
             LearningScheduleConfig::ExponentialDecay { decay_rate } => {
                 // Exponential decay: lr = initial_lr * decay_rate^epoch
                 let decay_factor = decay_rate.powf(epoch_after_warmup as f64);
                 initial_lr * decay_factor.max(0.0001) // Minimum LR threshold
-            },
-            
+            }
+
             LearningScheduleConfig::CosineAnnealing { t_max } => {
                 // Cosine annealing: lr = initial_lr * 0.5 * (1 + cos(π * epoch / t_max))
                 let t_max_f = (*t_max).max(1) as f64;
                 let progress = (epoch_after_warmup as f64) / t_max_f;
                 let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
                 initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
-            },
-            
+            }
+
             LearningScheduleConfig::WarmRestarts { t_0, t_mult } => {
                 // Cosine annealing with warm restarts (SGDR)
                 let mut t_cur = epoch_after_warmup;
                 let mut t_i = (*t_0).max(1) as usize;
                 let t_mult_val = (*t_mult).max(1) as usize;
-                
+
                 // Find current restart cycle
                 while t_cur >= t_i {
                     t_cur -= t_i;
                     t_i *= t_mult_val;
                 }
-                
+
                 // Calculate cosine annealing within current cycle
                 let progress = t_cur as f64 / t_i.max(1) as f64;
                 let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
                 initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
-            },
+            }
         }
     }
 }
@@ -3633,6 +3669,7 @@ mod tests {
                 validation_split: 0.2, // 20% validation
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
+                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -3640,7 +3677,7 @@ mod tests {
 
         // Test that early stopping training completes without errors
         let result = model
-            .train(&sequences, &targets, &training_config, None, None)
+            .train(&sequences, &targets, &training_config, None, None, None)
             .await;
 
         if let Err(ref e) = result {
@@ -3709,6 +3746,7 @@ mod tests {
                 },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
+                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -3716,7 +3754,7 @@ mod tests {
 
         // Test that fixed epochs training completes without errors
         let result = model
-            .train(&sequences, &targets, &training_config, None, None)
+            .train(&sequences, &targets, &training_config, None, None, None)
             .await;
 
         assert!(
@@ -3783,6 +3821,7 @@ mod tests {
                 gradient_clip: Some(1.0),
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
+                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
             },
 
             data: crate::config::training::DataConfig::default(),
@@ -3790,7 +3829,7 @@ mod tests {
         };
 
         model
-            .train(&sequences, &targets, &training_config, None, None)
+            .train(&sequences, &targets, &training_config, None, None, None)
             .await
             .expect("Training should complete successfully");
 
@@ -3885,6 +3924,7 @@ mod tests {
                 },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
+                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -3892,7 +3932,7 @@ mod tests {
 
         // Test multi-layer training
         let result = model
-            .train(&sequences, &targets, &training_config, None, None)
+            .train(&sequences, &targets, &training_config, None, None, None)
             .await;
 
         assert!(

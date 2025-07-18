@@ -13,9 +13,12 @@ pub use schema::{CryptoDataSchema, DataValidationError};
 pub use sequence::SequenceGenerator;
 pub use target_converter::TargetConverter;
 
+use crate::config::training::ClassWeightStrategy;
 use crate::targets::PreparedTargets;
+use crate::targets::TargetType;
 use crate::utils::error::Result;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Main data pipeline orchestrator
@@ -69,6 +72,101 @@ impl DataPipeline {
         );
 
         Ok(windows)
+    }
+
+    /// Calculate class weights for a specific training window
+    /// Reuses the same logic as the LSTM model's class weight calculation
+    fn calculate_window_class_weights(
+        &self,
+        train_data: &PreparedData,
+        target_type: &TargetType,
+        horizon: &str,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<Option<Vec<f32>>> {
+        // Get the target data for the specific target type and horizon
+        let targets = match target_type {
+            TargetType::PriceLevel => train_data.targets.price_levels.get(horizon),
+            TargetType::Direction => train_data.targets.directions.get(horizon),
+            TargetType::Volatility => train_data.targets.volatility.get(horizon),
+        };
+
+        let targets = match targets {
+            Some(t) => t,
+            None => {
+                log::warn!(
+                    "⚠️ No target data available for {:?} horizon {}, skipping class weights",
+                    target_type,
+                    horizon
+                );
+                return Ok(None);
+            }
+        };
+
+        if targets.is_empty() {
+            log::warn!(
+                "⚠️ Empty target data for {:?} horizon {}, skipping class weights",
+                target_type,
+                horizon
+            );
+            return Ok(None);
+        }
+
+        // Get the correct number of classes from model configuration (same logic as LSTM model)
+        let num_classes = match target_type {
+            TargetType::PriceLevel => {
+                if config.model.output_heads.price_levels.enabled {
+                    config.model.output_heads.price_levels.bins as usize
+                } else {
+                    // Fallback: calculate from data but this should not happen
+                    let max_class = targets.iter().max().unwrap_or(&0);
+                    (*max_class + 1) as usize
+                }
+            }
+            TargetType::Direction => 3,  // Down=0, Sideways=1, Up=2
+            TargetType::Volatility => 3, // Low=0, Medium=1, High=2
+        };
+
+        // Count class frequencies
+        let mut class_counts: HashMap<i32, usize> = HashMap::new();
+        let mut total_samples = 0;
+
+        for &target in targets.iter() {
+            let class_id = target;
+            *class_counts.entry(class_id).or_insert(0) += 1;
+            total_samples += 1;
+        }
+
+        if num_classes < 2 {
+            log::warn!(
+                "⚠️ Only {} classes configured for {:?} horizon {}, skipping class weights",
+                num_classes,
+                target_type,
+                horizon
+            );
+            return Ok(None);
+        }
+
+        // Calculate balanced class weights using sklearn's "balanced" strategy
+        // weight[i] = total_samples / (num_classes * class_count[i])
+        let mut weights = vec![1.0f32; num_classes];
+
+        for (class_id, weight) in weights.iter_mut().enumerate().take(num_classes) {
+            let class_count = class_counts.get(&(class_id as i32)).unwrap_or(&1);
+            if *class_count > 0 {
+                *weight = total_samples as f32 / (num_classes as f32 * *class_count as f32);
+            }
+        }
+
+        log::debug!(
+            "🎯 Window class weights for {:?} horizon {}: {:?} (from {} samples, {} classes configured)",
+            target_type,
+            horizon,
+            weights,
+            total_samples,
+            num_classes
+        );
+
+        Ok(Some(weights))
     }
 
     /// Create walk-forward analysis windows using existing validation_split config
@@ -151,12 +249,42 @@ impl DataPipeline {
                 )
                 .await?;
 
+            // Calculate per-window class weights based on configuration strategy
+            let window_class_weights = match config.training.class_weight_strategy {
+                ClassWeightStrategy::PerWindow => {
+                    if let Some(primary_horizon) = config.horizons.first() {
+                        self.calculate_window_class_weights(
+                            &train_sequences,
+                            &TargetType::PriceLevel,
+                            primary_horizon,
+                            config,
+                        )
+                        .unwrap_or_else(|e| {
+                            log::warn!("⚠️ Failed to calculate window class weights: {}", e);
+                            None
+                        })
+                    } else {
+                        log::warn!("⚠️ No horizons configured, skipping window class weights");
+                        None
+                    }
+                }
+                ClassWeightStrategy::Global => {
+                    // Global weights will be calculated once in the LSTM model
+                    None
+                }
+                ClassWeightStrategy::None => {
+                    // No class weighting
+                    None
+                }
+            };
+
             windows.push(TrainingWindow {
                 train_data: train_sequences,
                 val_data: val_sequences,
                 window_id: windows.len(),
                 train_samples: train_end,
                 val_samples: validation_size,
+                class_weights: window_class_weights,
             });
 
             log::info!(
@@ -428,4 +556,6 @@ pub struct TrainingWindow {
     pub window_id: usize,
     pub train_samples: usize,
     pub val_samples: usize,
+    /// Per-window class weights for balanced training
+    pub class_weights: Option<Vec<f32>>,
 }
