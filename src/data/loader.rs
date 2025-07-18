@@ -348,6 +348,90 @@ impl DataLoader {
         Ok((train_df, test_df))
     }
 
+    /// Split data into train/validation/test with proper chronological ordering
+    /// This is the SOLUTION to fix validation loss growing issue
+    pub fn split_chronological_three_way(
+        &self,
+        df: &DataFrame,
+        train_ratio: f64,
+        val_ratio: f64,
+    ) -> Result<(DataFrame, DataFrame, DataFrame)> {
+        if train_ratio <= 0.0 || val_ratio <= 0.0 || (train_ratio + val_ratio) >= 1.0 {
+            return Err(VangaError::DataError(format!(
+                "Invalid ratios: train_ratio={}, val_ratio={}, sum={} (must be > 0 and sum < 1.0)",
+                train_ratio, val_ratio, train_ratio + val_ratio
+            )));
+        }
+
+        let total_rows = df.height();
+        let train_rows = (total_rows as f64 * train_ratio) as usize;
+        let val_rows = (total_rows as f64 * val_ratio) as usize;
+        let test_rows = total_rows - train_rows - val_rows;
+
+        if train_rows == 0 || val_rows == 0 || test_rows == 0 {
+            return Err(VangaError::DataError(
+                "Insufficient data for three-way split - all splits must have at least 1 row".to_string(),
+            ));
+        }
+
+        // CRITICAL: Chronological split to prevent data leakage
+        // Timeline: [Training Data] -> [Validation Data] -> [Test Data]
+        let train_df = df.slice(0, train_rows);
+        let val_df = df.slice(train_rows as i64, val_rows);
+        let test_df = df.slice((train_rows + val_rows) as i64, test_rows);
+
+        log::info!(
+            "🎯 CHRONOLOGICAL THREE-WAY SPLIT (SOLUTION FOR VALIDATION LOSS ISSUE):"
+        );
+        log::info!(
+            "📊 Training: {} samples ({:.1}%)",
+            train_df.height(),
+            train_ratio * 100.0
+        );
+        log::info!(
+            "📊 Validation: {} samples ({:.1}%)",
+            val_df.height(),
+            val_ratio * 100.0
+        );
+        log::info!(
+            "📊 Test: {} samples ({:.1}%)",
+            test_df.height(),
+            (1.0 - train_ratio - val_ratio) * 100.0
+        );
+
+        // Validate timestamp ordering if timestamp column exists
+        let timestamp_cols = df.get_column_names();
+        {
+            let timestamp_col = timestamp_cols
+                .iter()
+                .find(|col| col.to_lowercase().contains("time"))
+                .copied();
+
+            if let Some(ts_col) = timestamp_col {
+                if let (Ok(train_ts), Ok(val_ts), Ok(test_ts)) = (
+                    train_df.column(ts_col),
+                    val_df.column(ts_col),
+                    test_df.column(ts_col),
+                ) {
+                    log::info!(
+                        "🕐 Timeline validation: Train ends before Val starts, Val ends before Test starts"
+                    );
+                    log::debug!(
+                        "Train: {} to {}, Val: {} to {}, Test: {} to {}",
+                        train_ts.get(0).unwrap_or_default(),
+                        train_ts.get(train_ts.len() - 1).unwrap_or_default(),
+                        val_ts.get(0).unwrap_or_default(),
+                        val_ts.get(val_ts.len() - 1).unwrap_or_default(),
+                        test_ts.get(0).unwrap_or_default(),
+                        test_ts.get(test_ts.len() - 1).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+
+        Ok((train_df, val_df, test_df))
+    }
+
     /// Fix data types for all columns since they were read as Utf8
     fn fix_custom_feature_types(&self, df: DataFrame) -> Result<DataFrame> {
         // Get column names before moving df

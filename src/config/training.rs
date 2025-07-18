@@ -381,6 +381,9 @@ impl TrainingParams {
         // Validate early stopping parameters
         self.validate_early_stopping()?;
 
+        // Validate learning schedule parameters
+        self.validate_learning_schedule()?;
+
         Ok(())
     }
 
@@ -673,6 +676,58 @@ impl TrainingParams {
             )));
         }
 
+        Ok(())
+    }
+
+    /// Validate learning schedule configuration parameters
+    fn validate_learning_schedule(&self) -> Result<()> {
+        if let Some(schedule) = &self.learning_schedule {
+            match schedule {
+                LearningScheduleConfig::Constant => {
+                    // No parameters to validate for constant schedule
+                },
+                
+                LearningScheduleConfig::LinearDecay { decay_rate } => {
+                    if *decay_rate <= 0.0 || *decay_rate > 1.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "LinearDecay decay_rate must be between 0.0 and 1.0, got: {}",
+                            decay_rate
+                        )));
+                    }
+                },
+                
+                LearningScheduleConfig::ExponentialDecay { decay_rate } => {
+                    if *decay_rate <= 0.0 || *decay_rate > 1.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "ExponentialDecay decay_rate must be between 0.0 and 1.0, got: {}",
+                            decay_rate
+                        )));
+                    }
+                },
+                
+                LearningScheduleConfig::CosineAnnealing { t_max } => {
+                    if *t_max == 0 {
+                        return Err(VangaError::ConfigError(
+                            "CosineAnnealing t_max must be greater than 0".to_string()
+                        ));
+                    }
+                },
+                
+                LearningScheduleConfig::WarmRestarts { t_0, t_mult } => {
+                    if *t_0 == 0 {
+                        return Err(VangaError::ConfigError(
+                            "WarmRestarts t_0 must be greater than 0".to_string()
+                        ));
+                    }
+                    if *t_mult == 0 {
+                        return Err(VangaError::ConfigError(
+                            "WarmRestarts t_mult must be greater than 0".to_string()
+                        ));
+                    }
+                },
+            }
+        }
+        
         Ok(())
     }
 }

@@ -1220,6 +1220,35 @@ impl LSTMModel {
                         warmup_lr
                     );
                 }
+            } else {
+                // Apply learning schedule after warmup phase (if configured)
+                if let Some(schedule_config) = &config.training.learning_schedule {
+                    let epoch_after_warmup = epoch - warmup_epochs as usize;
+                    let total_epochs = match &config.training.epochs {
+                        crate::config::training::EpochConfig::Fixed(n) => *n as usize,
+                        crate::config::training::EpochConfig::Auto { max_epochs } => *max_epochs as usize,
+                    };
+                    
+                    let scheduled_lr = Self::calculate_scheduled_learning_rate(
+                        schedule_config,
+                        epoch_after_warmup,
+                        target_lr,
+                        total_epochs.saturating_sub(warmup_epochs as usize),
+                    );
+                    
+                    // Only update if there's a meaningful change (avoid unnecessary updates)
+                    if (scheduled_lr - current_lr).abs() > 1e-8 {
+                        optimizer.set_learning_rate(scheduled_lr);
+                        current_lr = scheduled_lr;
+                        
+                        log::debug!(
+                            "📈 Schedule LR update at epoch {}: {:.6} (schedule: {:?})",
+                            epoch + 1,
+                            scheduled_lr,
+                            schedule_config
+                        );
+                    }
+                }
             }
 
             // Training phase - process data in batches
@@ -1338,6 +1367,7 @@ impl LSTMModel {
             };
 
             // Adaptive learning rate adjustment after warmup
+            // NOTE: This runs AFTER schedule updates, so adaptive LR can override schedule if needed
             if epoch >= warmup_epochs as usize {
                 if let crate::config::training::LearningRateConfig::Adaptive { .. } =
                     &config.training.learning_rate
@@ -1409,6 +1439,23 @@ impl LSTMModel {
                 } else {
                     ""
                 };
+                
+                // Add schedule status information
+                let schedule_status = if epoch >= warmup_epochs as usize {
+                    if let Some(schedule) = &config.training.learning_schedule {
+                        match schedule {
+                            crate::config::training::LearningScheduleConfig::Constant => " [Constant]",
+                            crate::config::training::LearningScheduleConfig::LinearDecay { .. } => " [LinearDecay]",
+                            crate::config::training::LearningScheduleConfig::ExponentialDecay { .. } => " [ExpDecay]",
+                            crate::config::training::LearningScheduleConfig::CosineAnnealing { .. } => " [CosineAnn]",
+                            crate::config::training::LearningScheduleConfig::WarmRestarts { .. } => " [WarmRestart]",
+                        }
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                };
 
                 if let Some(val_loss) = avg_val_loss {
                     // Get target type for this individual model
@@ -1424,9 +1471,8 @@ impl LSTMModel {
                     } else {
                         "🚨"
                     };
-
                     log::info!(
-                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}{}, Early Stop: {}/{}{}",
+                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}{}{}, Early Stop: {}/{}{}",
                         epoch + 1,
                         self.training_config.epochs,
                         avg_train_loss,
@@ -1435,6 +1481,7 @@ impl LSTMModel {
                         ratio_status,
                         current_lr,
                         warmup_status,
+                        schedule_status,
                         early_stopping_counter,
                         early_stopping_patience,
                         target_info
@@ -1447,13 +1494,14 @@ impl LSTMModel {
                 } else {
                     let num_batches = total_train_samples.div_ceil(batch_size);
                     log::info!(
-                        "Epoch {}/{}: Loss = {:.6}, Batches: {}, LR: {:.6}{}",
+                        "Epoch {}/{}: Loss = {:.6}, Batches: {}, LR: {:.6}{}{}",
                         epoch + 1,
                         self.training_config.epochs,
                         avg_train_loss,
                         num_batches,
                         current_lr,
-                        warmup_status
+                        warmup_status,
+                        schedule_status
                     );
                 }
 
@@ -3461,6 +3509,69 @@ impl LSTMModel {
         };
 
         Ok(norm_squared)
+    }
+
+    /// Calculate learning rate based on schedule configuration
+    /// 
+    /// This function implements all 5 learning schedule types:
+    /// - Constant: Maintains initial learning rate
+    /// - LinearDecay: Linear reduction over training epochs
+    /// - ExponentialDecay: Exponential decay with configurable rate
+    /// - CosineAnnealing: Cosine annealing schedule
+    /// - WarmRestarts: Cosine annealing with warm restarts (SGDR)
+    fn calculate_scheduled_learning_rate(
+        schedule_config: &crate::config::training::LearningScheduleConfig,
+        epoch_after_warmup: usize,
+        initial_lr: f64,
+        total_epochs: usize,
+    ) -> f64 {
+        use crate::config::training::LearningScheduleConfig;
+        
+        match schedule_config {
+            LearningScheduleConfig::Constant => {
+                // Maintain constant learning rate
+                initial_lr
+            },
+            
+            LearningScheduleConfig::LinearDecay { decay_rate } => {
+                // Linear decay: lr = initial_lr * (1 - decay_rate * progress)
+                let progress = epoch_after_warmup as f64 / total_epochs.max(1) as f64;
+                let decay_factor = 1.0 - (decay_rate * progress);
+                initial_lr * decay_factor.max(0.001) // Minimum LR threshold
+            },
+            
+            LearningScheduleConfig::ExponentialDecay { decay_rate } => {
+                // Exponential decay: lr = initial_lr * decay_rate^epoch
+                let decay_factor = decay_rate.powf(epoch_after_warmup as f64);
+                initial_lr * decay_factor.max(0.0001) // Minimum LR threshold
+            },
+            
+            LearningScheduleConfig::CosineAnnealing { t_max } => {
+                // Cosine annealing: lr = initial_lr * 0.5 * (1 + cos(π * epoch / t_max))
+                let t_max_f = (*t_max).max(1) as f64;
+                let progress = (epoch_after_warmup as f64) / t_max_f;
+                let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
+                initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
+            },
+            
+            LearningScheduleConfig::WarmRestarts { t_0, t_mult } => {
+                // Cosine annealing with warm restarts (SGDR)
+                let mut t_cur = epoch_after_warmup;
+                let mut t_i = (*t_0).max(1) as usize;
+                let t_mult_val = (*t_mult).max(1) as usize;
+                
+                // Find current restart cycle
+                while t_cur >= t_i {
+                    t_cur -= t_i;
+                    t_i *= t_mult_val;
+                }
+                
+                // Calculate cosine annealing within current cycle
+                let progress = t_cur as f64 / t_i.max(1) as f64;
+                let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
+                initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
+            },
+        }
     }
 }
 
