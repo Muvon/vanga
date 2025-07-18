@@ -63,8 +63,14 @@ impl Predictor {
 
         log::info!("Generated {} predictions", raw_predictions.nrows());
 
-        // Generate targets for confidence calculation (before cleanup)
-        let targets_config = self.generate_targets_for_confidence(&prepared_data).await?;
+        // Generate targets for confidence calculation (before cleanup) - make optional
+        let targets_config = match self.generate_targets_for_confidence(&prepared_data).await {
+            Ok(config) => Some(config),
+            Err(e) => {
+                log::warn!("Could not generate targets for confidence calculation: {}. Predictions will proceed without confidence scores.", e);
+                None
+            }
+        };
 
         // Explicit memory cleanup after prediction and data extraction
         drop(prepared_data);
@@ -85,7 +91,7 @@ impl Predictor {
             &self.config.symbols[0],
             &horizon,
             current_price,
-            Some(&targets_config), // Pass actual targets config for confidence calculation
+            targets_config.as_ref(), // Pass targets config if available for confidence calculation
         )?;
 
         // Apply post-processing if configured

@@ -1421,16 +1421,51 @@ impl LSTMModel {
         self.trained = true;
         log::info!("✅ Unified LSTM training completed successfully");
 
-        // Calculate final training metrics
+        // Calculate final training metrics - use classification accuracy for categorical targets
         if let Ok(final_predictions) = self.predict(sequences).await {
-            let final_mse = self.calculate_mse_loss(&final_predictions, targets);
-            let final_mape = self.calculate_mape(&final_predictions, targets);
-            log::info!(
-                "📊 Final Training Metrics - MSE: {:.6} (√MSE: {:.3}), MAPE: {:.2}%",
-                final_mse,
-                final_mse.sqrt(),
-                final_mape
-            );
+            // For classification targets, use accuracy instead of MSE
+            if let Some((_, target_type)) = &self.target_context {
+                match target_type {
+                    TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
+                        // Calculate classification accuracy
+                        let mut correct = 0;
+                        let mut total = 0;
+
+                        for i in 0..final_predictions.nrows() {
+                            if i < targets.nrows() {
+                                let predicted_class = final_predictions[[i, 0]] as i32;
+                                let true_class = targets[[i, 0]] as i32;
+                                if predicted_class == true_class {
+                                    correct += 1;
+                                }
+                                total += 1;
+                            }
+                        }
+
+                        let accuracy = if total > 0 {
+                            correct as f64 / total as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        log::info!(
+                            "📊 Final Training Metrics - Accuracy: {:.2}% ({}/{} correct)",
+                            accuracy,
+                            correct,
+                            total
+                        );
+                    }
+                }
+            } else {
+                // Fallback to MSE for regression targets
+                let final_mse = self.calculate_mse_loss(&final_predictions, targets);
+                let final_mape = self.calculate_mape(&final_predictions, targets);
+                log::info!(
+                    "📊 Final Training Metrics - MSE: {:.6} (√MSE: {:.3}), MAPE: {:.2}%",
+                    final_mse,
+                    final_mse.sqrt(),
+                    final_mape
+                );
+            }
         }
 
         Ok(())

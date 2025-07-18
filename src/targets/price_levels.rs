@@ -218,8 +218,10 @@ fn calculate_price_level_targets(
         ));
     }
 
-    // Calculate percentage changes for quantile calculation
+    // FIXED: Calculate percentage changes once and store with indices
     let mut percentage_changes = Vec::new();
+    let mut indexed_changes = Vec::new();
+
     for i in training_data_start..training_data_end {
         let current_price = prices[i];
         let target_price = match &config.target_strategy {
@@ -238,6 +240,9 @@ fn calculate_price_level_targets(
         if current_price != 0.0 {
             let price_change = (target_price - current_price) / current_price;
             percentage_changes.push(price_change);
+            indexed_changes.push((i, price_change));
+        } else {
+            indexed_changes.push((i, 0.0)); // Mark invalid prices
         }
     }
 
@@ -255,32 +260,12 @@ fn calculate_price_level_targets(
         global_quantiles
     );
 
-    // Apply consistent quantiles to all samples using percentage changes
-    for i in training_data_start..training_data_end {
-        let current_price = prices[i];
-
-        // Calculate target price based on strategy
-        let target_price = match &config.target_strategy {
-            crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
-
-            crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
-                calculate_standard_vwap(prices, i, horizon_steps)?
-            }
-
-            crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
-                momentum_window,
-                bias_strength,
-            } => {
-                calculate_momentum_vwap(prices, i, horizon_steps, *momentum_window, *bias_strength)?
-            }
-        };
-
-        if current_price == 0.0 {
+    // Apply consistent quantiles using pre-calculated percentage changes
+    for (i, price_change) in indexed_changes {
+        if price_change == 0.0 {
             targets[i] = config.bins as i32 / 2; // Neutral class for invalid prices
             continue;
         }
-
-        let price_change = (target_price - current_price) / current_price;
 
         // Skip if price change is too small
         if price_change.abs() < config.range_percent {
@@ -288,7 +273,7 @@ fn calculate_price_level_targets(
             continue;
         }
 
-        // FIXED: Classify percentage change against percentage quantiles
+        // Classify percentage change against percentage quantiles
         targets[i] = classify_price_to_level(price_change, &global_quantiles);
     }
 
