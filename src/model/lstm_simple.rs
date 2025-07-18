@@ -619,15 +619,16 @@ impl LSTMModel {
         }
     }
 
-    /// Calculate categorical MAPE - handles class 0 by using modified percentage calculation
-    /// For categorical targets, treats class differences as ordinal distances
+    /// Calculate MAPE for categorical data (price levels)
     ///
-    /// Example interpretation for categorical targets:
-    /// - Predicted: [0, 1, 2], Actual: [0, 1, 1]
-    /// - Class 0: |0-0|/(0+1) = 0% error
-    /// - Class 1: |1-1|/(1+1) = 0% error
-    /// - Class 2: |2-1|/(2+1) = 33.3% error
-    /// - Average MAPE: 11.1%
+    /// For ordinal categorical data (price levels 0,1,2,3,4), we calculate MAPE as
+    /// the percentage of the maximum possible error. This gives meaningful results:
+    /// - If max_class=4, predicting class 4 when actual is class 0 = 100% error
+    /// - If max_class=4, predicting class 2 when actual is class 0 = 50% error
+    /// - If max_class=4, predicting class 1 when actual is class 0 = 25% error
+    ///
+    /// Formula: MAPE = (|predicted - actual| / max_possible_error) * 100
+    /// where max_possible_error = max_class_value (since min is always 0)
     fn calculate_categorical_mape(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
         // CRITICAL FIX: Validate shapes before operations
         if predictions.shape() != targets.shape() {
@@ -639,6 +640,16 @@ impl LSTMModel {
             return f64::INFINITY;
         }
 
+        // Find the maximum class value to determine the scale
+        let max_target = targets.iter().fold(0.0f64, |acc, &x| acc.max(x));
+        let max_prediction = predictions.iter().fold(0.0f64, |acc, &x| acc.max(x));
+        let max_class_value = max_target.max(max_prediction);
+
+        // If all values are 0 or max_class_value is 0, return 0% error
+        if max_class_value <= 0.0 {
+            return 0.0;
+        }
+
         let mut total_percentage_error = 0.0;
         let mut total_samples = 0;
 
@@ -647,10 +658,9 @@ impl LSTMModel {
                 let actual = targets[[i, j]];
                 let predicted = predictions[[i, j]];
 
-                // For categorical data, calculate percentage error differently
-                // Use (actual + 1) to avoid division by zero for class 0
-                let adjusted_actual = actual.abs() + 1.0;
-                let percentage_error = ((actual - predicted).abs() / adjusted_actual) * 100.0;
+                // Calculate percentage error relative to maximum possible error
+                let absolute_error = (actual - predicted).abs();
+                let percentage_error = (absolute_error / max_class_value) * 100.0;
 
                 total_percentage_error += percentage_error;
                 total_samples += 1;
@@ -660,7 +670,7 @@ impl LSTMModel {
         if total_samples > 0 {
             total_percentage_error / total_samples as f64
         } else {
-            f64::INFINITY
+            0.0
         }
     }
 
