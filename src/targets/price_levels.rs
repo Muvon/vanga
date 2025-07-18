@@ -159,7 +159,7 @@ pub fn generate_price_level_targets(
         target_strategy: crate::config::model::PriceLevelTargetStrategy::Current,
     };
 
-    generate_price_level_targets_with_head(df, horizons, &price_level_head)
+    generate_price_level_targets_with_head(df, horizons, &price_level_head, None)
 }
 
 /// Generate price level targets using PriceLevelHead configuration
@@ -167,13 +167,19 @@ pub fn generate_price_level_targets_with_head(
     df: &DataFrame,
     horizons: &[String],
     config: &crate::config::model::PriceLevelHead,
+    feature_config: Option<&crate::config::FeatureConfig>,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
+    // Calculate feature window if FeatureConfig is provided
+    let feature_window =
+        feature_config.map(crate::utils::feature_window::calculate_max_feature_window);
+
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
-        let price_targets = calculate_price_level_targets(&close_prices, horizon_steps, config)?;
+        let price_targets =
+            calculate_price_level_targets(&close_prices, horizon_steps, config, feature_window)?;
 
         // Analyze and log class distribution
         analyze_class_distribution(&price_targets, horizon, config.bins)?;
@@ -190,7 +196,24 @@ pub fn generate_price_level_targets_from_model_config(
     horizons: &[String],
     model_config: &crate::config::model::ModelConfig,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    generate_price_level_targets_with_head(df, horizons, &model_config.output_heads.price_levels)
+    generate_price_level_targets_with_head(
+        df,
+        horizons,
+        &model_config.output_heads.price_levels,
+        None,
+    )
+}
+
+/// Calculate minimum data points required for target generation (fallback when FeatureConfig not available)
+fn calculate_min_data_points(_config: &crate::config::model::PriceLevelHead) -> usize {
+    // Default maximum feature window from technical indicators
+    // Based on maximum periods used in feature engineering:
+    // - SMA/EMA periods: up to 200
+    // - RSI, MACD, Bollinger Bands: ~26-50 periods
+    // - Volume indicators: ~20-50 periods
+    let max_feature_window = 250; // Conservative estimate
+    let stability_buffer = 50;
+    max_feature_window + stability_buffer
 }
 
 /// Calculate price level targets for a specific horizon with consistent global quantiles
@@ -198,18 +221,24 @@ fn calculate_price_level_targets(
     prices: &[f64],
     horizon_steps: usize,
     config: &crate::config::model::PriceLevelHead,
+    feature_window: Option<usize>,
 ) -> Result<Vec<i32>> {
-    if prices.len() < horizon_steps + 100 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient data for price level target generation".to_string(),
-        ));
+    // Use provided feature_window or fallback to default calculation
+    let min_data_points = feature_window.unwrap_or_else(|| calculate_min_data_points(config));
+
+    if prices.len() < horizon_steps + min_data_points {
+        return Err(crate::utils::error::VangaError::DataError(format!(
+            "Insufficient data for price level target generation. Need {} points, have {}",
+            horizon_steps + min_data_points,
+            prices.len()
+        )));
     }
 
     let mut targets = vec![-1; prices.len()];
 
     // CRITICAL FIX: Calculate global quantiles from PERCENTAGE CHANGES, not absolute prices
     // This ensures consistent class boundaries across all symbols regardless of price level
-    let training_data_start = 100; // Skip initial lookback period
+    let training_data_start = min_data_points; // Skip initial feature window period
     let training_data_end = prices.len() - horizon_steps; // Ensure we have future data
 
     if training_data_end <= training_data_start {
@@ -599,7 +628,7 @@ mod tests {
         let prices = create_test_prices();
         let config = create_test_config(PriceLevelTargetStrategy::Current);
 
-        let result = calculate_price_level_targets(&prices, 2, &config).unwrap();
+        let result = calculate_price_level_targets(&prices, 2, &config, None).unwrap();
 
         // Should have valid targets for middle indices
         assert!(result.len() == prices.len());
@@ -617,13 +646,14 @@ mod tests {
         let prices = create_test_prices();
         let config = create_test_config(PriceLevelTargetStrategy::StandardVwap);
 
-        let result = calculate_price_level_targets(&prices, 2, &config).unwrap();
+        let result = calculate_price_level_targets(&prices, 2, &config, None).unwrap();
 
         // Should have valid targets for middle indices
         assert!(result.len() == prices.len());
         // Results should be different from current strategy for same input
         let current_config = create_test_config(PriceLevelTargetStrategy::Current);
-        let current_result = calculate_price_level_targets(&prices, 2, &current_config).unwrap();
+        let current_result =
+            calculate_price_level_targets(&prices, 2, &current_config, None).unwrap();
 
         // At least some values should be different
         let mut differences = 0;
@@ -644,7 +674,7 @@ mod tests {
             bias_strength: 0.5,
         });
 
-        let result = calculate_price_level_targets(&prices, 2, &config).unwrap();
+        let result = calculate_price_level_targets(&prices, 2, &config, None).unwrap();
 
         // Should have valid targets for middle indices
         assert!(result.len() == prices.len());

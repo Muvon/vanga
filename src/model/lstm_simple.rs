@@ -27,6 +27,15 @@ use candle_optimisers::{
     Decay,
 };
 
+/// Target format enumeration for metrics calculation
+#[derive(Debug, Clone, Copy)]
+enum TargetFormat {
+    OneHot,          // [0, 0, 1, 0, 0] - one-hot encoded classes
+    RawClassIndices, // [2] - raw class index
+    RawValues,       // [0.8] - continuous values or other formats
+    Unknown,         // Cannot determine format
+}
+
 /// LSTM network configuration - EXACT same as original
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LSTMConfig {
@@ -2631,6 +2640,49 @@ impl LSTMModel {
         }
     }
 
+    /// Detect target format based on tensor shape and values
+    fn detect_target_format(&self, target_tensor: &Tensor) -> Result<TargetFormat> {
+        let shape = target_tensor.shape();
+        let dims = shape.dims();
+        if dims.len() != 2 {
+            return Ok(TargetFormat::Unknown);
+        }
+
+        let num_outputs = dims[1];
+
+        // If only 1 output dimension, it's likely raw class indices
+        if num_outputs == 1 {
+            return Ok(TargetFormat::RawClassIndices);
+        }
+
+        // If multiple outputs, check if it looks like one-hot encoding
+        // Sample a few rows to check the pattern
+        let sample_data = target_tensor.to_vec2::<f32>()?;
+        let mut one_hot_count = 0;
+        let mut total_checked = 0;
+
+        for row in sample_data.iter().take(10) {
+            // Check first 10 rows
+            total_checked += 1;
+
+            // Count non-zero values
+            let non_zero_count = row.iter().filter(|&&x| x > 0.0).count();
+            let max_value = row.iter().fold(0.0f32, |a, &b| a.max(b));
+
+            // One-hot pattern: exactly one 1.0, rest are 0.0
+            if non_zero_count == 1 && max_value == 1.0 {
+                one_hot_count += 1;
+            }
+        }
+
+        // If most samples follow one-hot pattern, classify as one-hot
+        if total_checked > 0 && one_hot_count as f32 / total_checked as f32 > 0.8 {
+            Ok(TargetFormat::OneHot)
+        } else {
+            Ok(TargetFormat::RawValues)
+        }
+    }
+
     /// Calculate categorical validation metrics for price level targets
     async fn calculate_categorical_validation_metrics(
         &self,
@@ -2649,6 +2701,15 @@ impl LSTMModel {
         let validation_batch_size = 64; // Fixed batch size for validation metrics
         let mut all_predictions = Vec::new();
         let mut all_targets = Vec::new();
+
+        // Detect target format once for the entire validation set
+        let (_input_tensor_sample, target_tensor_sample) = self.convert_sequences_to_tensors(
+            &val_sequences.slice(ndarray::s![0..1, .., ..]).to_owned(),
+            &val_targets.slice(ndarray::s![0..1, ..]).to_owned(),
+        )?;
+        let target_format = self.detect_target_format(&target_tensor_sample)?;
+
+        log::debug!("🎯 Detected target format: {:?}", target_format);
 
         // Collect all predictions and targets
         for batch_start in (0..total_val_samples).step_by(validation_batch_size) {
@@ -2679,19 +2740,57 @@ impl LSTMModel {
                     .map(|(idx, _)| idx as i32)
                     .unwrap_or(0);
 
-                // Get true class
-                let true_class = if target_row.len() == 1 {
-                    target_row[0] as i32
-                } else {
-                    // One-hot encoded - find max index
-                    target_row
-                        .iter()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| {
-                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(idx, _)| idx as i32)
-                        .unwrap_or(0)
+                // Get true class - use detected format for proper extraction
+                let true_class = match target_format {
+                    TargetFormat::OneHot => {
+                        // One-hot encoded - find max index
+                        target_row
+                            .iter()
+                            .enumerate()
+                            .max_by(|(_, a), (_, b)| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .map(|(idx, _)| idx as i32)
+                            .unwrap_or(0)
+                    }
+                    TargetFormat::RawClassIndices => {
+                        // Raw class index format: [2.0] means class 2
+                        let raw_value = target_row[0];
+                        if raw_value >= 0.0 && raw_value.fract() == 0.0 {
+                            raw_value as i32
+                        } else {
+                            log::warn!(
+                                "Invalid class index in target: {}, defaulting to class 0",
+                                raw_value
+                            );
+                            0
+                        }
+                    }
+                    TargetFormat::RawValues | TargetFormat::Unknown => {
+                        // For other formats, try to infer the best approach
+                        if target_row.len() == 1 {
+                            let raw_value = target_row[0];
+                            if raw_value >= 0.0 && raw_value.fract() == 0.0 {
+                                raw_value as i32
+                            } else {
+                                log::warn!(
+                                    "Non-integer target value: {}, defaulting to class 0",
+                                    raw_value
+                                );
+                                0
+                            }
+                        } else {
+                            // Multi-value, assume one-hot
+                            target_row
+                                .iter()
+                                .enumerate()
+                                .max_by(|(_, a), (_, b)| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                                .map(|(idx, _)| idx as i32)
+                                .unwrap_or(0)
+                        }
+                    }
                 };
 
                 all_predictions.push(predicted_class);
@@ -2705,6 +2804,19 @@ impl LSTMModel {
             self.calculate_precision_recall_f1(&all_predictions, &all_targets);
         let class_distribution =
             self.analyze_prediction_distribution(&all_predictions, &all_targets);
+
+        // Debug logging for first few samples to verify target extraction
+        if epoch == 10 {
+            log::debug!("🔍 Target extraction verification (first 5 samples):");
+            for i in 0..std::cmp::min(5, all_predictions.len()) {
+                log::debug!(
+                    "  Sample {}: Predicted={}, True={}",
+                    i,
+                    all_predictions[i],
+                    all_targets[i]
+                );
+            }
+        }
 
         // Log categorical metrics
         log::info!(
