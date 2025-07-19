@@ -127,7 +127,8 @@ impl Default for TrainingConfig {
 /// LSTM model for cryptocurrency forecasting - Enhanced with attention support
 pub struct LSTMModel {
     config: LSTMConfig,
-    lstm_layers: Option<Vec<LSTM>>, // Changed to Vec<LSTM> for manual chaining
+    lstm_layers: Option<Vec<LSTM>>, // Forward layers for unidirectional or bidirectional
+    backward_lstm_layers: Option<Vec<LSTM>>, // Backward layers for bidirectional LSTM
     output_layer: Option<Linear>,
     pub attention_layers: Option<MultiHeadAttention>, // Public for testing
     pub attention_config: Option<AttentionModuleConfig>, // Public for testing
@@ -143,6 +144,8 @@ pub struct LSTMModel {
     /// Global class weights calculated once from entire training dataset
     /// Used for consistent loss calculation across all batches (training and validation)
     global_class_weights: Option<Vec<f32>>,
+    /// Architecture configuration for bidirectional detection
+    architecture: Option<crate::config::model::LSTMArchitecture>,
 }
 
 /// Serializable model state for persistence - SAME as original
@@ -211,6 +214,7 @@ impl LSTMModel {
         Ok(Self {
             config,
             lstm_layers: None,
+            backward_lstm_layers: None, // Initialize backward layers as None
             output_layer: None,
             attention_layers: None, // Initialize attention as None
             attention_config: None, // Initialize attention config as None
@@ -222,6 +226,7 @@ impl LSTMModel {
             loss_function: CryptoLossFunction::MSE, // Default to MSE
             target_context: None,                   // No target context by default
             global_class_weights: None,             // No global weights initially
+            architecture: None,                     // No architecture info by default
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -352,6 +357,9 @@ impl LSTMModel {
         // Configure loss function
         model.loss_function = model_config.loss_function.clone();
 
+        // Store architecture information for bidirectional detection
+        model.architecture = Some(model_config.architecture.clone());
+
         Ok(model)
     }
 
@@ -400,13 +408,25 @@ impl LSTMModel {
     /// Initialize attention layers during model initialization
     fn initialize_attention_layers(&mut self, vs: &VarBuilder) -> Result<()> {
         if let Some(attention_config) = &self.attention_config {
-            // Use the last layer's hidden size for attention input dimension
-            let attention_input_size = self
+            // Calculate attention input size based on architecture
+            let base_hidden_size = self
                 .config
                 .get_hidden_size_for_layer(self.config.num_layers - 1);
 
+            // For bidirectional LSTM, attention receives concatenated output (2x hidden size)
+            let is_bidirectional = matches!(
+                self.architecture,
+                Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
+            );
+
+            let attention_input_size = if is_bidirectional {
+                base_hidden_size * 2
+            } else {
+                base_hidden_size
+            };
+
             let attention = MultiHeadAttention::new(
-                attention_input_size, // Use last LSTM layer's hidden size as input dimension
+                attention_input_size, // Use correct input dimension for bidirectional
                 attention_config.clone(),
                 vs.pp("attention"),
                 self.device.clone(),
@@ -415,9 +435,10 @@ impl LSTMModel {
             self.attention_layers = Some(attention);
 
             log::debug!(
-                "✅ Attention layers initialized: {} heads, input_size={}",
+                "✅ Attention layers initialized: {} heads, input_size={}, bidirectional={}",
                 attention_config.num_heads,
-                attention_input_size
+                attention_input_size,
+                is_bidirectional
             );
         }
 
@@ -438,7 +459,7 @@ impl LSTMModel {
         }
     }
 
-    /// Initialize multi-layer LSTM network using Sequential - COMPLETE REWRITE
+    /// Initialize multi-layer LSTM network using Sequential - Enhanced with bidirectional support
     fn initialize_network(&mut self) -> Result<()> {
         if self.lstm_layers.is_some() {
             return Ok(()); // Already initialized
@@ -448,6 +469,16 @@ impl LSTMModel {
             "Initializing multi-layer LSTM network with config: {:?}",
             self.config
         );
+
+        // Check if this is a bidirectional LSTM
+        let is_bidirectional = matches!(
+            self.architecture,
+            Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
+        );
+
+        if is_bidirectional {
+            log::info!("🔄 Initializing Bidirectional LSTM with forward and backward layers");
+        }
 
         let vs = VarBuilder::from_varmap(&self.varmap, DType::F32, &self.device);
         let num_layers = self.config.num_layers;
@@ -462,50 +493,84 @@ impl LSTMModel {
             log::warn!("Large number of layers ({}) may cause overfitting. Consider 2-3 layers for most datasets.", num_layers);
         }
 
-        // Build multi-layer LSTM stack using Sequential
-        let mut lstm_layers = Vec::new();
+        // Build forward LSTM layers
+        let mut forward_lstm_layers = Vec::new();
+        // Build backward LSTM layers (only for bidirectional)
+        let mut backward_lstm_layers = Vec::new();
 
         for layer_idx in 0..num_layers {
-            // Input size: first layer uses input_size, subsequent layers use previous layer's hidden size
+            // Input size calculation for bidirectional:
+            // - First layer: uses input_size
+            // - Subsequent layers: uses 2x hidden_size (concatenated forward+backward) for bidirectional,
+            //   or 1x hidden_size for unidirectional
             let layer_input_size = if layer_idx == 0 {
                 self.config.input_size
             } else {
-                self.config.get_hidden_size_for_layer(layer_idx - 1)
+                let prev_hidden_size = self.config.get_hidden_size_for_layer(layer_idx - 1);
+                if is_bidirectional {
+                    prev_hidden_size * 2 // Bidirectional output is concatenated
+                } else {
+                    prev_hidden_size
+                }
             };
 
             // Get hidden size for this specific layer
             let layer_hidden_size = self.config.get_hidden_size_for_layer(layer_idx);
 
-            // Create LSTM configuration for this layer with PROPER INITIALIZATION
-            let lstm_config = CandleLSTMConfig {
+            // Create forward LSTM layer
+            let forward_lstm_config = CandleLSTMConfig {
                 layer_idx,
                 direction: candle_nn::rnn::Direction::Forward,
                 ..CandleLSTMConfig::default()
             };
 
-            // Create LSTM layer with XAVIER/GLOROT INITIALIZATION to prevent exploding gradients
-
-            let vs_layer = vs.pp(format!("lstm_layer_{}", layer_idx));
-
-            // CRITICAL FIX: Use proper weight initialization for gradient stability
-            // Xavier initialization scales weights based on layer size to prevent explosion
-            let lstm_layer = lstm(
+            let vs_forward = vs.pp(format!("forward_lstm_layer_{}", layer_idx));
+            let forward_lstm_layer = lstm(
                 layer_input_size,
-                layer_hidden_size, // Use per-layer hidden size
-                lstm_config,
-                vs_layer,
+                layer_hidden_size,
+                forward_lstm_config,
+                vs_forward,
             )
             .map_err(|e| {
-                VangaError::ModelError(format!("LSTM layer {} creation failed: {}", layer_idx, e))
+                VangaError::ModelError(format!(
+                    "Forward LSTM layer {} creation failed: {}",
+                    layer_idx, e
+                ))
             })?;
 
-            // Log initialization details for debugging
+            forward_lstm_layers.push(forward_lstm_layer);
+
+            // Create backward LSTM layer (only for bidirectional)
+            if is_bidirectional {
+                let backward_lstm_config = CandleLSTMConfig {
+                    layer_idx,
+                    direction: candle_nn::rnn::Direction::Backward,
+                    ..CandleLSTMConfig::default()
+                };
+
+                let vs_backward = vs.pp(format!("backward_lstm_layer_{}", layer_idx));
+                let backward_lstm_layer = lstm(
+                    layer_input_size,
+                    layer_hidden_size,
+                    backward_lstm_config,
+                    vs_backward,
+                )
+                .map_err(|e| {
+                    VangaError::ModelError(format!(
+                        "Backward LSTM layer {} creation failed: {}",
+                        layer_idx, e
+                    ))
+                })?;
+
+                backward_lstm_layers.push(backward_lstm_layer);
+            }
+
             log::debug!(
-                "🔧 LSTM layer {} initialized with Xavier scaling: input={}, hidden={}, sequence_len={}",
+                "Layer {}: input_size={}, hidden_size={}, bidirectional={}",
                 layer_idx,
                 layer_input_size,
                 layer_hidden_size,
-                self.config.sequence_length
+                is_bidirectional
             );
 
             // GRADIENT STABILITY CHECK: Warn about configurations that cause exploding gradients
@@ -522,20 +587,13 @@ impl LSTMModel {
                     layer_idx, layer_hidden_size, self.config.sequence_length
                 );
             }
-
-            // Store LSTM layer directly (no boxing needed)
-            lstm_layers.push(lstm_layer);
-
-            log::debug!(
-                "✅ LSTM layer {} initialized: input_size={}, hidden_size={}",
-                layer_idx,
-                layer_input_size,
-                layer_hidden_size
-            );
         }
 
-        // Store the LSTM layers for manual chaining in forward pass
-        self.lstm_layers = Some(lstm_layers);
+        // Store the layers
+        self.lstm_layers = Some(forward_lstm_layers);
+        if is_bidirectional {
+            self.backward_lstm_layers = Some(backward_lstm_layers);
+        }
 
         // CRITICAL: Apply proper weight initialization after LSTM creation
         self.apply_xavier_initialization()?;
@@ -545,26 +603,31 @@ impl LSTMModel {
             self.initialize_attention_layers(&vs)?;
         }
 
-        // Attention integration temporarily disabled for clean compilation
+        // Calculate output layer input size
+        // For bidirectional: last layer hidden size * 2 (concatenated)
+        // For unidirectional: last layer hidden size
+        let final_hidden_size = self.config.get_hidden_size_for_layer(num_layers - 1);
+        let output_input_size = if is_bidirectional {
+            final_hidden_size * 2
+        } else {
+            final_hidden_size
+        };
 
-        // Create output layer for sequence-to-one prediction - FIXED to use last layer hidden size
-        let last_layer_hidden_size = self.config.get_hidden_size_for_layer(num_layers - 1);
-        let output_layer = linear(
-            last_layer_hidden_size,  // Use last layer's hidden size
-            self.config.output_size, // Use configured output_size for multi-class targets
-            vs.pp("output"),
-        )
-        .map_err(|e| VangaError::ModelError(format!("Output layer creation failed: {}", e)))?;
+        // Create output layer with proper input size
+        let output_layer = linear(output_input_size, self.config.output_size, vs.pp("output"))
+            .map_err(|e| VangaError::ModelError(format!("Output layer creation failed: {}", e)))?;
 
         self.output_layer = Some(output_layer);
 
         log::info!(
-            "✅ Multi-layer LSTM network initialized successfully: {} layers, {} → {:?} → {}",
+            "✅ LSTM network initialized: {} layers, {} parameters, bidirectional={}, output_input_size={}, final_hidden_size={}",
             num_layers,
-            self.config.input_size,
-            self.config.hidden_sizes,
-            self.config.output_size
+            self.config.total_parameters(),
+            is_bidirectional,
+            output_input_size,
+            final_hidden_size
         );
+
         Ok(())
     }
 
@@ -632,60 +695,131 @@ impl LSTMModel {
         Ok((seq_tensor, target_tensor))
     }
 
-    /// Forward pass through multi-layer LSTM network using Sequential
+    /// Forward pass through multi-layer LSTM network - Enhanced with bidirectional support
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let lstm_layers = self
-            .lstm_layers
-            .as_ref()
-            .ok_or_else(|| VangaError::ModelError("LSTM layers not initialized".to_string()))?;
+        let forward_lstm_layers = self.lstm_layers.as_ref().ok_or_else(|| {
+            VangaError::ModelError("Forward LSTM layers not initialized".to_string())
+        })?;
 
         let output_layer = self
             .output_layer
             .as_ref()
             .ok_or_else(|| VangaError::ModelError("Output layer not initialized".to_string()))?;
 
-        // Manual forward pass through LSTM layers
-        let mut current_output = input.clone();
-        for (i, lstm_layer) in lstm_layers.iter().enumerate() {
-            // Use the seq method from RNN trait which processes the full sequence
-            let layer_states = lstm_layer.seq(&current_output)?;
+        // Check if this is bidirectional
+        let is_bidirectional = matches!(
+            self.architecture,
+            Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
+        );
 
-            // Validate we have states to process
-            if layer_states.is_empty() {
-                return Err(VangaError::ModelError(format!(
-                    "Layer {} produced no states",
-                    i
-                )));
+        let lstm_output = if is_bidirectional {
+            // Bidirectional processing
+            let backward_lstm_layers = self.backward_lstm_layers.as_ref().ok_or_else(|| {
+                VangaError::ModelError(
+                    "Backward LSTM layers not initialized for bidirectional model".to_string(),
+                )
+            })?;
+
+            // Process each layer bidirectionally
+            let mut current_input = input.clone();
+
+            for (layer_idx, (forward_layer, backward_layer)) in forward_lstm_layers
+                .iter()
+                .zip(backward_lstm_layers.iter())
+                .enumerate()
+            {
+                // Process forward direction
+                let forward_states = forward_layer.seq(&current_input)?;
+                if forward_states.is_empty() {
+                    return Err(VangaError::ModelError(format!(
+                        "Forward layer {} produced no states",
+                        layer_idx
+                    )));
+                }
+
+                let mut forward_hidden_states = Vec::new();
+                for state in &forward_states {
+                    forward_hidden_states.push(state.h().clone());
+                }
+                let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
+
+                // Process backward direction
+                let backward_states = backward_layer.seq(&current_input)?;
+                if backward_states.is_empty() {
+                    return Err(VangaError::ModelError(format!(
+                        "Backward layer {} produced no states",
+                        layer_idx
+                    )));
+                }
+
+                let mut backward_hidden_states = Vec::new();
+                for state in &backward_states {
+                    backward_hidden_states.push(state.h().clone());
+                }
+                let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
+
+                // Concatenate forward and backward outputs along the feature dimension
+                // forward_output: [batch_size, seq_len, hidden_size]
+                // backward_output: [batch_size, seq_len, hidden_size]
+                // Result: [batch_size, seq_len, 2*hidden_size]
+                current_input =
+                    Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
+
+                log::debug!(
+                    "Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
+                    layer_idx,
+                    forward_output.shape(),
+                    backward_output.shape(),
+                    current_input.shape()
+                );
             }
 
-            // Collect all hidden states from the sequence to form the output tensor
-            // Each state.h() is [batch_size, hidden_size], we need [batch_size, seq_len, hidden_size]
-            let mut hidden_states = Vec::new();
-            for state in &layer_states {
-                hidden_states.push(state.h().clone());
+            current_input
+        } else {
+            // Unidirectional processing (original logic)
+            let mut current_output = input.clone();
+            for (i, lstm_layer) in forward_lstm_layers.iter().enumerate() {
+                let layer_states = lstm_layer.seq(&current_output)?;
+
+                if layer_states.is_empty() {
+                    return Err(VangaError::ModelError(format!(
+                        "Layer {} produced no states",
+                        i
+                    )));
+                }
+
+                let mut hidden_states = Vec::new();
+                for state in &layer_states {
+                    hidden_states.push(state.h().clone());
+                }
+
+                current_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
+                log::debug!(
+                    "Unidirectional layer {} output shape: {:?}",
+                    i,
+                    current_output.shape()
+                );
+
+                // Validate output dimensions
+                let output_shape = current_output.shape();
+                if output_shape.dims().len() != 3 {
+                    return Err(VangaError::ModelError(format!(
+                        "Layer {} output has wrong dimensions: expected 3D tensor, got {:?}",
+                        i, output_shape
+                    )));
+                }
             }
-
-            // Stack the hidden states to form [batch_size, seq_len, hidden_size]
-            current_output = Tensor::stack(&hidden_states, 1)?;
-
-            // Validate output dimensions match expectations
-            let output_shape = current_output.shape();
-            log::debug!("Layer {} output shape: {:?}", i, output_shape);
-
-            // Ensure we have the expected 3D tensor [batch_size, seq_len, hidden_size]
-            if output_shape.dims().len() != 3 {
-                return Err(VangaError::ModelError(format!(
-                    "Layer {} output has wrong dimensions: expected 3D tensor, got {:?}",
-                    i, output_shape
-                )));
-            }
-        }
-        let lstm_output = current_output;
+            current_output
+        };
 
         // Apply attention if enabled
         let final_output = if self.use_attention && self.attention_layers.is_some() {
             let attention = self.attention_layers.as_ref().unwrap();
-            let (attended_output, _attention_weights) = attention.forward(&lstm_output)?;
+
+            // Ensure LSTM output is contiguous before passing to attention
+            let contiguous_lstm_output = lstm_output.contiguous()?;
+            let (attended_output, _attention_weights) =
+                attention.forward(&contiguous_lstm_output)?;
 
             // For sequence-to-one prediction, take the last timestep from attended output
             let seq_len = attended_output.dim(1).map_err(|e| {
@@ -700,6 +834,7 @@ impl LSTMModel {
                         e
                     ))
                 })?
+                .contiguous()?
                 .squeeze(1)
                 .map_err(|e| {
                     VangaError::ModelError(format!(
@@ -707,9 +842,10 @@ impl LSTMModel {
                         e
                     ))
                 })?
+                .contiguous()?
         } else {
             // Standard LSTM: For sequence-to-one prediction, we need the last timestep
-            // Sequential output should be [batch_size, seq_len, hidden_size]
+            // LSTM output should be [batch_size, seq_len, hidden_size] or [batch_size, seq_len, 2*hidden_size] for bidirectional
             let seq_len = lstm_output.dim(1).map_err(|e| {
                 VangaError::ModelError(format!("Failed to get sequence length: {}", e))
             })?;
@@ -729,6 +865,14 @@ impl LSTMModel {
         let predictions = output_layer
             .forward(&final_output)
             .map_err(|e| VangaError::ModelError(format!("Output layer forward failed: {}", e)))?;
+
+        log::debug!(
+            "Forward pass complete: input_shape={:?}, final_output_shape={:?}, predictions_shape={:?}, bidirectional={}",
+            input.shape(),
+            final_output.shape(),
+            predictions.shape(),
+            is_bidirectional
+        );
 
         Ok(predictions)
     }
@@ -4145,6 +4289,12 @@ impl LSTMModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::model::{
+        AttentionConfig, AttentionMechanism, DirectionHead, DistributionType, DropoutConfig,
+        DropoutRate, HiddenUnitsConfig, LSTMArchitecture, ModelConfig, OutputHeadsConfig,
+        PriceLevelHead, PriceLevelTargetStrategy, SequenceLengthConfig, VisualizationConfig,
+        VolatilityHead, VolatilityPredictionMethod,
+    };
     use crate::config::training::OptimizerType;
     use crate::config::training::{EpochConfig, LearningRateConfig, TrainingParams};
     use ndarray::Array3;
@@ -4505,5 +4655,378 @@ mod tests {
             model.lstm_layers.is_some(),
             "Multi-layer LSTM layers should be initialized"
         );
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_lstm_initialization() {
+        // Create a bidirectional LSTM configuration
+        let model_config = ModelConfig {
+            architecture: LSTMArchitecture::BidirectionalLSTM { layers: 2 },
+            sequence_length: SequenceLengthConfig::Fixed(10),
+            hidden_units: HiddenUnitsConfig::Fixed(vec![32, 16]),
+            dropout: DropoutConfig {
+                enabled: false,
+                rate: DropoutRate::Fixed(0.0),
+                variational: false,
+                recurrent: false,
+            },
+            attention: AttentionConfig {
+                enabled: false,
+                mechanism: AttentionMechanism::None,
+                heads: 1,
+                head_dim: None,
+                dropout_rate: 0.0,
+                temperature_scaling: 1.0,
+                use_relative_position: false,
+                visualization: VisualizationConfig::default(),
+            },
+            output_heads: OutputHeadsConfig {
+                price_levels: PriceLevelHead {
+                    enabled: true,
+                    bins: 5,
+                    range_percent: 2.0,
+                    distribution_type: DistributionType::Categorical,
+                    target_strategy: PriceLevelTargetStrategy::Current,
+                },
+                direction: DirectionHead {
+                    enabled: false,
+                    threshold: 0.01,
+                    confidence_calibration: false,
+                },
+                volatility: VolatilityHead {
+                    enabled: false,
+                    method: VolatilityPredictionMethod::Direct,
+                    horizons: vec!["1h".to_string()],
+                },
+            },
+            quantile_outputs: None,
+            loss_function: CryptoLossFunction::MSE,
+        };
+
+        // Create model with bidirectional architecture
+        let input_size = 10;
+        let output_size = 5;
+
+        let mut model =
+            LSTMModel::from_model_config(&model_config, input_size, output_size).unwrap();
+
+        // Verify architecture is stored
+        assert!(matches!(
+            model.architecture,
+            Some(LSTMArchitecture::BidirectionalLSTM { .. })
+        ));
+
+        // Initialize the network - this should create both forward and backward layers
+        model.initialize_network().unwrap();
+
+        // Verify both forward and backward layers are created
+        assert!(model.lstm_layers.is_some());
+        assert!(model.backward_lstm_layers.is_some());
+
+        let forward_layers = model.lstm_layers.as_ref().unwrap();
+        let backward_layers = model.backward_lstm_layers.as_ref().unwrap();
+
+        // Should have 2 layers each
+        assert_eq!(forward_layers.len(), 2);
+        assert_eq!(backward_layers.len(), 2);
+
+        println!("✅ Bidirectional LSTM initialization test passed!");
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_lstm_forward_pass() {
+        // Create a bidirectional LSTM configuration
+        let model_config = ModelConfig {
+            architecture: LSTMArchitecture::BidirectionalLSTM { layers: 1 },
+            sequence_length: SequenceLengthConfig::Fixed(5),
+            hidden_units: HiddenUnitsConfig::Fixed(vec![8]),
+            dropout: DropoutConfig {
+                enabled: false,
+                rate: DropoutRate::Fixed(0.0),
+                variational: false,
+                recurrent: false,
+            },
+            attention: AttentionConfig {
+                enabled: false,
+                mechanism: AttentionMechanism::None,
+                heads: 1,
+                head_dim: None,
+                dropout_rate: 0.0,
+                temperature_scaling: 1.0,
+                use_relative_position: false,
+                visualization: VisualizationConfig::default(),
+            },
+            output_heads: OutputHeadsConfig {
+                price_levels: PriceLevelHead {
+                    enabled: true,
+                    bins: 3,
+                    range_percent: 1.0,
+                    distribution_type: DistributionType::Categorical,
+                    target_strategy: PriceLevelTargetStrategy::Current,
+                },
+                direction: DirectionHead {
+                    enabled: false,
+                    threshold: 0.01,
+                    confidence_calibration: false,
+                },
+                volatility: VolatilityHead {
+                    enabled: false,
+                    method: VolatilityPredictionMethod::Direct,
+                    horizons: vec!["1h".to_string()],
+                },
+            },
+            quantile_outputs: None,
+            loss_function: CryptoLossFunction::MSE,
+        };
+
+        let input_size = 4;
+        let expected_output_size = model_config.output_heads.calculate_total_output_size();
+
+        let mut model =
+            LSTMModel::from_model_config(&model_config, input_size, expected_output_size).unwrap();
+
+        model.initialize_network().unwrap();
+
+        // Mark model as trained for prediction (bypass training requirement for test)
+        model.trained = true;
+
+        // Clear target context to get raw output shape instead of converted class indices
+        model.target_context = None;
+
+        // Create test input data: [batch_size=2, seq_len=5, features=4]
+        let batch_size = 2;
+        let seq_len = 5;
+        let features = 4;
+
+        let mut input_data = Array3::<f64>::zeros((batch_size, seq_len, features));
+
+        // Fill with some test data
+        for i in 0..batch_size {
+            for j in 0..seq_len {
+                for k in 0..features {
+                    input_data[[i, j, k]] = (i as f64 + j as f64 * 0.1 + k as f64 * 0.01) * 0.1;
+                }
+            }
+        }
+
+        // Test forward pass directly to get raw output shape (not converted to class indices)
+        // Convert input data to tensor manually using the same logic as predict method
+        let batch_size = input_data.shape()[0];
+        let seq_len = input_data.shape()[1];
+        let features = input_data.shape()[2];
+
+        let mut seq_data: Vec<f32> = Vec::with_capacity(batch_size * seq_len * features);
+
+        for batch_idx in 0..batch_size {
+            for seq_idx in 0..seq_len {
+                for feature_idx in 0..features {
+                    seq_data.push(input_data[[batch_idx, seq_idx, feature_idx]] as f32);
+                }
+            }
+        }
+
+        let input_tensor = Tensor::from_vec(
+            seq_data,
+            (batch_size, seq_len, features),
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+
+        let predictions = model.forward(&input_tensor).unwrap();
+
+        // Verify output shape
+        let shape_dims = predictions.shape().dims();
+        assert_eq!(shape_dims, &[batch_size, expected_output_size]);
+
+        println!("✅ Bidirectional LSTM forward pass test passed!");
+        println!(
+            "   Input shape: [{}, {}, {}]",
+            batch_size, seq_len, features
+        );
+        println!("   Output shape: {:?}", predictions.shape().dims());
+        println!("   Expected output size: {}", expected_output_size);
+    }
+
+    #[tokio::test]
+    async fn test_unidirectional_vs_bidirectional_output_size() {
+        let input_size = 6;
+        let output_size = 4;
+        let hidden_size = 12;
+
+        // Test unidirectional LSTM
+        let unidirectional_config = ModelConfig {
+            architecture: LSTMArchitecture::MultiLSTM { layers: 1 },
+            sequence_length: SequenceLengthConfig::Fixed(8),
+            hidden_units: HiddenUnitsConfig::Fixed(vec![hidden_size]),
+            dropout: DropoutConfig {
+                enabled: false,
+                rate: DropoutRate::Fixed(0.0),
+                variational: false,
+                recurrent: false,
+            },
+            attention: AttentionConfig {
+                enabled: false,
+                mechanism: AttentionMechanism::None,
+                heads: 1,
+                head_dim: None,
+                dropout_rate: 0.0,
+                temperature_scaling: 1.0,
+                use_relative_position: false,
+                visualization: VisualizationConfig::default(),
+            },
+            output_heads: OutputHeadsConfig {
+                price_levels: PriceLevelHead {
+                    enabled: true,
+                    bins: output_size as u32,
+                    range_percent: 1.0,
+                    distribution_type: DistributionType::Categorical,
+                    target_strategy: PriceLevelTargetStrategy::Current,
+                },
+                direction: DirectionHead {
+                    enabled: false,
+                    threshold: 0.01,
+                    confidence_calibration: false,
+                },
+                volatility: VolatilityHead {
+                    enabled: false,
+                    method: VolatilityPredictionMethod::Direct,
+                    horizons: vec!["1h".to_string()],
+                },
+            },
+            quantile_outputs: None,
+            loss_function: CryptoLossFunction::MSE,
+        };
+
+        // Test bidirectional LSTM
+        let bidirectional_config = ModelConfig {
+            architecture: LSTMArchitecture::BidirectionalLSTM { layers: 1 },
+            ..unidirectional_config.clone()
+        };
+
+        let mut uni_model =
+            LSTMModel::from_model_config(&unidirectional_config, input_size, output_size).unwrap();
+        let mut bi_model =
+            LSTMModel::from_model_config(&bidirectional_config, input_size, output_size).unwrap();
+
+        uni_model.initialize_network().unwrap();
+        bi_model.initialize_network().unwrap();
+
+        // Verify unidirectional has no backward layers
+        assert!(uni_model.backward_lstm_layers.is_none());
+
+        // Verify bidirectional has backward layers
+        assert!(bi_model.backward_lstm_layers.is_some());
+
+        println!("✅ Unidirectional vs Bidirectional architecture test passed!");
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_lstm_with_attention() {
+        // Test bidirectional LSTM with attention enabled
+        let model_config = ModelConfig {
+            architecture: LSTMArchitecture::BidirectionalLSTM { layers: 1 },
+            sequence_length: SequenceLengthConfig::Fixed(5),
+            hidden_units: HiddenUnitsConfig::Fixed(vec![8]),
+            dropout: DropoutConfig {
+                enabled: false,
+                rate: DropoutRate::Fixed(0.0),
+                variational: false,
+                recurrent: false,
+            },
+            attention: AttentionConfig {
+                enabled: true, // Enable attention
+                mechanism: AttentionMechanism::SelfAttention,
+                heads: 2,
+                head_dim: Some(8),
+                dropout_rate: 0.0,
+                temperature_scaling: 1.0,
+                use_relative_position: false,
+                visualization: VisualizationConfig::default(),
+            },
+            output_heads: OutputHeadsConfig {
+                price_levels: PriceLevelHead {
+                    enabled: true,
+                    bins: 3,
+                    range_percent: 1.0,
+                    distribution_type: DistributionType::Categorical,
+                    target_strategy: PriceLevelTargetStrategy::Current,
+                },
+                direction: DirectionHead {
+                    enabled: false,
+                    threshold: 0.01,
+                    confidence_calibration: false,
+                },
+                volatility: VolatilityHead {
+                    enabled: false,
+                    method: VolatilityPredictionMethod::Direct,
+                    horizons: vec!["1h".to_string()],
+                },
+            },
+            quantile_outputs: None,
+            loss_function: CryptoLossFunction::MSE,
+        };
+
+        let input_size = 4;
+        let expected_output_size = model_config.output_heads.calculate_total_output_size();
+
+        let mut model =
+            LSTMModel::from_model_config(&model_config, input_size, expected_output_size).unwrap();
+
+        model.initialize_network().unwrap();
+
+        // Mark model as trained for prediction (bypass training requirement for test)
+        model.trained = true;
+
+        // Clear target context to get raw output shape instead of converted class indices
+        model.target_context = None;
+
+        // Create test input data: [batch_size=2, seq_len=5, features=4]
+        let batch_size = 2;
+        let seq_len = 5;
+        let features = 4;
+
+        let mut input_data = Array3::<f64>::zeros((batch_size, seq_len, features));
+
+        // Fill with some test data
+        for i in 0..batch_size {
+            for j in 0..seq_len {
+                for k in 0..features {
+                    input_data[[i, j, k]] = (i as f64 + j as f64 * 0.1 + k as f64 * 0.01) * 0.1;
+                }
+            }
+        }
+
+        // Test forward pass directly to get raw output shape (not converted to class indices)
+        // Convert input data to tensor manually using the same logic as predict method
+        let mut seq_data: Vec<f32> = Vec::with_capacity(batch_size * seq_len * features);
+
+        for batch_idx in 0..batch_size {
+            for seq_idx in 0..seq_len {
+                for feature_idx in 0..features {
+                    seq_data.push(input_data[[batch_idx, seq_idx, feature_idx]] as f32);
+                }
+            }
+        }
+
+        let input_tensor = Tensor::from_vec(
+            seq_data,
+            (batch_size, seq_len, features),
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+
+        let predictions = model.forward(&input_tensor).unwrap();
+
+        // Verify output shape
+        let shape_dims = predictions.shape().dims();
+        assert_eq!(shape_dims, &[batch_size, expected_output_size]);
+
+        println!("✅ Bidirectional LSTM with attention test passed!");
+        println!(
+            "   Input shape: [{}, {}, {}]",
+            batch_size, seq_len, features
+        );
+        println!("   Output shape: {:?}", predictions.shape().dims());
+        println!("   Expected output size: {}", expected_output_size);
     }
 }
