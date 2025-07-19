@@ -1475,29 +1475,33 @@ impl LSTMModel {
                 let grads = loss.backward()?;
 
                 // Apply gradient clipping if configured
-                let grad_norm = if let Some(clip_value) = self.training_config.clip_gradient {
-                    let clipped_norm =
+                let (original_grad_norm, effective_grad_norm) = if let Some(clip_value) =
+                    self.training_config.clip_gradient
+                {
+                    let (orig_norm, eff_norm) =
                         self.clip_gradients(&grads, clip_value, &mut optimizer, current_lr)?;
 
                     if epoch == 0 && batch_idx == 0 {
                         log::info!(
-                            "🔧 Gradient clipping enabled: threshold={:.3}, initial_norm={:.6}",
+                            "🔧 Gradient clipping enabled: threshold={:.3}, initial_norm={:.6} -> effective_norm={:.6}",
                             clip_value,
-                            clipped_norm
+                            orig_norm,
+                            eff_norm
                         );
                     }
 
-                    clipped_norm
+                    (orig_norm, eff_norm)
                 } else {
                     // No clipping - calculate norm for monitoring
-                    self.calculate_gradient_norm(&grads)?
+                    let norm = self.calculate_gradient_norm(&grads)?;
+                    (norm, norm) // Both norms are the same when no clipping
                 };
 
-                // GRADIENT FLOW VALIDATION: Check gradients before optimizer step
-                self.validate_gradient_flow(&grads, grad_norm)?;
+                // GRADIENT FLOW VALIDATION: Check gradients using EFFECTIVE norm after clipping
+                self.validate_gradient_flow(&grads, effective_grad_norm, original_grad_norm)?;
 
-                // Accumulate gradient norm for epoch reporting
-                epoch_grad_norm += grad_norm;
+                // Accumulate effective gradient norm for epoch reporting (shows actual training impact)
+                epoch_grad_norm += effective_grad_norm;
                 batch_count += 1;
 
                 // Update parameters using the configured optimizer
@@ -2389,32 +2393,50 @@ impl LSTMModel {
     fn validate_gradient_flow(
         &self,
         grads: &candle_core::backprop::GradStore,
-        grad_norm: f64,
+        effective_grad_norm: f64,
+        original_grad_norm: f64,
     ) -> Result<bool> {
-        // Check for NaN gradients
-        if grad_norm.is_nan() {
+        // Check for NaN gradients (use effective norm)
+        if effective_grad_norm.is_nan() {
             return Err(VangaError::ModelError("🚨 NaN gradients detected! This indicates numerical instability in loss calculation or model architecture.".to_string()));
         }
 
-        // Check for infinite gradients
-        if grad_norm.is_infinite() {
+        // Check for infinite gradients (use effective norm)
+        if effective_grad_norm.is_infinite() {
             return Err(VangaError::ModelError("🚨 Infinite gradients detected! This indicates exploding gradients - consider gradient clipping or lower learning rate.".to_string()));
         }
 
-        // Check for zero gradients (no learning)
-        if grad_norm < 1e-12 {
+        // Check for zero gradients (no learning) - use effective norm
+        if effective_grad_norm < 1e-12 {
             log::warn!(
-                "⚠️ Very small gradient norm ({:.2e}) - model may not be learning effectively",
-                grad_norm
+                "⚠️ Very small effective gradient norm ({:.2e}) - model may not be learning effectively",
+                effective_grad_norm
             );
             return Ok(false);
         }
 
-        // Check for exploding gradients
-        if grad_norm > 100.0 {
-            log::warn!(
-                "⚠️ Large gradient norm ({:.2e}) - consider gradient clipping",
-                grad_norm
+        // Check for exploding gradients - NOW USES EFFECTIVE NORM (the actual training impact)
+        if effective_grad_norm > 100.0 {
+            if original_grad_norm != effective_grad_norm {
+                // Clipping was applied but still too large
+                log::warn!(
+                    "⚠️ Large effective gradient norm ({:.2e}) after clipping from original ({:.2e}) - consider lower clipping threshold or learning rate",
+                    effective_grad_norm,
+                    original_grad_norm
+                );
+            } else {
+                // No clipping was applied
+                log::warn!(
+                    "⚠️ Large gradient norm ({:.2e}) - consider gradient clipping",
+                    effective_grad_norm
+                );
+            }
+        } else if original_grad_norm > effective_grad_norm {
+            // Clipping was successfully applied
+            log::debug!(
+                "✂️ Gradient clipping working: original={:.2e} -> effective={:.2e}",
+                original_grad_norm,
+                effective_grad_norm
             );
         }
 
@@ -2454,8 +2476,9 @@ impl LSTMModel {
         }
 
         log::debug!(
-            "✅ Gradient flow validation passed - norm: {:.6e}",
-            grad_norm
+            "✅ Gradient flow validation passed - effective_norm: {:.6e}, original_norm: {:.6e}",
+            effective_grad_norm,
+            original_grad_norm
         );
         Ok(true)
     }
@@ -3931,7 +3954,7 @@ impl LSTMModel {
         clip_value: f64,
         optimizer: &mut OptimizerWrapper,
         original_lr: f64,
-    ) -> Result<f64> {
+    ) -> Result<(f64, f64)> {
         // Calculate gradient norm across all parameters using VarMap
         let mut total_norm_squared = 0.0f64;
         let mut param_count = 0;
@@ -3963,27 +3986,29 @@ impl LSTMModel {
             );
         } else {
             log::warn!("⚠️ No gradients found for norm calculation - this may indicate a problem with the model");
-            return Ok(0.0);
+            return Ok((0.0, 0.0));
         }
 
         // Apply gradient clipping by scaling learning rate if needed
         if grad_norm > clip_value && grad_norm > 0.0 {
             let clip_ratio = clip_value / grad_norm;
             let effective_lr = original_lr * clip_ratio;
+            let effective_norm = clip_value; // Effective gradient norm after clipping
 
             log::debug!(
-                "✂️ GRADIENT CLIPPING APPLIED: norm={:.6} > threshold={:.6} (clip ratio: {:.3}, lr: {:.6} -> {:.6})",
+                "✂️ GRADIENT CLIPPING APPLIED: original_norm={:.6} > threshold={:.6} (clip ratio: {:.3}, lr: {:.6} -> {:.6}, effective_norm={:.6})",
                 grad_norm,
                 clip_value,
                 clip_ratio,
                 original_lr,
-                effective_lr
+                effective_lr,
+                effective_norm
             );
 
             // Temporarily scale learning rate to achieve gradient clipping effect
             optimizer.set_learning_rate(effective_lr);
 
-            Ok(grad_norm) // Return ACTUAL gradient norm, not clipped value
+            Ok((grad_norm, effective_norm)) // Return both original and effective norms
         } else {
             // No clipping needed - ensure learning rate is at original value
             optimizer.set_learning_rate(original_lr);
@@ -3992,7 +4017,7 @@ impl LSTMModel {
                 grad_norm,
                 clip_value
             );
-            Ok(grad_norm)
+            Ok((grad_norm, grad_norm)) // Both norms are the same when no clipping
         }
     }
 
