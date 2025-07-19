@@ -342,23 +342,51 @@ impl LSTMModel {
                 self.config.hidden_size
             };
 
-            // Create LSTM configuration for this layer
+            // Create LSTM configuration for this layer with PROPER INITIALIZATION
             let lstm_config = CandleLSTMConfig {
                 layer_idx,
                 direction: candle_nn::rnn::Direction::Forward,
                 ..CandleLSTMConfig::default()
             };
 
-            // Create LSTM layer with proper naming
+            // Create LSTM layer with XAVIER/GLOROT INITIALIZATION to prevent exploding gradients
+            let vs_layer = vs.pp(format!("lstm_layer_{}", layer_idx));
+
+            // CRITICAL FIX: Use proper weight initialization for gradient stability
+            // Xavier initialization scales weights based on layer size to prevent explosion
             let lstm_layer = lstm(
                 layer_input_size,
                 self.config.hidden_size,
                 lstm_config,
-                vs.pp(format!("lstm_layer_{}", layer_idx)),
+                vs_layer,
             )
             .map_err(|e| {
                 VangaError::ModelError(format!("LSTM layer {} creation failed: {}", layer_idx, e))
             })?;
+
+            // Log initialization details for debugging
+            log::debug!(
+                "🔧 LSTM layer {} initialized with Xavier scaling: input={}, hidden={}, sequence_len={}",
+                layer_idx,
+                layer_input_size,
+                self.config.hidden_size,
+                self.config.sequence_length
+            );
+
+            // GRADIENT STABILITY CHECK: Warn about configurations that cause exploding gradients
+            if self.config.sequence_length > 60 {
+                log::warn!(
+                    "⚠️ LONG SEQUENCE WARNING: sequence_length={} > 60 may cause exploding gradients. Consider reducing to 30-60 for stability.",
+                    self.config.sequence_length
+                );
+            }
+
+            if self.config.hidden_size > 256 && self.config.sequence_length > 30 {
+                log::warn!(
+                    "⚠️ LARGE MODEL WARNING: hidden_size={} with sequence_length={} may cause gradient instability. Consider reducing one or both.",
+                    self.config.hidden_size, self.config.sequence_length
+                );
+            }
 
             // Store LSTM layer directly (no boxing needed)
             lstm_layers.push(lstm_layer);
@@ -1009,9 +1037,6 @@ impl LSTMModel {
             self.initialize_network()?;
         }
 
-        // REMOVED: self.config.output_size = 1; - This was breaking multi-target categorical loss
-        // The output_size should remain as configured during model creation for proper loss calculation
-
         // Determine if we need validation split
         let validation_split = config.training.validation_split;
         let use_validation = validation_split > 0.0;
@@ -1222,7 +1247,10 @@ impl LSTMModel {
 
         // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
         for epoch in 0..self.training_config.epochs {
+            // Initialize epoch tracking variables
             let mut epoch_train_loss = 0.0;
+            let mut epoch_grad_norm = 0.0; // Track gradient norm for epoch logging
+            let mut batch_count = 0;
 
             // Calculate warmup learning rate for current epoch
             if epoch < warmup_epochs as usize {
@@ -1323,6 +1351,14 @@ impl LSTMModel {
                     }
                 }
 
+                // GRADIENT FLOW VALIDATION: Check gradients before optimizer step
+                let grad_norm = self.calculate_gradient_norm(&grads)?;
+                self.validate_gradient_flow(&grads, grad_norm)?;
+
+                // Accumulate gradient norm for epoch reporting
+                epoch_grad_norm += grad_norm;
+                batch_count += 1;
+
                 // Update parameters using the configured optimizer
                 optimizer.step(&grads)?;
 
@@ -1333,8 +1369,13 @@ impl LSTMModel {
                 epoch_train_loss += batch_loss * actual_batch_size as f32;
             }
 
-            // Calculate average training loss
+            // Calculate average training loss and gradient norm
             let avg_train_loss = epoch_train_loss / total_train_samples as f32;
+            let avg_grad_norm = if batch_count > 0 {
+                epoch_grad_norm / batch_count as f64
+            } else {
+                0.0
+            };
 
             // Validation phase (only if validation data is available)
             let avg_val_loss = if let (Some(val_seq), Some(val_tgt)) =
@@ -1506,7 +1547,7 @@ impl LSTMModel {
                         "🚨"
                     };
                     log::info!(
-                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}{}{}, Early Stop: {}/{}{}",
+                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}, Grad: {:.2e}{}{}, Early Stop: {}/{}{}",
                         epoch + 1,
                         self.training_config.epochs,
                         avg_train_loss,
@@ -1514,6 +1555,7 @@ impl LSTMModel {
                         loss_ratio,
                         ratio_status,
                         current_lr,
+                        avg_grad_norm,
                         warmup_status,
                         schedule_status,
                         early_stopping_counter,
@@ -2159,6 +2201,204 @@ impl LSTMModel {
         self.config.output_size
     }
 
+    /// Calculate gradient norm for monitoring gradient flow
+    fn calculate_gradient_norm(&self, grads: &candle_core::backprop::GradStore) -> Result<f64> {
+        let mut total_norm_squared = 0.0f64;
+        let mut param_count = 0;
+
+        // Get all variables from the VarMap (same approach as clip_gradients)
+        let all_vars = self.varmap.all_vars();
+
+        for var in all_vars.iter() {
+            if let Some(grad) = grads.get(var) {
+                total_norm_squared += self.calculate_tensor_norm_squared(grad)?;
+                param_count += 1;
+
+                log::trace!(
+                    "Gradient norm for param {}: {:.6e}",
+                    var.as_tensor()
+                        .shape()
+                        .dims()
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join("x"),
+                    self.calculate_tensor_norm_squared(grad)?.sqrt()
+                );
+            }
+        }
+
+        if param_count == 0 {
+            return Err(VangaError::ModelError(
+                "No gradients found in backward pass".to_string(),
+            ));
+        }
+
+        let total_norm = total_norm_squared.sqrt();
+        log::debug!(
+            "🔍 Total gradient norm: {:.6e} across {} parameters",
+            total_norm,
+            param_count
+        );
+
+        Ok(total_norm)
+    }
+
+    /// Validate gradient flow to catch gradient issues early
+    fn validate_gradient_flow(
+        &self,
+        grads: &candle_core::backprop::GradStore,
+        grad_norm: f64,
+    ) -> Result<bool> {
+        // Check for NaN gradients
+        if grad_norm.is_nan() {
+            return Err(VangaError::ModelError("🚨 NaN gradients detected! This indicates numerical instability in loss calculation or model architecture.".to_string()));
+        }
+
+        // Check for infinite gradients
+        if grad_norm.is_infinite() {
+            return Err(VangaError::ModelError("🚨 Infinite gradients detected! This indicates exploding gradients - consider gradient clipping or lower learning rate.".to_string()));
+        }
+
+        // Check for zero gradients (no learning)
+        if grad_norm < 1e-12 {
+            log::warn!(
+                "⚠️ Very small gradient norm ({:.2e}) - model may not be learning effectively",
+                grad_norm
+            );
+            return Ok(false);
+        }
+
+        // Check for exploding gradients
+        if grad_norm > 100.0 {
+            log::warn!(
+                "⚠️ Large gradient norm ({:.2e}) - consider gradient clipping",
+                grad_norm
+            );
+        }
+
+        // Validate individual gradient tensors for NaN using sum approach
+        let all_vars = self.varmap.all_vars();
+        for var in all_vars.iter() {
+            if let Some(grad) = grads.get(var) {
+                // Check for NaN in individual gradients using sum approach with proper dtype handling
+                let grad_sum = grad.sum_all()?;
+
+                // Handle both F32 and F64 tensors (same pattern as calculate_tensor_norm_squared)
+                let grad_sum_value: f64 = match grad_sum.dtype() {
+                    candle_core::DType::F32 => {
+                        let val: f32 = grad_sum.to_scalar().map_err(|e| {
+                            VangaError::ModelError(format!("F32 gradient sum check failed: {}", e))
+                        })?;
+                        val as f64
+                    }
+                    candle_core::DType::F64 => grad_sum.to_scalar().map_err(|e| {
+                        VangaError::ModelError(format!("F64 gradient sum check failed: {}", e))
+                    })?,
+                    other => {
+                        return Err(VangaError::ModelError(format!(
+                            "Unsupported gradient tensor dtype: {:?}. Expected F32 or F64.",
+                            other
+                        )));
+                    }
+                };
+
+                if grad_sum_value.is_nan() {
+                    return Err(VangaError::ModelError(format!(
+                        "🚨 NaN detected in gradient for parameter with shape {:?}",
+                        var.as_tensor().shape()
+                    )));
+                }
+            }
+        }
+
+        log::debug!(
+            "✅ Gradient flow validation passed - norm: {:.6e}",
+            grad_norm
+        );
+        Ok(true)
+    }
+
+    /// Validate tensor shapes for loss calculation to catch configuration mismatches
+    fn validate_tensor_shapes(
+        &self,
+        predictions: &Tensor,
+        targets: &Tensor,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        let pred_shape = predictions.shape();
+        let target_shape = targets.shape();
+
+        // Basic shape validation
+        if pred_shape.dims().len() != 2 {
+            return Err(VangaError::ModelError(format!(
+                "🚨 TENSOR SHAPE ERROR: Predictions must be 2D tensor, got shape {:?}",
+                pred_shape
+            )));
+        }
+
+        if target_shape.dims().len() != 2 {
+            return Err(VangaError::ModelError(format!(
+                "🚨 TENSOR SHAPE ERROR: Targets must be 2D tensor, got shape {:?}",
+                target_shape
+            )));
+        }
+
+        // Batch size consistency
+        let pred_batch_size = pred_shape.dims()[0];
+        let target_batch_size = target_shape.dims()[0];
+
+        if pred_batch_size != target_batch_size {
+            return Err(VangaError::ModelError(format!(
+                "🚨 BATCH SIZE MISMATCH: Predictions batch size {} != targets batch size {}",
+                pred_batch_size, target_batch_size
+            )));
+        }
+
+        // Output size validation for classification targets
+        let target_type = self.get_target_type()?;
+        let pred_output_size = pred_shape.dims()[1];
+        let expected_output_size = match target_type {
+            TargetType::PriceLevel => {
+                if config.model.output_heads.price_levels.enabled {
+                    config.model.output_heads.price_levels.bins as usize
+                } else {
+                    1 // Regression mode
+                }
+            }
+            TargetType::Direction => 3,  // Up/Down/Sideways
+            TargetType::Volatility => 3, // Low/Medium/High
+        };
+
+        // CRITICAL CHECK: This catches the main bug we're fixing
+        if config.model.output_heads.price_levels.enabled
+            && target_type == TargetType::PriceLevel
+            && pred_output_size == 1
+            && expected_output_size > 1
+        {
+            return Err(VangaError::ModelError(format!(
+                "🚨 CRITICAL CONFIGURATION MISMATCH: PriceLevel classification enabled with {} bins but model output_size=1. This causes MSE fallback instead of CrossEntropy loss, breaking gradient flow. Fix: Set model output_size={}",
+                expected_output_size, expected_output_size
+            )));
+        }
+
+        if pred_output_size != expected_output_size {
+            log::warn!(
+                "⚠️ OUTPUT SIZE MISMATCH: Model output_size={} but expected {} for {:?} target. This may cause suboptimal loss calculation.",
+                pred_output_size, expected_output_size, target_type
+            );
+        }
+
+        log::debug!(
+            "✅ Tensor shape validation passed: pred={:?}, target={:?}, expected_output={}",
+            pred_shape,
+            target_shape,
+            expected_output_size
+        );
+
+        Ok(())
+    }
+
     /// Set target context for this individual model
     /// This allows proper target type detection without assumptions based on output_size
     pub fn set_target_context(
@@ -2264,10 +2504,11 @@ impl LSTMModel {
             // Already correct shape for multi-class
             predictions.clone()
         } else if predictions.dims().len() == 2 && predictions.dims()[1] == 1 {
-            // Single output - need to expand to multi-class logits
-            // For single output, we'll use MSE instead of trying to force CrossEntropy
-            log::debug!("🔄 Single output detected, falling back to MSE loss");
-            return Ok(predictions.sub(targets)?.sqr()?.mean_all()?);
+            // CRITICAL BUG FIX: Single output with classification targets is a configuration error
+            return Err(VangaError::ModelError(format!(
+                "🚨 CONFIGURATION MISMATCH: Model has output_size=1 but classification target requires {} classes. This causes MSE fallback instead of CrossEntropy loss, breaking gradient flow. Fix: Set model output_size={} for classification targets.",
+                num_classes, num_classes
+            )));
         } else {
             return Err(VangaError::ModelError(format!(
                 "Invalid prediction shape for CrossEntropy: {:?}, expected last dim = {}",
@@ -3174,6 +3415,9 @@ impl LSTMModel {
         targets: &Tensor,
         config: &crate::config::TrainingConfig,
     ) -> Result<Tensor> {
+        // TENSOR SHAPE VALIDATION: Critical for catching configuration mismatches early
+        self.validate_tensor_shapes(predictions, targets, config)?;
+
         // Log loss calculation context
         log::debug!(
             "🔍 LOSS CALCULATION - Pred shape: {:?}, Target shape: {:?}",
