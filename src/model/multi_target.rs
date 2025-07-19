@@ -7,6 +7,7 @@ use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3, Axis};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Defines the context for a training session.
@@ -17,15 +18,17 @@ pub enum TrainingContext<'a> {
         targets: &'a Array2<f64>,
         val_sequences: Option<&'a Array3<f64>>,
         val_targets: Option<&'a Array2<f64>>,
-        /// Optional per-window class weights for balanced training
-        class_weights: Option<&'a Vec<f32>>,
+        /// Target-specific class weights for balanced training
+        /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
+        target_class_weights: Option<&'a HashMap<String, Vec<f32>>>,
     },
     /// Continues training from a previous state.
     Continue {
         new_sequences: &'a Array3<f64>,
         new_targets: &'a Array2<f64>,
-        /// Optional per-window class weights for balanced training
-        class_weights: Option<&'a Vec<f32>>,
+        /// Target-specific class weights for balanced training
+        /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
+        target_class_weights: Option<&'a HashMap<String, Vec<f32>>>,
     },
 }
 /// Multi-target LSTM model that trains separate models for each target
@@ -159,12 +162,14 @@ impl MultiTargetLSTMModel {
             );
 
             if actual_output_size != output_size {
-                log::error!(
-                    "🚨 SIZE MISMATCH: {} expected {} but got {}",
+                return Err(VangaError::ModelError(format!(
+                    "🚨 CRITICAL: Target '{}' output size mismatch! Expected {} classes but model has {} classes. \
+                    This indicates a bins configuration mismatch between target generation and model creation. \
+                    Check that model.output_heads.price_levels.bins matches the target generation configuration.",
                     target_name,
                     output_size,
                     actual_output_size
-                );
+                )));
             }
 
             // Reconfigure attention with target context for better logging
@@ -199,14 +204,14 @@ impl MultiTargetLSTMModel {
                 targets,
                 val_sequences,
                 val_targets,
-                class_weights,
+                target_class_weights,
             } => {
                 self.train_internal(
                     sequences,
                     targets,
                     val_sequences,
                     val_targets,
-                    class_weights,
+                    target_class_weights,
                     config,
                 )
                 .await
@@ -214,7 +219,7 @@ impl MultiTargetLSTMModel {
             TrainingContext::Continue {
                 new_sequences,
                 new_targets,
-                class_weights: _, // Unused in continue training
+                target_class_weights: _, // Unused in continue training
             } => {
                 self.continue_training(new_sequences, new_targets, config)
                     .await
@@ -282,7 +287,7 @@ impl MultiTargetLSTMModel {
         targets: &Array2<f64>,
         val_sequences: Option<&Array3<f64>>,
         val_targets: Option<&Array2<f64>>,
-        class_weights: Option<&Vec<f32>>,
+        target_class_weights: Option<&HashMap<String, Vec<f32>>>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!(
@@ -318,11 +323,29 @@ impl MultiTargetLSTMModel {
         // Train each model with its corresponding target
         for (i, model) in self.models.iter_mut().enumerate() {
             let target_name = &self.target_names[i];
+
+            // CRITICAL VALIDATION: Ensure target dimensions match model output dimensions
+            let model_output_size = model.get_output_size();
+            let target_type = Self::get_target_type_from_name(target_name);
+            let expected_output_size = Self::get_output_size_for_target(target_type, &config.model);
+
+            if model_output_size != expected_output_size {
+                return Err(VangaError::ModelError(format!(
+                    "🚨 TRAINING VALIDATION FAILED: Target '{}' has model output size {} but expected {} for {:?}. \
+                    This indicates a bins configuration mismatch. Check your configuration file.",
+                    target_name,
+                    model_output_size,
+                    expected_output_size,
+                    target_type
+                )));
+            }
+
             log::info!(
-                "Training model {}/{}: {}",
+                "Training model {}/{}: {} (output size: {} classes)",
                 i + 1,
                 self.num_targets,
-                target_name
+                target_name,
+                model_output_size
             );
 
             // Extract single target column for this model
@@ -366,6 +389,40 @@ impl MultiTargetLSTMModel {
                 }
             );
 
+            // Get target-specific class weights for this model
+            let target_specific_weights = if let Some(weights_map) = target_class_weights {
+                // Extract target type and horizon from target name (format: "target_type_horizon")
+                let target_type = Self::get_target_type_from_name(target_name);
+
+                // Find the horizon from target name (assumes format like "price_level_1h")
+                let horizon = if let Some(last_underscore) = target_name.rfind('_') {
+                    &target_name[last_underscore + 1..]
+                } else {
+                    // Fallback to first horizon if parsing fails
+                    config.horizons.first().map(|h| h.as_str()).unwrap_or("1h")
+                };
+
+                let weights_key = format!("{:?}_{}", target_type, horizon);
+                let weights = weights_map.get(&weights_key);
+
+                if let Some(w) = weights {
+                    log::debug!(
+                        "🎯 Using target-specific class weights for {}: {} classes",
+                        target_name,
+                        w.len()
+                    );
+                } else {
+                    log::debug!(
+                        "⚠️ No target-specific class weights found for key '{}', using None",
+                        weights_key
+                    );
+                }
+
+                weights
+            } else {
+                None
+            };
+
             match model
                 .train(
                     sequences,
@@ -373,7 +430,7 @@ impl MultiTargetLSTMModel {
                     config,
                     val_sequences,
                     val_single_target.as_ref(),
-                    class_weights,
+                    target_specific_weights,
                 )
                 .await
             {
@@ -710,7 +767,7 @@ mod tests {
                     targets: &wrong_targets,
                     val_sequences: None,
                     val_targets: None,
-                    class_weights: None,
+                    target_class_weights: None,
                 },
                 &config,
             )

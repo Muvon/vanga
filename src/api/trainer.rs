@@ -1,8 +1,7 @@
 // Model trainer
 use crate::config::TrainingConfig;
 use crate::data::DataPipeline;
-use crate::model::multi_target::MultiTargetLSTMModel;
-use crate::model::multi_target::TrainingContext;
+use crate::model::multi_target::{MultiTargetLSTMModel, TrainingContext};
 use crate::targets::{PreparedTargets, TargetGenerator};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
@@ -102,9 +101,16 @@ impl ModelTrainer {
         &self,
         window: &crate::data::TrainingWindow,
     ) -> Result<MultiTargetLSTMModel> {
-        // Generate targets with training config horizons
+        // Generate targets with training config horizons - FIXED: Use model config for price levels
         let target_config = crate::targets::MultiTargetConfig {
-            price_level_config: crate::targets::PriceLevelConfig::default(),
+            price_level_config: crate::targets::PriceLevelConfig {
+                bins: self.config.model.output_heads.price_levels.bins,
+                quantile_method: crate::targets::price_levels::QuantileMethod::Rolling {
+                    window: 1000,
+                },
+                lookback_window: 100,
+                min_price_change: 0.001,
+            },
             direction_config: crate::targets::DirectionConfig::default(),
             volatility_config: crate::targets::VolatilityConfig::default(),
             horizons: self.config.horizons.clone(),
@@ -159,7 +165,7 @@ impl ModelTrainer {
                     targets: &train_targets,
                     val_sequences: Some(&window.val_data.sequences),
                     val_targets: Some(&val_targets),
-                    class_weights: window.class_weights.as_ref(),
+                    target_class_weights: Some(&window.target_class_weights),
                 },
                 &self.config,
             )
@@ -175,9 +181,16 @@ impl ModelTrainer {
         mut model: MultiTargetLSTMModel,
         window: &crate::data::TrainingWindow,
     ) -> Result<MultiTargetLSTMModel> {
-        // Generate targets for new window
+        // Generate targets for new window using model configuration - FIXED: Use model config for price levels
         let target_config = crate::targets::MultiTargetConfig {
-            price_level_config: crate::targets::PriceLevelConfig::default(),
+            price_level_config: crate::targets::PriceLevelConfig {
+                bins: self.config.model.output_heads.price_levels.bins,
+                quantile_method: crate::targets::price_levels::QuantileMethod::Rolling {
+                    window: 1000,
+                },
+                lookback_window: 100,
+                min_price_change: 0.001,
+            },
             direction_config: crate::targets::DirectionConfig::default(),
             volatility_config: crate::targets::VolatilityConfig::default(),
             horizons: self.config.horizons.clone(),
@@ -219,7 +232,7 @@ impl ModelTrainer {
                 TrainingContext::Continue {
                     new_sequences: &window.train_data.sequences,
                     new_targets: &train_targets,
-                    class_weights: window.class_weights.as_ref(),
+                    target_class_weights: Some(&window.target_class_weights),
                 },
                 &self.config,
             )

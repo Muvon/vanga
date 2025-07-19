@@ -136,6 +136,23 @@ impl DataPipeline {
             total_samples += 1;
         }
 
+        // Debug: Log detailed class distribution for this window
+        log::debug!(
+            "🔍 Window class distribution for {:?} horizon {}: {} total samples",
+            target_type,
+            horizon,
+            total_samples
+        );
+        for (class_id, count) in &class_counts {
+            let percentage = (*count as f64 / total_samples as f64) * 100.0;
+            log::debug!(
+                "   Class {}: {} samples ({:.2}%)",
+                class_id,
+                count,
+                percentage
+            );
+        }
+
         if num_classes < 2 {
             log::warn!(
                 "⚠️ Only {} classes configured for {:?} horizon {}, skipping class weights",
@@ -167,6 +184,51 @@ impl DataPipeline {
         );
 
         Ok(Some(weights))
+    }
+
+    /// Calculate class weights for all target types and horizons
+    fn calculate_all_target_class_weights(
+        &self,
+        train_data: &PreparedData,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<HashMap<String, Vec<f32>>> {
+        let mut target_weights = HashMap::new();
+
+        // Define all target types to calculate weights for
+        let target_types = [
+            TargetType::PriceLevel,
+            TargetType::Direction,
+            TargetType::Volatility,
+        ];
+
+        for target_type in &target_types {
+            for horizon in &config.horizons {
+                // Calculate weights for this specific target type and horizon
+                if let Ok(Some(weights)) =
+                    self.calculate_window_class_weights(train_data, target_type, horizon, config)
+                {
+                    let key = format!("{:?}_{}", target_type, horizon);
+                    target_weights.insert(key, weights);
+
+                    log::debug!(
+                        "📊 Calculated class weights for {:?} horizon {}: {} classes",
+                        target_type,
+                        horizon,
+                        target_weights
+                            .get(&format!("{:?}_{}", target_type, horizon))
+                            .unwrap()
+                            .len()
+                    );
+                }
+            }
+        }
+
+        log::info!(
+            "🎯 Calculated class weights for {} target-horizon combinations",
+            target_weights.len()
+        );
+
+        Ok(target_weights)
     }
 
     /// Create walk-forward analysis windows using existing validation_split config
@@ -249,34 +311,44 @@ impl DataPipeline {
                 )
                 .await?;
 
-            // Calculate per-window class weights based on configuration strategy
-            let window_class_weights = match config.training.class_weight_strategy {
-                ClassWeightStrategy::PerWindow => {
-                    if let Some(primary_horizon) = config.horizons.first() {
-                        self.calculate_window_class_weights(
-                            &train_sequences,
-                            &TargetType::PriceLevel,
-                            primary_horizon,
-                            config,
-                        )
-                        .unwrap_or_else(|e| {
-                            log::warn!("⚠️ Failed to calculate window class weights: {}", e);
-                            None
-                        })
-                    } else {
-                        log::warn!("⚠️ No horizons configured, skipping window class weights");
-                        None
-                    }
-                }
+            // Calculate target-specific per-window class weights based on configuration strategy
+            let target_class_weights = match config.training.class_weight_strategy {
+                ClassWeightStrategy::PerWindow => self
+                    .calculate_all_target_class_weights(&train_sequences, config)
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "⚠️ Failed to calculate target-specific class weights: {}",
+                            e
+                        );
+                        HashMap::new()
+                    }),
                 ClassWeightStrategy::Global => {
                     // Global weights will be calculated once in the LSTM model
-                    None
+                    HashMap::new()
                 }
                 ClassWeightStrategy::None => {
                     // No class weighting
-                    None
+                    HashMap::new()
                 }
             };
+
+            // Log target class weights summary for this window
+            if !target_class_weights.is_empty() {
+                log::info!(
+                    "🎯 Window {} class weights: {} target-horizon combinations calculated",
+                    windows.len() + 1,
+                    target_class_weights.len()
+                );
+                for (key, weights) in &target_class_weights {
+                    log::debug!("   {}: {:?}", key, weights);
+                }
+            } else {
+                log::info!(
+                    "🎯 Window {}: No class weights calculated (strategy: {:?})",
+                    windows.len() + 1,
+                    config.training.class_weight_strategy
+                );
+            }
 
             windows.push(TrainingWindow {
                 train_data: train_sequences,
@@ -284,19 +356,8 @@ impl DataPipeline {
                 window_id: windows.len(),
                 train_samples: train_end,
                 val_samples: validation_size,
-                class_weights: window_class_weights,
+                target_class_weights,
             });
-
-            log::info!(
-                "📊 Window {}: Train[0-{}] → Gap[{}-{}] → Val[{}-{}] | Gap: {} steps (prevents data leakage)",
-                windows.len(),
-                train_end,
-                train_end,
-                val_start,
-                val_start,
-                val_end,
-                gap_size
-            );
 
             // Move window forward by validation_size (no overlap in test sets)
             train_end = val_end;
@@ -556,6 +617,7 @@ pub struct TrainingWindow {
     pub window_id: usize,
     pub train_samples: usize,
     pub val_samples: usize,
-    /// Per-window class weights for balanced training
-    pub class_weights: Option<Vec<f32>>,
+    /// Target-specific class weights for balanced training
+    /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
+    pub target_class_weights: HashMap<String, Vec<f32>>,
 }
