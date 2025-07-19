@@ -1564,36 +1564,17 @@ impl LSTMModel {
             if let Some((_, target_type)) = &self.target_context {
                 match target_type {
                     TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
-                        // Calculate classification accuracy
-                        let mut correct = 0;
-                        let mut total = 0;
-
-                        for i in 0..final_predictions.nrows() {
-                            if i < targets.nrows() {
-                                let predicted_class = final_predictions[[i, 0]] as i32;
-                                let true_class = targets[[i, 0]] as i32;
-                                if predicted_class == true_class {
-                                    correct += 1;
-                                }
-                                total += 1;
-                            }
-                        }
-
-                        let accuracy = if total > 0 {
-                            correct as f64 / total as f64 * 100.0
-                        } else {
-                            0.0
-                        };
-
-                        // Calculate additional distance-based metrics for categorical data
-                        let final_mse = self.calculate_mse_loss(&final_predictions, targets);
-                        let final_categorical_mape =
-                            self.calculate_categorical_mape(&final_predictions, targets);
-
+                        // Use the SAME working method that calculates correct MAPE every 10 epochs
                         log::info!(
-                            "📊 Final Training Metrics - Accuracy: {:.2}% ({}/{} correct), MSE: {:.3}, MAPE: {:.2}%",
-                            accuracy, correct, total, final_mse, final_categorical_mape
+                            "📊 Calculating Final Training Metrics using validated method..."
                         );
+                        let _ = self
+                            .calculate_categorical_validation_metrics(
+                                sequences, targets, 64, // batch_size (not used in the method)
+                                10, // epoch = 10 to force calculation (10 % 10 == 0)
+                                config,
+                            )
+                            .await;
                     }
                 }
             } else {
