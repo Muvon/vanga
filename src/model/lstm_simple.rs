@@ -1255,6 +1255,28 @@ impl LSTMModel {
             let val_seq = sequences.slice(s![val_start.., .., ..]).to_owned();
             let val_tgt = targets.slice(s![val_start.., ..]).to_owned();
 
+            // CRITICAL: Validate sequence-target alignment
+            log::debug!(
+                "🔍 Train/Val split validation: train_seq={:?}, train_tgt={:?}, val_seq={:?}, val_tgt={:?}",
+                train_seq.shape(), train_tgt.shape(), val_seq.shape(), val_tgt.shape()
+            );
+
+            if train_seq.shape()[0] != train_tgt.shape()[0] {
+                return Err(VangaError::DataError(format!(
+                    "Train sequence-target mismatch: {} sequences vs {} targets",
+                    train_seq.shape()[0],
+                    train_tgt.shape()[0]
+                )));
+            }
+
+            if val_seq.shape()[0] != val_tgt.shape()[0] {
+                return Err(VangaError::DataError(format!(
+                    "Validation sequence-target mismatch: {} sequences vs {} targets",
+                    val_seq.shape()[0],
+                    val_tgt.shape()[0]
+                )));
+            }
+
             log::info!(
                     "🔒 Data leakage prevention: {} train samples, {} gap (max horizon: {}), {} val samples (starting at {})",
                     train_samples,

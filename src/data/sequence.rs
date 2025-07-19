@@ -364,8 +364,108 @@ impl SequenceGenerator {
             sequences.slice_mut(s![i, .., ..]).assign(&sequence);
         }
 
-        // Return both sequences and the actual generated targets
-        Ok((sequences, prepared_targets))
+        // CRITICAL FIX: Create sequence-aligned targets
+        // When using step_size > 1, we need to map sequence indices to target indices
+        let mut sequence_aligned_targets = PreparedTargets::new(num_sequences);
+
+        // Map each sequence index to its corresponding target index
+        for seq_idx in 0..num_sequences {
+            let target_idx = seq_idx * step_size + sequence_length - 1; // Target is at end of sequence
+
+            // Copy targets for this sequence from the original targets
+            for (horizon, price_targets) in &prepared_targets.price_levels {
+                if let Some(target_vec) = sequence_aligned_targets.price_levels.get_mut(horizon) {
+                    if target_idx < price_targets.len() {
+                        target_vec[seq_idx] = price_targets[target_idx];
+                    }
+                } else {
+                    let mut new_vec = vec![-1; num_sequences];
+                    if target_idx < price_targets.len() {
+                        new_vec[seq_idx] = price_targets[target_idx];
+                    }
+                    sequence_aligned_targets
+                        .price_levels
+                        .insert(horizon.clone(), new_vec);
+                }
+            }
+
+            for (horizon, direction_targets) in &prepared_targets.directions {
+                if let Some(target_vec) = sequence_aligned_targets.directions.get_mut(horizon) {
+                    if target_idx < direction_targets.len() {
+                        target_vec[seq_idx] = direction_targets[target_idx];
+                    }
+                } else {
+                    let mut new_vec = vec![-1; num_sequences];
+                    if target_idx < direction_targets.len() {
+                        new_vec[seq_idx] = direction_targets[target_idx];
+                    }
+                    sequence_aligned_targets
+                        .directions
+                        .insert(horizon.clone(), new_vec);
+                }
+            }
+
+            for (horizon, volatility_targets) in &prepared_targets.volatility {
+                if let Some(target_vec) = sequence_aligned_targets.volatility.get_mut(horizon) {
+                    if target_idx < volatility_targets.len() {
+                        target_vec[seq_idx] = volatility_targets[target_idx];
+                    }
+                } else {
+                    let mut new_vec = vec![-1; num_sequences];
+                    if target_idx < volatility_targets.len() {
+                        new_vec[seq_idx] = volatility_targets[target_idx];
+                    }
+                    sequence_aligned_targets
+                        .volatility
+                        .insert(horizon.clone(), new_vec);
+                }
+            }
+        }
+
+        // Update valid indices to be sequence indices where targets are valid
+        sequence_aligned_targets.valid_indices = (0..num_sequences)
+            .filter(|&i| {
+                // Check if all targets are valid for this sequence
+                let mut all_valid = true;
+
+                // Check first horizon as representative
+                if let Some(first_horizon) = horizons.first() {
+                    if let Some(price_targets) =
+                        sequence_aligned_targets.price_levels.get(first_horizon)
+                    {
+                        if i >= price_targets.len() || price_targets[i] < 0 {
+                            all_valid = false;
+                        }
+                    }
+                }
+
+                all_valid
+            })
+            .collect();
+
+        log::info!(
+            "📊 Sequence-aligned targets: {} sequences with {} valid samples",
+            num_sequences,
+            sequence_aligned_targets.valid_indices.len()
+        );
+
+        // Debug: Verify alignment for first few sequences
+        if num_sequences > 0 && log::log_enabled!(log::Level::Debug) {
+            log::debug!("🔍 Target alignment verification (first 3 sequences):");
+            for seq_idx in 0..std::cmp::min(3, num_sequences) {
+                let target_idx = seq_idx * step_size + sequence_length - 1;
+                log::debug!(
+                    "  Sequence {} → Target index {} (step_size={}, seq_len={})",
+                    seq_idx,
+                    target_idx,
+                    step_size,
+                    sequence_length
+                );
+            }
+        }
+
+        // Return both sequences and the sequence-aligned targets
+        Ok((sequences, sequence_aligned_targets))
     }
 
     /// Create prediction sequences from feature data
