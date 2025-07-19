@@ -141,7 +141,7 @@ impl DataPreprocessor {
         // CRITICAL: Calculate normalization stats from raw data BEFORE applying normalization
         // This ensures prediction pipeline can use the same stats for consistent preprocessing
         log::info!("📊 Calculating normalization statistics from raw data before normalization");
-        let normalization_stats = self.calculate_normalization_stats(&df)?;
+        let normalization_stats = self.calculate_statistics(&df)?;
         log::info!(
             "✅ Normalization stats calculated from raw data (means, stds, mins, maxs, etc.)"
         );
@@ -2016,109 +2016,6 @@ impl DataPreprocessor {
         }
 
         Ok(())
-    }
-
-    /// Calculate normalization statistics from a DataFrame
-    /// This is used to calculate stats from raw data before normalization is applied
-    fn calculate_normalization_stats(
-        &self,
-        df: &DataFrame,
-    ) -> Result<crate::data::NormalizationStats> {
-        // Get numeric columns only
-        let numeric_columns: Vec<String> = df
-            .get_columns()
-            .iter()
-            .filter(|col| col.dtype().is_numeric())
-            .map(|col| col.name().to_string())
-            .collect();
-
-        let feature_count = numeric_columns.len();
-        let mut means = Vec::with_capacity(feature_count);
-        let mut stds = Vec::with_capacity(feature_count);
-        let mut mins = Vec::with_capacity(feature_count);
-        let mut maxs = Vec::with_capacity(feature_count);
-        let mut medians = Vec::with_capacity(feature_count);
-        let mut q25 = Vec::with_capacity(feature_count);
-        let mut q75 = Vec::with_capacity(feature_count);
-
-        for column_name in &numeric_columns {
-            let series = df.column(column_name).map_err(|e| {
-                VangaError::DataError(format!("Failed to get column {}: {}", column_name, e))
-            })?;
-
-            // Convert to f64 and filter out NaN/infinite values
-            let values: Vec<f64> = if let Ok(float_series) = series.f64() {
-                float_series
-                    .into_iter()
-                    .filter_map(|v| v.filter(|x| x.is_finite()))
-                    .collect()
-            } else {
-                // Try to cast to f64 if not already
-                let casted = series
-                    .cast(&polars::prelude::DataType::Float64)
-                    .map_err(|e| {
-                        VangaError::DataError(format!(
-                            "Failed to cast column {} to f64: {}",
-                            column_name, e
-                        ))
-                    })?;
-                let float_series = casted.f64().map_err(|e| {
-                    VangaError::DataError(format!(
-                        "Failed to get f64 view of column {}: {}",
-                        column_name, e
-                    ))
-                })?;
-                float_series
-                    .into_iter()
-                    .filter_map(|v| v.filter(|x| x.is_finite()))
-                    .collect()
-            };
-
-            if values.is_empty() {
-                return Err(VangaError::DataError(format!(
-                    "Column {} has no valid numeric values",
-                    column_name
-                )));
-            }
-
-            // Calculate statistics
-            let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance =
-                values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
-            let std = variance.sqrt();
-            let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-            let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-            // Calculate quantiles
-            let mut sorted_values = values.clone();
-            sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let len = sorted_values.len();
-            let median = if len % 2 == 0 {
-                (sorted_values[len / 2 - 1] + sorted_values[len / 2]) / 2.0
-            } else {
-                sorted_values[len / 2]
-            };
-            let q25_val = sorted_values[len / 4];
-            let q75_val = sorted_values[3 * len / 4];
-
-            means.push(mean);
-            stds.push(std);
-            mins.push(min);
-            maxs.push(max);
-            medians.push(median);
-            q25.push(q25_val);
-            q75.push(q75_val);
-        }
-
-        Ok(crate::data::NormalizationStats {
-            means,
-            stds,
-            mins,
-            maxs,
-            medians,
-            q25,
-            q75,
-        })
     }
 }
 
