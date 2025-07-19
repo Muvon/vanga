@@ -41,11 +41,67 @@ enum TargetFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LSTMConfig {
     pub input_size: usize,
-    pub hidden_size: usize,
+    pub hidden_sizes: Vec<usize>, // Changed from single hidden_size to per-layer sizes
     pub output_size: usize,
     pub sequence_length: usize,
     pub learning_rate: f64,
     pub num_layers: usize, // Added for multi-layer support
+}
+
+impl LSTMConfig {
+    /// Get hidden size for a specific layer
+    pub fn get_hidden_size_for_layer(&self, layer_idx: usize) -> usize {
+        self.hidden_sizes
+            .get(layer_idx)
+            .copied()
+            .unwrap_or_else(|| {
+                // Fallback: use last available size if layer_idx exceeds array
+                self.hidden_sizes.last().copied().unwrap_or(128)
+            })
+    }
+
+    /// Get the total number of parameters across all layers
+    pub fn total_parameters(&self) -> usize {
+        let mut total = 0;
+        for layer_idx in 0..self.num_layers {
+            let input_size = if layer_idx == 0 {
+                self.input_size
+            } else {
+                self.get_hidden_size_for_layer(layer_idx - 1)
+            };
+            let hidden_size = self.get_hidden_size_for_layer(layer_idx);
+
+            // LSTM has 4 gates, each with input and hidden weights plus bias
+            total += (input_size + hidden_size + 1) * hidden_size * 4;
+        }
+        total
+    }
+
+    /// Validate the configuration for consistency
+    pub fn validate(&self) -> Result<()> {
+        if self.hidden_sizes.is_empty() {
+            return Err(VangaError::ModelError(
+                "hidden_sizes cannot be empty".to_string(),
+            ));
+        }
+
+        if self.num_layers == 0 {
+            return Err(VangaError::ModelError(
+                "num_layers must be at least 1".to_string(),
+            ));
+        }
+
+        // Warn if hidden_sizes array is shorter than num_layers
+        if self.hidden_sizes.len() < self.num_layers {
+            log::warn!(
+                "hidden_sizes array length ({}) < num_layers ({}). Will reuse last size for remaining layers.",
+                self.hidden_sizes.len(),
+                self.num_layers
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Training configuration - preserving original structure
@@ -184,39 +240,109 @@ impl LSTMModel {
             crate::config::model::SequenceLengthConfig::Adaptive => 60,
         };
 
-        // Extract hidden units from config - SAME logic
-        let hidden_size = match &model_config.hidden_units {
+        // Extract number of layers from architecture config - MOVED UP
+        let num_layers = Self::extract_num_layers_from_architecture(&model_config.architecture);
+
+        // Extract hidden units from config - ENHANCED to use full array
+        let hidden_sizes = match &model_config.hidden_units {
             crate::config::model::HiddenUnitsConfig::Fixed(units) => {
-                units.first().copied().unwrap_or(128) as usize
+                // Use the full array instead of just the first value
+                units.iter().map(|&u| u as usize).collect::<Vec<usize>>()
             }
             crate::config::model::HiddenUnitsConfig::Auto {
                 min_units,
                 max_units: _,
-            } => *min_units as usize,
+            } => {
+                // For auto config, create a single-layer configuration
+                vec![*min_units as usize]
+            }
             crate::config::model::HiddenUnitsConfig::Pyramid {
                 base_units,
-                reduction_factor: _,
-            } => *base_units as usize,
+                reduction_factor,
+            } => {
+                // Generate pyramid architecture: base_units, base_units * reduction_factor, etc.
+                let mut sizes = Vec::new();
+                let mut current_size = *base_units as f64;
+
+                for _ in 0..num_layers {
+                    sizes.push(current_size as usize);
+                    current_size *= reduction_factor;
+                    // Ensure minimum size of 8 units
+                    if current_size < 8.0 {
+                        current_size = 8.0;
+                    }
+                }
+                sizes
+            }
         };
 
-        // Extract number of layers from architecture config - NEW
-        let num_layers = Self::extract_num_layers_from_architecture(&model_config.architecture);
+        // Validate hidden_sizes array consistency
+        if hidden_sizes.is_empty() {
+            return Err(VangaError::ModelError(
+                "Hidden units configuration resulted in empty array".to_string(),
+            ));
+        }
+
+        // Validate reasonable hidden sizes
+        for (i, &size) in hidden_sizes.iter().enumerate() {
+            if size == 0 {
+                return Err(VangaError::ModelError(format!(
+                    "Layer {} has zero hidden units",
+                    i
+                )));
+            }
+            if size > 2048 {
+                log::warn!(
+                    "⚠️ Layer {} has very large hidden size ({}). This may cause memory issues.",
+                    i,
+                    size
+                );
+            }
+        }
+
+        // Extend hidden_sizes if needed to match num_layers
+        let mut final_hidden_sizes = hidden_sizes;
+        if final_hidden_sizes.len() < num_layers {
+            let last_size = final_hidden_sizes.last().copied().unwrap_or(128);
+            log::info!(
+                "🔧 Extending hidden_sizes from {} to {} layers using last size ({})",
+                final_hidden_sizes.len(),
+                num_layers,
+                last_size
+            );
+            final_hidden_sizes.resize(num_layers, last_size);
+        } else if final_hidden_sizes.len() > num_layers {
+            log::warn!(
+                "⚠️ hidden_sizes array length ({}) > num_layers ({}). Truncating to {} layers.",
+                final_hidden_sizes.len(),
+                num_layers,
+                num_layers
+            );
+            final_hidden_sizes.truncate(num_layers);
+        }
 
         // Use sequence_length for LSTM configuration if needed - SAME logic
-        let effective_hidden_size = if sequence_length > 100 {
-            hidden_size + (sequence_length / 10) // Adjust hidden size based on sequence length
+        let adjusted_hidden_sizes = if sequence_length > 100 {
+            // Adjust all layer sizes based on sequence length
+            final_hidden_sizes
+                .iter()
+                .map(|&size| size + (sequence_length / 10))
+                .collect()
         } else {
-            hidden_size
+            final_hidden_sizes
         };
 
         let lstm_config = LSTMConfig {
             input_size,
-            hidden_size: effective_hidden_size,
+            hidden_sizes: adjusted_hidden_sizes,
             output_size,
             sequence_length,      // Use actual sequence length from config
             learning_rate: 0.001, // Default learning rate
             num_layers,           // Now properly extracted from architecture
         };
+
+        // Validate the configuration
+        lstm_config.validate()?;
 
         let mut model = Self::new(lstm_config)?;
 
@@ -274,8 +400,13 @@ impl LSTMModel {
     /// Initialize attention layers during model initialization
     fn initialize_attention_layers(&mut self, vs: &VarBuilder) -> Result<()> {
         if let Some(attention_config) = &self.attention_config {
+            // Use the last layer's hidden size for attention input dimension
+            let attention_input_size = self
+                .config
+                .get_hidden_size_for_layer(self.config.num_layers - 1);
+
             let attention = MultiHeadAttention::new(
-                self.config.hidden_size, // Use LSTM hidden size as input dimension
+                attention_input_size, // Use last LSTM layer's hidden size as input dimension
                 attention_config.clone(),
                 vs.pp("attention"),
                 self.device.clone(),
@@ -284,9 +415,9 @@ impl LSTMModel {
             self.attention_layers = Some(attention);
 
             log::debug!(
-                "✅ Attention layers initialized: {} heads, hidden_size={}",
+                "✅ Attention layers initialized: {} heads, input_size={}",
                 attention_config.num_heads,
-                self.config.hidden_size
+                attention_input_size
             );
         }
 
@@ -335,12 +466,15 @@ impl LSTMModel {
         let mut lstm_layers = Vec::new();
 
         for layer_idx in 0..num_layers {
-            // Input size: first layer uses input_size, subsequent layers use hidden_size
+            // Input size: first layer uses input_size, subsequent layers use previous layer's hidden size
             let layer_input_size = if layer_idx == 0 {
                 self.config.input_size
             } else {
-                self.config.hidden_size
+                self.config.get_hidden_size_for_layer(layer_idx - 1)
             };
+
+            // Get hidden size for this specific layer
+            let layer_hidden_size = self.config.get_hidden_size_for_layer(layer_idx);
 
             // Create LSTM configuration for this layer with PROPER INITIALIZATION
             let lstm_config = CandleLSTMConfig {
@@ -357,7 +491,7 @@ impl LSTMModel {
             // Xavier initialization scales weights based on layer size to prevent explosion
             let lstm_layer = lstm(
                 layer_input_size,
-                self.config.hidden_size,
+                layer_hidden_size, // Use per-layer hidden size
                 lstm_config,
                 vs_layer,
             )
@@ -370,7 +504,7 @@ impl LSTMModel {
                 "🔧 LSTM layer {} initialized with Xavier scaling: input={}, hidden={}, sequence_len={}",
                 layer_idx,
                 layer_input_size,
-                self.config.hidden_size,
+                layer_hidden_size,
                 self.config.sequence_length
             );
 
@@ -382,10 +516,10 @@ impl LSTMModel {
                 );
             }
 
-            if self.config.hidden_size > 256 && self.config.sequence_length > 30 {
+            if layer_hidden_size > 256 && self.config.sequence_length > 30 {
                 log::warn!(
-                    "⚠️ LARGE MODEL WARNING: hidden_size={} with sequence_length={} may cause gradient instability. Consider reducing one or both.",
-                    self.config.hidden_size, self.config.sequence_length
+                    "⚠️ LARGE MODEL WARNING: layer {} hidden_size={} with sequence_length={} may cause gradient instability. Consider reducing one or both.",
+                    layer_idx, layer_hidden_size, self.config.sequence_length
                 );
             }
 
@@ -396,7 +530,7 @@ impl LSTMModel {
                 "✅ LSTM layer {} initialized: input_size={}, hidden_size={}",
                 layer_idx,
                 layer_input_size,
-                self.config.hidden_size
+                layer_hidden_size
             );
         }
 
@@ -413,9 +547,10 @@ impl LSTMModel {
 
         // Attention integration temporarily disabled for clean compilation
 
-        // Create output layer for sequence-to-one prediction - FIXED to use config output_size
+        // Create output layer for sequence-to-one prediction - FIXED to use last layer hidden size
+        let last_layer_hidden_size = self.config.get_hidden_size_for_layer(num_layers - 1);
         let output_layer = linear(
-            self.config.hidden_size,
+            last_layer_hidden_size,  // Use last layer's hidden size
             self.config.output_size, // Use configured output_size for multi-class targets
             vs.pp("output"),
         )
@@ -424,10 +559,10 @@ impl LSTMModel {
         self.output_layer = Some(output_layer);
 
         log::info!(
-            "✅ Multi-layer LSTM network initialized successfully: {} layers, {} → {} → {}",
+            "✅ Multi-layer LSTM network initialized successfully: {} layers, {} → {:?} → {}",
             num_layers,
             self.config.input_size,
-            self.config.hidden_size,
+            self.config.hidden_sizes,
             self.config.output_size
         );
         Ok(())
@@ -830,12 +965,17 @@ impl LSTMModel {
     fn estimate_batch_memory_usage(&self, batch_size: usize) -> usize {
         let sequence_length = self.config.sequence_length;
         let input_features = self.config.input_size;
-        let hidden_size = self.config.hidden_size;
         let num_layers = self.config.num_layers;
+
+        // Calculate total hidden states size across all layers
+        let mut hidden_states_size = 0;
+        for layer_idx in 0..num_layers {
+            let hidden_size = self.config.get_hidden_size_for_layer(layer_idx);
+            hidden_states_size += batch_size * hidden_size * 4 * 2; // forward + backward, f32 = 4 bytes
+        }
 
         // Rough estimation: input tensor + hidden states + gradients + attention (if enabled)
         let input_tensor_size = batch_size * sequence_length * input_features * 4; // f32 = 4 bytes
-        let hidden_states_size = batch_size * hidden_size * num_layers * 4 * 2; // forward + backward
         let attention_multiplier = if self.use_attention { 3 } else { 1 }; // Attention adds ~3x memory
 
         (input_tensor_size + hidden_states_size) * attention_multiplier
@@ -3967,7 +4107,7 @@ mod tests {
         // Create a simple LSTM model
         let config = LSTMConfig {
             input_size: 3,
-            hidden_size: 8,
+            hidden_sizes: vec![8, 8], // Two layers with 8 hidden units each
             output_size: 1,
             sequence_length: 5,
             learning_rate: 0.01,
@@ -4044,7 +4184,7 @@ mod tests {
         // Test that fixed epoch configuration bypasses early stopping
         let config = LSTMConfig {
             input_size: 3,
-            hidden_size: 8,
+            hidden_sizes: vec![8, 8], // Two layers with 8 hidden units each
             output_size: 1,
             sequence_length: 5,
             learning_rate: 0.01,
@@ -4123,7 +4263,7 @@ mod tests {
         // Step 1: Create and train a model
         let config = LSTMConfig {
             input_size: 3,
-            hidden_size: 8,
+            hidden_sizes: vec![8, 8], // Two layers with 8 hidden units each
             output_size: 1,
             sequence_length: 5,
             learning_rate: 0.01,
@@ -4219,7 +4359,7 @@ mod tests {
         // Test multi-layer LSTM creation and training
         let config = LSTMConfig {
             input_size: 4,
-            hidden_size: 16,
+            hidden_sizes: vec![16, 16, 16], // Three layers with 16 hidden units each
             output_size: 1,
             sequence_length: 10,
             learning_rate: 0.01,
