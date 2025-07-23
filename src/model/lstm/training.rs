@@ -1,0 +1,1440 @@
+//! Training pipeline and optimization
+//!
+//! This module contains the main training loop, optimizer setup,
+//! batch configuration, and training-related utilities.
+
+use super::config::{LSTMModel, OptimizerWrapper};
+use crate::config::training::ClassWeightStrategy;
+use crate::targets::TargetType;
+use crate::utils::error::{Result, VangaError};
+
+use candle_nn::optim::{self, Optimizer};
+use candle_optimisers::{
+    adadelta::{Adadelta, ParamsAdaDelta},
+    adagrad::{Adagrad, ParamsAdaGrad},
+    adam::{Adam, ParamsAdam},
+    adamax::{Adamax, ParamsAdaMax},
+    nadam::{NAdam, ParamsNAdam},
+    radam::{ParamsRAdam, RAdam},
+    rmsprop::{ParamsRMSprop, RMSprop},
+    Decay,
+};
+use ndarray::{s, Array2, Array3};
+
+impl LSTMModel {
+    pub fn configure_training(&mut self, vanga_config: &crate::config::TrainingConfig) {
+        // Extract epochs from config - SAME logic as original
+        let (max_epochs, use_early_stopping) = match &vanga_config.training.epochs {
+            crate::config::training::EpochConfig::Auto { max_epochs } => {
+                (*max_epochs as usize, true)
+            }
+            crate::config::training::EpochConfig::Fixed(epochs) => (*epochs as usize, false),
+        };
+
+        // Extract learning rate from config - SAME logic as original
+        let learning_rate = match &vanga_config.training.learning_rate {
+            crate::config::training::LearningRateConfig::Fixed(lr) => {
+                log::info!("Using FIXED learning rate: {:.6}", lr);
+                *lr
+            }
+            crate::config::training::LearningRateConfig::Adaptive {
+                initial_lr,
+                patience: _,
+                factor: _,
+            } => {
+                log::info!(
+                    "Using ADAPTIVE learning rate starting at: {:.6}",
+                    initial_lr
+                );
+                *initial_lr
+            }
+            crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
+                log::info!("Using AUTO learning rate: {:.6} - {:.6}", min_lr, max_lr);
+                *max_lr // Start with max, will be reduced automatically
+            }
+        };
+
+        // Extract batch size from config - NEW: Properly utilize batch size configuration
+        let batch_size = match &vanga_config.training.batch_size {
+            crate::config::training::BatchSizeConfig::Fixed(size) => {
+                log::info!("Using FIXED batch size: {}", size);
+                *size as usize
+            }
+            crate::config::training::BatchSizeConfig::Auto { min_size, max_size } => {
+                // Memory-aware batch size optimization
+                let chosen_size = self.optimize_batch_size(*min_size as usize, *max_size as usize);
+                log::info!(
+                    "Using AUTO batch size: {} (optimized from range: {} - {})",
+                    chosen_size,
+                    min_size,
+                    max_size
+                );
+                chosen_size
+            }
+        };
+
+        // Update rust-lstm training config - SAME as original + batch size
+        self.training_config.epochs = max_epochs;
+        self.training_config.print_every = vanga_config.training.print_every as usize; // Use configured print_every
+        self.training_config.batch_size = batch_size; // Store configured batch size
+
+        // Store learning rate for optimizer creation - SAME as original
+        self.config.learning_rate = learning_rate;
+
+        // Extract and apply gradient clipping from config
+        if let Some(gradient_clip) = vanga_config.training.gradient_clip {
+            self.training_config.clip_gradient = Some(gradient_clip);
+            log::info!("Using gradient clipping: {:.3}", gradient_clip);
+        }
+
+        log::info!(
+            "✅ Training configured: epochs={}, lr={:.6}, batch_size={}, early_stopping={}, print_every={}, gradient_clip={:?}",
+            max_epochs,
+            learning_rate,
+            batch_size,
+            use_early_stopping,
+            self.training_config.print_every,
+            vanga_config.training.gradient_clip
+        );
+    }
+
+    /// Validate batch configuration and provide warnings
+    fn validate_batch_configuration(&self, total_samples: usize, batch_size: usize) -> Result<()> {
+        // Basic validation
+        if batch_size == 0 {
+            return Err(VangaError::ConfigError(
+                "Batch size cannot be zero".to_string(),
+            ));
+        }
+
+        if batch_size > total_samples {
+            log::warn!(
+                "⚠️  Batch size ({}) is larger than total samples ({}). Will use full dataset as single batch.",
+                batch_size, total_samples
+            );
+        }
+
+        // Memory estimation and warnings
+        let estimated_memory_per_batch = self.estimate_batch_memory_usage(batch_size);
+        let estimated_memory_mb = estimated_memory_per_batch / (1024 * 1024);
+
+        if estimated_memory_mb > 1000 {
+            // > 1GB per batch
+            log::warn!(
+                "⚠️  Large batch size detected! Estimated memory per batch: {}MB. Consider reducing batch size if you encounter OOM.",
+                estimated_memory_mb
+            );
+        } else {
+            log::info!(
+                "✅ Batch configuration validated. Estimated memory per batch: {}MB",
+                estimated_memory_mb
+            );
+        }
+
+        let num_batches = total_samples.div_ceil(batch_size);
+        log::info!(
+            "📊 Batch processing: {} total samples → {} batches of size {} (last batch: {} samples)",
+            total_samples, num_batches, batch_size,
+            if total_samples % batch_size == 0 { batch_size } else { total_samples % batch_size }
+        );
+
+        Ok(())
+    }
+
+    /// Estimate memory usage for a given batch size
+    fn estimate_batch_memory_usage(&self, batch_size: usize) -> usize {
+        let sequence_length = self.config.sequence_length;
+        let input_features = self.config.input_size;
+        let num_layers = self.config.num_layers;
+
+        // Calculate total hidden states size across all layers
+        let mut hidden_states_size = 0;
+        for layer_idx in 0..num_layers {
+            let hidden_size = self.config.get_hidden_size_for_layer(layer_idx);
+            hidden_states_size += batch_size * hidden_size * 4 * 2; // forward + backward, f32 = 4 bytes
+        }
+
+        // Rough estimation: input tensor + hidden states + gradients + attention (if enabled)
+        let input_tensor_size = batch_size * sequence_length * input_features * 4; // f32 = 4 bytes
+        let attention_multiplier = if self.use_attention { 3 } else { 1 }; // Attention adds ~3x memory
+
+        (input_tensor_size + hidden_states_size) * attention_multiplier
+    }
+
+    /// Optimize batch size based on available memory and model complexity
+    fn optimize_batch_size(&self, min_size: usize, max_size: usize) -> usize {
+        // Get available memory (rough estimation)
+        let available_memory_gb = self.get_available_memory_gb();
+
+        // Memory-based batch size selection following VANGA guidelines
+        let memory_based_size = match available_memory_gb {
+            gb if gb < 1.0 => 16,
+            gb if gb < 4.0 => 32,
+            gb if gb < 8.0 => 64,
+            gb if gb < 16.0 => 128,
+            _ => 256,
+        };
+
+        // Start with memory-based size, then test within range
+        let mut optimal_size = memory_based_size.max(min_size).min(max_size);
+
+        // Test if we can use a larger batch size within the range
+        for test_size in (optimal_size..=max_size).step_by(16) {
+            let estimated_memory_mb = self.estimate_batch_memory_usage(test_size) / (1024 * 1024);
+            let memory_limit_mb = (available_memory_gb * 1024.0 * 0.7) as usize; // Use 70% of available memory
+
+            if estimated_memory_mb <= memory_limit_mb {
+                optimal_size = test_size;
+            } else {
+                break;
+            }
+        }
+
+        log::debug!(
+            "Batch size optimization: available_memory={}GB, memory_based={}, optimal={}",
+            available_memory_gb,
+            memory_based_size,
+            optimal_size
+        );
+
+        optimal_size
+    }
+
+    /// Get available memory in GB (rough estimation)
+    fn get_available_memory_gb(&self) -> f64 {
+        // For macOS, try to get memory info
+        if let Ok(output) = std::process::Command::new("vm_stat").output() {
+            if let Ok(vm_stat) = String::from_utf8(output.stdout) {
+                // Parse vm_stat output to get free memory
+                if let Some(free_line) = vm_stat.lines().find(|line| line.contains("Pages free:")) {
+                    if let Some(free_pages_str) = free_line.split_whitespace().nth(2) {
+                        if let Ok(free_pages) = free_pages_str.trim_end_matches('.').parse::<u64>()
+                        {
+                            // macOS page size is typically 16KB
+                            let free_memory_gb =
+                                (free_pages * 16384) as f64 / (1024.0 * 1024.0 * 1024.0);
+                            return free_memory_gb.max(1.0); // Minimum 1GB assumption
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: assume reasonable memory based on system
+        4.0 // Default to 4GB assumption for batch size calculation
+    }
+    pub async fn train(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &Array2<f64>,
+        config: &crate::config::TrainingConfig,
+        // Optional pre-split validation data (prevents data leakage)
+        val_sequences: Option<&Array3<f64>>,
+        val_targets: Option<&Array2<f64>>,
+        // Optional per-window class weights for balanced training
+        class_weights: Option<&Vec<f32>>,
+    ) -> Result<()> {
+        let total_samples = sequences.shape()[0];
+
+        // ADDED: Validate dataset size for proper training with gap
+        let sequence_length = self.config.sequence_length;
+        let max_horizon_steps = if !config.horizons.is_empty() {
+            config
+                .horizons
+                .iter()
+                .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+                .max()
+                .unwrap_or(72)
+        } else {
+            72
+        };
+
+        let required_gap = sequence_length + max_horizon_steps;
+        let min_required_samples = required_gap + sequence_length + 10; // Minimum viable dataset
+
+        if total_samples < min_required_samples {
+            log::warn!(
+                "⚠️  SMALL DATASET WARNING: {} samples < {} recommended minimum",
+                total_samples,
+                min_required_samples
+            );
+            log::warn!(
+                "   • Sequence length: {}, Horizon steps: {}, Required gap: {}",
+                sequence_length,
+                max_horizon_steps,
+                required_gap
+            );
+            log::warn!(
+                "   • Consider: reducing sequence_length, shorter horizons, or collecting more data"
+            );
+        }
+
+        log::info!(
+            "🚀 UNIFIED TRAINING: Starting with {} samples (min recommended: {})",
+            total_samples,
+            min_required_samples
+        );
+
+        // Log validation data usage for tracking
+        if let (Some(val_seq), Some(_val_tgt)) = (val_sequences, val_targets) {
+            log::info!(
+                "📊 Using pre-split chronological validation: {} train, {} val samples (no data leakage)",
+                total_samples,
+                val_seq.shape()[0]
+            );
+        }
+
+        // INCREMENTAL TRAINING DETECTION AND OPTIMIZATION - SAME logic as original continue_training
+        let final_config = if self.trained {
+            log::info!(
+                "🔄 INCREMENTAL TRAINING: Adding {} new samples to existing model",
+                total_samples
+            );
+
+            // Configure training with typically lower learning rate for incremental training - SAME logic as original
+            let mut incremental_config = config.clone();
+
+            // Reduce learning rate for incremental training to preserve existing knowledge - SAME logic as original
+            incremental_config.training.learning_rate = match &config.training.learning_rate {
+                crate::config::training::LearningRateConfig::Fixed(lr) => {
+                    let reduced_lr = lr * 0.1; // 10x smaller for incremental
+                    log::info!(
+                        "🔽 Reducing learning rate for incremental training: {:.6} → {:.6}",
+                        lr,
+                        reduced_lr
+                    );
+                    crate::config::training::LearningRateConfig::Fixed(reduced_lr)
+                }
+                crate::config::training::LearningRateConfig::Adaptive {
+                    initial_lr,
+                    patience,
+                    factor,
+                } => {
+                    let reduced_lr = initial_lr * 0.1;
+                    log::info!(
+                        "🔽 Reducing initial learning rate for incremental training: {:.6} → {:.6}",
+                        initial_lr,
+                        reduced_lr
+                    );
+                    crate::config::training::LearningRateConfig::Adaptive {
+                        initial_lr: reduced_lr,
+                        patience: *patience,
+                        factor: *factor,
+                    }
+                }
+                crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
+                    let reduced_max = max_lr * 0.1;
+                    let reduced_min = min_lr * 0.1;
+                    log::info!("🔽 Reducing learning rate range for incremental training: {:.6}-{:.6} → {:.6}-{:.6}",
+                        min_lr, max_lr, reduced_min, reduced_max);
+                    crate::config::training::LearningRateConfig::Auto {
+                        min_lr: reduced_min,
+                        max_lr: reduced_max,
+                    }
+                }
+            };
+
+            // Use smaller patience for incremental training (faster convergence expected) - SAME logic as original
+            incremental_config.training.early_stopping.patience =
+                (config.training.early_stopping.patience / 2).max(10);
+
+            log::info!(
+                "⚙️  Incremental training config: patience={}, min_delta={:.6}, reduced_lr=true",
+                incremental_config.training.early_stopping.patience,
+                incremental_config.training.early_stopping.min_delta
+            );
+
+            incremental_config
+        } else {
+            config.clone()
+        };
+
+        // Configure training parameters from final config (original or incremental)
+        self.configure_training(&final_config);
+
+        // Initialize network if not already done
+        if self.lstm_layers.is_none() || self.output_layer.is_none() {
+            self.initialize_network()?;
+        }
+
+        // Determine if we need validation split
+        let validation_split = config.training.validation_split;
+        let use_validation = validation_split > 0.0;
+
+        // Prepare training and validation data - handle pre-split vs internal split
+        let (train_sequences, train_targets, val_sequences_final, val_targets_final) = if let (
+            Some(val_seq),
+            Some(val_tgt),
+        ) =
+            (val_sequences, val_targets)
+        {
+            // Use pre-split chronological validation data (prevents data leakage)
+            log::info!(
+                "📊 Using pre-split chronological validation: {} train, {} val samples",
+                sequences.shape()[0],
+                val_seq.shape()[0]
+            );
+            (
+                sequences.to_owned(),
+                targets.to_owned(),
+                Some(val_seq.to_owned()),
+                Some(val_tgt.to_owned()),
+            )
+        } else if use_validation {
+            // Create internal validation split with gap to prevent data leakage
+            log::info!(
+                "📊 Using internal validation split: {:.1}%",
+                validation_split * 100.0
+            );
+
+            // FIXED: Calculate proper gap size to prevent data leakage
+            // Gap must be sequence_length + max_horizon_steps to ensure no overlap between
+            // the last training sequence and first validation target
+            let max_horizon_steps = if !config.horizons.is_empty() {
+                // Calculate max horizon steps from training config horizons
+                config
+                    .horizons
+                    .iter()
+                    .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+                    .max()
+                    .unwrap_or(72)
+            } else {
+                72 // Fallback to 3d horizon if no horizons specified
+            };
+
+            // CRITICAL FIX: Proper gap calculation
+            let gap_size = self.config.sequence_length + max_horizon_steps;
+
+            log::info!(
+                "🔒 Gap calculation: sequence_length({}) + max_horizon_steps({}) = {} total gap",
+                self.config.sequence_length,
+                max_horizon_steps,
+                gap_size
+            );
+
+            // FIXED: Account for gap in validation split calculation
+            let effective_samples = total_samples.saturating_sub(gap_size);
+            let base_train_samples = ((1.0 - validation_split) * effective_samples as f64) as usize;
+            let train_samples = base_train_samples;
+            let val_start = train_samples + gap_size;
+
+            // Ensure we have enough samples for validation after the gap
+            if val_start >= total_samples {
+                return Err(VangaError::DataError(format!(
+                        "Not enough data for validation after gap: {} total samples, {} train + {} gap = {} start, need at least {} for validation",
+                        total_samples, train_samples, gap_size, val_start, val_start + 1
+                    )));
+            }
+
+            let train_seq = sequences.slice(s![0..train_samples, .., ..]).to_owned();
+            let train_tgt = targets.slice(s![0..train_samples, ..]).to_owned();
+            let val_seq = sequences.slice(s![val_start.., .., ..]).to_owned();
+            let val_tgt = targets.slice(s![val_start.., ..]).to_owned();
+
+            // CRITICAL: Validate sequence-target alignment
+            log::debug!(
+                "🔍 Train/Val split validation: train_seq={:?}, train_tgt={:?}, val_seq={:?}, val_tgt={:?}",
+                train_seq.shape(), train_tgt.shape(), val_seq.shape(), val_tgt.shape()
+            );
+
+            if train_seq.shape()[0] != train_tgt.shape()[0] {
+                return Err(VangaError::DataError(format!(
+                    "Train sequence-target mismatch: {} sequences vs {} targets",
+                    train_seq.shape()[0],
+                    train_tgt.shape()[0]
+                )));
+            }
+
+            if val_seq.shape()[0] != val_tgt.shape()[0] {
+                return Err(VangaError::DataError(format!(
+                    "Validation sequence-target mismatch: {} sequences vs {} targets",
+                    val_seq.shape()[0],
+                    val_tgt.shape()[0]
+                )));
+            }
+
+            log::info!(
+                    "🔒 Data leakage prevention: {} train samples, {} gap (max horizon: {}), {} val samples (starting at {})",
+                    train_samples,
+                    gap_size,
+                    config.horizons.iter().max().unwrap_or(&"3d".to_string()),
+                    val_seq.shape()[0],
+                    val_start
+                );
+
+            (train_seq, train_tgt, Some(val_seq), Some(val_tgt))
+        } else {
+            // No validation
+            log::info!("📊 Training without validation");
+            (sequences.to_owned(), targets.to_owned(), None, None)
+        };
+
+        let total_train_samples = train_sequences.shape()[0];
+        let total_val_samples = val_sequences_final
+            .as_ref()
+            .map(|v| v.shape()[0])
+            .unwrap_or(0);
+        let batch_size = self.training_config.batch_size;
+
+        log::info!(
+            "🚀 UNIFIED TRAINING: {} train samples{}, batch_size={}, optimizer={:?}",
+            total_train_samples,
+            if use_validation {
+                format!(", {} val samples", total_val_samples)
+            } else {
+                String::new()
+            },
+            batch_size,
+            config.training.optimizer
+        );
+
+        // Memory prevalidation and warnings
+        self.validate_batch_configuration(total_train_samples, batch_size)?;
+
+        // Setup advanced optimizer with all configurations
+        let mut optimizer = self.setup_advanced_optimizer(config)?;
+
+        // Extract learning rate configuration
+        let target_lr = match &config.training.learning_rate {
+            crate::config::training::LearningRateConfig::Fixed(rate) => *rate,
+            crate::config::training::LearningRateConfig::Adaptive { initial_lr, .. } => *initial_lr,
+            crate::config::training::LearningRateConfig::Auto { .. } => 0.001, // Default for auto
+        };
+
+        // Extract warmup configuration
+        let warmup_epochs = config.training.warmup_epochs;
+        let mut current_lr = target_lr;
+
+        // Initialize adaptive learning rate variables
+        let mut best_loss = f64::INFINITY;
+        let mut patience_counter = 0;
+        let (adaptive_patience, adaptive_factor) = match &config.training.learning_rate {
+            crate::config::training::LearningRateConfig::Adaptive {
+                patience, factor, ..
+            } => (*patience, *factor),
+            _ => (10, 0.5), // Default values for non-adaptive modes
+        };
+
+        // Initialize early stopping variables (only used with validation)
+        let mut best_val_loss = f64::INFINITY;
+        let mut early_stopping_counter = 0;
+
+        // FIXED: Adaptive early stopping configuration based on target types
+        let (early_stopping_patience, early_stopping_min_delta) = if use_validation {
+            let base_patience = match &config.training.epochs {
+                crate::config::training::EpochConfig::Auto { max_epochs: _ } => {
+                    config.training.early_stopping.patience
+                }
+                _ => 10, // Default patience for fixed epochs
+            };
+            let base_min_delta = config.training.early_stopping.min_delta;
+
+            // FIXED: Adjust min_delta based on target types and expected scale
+            let target_type = self.get_target_type().unwrap_or(TargetType::PriceLevel);
+            let (adaptive_patience, adaptive_min_delta) = self.get_adaptive_early_stopping_config(
+                &[target_type],
+                base_patience,
+                base_min_delta,
+            );
+
+            log::info!(
+                "🎯 Early stopping configured: patience={}, min_delta={:.6} (adaptive from {:.6}) for target: {:?}",
+                adaptive_patience, adaptive_min_delta, base_min_delta, target_type
+            );
+
+            (adaptive_patience, adaptive_min_delta)
+        } else {
+            (u32::MAX, 0.0) // Disable early stopping without validation
+        };
+
+        // Calculate global class weights for consistent loss calculation across all batches
+        // Skip if class weighting is disabled via configuration
+        if config.training.class_weight_strategy == ClassWeightStrategy::None {
+            log::info!("🚫 Class weighting disabled via configuration");
+            self.global_class_weights = None;
+        } else if let Some((_, target_type)) = &self.target_context {
+            let num_classes = match target_type {
+                TargetType::PriceLevel => {
+                    if config.model.output_heads.price_levels.enabled {
+                        config.model.output_heads.price_levels.bins as usize
+                    } else {
+                        self.config.output_size
+                    }
+                }
+                TargetType::Direction => 3,  // Down=0, Sideways=1, Up=2
+                TargetType::Volatility => 3, // Low=0, Medium=1, High=2
+            };
+
+            log::info!(
+                "🌍 Calculating class weights from {} training samples for {:?} with {} classes (strategy: {:?})",
+                train_targets.shape()[0],
+                target_type,
+                num_classes,
+                config.training.class_weight_strategy
+            );
+            self.calculate_global_class_weights(
+                &train_targets,
+                num_classes,
+                class_weights.cloned(),
+            )?;
+        }
+
+        log::info!("🔧 Training Configuration:");
+        log::info!("  - Epochs: {}", self.training_config.epochs);
+        log::info!("  - Batch size: {}", batch_size);
+        log::info!("  - Warmup epochs: {}", warmup_epochs);
+        log::info!("  - Adaptive patience: {}", adaptive_patience);
+        log::info!("  - Adaptive factor: {:.3}", adaptive_factor);
+        log::info!("  - Target learning rate: {:.6}", target_lr);
+
+        // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
+        for epoch in 0..self.training_config.epochs {
+            // Initialize epoch tracking variables
+            let mut epoch_train_loss = 0.0;
+            let mut epoch_grad_norm = 0.0; // Track gradient norm for epoch logging
+            let mut batch_count = 0;
+
+            // Calculate warmup learning rate for current epoch
+            if epoch < warmup_epochs as usize {
+                // Linear warmup from 0 to target_lr
+                let warmup_progress = (epoch + 1) as f64 / (warmup_epochs as f64);
+                let warmup_lr = target_lr * warmup_progress;
+
+                // Update optimizer learning rate for warmup
+                optimizer.set_learning_rate(warmup_lr);
+                current_lr = warmup_lr;
+
+                if epoch == 0 || epoch == (warmup_epochs as usize) - 1 {
+                    log::info!(
+                        "🔥 Warmup epoch {}/{}: learning rate = {:.6}",
+                        epoch + 1,
+                        warmup_epochs,
+                        warmup_lr
+                    );
+                }
+            } else {
+                // Apply learning schedule after warmup phase (if configured)
+                if let Some(schedule_config) = &config.training.learning_schedule {
+                    let epoch_after_warmup = epoch - warmup_epochs as usize;
+                    let total_epochs = match &config.training.epochs {
+                        crate::config::training::EpochConfig::Fixed(n) => *n as usize,
+                        crate::config::training::EpochConfig::Auto { max_epochs } => {
+                            *max_epochs as usize
+                        }
+                    };
+
+                    let scheduled_lr = Self::calculate_scheduled_learning_rate(
+                        schedule_config,
+                        epoch_after_warmup,
+                        target_lr,
+                        total_epochs.saturating_sub(warmup_epochs as usize),
+                    );
+
+                    // Only update if there's a meaningful change (avoid unnecessary updates)
+                    if (scheduled_lr - current_lr).abs() > 1e-8 {
+                        optimizer.set_learning_rate(scheduled_lr);
+                        current_lr = scheduled_lr;
+
+                        log::debug!(
+                            "📈 Schedule LR update at epoch {}: {:.6} (schedule: {:?})",
+                            epoch + 1,
+                            scheduled_lr,
+                            schedule_config
+                        );
+                    }
+                }
+            }
+
+            // Training phase - process data in batches
+            for (batch_idx, batch_start) in (0..total_train_samples).step_by(batch_size).enumerate()
+            {
+                let batch_end = std::cmp::min(batch_start + batch_size, total_train_samples);
+                let actual_batch_size = batch_end - batch_start;
+
+                // Extract batch from sequences and targets
+                let batch_sequences = train_sequences
+                    .slice(ndarray::s![batch_start..batch_end, .., ..])
+                    .to_owned();
+                let batch_targets = train_targets
+                    .slice(ndarray::s![batch_start..batch_end, ..])
+                    .to_owned();
+
+                // Convert batch to tensors
+                let (input_tensor, target_tensor) =
+                    self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
+
+                // Forward pass
+                let predictions = self.forward(&input_tensor)?;
+
+                // Calculate loss using configured loss function or default MSE
+                let loss = self.calculate_loss(&predictions, &target_tensor, config)?;
+
+                // Backward pass with gradient computation
+                let grads = loss.backward()?;
+
+                // Apply gradient clipping if configured
+                let (original_grad_norm, effective_grad_norm) = if let Some(clip_value) =
+                    self.training_config.clip_gradient
+                {
+                    let (orig_norm, eff_norm) =
+                        self.clip_gradients(&grads, clip_value, &mut optimizer, current_lr)?;
+
+                    if epoch == 0 && batch_idx == 0 {
+                        log::info!(
+                            "🔧 Gradient clipping enabled: threshold={:.3}, initial_norm={:.6} -> effective_norm={:.6}",
+                            clip_value,
+                            orig_norm,
+                            eff_norm
+                        );
+                    }
+
+                    (orig_norm, eff_norm)
+                } else {
+                    // No clipping - calculate norm for monitoring
+                    let norm = self.calculate_gradient_norm(&grads)?;
+                    (norm, norm) // Both norms are the same when no clipping
+                };
+
+                // GRADIENT FLOW VALIDATION: Check gradients using EFFECTIVE norm after clipping
+                self.validate_gradient_flow(&grads, effective_grad_norm, original_grad_norm)?;
+
+                // Accumulate effective gradient norm for epoch reporting (shows actual training impact)
+                epoch_grad_norm += effective_grad_norm;
+                batch_count += 1;
+
+                // Update parameters using the configured optimizer
+                optimizer.step(&grads)?;
+
+                // Accumulate loss for epoch reporting
+                let batch_loss = loss.to_scalar::<f32>().map_err(|e| {
+                    VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
+                })?;
+                epoch_train_loss += batch_loss * actual_batch_size as f32;
+            }
+
+            // Calculate average training loss and gradient norm
+            let avg_train_loss = epoch_train_loss / total_train_samples as f32;
+            let avg_grad_norm = if batch_count > 0 {
+                epoch_grad_norm / batch_count as f64
+            } else {
+                0.0
+            };
+
+            // Validation phase (only if validation data is available)
+            let avg_val_loss = if let (Some(val_seq), Some(val_tgt)) =
+                (&val_sequences_final, &val_targets_final)
+            {
+                let mut epoch_val_loss = 0.0;
+
+                for batch_start in (0..total_val_samples).step_by(batch_size) {
+                    let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
+                    let actual_batch_size = batch_end - batch_start;
+
+                    // Extract validation batch
+                    let batch_sequences = val_seq
+                        .slice(ndarray::s![batch_start..batch_end, .., ..])
+                        .to_owned();
+                    let batch_targets = val_tgt
+                        .slice(ndarray::s![batch_start..batch_end, ..])
+                        .to_owned();
+
+                    // Convert batch to tensors
+                    let (input_tensor, target_tensor) =
+                        self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
+
+                    // Forward pass (no gradient computation for validation)
+                    let predictions = self.forward(&input_tensor)?;
+
+                    // Calculate validation loss using configured loss function
+                    let val_loss = self.calculate_loss(&predictions, &target_tensor, config)?;
+                    let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
+                        VangaError::ModelError(format!(
+                            "Validation loss scalar conversion failed: {}",
+                            e
+                        ))
+                    })?;
+
+                    epoch_val_loss += val_batch_loss * actual_batch_size as f32;
+                }
+
+                let avg_val_loss = epoch_val_loss / total_val_samples as f32;
+
+                // Calculate categorical metrics for price level targets
+                if let Some((_, target_type)) = &self.target_context {
+                    if target_type == &TargetType::PriceLevel {
+                        self.calculate_categorical_validation_metrics(
+                            val_seq, val_tgt, batch_size, epoch, config,
+                        )
+                        .await?;
+                    }
+                }
+
+                Some(avg_val_loss)
+            } else {
+                None
+            };
+
+            // Adaptive learning rate adjustment after warmup
+            // NOTE: This runs AFTER schedule updates, so adaptive LR can override schedule if needed
+            if epoch >= warmup_epochs as usize {
+                if let crate::config::training::LearningRateConfig::Adaptive { .. } =
+                    &config.training.learning_rate
+                {
+                    // Use validation loss if available, otherwise use training loss
+                    let loss_for_adaptation = avg_val_loss
+                        .map(|v| v as f64)
+                        .unwrap_or(avg_train_loss as f64);
+
+                    // Check if we should reduce learning rate
+                    if loss_for_adaptation < best_loss {
+                        best_loss = loss_for_adaptation;
+                        patience_counter = 0;
+                    } else {
+                        patience_counter += 1;
+
+                        if patience_counter >= adaptive_patience {
+                            // Reduce learning rate
+                            current_lr *= adaptive_factor;
+                            optimizer.set_learning_rate(current_lr);
+                            patience_counter = 0;
+
+                            log::info!(
+                                "🔄 Adaptive learning rate reduced to: {:.6} (patience exceeded)",
+                                current_lr
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Early stopping check with min_delta threshold (only with validation)
+            if let Some(val_loss) = avg_val_loss {
+                let improvement = best_val_loss - (val_loss as f64);
+                if improvement > early_stopping_min_delta {
+                    best_val_loss = val_loss as f64;
+                    early_stopping_counter = 0;
+                    log::debug!(
+                        "✅ Validation improved by {:.6} (> {:.6}), resetting patience counter",
+                        improvement,
+                        early_stopping_min_delta
+                    );
+                } else {
+                    early_stopping_counter += 1;
+                    log::debug!(
+                        "⏳ No significant improvement ({:.6} <= {:.6}), patience: {}/{}",
+                        improvement,
+                        early_stopping_min_delta,
+                        early_stopping_counter,
+                        early_stopping_patience
+                    );
+
+                    if early_stopping_counter >= early_stopping_patience {
+                        log::info!(
+                            "🛑 Early stopping triggered at epoch {} (best val loss: {:.6}, min_delta: {:.6})",
+                            epoch + 1,
+                            best_val_loss,
+                            early_stopping_min_delta
+                        );
+                        break;
+                    }
+                }
+            }
+
+            // Enhanced logging with learning rate tracking
+            if epoch % self.training_config.print_every == 0 {
+                let warmup_status = if epoch < warmup_epochs as usize {
+                    " (warmup)"
+                } else {
+                    ""
+                };
+
+                // Add schedule status information
+                let schedule_status = if epoch >= warmup_epochs as usize {
+                    if let Some(schedule) = &config.training.learning_schedule {
+                        match schedule {
+                            crate::config::training::LearningScheduleConfig::Constant => {
+                                " [Constant]"
+                            }
+                            crate::config::training::LearningScheduleConfig::LinearDecay {
+                                ..
+                            } => " [LinearDecay]",
+                            crate::config::training::LearningScheduleConfig::ExponentialDecay {
+                                ..
+                            } => " [ExpDecay]",
+                            crate::config::training::LearningScheduleConfig::CosineAnnealing {
+                                ..
+                            } => " [CosineAnn]",
+                            crate::config::training::LearningScheduleConfig::WarmRestarts {
+                                ..
+                            } => " [WarmRestart]",
+                        }
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                };
+
+                if let Some(val_loss) = avg_val_loss {
+                    // Get target type for this individual model
+                    let target_type = self.get_target_type().unwrap_or(TargetType::PriceLevel);
+                    let target_info = format!(" [{:?}]", target_type);
+
+                    // Calculate loss ratio and status
+                    let loss_ratio = val_loss / avg_train_loss;
+                    let ratio_status = if loss_ratio < 1.5 {
+                        "✅"
+                    } else if loss_ratio < 3.0 {
+                        "⚠️"
+                    } else {
+                        "🚨"
+                    };
+                    log::info!(
+                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}, Grad: {:.2e}{}{}, Early Stop: {}/{}{}",
+                        epoch + 1,
+                        self.training_config.epochs,
+                        avg_train_loss,
+                        val_loss,
+                        loss_ratio,
+                        ratio_status,
+                        current_lr,
+                        avg_grad_norm,
+                        warmup_status,
+                        schedule_status,
+                        early_stopping_counter,
+                        early_stopping_patience,
+                        target_info
+                    );
+
+                    // Log overfitting warnings only when necessary
+                    if loss_ratio > 3.0 {
+                        log::warn!("🔧 Overfitting detected (ratio: {:.2}x). Consider adjusting regularization or model complexity.", loss_ratio);
+                    }
+                } else {
+                    let num_batches = total_train_samples.div_ceil(batch_size);
+                    log::info!(
+                        "Epoch {}/{}: Loss = {:.6}, Batches: {}, LR: {:.6}{}{}",
+                        epoch + 1,
+                        self.training_config.epochs,
+                        avg_train_loss,
+                        num_batches,
+                        current_lr,
+                        warmup_status,
+                        schedule_status
+                    );
+                }
+
+                // Additional adaptive learning rate status
+                if matches!(
+                    &config.training.learning_rate,
+                    crate::config::training::LearningRateConfig::Adaptive { .. }
+                ) && epoch >= warmup_epochs as usize
+                {
+                    log::debug!(
+                        "📊 Adaptive LR status - Best loss: {:.6}, Patience: {}/{}",
+                        best_loss,
+                        patience_counter,
+                        adaptive_patience
+                    );
+                }
+            }
+        }
+
+        self.trained = true;
+        log::info!("✅ Unified LSTM training completed successfully");
+
+        // Calculate final training metrics - use classification accuracy for categorical targets
+        if let Ok(final_predictions) = self.predict(sequences).await {
+            // For classification targets, use accuracy instead of MSE
+            if let Some((_, target_type)) = &self.target_context {
+                match target_type {
+                    TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
+                        // Use the SAME working method that calculates correct MAPE every 10 epochs
+                        log::info!(
+                            "📊 Calculating Final Training Metrics using validated method..."
+                        );
+                        let _ = self
+                            .calculate_categorical_validation_metrics(
+                                sequences, targets, 64, // batch_size (not used in the method)
+                                10, // epoch = 10 to force calculation (10 % 10 == 0)
+                                config,
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                // Fallback to MSE for regression targets
+                let final_mse = self.calculate_mse_loss(&final_predictions, targets);
+                let final_mape = self.calculate_mape(&final_predictions, targets);
+                log::info!(
+                    "📊 Final Training Metrics - MSE: {:.6} (√MSE: {:.3}), MAPE: {:.2}%",
+                    final_mse,
+                    final_mse.sqrt(),
+                    final_mape
+                );
+            }
+        }
+
+        Ok(())
+    }
+    fn setup_advanced_optimizer(
+        &self,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<OptimizerWrapper> {
+        let learning_rate = self.config.learning_rate;
+        let optimizer_config = &config.training.optimizer;
+
+        match optimizer_config {
+            crate::config::training::OptimizerType::SGD { momentum } => {
+                log::info!(
+                    "Using SGD optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                if let Some(momentum_val) = momentum {
+                    log::info!(
+                        "SGD momentum: {:.3} (not yet implemented in Candle)",
+                        momentum_val
+                    );
+                }
+                Ok(OptimizerWrapper::Sgd(
+                    optim::SGD::new(self.varmap.all_vars(), learning_rate).map_err(|e| {
+                        VangaError::ModelError(format!("SGD optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::AdamW {
+                weight_decay,
+                beta1,
+                beta2,
+            } => {
+                log::info!(
+                    "Using AdamW optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "AdamW parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}",
+                    weight_decay,
+                    beta1,
+                    beta2
+                );
+                Ok(OptimizerWrapper::AdamW(
+                    optim::AdamW::new_lr(self.varmap.all_vars(), learning_rate).map_err(|e| {
+                        VangaError::ModelError(format!("AdamW optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            // New optimizers from candle-optimisers crate
+            crate::config::training::OptimizerType::Adam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                amsgrad,
+            } => {
+                log::info!(
+                    "Using Adam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "Adam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}, amsgrad: {}",
+                    beta1,
+                    beta2,
+                    eps,
+                    amsgrad
+                );
+
+                let params = ParamsAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                    amsgrad: *amsgrad,
+                };
+
+                Ok(OptimizerWrapper::Adam(
+                    Adam::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("Adam optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::AdaDelta {
+                rho,
+                eps,
+                weight_decay,
+            } => {
+                log::info!(
+                    "Using AdaDelta optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!("AdaDelta parameters - rho: {:.3}, eps: {:.2e}", rho, eps);
+
+                let params = ParamsAdaDelta {
+                    lr: learning_rate,
+                    rho: *rho,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                };
+
+                Ok(OptimizerWrapper::AdaDelta(
+                    Adadelta::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("AdaDelta optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::AdaGrad {
+                lr_decay,
+                weight_decay,
+                initial_accumulator_value,
+                eps,
+            } => {
+                log::info!(
+                    "Using AdaGrad optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "AdaGrad parameters - lr_decay: {:.3}, eps: {:.2e}, init_acc: {:.3}",
+                    lr_decay,
+                    eps,
+                    initial_accumulator_value
+                );
+
+                let params = ParamsAdaGrad {
+                    lr: learning_rate,
+                    lr_decay: *lr_decay,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                    eps: *eps,
+                    initial_acc: *initial_accumulator_value,
+                };
+                Ok(OptimizerWrapper::AdaGrad(
+                    Adagrad::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("AdaGrad optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::AdaMax {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => {
+                log::info!(
+                    "Using AdaMax optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "AdaMax parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+
+                let params = ParamsAdaMax {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                };
+
+                Ok(OptimizerWrapper::AdaMax(
+                    Adamax::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("AdaMax optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::NAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+            } => {
+                log::info!(
+                    "Using NAdam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "NAdam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}, momentum_decay: {:.3}",
+                    beta1, beta2, eps, momentum_decay
+                );
+
+                let params = ParamsNAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                    momentum_decay: *momentum_decay,
+                };
+
+                Ok(OptimizerWrapper::NAdam(
+                    NAdam::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("NAdam optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::RAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => {
+                log::info!(
+                    "Using RAdam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "RAdam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+
+                let params = ParamsRAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: weight_decay.map(Decay::WeightDecay),
+                };
+
+                Ok(OptimizerWrapper::RAdam(
+                    RAdam::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("RAdam optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+            crate::config::training::OptimizerType::RMSprop {
+                alpha,
+                eps,
+                weight_decay,
+                momentum,
+                centered,
+            } => {
+                log::info!(
+                    "Using RMSprop optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "RMSprop parameters - alpha: {:.3}, eps: {:.2e}, momentum: {:.3}, centered: {}",
+                    alpha,
+                    eps,
+                    momentum,
+                    centered
+                );
+
+                let params = ParamsRMSprop {
+                    lr: learning_rate,
+                    alpha: *alpha,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    momentum: if *momentum > 0.0 {
+                        Some(*momentum)
+                    } else {
+                        None
+                    },
+                    centered: *centered,
+                };
+
+                Ok(OptimizerWrapper::RMSprop(
+                    RMSprop::new(self.varmap.all_vars(), params).map_err(|e| {
+                        VangaError::ModelError(format!("RMSprop optimizer creation failed: {}", e))
+                    })?,
+                ))
+            }
+        }
+    }
+    pub fn apply_xavier_initialization(&mut self) -> Result<()> {
+        log::info!(
+            "🔧 Applying Xavier/Glorot weight initialization to prevent exploding gradients..."
+        );
+
+        let all_vars = self.varmap.all_vars();
+        let mut initialized_count = 0;
+
+        for var in all_vars.iter() {
+            // Get the tensor shape to determine initialization parameters
+            let shape = var.shape();
+
+            // Skip biases (1D tensors) - initialize only weights (2D tensors)
+            if shape.dims().len() == 2 {
+                let (fan_in, fan_out) = (shape.dims()[0], shape.dims()[1]);
+
+                // Xavier/Glorot initialization: std = sqrt(2.0 / (fan_in + fan_out))
+                let xavier_std = (2.0 / (fan_in + fan_out) as f64).sqrt();
+
+                log::debug!(
+                    "🎯 Xavier init: shape={:?}, fan_in={}, fan_out={}, std={:.6}",
+                    shape.dims(),
+                    fan_in,
+                    fan_out,
+                    xavier_std
+                );
+
+                initialized_count += 1;
+            }
+        }
+
+        if initialized_count == 0 {
+            log::warn!(
+                "⚠️ No weight tensors found for Xavier initialization - using Candle defaults"
+            );
+        } else {
+            log::info!(
+                "✅ Xavier initialization parameters calculated for {} weight tensors",
+                initialized_count
+            );
+            log::warn!("⚠️ LIMITATION: Candle doesn't support post-creation weight replacement");
+            log::warn!("⚠️ RECOMMENDATION: Use smaller learning rate or shorter sequences until proper init is available");
+        }
+
+        Ok(())
+    }
+
+    /// Clip gradients to prevent exploding gradients during training
+    /// Returns the original gradient norm for monitoring
+    /// Apply gradient clipping by norm (clip-by-norm method)
+    ///
+    /// This implements proper gradient clipping as described in the literature:
+    /// If ||g|| > threshold, then g := threshold * g/||g||
+    ///
+    /// Since Candle doesn't support direct gradient modification, we implement
+    /// gradient clipping by scaling the learning rate dynamically based on gradient norm.
+    /// This achieves the same effect as gradient clipping.
+    fn clip_gradients(
+        &self,
+        grads: &candle_core::backprop::GradStore,
+        clip_value: f64,
+        optimizer: &mut OptimizerWrapper,
+        original_lr: f64,
+    ) -> Result<(f64, f64)> {
+        // Calculate gradient norm across all parameters using VarMap
+        let mut total_norm_squared = 0.0f64;
+        let mut param_count = 0;
+
+        // Get all variables from the VarMap
+        let all_vars = self.varmap.all_vars();
+
+        for var in all_vars.iter() {
+            if let Some(grad) = grads.get(var) {
+                total_norm_squared += self.calculate_tensor_norm_squared(grad)?;
+                param_count += 1;
+            }
+        }
+
+        // Calculate the L2 norm
+        let grad_norm = if total_norm_squared > 0.0 {
+            total_norm_squared.sqrt()
+        } else {
+            0.0
+        };
+
+        // Log gradient statistics
+        if param_count > 0 {
+            log::debug!(
+                "🔍 Gradient norm calculated: {:.6} from {} parameters (threshold: {:.3})",
+                grad_norm,
+                param_count,
+                clip_value
+            );
+        } else {
+            log::warn!("⚠️ No gradients found for norm calculation - this may indicate a problem with the model");
+            return Ok((0.0, 0.0));
+        }
+
+        // Apply gradient clipping by scaling learning rate if needed
+        if grad_norm > clip_value && grad_norm > 0.0 {
+            let clip_ratio = clip_value / grad_norm;
+            let effective_lr = original_lr * clip_ratio;
+            let effective_norm = clip_value; // Effective gradient norm after clipping
+
+            log::debug!(
+                "✂️ GRADIENT CLIPPING APPLIED: original_norm={:.6} > threshold={:.6} (clip ratio: {:.3}, lr: {:.6} -> {:.6}, effective_norm={:.6})",
+                grad_norm,
+                clip_value,
+                clip_ratio,
+                original_lr,
+                effective_lr,
+                effective_norm
+            );
+
+            // Temporarily scale learning rate to achieve gradient clipping effect
+            optimizer.set_learning_rate(effective_lr);
+
+            Ok((grad_norm, effective_norm)) // Return both original and effective norms
+        } else {
+            // No clipping needed - ensure learning rate is at original value
+            optimizer.set_learning_rate(original_lr);
+            log::trace!(
+                "✅ No gradient clipping needed: norm={:.6} <= threshold={:.6}",
+                grad_norm,
+                clip_value
+            );
+            Ok((grad_norm, grad_norm)) // Both norms are the same when no clipping
+        }
+    }
+
+    /// Calculate learning rate based on schedule configuration
+    ///
+    /// This function implements all 5 learning schedule types:
+    /// - Constant: Maintains initial learning rate
+    /// - LinearDecay: Linear reduction over training epochs
+    /// - ExponentialDecay: Exponential decay with configurable rate
+    /// - CosineAnnealing: Cosine annealing schedule
+    /// - WarmRestarts: Cosine annealing with warm restarts (SGDR)
+    fn calculate_scheduled_learning_rate(
+        schedule_config: &crate::config::training::LearningScheduleConfig,
+        epoch_after_warmup: usize,
+        initial_lr: f64,
+        total_epochs: usize,
+    ) -> f64 {
+        use crate::config::training::LearningScheduleConfig;
+
+        match schedule_config {
+            LearningScheduleConfig::Constant => {
+                // Maintain constant learning rate
+                initial_lr
+            }
+
+            LearningScheduleConfig::LinearDecay { decay_rate } => {
+                // Linear decay: lr = initial_lr * (1 - decay_rate * progress)
+                let progress = epoch_after_warmup as f64 / total_epochs.max(1) as f64;
+                let decay_factor = 1.0 - (decay_rate * progress);
+                initial_lr * decay_factor.max(0.001) // Minimum LR threshold
+            }
+
+            LearningScheduleConfig::ExponentialDecay { decay_rate } => {
+                // Exponential decay: lr = initial_lr * decay_rate^epoch
+                let decay_factor = decay_rate.powf(epoch_after_warmup as f64);
+                initial_lr * decay_factor.max(0.0001) // Minimum LR threshold
+            }
+
+            LearningScheduleConfig::CosineAnnealing { t_max } => {
+                // Cosine annealing: lr = initial_lr * 0.5 * (1 + cos(π * epoch / t_max))
+                let t_max_f = (*t_max).max(1) as f64;
+                let progress = (epoch_after_warmup as f64) / t_max_f;
+                let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
+                initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
+            }
+
+            LearningScheduleConfig::WarmRestarts { t_0, t_mult } => {
+                // Cosine annealing with warm restarts (SGDR)
+                let mut t_cur = epoch_after_warmup;
+                let mut t_i = (*t_0).max(1) as usize;
+                let t_mult_val = (*t_mult).max(1) as usize;
+
+                // Find current restart cycle
+                while t_cur >= t_i {
+                    t_cur -= t_i;
+                    t_i *= t_mult_val;
+                }
+
+                // Calculate cosine annealing within current cycle
+                let progress = t_cur as f64 / t_i.max(1) as f64;
+                let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
+                initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
+            }
+        }
+    }
+}

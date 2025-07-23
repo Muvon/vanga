@@ -60,7 +60,14 @@ src/
 │   ├── trainer.rs     # Training pipeline orchestration
 │   └── predictor.rs   # Prediction pipeline orchestration
 ├── model/         # LSTM implementations
-│   ├── lstm_simple.rs # Core LSTM (MAIN TRAINING LOGIC)
+│   ├── lstm/          # Modular LSTM implementation (NEW STRUCTURE)
+│   │   ├── config.rs      # Configuration structs and validation
+│   │   ├── core.rs        # Model lifecycle and initialization
+│   │   ├── training.rs    # Training pipeline (MAIN TRAINING LOGIC)
+│   │   ├── inference.rs   # Prediction and forward pass
+│   │   ├── loss.rs        # Loss calculation and metrics
+│   │   └── mod.rs         # Public API and re-exports
+│   ├── lstm_simple.rs # Compatibility layer (re-exports from lstm/)
 │   └── multi_target.rs # Multi-target wrapper
 ├── features/      # Feature engineering
 │   ├── technical.rs   # Technical indicators
@@ -113,13 +120,17 @@ Raw CSV Data → Feature Engineering → Normalization (SAME STATS) → Sequence
 
 ### Key Files to Know
 
-#### `src/model/lstm_simple.rs` - CRITICAL
-- **Main training method**: `pub async fn train()` - THE method to enhance
-- **Never create**: `train_with_xyz()` methods - use conditional logic inside `train()`
-- **Validation logic**: Handles both internal splits and pre-split chronological data
-- **Configuration-driven**: All behavior controlled by `TrainingConfig`
-- **Tensor operations**: Contains critical broadcasting fixes (lines 2240-2250)
-- **Loss calculation**: Multi-target aware with class weighting and label smoothing
+#### `src/model/lstm/` - MODULAR LSTM (NEW STRUCTURE)
+- **training.rs**: `pub async fn train()` - THE method to enhance (main training logic)
+- **loss.rs**: Loss calculation with `calculate_weighted_soft_crossentropy_loss()`
+- **config.rs**: LSTMConfig, TrainingConfig, OptimizerWrapper (all 9 optimizers)
+- **core.rs**: Model lifecycle, initialization, persistence methods
+- **inference.rs**: `predict()` method and forward pass implementation
+- **mod.rs**: Public API with full backward compatibility via re-exports
+
+#### `src/model/lstm_simple.rs` - COMPATIBILITY LAYER
+- **Current role**: Just `pub use crate::model::lstm::*;` for backward compatibility
+- **All existing code**: Works unchanged due to re-exports
 
 #### `src/model/multi_target.rs`
 - **Wrapper around lstm_simple**: Trains multiple models for different targets
@@ -337,13 +348,14 @@ let loss_tensor = predictions.sub(targets)?.sqr()?.mean_all()?;
 ### Common Issue Locations
 
 #### Training Problems
-- **Main logic**: `src/model/lstm_simple.rs::train()`
+- **Main logic**: `src/model/lstm/training.rs::train()` (NEW LOCATION)
+- **Loss functions**: `src/model/lstm/loss.rs` (tensor broadcasting, class weights)
+- **Configuration**: `src/model/lstm/config.rs` + `src/config/training.rs`
 - **Multi-target**: `src/model/multi_target.rs`
-- **Configuration**: `src/config/training.rs`
 - **Data loading**: `src/data/loader.rs`
 
 #### Tensor Broadcasting Issues (CRITICAL)
-- **Price level loss**: `src/model/lstm_simple.rs::calculate_weighted_soft_crossentropy_loss()` (lines 2628-2705)
+- **LSTM loss functions**: `src/model/lstm/loss.rs::calculate_weighted_soft_crossentropy_loss()` (NEW LOCATION)
 - **Composite loss**: `src/model/loss.rs::calculate_weighted_soft_crossentropy_loss()` (matches LSTM implementation)
 - **Attention mechanism**: `src/model/attention.rs` (uses broadcast_div pattern)
 - **Loss functions**: `src/model/loss.rs` (uses broadcast_as pattern)
@@ -362,8 +374,8 @@ let loss_tensor = predictions.sub(targets)?.sqr()?.mean_all()?;
 - **Configuration**: `src/config/features.rs`
 
 #### Validation & Early Stopping
-- **Early stopping logic**: `src/model/lstm_simple.rs` (lines ~1020-1040)
-- **Validation splits**: `src/model/lstm_simple.rs` (lines ~790-830)
+- **Early stopping logic**: `src/model/lstm/training.rs` (NEW LOCATION)
+- **Validation splits**: `src/model/lstm/training.rs` (NEW LOCATION)
 - **Chronological validation**: `src/model/multi_target.rs::train_with_chronological_validation()`
 
 #### Price Level Target Issues (CRITICAL ARCHITECTURE)
@@ -527,7 +539,11 @@ ls configs/optimizer_examples/
 ```
 
 ### Key Files for Common Tasks
-- **Training issues**: `src/model/lstm_simple.rs`
+- **Training issues**: `src/model/lstm/training.rs` (NEW: main training logic)
+- **Loss functions**: `src/model/lstm/loss.rs` (NEW: tensor broadcasting, class weights)
+- **LSTM configuration**: `src/model/lstm/config.rs` (NEW: LSTMConfig, optimizers)
+- **Model lifecycle**: `src/model/lstm/core.rs` (NEW: initialization, persistence)
+- **Prediction**: `src/model/lstm/inference.rs` (NEW: predict method)
 - **Multi-target problems**: `src/model/multi_target.rs`
 - **Target generation**: `src/targets/price_levels.rs` (percentage-based quantiles)
 - **Feature normalization**: `src/data/preprocessor.rs` (training/prediction consistency)
