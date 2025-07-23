@@ -1,11 +1,9 @@
 // Sequence generator for LSTM training and prediction
 use crate::data::{DataMetadata, PreparedData, PreparedPredictionData};
-use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use chrono::Utc;
 use ndarray::{s, Array2, Array3, Axis};
 use polars::prelude::*;
-use rayon::prelude::*;
 
 pub struct SequenceGenerator {
     // Sequence generation logic - overlap controlled via DataConfig
@@ -24,8 +22,7 @@ impl SequenceGenerator {
 
     pub async fn generate_training_sequences(
         &self,
-        df: DataFrame,
-        normalization_stats: crate::data::NormalizationStats,
+        df: DataFrame, // RAW data with features, NOT pre-normalized
         horizons: &[String],
         model_config: &crate::config::ModelConfig,
         data_config: &crate::config::training::DataConfig,
@@ -78,14 +75,18 @@ impl SequenceGenerator {
         // Extract feature data as matrix
         let feature_data = self.extract_feature_matrix(&df, &feature_columns)?;
 
-        // Generate sequences using sliding window with config overlap
+        // Generate sequences using per-sequence normalization (CORRECT approach)
         let (sequences, targets) = self
-            .create_sliding_windows(&feature_data, sequence_length, horizons, &df, data_config)
+            .create_sliding_windows_with_normalization(
+                &feature_data,
+                sequence_length,
+                horizons,
+                &df,
+                data_config,
+            )
             .await?;
 
-        // FIXED: Use normalization stats passed from preprocessor (calculated from raw data)
-        // Data is already normalized by preprocessor, so sequences are already normalized
-        log::info!("✅ Using normalization stats from preprocessor (calculated from raw data before normalization)");
+        log::info!("✅ Using per-sequence normalization (each sequence normalized independently)");
 
         // Create metadata
         let metadata = DataMetadata {
@@ -130,7 +131,16 @@ impl SequenceGenerator {
             sequences,
             targets,
             feature_names: feature_columns,
-            normalization_stats,
+            // No global normalization stats needed - each sequence normalized independently
+            normalization_stats: crate::data::NormalizationStats {
+                means: vec![],
+                stds: vec![],
+                mins: vec![],
+                maxs: vec![],
+                medians: vec![],
+                q25: vec![],
+                q75: vec![],
+            },
             metadata,
         })
     }
@@ -246,228 +256,6 @@ impl SequenceGenerator {
         Ok(matrix)
     }
 
-    async fn create_sliding_windows(
-        &self,
-        feature_data: &Array2<f64>,
-        sequence_length: usize,
-        horizons: &[String],
-        df: &DataFrame,
-        data_config: &crate::config::training::DataConfig,
-    ) -> Result<(Array3<f64>, PreparedTargets)> {
-        let total_rows = feature_data.nrows();
-        let feature_count = feature_data.ncols();
-
-        if total_rows < sequence_length + 1 {
-            return Err(VangaError::DataError(format!(
-                "Not enough data for sequences: {} rows, need {}",
-                total_rows,
-                sequence_length + 1
-            )));
-        }
-
-        // Calculate maximum horizon offset for proper sequence alignment
-        let max_horizon_steps = horizons
-            .iter()
-            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
-            .max()
-            .unwrap_or(1);
-
-        // Calculate step size based on config overlap ratio
-        let sequence_overlap = data_config.sequence_overlap;
-        let step_size = if sequence_overlap == 0.0 {
-            sequence_length // No overlap - sequences don't share data
-        } else {
-            std::cmp::max(
-                1,
-                (sequence_length as f64 * (1.0 - sequence_overlap)) as usize,
-            )
-        };
-
-        // Adjust sequence count to account for multi-horizon targets and step size
-        let effective_rows = total_rows.saturating_sub(max_horizon_steps);
-        let max_start_idx = effective_rows.saturating_sub(sequence_length);
-
-        // Calculate number of sequences with step_size (prevents 99% overlap!)
-        let num_sequences = if max_start_idx == 0 {
-            0
-        } else {
-            (max_start_idx / step_size) + 1
-        };
-
-        if num_sequences == 0 {
-            return Err(VangaError::DataError(format!(
-                "Insufficient data for sequences: {} total rows, {} max horizon steps, {} sequence length, {} step size",
-                total_rows, max_horizon_steps, sequence_length, step_size
-            )));
-        }
-
-        // Calculate data efficiency metrics
-        let theoretical_max_sequences = max_start_idx; // With step_size=1
-        let data_efficiency = (num_sequences as f64 / theoretical_max_sequences as f64) * 100.0;
-        let total_data_points = num_sequences * sequence_length;
-        let unique_data_points = max_start_idx + sequence_length - 1;
-        let data_reuse_factor = total_data_points as f64 / unique_data_points as f64;
-
-        log::info!("📊 SEQUENCE GENERATION SUMMARY:");
-        log::info!(
-            "   • Dataset: {} rows → {} effective rows (after horizon offset: {})",
-            total_rows,
-            effective_rows,
-            max_horizon_steps
-        );
-        log::info!(
-            "   • Overlap Config: {:.1}% → Step Size: {} (every {} rows)",
-            sequence_overlap * 100.0,
-            step_size,
-            step_size
-        );
-        log::info!(
-            "   • Sequences: {} generated (vs {} theoretical max with step=1)",
-            num_sequences,
-            theoretical_max_sequences
-        );
-        log::info!(
-            "   • Data Efficiency: {:.1}% ({} sequences / {} max possible)",
-            data_efficiency,
-            num_sequences,
-            theoretical_max_sequences
-        );
-        log::info!(
-            "   • Data Reuse: {:.2}x (each data point used ~{:.1} times)",
-            data_reuse_factor,
-            data_reuse_factor
-        );
-        log::info!(
-            "   • Features: {} per sequence, Horizons: {}",
-            feature_count,
-            horizons.len()
-        );
-
-        // Generate targets using DataFrame for all horizons
-        let prepared_targets = self.generate_multi_horizon_targets(df, horizons).await?;
-
-        let mut sequences = Array3::zeros((num_sequences, sequence_length, feature_count));
-
-        // FIXED: Create sequences with configurable step size (no more 99% overlap!)
-        let sequences_vec: Vec<Array2<f64>> = (0..num_sequences)
-            .into_par_iter()
-            .map(|i| {
-                let start_idx = i * step_size;
-                feature_data
-                    .slice(s![start_idx..start_idx + sequence_length, ..])
-                    .to_owned()
-            })
-            .collect();
-
-        // Convert parallel results to Array3
-        for (i, sequence) in sequences_vec.into_iter().enumerate() {
-            sequences.slice_mut(s![i, .., ..]).assign(&sequence);
-        }
-
-        // CRITICAL FIX: Create sequence-aligned targets
-        // When using step_size > 1, we need to map sequence indices to target indices
-        let mut sequence_aligned_targets = PreparedTargets::new(num_sequences);
-
-        // Map each sequence index to its corresponding target index
-        for seq_idx in 0..num_sequences {
-            let target_idx = seq_idx * step_size + sequence_length - 1; // Target is at end of sequence
-
-            // Copy targets for this sequence from the original targets
-            for (horizon, price_targets) in &prepared_targets.price_levels {
-                if let Some(target_vec) = sequence_aligned_targets.price_levels.get_mut(horizon) {
-                    if target_idx < price_targets.len() {
-                        target_vec[seq_idx] = price_targets[target_idx];
-                    }
-                } else {
-                    let mut new_vec = vec![-1; num_sequences];
-                    if target_idx < price_targets.len() {
-                        new_vec[seq_idx] = price_targets[target_idx];
-                    }
-                    sequence_aligned_targets
-                        .price_levels
-                        .insert(horizon.clone(), new_vec);
-                }
-            }
-
-            for (horizon, direction_targets) in &prepared_targets.directions {
-                if let Some(target_vec) = sequence_aligned_targets.directions.get_mut(horizon) {
-                    if target_idx < direction_targets.len() {
-                        target_vec[seq_idx] = direction_targets[target_idx];
-                    }
-                } else {
-                    let mut new_vec = vec![-1; num_sequences];
-                    if target_idx < direction_targets.len() {
-                        new_vec[seq_idx] = direction_targets[target_idx];
-                    }
-                    sequence_aligned_targets
-                        .directions
-                        .insert(horizon.clone(), new_vec);
-                }
-            }
-
-            for (horizon, volatility_targets) in &prepared_targets.volatility {
-                if let Some(target_vec) = sequence_aligned_targets.volatility.get_mut(horizon) {
-                    if target_idx < volatility_targets.len() {
-                        target_vec[seq_idx] = volatility_targets[target_idx];
-                    }
-                } else {
-                    let mut new_vec = vec![-1; num_sequences];
-                    if target_idx < volatility_targets.len() {
-                        new_vec[seq_idx] = volatility_targets[target_idx];
-                    }
-                    sequence_aligned_targets
-                        .volatility
-                        .insert(horizon.clone(), new_vec);
-                }
-            }
-        }
-
-        // Update valid indices to be sequence indices where targets are valid
-        sequence_aligned_targets.valid_indices = (0..num_sequences)
-            .filter(|&i| {
-                // Check if all targets are valid for this sequence
-                let mut all_valid = true;
-
-                // Check first horizon as representative
-                if let Some(first_horizon) = horizons.first() {
-                    if let Some(price_targets) =
-                        sequence_aligned_targets.price_levels.get(first_horizon)
-                    {
-                        if i >= price_targets.len() || price_targets[i] < 0 {
-                            all_valid = false;
-                        }
-                    }
-                }
-
-                all_valid
-            })
-            .collect();
-
-        log::info!(
-            "📊 Sequence-aligned targets: {} sequences with {} valid samples",
-            num_sequences,
-            sequence_aligned_targets.valid_indices.len()
-        );
-
-        // Debug: Verify alignment for first few sequences
-        if num_sequences > 0 && log::log_enabled!(log::Level::Debug) {
-            log::debug!("🔍 Target alignment verification (first 3 sequences):");
-            for seq_idx in 0..std::cmp::min(3, num_sequences) {
-                let target_idx = seq_idx * step_size + sequence_length - 1;
-                log::debug!(
-                    "  Sequence {} → Target index {} (step_size={}, seq_len={})",
-                    seq_idx,
-                    target_idx,
-                    step_size,
-                    sequence_length
-                );
-            }
-        }
-
-        // Return both sequences and the sequence-aligned targets
-        Ok((sequences, sequence_aligned_targets))
-    }
-
     /// Create prediction sequences from feature data
     fn create_prediction_sequences(
         &self,
@@ -503,7 +291,7 @@ impl SequenceGenerator {
         // Check minimum data requirements for all horizons
         let min_required_rows = horizons
             .iter()
-            .map(|h| self.parse_horizon_to_steps(h).unwrap_or(1))
+            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
             .max()
             .unwrap_or(1)
             * 2; // At least 2x the largest horizon for reliable training
@@ -556,31 +344,6 @@ impl SequenceGenerator {
     }
 
     /// Parse horizon string to steps (reuses existing volatility module function)
-    fn parse_horizon_to_steps(&self, horizon: &str) -> Result<usize> {
-        // Reuse the existing function from volatility module
-        crate::targets::volatility::parse_horizon_to_steps(horizon)
-    }
-
-    /// Generate targets for multiple horizons using DataFrame
-    async fn generate_multi_horizon_targets(
-        &self,
-        df: &DataFrame,
-        horizons: &[String],
-    ) -> Result<PreparedTargets> {
-        log::info!(
-            "Generating targets for {} specific horizons",
-            horizons.len()
-        );
-
-        // Create target generator with horizon-specific configuration
-        let config = crate::targets::MultiTargetConfig {
-            horizons: horizons.to_vec(),
-            ..Default::default()
-        };
-
-        let target_generator = crate::targets::TargetGenerator::new(config);
-        target_generator.generate_all_targets(df).await
-    }
 
     /// Validate feature window requirements for training data
     fn validate_feature_window_requirements(
@@ -639,5 +402,193 @@ impl SequenceGenerator {
         log::info!("   ✅ Sufficient data available");
 
         Ok(())
+    }
+
+    /// Normalize a sequence window using only data within that window
+    /// This is the CORRECT approach for time series ML - each sequence is self-contained
+    fn normalize_sequence_window(&self, window_df: &DataFrame) -> Result<DataFrame> {
+        let mut normalized_columns = Vec::new();
+
+        // Process each column independently
+        for column_name in window_df.get_column_names() {
+            if column_name == "timestamp" {
+                // Keep timestamp as-is
+                normalized_columns.push(window_df.column(column_name)?.clone());
+                continue;
+            }
+
+            if let Ok(series) = window_df.column(column_name) {
+                if series.dtype().is_numeric() {
+                    // Normalize using only THIS WINDOW's data
+                    let normalized_series = self.normalize_column_in_window(series)?;
+                    normalized_columns.push(normalized_series);
+                } else {
+                    normalized_columns.push(series.clone());
+                }
+            }
+        }
+
+        // Reconstruct DataFrame with normalized columns
+        DataFrame::new(normalized_columns).map_err(|e| {
+            VangaError::DataError(format!("Failed to create normalized DataFrame: {}", e))
+        })
+    }
+
+    /// Normalize a single column using only values within the sequence window
+    fn normalize_column_in_window(&self, series: &Series) -> Result<Series> {
+        if let Ok(float_series) = series.f64() {
+            // Since we've already removed initial NaN rows, we should have valid data
+            let values: Vec<f64> = float_series
+                .into_iter()
+                .filter_map(|v| v.filter(|x| x.is_finite()))
+                .collect();
+
+            // If no finite values (shouldn't happen after remove_nan_rows), return original
+            if values.is_empty() {
+                log::warn!(
+                    "Column '{}' has no finite values after NaN removal - this shouldn't happen",
+                    series.name()
+                );
+                return Ok(series.clone());
+            }
+
+            // If only one unique value, return zeros (normalized constant)
+            if values.len() == 1 {
+                let zeros: Vec<Option<f64>> = (0..float_series.len()).map(|_| Some(0.0)).collect();
+                return Ok(Series::new(series.name(), zeros));
+            }
+
+            // Calculate mean and std from finite values only
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
+            let std_dev = variance.sqrt();
+
+            // Robust division by zero protection
+            let std_dev = if std_dev < 1e-6 {
+                1e-6 // Very small but not zero
+            } else {
+                std_dev
+            };
+
+            // Normalize: (x - mean) / std, preserving structure
+            let normalized_values: Vec<Option<f64>> = float_series
+                .into_iter()
+                .map(|v| {
+                    match v {
+                        Some(x) if x.is_finite() => Some((x - mean) / std_dev),
+                        _ => None, // Keep NaN as None
+                    }
+                })
+                .collect();
+
+            Ok(Series::new(series.name(), normalized_values))
+        } else {
+            Ok(series.clone())
+        }
+    }
+
+    /// Create sliding windows with per-sequence normalization
+    /// Each window: [sequence_length + gap + horizon_steps] normalized together
+    async fn create_sliding_windows_with_normalization(
+        &self,
+        _feature_data: &Array2<f64>, // Unused - we work with DataFrame directly
+        sequence_length: usize,
+        horizons: &[String],
+        df: &DataFrame,
+        data_config: &crate::config::training::DataConfig,
+    ) -> Result<(Array3<f64>, crate::targets::PreparedTargets)> {
+        // Calculate maximum horizon steps
+        let max_horizon_steps = horizons
+            .iter()
+            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+            .max()
+            .unwrap_or(1);
+
+        // Calculate gap size (same logic as walk-forward windows)
+        let gap_size = max_horizon_steps; // Gap to prevent data leakage
+
+        // Total window size: sequence + gap + horizon
+        let total_window_size = sequence_length + gap_size + max_horizon_steps;
+
+        log::info!(
+            "🔧 Per-sequence normalization: sequence_length({}) + gap({}) + max_horizon({}) = {} total window",
+            sequence_length, gap_size, max_horizon_steps, total_window_size
+        );
+
+        let total_records = df.height();
+        if total_records < total_window_size {
+            return Err(VangaError::DataError(format!(
+                "Insufficient data: need {} records, have {}",
+                total_window_size, total_records
+            )));
+        }
+
+        let mut all_sequences = Vec::new();
+
+        // Generate sequences with proper normalization
+        let step_size = if data_config.sequence_overlap > 0.0 {
+            1
+        } else {
+            sequence_length
+        };
+        let mut i = 0;
+
+        while i + total_window_size <= total_records {
+            // Extract the complete window (sequence + gap + horizon)
+            let window_df = df.slice(i as i64, total_window_size);
+
+            // Normalize the entire window
+            let normalized_window = self.normalize_sequence_window(&window_df)?;
+
+            // Extract the input sequence (first sequence_length rows)
+            let sequence_df = normalized_window.slice(0, sequence_length);
+            let feature_columns: Vec<String> = df
+                .get_column_names()
+                .iter()
+                .filter(|&col| *col != "timestamp")
+                .map(|s| s.to_string())
+                .collect();
+            let sequence_matrix = self.extract_feature_matrix(&sequence_df, &feature_columns)?;
+
+            // Convert to sequence format [sequence_length, features]
+            all_sequences.push(sequence_matrix);
+
+            i += step_size;
+        }
+
+        log::info!(
+            "✅ Generated {} sequences with per-sequence normalization",
+            all_sequences.len()
+        );
+
+        // Convert sequences to Array3
+        let sequences = self.convert_sequences_to_array3(all_sequences)?;
+
+        // Generate targets using the original target generation logic
+        // Note: Targets are generated from the original raw data, not normalized data
+        let target_generator = crate::targets::TargetGenerator::with_defaults();
+        let targets = target_generator.generate_all_targets(df).await?;
+
+        Ok((sequences, targets))
+    }
+
+    /// Convert list of sequence matrices to Array3
+    fn convert_sequences_to_array3(&self, sequences: Vec<Array2<f64>>) -> Result<Array3<f64>> {
+        if sequences.is_empty() {
+            return Err(VangaError::DataError("No sequences to convert".to_string()));
+        }
+
+        let num_sequences = sequences.len();
+        let sequence_length = sequences[0].nrows();
+        let num_features = sequences[0].ncols();
+
+        let mut array3 = Array3::zeros((num_sequences, sequence_length, num_features));
+
+        for (i, sequence) in sequences.iter().enumerate() {
+            array3.slice_mut(s![i, .., ..]).assign(sequence);
+        }
+
+        Ok(array3)
     }
 }

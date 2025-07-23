@@ -55,15 +55,15 @@ impl DataPipeline {
         // Validate schema
         CryptoDataSchema::validate(&raw_data)?;
 
-        // Preprocess data (features, normalization, etc.)
-        let (processed_data, normalization_stats) = self
+        // Apply feature engineering but NO global normalization
+        let processed_data = self
             .preprocessor
-            .process_for_training(raw_data, &config.data, Some(&config.features))
+            .process_features_only(raw_data, &config.data, Some(&config.features))
             .await?;
 
-        // CRITICAL: Use walk-forward analysis to maximize data utilization
+        // Create windows with raw data - normalization happens per-sequence
         let windows = self
-            .create_walk_forward_windows(&processed_data, &normalization_stats, config)
+            .create_walk_forward_windows(processed_data, config)
             .await?;
 
         log::info!(
@@ -234,11 +234,10 @@ impl DataPipeline {
     /// Create walk-forward analysis windows using existing validation_split config
     async fn create_walk_forward_windows(
         &self,
-        df: &polars::prelude::DataFrame,
-        normalization_stats: &NormalizationStats,
+        raw_processed_data: polars::prelude::DataFrame, // Has features but NOT normalized
         config: &crate::config::TrainingConfig,
     ) -> Result<Vec<TrainingWindow>> {
-        let total_samples = df.height();
+        let total_samples = raw_processed_data.height();
         let validation_size = (total_samples as f64 * config.training.validation_split) as usize;
         let min_train_size = total_samples / 2; // Start with at least 50% for initial training
 
@@ -285,15 +284,14 @@ impl DataPipeline {
             let val_start = train_end + gap_size; // PROPER GAP ADDED
             let val_end = val_start + validation_size;
 
-            let train_df = df.slice(0, train_end);
-            let val_df = df.slice(val_start as i64, validation_size);
+            let train_df = raw_processed_data.slice(0, train_end);
+            let val_df = raw_processed_data.slice(val_start as i64, validation_size);
 
-            // Generate sequences for this window
+            // Generate sequences with per-sequence normalization
             let train_sequences = self
                 .sequence_generator
                 .generate_training_sequences(
-                    train_df,
-                    normalization_stats.clone(),
+                    train_df, // RAW data
                     &config.horizons,
                     &config.model,
                     &config.data,
@@ -303,8 +301,7 @@ impl DataPipeline {
             let val_sequences = self
                 .sequence_generator
                 .generate_training_sequences(
-                    val_df,
-                    normalization_stats.clone(),
+                    val_df, // RAW data
                     &config.horizons,
                     &config.model,
                     &config.data,
@@ -363,53 +360,16 @@ impl DataPipeline {
             train_end = val_end;
         }
 
-        // Calculate comprehensive data split statistics
-        let total_train_sequences: usize = windows
-            .iter()
-            .map(|w| w.train_data.sequences.shape()[0])
-            .sum();
-        let total_val_sequences: usize = windows
-            .iter()
-            .map(|w| w.val_data.sequences.shape()[0])
-            .sum();
-        let avg_train_per_window = if !windows.is_empty() {
-            total_train_sequences / windows.len()
-        } else {
-            0
-        };
-        let avg_val_per_window = if !windows.is_empty() {
-            total_val_sequences / windows.len()
-        } else {
-            0
-        };
+        if windows.is_empty() {
+            return Err(crate::utils::error::VangaError::DataError(
+                "No valid walk-forward windows could be created".to_string(),
+            ));
+        }
 
-        log::info!("📊 WALK-FORWARD ANALYSIS SUMMARY:");
         log::info!(
-            "   • Windows: {} created with {:.1}% validation split",
-            windows.len(),
-            config.training.validation_split * 100.0
+            "📊 Walk-forward windows created: {} windows with per-sequence normalization",
+            windows.len()
         );
-        log::info!(
-            "   • Total Sequences: {} train + {} validation = {}",
-            total_train_sequences,
-            total_val_sequences,
-            total_train_sequences + total_val_sequences
-        );
-        log::info!(
-            "   • Per Window Avg: {} train, {} validation sequences",
-            avg_train_per_window,
-            avg_val_per_window
-        );
-        log::info!(
-            "   • Data Split Ratio: {:.1}% train / {:.1}% validation",
-            (total_train_sequences as f64 / (total_train_sequences + total_val_sequences) as f64)
-                * 100.0,
-            (total_val_sequences as f64 / (total_train_sequences + total_val_sequences) as f64)
-                * 100.0
-        );
-        log::info!("   • Chronological Order: Maintained (no data leakage)");
-        log::info!("   • Test Split: Reserved for final evaluation (separate from validation)");
-        log::info!("   • Validation Strategy: Walk-forward windows prevent overfitting");
 
         Ok(windows)
     }
@@ -434,10 +394,10 @@ impl DataPipeline {
         let processed_data = if let Some(training_config) = model.get_training_config() {
             log::info!("Using stored training config for consistent preprocessing");
 
-            // STEP 1: Apply EXACT same preprocessing as training
-            let (mut df, _normalization_stats) = self
+            // Apply EXACT same preprocessing as training (feature engineering + remove_nan_rows)
+            let df = self
                 .preprocessor
-                .process_for_training(
+                .process_features_only(
                     raw_data,
                     &training_config.data,
                     Some(&training_config.features),
@@ -449,63 +409,14 @@ impl DataPipeline {
                 df.height(),
                 df.width()
             );
-
-            // STEP 2: CRITICAL - Apply normalization using stored training stats
-            // This is the missing step that caused the bug!
-            if let Some(normalization_stats) = model.get_normalization_stats() {
-                log::info!("🔧 Applying normalization using stored training statistics");
-
-                df = self.preprocessor.apply_normalization_with_stats(
-                    df,
-                    normalization_stats,
-                    &training_config.data.normalization,
-                )?;
-
-                log::info!("✅ Normalization applied - model will receive properly scaled inputs");
-            } else {
-                log::warn!("⚠️  No normalization stats found in model - model may receive wrong input scale");
-                log::warn!("    This suggests the model was trained with an older version that didn't store normalization stats");
-            }
-
-            // STEP 3: Extract most recent data for prediction (AFTER normalization)
-            let sequence_length = match &training_config.model.sequence_length {
-                crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
-                crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => {
-                    *min_length as usize
-                }
-                crate::config::model::SequenceLengthConfig::Adaptive => 60,
-            };
-
-            let required_rows = sequence_length + 1;
-
-            // Validate we have enough data after preprocessing
-            if df.height() < required_rows {
-                return Err(crate::utils::error::VangaError::DataError(format!(
-                    "Insufficient data after preprocessing: {} rows available, {} required for prediction",
-                    df.height(),
-                    required_rows
-                )));
-            }
-
-            // Take most recent data for prediction
-            let start_idx = df.height() - required_rows;
-            df = df.slice(start_idx as i64, required_rows);
-
-            log::info!("🔍 PREDICTION PIPELINE SUMMARY:");
-            log::info!("   ✅ Used exact same preprocessing as training");
-            log::info!("   ✅ Applied normalization with stored training stats");
-            log::info!(
-                "   ✅ Extracted {} most recent rows for prediction",
-                required_rows
-            );
-            log::info!("   ✅ Model will receive properly normalized inputs");
+            log::info!("✅ Per-sequence normalization will be applied during sequence generation");
 
             df
         } else {
             // Fallback for old models without stored training config
             log::warn!("No training config found in model - using basic preprocessing (may cause feature mismatch)");
             self.preprocessor
-                .process_for_prediction(raw_data, &config.symbols[0])
+                .process_for_prediction(raw_data, &config.symbols[0], None)
                 .await?
         };
 
@@ -586,7 +497,7 @@ pub struct PreparedPredictionData {
 }
 
 /// Normalization statistics for features
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NormalizationStats {
     pub means: Vec<f64>,
     pub stds: Vec<f64>,

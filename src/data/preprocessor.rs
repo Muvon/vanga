@@ -1,5 +1,6 @@
 // Data preprocessor
 use crate::config::training::DataConfig;
+use crate::features::engineering::apply_feature_engineering;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 
@@ -25,6 +26,98 @@ impl Default for DataPreprocessor {
 impl DataPreprocessor {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Process features without global normalization - for per-sequence normalization approach
+    pub async fn process_features_only(
+        &self,
+        mut df: DataFrame,
+        config: &DataConfig,
+        features_config: Option<&crate::config::FeatureConfig>,
+    ) -> Result<DataFrame> {
+        log::info!(
+            "Processing features WITHOUT global normalization: {} rows, {} columns",
+            df.height(),
+            df.width()
+        );
+
+        // Validate input DataFrame
+        if df.height() == 0 {
+            return Err(VangaError::DataError(
+                "Cannot process empty DataFrame for feature processing".to_string(),
+            ));
+        }
+
+        // Apply feature engineering (technical indicators, etc.)
+        if let Some(features_config) = features_config {
+            df = apply_feature_engineering(df, &features_config.engineering).await?;
+        }
+
+        // CRITICAL: Remove initial NaN rows from lag features
+        // This finds the first row where ALL columns have valid values and removes everything before
+        df = self.remove_nan_rows(df)?;
+
+        log::info!(
+            "✅ Removed initial NaN rows (lag feature warmup): {} rows remaining",
+            df.height()
+        );
+
+        // Apply outlier handling if enabled
+        df = if config.outlier_handling.enabled {
+            log::info!(
+                "Outlier handling enabled: method={:?}, threshold={}",
+                config.outlier_handling.method,
+                config.outlier_handling.threshold
+            );
+
+            let original_rows = df.height();
+
+            let processed_df = match config.outlier_handling.method {
+                crate::config::training::OutlierMethod::IQR => {
+                    self.remove_outliers_iqr(df, config.outlier_handling.threshold)?
+                }
+                crate::config::training::OutlierMethod::ZScore => {
+                    self.remove_outliers_zscore(df, config.outlier_handling.threshold)?
+                }
+                crate::config::training::OutlierMethod::ModifiedZScore => {
+                    self.remove_outliers_modified_zscore(df, config.outlier_handling.threshold)?
+                }
+            };
+
+            let remaining_rows = processed_df.height();
+            if remaining_rows == 0 {
+                return Err(VangaError::DataError(
+                    "All rows were removed during outlier detection. Consider adjusting the threshold or disabling outlier handling.".to_string()
+                ));
+            }
+
+            if remaining_rows < original_rows / 2 {
+                log::warn!("Outlier removal eliminated more than 50% of data ({} -> {} rows). Consider adjusting threshold.",
+                          original_rows, remaining_rows);
+            }
+
+            log::info!(
+                "Outlier handling completed: {} -> {} rows ({:.1}% retained)",
+                original_rows,
+                remaining_rows,
+                (remaining_rows as f64 / original_rows as f64) * 100.0
+            );
+
+            processed_df
+        } else {
+            log::info!("Outlier handling disabled");
+            df
+        };
+
+        // CRITICAL: NO GLOBAL NORMALIZATION HERE - will be done per-sequence
+        log::info!(
+            "✅ Features processed (no global normalization): {} rows, {} columns",
+            df.height(),
+            df.width()
+        );
+        log::info!("🔧 Normalization will be applied per-sequence during training");
+
+        Ok(df)
     }
 
     pub async fn process_for_training(
@@ -231,6 +324,7 @@ impl DataPreprocessor {
         &self,
         mut df: DataFrame,
         symbol: &str,
+        features_config: Option<&crate::config::FeatureConfig>,
     ) -> Result<DataFrame> {
         log::info!(
             "Processing data for prediction on symbol: {} ({} rows, {} columns)",
@@ -265,6 +359,28 @@ impl DataPreprocessor {
                 )));
             }
         }
+
+        // Apply same feature engineering as training
+        if let Some(features_config) = features_config {
+            df = crate::features::engineering::apply_feature_engineering(
+                df,
+                &features_config.engineering,
+            )
+            .await?;
+            log::info!(
+                "✅ Applied feature engineering for prediction on symbol {} ({} columns after engineering)",
+                symbol,
+                df.width()
+            );
+        }
+
+        // CRITICAL: Remove initial NaN rows from lag features (same as training)
+        df = self.remove_nan_rows(df)?;
+        log::info!(
+            "✅ Removed initial NaN rows for prediction on symbol {} ({} rows remaining)",
+            symbol,
+            df.height()
+        );
 
         // Apply same preprocessing as training (without target-specific operations)
         // For prediction, we should use stored normalization parameters from training
@@ -395,7 +511,7 @@ impl DataPreprocessor {
             let mut processing_errors = Vec::new();
 
             for (symbol, df) in symbol_data {
-                match self.process_for_prediction(df, &symbol).await {
+                match self.process_for_prediction(df, &symbol, None).await {
                     Ok(processed_df) => {
                         log::debug!(
                             "Individual processing completed for symbol {}: {} rows, {} columns",
