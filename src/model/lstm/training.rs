@@ -362,12 +362,14 @@ impl LSTMModel {
         let use_validation = validation_split > 0.0;
 
         // Prepare training and validation data - handle pre-split vs internal split
-        let (train_sequences, train_targets, val_sequences_final, val_targets_final) = if let (
-            Some(val_seq),
-            Some(val_tgt),
-        ) =
-            (val_sequences, val_targets)
-        {
+        let (
+            train_sequences,
+            train_targets,
+            val_sequences_final,
+            val_targets_final,
+            test_sequences_final,
+            test_targets_final,
+        ) = if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
             // Use pre-split chronological validation data (prevents data leakage)
             log::info!(
                 "📊 Using pre-split chronological validation: {} train, {} val samples",
@@ -379,12 +381,32 @@ impl LSTMModel {
                 targets.to_owned(),
                 Some(val_seq.to_owned()),
                 Some(val_tgt.to_owned()),
+                ndarray::Array3::zeros((0, sequences.shape()[1], sequences.shape()[2])), // Empty test data for pre-split
+                ndarray::Array2::zeros((0, targets.shape()[1])),
             )
         } else if use_validation {
             // Create internal validation split with gap to prevent data leakage
             log::info!(
                 "📊 Using internal validation split: {:.1}%",
                 validation_split * 100.0
+            );
+
+            // STEP 1: Reserve test set if test_split > 0
+            let test_split = config.training.test_split;
+            let test_size = if test_split > 0.0 {
+                (total_samples as f64 * test_split) as usize
+            } else {
+                0
+            };
+
+            let available_for_training = total_samples - test_size;
+
+            log::info!(
+                "📊 Three-way split: total={}, test_reserved={} ({:.1}%), available_for_training={}",
+                total_samples,
+                test_size,
+                test_split * 100.0,
+                available_for_training
             );
 
             // FIXED: Calculate proper gap size to prevent data leakage
@@ -413,23 +435,42 @@ impl LSTMModel {
             );
 
             // FIXED: Account for gap in validation split calculation
-            let effective_samples = total_samples.saturating_sub(gap_size);
+            let effective_samples = available_for_training.saturating_sub(gap_size);
             let base_train_samples = ((1.0 - validation_split) * effective_samples as f64) as usize;
             let train_samples = base_train_samples;
             let val_start = train_samples + gap_size;
 
             // Ensure we have enough samples for validation after the gap
-            if val_start >= total_samples {
+            if val_start >= available_for_training {
                 return Err(VangaError::DataError(format!(
-                        "Not enough data for validation after gap: {} total samples, {} train + {} gap = {} start, need at least {} for validation",
-                        total_samples, train_samples, gap_size, val_start, val_start + 1
+                        "Not enough data for validation after gap: {} available samples, {} train + {} gap = {} start, need at least {} for validation",
+                        available_for_training, train_samples, gap_size, val_start, val_start + 1
                     )));
             }
 
             let train_seq = sequences.slice(s![0..train_samples, .., ..]).to_owned();
             let train_tgt = targets.slice(s![0..train_samples, ..]).to_owned();
-            let val_seq = sequences.slice(s![val_start.., .., ..]).to_owned();
-            let val_tgt = targets.slice(s![val_start.., ..]).to_owned();
+            let val_seq = sequences
+                .slice(s![val_start..available_for_training, .., ..])
+                .to_owned();
+            let val_tgt = targets
+                .slice(s![val_start..available_for_training, ..])
+                .to_owned();
+
+            // Extract test data if test_split > 0
+            let (test_seq, test_tgt) = if test_size > 0 {
+                let test_seq = sequences
+                    .slice(s![available_for_training.., .., ..])
+                    .to_owned();
+                let test_tgt = targets.slice(s![available_for_training.., ..]).to_owned();
+                (test_seq, test_tgt)
+            } else {
+                // Create empty test data with proper dimensions
+                let empty_test_seq =
+                    ndarray::Array3::zeros((0, sequences.shape()[1], sequences.shape()[2]));
+                let empty_test_tgt = ndarray::Array2::zeros((0, targets.shape()[1]));
+                (empty_test_seq, empty_test_tgt)
+            };
 
             // CRITICAL: Validate sequence-target alignment
             log::debug!(
@@ -462,12 +503,39 @@ impl LSTMModel {
                     val_start
                 );
 
-            (train_seq, train_tgt, Some(val_seq), Some(val_tgt))
+            (
+                train_seq,
+                train_tgt,
+                Some(val_seq),
+                Some(val_tgt),
+                test_seq,
+                test_tgt,
+            )
         } else {
             // No validation
             log::info!("📊 Training without validation");
-            (sequences.to_owned(), targets.to_owned(), None, None)
+            let empty_test_seq =
+                ndarray::Array3::zeros((0, sequences.shape()[1], sequences.shape()[2]));
+            let empty_test_tgt = ndarray::Array2::zeros((0, targets.shape()[1]));
+            (
+                sequences.to_owned(),
+                targets.to_owned(),
+                None,
+                None,
+                empty_test_seq,
+                empty_test_tgt,
+            )
         };
+
+        // Store validation and test data for consistent metrics calculation
+        if let Some(val_seq) = &val_sequences_final {
+            self.stored_val_sequences = Some(val_seq.clone());
+        }
+        if let Some(val_tgt) = &val_targets_final {
+            self.stored_val_targets = Some(val_tgt.clone());
+        }
+        self.stored_test_sequences = test_sequences_final.clone();
+        self.stored_test_targets = test_targets_final.clone();
 
         let total_train_samples = train_sequences.shape()[0];
         let total_val_samples = val_sequences_final
@@ -1034,17 +1102,48 @@ impl LSTMModel {
             if let Some((_, target_type)) = &self.target_context {
                 match target_type {
                     TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
-                        // Use the SAME working method that calculates correct MAPE every 10 epochs
+                        // Use stored validation data for consistent metrics
                         log::info!(
-                            "📊 Calculating Final Training Metrics using validated method..."
+                            "📊 Calculating Final Training Metrics using stored validation data..."
                         );
-                        let _ = self
-                            .calculate_categorical_validation_metrics(
-                                sequences, targets, 64, // batch_size (not used in the method)
-                                10, // epoch = 10 to force calculation (10 % 10 == 0)
-                                config,
-                            )
-                            .await;
+
+                        if let (Some(stored_val_seq), Some(stored_val_tgt)) =
+                            (&self.stored_val_sequences, &self.stored_val_targets)
+                        {
+                            let _ = self
+                                .calculate_categorical_validation_metrics(
+                                    stored_val_seq,
+                                    stored_val_tgt,
+                                    64, // batch_size (not used in the method)
+                                    10, // epoch = 10 to force calculation (10 % 10 == 0)
+                                    config,
+                                )
+                                .await;
+                        } else {
+                            log::warn!("⚠️ No stored validation data available for final metrics");
+                        }
+
+                        // Calculate test metrics if test data is available
+                        if self.stored_test_sequences.shape()[0] > 0 {
+                            log::info!(
+                                "📊 Calculating Final Test Metrics on {} samples...",
+                                self.stored_test_sequences.shape()[0]
+                            );
+                            let _ = self
+                                .calculate_categorical_validation_metrics(
+                                    &self.stored_test_sequences,
+                                    &self.stored_test_targets,
+                                    64,
+                                    10, // Force calculation
+                                    config,
+                                )
+                                .await;
+                        } else {
+                            log::debug!("📊 No test data available for final evaluation");
+                        }
+
+                        // Comprehensive evaluation summary
+                        self.log_comprehensive_evaluation_summary().await;
                     }
                 }
             } else {
@@ -1558,5 +1657,56 @@ impl LSTMModel {
         );
 
         Ok(combined)
+    }
+
+    /// Log comprehensive evaluation summary with data split information
+    async fn log_comprehensive_evaluation_summary(&self) {
+        log::info!("🎯 ═══════════════════════════════════════════════════════════");
+        log::info!("🎯 COMPREHENSIVE EVALUATION SUMMARY");
+        log::info!("🎯 ═══════════════════════════════════════════════════════════");
+
+        // Data split summary
+        let val_samples = self
+            .stored_val_sequences
+            .as_ref()
+            .map(|v| v.shape()[0])
+            .unwrap_or(0);
+        let test_samples = self.stored_test_sequences.shape()[0];
+
+        log::info!("📊 Data Split Summary:");
+        log::info!(
+            "   • Validation Samples: {} (used for epoch metrics and final validation)",
+            val_samples
+        );
+        log::info!(
+            "   • Test Samples: {} (reserved for final evaluation)",
+            test_samples
+        );
+
+        if test_samples > 0 {
+            log::info!("✅ Three-way split successfully implemented:");
+            log::info!("   • Training: Used for model optimization");
+            log::info!("   • Validation: Used for early stopping and hyperparameter tuning");
+            log::info!("   • Test: Used for unbiased final performance evaluation");
+        } else {
+            log::info!("📝 Two-way split used (no test data reserved)");
+        }
+
+        // Target context information
+        if let Some((target_name, target_type)) = &self.target_context {
+            log::info!("🎯 Target Information:");
+            log::info!("   • Target Name: {}", target_name);
+            log::info!("   • Target Type: {:?}", target_type);
+        }
+
+        // Class weights information
+        if let Some(weights) = &self.training_class_weights {
+            log::info!(
+                "⚖️ Class Weighting: {} classes with global weights applied",
+                weights.len()
+            );
+        }
+
+        log::info!("🎯 ═══════════════════════════════════════════════════════════");
     }
 }

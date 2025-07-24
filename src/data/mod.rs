@@ -231,19 +231,30 @@ impl DataPipeline {
         Ok(target_weights)
     }
 
-    /// Create walk-forward analysis windows using existing validation_split config
+    /// Create walk-forward analysis windows with proper three-way split
+    /// Reserves test_split for final evaluation while maximizing training data utilization
     async fn create_walk_forward_windows(
         &self,
         raw_processed_data: polars::prelude::DataFrame, // Has features but NOT normalized
         config: &crate::config::TrainingConfig,
     ) -> Result<Vec<TrainingWindow>> {
         let total_samples = raw_processed_data.height();
-        let validation_size = (total_samples as f64 * config.training.validation_split) as usize;
-        let min_train_size = total_samples / 2; // Start with at least 50% for initial training
 
-        if validation_size == 0 || min_train_size + validation_size > total_samples {
+        // STEP 1: Reserve test set (never touched during training/validation)
+        let test_size = (total_samples as f64 * config.training.test_split) as usize;
+        let available_for_training = total_samples - test_size;
+
+        // STEP 2: Calculate validation size from remaining data
+        let validation_size =
+            (available_for_training as f64 * config.training.validation_split) as usize;
+        let min_train_size = available_for_training / 2; // Start with at least 50% for initial training
+
+        if validation_size == 0 || min_train_size + validation_size > available_for_training {
             return Err(crate::utils::error::VangaError::DataError(
-                "Insufficient data for walk-forward analysis".to_string(),
+                format!(
+                    "Insufficient data for walk-forward analysis: total={}, test_reserved={}, available={}, min_train={}, val={}",
+                    total_samples, test_size, available_for_training, min_train_size, validation_size
+                )
             ));
         }
 
@@ -279,13 +290,34 @@ impl DataPipeline {
             gap_size
         );
 
-        // Create progressive windows with proper gap to prevent data leakage
-        while train_end + gap_size + validation_size <= total_samples {
+        log::info!(
+            "📊 Three-way split setup: total={}, test_reserved={} ({:.1}%), available_for_training={}, val_size={} ({:.1}%)",
+            total_samples,
+            test_size,
+            config.training.test_split * 100.0,
+            available_for_training,
+            validation_size,
+            config.training.validation_split * 100.0
+        );
+
+        // STEP 3: Create progressive windows with proper gap to prevent data leakage
+        // Only use available_for_training data, keep test set completely separate
+        while train_end + gap_size + validation_size <= available_for_training {
             let val_start = train_end + gap_size; // PROPER GAP ADDED
-            let val_end = val_start + validation_size;
+            let _val_end = val_start + validation_size;
 
             let train_df = raw_processed_data.slice(0, train_end);
             let val_df = raw_processed_data.slice(val_start as i64, validation_size);
+
+            // Test data is reserved - only include in final window
+            let _test_df =
+                if train_end + gap_size + validation_size + gap_size >= available_for_training {
+                    // Final window - include test data for final evaluation
+                    Some(raw_processed_data.slice(available_for_training as i64, test_size))
+                } else {
+                    // Intermediate window - no test data
+                    None
+                };
 
             // Generate sequences with per-sequence normalization
             let train_sequences = self
@@ -307,6 +339,33 @@ impl DataPipeline {
                     &config.data,
                 )
                 .await?;
+
+            // Generate test sequences - empty for intermediate windows, populated for final window
+            let test_sequences =
+                if train_end + gap_size + validation_size + gap_size >= available_for_training {
+                    // Final window - include test data for final evaluation
+                    self.sequence_generator
+                        .generate_training_sequences(
+                            raw_processed_data.slice(available_for_training as i64, test_size),
+                            &config.horizons,
+                            &config.model,
+                            &config.data,
+                        )
+                        .await?
+                } else {
+                    // Intermediate window - create empty test data with same structure
+                    PreparedData {
+                        sequences: ndarray::Array3::zeros((
+                            0,
+                            train_sequences.sequences.shape()[1],
+                            train_sequences.sequences.shape()[2],
+                        )),
+                        targets: crate::targets::PreparedTargets::new(0),
+                        feature_names: train_sequences.feature_names.clone(),
+                        normalization_stats: train_sequences.normalization_stats.clone(),
+                        metadata: train_sequences.metadata.clone(),
+                    }
+                };
 
             // Calculate target-specific per-window class weights based on configuration strategy
             let target_class_weights = match config.training.class_weight_strategy {
@@ -358,14 +417,25 @@ impl DataPipeline {
             windows.push(TrainingWindow {
                 train_data: train_sequences,
                 val_data: val_sequences,
+                test_data: test_sequences.clone(),
                 window_id: windows.len(),
                 train_samples: train_end,
                 val_samples: validation_size,
+                test_samples: test_sequences.sequences.shape()[0],
                 target_class_weights,
             });
 
-            // Move window forward by validation_size (no overlap in test sets)
-            train_end = val_end;
+            // Progress to next window - increase training data size
+            train_end += validation_size / 4; // Increment by 25% of validation size for smooth progression
+
+            log::debug!(
+                "📊 Window {}: train_samples={}, val_samples={}, test_samples={}, val_start={}",
+                windows.len(),
+                train_end,
+                validation_size,
+                test_sequences.sequences.shape()[0],
+                val_start
+            );
         }
 
         if windows.is_empty() {
@@ -487,7 +557,7 @@ impl DataPipeline {
 }
 
 /// Prepared training data with sequences and targets
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreparedData {
     pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
     pub targets: PreparedTargets,
@@ -528,14 +598,17 @@ pub struct DataMetadata {
     pub horizons: Vec<String>,
 }
 
-/// Walk-forward training window
+/// Walk-forward training window with proper three-way split
 #[derive(Debug)]
 pub struct TrainingWindow {
     pub train_data: PreparedData,
     pub val_data: PreparedData,
+    /// Test data - empty for intermediate windows, populated for final evaluation
+    pub test_data: PreparedData,
     pub window_id: usize,
     pub train_samples: usize,
     pub val_samples: usize,
+    pub test_samples: usize,
     /// Target-specific class weights for balanced training
     /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
     pub target_class_weights: HashMap<String, Vec<f32>>,

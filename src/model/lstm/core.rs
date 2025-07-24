@@ -39,6 +39,10 @@ impl LSTMModel {
             training_class_weights: None,           // No global weights initially
             validation_class_weights: None,         // No validation weights initially
             architecture: None,                     // No architecture info by default
+            stored_val_sequences: None,             // No stored validation data initially
+            stored_val_targets: None,               // No stored validation targets initially
+            stored_test_sequences: ndarray::Array3::zeros((0, 1, 1)), // Empty test sequences
+            stored_test_targets: ndarray::Array2::zeros((0, 1)), // Empty test targets
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support

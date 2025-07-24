@@ -1310,6 +1310,11 @@ impl LSTMModel {
             return Ok(());
         }
 
+        // Check if this is test data evaluation (when called with epoch=10 for final metrics)
+        let is_test_evaluation = epoch == 10
+            && self.stored_test_sequences.shape()[0] > 0
+            && val_sequences.shape()[0] == self.stored_test_sequences.shape()[0];
+
         let total_val_samples = val_sequences.shape()[0];
         let validation_batch_size = 64; // Fixed batch size for validation metrics
         let mut all_predictions = Vec::new();
@@ -1486,12 +1491,20 @@ impl LSTMModel {
 
         // Target-type aware metric interpretation (reuse existing target context)
         if let Some((_, target_type)) = &self.target_context {
+            let metric_label = if is_test_evaluation {
+                "Final Test"
+            } else if epoch == 10 {
+                "Final Validation"
+            } else {
+                "Validation"
+            };
+
             match target_type {
                 TargetType::Direction => {
                     // For Direction: MAPE is less meaningful, focus on accuracy
                     log::info!(
-                        "📊 Categorical Metrics [{}] [Epoch {}]: Accuracy: {:.3} (Directional correctness), Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}",
-                        target_type_name, epoch, accuracy, precision, recall, f1, mse
+                        "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3} (Directional correctness), Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}",
+                        target_type_name, metric_label, accuracy, precision, recall, f1, mse
                     );
                     log::debug!(
                         "📈 Direction MAPE: {:.2}% (Note: Distance-based metric, interpret as classification error)",
@@ -1501,16 +1514,24 @@ impl LSTMModel {
                 TargetType::PriceLevel | TargetType::Volatility => {
                     // For ordinal targets: All metrics including MAPE are meaningful
                     log::info!(
-                        "📊 Categorical Metrics [{}] [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}% (Ordinal distance)",
-                        target_type_name, epoch, accuracy, precision, recall, f1, mse, categorical_mape
+                        "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}% (Ordinal distance)",
+                        target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
                     );
                 }
             }
         } else {
             // Fallback for unknown target type
+            let metric_label = if is_test_evaluation {
+                "Final Test"
+            } else if epoch == 10 {
+                "Final Validation"
+            } else {
+                "Validation"
+            };
+
             log::info!(
-                "📊 Categorical Metrics [{}] [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
-                target_type_name, epoch, accuracy, precision, recall, f1, mse, categorical_mape
+                "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
+                target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
             );
         }
 

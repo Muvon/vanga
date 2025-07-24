@@ -135,6 +135,14 @@ pub struct LSTMModel {
     pub validation_class_weights: Option<Vec<f32>>,
     /// Architecture configuration for bidirectional detection
     pub architecture: Option<crate::config::model::LSTMArchitecture>,
+    /// Stored validation data for consistent metrics calculation
+    /// Used to ensure epoch metrics and final metrics use the same data
+    pub stored_val_sequences: Option<ndarray::Array3<f64>>,
+    pub stored_val_targets: Option<ndarray::Array2<f64>>,
+    /// Stored test data for final evaluation - empty arrays if no test data
+    /// Check sequences.shape()[0] > 0 to determine if test data is available
+    pub stored_test_sequences: ndarray::Array3<f64>,
+    pub stored_test_targets: ndarray::Array2<f64>,
 }
 
 /// Serializable model state for persistence - SAME as original
