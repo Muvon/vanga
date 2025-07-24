@@ -1,0 +1,131 @@
+# VANGA Alternative Validation Split Configuration
+# Test different validation strategies to isolate chronological complexity issue
+# Use this AFTER debug_val_train_ratio.toml to compare results
+
+[training]
+# ============================================================================
+# ALTERNATIVE VALIDATION STRATEGY TESTING
+# ============================================================================
+
+# Same basic parameters as debug config
+epochs = { Fixed = 100 }
+learning_rate = { Fixed = 0.0005 }
+batch_size = { Fixed = 32 }
+warmup_epochs = 2
+early_stopping = { patience = 20, min_delta = 0.0001 }
+print_every = 1
+gradient_clip = 0.5
+
+# ============================================================================
+# MODIFIED VALIDATION SPLITS - Test different approaches
+# ============================================================================
+
+# OPTION 1: Smaller validation split (less recent data)
+validation_split = 0.1   # Only 10% validation instead of 20%
+test_split = 0.1
+
+# OPTION 2: Larger validation split (more data for validation)
+# validation_split = 0.3   # 30% validation
+# test_split = 0.1
+
+# ============================================================================
+# OPTIMIZER - Same as debug config
+# ============================================================================
+optimizer = { AdamW = { weight_decay = 0.005, beta1 = 0.9, beta2 = 0.999 } }
+
+# ============================================================================
+# MODEL - Same simplified architecture
+# ============================================================================
+[model]
+architecture = { MultiLSTM = { layers = 1 } }
+sequence_length = { Fixed = 60 }
+hidden_units = { Fixed = 128 }
+
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.15 }
+variational = false
+recurrent = false
+
+[model.attention]
+enabled = false
+
+# ============================================================================
+# OUTPUT HEADS - Same as debug config
+# ============================================================================
+[model.output_heads]
+
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0  # Breakout sensitivity multiplier
+range_percent = 0.03
+distribution_type = "Categorical"
+
+target_strategy = { type = "current" }
+
+# ============================================================================
+# FEATURES - Same minimal set
+# ============================================================================
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [10, 20, 50]
+ema_periods = [10, 20]
+
+[features.technical_indicators.momentum]
+rsi_periods = [14]
+stochastic = true
+williams_r = false
+cci_periods = []
+momentum_periods = [10]
+
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14]
+keltner_channels = false
+donchian_channels = false
+
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [10]
+mfi_periods = []
+volume_profile = false
+
+# Disable complex features
+[features.market_microstructure]
+enabled = false
+
+[features.volatility_features]
+enabled = false
+
+[features.custom_features]
+enabled = false
+
+[features.engineering]
+enabled = false
+
+[features.cross_asset]
+enabled = false
+
+[features.selection]
+enabled = false
+
+# ============================================================================
+# DATA CONFIGURATION
+# ============================================================================
+[data]
+normalization = "Standard"
+sequence_overlap = 0.0
+
+# ============================================================================
+# TESTING STRATEGY
+# ============================================================================
+# 1. Run with validation_split = 0.1 (10% validation)
+# 2. Compare loss ratio pattern with 20% validation
+# 3. If 10% validation shows better ratio stability,
+#    the issue is validation data complexity (recent market patterns)
+# 4. If pattern persists, investigate other factors:
+#    - Learning rate too aggressive for validation patterns
+#    - Model capacity insufficient for validation complexity
+#    - Feature engineering differences between train/val periods

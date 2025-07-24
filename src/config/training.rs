@@ -89,6 +89,8 @@ pub enum ClassWeightStrategy {
     PerWindow,
     /// Disable class weighting entirely
     None,
+    /// Advanced imbalance mitigation with adaptive strategies
+    Advanced,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1106,44 +1108,6 @@ impl TrainingConfig {
 
         // Validate model configuration
         self.model.validate()?;
-
-        // Validate bins consistency between model config and target generation
-        self.validate_bins_consistency()?;
-
-        Ok(())
-    }
-
-    /// Validate that bins configuration is consistent across all components
-    fn validate_bins_consistency(&self) -> Result<()> {
-        let model_bins = self.model.output_heads.price_levels.bins;
-
-        // Validate bins value is reasonable
-        if model_bins < 2 {
-            return Err(VangaError::ConfigError(format!(
-                "Price level bins must be at least 2, got: {}",
-                model_bins
-            )));
-        }
-
-        if model_bins > 20 {
-            return Err(VangaError::ConfigError(format!(
-                "Price level bins should not exceed 20 for practical reasons, got: {}",
-                model_bins
-            )));
-        }
-
-        // Validate that horizons are configured
-        if self.horizons.is_empty() {
-            return Err(VangaError::ConfigError(
-                "At least one prediction horizon must be configured".to_string(),
-            ));
-        }
-
-        log::info!(
-            "✅ Bins consistency validated: {} bins configured for {} horizons",
-            model_bins,
-            self.horizons.len()
-        );
 
         Ok(())
     }

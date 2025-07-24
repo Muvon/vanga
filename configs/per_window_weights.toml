@@ -1,0 +1,59 @@
+# Per-Window Class Weights Configuration
+# This configuration demonstrates the new per-window class weighting feature
+# that fixes validation loss growing in walk-forward validation
+
+symbol = "BTCUSDT"
+data_path = "data/BTCUSDT_1h.csv"
+fresh_training = true
+continue_training = false
+horizons = ["1h", "4h", "12h"]
+
+[features]
+# Standard crypto features
+technical_indicators = true
+market_microstructure = true
+cross_asset = false
+volatility_clustering = true
+
+[model]
+architecture = "SimpleLSTM"
+
+[model.architecture_config.SimpleLSTM]
+hidden_units = { Fixed = 128 }
+num_layers = 2
+dropout = 0.2
+sequence_length = { Fixed = 60 }
+attention = { enabled = false }
+
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0  # Breakout sensitivity multiplier (5 price level classes: [0, 1, 2, 3, 4, 5])
+
+[training]
+device = "auto"
+epochs = { Auto = { max_epochs = 200 } }
+batch_size = { Fixed = 32 }
+learning_rate = { Fixed = 0.001 }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+warmup_epochs = 5
+validation_split = 0.2
+test_split = 0.1
+
+# 🎯 NEW FEATURE: Per-Window Class Weights
+# This fixes the validation loss growing issue in walk-forward validation
+# Options:
+#   - "Global": Calculate weights once from initial training data (default, original behavior)
+#   - "PerWindow": Calculate weights per walk-forward window (fixes temporal mismatch)
+#   - "None": Disable class weighting entirely
+class_weight_strategy = "PerWindow"
+
+[training.early_stopping]
+patience = 15
+min_delta = 0.001
+
+[data]
+normalization = "Robust"
+sequence_overlap = 0.8
+
+[optimization]
+method = "None"  # Disable optimization for faster testing

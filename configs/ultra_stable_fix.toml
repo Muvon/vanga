@@ -1,0 +1,83 @@
+# EMERGENCY FIX: Ultra-stable configuration to stop overfitting
+# This addresses gradient explosion and overfitting issues
+
+[model]
+# CRITICAL: Much smaller architecture
+architecture = { MultiLSTM = { layers = 2 } }  # Reduced from 3 to 2 layers
+
+# CRITICAL: Much shorter sequences to reduce gradient explosion
+sequence_length = { Fixed = 20 }  # Reduced from 30+ to 20
+
+# CRITICAL: Much smaller hidden units - your [80,20,10] was causing explosion
+hidden_units = { Fixed = [32, 16] }  # Dramatically smaller: 32→16 instead of 80→20→10
+
+# CRITICAL: Higher dropout to prevent overfitting
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.4 }  # Increased from 0.2 to 0.4
+variational = true      # Enable variational dropout
+recurrent = true        # Enable recurrent dropout
+
+# Attention disabled for stability
+[model.attention]
+enabled = false
+mechanism = "None"
+
+# Output configuration
+[model.output_heads]
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0  # Breakout sensitivity multiplier
+range_percent = 2.0
+distribution_type = "Quantile"
+target_strategy = "PercentageBased"
+
+[model.output_heads.direction]
+enabled = false
+
+[model.output_heads.volatility]
+enabled = false
+
+loss_function = "Composite"
+
+[training]
+# CRITICAL: Much smaller learning rate
+epochs = { Fixed = 100 }
+optimizer = { AdamW = { weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999 } }  # Increased weight decay
+learning_rate = { Fixed = 0.0001 }  # Reduced from 0.001 to 0.0001
+
+# CRITICAL: Much smaller batch size
+batch_size = { Fixed = 8 }  # Reduced from 16 to 8
+
+# CRITICAL: More aggressive gradient clipping
+gradient_clip = 0.1  # Reduced from 0.5 to 0.1
+
+validation_split = 0.3  # Increased validation split
+print_every = 2
+
+[training.device]
+type = "Auto"
+
+# CRITICAL: More aggressive early stopping
+[training.early_stopping]
+enabled = true
+patience = 3  # Reduced from 5 to 3
+min_delta = 0.005  # Increased sensitivity
+restore_best_weights = true
+
+# CRITICAL: Learning rate scheduling to prevent explosion
+[training.learning_schedule]
+enabled = true
+schedule_type = "ReduceOnPlateau"
+factor = 0.5
+patience = 2
+min_lr = 0.00001
+
+[features]
+[features.technical]
+enabled = true
+# CRITICAL: Fewer indicators to reduce complexity
+indicators = ["sma", "ema", "rsi"]  # Reduced from 5 to 3 indicators
+
+[features.cross_asset]
+enabled = false

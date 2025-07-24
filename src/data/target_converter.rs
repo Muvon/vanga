@@ -63,8 +63,8 @@ impl TargetConverter {
                     "price_levels",
                 )?;
 
-                // Convert to one-hot encoding
-                let num_bins = self.output_heads.price_levels.bins as usize;
+                // Convert to one-hot encoding (sequence-aware classification always uses 6 bins)
+                let num_bins = 6; // Fixed for sequence-aware price level classification
                 if price_target < num_bins {
                     training_array[[sample_idx, output_idx + price_target]] = 1.0;
                 }
@@ -193,20 +193,20 @@ mod tests {
         OutputHeadsConfig {
             price_levels: PriceLevelHead {
                 enabled: true,
-                bins: 5,
-                range_percent: 0.1,
+                bandwidth_size: Some(1.0), // Default bandwidth size for testing
                 distribution_type: crate::config::model::DistributionType::Categorical,
-                target_strategy: crate::config::model::PriceLevelTargetStrategy::Current,
             },
             direction: DirectionHead {
                 enabled: true,
-                threshold: 0.02,
+                thresholds: (-0.01, 0.01),
                 confidence_calibration: false,
+                use_adaptive_thresholds: true,
             },
             volatility: VolatilityHead {
                 enabled: true,
                 method: crate::config::model::VolatilityPredictionMethod::Direct,
                 horizons: vec!["1h".to_string()],
+                thresholds: (0.33, 0.67),
             },
         }
     }

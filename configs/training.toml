@@ -203,6 +203,13 @@ Composite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight =
 #   - volatility_penalty: Market regime adjustment factor (1.0-1.5)
 
 # ============================================================================
+# CLASS WEIGHT STRATEGY - Handle imbalanced datasets
+# ============================================================================
+# Global strategy uses same class weights for both training and validation
+# This ensures identical loss scaling for comparable train/val losses
+class_weight_strategy = "Global"  # Options: "Global", "PerWindow", "Advanced", "None"
+
+# ============================================================================
 # TRAINING MONITORING
 # ============================================================================
 print_every = 1                # Print training progress every N epochs (1 = every epoch, 10 = every 10 epochs)
@@ -259,8 +266,7 @@ output_dir = "attention_analysis"
 
 [model.output_heads.price_levels]
 enabled = true
-bins = 10
-range_percent = 0.05
+bandwidth_size = 1.0  # Breakout sensitivity multiplier (0.5=sensitive, 1.0=standard, 1.5=conservative)
 distribution_type = "Categorical"
 
 # ✅ CONSISTENT: All strategies use same format with internally tagged enum
@@ -286,13 +292,15 @@ target_strategy = { type = "current" }
 
 [model.output_heads.direction]
 enabled = true
-threshold = 0.01
+thresholds = [-0.01, 0.01]  # [down_threshold, up_threshold] - consistent format
 confidence_calibration = true
+use_adaptive_thresholds = true
 
 [model.output_heads.volatility]
 enabled = true
 method = "Direct"
 horizons = ["1h", "4h", "1d"]
+thresholds = [0.33, 0.67]  # [low_percentile, high_percentile] - consistent format
 
 # ✅ FEATURES SECTION - All feature configuration under [features.x]
 [features.technical_indicators]

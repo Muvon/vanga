@@ -180,39 +180,78 @@ pub struct OutputHeadsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevelHead {
     pub enabled: bool,
-    pub bins: u32,
-    pub range_percent: f64,
+    pub bandwidth_size: Option<f64>, // Optional for backward compatibility
     pub distribution_type: DistributionType,
-    pub target_strategy: PriceLevelTargetStrategy,
 }
 
 impl PriceLevelHead {
     /// Validate the price level head configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        if self.bins < 2 {
-            return Err(crate::utils::error::VangaError::config(
-                "Price level bins must be at least 2",
-            ));
-        }
-        if self.bins > 50 {
-            return Err(crate::utils::error::VangaError::config(
-                "Price level bins should be <= 50 for reasonable performance",
-            ));
-        }
-        if self.range_percent <= 0.0 {
-            return Err(crate::utils::error::VangaError::config(
-                "Price level range_percent must be greater than 0.0",
-            ));
-        }
-        if self.range_percent > 1.0 {
-            return Err(crate::utils::error::VangaError::config(
-                "Price level range_percent should be <= 1.0 (100%)",
-            ));
+        if let Some(bandwidth_size) = self.bandwidth_size {
+            if bandwidth_size <= 0.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Price level bandwidth_size must be positive",
+                ));
+            }
+            if !bandwidth_size.is_finite() {
+                return Err(crate::utils::error::VangaError::config(
+                    "Price level bandwidth_size must be finite",
+                ));
+            }
         }
 
-        // Validate the target strategy
-        self.target_strategy.validate()?;
+        // Sequence-aware classification always uses 6 bins (fixed architecture)
+        // bandwidth_size only affects breakout sensitivity, not number of bins
+        // No validation needed for bins since it's architecturally fixed
 
+        Ok(())
+    }
+}
+
+impl DirectionHead {
+    /// Validate the direction head configuration
+    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+        let (down_threshold, up_threshold) = self.thresholds;
+        if down_threshold >= 0.0 {
+            return Err(crate::utils::error::VangaError::config(
+                "Direction down_threshold must be negative",
+            ));
+        }
+        if up_threshold <= 0.0 {
+            return Err(crate::utils::error::VangaError::config(
+                "Direction up_threshold must be positive",
+            ));
+        }
+        if down_threshold.abs() != up_threshold {
+            log::warn!(
+                "Direction thresholds are not symmetric: {} vs {}",
+                down_threshold,
+                up_threshold
+            );
+        }
+        Ok(())
+    }
+}
+
+impl VolatilityHead {
+    /// Validate the volatility head configuration
+    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
+        let (low_percentile, high_percentile) = self.thresholds;
+        if low_percentile <= 0.0 || low_percentile >= 1.0 {
+            return Err(crate::utils::error::VangaError::config(
+                "Volatility low_percentile must be between 0.0 and 1.0",
+            ));
+        }
+        if high_percentile <= 0.0 || high_percentile >= 1.0 {
+            return Err(crate::utils::error::VangaError::config(
+                "Volatility high_percentile must be between 0.0 and 1.0",
+            ));
+        }
+        if low_percentile >= high_percentile {
+            return Err(crate::utils::error::VangaError::config(
+                "Volatility low_percentile must be less than high_percentile",
+            ));
+        }
         Ok(())
     }
 }
@@ -220,8 +259,9 @@ impl PriceLevelHead {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionHead {
     pub enabled: bool,
-    pub threshold: f64,
+    pub thresholds: (f64, f64), // (down_threshold, up_threshold) for consistency
     pub confidence_calibration: bool,
+    pub use_adaptive_thresholds: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +269,7 @@ pub struct VolatilityHead {
     pub enabled: bool,
     pub method: VolatilityPredictionMethod,
     pub horizons: Vec<String>,
+    pub thresholds: (f64, f64), // (low_percentile, high_percentile) for consistency
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,68 +277,6 @@ pub enum DistributionType {
     Categorical,
     Beta,
     Dirichlet,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PriceLevelTargetStrategy {
-    /// Current approach: single future price point
-    Current,
-
-    /// Standard VWAP over horizon period
-    StandardVwap,
-
-    /// Momentum-aware VWAP with directional bias
-    MomentumVwap {
-        momentum_window: usize,
-        bias_strength: f64,
-    },
-}
-
-impl Default for PriceLevelTargetStrategy {
-    fn default() -> Self {
-        Self::Current // Backward compatibility
-    }
-}
-
-impl PriceLevelTargetStrategy {
-    /// Validate the target strategy configuration
-    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        match self {
-            Self::Current => Ok(()),
-            Self::StandardVwap => Ok(()),
-            Self::MomentumVwap {
-                momentum_window,
-                bias_strength,
-            } => {
-                if *momentum_window == 0 {
-                    return Err(crate::utils::error::VangaError::config(
-                        "MomentumVwap momentum_window must be greater than 0",
-                    ));
-                }
-                if *momentum_window > 100 {
-                    return Err(crate::utils::error::VangaError::config(
-                        "MomentumVwap momentum_window should be <= 100 for reasonable performance",
-                    ));
-                }
-                if *bias_strength < 0.0 || *bias_strength > 1.0 {
-                    return Err(crate::utils::error::VangaError::config(
-                        "MomentumVwap bias_strength must be between 0.0 and 1.0",
-                    ));
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// Get a human-readable description of the strategy
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Current => "Current: Uses simple future price point",
-            Self::StandardVwap => "Standard VWAP: Volume-weighted average price over horizon",
-            Self::MomentumVwap { .. } => "Momentum VWAP: Momentum-aware VWAP with directional bias",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,20 +320,20 @@ impl Default for ModelConfig {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bins: 10,
-                    range_percent: 5.0,
+                    bandwidth_size: Some(1.0), // Default bandwidth size
                     distribution_type: DistributionType::Categorical,
-                    target_strategy: PriceLevelTargetStrategy::default(),
                 },
                 direction: DirectionHead {
                     enabled: true,
-                    threshold: 0.01,
+                    thresholds: (-0.01, 0.01), // 1% symmetric thresholds
                     confidence_calibration: true,
+                    use_adaptive_thresholds: true,
                 },
                 volatility: VolatilityHead {
                     enabled: true,
                     method: VolatilityPredictionMethod::Direct,
                     horizons: vec!["1h".to_string(), "4h".to_string(), "24h".to_string()],
+                    thresholds: (0.33, 0.67), // 33rd and 67th percentiles
                 },
             },
             quantile_outputs: None, // Disabled by default for backward compatibility
@@ -369,6 +348,12 @@ impl ModelConfig {
         // Validate output heads
         if self.output_heads.price_levels.enabled {
             self.output_heads.price_levels.validate()?;
+        }
+        if self.output_heads.direction.enabled {
+            self.output_heads.direction.validate()?;
+        }
+        if self.output_heads.volatility.enabled {
+            self.output_heads.volatility.validate()?;
         }
 
         // Validate sequence length
@@ -467,9 +452,9 @@ impl OutputHeadsConfig {
     pub fn calculate_total_output_size(&self) -> usize {
         let mut total_size = 0;
 
-        // Price level classification outputs (softmax probabilities)
+        // Price level classification outputs (6 bins for sequence-aware classification)
         if self.price_levels.enabled {
-            total_size += self.price_levels.bins as usize;
+            total_size += 6; // Fixed: sequence-aware classification always uses 6 bins
         }
 
         // Direction prediction outputs (3 classes: DOWN, SIDEWAYS, UP)
@@ -497,7 +482,7 @@ impl OutputHeadsConfig {
         let mut current_offset = 0;
 
         if self.price_levels.enabled {
-            let size = self.price_levels.bins as usize;
+            let size = 6; // Fixed: sequence-aware classification always uses 6 bins
             segments.price_levels = Some((current_offset, current_offset + size));
             current_offset += size;
         }

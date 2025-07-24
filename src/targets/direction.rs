@@ -41,9 +41,9 @@ pub enum Direction {
     Up = 2,
 }
 
-/// Generate direction targets with consistent thresholds
-/// Ensures training and validation use the same classification boundaries
-pub fn generate_direction_targets_with_consistent_thresholds(
+/// Generate direction targets with volatility-adaptive thresholds
+/// Uses market volatility to adjust classification boundaries for better accuracy
+pub fn generate_direction_targets_with_adaptive_thresholds(
     prices: &[f64],
     horizon_steps: usize,
     config: &DirectionConfig,
@@ -62,7 +62,7 @@ pub fn generate_direction_targets_with_consistent_thresholds(
         prices
     };
 
-    let thresholds = calculate_adaptive_thresholds_from_training(train_prices, config)?;
+    let thresholds = calculate_volatility_adaptive_thresholds_from_training(train_prices, config)?;
 
     // Apply same thresholds to entire dataset
     let targets = apply_direction_thresholds(prices, horizon_steps, &thresholds)?;
@@ -70,38 +70,60 @@ pub fn generate_direction_targets_with_consistent_thresholds(
     Ok((targets, thresholds))
 }
 
-/// Calculate adaptive thresholds from training data only
-fn calculate_adaptive_thresholds_from_training(
+/// Calculate volatility-adaptive thresholds from training data
+/// Adjusts thresholds based on market volatility for better accuracy
+fn calculate_volatility_adaptive_thresholds_from_training(
     train_prices: &[f64],
     config: &DirectionConfig,
 ) -> Result<(f64, f64)> {
-    // Calculate price changes in training data
-    let mut price_changes = Vec::new();
-    for i in 1..train_prices.len() {
-        let change = (train_prices[i] - train_prices[i - 1]) / train_prices[i - 1];
-        price_changes.push(change);
+    if config.use_adaptive_thresholds {
+        // Calculate rolling volatility
+        let volatility_window = config.volatility_window.min(train_prices.len() / 2);
+        let mut volatilities = Vec::new();
+
+        for i in volatility_window..train_prices.len() {
+            let window = &train_prices[i.saturating_sub(volatility_window)..i];
+            let returns: Vec<f64> = window.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
+
+            if !returns.is_empty() {
+                let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
+                let variance = returns
+                    .iter()
+                    .map(|r| (r - mean_return).powi(2))
+                    .sum::<f64>()
+                    / returns.len() as f64;
+                volatilities.push(variance.sqrt());
+            }
+        }
+
+        if volatilities.is_empty() {
+            return Ok((config.down_threshold, config.up_threshold));
+        }
+
+        // Calculate average volatility for adaptive scaling
+        let avg_volatility = if volatilities.is_empty() {
+            0.01
+        } else {
+            volatilities.iter().sum::<f64>() / volatilities.len() as f64
+        };
+
+        // Use calculate_volatility helper for consistency
+        let market_volatility = calculate_volatility(train_prices, config.volatility_window);
+        let combined_volatility = (avg_volatility + market_volatility) / 2.0;
+
+        // Adjust thresholds based on combined volatility
+        let volatility_multiplier = (combined_volatility * 100.0).clamp(0.5, 3.0); // Scale and clamp
+        let adaptive_threshold = config.threshold * volatility_multiplier;
+
+        // Apply min/max constraints
+        let final_threshold = adaptive_threshold
+            .max(config.threshold * 0.5) // At least 50% of base threshold
+            .min(config.threshold * 2.0); // At most 200% of base threshold
+
+        Ok((-final_threshold, final_threshold))
+    } else {
+        Ok((config.down_threshold, config.up_threshold))
     }
-
-    if price_changes.is_empty() {
-        return Ok((config.threshold, -config.threshold));
-    }
-
-    // Sort changes to find percentiles
-    price_changes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Use percentile-based thresholds for better balance
-    let up_threshold_idx = (price_changes.len() as f64 * 0.7) as usize;
-    let down_threshold_idx = (price_changes.len() as f64 * 0.3) as usize;
-
-    let up_threshold = price_changes[up_threshold_idx.min(price_changes.len() - 1)];
-    let down_threshold = price_changes[down_threshold_idx];
-
-    // Ensure minimum threshold magnitude
-    let min_threshold = config.threshold;
-    let final_up_threshold = up_threshold.max(min_threshold);
-    let final_down_threshold = down_threshold.min(-min_threshold);
-
-    Ok((final_up_threshold, final_down_threshold))
 }
 
 /// Apply direction thresholds to generate targets
@@ -110,24 +132,46 @@ fn apply_direction_thresholds(
     horizon_steps: usize,
     thresholds: &(f64, f64),
 ) -> Result<Vec<i32>> {
+    let (down_threshold, up_threshold) = *thresholds;
     let mut targets = vec![-1; prices.len()];
-    let (up_threshold, down_threshold) = *thresholds;
 
     for i in 0..(prices.len().saturating_sub(horizon_steps)) {
         let current_price = prices[i];
         let future_price = prices[i + horizon_steps];
         let price_change = (future_price - current_price) / current_price;
 
-        targets[i] = if price_change >= up_threshold {
-            2 // Up
-        } else if price_change <= down_threshold {
+        targets[i] = if price_change <= down_threshold {
             0 // Down
+        } else if price_change >= up_threshold {
+            2 // Up
         } else {
             1 // Sideways
         };
     }
 
     Ok(targets)
+}
+
+/// Calculate volatility for adaptive thresholds
+fn calculate_volatility(prices: &[f64], window: usize) -> f64 {
+    if prices.len() < window + 1 {
+        return 0.01; // Default volatility
+    }
+
+    let mut returns = Vec::new();
+    for i in 1..=window.min(prices.len() - 1) {
+        let ret = (prices[i] - prices[i - 1]) / prices[i - 1];
+        returns.push(ret);
+    }
+
+    if returns.is_empty() {
+        return 0.01;
+    }
+
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+
+    variance.sqrt()
 }
 
 /// Generate direction targets for multiple horizons

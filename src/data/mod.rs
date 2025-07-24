@@ -115,7 +115,7 @@ impl DataPipeline {
         let num_classes = match target_type {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
-                    config.model.output_heads.price_levels.bins as usize
+                    6 // Fixed: sequence-aware classification always uses 6 bins
                 } else {
                     // Fallback: calculate from data but this should not happen
                     let max_class = targets.iter().max().unwrap_or(&0);
@@ -326,6 +326,14 @@ impl DataPipeline {
                 ClassWeightStrategy::None => {
                     // No class weighting
                     HashMap::new()
+                }
+                ClassWeightStrategy::Advanced => {
+                    // Use advanced imbalance mitigation strategies
+                    self.calculate_all_target_class_weights(&train_sequences, config)
+                        .unwrap_or_else(|e| {
+                            log::warn!("⚠️ Failed to calculate advanced class weights: {}", e);
+                            HashMap::new()
+                        })
                 }
             };
 

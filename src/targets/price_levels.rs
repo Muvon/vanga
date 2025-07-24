@@ -7,182 +7,69 @@ use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-/// Type alias for price level targets with quantile boundaries
-type PriceLevelTargetsWithBoundaries = (HashMap<String, Vec<i32>>, HashMap<String, Vec<f64>>);
-
 /// Configuration for price level target generation
 #[derive(Debug, Clone)]
 pub struct PriceLevelConfig {
-    pub bins: u32,
-    pub quantile_method: QuantileMethod,
-    pub lookback_window: usize,
-    pub min_price_change: f64,
-}
-
-#[derive(Debug, Clone)]
-pub enum QuantileMethod {
-    Fixed,
-    Rolling { window: usize },
-    Adaptive { min_samples: usize },
+    /// Bandwidth multiplier for breakout sensitivity (default: 1.0)
+    /// - 0.5: More sensitive (smaller breakout thresholds)
+    /// - 1.0: Standard behavior
+    /// - 1.5: Less sensitive (larger breakout thresholds)
+    pub bandwidth_size: f64,
 }
 
 impl Default for PriceLevelConfig {
     fn default() -> Self {
         Self {
-            bins: 5,
-            quantile_method: QuantileMethod::Rolling { window: 1000 },
-            lookback_window: 100,
-            min_price_change: 0.001, // 0.1% minimum change
+            bandwidth_size: 1.0,
         }
     }
 }
 
-/// Generate price level targets with consistent global boundaries
-/// This ensures training and validation use the same class boundaries
-pub fn generate_price_level_targets_with_global_boundaries(
-    df: &DataFrame,
-    horizons: &[String],
-    config: &crate::config::model::PriceLevelHead,
-    train_val_split_idx: Option<usize>, // Split point for consistent boundaries
-) -> Result<PriceLevelTargetsWithBoundaries> {
-    let mut all_targets = HashMap::new();
-    let mut global_quantiles = HashMap::new();
+impl PriceLevelConfig {
+    /// Validate the configuration parameters
+    pub fn validate(&self) -> Result<()> {
+        if self.bandwidth_size <= 0.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "bandwidth_size must be positive, got: {}",
+                self.bandwidth_size
+            )));
+        }
 
-    // Extract price column
-    let prices = df
-        .column("close")?
-        .f64()?
-        .into_no_null_iter()
-        .collect::<Vec<f64>>();
-
-    if prices.len() < 2 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient price data for target generation".to_string(),
-        ));
-    }
-
-    for horizon in horizons {
-        let horizon_steps = parse_horizon_to_steps(horizon)?;
-
-        // Calculate global quantiles from training portion only for consistency
-        let train_end_idx = if let Some(split_idx) = train_val_split_idx {
-            split_idx.min(prices.len().saturating_sub(horizon_steps))
-        } else {
-            prices.len().saturating_sub(horizon_steps)
-        };
-
-        let train_start_idx = 100; // Skip initial lookback period
-
-        if train_end_idx <= train_start_idx {
-            return Err(crate::utils::error::VangaError::DataError(
-                "Insufficient training data for global quantile calculation".to_string(),
+        if !self.bandwidth_size.is_finite() {
+            return Err(crate::utils::error::VangaError::ConfigError(
+                "bandwidth_size must be a finite number".to_string(),
             ));
         }
 
-        // FIXED: Use consistent Fixed quantile method for stable boundaries
-        let quantiles = calculate_quantiles(
-            &prices[train_start_idx..train_end_idx],
-            config.bins,
-            &QuantileMethod::Fixed, // Always use Fixed for consistency
-        )?;
-
-        log::debug!(
-            "🎯 Global boundaries [{}]: {} training samples, quantiles: {:?}",
-            horizon,
-            train_end_idx - train_start_idx,
-            quantiles
-        );
-
-        // Apply same quantiles to entire dataset (both training and validation)
-        let targets = apply_quantiles_to_targets(&prices, horizon_steps, &quantiles, config)?;
-
-        all_targets.insert(horizon.clone(), targets);
-        global_quantiles.insert(horizon.clone(), quantiles);
+        Ok(())
     }
-
-    Ok((all_targets, global_quantiles))
 }
 
-/// Apply pre-calculated quantiles to generate targets
-fn apply_quantiles_to_targets(
-    prices: &[f64],
-    horizon_steps: usize,
-    quantiles: &[f64],
-    config: &crate::config::model::PriceLevelHead,
-) -> Result<Vec<i32>> {
-    let mut targets = vec![-1; prices.len()]; // Initialize with invalid targets
-
-    for i in 0..(prices.len().saturating_sub(horizon_steps)) {
-        let current_price = prices[i];
-
-        // Calculate target price based on strategy
-        let target_price = match &config.target_strategy {
-            crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
-            crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
-                calculate_standard_vwap(prices, i, horizon_steps)?
-            }
-            crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
-                momentum_window,
-                bias_strength,
-            } => {
-                calculate_momentum_vwap(prices, i, horizon_steps, *momentum_window, *bias_strength)?
-            }
-        };
-
-        let price_change = (target_price - current_price) / current_price;
-
-        // Skip if price change is too small
-        if price_change.abs() < config.range_percent {
-            targets[i] = config.bins as i32 / 2; // Neutral class
-            continue;
-        }
-
-        // Classify using global quantiles
-        targets[i] = classify_price_to_level(target_price, quantiles);
-    }
-
-    Ok(targets)
-}
-
-/// Generate price level targets for multiple horizons
+/// Generate price level targets using PriceLevelConfig
 pub fn generate_price_level_targets(
     df: &DataFrame,
     horizons: &[String],
     config: &PriceLevelConfig,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    // Convert PriceLevelConfig to PriceLevelHead for compatibility
-    let price_level_head = crate::config::model::PriceLevelHead {
-        enabled: true,
-        bins: config.bins,
-        range_percent: config.min_price_change,
-        distribution_type: crate::config::model::DistributionType::Categorical,
-        target_strategy: crate::config::model::PriceLevelTargetStrategy::Current,
-    };
+    // Validate configuration
+    config.validate()?;
 
-    generate_price_level_targets_with_head(df, horizons, &price_level_head, None)
-}
-
-/// Generate price level targets using PriceLevelHead configuration
-pub fn generate_price_level_targets_with_head(
-    df: &DataFrame,
-    horizons: &[String],
-    config: &crate::config::model::PriceLevelHead,
-    feature_config: Option<&crate::config::FeatureConfig>,
-) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
-    // Calculate feature window if FeatureConfig is provided
-    let feature_window =
-        feature_config.map(crate::utils::feature_window::calculate_max_feature_window);
-
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
-        let price_targets =
-            calculate_price_level_targets(&close_prices, horizon_steps, config, feature_window)?;
+        let price_targets = calculate_price_level_targets(
+            &close_prices,
+            horizon_steps,
+            config,
+            None,
+            None, // No sequence length override - use default behavior
+        )?;
 
         // Analyze and log class distribution
-        analyze_class_distribution(&price_targets, horizon, config.bins)?;
+        // Analyze and log class distribution (always 6 bins for sequence-aware classification)
+        analyze_class_distribution(&price_targets, horizon, 6)?;
 
         targets.insert(horizon.clone(), price_targets);
     }
@@ -196,16 +83,18 @@ pub fn generate_price_level_targets_from_model_config(
     horizons: &[String],
     model_config: &crate::config::model::ModelConfig,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    generate_price_level_targets_with_head(
-        df,
-        horizons,
-        &model_config.output_heads.price_levels,
-        None,
-    )
+    let config = PriceLevelConfig {
+        bandwidth_size: model_config
+            .output_heads
+            .price_levels
+            .bandwidth_size
+            .unwrap_or(1.0),
+    };
+    generate_price_level_targets(df, horizons, &config)
 }
 
 /// Calculate minimum data points required for target generation (fallback when FeatureConfig not available)
-fn calculate_min_data_points(_config: &crate::config::model::PriceLevelHead) -> usize {
+fn calculate_min_data_points(_config: &PriceLevelConfig) -> usize {
     // Default maximum feature window from technical indicators
     // Based on maximum periods used in feature engineering:
     // - SMA/EMA periods: up to 200
@@ -216,182 +105,160 @@ fn calculate_min_data_points(_config: &crate::config::model::PriceLevelHead) -> 
     max_feature_window + stability_buffer
 }
 
+/// Classify price level using sequence-aware 6-bin classification
+///
+/// This method uses the input sequence to define adaptive boundaries:
+/// - Extracts min, max, and current price from the sequence
+/// - Calculates bandwidth = max - min
+/// - Creates 6 bins relative to sequence context:
+///   - 0: Strong Breakout Down (< min - bandwidth)
+///   - 1: Moderate Down (min - bandwidth ≤ x < min)
+///   - 2: Within Range Low (min ≤ x < current)
+///   - 3: Within Range High (current ≤ x < max)
+///   - 4: Moderate Up (max ≤ x < max + bandwidth)
+///   - 5: Strong Breakout Up (≥ max + bandwidth)
+///
+/// # Arguments
+/// * `target_price` - The future price to classify
+/// * `sequence_prices` - The input sequence prices (min length: 2)
+///
+/// # Returns
+/// * `i32` - Classification bin [0-5]
+fn classify_price_level_sequence_aware(
+    target_price: f64,
+    sequence_prices: &[f64],
+    config: &PriceLevelConfig,
+) -> i32 {
+    if sequence_prices.is_empty() {
+        return 2; // Default to neutral class
+    }
+
+    let sequence_min = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let sequence_max = sequence_prices
+        .iter()
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let current_price = sequence_prices[sequence_prices.len() - 1];
+    let base_bandwidth = sequence_max - sequence_min;
+    let bandwidth = base_bandwidth * config.bandwidth_size;
+
+    // Handle edge case: flat sequence (bandwidth = 0)
+    if bandwidth == 0.0 {
+        return if target_price >= current_price { 3 } else { 2 };
+    }
+
+    // 6-bin classification
+    if target_price < sequence_min - bandwidth {
+        return 0; // Strong Breakout Down
+    }
+    if target_price < sequence_min {
+        return 1; // Moderate Down
+    }
+    if target_price < current_price {
+        return 2; // Within Range Low
+    }
+    if target_price < sequence_max {
+        return 3; // Within Range High
+    }
+    if target_price < sequence_max + bandwidth {
+        return 4; // Moderate Up
+    }
+    5 // Strong Breakout Up
+}
+
 /// Calculate price level targets for a specific horizon with consistent global quantiles
 fn calculate_price_level_targets(
     prices: &[f64],
     horizon_steps: usize,
-    config: &crate::config::model::PriceLevelHead,
+    config: &PriceLevelConfig,
     feature_window: Option<usize>,
+    _sequence_length_override: Option<usize>,
 ) -> Result<Vec<i32>> {
-    // Use provided feature_window or fallback to default calculation
-    let min_data_points = feature_window.unwrap_or_else(|| calculate_min_data_points(config));
+    // Validate configuration
+    config.validate()?;
 
-    if prices.len() < horizon_steps + min_data_points {
+    // Use provided feature_window or fallback to default calculation for sequence length
+    let sequence_length = feature_window.unwrap_or_else(|| calculate_min_data_points(config));
+
+    if prices.len() < horizon_steps + sequence_length {
         return Err(crate::utils::error::VangaError::DataError(format!(
             "Insufficient data for price level target generation. Need {} points, have {}",
-            horizon_steps + min_data_points,
+            horizon_steps + sequence_length,
             prices.len()
         )));
     }
 
+    // Only sequence-aware approach now
+    calculate_sequence_aware_targets(prices, horizon_steps, sequence_length, config)
+}
+
+/// Calculate sequence-aware price level targets using sequence context
+///
+/// This function generates targets using the sequence-aware approach where each prediction
+/// point uses its own sequence context (min, max, current) to define adaptive boundaries.
+/// No global quantiles are needed - each sequence defines its own classification boundaries.
+fn calculate_sequence_aware_targets(
+    prices: &[f64],
+    horizon_steps: usize,
+    sequence_length: usize,
+    config: &PriceLevelConfig,
+) -> Result<Vec<i32>> {
     let mut targets = vec![-1; prices.len()];
 
-    // CRITICAL FIX: Calculate global quantiles from PERCENTAGE CHANGES, not absolute prices
-    // This ensures consistent class boundaries across all symbols regardless of price level
-    let training_data_start = min_data_points; // Skip initial feature window period
-    let training_data_end = prices.len() - horizon_steps; // Ensure we have future data
+    // Start from sequence_length to have enough history
+    let start_idx = sequence_length;
+    let end_idx = prices.len().saturating_sub(horizon_steps);
 
-    if training_data_end <= training_data_start {
+    if end_idx <= start_idx {
         return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient data range for global quantile calculation".to_string(),
+            "Insufficient data for sequence-aware target generation".to_string(),
         ));
     }
 
-    // FIXED: Calculate percentage changes once and store with indices
-    let mut percentage_changes = Vec::new();
-    let mut indexed_changes = Vec::new();
-
-    for i in training_data_start..training_data_end {
-        let current_price = prices[i];
-        let target_price = match &config.target_strategy {
-            crate::config::model::PriceLevelTargetStrategy::Current => prices[i + horizon_steps],
-            crate::config::model::PriceLevelTargetStrategy::StandardVwap => {
-                calculate_standard_vwap(prices, i, horizon_steps)?
-            }
-            crate::config::model::PriceLevelTargetStrategy::MomentumVwap {
-                momentum_window,
-                bias_strength,
-            } => {
-                calculate_momentum_vwap(prices, i, horizon_steps, *momentum_window, *bias_strength)?
-            }
-        };
-
-        if current_price != 0.0 {
-            let price_change = (target_price - current_price) / current_price;
-            percentage_changes.push(price_change);
-            indexed_changes.push((i, price_change));
-        } else {
-            indexed_changes.push((i, 0.0)); // Mark invalid prices
-        }
-    }
-
-    // Calculate quantiles from percentage changes (symbol-agnostic)
-    let global_quantiles = calculate_quantiles(
-        &percentage_changes,
-        config.bins,
-        &QuantileMethod::Fixed, // Use Fixed method for consistency across train/val
-    )?;
-
     log::debug!(
-        "🎯 Global quantiles calculated for {} bins using {} percentage changes: {:?}",
-        config.bins,
-        percentage_changes.len(),
-        global_quantiles
+        "🔄 Generating sequence-aware targets: sequence_length={}, start_idx={}, end_idx={}, total_targets={}",
+        sequence_length,
+        start_idx,
+        end_idx,
+        end_idx - start_idx
     );
 
-    // Apply consistent quantiles using pre-calculated percentage changes
-    for (i, price_change) in indexed_changes {
-        if price_change == 0.0 {
-            targets[i] = config.bins as i32 / 2; // Neutral class for invalid prices
-            continue;
-        }
+    for i in start_idx..end_idx {
+        // Extract sequence for this prediction point
+        let sequence_start = i.saturating_sub(sequence_length);
+        let sequence = &prices[sequence_start..i];
 
-        // Skip if price change is too small
-        if price_change.abs() < config.range_percent {
-            targets[i] = config.bins as i32 / 2; // Neutral class
-            continue;
-        }
+        // Get target price
+        let target_price = prices[i + horizon_steps];
 
-        // Classify percentage change against percentage quantiles
-        targets[i] = classify_price_to_level(price_change, &global_quantiles);
+        // Classify using sequence-aware approach
+        targets[i] = classify_price_level_sequence_aware(target_price, sequence, config);
     }
 
     Ok(targets)
 }
 
-/// Calculate dynamic quantiles for price classification
-fn calculate_quantiles(prices: &[f64], bins: u32, method: &QuantileMethod) -> Result<Vec<f64>> {
-    if prices.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Empty price data for quantile calculation".to_string(),
-        ));
-    }
-
-    let mut sorted_prices = prices.to_vec();
-    sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut quantiles = Vec::new();
-
-    match method {
-        QuantileMethod::Fixed => {
-            for i in 1..bins {
-                let percentile = i as f64 / bins as f64;
-                let index = (percentile * (sorted_prices.len() - 1) as f64) as usize;
-                quantiles.push(sorted_prices[index]);
-            }
-        }
-        QuantileMethod::Rolling { window } => {
-            let effective_window = (*window).min(prices.len());
-            let recent_prices = &sorted_prices[sorted_prices.len() - effective_window..];
-
-            for i in 1..bins {
-                let percentile = i as f64 / bins as f64;
-                let index = (percentile * (recent_prices.len() - 1) as f64) as usize;
-                quantiles.push(recent_prices[index]);
-            }
-        }
-        QuantileMethod::Adaptive { min_samples } => {
-            if sorted_prices.len() < *min_samples {
-                return calculate_quantiles(prices, bins, &QuantileMethod::Fixed);
-            }
-
-            // Use adaptive quantiles based on price volatility
-            let volatility = calculate_price_volatility(&sorted_prices);
-            let adaptive_factor = 1.0 + volatility * 0.5;
-
-            for i in 1..bins {
-                let base_percentile = i as f64 / bins as f64;
-                let adaptive_percentile = (base_percentile * adaptive_factor).clamp(0.05, 0.95);
-                let index = (adaptive_percentile * (sorted_prices.len() - 1) as f64) as usize;
-                quantiles.push(sorted_prices[index]);
-            }
-        }
-    }
-
-    Ok(quantiles)
-}
-
-/// Classify a value into a quantile level (works for both prices and percentage changes)
-fn classify_price_to_level(value: f64, quantiles: &[f64]) -> i32 {
-    for (i, &threshold) in quantiles.iter().enumerate() {
-        if value <= threshold {
-            return i as i32;
-        }
-    }
-    // Return highest class for values above all quantiles
-    quantiles.len() as i32
-}
-
-/// Calculate price volatility for adaptive quantiles
-fn calculate_price_volatility(prices: &[f64]) -> f64 {
-    if prices.len() < 2 {
-        return 0.0;
-    }
-
-    let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
-
-    let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
-    let variance = returns
-        .iter()
-        .map(|r| (r - mean_return).powi(2))
-        .sum::<f64>()
-        / returns.len() as f64;
-
-    variance.sqrt()
-}
-
-/// Analyze class distribution and log insights for debugging
+/// Analyze class distribution and log insights for debugging with imbalance mitigation
 fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Result<()> {
+    use crate::targets::imbalance_mitigation::{
+        ClassDistributionAnalysis, ImbalanceMitigationConfig, ImbalanceMitigator,
+    };
+
+    // Perform advanced analysis
+    let mitigation_config = ImbalanceMitigationConfig::default();
+    let analysis = ClassDistributionAnalysis::analyze(targets, bins as usize, &mitigation_config);
+
+    // Generate and log recommendations if imbalance is severe
+    if analysis.imbalance_ratio > mitigation_config.max_imbalance_ratio {
+        let current_config = PriceLevelConfig::default();
+        let recommendations = ImbalanceMitigator::generate_recommendations(
+            &analysis,
+            &current_config,
+            &mitigation_config,
+        );
+        recommendations.log_recommendations(horizon);
+    }
+
+    // Continue with existing logging for compatibility
     let mut class_counts = vec![0usize; bins as usize];
     let mut valid_targets = 0;
 
@@ -448,16 +315,16 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
             .join(", ")
     );
 
-    // Warn about severe imbalance
-    if imbalance_ratio > 10.0 {
+    // Check for problematic imbalance
+    if imbalance_ratio > 100.0 {
         log::warn!(
-            "⚠️  Severe class imbalance detected for {} ({}x ratio) - consider class weighting",
+            "⚠️  Severe class imbalance detected for {} ({:.0}x ratio) - consider class weighting",
             horizon,
             imbalance_ratio
         );
     }
 
-    // Warn about empty classes
+    // Identify empty classes
     let empty_classes: Vec<usize> = class_counts
         .iter()
         .enumerate()
@@ -527,337 +394,214 @@ fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
         }
     }
 }
-/// Calculate standard VWAP over horizon period
-fn calculate_standard_vwap(prices: &[f64], start_idx: usize, horizon_steps: usize) -> Result<f64> {
-    if start_idx + horizon_steps >= prices.len() {
-        return Ok(prices[start_idx]);
-    }
-
-    let mut sum = 0.0;
-    let mut count = 0;
-
-    for i in 1..=horizon_steps {
-        let idx = start_idx + i;
-        if idx >= prices.len() {
-            break;
-        }
-        sum += prices[idx];
-        count += 1;
-    }
-
-    Ok(if count > 0 {
-        sum / count as f64
-    } else {
-        prices[start_idx]
-    })
-}
-
-/// Calculate momentum-aware VWAP with directional bias
-fn calculate_momentum_vwap(
-    prices: &[f64],
-    start_idx: usize,
-    horizon_steps: usize,
-    momentum_window: usize,
-    bias_strength: f64,
-) -> Result<f64> {
-    if start_idx + horizon_steps >= prices.len() || start_idx < momentum_window {
-        return Ok(prices[start_idx]);
-    }
-
-    // Calculate momentum
-    let current_price = prices[start_idx];
-    let past_price = prices[start_idx - momentum_window];
-    let momentum = (current_price - past_price) / past_price;
-
-    let mut weighted_sum = 0.0;
-    let mut weight_sum = 0.0;
-
-    for i in 1..=horizon_steps {
-        let idx = start_idx + i;
-        if idx >= prices.len() {
-            break;
-        }
-
-        let price = prices[idx];
-
-        // Time-based weight (more recent = higher weight)
-        let time_weight = i as f64 / horizon_steps as f64;
-
-        // Momentum-based weight adjustment
-        let momentum_adjustment = if momentum > 0.0 {
-            1.0 + (momentum * bias_strength)
-        } else {
-            1.0 - (momentum.abs() * bias_strength)
-        };
-
-        let total_weight = time_weight * momentum_adjustment;
-
-        weighted_sum += price * total_weight;
-        weight_sum += total_weight;
-    }
-
-    Ok(if weight_sum > 0.0 {
-        weighted_sum / weight_sum
-    } else {
-        prices[start_idx]
-    })
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::model::{DistributionType, PriceLevelHead, PriceLevelTargetStrategy};
 
     fn create_test_prices() -> Vec<f64> {
-        // Create enough data for testing (100 lookback + horizon + some extra)
-        (0..150).map(|i| 100.0 + i as f64).collect()
+        // Create enough data for testing (sequence_length + horizon + some extra)
+        (0..400).map(|i| 100.0 + i as f64).collect()
     }
 
-    fn create_test_config(strategy: PriceLevelTargetStrategy) -> PriceLevelHead {
-        PriceLevelHead {
-            enabled: true,
-            bins: 5,
-            range_percent: 0.01,
-            distribution_type: DistributionType::Categorical,
-            target_strategy: strategy,
+    fn create_test_config() -> PriceLevelConfig {
+        PriceLevelConfig {
+            bandwidth_size: 1.0,
         }
     }
 
     #[test]
-    fn test_current_strategy() {
-        let prices = create_test_prices();
-        let config = create_test_config(PriceLevelTargetStrategy::Current);
+    fn test_sequence_aware_classification() {
+        // Test case: sequence [10, 15, 12, 18, 14]
+        // min=10, max=18, current=14, base_bandwidth=8, bandwidth=8*1.0=8
+        let sequence = vec![10.0, 15.0, 12.0, 18.0, 14.0];
+        let config = create_test_config();
 
-        let result = calculate_price_level_targets(&prices, 2, &config, None).unwrap();
-
-        // Should have valid targets for middle indices
-        assert!(result.len() == prices.len());
-        // First 100 and last 2 should be -1 (invalid)
-        for &value in result.iter().take(100) {
-            assert_eq!(value, -1);
-        }
-        for &value in result.iter().skip(prices.len() - 2) {
-            assert_eq!(value, -1);
-        }
+        // Test each bin
+        assert_eq!(
+            classify_price_level_sequence_aware(1.0, &sequence, &config),
+            0
+        ); // < 10-8 = 2
+        assert_eq!(
+            classify_price_level_sequence_aware(5.0, &sequence, &config),
+            1
+        ); // 2 ≤ x < 10
+        assert_eq!(
+            classify_price_level_sequence_aware(12.0, &sequence, &config),
+            2
+        ); // 10 ≤ x < 14
+        assert_eq!(
+            classify_price_level_sequence_aware(16.0, &sequence, &config),
+            3
+        ); // 14 ≤ x < 18
+        assert_eq!(
+            classify_price_level_sequence_aware(20.0, &sequence, &config),
+            4
+        ); // 18 ≤ x < 26
+        assert_eq!(
+            classify_price_level_sequence_aware(30.0, &sequence, &config),
+            5
+        ); // ≥ 26
     }
 
     #[test]
-    fn test_standard_vwap_strategy() {
-        let prices = create_test_prices();
-        let config = create_test_config(PriceLevelTargetStrategy::StandardVwap);
+    fn test_flat_sequence_edge_case() {
+        let sequence = vec![10.0, 10.0, 10.0, 10.0, 10.0]; // bandwidth = 0
+        let config = create_test_config();
 
-        let result = calculate_price_level_targets(&prices, 2, &config, None).unwrap();
-
-        // Should have valid targets for middle indices
-        assert!(result.len() == prices.len());
-        // Results should be different from current strategy for same input
-        let current_config = create_test_config(PriceLevelTargetStrategy::Current);
-        let current_result =
-            calculate_price_level_targets(&prices, 2, &current_config, None).unwrap();
-
-        // At least some values should be different
-        let mut differences = 0;
-        for i in 100..(prices.len() - 2) {
-            if result[i] != current_result[i] {
-                differences += 1;
-            }
-        }
-        // We expect some differences due to VWAP vs single point
-        assert!(differences >= 0); // At least allow for same results in simple cases
+        assert_eq!(
+            classify_price_level_sequence_aware(9.0, &sequence, &config),
+            2
+        ); // < current
+        assert_eq!(
+            classify_price_level_sequence_aware(11.0, &sequence, &config),
+            3
+        ); // ≥ current
     }
 
     #[test]
-    fn test_momentum_vwap_strategy() {
-        let prices = create_test_prices();
-        let config = create_test_config(PriceLevelTargetStrategy::MomentumVwap {
-            momentum_window: 3,
-            bias_strength: 0.5,
-        });
+    fn test_empty_sequence_edge_case() {
+        let sequence = vec![];
+        let config = create_test_config();
 
-        let result = calculate_price_level_targets(&prices, 2, &config, None).unwrap();
-
-        // Should have valid targets for middle indices
-        assert!(result.len() == prices.len());
-        // First 100 should be -1 (invalid)
-        for &value in result.iter().take(100) {
-            assert_eq!(value, -1);
-        }
+        assert_eq!(
+            classify_price_level_sequence_aware(100.0, &sequence, &config),
+            2
+        ); // Default neutral
     }
 
     #[test]
-    fn test_calculate_standard_vwap() {
-        let prices = vec![100.0, 101.0, 102.0, 103.0, 104.0, 105.0];
+    fn test_bandwidth_size_multiplier() {
+        // Test case: sequence [10, 15, 12, 18, 14]
+        // min=10, max=18, current=14, base_bandwidth=8
+        let sequence = vec![10.0, 15.0, 12.0, 18.0, 14.0];
 
-        let result = calculate_standard_vwap(&prices, 0, 3).unwrap();
-
-        // Should be average of prices[1], prices[2], prices[3] = (101 + 102 + 103) / 3 = 102
-        assert!((result - 102.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_calculate_momentum_vwap() {
-        let prices = vec![100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0];
-
-        let result = calculate_momentum_vwap(&prices, 3, 2, 2, 0.5).unwrap();
-
-        // Should return a weighted average that considers momentum
-        assert!(result > 0.0);
-        assert!(result < 200.0); // Reasonable bounds
-    }
-
-    #[test]
-    fn test_vwap_edge_cases() {
-        let prices = vec![100.0, 101.0];
-
-        // Test with insufficient data
-        let result = calculate_standard_vwap(&prices, 0, 5).unwrap();
-        assert_eq!(result, 100.0); // Should return current price
-
-        // Test momentum VWAP with insufficient history
-        let result = calculate_momentum_vwap(&prices, 0, 2, 5, 0.5).unwrap();
-        assert_eq!(result, 100.0); // Should return current price
-    }
-
-    #[test]
-    fn test_backward_compatibility() {
-        // Test that the old PriceLevelConfig interface still works
-        let old_config = PriceLevelConfig {
-            bins: 5,
-            quantile_method: QuantileMethod::Fixed,
-            lookback_window: 50,
-            min_price_change: 0.01,
+        // Test with sensitive configuration (bandwidth_size = 0.5)
+        let sensitive_config = PriceLevelConfig {
+            bandwidth_size: 0.5,
         };
+        // bandwidth = 8 * 0.5 = 4
+        // Breakout thresholds: < 6.0 (bin 0), ≥ 22.0 (bin 5)
+        assert_eq!(
+            classify_price_level_sequence_aware(5.0, &sequence, &sensitive_config),
+            0
+        ); // < 10-4 = 6
+        assert_eq!(
+            classify_price_level_sequence_aware(23.0, &sequence, &sensitive_config),
+            5
+        ); // ≥ 18+4 = 22
 
-        // Create test DataFrame with enough data
+        // Test with conservative configuration (bandwidth_size = 1.5)
+        let conservative_config = PriceLevelConfig {
+            bandwidth_size: 1.5,
+        };
+        // bandwidth = 8 * 1.5 = 12
+        // Breakout thresholds: < -2.0 (bin 0), ≥ 30.0 (bin 5)
+        assert_eq!(
+            classify_price_level_sequence_aware(-3.0, &sequence, &conservative_config),
+            0
+        ); // < 10-12 = -2
+        assert_eq!(
+            classify_price_level_sequence_aware(31.0, &sequence, &conservative_config),
+            5
+        ); // ≥ 18+12 = 30
+
+        // Same price should be classified differently with different bandwidth_size
+        let test_price = 25.0;
+        assert_eq!(
+            classify_price_level_sequence_aware(test_price, &sequence, &sensitive_config),
+            5
+        ); // Strong breakout (25 ≥ 22)
+        assert_eq!(
+            classify_price_level_sequence_aware(test_price, &sequence, &conservative_config),
+            4
+        ); // Moderate up (18 ≤ 25 < 30)
+    }
+
+    #[test]
+    fn test_sequence_aware_targets_generation() {
+        let prices = create_test_prices();
+        let config = create_test_config();
+
+        let result = calculate_price_level_targets(&prices, 2, &config, Some(50), None).unwrap();
+
+        // Should have valid targets for middle indices
+        assert!(result.len() == prices.len());
+
+        // Check that we have some valid targets (not all -1)
+        let valid_targets: Vec<_> = result.iter().filter(|&&x| x != -1).collect();
+        assert!(!valid_targets.is_empty());
+
+        // All valid targets should be in range [0, 5]
+        for &target in &valid_targets {
+            assert!((0..=5).contains(target));
+        }
+    }
+
+    #[test]
+    fn test_integration_with_dataframe() {
+        // Test the full pipeline with sample data
         use polars::prelude::*;
-        let prices: Vec<f64> = (0..200).map(|i| 100.0 + i as f64).collect();
+        let prices: Vec<f64> = (0..400).map(|i| 100.0 + i as f64).collect();
         let df = df! {
             "close" => prices
         }
         .unwrap();
 
         let horizons = vec!["1h".to_string()];
-        let result = generate_price_level_targets(&df, &horizons, &old_config);
+        let config = create_test_config();
 
-        // Should work without errors
-        assert!(result.is_ok());
-    }
+        let targets = generate_price_level_targets(&df, &horizons, &config).unwrap();
 
-    #[test]
-    fn test_model_config_integration() {
-        use crate::config::model::ModelConfig;
-
-        // Create test DataFrame with enough data
-        use polars::prelude::*;
-        let prices: Vec<f64> = (0..200).map(|i| 100.0 + i as f64).collect();
-        let df = df! {
-            "close" => prices
-        }
-        .unwrap();
-
-        let model_config = ModelConfig::default();
-        let horizons = vec!["1h".to_string()];
-
-        let result = generate_price_level_targets_from_model_config(&df, &horizons, &model_config);
-
-        // Should work without errors
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_config_parsing_consistency() {
-        use crate::config::model::{PriceLevelHead, PriceLevelTargetStrategy};
-
-        // Test current strategy parsing
-        let current_toml = r#"
-enabled = true
-bins = 10
-range_percent = 0.05
-distribution_type = "Categorical"
-target_strategy = { type = "current" }
-"#;
-        let current_head: PriceLevelHead = toml::from_str(current_toml).unwrap();
-        assert!(matches!(
-            current_head.target_strategy,
-            PriceLevelTargetStrategy::Current
-        ));
-        assert!(current_head.validate().is_ok());
-
-        // Test standard VWAP strategy parsing
-        let standard_toml = r#"
-enabled = true
-bins = 10
-range_percent = 0.05
-distribution_type = "Categorical"
-target_strategy = { type = "standard_vwap" }
-"#;
-        let standard_head: PriceLevelHead = toml::from_str(standard_toml).unwrap();
-        assert!(matches!(
-            standard_head.target_strategy,
-            PriceLevelTargetStrategy::StandardVwap
-        ));
-        assert!(standard_head.validate().is_ok());
-
-        // Test momentum VWAP strategy parsing
-        let momentum_toml = r#"
-enabled = true
-bins = 10
-range_percent = 0.05
-distribution_type = "Categorical"
-target_strategy = { type = "momentum_vwap", momentum_window = 20, bias_strength = 0.3 }
-"#;
-        let momentum_head: PriceLevelHead = toml::from_str(momentum_toml).unwrap();
-        match momentum_head.target_strategy {
-            PriceLevelTargetStrategy::MomentumVwap {
-                momentum_window,
-                bias_strength,
-            } => {
-                assert_eq!(momentum_window, 20);
-                assert_eq!(bias_strength, 0.3);
+        // Verify targets are in valid range [0, 5]
+        for target_vec in targets.values() {
+            for &target in target_vec {
+                if target != -1 {
+                    assert!((0..=5).contains(&target));
+                }
             }
-            _ => panic!("Expected MomentumVwap variant"),
         }
-        assert!(momentum_head.validate().is_ok());
     }
 
     #[test]
-    fn test_validation_errors() {
-        use crate::config::model::{DistributionType, PriceLevelHead, PriceLevelTargetStrategy};
+    fn test_config_validation() {
+        // Test valid config
+        let valid_config = create_test_config();
+        assert_eq!(valid_config.bandwidth_size, 1.0);
+        assert!(valid_config.validate().is_ok());
 
-        // Test invalid momentum_window
-        let invalid_head = PriceLevelHead {
-            enabled: true,
-            bins: 10,
-            range_percent: 0.05,
-            distribution_type: DistributionType::Categorical,
-            target_strategy: PriceLevelTargetStrategy::MomentumVwap {
-                momentum_window: 0, // Invalid!
-                bias_strength: 0.3,
-            },
+        // Test different bandwidth_size values
+        let sensitive_config = PriceLevelConfig {
+            bandwidth_size: 0.5,
         };
-        assert!(invalid_head.validate().is_err());
+        assert_eq!(sensitive_config.bandwidth_size, 0.5);
+        assert!(sensitive_config.validate().is_ok());
 
-        // Test invalid bias_strength
-        let invalid_head2 = PriceLevelHead {
-            enabled: true,
-            bins: 10,
-            range_percent: 0.05,
-            distribution_type: DistributionType::Categorical,
-            target_strategy: PriceLevelTargetStrategy::MomentumVwap {
-                momentum_window: 20,
-                bias_strength: 1.5, // Invalid!
-            },
+        let conservative_config = PriceLevelConfig {
+            bandwidth_size: 1.5,
         };
-        assert!(invalid_head2.validate().is_err());
+        assert_eq!(conservative_config.bandwidth_size, 1.5);
+        assert!(conservative_config.validate().is_ok());
 
-        // Test invalid bins
-        let invalid_head3 = PriceLevelHead {
-            enabled: true,
-            bins: 1, // Invalid!
-            range_percent: 0.05,
-            distribution_type: DistributionType::Categorical,
-            target_strategy: PriceLevelTargetStrategy::Current,
+        // Test invalid configs
+        let zero_config = PriceLevelConfig {
+            bandwidth_size: 0.0,
         };
-        assert!(invalid_head3.validate().is_err());
+        assert!(zero_config.validate().is_err());
+
+        let negative_config = PriceLevelConfig {
+            bandwidth_size: -1.0,
+        };
+        assert!(negative_config.validate().is_err());
+
+        let infinite_config = PriceLevelConfig {
+            bandwidth_size: f64::INFINITY,
+        };
+        assert!(infinite_config.validate().is_err());
+
+        let nan_config = PriceLevelConfig {
+            bandwidth_size: f64::NAN,
+        };
+        assert!(nan_config.validate().is_err());
     }
 }

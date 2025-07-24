@@ -6,6 +6,7 @@
 //! - Volatility: Low/medium/high volatility regime classification
 
 pub mod direction;
+pub mod imbalance_mitigation;
 pub mod price_levels;
 pub mod volatility;
 
@@ -380,11 +381,11 @@ fn calculate_class_distribution(targets: &[i32]) -> ClassDistribution {
 impl TargetGenerator {
     /// Generate price level targets (DEPRECATED - use generate_all_targets)
     #[deprecated(note = "Use generate_all_targets() instead")]
-    pub fn generate_price_level_targets(
+    pub fn generate_price_level_targets_legacy(
         &self,
         prices: &[f64],
-        bins: u32,
-        range_percent: f64,
+        _bins: u32,          // Deprecated parameter, ignored
+        _range_percent: f64, // Acknowledge unused parameter
     ) -> Result<Vec<Vec<f64>>> {
         log::warn!(
             "DEPRECATED: Use generate_all_targets() instead of legacy price level generation"
@@ -408,17 +409,11 @@ impl TargetGenerator {
                 })?;
 
         // Use the working implementation with adapted config
-        let config = crate::targets::price_levels::PriceLevelConfig {
-            bins,
-            min_price_change: range_percent / 100.0, // Convert percentage to decimal
-            ..Default::default()
+        let config = PriceLevelConfig {
+            bandwidth_size: 1.0, // Default bandwidth size for backward compatibility
         };
 
-        let targets = crate::targets::price_levels::generate_price_level_targets(
-            &df,
-            &self.config.horizons,
-            &config,
-        )?;
+        let targets = generate_price_level_targets(&df, &self.config.horizons, &config)?;
 
         // Convert HashMap<String, Vec<i32>> to Vec<Vec<f64>> for backward compatibility
         let mut result = Vec::new();

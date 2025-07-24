@@ -32,7 +32,7 @@ enabled = false  # Disabled for quick start
 
 [model.output_heads.price_levels]
 enabled = true
-bins = 10
+bandwidth_size = 1.0  # Breakout sensitivity multiplier
 range_percent = 0.05
 distribution_type = "Categorical"
 

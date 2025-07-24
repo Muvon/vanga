@@ -36,7 +36,8 @@ impl LSTMModel {
             trained: false,
             loss_function: CryptoLossFunction::MSE, // Default to MSE
             target_context: None,                   // No target context by default
-            global_class_weights: None,             // No global weights initially
+            training_class_weights: None,           // No global weights initially
+            validation_class_weights: None,         // No validation weights initially
             architecture: None,                     // No architecture info by default
         })
     }

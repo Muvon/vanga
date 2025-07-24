@@ -53,7 +53,7 @@ output_dir = "attention_analysis"
 # Multi-target outputs (existing)
 [model.output_heads.price_levels]
 enabled = true
-bins = 10
+bandwidth_size = 1.0  # Breakout sensitivity multiplier
 range_percent = 5.0
 distribution_type = "Categorical"
 

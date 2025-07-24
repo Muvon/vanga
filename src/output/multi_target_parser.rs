@@ -37,7 +37,7 @@ impl MultiTargetParser {
                     start,
                     end,
                     price_level_logits.len(),
-                    self.output_heads.price_levels.bins
+                    6 // Fixed: sequence-aware classification always uses 6 bins
                 );
                 println!(
                     "DEBUG: Price levels slice content: {:?}",
@@ -161,7 +161,7 @@ impl MultiTargetParser {
             ));
         }
 
-        let expected_bins = self.output_heads.price_levels.bins as usize;
+        let expected_bins = 6; // Fixed: sequence-aware classification always uses 6 bins
         if logits.len() != expected_bins {
             return Err(VangaError::PredictionError(format!(
                 "Expected {} price level bins, got {}",

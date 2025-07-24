@@ -194,13 +194,15 @@ impl SequenceGenerator {
             feature_columns.len()
         );
 
-        // Extract feature data as matrix
-        let feature_data = self.extract_feature_matrix(&df, &feature_columns)?;
-
-        // Generate prediction sequences (use the last sequence_length rows)
+        // Extract feature data as matrix from original DataFrame (before normalization)
         let start_idx = num_rows.saturating_sub(sequence_length);
+
+        // FIXED: Ensure prediction pipeline uses same per-sequence normalization as training
+        // Extract the last sequence_length rows and normalize only that sequence
+        let sequence_df = df.slice(start_idx as i64, sequence_length);
+        let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
         let sequences =
-            self.create_prediction_sequences(&feature_data, start_idx, sequence_length)?;
+            self.create_prediction_sequences(&normalized_sequence, 0, sequence_length)?;
 
         // Create metadata
         let metadata = crate::data::DataMetadata {
@@ -259,10 +261,19 @@ impl SequenceGenerator {
     /// Create prediction sequences from feature data
     fn create_prediction_sequences(
         &self,
-        feature_data: &Array2<f64>,
+        normalized_df: &DataFrame,
         start_idx: usize,
         sequence_length: usize,
     ) -> Result<Array3<f64>> {
+        // Extract feature columns (exclude timestamp)
+        let feature_columns: Vec<String> = normalized_df
+            .get_column_names()
+            .iter()
+            .filter(|&col| *col != "timestamp")
+            .map(|s| s.to_string())
+            .collect();
+
+        let feature_data = self.extract_feature_matrix(normalized_df, &feature_columns)?;
         let num_features = feature_data.ncols();
         let available_rows = feature_data.nrows() - start_idx;
 
@@ -344,7 +355,6 @@ impl SequenceGenerator {
     }
 
     /// Parse horizon string to steps (reuses existing volatility module function)
-
     /// Validate feature window requirements for training data
     fn validate_feature_window_requirements(
         &self,
@@ -538,18 +548,17 @@ impl SequenceGenerator {
             // Extract the complete window (sequence + gap + horizon)
             let window_df = df.slice(i as i64, total_window_size);
 
-            // Normalize the entire window
-            let normalized_window = self.normalize_sequence_window(&window_df)?;
-
-            // Extract the input sequence (first sequence_length rows)
-            let sequence_df = normalized_window.slice(0, sequence_length);
+            // FIXED: Only normalize the input sequence part, NOT gap+targets
+            let sequence_df = window_df.slice(0, sequence_length);
+            let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
             let feature_columns: Vec<String> = df
                 .get_column_names()
                 .iter()
                 .filter(|&col| *col != "timestamp")
                 .map(|s| s.to_string())
                 .collect();
-            let sequence_matrix = self.extract_feature_matrix(&sequence_df, &feature_columns)?;
+            let sequence_matrix =
+                self.extract_feature_matrix(&normalized_sequence, &feature_columns)?;
 
             // Convert to sequence format [sequence_length, features]
             all_sequences.push(sequence_matrix);

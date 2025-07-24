@@ -595,7 +595,7 @@ pub struct TensorCryptoLossFunction {
     cached_weights: Option<CachedWeightTensors>,
     last_config: Option<CryptoCompositeConfig>,
     /// Global class weights for categorical targets (matches LSTM implementation)
-    global_class_weights: Option<Vec<f32>>,
+    training_class_weights: Option<Vec<f32>>,
 }
 
 impl TensorCryptoLossFunction {
@@ -605,7 +605,7 @@ impl TensorCryptoLossFunction {
             loss_type,
             cached_weights: None,
             last_config: None,
-            global_class_weights: None,
+            training_class_weights: None,
         }
     }
 
@@ -618,7 +618,7 @@ impl TensorCryptoLossFunction {
             loss_type,
             cached_weights: None,
             last_config: None,
-            global_class_weights: class_weights,
+            training_class_weights: class_weights,
         }
     }
 
@@ -732,7 +732,7 @@ impl TensorCryptoLossFunction {
                 candle_nn::ops::log_softmax(predictions, candle_core::D::Minus1)?.contiguous()?;
 
             // Apply class weights if available (matching LSTM behavior)
-            if let Some(ref class_weights) = self.global_class_weights {
+            if let Some(ref class_weights) = self.training_class_weights {
                 if class_weights.len() == num_classes {
                     log::debug!("🌍 Applying global class weights: {:?}", class_weights);
 
@@ -743,18 +743,44 @@ impl TensorCryptoLossFunction {
                         class_weights,
                     )
                 } else {
-                    log::warn!(
-                        "⚠️ Class weights length {} doesn't match num_classes {}, using unweighted loss",
+                    log::error!(
+                        "🚨 CRITICAL: Class weights length {} doesn't match model output classes {}",
                         class_weights.len(),
                         num_classes
                     );
-                    // Fallback to unweighted soft CrossEntropy
-                    let cross_entropy = smoothed_targets
-                        .mul(&log_softmax)?
-                        .sum(candle_core::D::Minus1)?
-                        .neg()?
-                        .mean_all()?;
-                    Ok(cross_entropy)
+                    log::error!(
+                        "🚨 This causes training/validation loss inconsistency! Model output_size must match target type."
+                    );
+
+                    // FIXED: Truncate or pad class weights to match model output size
+                    let aligned_weights = if class_weights.len() > num_classes {
+                        // Truncate weights to match model output
+                        log::warn!(
+                            "⚠️ Truncating class weights from {} to {} classes",
+                            class_weights.len(),
+                            num_classes
+                        );
+                        class_weights[..num_classes].to_vec()
+                    } else {
+                        // Pad weights with 1.0 for missing classes
+                        log::warn!(
+                            "⚠️ Padding class weights from {} to {} classes with weight 1.0",
+                            class_weights.len(),
+                            num_classes
+                        );
+                        let mut padded_weights = class_weights.clone();
+                        padded_weights.resize(num_classes, 1.0);
+                        padded_weights
+                    };
+
+                    log::debug!("🔧 Using aligned class weights: {:?}", aligned_weights);
+
+                    // Use aligned weights for consistent loss calculation
+                    self.calculate_weighted_soft_crossentropy_loss(
+                        predictions,
+                        &smoothed_targets,
+                        &aligned_weights,
+                    )
                 }
             } else {
                 log::debug!("📊 No class weights available, using unweighted CrossEntropy");

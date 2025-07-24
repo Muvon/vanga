@@ -295,7 +295,7 @@ impl LSTMModel {
         let expected_output_size = match target_type {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
-                    config.model.output_heads.price_levels.bins as usize
+                    6 // Fixed: sequence-aware classification always uses 6 bins
                 } else {
                     1 // Regression mode
                 }
@@ -408,7 +408,7 @@ impl LSTMModel {
         match target_type {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
-                    config.model.output_heads.price_levels.bins as usize
+                    6 // Fixed: sequence-aware classification always uses 6 bins
                 } else {
                     // Use output_size from LSTM config as fallback
                     self.config.output_size
@@ -425,6 +425,8 @@ impl LSTMModel {
         predictions: &Tensor,
         targets: &Tensor,
         num_classes: usize,
+        config: &crate::config::TrainingConfig,
+        is_validation: bool,
     ) -> Result<Tensor> {
         log::debug!(
             "🔍 CrossEntropy Loss - Pred shape: {:?}, Target shape: {:?}, Classes: {}",
@@ -460,23 +462,81 @@ impl LSTMModel {
             )));
         }
 
-        // Use global class weights if available, otherwise calculate per-batch (fallback)
+        // Use appropriate class weights based on context (training vs validation)
         let class_weights = if let Some((_target_name, target_type)) = &self.target_context {
             match target_type {
                 TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
-                    if let Some(ref global_weights) = self.global_class_weights {
-                        log::debug!(
-                            "🌍 Using global class weights for {:?}: {:?}",
-                            target_type,
-                            global_weights
-                        );
-                        Some(global_weights.clone())
+                    // For Advanced class weighting, use validation-specific weights during validation
+                    if is_validation
+                        && config.training.class_weight_strategy
+                            == crate::config::training::ClassWeightStrategy::Advanced
+                    {
+                        if let Some(ref validation_weights) = self.validation_class_weights {
+                            log::debug!(
+                                "🔍 LOSS DEBUG: Using validation-specific class weights for {:?}: {:?}",
+                                target_type,
+                                validation_weights
+                            );
+                            Some(validation_weights.clone())
+                        } else if let Some(ref global_weights) = self.training_class_weights {
+                            log::debug!(
+                                "⚠️ LOSS DEBUG: Validation weights not available for {:?}, falling back to global weights",
+                                target_type
+                            );
+                            Some(global_weights.clone())
+                        } else {
+                            log::debug!(
+                                "⚠️ LOSS DEBUG: No weights available for {:?}, calculating per-batch",
+                                target_type
+                            );
+                            let per_batch_weights =
+                                self.calculate_class_weights_from_tensor(targets, num_classes)?;
+                            if let Some(ref weights) = per_batch_weights {
+                                log::debug!(
+                                    "📊 LOSS DEBUG: Per-batch weights calculated: {:?}",
+                                    weights
+                                );
+                            }
+                            per_batch_weights
+                        }
                     } else {
-                        log::debug!(
-                            "⚠️ Global weights not available for {:?}, calculating per-batch",
-                            target_type
-                        );
-                        self.calculate_class_weights_from_tensor(targets, num_classes)?
+                        // For training or non-Advanced strategies, use global weights
+                        if let Some(ref global_weights) = self.training_class_weights {
+                            // CRITICAL: Validate class weights match expected target size
+                            let expected_classes = self.get_target_size(*target_type, config);
+                            if global_weights.len() != expected_classes {
+                                log::error!(
+                                    "🚨 CRITICAL: Class weights length {} doesn't match target type {:?} expected classes {}",
+                                    global_weights.len(),
+                                    target_type,
+                                    expected_classes
+                                );
+                                log::error!(
+                                    "🚨 This causes training/validation loss inconsistency! Check model output_size configuration."
+                                );
+                            }
+
+                            log::debug!(
+                                "🌍 LOSS DEBUG: Using global class weights for {:?}: {:?}",
+                                target_type,
+                                global_weights
+                            );
+                            Some(global_weights.clone())
+                        } else {
+                            log::debug!(
+                                "⚠️ LOSS DEBUG: Global weights not available for {:?}, calculating per-batch",
+                                target_type
+                            );
+                            let per_batch_weights =
+                                self.calculate_class_weights_from_tensor(targets, num_classes)?;
+                            if let Some(ref weights) = per_batch_weights {
+                                log::debug!(
+                                    "📊 LOSS DEBUG: Per-batch weights calculated: {:?}",
+                                    weights
+                                );
+                            }
+                            per_batch_weights
+                        }
                     }
                 }
             }
@@ -575,7 +635,7 @@ impl LSTMModel {
 
     /// Calculate global class weights from entire training dataset
     /// This ensures consistent loss calculation across all batches
-    pub fn calculate_global_class_weights(
+    pub fn calculate_training_class_weights(
         &mut self,
         train_targets: &Array2<f64>,
         num_classes: usize,
@@ -603,7 +663,7 @@ impl LSTMModel {
             }
         } else {
             log::debug!("🎯 No target context set, skipping global class weights");
-            self.global_class_weights = None;
+            self.training_class_weights = None;
             return Ok(());
         }
 
@@ -614,7 +674,7 @@ impl LSTMModel {
                 self.target_context.as_ref().map(|(_, t)| t),
                 weights
             );
-            self.global_class_weights = Some(weights);
+            self.training_class_weights = Some(weights);
             return Ok(());
         }
 
@@ -637,10 +697,71 @@ impl LSTMModel {
                 self.target_context.as_ref().map(|(_, t)| t),
                 weights
             );
-            self.global_class_weights = Some(weights);
+            self.training_class_weights = Some(weights);
         } else {
             log::warn!("⚠️ Failed to calculate global class weights, using per-batch calculation");
-            self.global_class_weights = None;
+            self.training_class_weights = None;
+        }
+
+        Ok(())
+    }
+
+    /// Calculate validation-specific class weights for Advanced weighting strategy
+    /// This ensures validation uses its own class distribution weights
+    pub fn calculate_validation_class_weights(
+        &mut self,
+        val_targets: &Array2<f64>,
+        num_classes: usize,
+    ) -> Result<()> {
+        // Only calculate validation weights for Advanced strategy
+        if let Some((_, target_type)) = &self.target_context {
+            match target_type {
+                TargetType::PriceLevel => {
+                    log::debug!(
+                        "🎯 Calculating validation class weights for PriceLevel target with {} classes",
+                        num_classes
+                    );
+                }
+                TargetType::Direction => {
+                    log::debug!(
+                        "🎯 Calculating validation class weights for Direction target (3 classes: Down=0, Sideways=1, Up=2)"
+                    );
+                }
+                TargetType::Volatility => {
+                    log::debug!(
+                        "🎯 Calculating validation class weights for Volatility target (3 classes: Low=0, Medium=1, High=2)"
+                    );
+                }
+            }
+        } else {
+            log::debug!("🎯 No target context set, skipping validation class weights");
+            self.validation_class_weights = None;
+            return Ok(());
+        }
+
+        // Convert to tensor for consistent processing - ensure F32 dtype
+        let targets_f32: Vec<f32> = val_targets
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&x| x as f32)
+            .collect();
+        let targets_tensor = Tensor::from_slice(&targets_f32, val_targets.dim(), &self.device)?;
+
+        // Calculate validation class weights from validation dataset
+        let weights = self.calculate_class_weights_from_tensor(&targets_tensor, num_classes)?;
+
+        if let Some(weights) = weights {
+            log::info!(
+                "🔍 Validation class weights calculated from {} validation samples for {:?}: {:?}",
+                val_targets.shape()[0],
+                self.target_context.as_ref().map(|(_, t)| t),
+                weights
+            );
+            self.validation_class_weights = Some(weights);
+        } else {
+            log::warn!("⚠️ Failed to calculate validation class weights, using global weights");
+            self.validation_class_weights = None;
         }
 
         Ok(())
@@ -790,6 +911,145 @@ impl LSTMModel {
         Ok(mean_loss)
     }
 
+    /// Calculate MSE loss with class weights for categorical targets
+    /// This applies the same class weighting logic as CrossEntropy but uses MSE loss
+    fn calculate_mse_with_class_weights(
+        &self,
+        predictions: &Tensor,
+        targets: &Tensor,
+        num_classes: usize,
+        config: &crate::config::TrainingConfig,
+        is_validation: bool,
+    ) -> Result<Tensor> {
+        log::debug!(
+            "🔍 MSE with class weights - Pred shape: {:?}, Target shape: {:?}, Classes: {}",
+            predictions.shape(),
+            targets.shape(),
+            num_classes
+        );
+
+        // Get appropriate class weights based on context (training vs validation)
+        let class_weights = if let Some((_target_name, target_type)) = &self.target_context {
+            match target_type {
+                TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
+                    // For Advanced class weighting, use validation-specific weights during validation
+                    if is_validation
+                        && config.training.class_weight_strategy
+                            == crate::config::training::ClassWeightStrategy::Advanced
+                    {
+                        if let Some(ref validation_weights) = self.validation_class_weights {
+                            log::debug!(
+                                "🔍 MSE DEBUG: Using validation-specific class weights for {:?}: {:?}",
+                                target_type,
+                                validation_weights
+                            );
+                            Some(validation_weights.clone())
+                        } else if let Some(ref global_weights) = self.training_class_weights {
+                            log::debug!(
+                                "⚠️ MSE DEBUG: Validation weights not available for {:?}, falling back to global weights",
+                                target_type
+                            );
+                            Some(global_weights.clone())
+                        } else {
+                            log::debug!(
+                                "⚠️ MSE DEBUG: No weights available for {:?}, using unweighted MSE",
+                                target_type
+                            );
+                            None
+                        }
+                    } else {
+                        // For training or non-Advanced strategies, use global weights
+                        if let Some(ref global_weights) = self.training_class_weights {
+                            // CRITICAL: Validate class weights match expected target size
+                            if let Some((_target_name, target_type)) = &self.target_context {
+                                let expected_classes = self.get_target_size(*target_type, config);
+                                if global_weights.len() != expected_classes {
+                                    log::error!(
+                                        "🚨 MSE CRITICAL: Class weights length {} doesn't match target type {:?} expected classes {}",
+                                        global_weights.len(),
+                                        target_type,
+                                        expected_classes
+                                    );
+                                }
+                            }
+
+                            log::debug!(
+                                "🌍 MSE DEBUG: Using global class weights for {:?}: {:?}",
+                                self.target_context.as_ref().map(|(_, t)| t),
+                                global_weights
+                            );
+                            Some(global_weights.clone())
+                        } else {
+                            log::debug!(
+                                "⚠️ MSE DEBUG: Global weights not available for {:?}, using unweighted MSE",
+                                target_type
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
+        // Calculate basic MSE loss
+        let mse_loss = predictions.sub(targets)?.sqr()?.mean_all()?;
+
+        // Apply class weights if available
+        if let Some(weights) = class_weights {
+            // For MSE with class weights, we need to weight the loss based on target classes
+            // Convert targets to class indices for weighting
+            let target_indices = targets.to_dtype(candle_core::DType::I64)?;
+
+            // Calculate weighted MSE by applying class weights to each sample
+            let batch_size = targets.dim(0)?;
+            let mut weighted_losses = Vec::with_capacity(batch_size);
+
+            let target_data = target_indices.to_vec1::<i64>()?;
+            let mse_per_sample = predictions
+                .sub(targets)?
+                .sqr()?
+                .mean(candle_core::D::Minus1)?;
+            let mse_data = mse_per_sample.to_vec1::<f32>()?;
+
+            for (i, &target_class) in target_data.iter().enumerate() {
+                let class_idx = target_class as usize;
+                if class_idx < weights.len() {
+                    let weight = weights[class_idx];
+                    let weighted_loss = mse_data[i] * weight;
+                    weighted_losses.push(weighted_loss);
+                } else {
+                    // Fallback for invalid class indices
+                    weighted_losses.push(mse_data[i]);
+                }
+            }
+
+            // Convert back to tensor and calculate mean
+            let weighted_tensor = Tensor::from_vec(
+                weighted_losses.clone(),
+                (weighted_losses.len(),),
+                predictions.device(),
+            )?;
+            let final_loss = weighted_tensor.mean_all()?;
+
+            log::debug!(
+                "⚖️ Weighted MSE: {:.6} (vs unweighted: {:.6}) for {} samples",
+                final_loss.to_scalar::<f32>().unwrap_or(0.0),
+                mse_loss.to_scalar::<f32>().unwrap_or(0.0),
+                batch_size
+            );
+
+            Ok(final_loss)
+        } else {
+            log::debug!(
+                "📈 Unweighted MSE: {:.6}",
+                mse_loss.to_scalar::<f32>().unwrap_or(0.0)
+            );
+            Ok(mse_loss)
+        }
+    }
+
     /// Calculate weighted soft CrossEntropy loss for one-hot encoded targets
     fn calculate_weighted_soft_crossentropy_loss(
         &self,
@@ -842,7 +1102,7 @@ impl LSTMModel {
         let weight_tensor_broadcast = weight_tensor.broadcast_as(targets_contiguous.shape())?;
 
         log::debug!(
-            "🔍 After broadcast_as: targets {:?} × weights {:?}",
+            "🔍 TENSOR DEBUG: After broadcast_as: targets {:?} × weights {:?}",
             targets_contiguous.shape(),
             weight_tensor_broadcast.shape()
         );
@@ -940,7 +1200,7 @@ impl LSTMModel {
         }
     }
 
-    /// Detect target format based on tensor shape and values
+    /// Detect target format based on tensor shape and values with enhanced validation
     fn detect_target_format(&self, target_tensor: &Tensor) -> Result<TargetFormat> {
         let shape = target_tensor.shape();
         let dims = shape.dims();
@@ -949,20 +1209,20 @@ impl LSTMModel {
         }
 
         let num_outputs = dims[1];
+        let num_samples = dims[0];
 
         // If only 1 output dimension, it's likely raw class indices
         if num_outputs == 1 {
             return Ok(TargetFormat::RawClassIndices);
         }
 
-        // If multiple outputs, check if it looks like one-hot encoding
-        // Sample a few rows to check the pattern
+        // Enhanced sampling: use more samples for better detection (reuse existing logic)
+        let sample_size = std::cmp::min(50, num_samples); // Sample up to 50 rows instead of 10
         let sample_data = target_tensor.to_vec2::<f32>()?;
         let mut one_hot_count = 0;
         let mut total_checked = 0;
 
-        for row in sample_data.iter().take(10) {
-            // Check first 10 rows
+        for row in sample_data.iter().take(sample_size) {
             total_checked += 1;
 
             // Count non-zero values
@@ -975,15 +1235,56 @@ impl LSTMModel {
             }
         }
 
-        // If most samples follow one-hot pattern, classify as one-hot
-        if total_checked > 0 && one_hot_count as f32 / total_checked as f32 > 0.8 {
-            Ok(TargetFormat::OneHot)
-        } else {
-            Ok(TargetFormat::RawValues)
+        // Validate detected format against expected target type if available
+        let detected_format =
+            if total_checked > 0 && one_hot_count as f32 / total_checked as f32 > 0.8 {
+                TargetFormat::OneHot
+            } else {
+                TargetFormat::RawValues
+            };
+
+        // Cross-validate with target context if available (reuse existing target size logic)
+        if let Some((_, target_type)) = &self.target_context {
+            let expected_classes =
+                self.get_target_size(*target_type, &crate::config::TrainingConfig::default());
+
+            match detected_format {
+                TargetFormat::OneHot => {
+                    if num_outputs != expected_classes {
+                        log::warn!(
+                            "🚨 Target format mismatch: Detected OneHot with {} classes, but {:?} expects {} classes",
+                            num_outputs, target_type, expected_classes
+                        );
+                    } else {
+                        log::debug!(
+                            "✅ Target format validation: OneHot format matches {:?} expected classes ({})",
+                            target_type, expected_classes
+                        );
+                    }
+                }
+                TargetFormat::RawClassIndices => {
+                    log::debug!(
+                        "✅ Target format validation: RawClassIndices detected for {:?} (expected {} classes)",
+                        target_type, expected_classes
+                    );
+                }
+                _ => {
+                    log::debug!(
+                        "⚠️ Target format validation: {} format detected for {:?}",
+                        match detected_format {
+                            TargetFormat::RawValues => "RawValues",
+                            _ => "Unknown",
+                        },
+                        target_type
+                    );
+                }
+            }
         }
+
+        Ok(detected_format)
     }
 
-    /// Calculate categorical validation metrics for price level targets
+    /// Calculate categorical validation metrics for all categorical targets (PriceLevel, Direction, Volatility)
     pub async fn calculate_categorical_validation_metrics(
         &self,
         val_sequences: &Array3<f64>,
@@ -1032,12 +1333,28 @@ impl LSTMModel {
             let target_data = target_tensor.to_vec2::<f32>()?;
 
             for (pred_row, target_row) in pred_data.iter().zip(target_data.iter()) {
-                // Get predicted class (argmax)
+                // Get predicted class (argmax) with validation
                 let predicted_class = pred_row
                     .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(idx, _)| idx as i32)
+                    .map(|(idx, _)| {
+                        // Validate predicted class against expected target type (reuse existing logic)
+                        if let Some((_, target_type)) = &self.target_context {
+                            let max_valid_class = self.get_target_size(*target_type, &crate::config::TrainingConfig::default()) - 1;
+                            if idx > max_valid_class {
+                                log::debug!(
+                                    "⚠️ Model predicted class {} for {:?}, but max valid is {}. Using max valid class.",
+                                    idx, target_type, max_valid_class
+                                );
+                                max_valid_class as i32
+                            } else {
+                                idx as i32
+                            }
+                        } else {
+                            idx as i32
+                        }
+                    })
                     .unwrap_or(0);
 
                 // Get true class - use detected format for proper extraction
@@ -1144,14 +1461,50 @@ impl LSTMModel {
             }
         }
 
-        // Log comprehensive categorical metrics
-        log::info!(
-            "📊 Categorical Metrics [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
-            epoch, accuracy, precision, recall, f1, mse, categorical_mape
-        );
+        // Log comprehensive categorical metrics with target-type aware interpretation
+        let target_type_name = if let Some((_, target_type)) = &self.target_context {
+            match target_type {
+                TargetType::PriceLevel => "PriceLevel",
+                TargetType::Direction => "Direction",
+                TargetType::Volatility => "Volatility",
+            }
+        } else {
+            "Unknown"
+        };
+
+        // Target-type aware metric interpretation (reuse existing target context)
+        if let Some((_, target_type)) = &self.target_context {
+            match target_type {
+                TargetType::Direction => {
+                    // For Direction: MAPE is less meaningful, focus on accuracy
+                    log::info!(
+                        "📊 Categorical Metrics [{}] [Epoch {}]: Accuracy: {:.3} (Directional correctness), Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}",
+                        target_type_name, epoch, accuracy, precision, recall, f1, mse
+                    );
+                    log::debug!(
+                        "📈 Direction MAPE: {:.2}% (Note: Distance-based metric, interpret as classification error)",
+                        categorical_mape
+                    );
+                }
+                TargetType::PriceLevel | TargetType::Volatility => {
+                    // For ordinal targets: All metrics including MAPE are meaningful
+                    log::info!(
+                        "📊 Categorical Metrics [{}] [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}% (Ordinal distance)",
+                        target_type_name, epoch, accuracy, precision, recall, f1, mse, categorical_mape
+                    );
+                }
+            }
+        } else {
+            // Fallback for unknown target type
+            log::info!(
+                "📊 Categorical Metrics [{}] [Epoch {}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
+                target_type_name, epoch, accuracy, precision, recall, f1, mse, categorical_mape
+            );
+        }
 
         log::debug!(
-            "📈 Class Distribution: Pred: {:?}, True: {:?}",
+            "📈 Class Distribution [{}]: Pred: {:?}, True: {:?}",
+            target_type_name,
             class_distribution.0,
             class_distribution.1
         );
@@ -1159,19 +1512,64 @@ impl LSTMModel {
         Ok(())
     }
 
-    /// Calculate accuracy for categorical predictions
+    /// Calculate accuracy for categorical predictions with target-type aware validation
     fn calculate_accuracy(&self, predictions: &[i32], targets: &[i32]) -> f32 {
         if predictions.len() != targets.len() || predictions.is_empty() {
             return 0.0;
         }
 
-        let correct = predictions
+        // Get expected class range from target context (reuse existing logic)
+        let max_valid_class = if let Some((_, target_type)) = &self.target_context {
+            // Reuse existing get_target_size logic - 1 (since classes are 0-indexed)
+            self.get_target_size(*target_type, &crate::config::TrainingConfig::default()) - 1
+        } else {
+            // Fallback: find max class in data if no context available
+            let max_pred = predictions.iter().max().copied().unwrap_or(0);
+            let max_target = targets.iter().max().copied().unwrap_or(0);
+            max_pred.max(max_target) as usize
+        };
+
+        // Filter out invalid class indices and count valid pairs
+        let valid_pairs: Vec<_> = predictions
             .iter()
             .zip(targets.iter())
+            .filter(|(pred, target)| {
+                **pred >= 0
+                    && **pred <= max_valid_class as i32
+                    && **target >= 0
+                    && **target <= max_valid_class as i32
+            })
+            .collect();
+
+        if valid_pairs.is_empty() {
+            log::warn!(
+                "🚨 No valid class pairs found for accuracy calculation. Max valid class: {}, Pred range: [{}, {}], Target range: [{}, {}]",
+                max_valid_class,
+                predictions.iter().min().unwrap_or(&0),
+                predictions.iter().max().unwrap_or(&0),
+                targets.iter().min().unwrap_or(&0),
+                targets.iter().max().unwrap_or(&0)
+            );
+            return 0.0;
+        }
+
+        // Log validation info if we filtered out invalid pairs
+        if valid_pairs.len() != predictions.len() {
+            log::debug!(
+                "📊 Accuracy validation: {}/{} pairs valid for target type {:?} (max class: {})",
+                valid_pairs.len(),
+                predictions.len(),
+                self.target_context.as_ref().map(|(_, t)| t),
+                max_valid_class
+            );
+        }
+
+        let correct = valid_pairs
+            .iter()
             .filter(|(pred, target)| pred == target)
             .count();
 
-        correct as f32 / predictions.len() as f32
+        correct as f32 / valid_pairs.len() as f32
     }
 
     /// Calculate precision, recall, and F1 score (macro-averaged)
@@ -1283,6 +1681,7 @@ impl LSTMModel {
         targets: &Tensor,
         target_type: TargetType,
         config: &crate::config::TrainingConfig,
+        is_validation: bool,
     ) -> Result<Tensor> {
         log::debug!(
             "🎯 Single target loss - Type: {:?}, Pred shape: {:?}, Target shape: {:?}",
@@ -1295,11 +1694,25 @@ impl LSTMModel {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
                     // CrossEntropy for categorical price levels
-                    let num_classes = config.model.output_heads.price_levels.bins as usize;
-                    self.calculate_crossentropy_loss(predictions, targets, num_classes)
+                    let num_classes = 6; // PriceLevel always uses 6 bins
+                    self.calculate_crossentropy_loss(
+                        predictions,
+                        targets,
+                        num_classes,
+                        config,
+                        is_validation,
+                    )
                 } else {
-                    // MSE for continuous price prediction
-                    Ok(predictions.sub(targets)?.sqr()?.mean_all()?)
+                    // MSE for continuous price prediction with class weights for categorical targets
+                    log::debug!("🎯 PriceLevel target: Using MSE loss with class weights");
+                    let num_classes = self.get_target_size(target_type, config);
+                    self.calculate_mse_with_class_weights(
+                        predictions,
+                        targets,
+                        num_classes,
+                        config,
+                        is_validation,
+                    )
                 }
             }
             TargetType::Direction => {
@@ -1317,8 +1730,15 @@ impl LSTMModel {
                     )));
                 }
 
-                // Use proper 3-class CrossEntropy loss (same pattern as PriceLevel)
-                self.calculate_crossentropy_loss(predictions, targets, 3)
+                // Use proper 3-class CrossEntropy loss
+                let num_classes = 3; // Direction always uses 3 classes
+                self.calculate_crossentropy_loss(
+                    predictions,
+                    targets,
+                    num_classes,
+                    config,
+                    is_validation,
+                )
             }
             TargetType::Volatility => {
                 // Volatility targets are ALWAYS 3-class classification (Low=0, Medium=1, High=2)
@@ -1335,8 +1755,15 @@ impl LSTMModel {
                     )));
                 }
 
-                // Use proper 3-class CrossEntropy loss (same pattern as PriceLevel)
-                self.calculate_crossentropy_loss(predictions, targets, 3)
+                // Use proper 3-class CrossEntropy loss
+                let num_classes = 3; // Volatility always uses 3 classes
+                self.calculate_crossentropy_loss(
+                    predictions,
+                    targets,
+                    num_classes,
+                    config,
+                    is_validation,
+                )
             }
         }
     }
@@ -1348,6 +1775,7 @@ impl LSTMModel {
         predictions: &Tensor,
         targets: &Tensor,
         config: &crate::config::TrainingConfig,
+        is_validation: bool, // New parameter to distinguish training vs validation
     ) -> Result<Tensor> {
         // TENSOR SHAPE VALIDATION: Critical for catching configuration mismatches early
         self.validate_tensor_shapes(predictions, targets, config)?;
@@ -1373,8 +1801,13 @@ impl LSTMModel {
         // FIXED: Use single-target loss for individual models (they should always have correct size)
         // The validation above will catch and log any size mismatches
         log::debug!("📊 Using single target loss calculation");
-        let loss_result =
-            self.calculate_single_target_loss(predictions, targets, target_type, config)?;
+        let loss_result = self.calculate_single_target_loss(
+            predictions,
+            targets,
+            target_type,
+            config,
+            is_validation,
+        )?;
 
         // Fallback to existing loss function system if configured
         let final_loss = if matches!(
@@ -1390,7 +1823,7 @@ impl LSTMModel {
             use crate::model::loss::TensorCryptoLossFunction;
             let mut tensor_loss_fn = TensorCryptoLossFunction::new_with_class_weights(
                 self.loss_function.clone(),
-                self.global_class_weights.clone(),
+                self.training_class_weights.clone(),
             );
 
             let market_regime = match &self.loss_function {
@@ -1408,10 +1841,11 @@ impl LSTMModel {
 
         let loss_value = final_loss.to_scalar::<f32>().unwrap_or(0.0);
         log::debug!(
-            "🎯 FINAL LOSS - Value: {:.6}, Target type: {:?}, Loss function: {:?}",
+            "🎯 FINAL LOSS DEBUG - Value: {:.6}, Target type: {:?}, Loss function: {:?}, Global weights: {}",
             loss_value,
             target_type,
-            self.loss_function
+            self.loss_function,
+            self.training_class_weights.is_some()
         );
 
         // Validate loss is not NaN or infinite

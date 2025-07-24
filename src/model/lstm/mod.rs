@@ -52,8 +52,8 @@ mod tests {
     use crate::config::model::{
         AttentionConfig, AttentionMechanism, DirectionHead, DistributionType, DropoutConfig,
         DropoutRate, HiddenUnitsConfig, LSTMArchitecture, ModelConfig, OutputHeadsConfig,
-        PriceLevelHead, PriceLevelTargetStrategy, SequenceLengthConfig, VisualizationConfig,
-        VolatilityHead, VolatilityPredictionMethod,
+        PriceLevelHead, SequenceLengthConfig, VisualizationConfig, VolatilityHead,
+        VolatilityPredictionMethod,
     };
     use crate::config::training::ClassWeightStrategy;
     use crate::config::training::OptimizerType;
@@ -446,20 +446,20 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bins: 5,
-                    range_percent: 2.0,
+                    bandwidth_size: Some(1.0), // Default bandwidth size
                     distribution_type: DistributionType::Categorical,
-                    target_strategy: PriceLevelTargetStrategy::Current,
                 },
                 direction: DirectionHead {
                     enabled: false,
-                    threshold: 0.01,
+                    thresholds: (-0.01, 0.01),
                     confidence_calibration: false,
+                    use_adaptive_thresholds: true,
                 },
                 volatility: VolatilityHead {
                     enabled: false,
                     method: VolatilityPredictionMethod::Direct,
                     horizons: vec!["1h".to_string()],
+                    thresholds: (0.33, 0.67),
                 },
             },
             quantile_outputs: None,
@@ -522,20 +522,20 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bins: 3,
-                    range_percent: 1.0,
+                    bandwidth_size: Some(1.0), // Default bandwidth size
                     distribution_type: DistributionType::Categorical,
-                    target_strategy: PriceLevelTargetStrategy::Current,
                 },
                 direction: DirectionHead {
                     enabled: false,
-                    threshold: 0.01,
+                    thresholds: (-0.01, 0.01),
                     confidence_calibration: false,
+                    use_adaptive_thresholds: true,
                 },
                 volatility: VolatilityHead {
                     enabled: false,
                     method: VolatilityPredictionMethod::Direct,
                     horizons: vec!["1h".to_string()],
+                    thresholds: (0.33, 0.67),
                 },
             },
             quantile_outputs: None,
@@ -640,20 +640,20 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bins: output_size as u32,
-                    range_percent: 1.0,
+                    bandwidth_size: Some(1.0), // Default bandwidth size
                     distribution_type: DistributionType::Categorical,
-                    target_strategy: PriceLevelTargetStrategy::Current,
                 },
                 direction: DirectionHead {
                     enabled: false,
-                    threshold: 0.01,
+                    thresholds: (-0.01, 0.01),
                     confidence_calibration: false,
+                    use_adaptive_thresholds: true,
                 },
                 volatility: VolatilityHead {
                     enabled: false,
                     method: VolatilityPredictionMethod::Direct,
                     horizons: vec!["1h".to_string()],
+                    thresholds: (0.33, 0.67),
                 },
             },
             quantile_outputs: None,
@@ -709,20 +709,20 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bins: 3,
-                    range_percent: 1.0,
+                    bandwidth_size: Some(1.0), // Default bandwidth size
                     distribution_type: DistributionType::Categorical,
-                    target_strategy: PriceLevelTargetStrategy::Current,
                 },
                 direction: DirectionHead {
                     enabled: false,
-                    threshold: 0.01,
+                    thresholds: (-0.01, 0.01),
                     confidence_calibration: false,
+                    use_adaptive_thresholds: true,
                 },
                 volatility: VolatilityHead {
                     enabled: false,
                     method: VolatilityPredictionMethod::Direct,
                     horizons: vec!["1h".to_string()],
+                    thresholds: (0.33, 0.67),
                 },
             },
             quantile_outputs: None,

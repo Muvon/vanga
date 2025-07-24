@@ -312,7 +312,6 @@ mod candle_integration_tests {
             output_heads: crate::config::model::OutputHeadsConfig {
                 price_levels: crate::config::model::PriceLevelHead {
                     enabled: true,
-                    bins: 5,
                     range_percent: 0.05,
                 },
                 direction: crate::config::model::DirectionHead {

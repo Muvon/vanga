@@ -94,9 +94,9 @@ output_dir = "cross_asset_attention"
 
 [model.output_heads.price_levels]
 enabled = true
-bins = 12                     # More bins for cross-asset granularity
-# TUNING: Increase bins (15-20) for fine-grained cross-asset predictions
-# EFFECT: More bins capture subtle cross-asset influence on price movements
+bandwidth_size = 1.0             # Breakout sensitivity multiplier for cross-asset training
+# TUNING: Lower values (0.5-0.8) = more sensitive cross-asset breakout detection
+# EFFECT: Controls threshold for strong breakout classification across multiple assets
 range_percent = 0.06         # Slightly wider range for cross-asset volatility
 distribution_type = "Categorical"
 

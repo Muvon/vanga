@@ -56,7 +56,6 @@ pub use api::trainer::train_model;
 // 4. Prediction with structured JSON output
 #[cfg(test)]
 mod integration_tests {
-    use crate::config::model::PriceLevelTargetStrategy;
     use crate::config::model::{
         DirectionHead, DistributionType, OutputHeadsConfig, PriceLevelHead, VolatilityHead,
         VolatilityPredictionMethod,
@@ -71,20 +70,20 @@ mod integration_tests {
         OutputHeadsConfig {
             price_levels: PriceLevelHead {
                 enabled: true,
-                bins: 5,
-                range_percent: 0.1,
+                bandwidth_size: Some(1.0), // Default bandwidth size
                 distribution_type: DistributionType::Categorical,
-                target_strategy: PriceLevelTargetStrategy::Current,
             },
             direction: DirectionHead {
                 enabled: true,
-                threshold: 0.02,
+                thresholds: (-0.01, 0.01),
                 confidence_calibration: false,
+                use_adaptive_thresholds: true,
             },
             volatility: VolatilityHead {
                 enabled: true,
                 method: VolatilityPredictionMethod::Direct,
                 horizons: vec!["1h".to_string()],
+                thresholds: (0.33, 0.67),
             },
         }
     }
@@ -95,7 +94,7 @@ mod integration_tests {
         assert!(config.output_heads.price_levels.enabled);
         assert!(config.output_heads.direction.enabled);
         assert!(config.output_heads.volatility.enabled);
-        assert_eq!(config.output_heads.price_levels.bins, 5);
+        assert_eq!(config.output_heads.price_levels.bandwidth_size, Some(1.0));
     }
 
     fn create_test_model_config() -> ModelConfig {
@@ -242,7 +241,7 @@ mod integration_tests {
         // Manually verify segments
         let mut offset = 0;
         if output_heads.price_levels.enabled {
-            let size = output_heads.price_levels.bins as usize;
+            let size = 6;
             println!(
                 "Price levels: offset={}, size={}, range=({}, {})",
                 offset,
@@ -295,7 +294,6 @@ mod integration_tests {
             "Price levels enabled: {}",
             output_heads.price_levels.enabled
         );
-        println!("Price levels bins: {}", output_heads.price_levels.bins);
         println!("Direction enabled: {}", output_heads.direction.enabled);
         println!("Volatility enabled: {}", output_heads.volatility.enabled);
         println!(
@@ -476,20 +474,20 @@ mod integration_tests {
         let mut disabled_heads = OutputHeadsConfig {
             price_levels: PriceLevelHead {
                 enabled: false,
-                bins: 5,
-                range_percent: 0.1,
+                bandwidth_size: Some(1.0), // Default bandwidth size
                 distribution_type: DistributionType::Categorical,
-                target_strategy: PriceLevelTargetStrategy::Current,
             },
             direction: DirectionHead {
                 enabled: false,
-                threshold: 0.02,
+                thresholds: (-0.01, 0.01),
                 confidence_calibration: false,
+                use_adaptive_thresholds: true,
             },
             volatility: VolatilityHead {
                 enabled: false,
                 method: VolatilityPredictionMethod::Direct,
                 horizons: vec!["1h".to_string()],
+                thresholds: (0.33, 0.67),
             },
         };
 

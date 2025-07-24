@@ -120,9 +120,9 @@ output_dir = "attention_analysis"  # Directory for attention outputs
 # Predicts probability distribution of future price changes
 [model.output_heads.price_levels]
 enabled = true                # Enable price level prediction (RECOMMENDED)
-bins = 10                    # Number of price change bins (5-20 typical range)
-# TUNING: More bins = finer granularity but harder to train, fewer bins = coarser but more stable
-# EFFECT: 10 bins typically covers -5% to +5% in 1% increments
+bandwidth_size = 1.0          # Breakout sensitivity multiplier (0.5=sensitive, 1.0=standard, 1.5=conservative)
+# TUNING: Lower values = more sensitive breakout detection, higher values = more conservative
+# EFFECT: Controls the threshold for strong breakout classification (bins 0 and 5)
 range_percent = 0.05         # Price change range (±5% = ±0.05)
 distribution_type = "Categorical"  # Output type (Categorical for probability distribution)
 

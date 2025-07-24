@@ -77,20 +77,35 @@ impl MultiTargetLSTMModel {
     fn get_output_size_for_target(target_type: TargetType, model_config: &ModelConfig) -> usize {
         match target_type {
             TargetType::PriceLevel => {
-                let bins = model_config.output_heads.price_levels.bins as usize;
-                log::debug!(
-                    "PriceLevel target: {} output classes (bins from config)",
+                if model_config.output_heads.price_levels.enabled {
+                    let bins = 6; // Fixed: sequence-aware classification always uses 6 bins
+                    log::debug!(
+                        "PriceLevel target: {} output classes (6 bins for sequence-aware classification)",
+                        bins
+                    );
                     bins
-                );
-                bins
+                } else {
+                    log::debug!("PriceLevel target disabled, using fallback output size: 1");
+                    1 // Fallback for regression mode
+                }
             }
             TargetType::Direction => {
-                log::debug!("Direction target: 3 output classes (Up/Down/Sideways)");
-                3 // Fixed: Up, Down, Sideways
+                if model_config.output_heads.direction.enabled {
+                    log::debug!("Direction target: 3 output classes (Up/Down/Sideways)");
+                    3 // Fixed: Up, Down, Sideways
+                } else {
+                    log::debug!("Direction target disabled, using fallback output size: 1");
+                    1 // Fallback
+                }
             }
             TargetType::Volatility => {
-                log::debug!("Volatility target: 3 output classes (Low/Medium/High)");
-                3 // Fixed: Low, Medium, High volatility regimes
+                if model_config.output_heads.volatility.enabled {
+                    log::debug!("Volatility target: 3 output classes (Low/Medium/High)");
+                    3 // Fixed: Low, Medium, High volatility
+                } else {
+                    log::debug!("Volatility target disabled, using fallback output size: 1");
+                    1 // Fallback
+                }
             }
         }
     }
@@ -147,7 +162,7 @@ impl MultiTargetLSTMModel {
             // Compact structured logging per target
             let config_info = match target_type {
                 TargetType::PriceLevel => {
-                    format!("bins={}", model_config.output_heads.price_levels.bins)
+                    "bins=6".to_string() // Fixed: sequence-aware classification always uses 6 bins
                 }
                 TargetType::Direction => "classes=3".to_string(),
                 TargetType::Volatility => "classes=3".to_string(),

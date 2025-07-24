@@ -551,16 +551,10 @@ impl LSTMModel {
         // Skip if class weighting is disabled via configuration
         if config.training.class_weight_strategy == ClassWeightStrategy::None {
             log::info!("🚫 Class weighting disabled via configuration");
-            self.global_class_weights = None;
+            self.training_class_weights = None;
         } else if let Some((_, target_type)) = &self.target_context {
             let num_classes = match target_type {
-                TargetType::PriceLevel => {
-                    if config.model.output_heads.price_levels.enabled {
-                        config.model.output_heads.price_levels.bins as usize
-                    } else {
-                        self.config.output_size
-                    }
-                }
+                TargetType::PriceLevel => 6,
                 TargetType::Direction => 3,  // Down=0, Sideways=1, Up=2
                 TargetType::Volatility => 3, // Low=0, Medium=1, High=2
             };
@@ -572,11 +566,37 @@ impl LSTMModel {
                 num_classes,
                 config.training.class_weight_strategy
             );
-            self.calculate_global_class_weights(
+            self.calculate_training_class_weights(
                 &train_targets,
                 num_classes,
                 class_weights.cloned(),
             )?;
+
+            // Calculate validation-specific class weights for Advanced strategy
+            if config.training.class_weight_strategy
+                == crate::config::training::ClassWeightStrategy::Advanced
+            {
+                if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
+                    // Validate that validation sequences and targets have matching dimensions
+                    if val_seq.shape()[0] != val_tgt.shape()[0] {
+                        return Err(VangaError::ModelError(format!(
+                            "Validation data dimension mismatch: sequences {} vs targets {}",
+                            val_seq.shape()[0],
+                            val_tgt.shape()[0]
+                        )));
+                    }
+
+                    log::info!(
+                        "🔍 Calculating validation class weights for Advanced strategy from {} validation samples",
+                        val_tgt.shape()[0]
+                    );
+                    self.calculate_validation_class_weights(val_tgt, num_classes)?;
+                } else {
+                    log::warn!(
+                        "⚠️ Advanced class weighting requested but no validation data provided"
+                    );
+                }
+            }
         }
 
         log::info!("🔧 Training Configuration:");
@@ -667,7 +687,7 @@ impl LSTMModel {
                 let predictions = self.forward(&input_tensor)?;
 
                 // Calculate loss using configured loss function or default MSE
-                let loss = self.calculate_loss(&predictions, &target_tensor, config)?;
+                let loss = self.calculate_loss(&predictions, &target_tensor, config, false)?; // false = training
 
                 // Backward pass with gradient computation
                 let grads = loss.backward()?;
@@ -709,6 +729,14 @@ impl LSTMModel {
                 let batch_loss = loss.to_scalar::<f32>().map_err(|e| {
                     VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
                 })?;
+
+                // 🔍 DETAILED TRAINING BATCH DEBUG
+                log::debug!(
+                    "🔍 TRAIN E{} B{}: raw_loss={:.6}, batch_size={}, weighted_loss={:.6}, grad_norm={:.6}",
+                    epoch + 1, batch_idx, batch_loss, actual_batch_size,
+                    batch_loss * actual_batch_size as f32, effective_grad_norm
+                );
+
                 epoch_train_loss += batch_loss * actual_batch_size as f32;
             }
 
@@ -719,6 +747,12 @@ impl LSTMModel {
             } else {
                 0.0
             };
+
+            // 🔍 EPOCH TRAINING SUMMARY DEBUG
+            log::debug!(
+                "🔍 TRAIN E{} SUMMARY: total_weighted_loss={:.6}, total_samples={}, avg_loss={:.6}, batches={}",
+                epoch + 1, epoch_train_loss, total_train_samples, avg_train_loss, batch_count
+            );
 
             // Validation phase (only if validation data is available)
             let avg_val_loss = if let (Some(val_seq), Some(val_tgt)) =
@@ -746,7 +780,8 @@ impl LSTMModel {
                     let predictions = self.forward(&input_tensor)?;
 
                     // Calculate validation loss using configured loss function
-                    let val_loss = self.calculate_loss(&predictions, &target_tensor, config)?;
+                    let val_loss =
+                        self.calculate_loss(&predictions, &target_tensor, config, true)?; // true = validation
                     let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
                         VangaError::ModelError(format!(
                             "Validation loss scalar conversion failed: {}",
@@ -754,18 +789,36 @@ impl LSTMModel {
                         ))
                     })?;
 
+                    // 🔍 DETAILED VALIDATION BATCH DEBUG
+                    log::debug!(
+                        "🔍 VAL E{} B{}: raw_loss={:.6}, batch_size={}, weighted_loss={:.6}",
+                        epoch + 1,
+                        batch_start / batch_size,
+                        val_batch_loss,
+                        actual_batch_size,
+                        val_batch_loss * actual_batch_size as f32
+                    );
+
                     epoch_val_loss += val_batch_loss * actual_batch_size as f32;
                 }
 
                 let avg_val_loss = epoch_val_loss / total_val_samples as f32;
 
-                // Calculate categorical metrics for price level targets
+                // 🔍 EPOCH VALIDATION SUMMARY DEBUG
+                log::debug!(
+                    "🔍 VAL E{} SUMMARY: total_weighted_loss={:.6}, total_samples={}, avg_loss={:.6}",
+                    epoch + 1, epoch_val_loss, total_val_samples, avg_val_loss
+                );
+
+                // Calculate categorical metrics for all categorical targets
                 if let Some((_, target_type)) = &self.target_context {
-                    if target_type == &TargetType::PriceLevel {
-                        self.calculate_categorical_validation_metrics(
-                            val_seq, val_tgt, batch_size, epoch, config,
-                        )
-                        .await?;
+                    match target_type {
+                        TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
+                            self.calculate_categorical_validation_metrics(
+                                val_seq, val_tgt, batch_size, epoch, config,
+                            )
+                            .await?;
+                        }
                     }
                 }
 

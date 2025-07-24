@@ -104,12 +104,13 @@ impl ModelTrainer {
         // Generate targets with training config horizons - FIXED: Use model config for price levels
         let target_config = crate::targets::MultiTargetConfig {
             price_level_config: crate::targets::PriceLevelConfig {
-                bins: self.config.model.output_heads.price_levels.bins,
-                quantile_method: crate::targets::price_levels::QuantileMethod::Rolling {
-                    window: 1000,
-                },
-                lookback_window: 100,
-                min_price_change: 0.001,
+                bandwidth_size: self
+                    .config
+                    .model
+                    .output_heads
+                    .price_levels
+                    .bandwidth_size
+                    .unwrap_or(1.0),
             },
             direction_config: crate::targets::DirectionConfig::default(),
             volatility_config: crate::targets::VolatilityConfig::default(),
@@ -184,12 +185,13 @@ impl ModelTrainer {
         // Generate targets for new window using model configuration - FIXED: Use model config for price levels
         let target_config = crate::targets::MultiTargetConfig {
             price_level_config: crate::targets::PriceLevelConfig {
-                bins: self.config.model.output_heads.price_levels.bins,
-                quantile_method: crate::targets::price_levels::QuantileMethod::Rolling {
-                    window: 1000,
-                },
-                lookback_window: 100,
-                min_price_change: 0.001,
+                bandwidth_size: self
+                    .config
+                    .model
+                    .output_heads
+                    .price_levels
+                    .bandwidth_size
+                    .unwrap_or(1.0),
             },
             direction_config: crate::targets::DirectionConfig::default(),
             volatility_config: crate::targets::VolatilityConfig::default(),

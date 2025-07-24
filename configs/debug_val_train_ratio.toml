@@ -1,0 +1,154 @@
+# VANGA Debugging Configuration - Val/Train Loss Ratio Analysis
+# Specifically designed to debug growing val/train ratio when both losses are decreasing
+# Problem: Val loss decreases slower than train loss in chronological splits
+
+[training]
+# ============================================================================
+# DEBUGGING PARAMETERS - Enhanced monitoring and analysis
+# ============================================================================
+
+# Reduced epochs for faster debugging iterations
+epochs = { Fixed = 100 }
+
+# Conservative learning rate to prevent train loss from decreasing too fast
+learning_rate = { Fixed = 0.0005 }  # Reduced from typical 0.001
+
+# Smaller batch size for more stable gradients
+batch_size = { Fixed = 32 }
+
+# Minimal warmup to see the pattern quickly
+warmup_epochs = 2
+
+# Aggressive early stopping to catch the pattern
+early_stopping = { patience = 20, min_delta = 0.0001 }
+
+# More frequent logging to track the ratio pattern
+print_every = 1  # Print every epoch
+
+# Conservative gradient clipping
+gradient_clip = 0.5
+
+# ============================================================================
+# VALIDATION ANALYSIS - Different split strategies for comparison
+# ============================================================================
+
+# Standard chronological split (your current setup)
+validation_split = 0.2  # 20% validation (most recent data)
+test_split = 0.1       # 10% test (most recent after validation)
+
+# ============================================================================
+# OPTIMIZER CONFIGURATION - Conservative for debugging
+# ============================================================================
+
+# Use AdamW with moderate weight decay
+optimizer = { AdamW = { weight_decay = 0.005, beta1 = 0.9, beta2 = 0.999 } }
+
+# ============================================================================
+# MODEL CONFIGURATION - Simplified for debugging
+# ============================================================================
+[model]
+# Simpler architecture to isolate the data issue
+architecture = { MultiLSTM = { layers = 1 } }
+
+# Moderate complexity
+sequence_length = { Fixed = 60 }
+hidden_units = { Fixed = 128 }
+
+# Moderate dropout
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.15 }  # Slightly reduced
+variational = false      # Disable for debugging
+recurrent = false       # Disable for debugging
+
+# Disable attention for debugging
+[model.attention]
+enabled = false
+
+# ============================================================================
+# LOSS FUNCTION - Simple MSE for clear debugging
+# ============================================================================
+# Using default MSE (no composite loss) for cleaner debugging
+
+# ============================================================================
+# OUTPUT HEADS - Simplified
+# ============================================================================
+[model.output_heads]
+
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0  # Breakout sensitivity multiplier (reduced complexity)
+range_percent = 0.03
+distribution_type = "Categorical"
+
+# ============================================================================
+# FEATURES - Minimal set for debugging
+# ============================================================================
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [10, 20, 50]  # Reduced set
+ema_periods = [10, 20]      # Reduced set
+
+[features.technical_indicators.momentum]
+rsi_periods = [14]          # Single period
+stochastic = true
+williams_r = false          # Disabled for debugging
+cci_periods = []            # Disabled
+momentum_periods = [10]     # Single period
+
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14]          # Single period
+keltner_channels = false    # Disabled
+donchian_channels = false   # Disabled
+
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [10]   # Single period
+mfi_periods = []            # Disabled
+volume_profile = false      # Disabled
+
+# Disable complex features for debugging
+[features.market_microstructure]
+enabled = false
+
+[features.volatility_features]
+enabled = false
+
+[features.custom_features]
+enabled = false
+
+[features.engineering]
+enabled = false
+
+[features.cross_asset]
+enabled = false
+
+[features.selection]
+enabled = false
+
+# ============================================================================
+# DATA CONFIGURATION - Standard preprocessing
+# ============================================================================
+[data]
+normalization = "Standard"  # Z-score normalization
+sequence_overlap = 0.0      # No overlap for cleaner debugging
+
+# ============================================================================
+# DEBUGGING NOTES
+# ============================================================================
+# This configuration is designed to:
+# 1. Use conservative learning rate to prevent train loss from dropping too fast
+# 2. Simplified model architecture to isolate data distribution issues
+# 3. Enhanced logging to track loss ratio patterns
+# 4. Minimal features to reduce noise in debugging
+# 5. Standard validation split to confirm chronological complexity mismatch
+#
+# Expected behavior:
+# - Train loss: Steady decrease (e.g., 1.0 → 0.8 → 0.6 → 0.4)
+# - Val loss: Slower decrease (e.g., 1.2 → 1.0 → 0.9 → 0.8)
+# - Ratio: Growing (1.2x → 1.25x → 1.5x → 2.0x)
+#
+# If this pattern persists, the issue is chronological data complexity mismatch.
