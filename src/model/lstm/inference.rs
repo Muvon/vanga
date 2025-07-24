@@ -8,7 +8,7 @@ use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::Tensor;
-use candle_nn::{Module, RNN};
+use candle_nn::{ops::dropout, Module, RNN};
 use ndarray::{Array2, Array3};
 
 impl LSTMModel {
@@ -75,8 +75,8 @@ impl LSTMModel {
         Ok((seq_tensor, target_tensor))
     }
 
-    /// Forward pass through multi-layer LSTM network - Enhanced with bidirectional support
-    pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
+    /// Forward pass through multi-layer LSTM network - Enhanced with bidirectional support and dropout
+    pub fn forward(&self, input: &Tensor, training: bool) -> Result<Tensor> {
         let forward_lstm_layers = self.lstm_layers.as_ref().ok_or_else(|| {
             VangaError::ModelError("Forward LSTM layers not initialized".to_string())
         })?;
@@ -145,6 +145,14 @@ impl LSTMModel {
                 current_input =
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
+                // Apply dropout between layers if enabled and in training mode
+                if training
+                    && self.dropout_config.as_ref().is_some_and(|d| d.enabled)
+                    && layer_idx < forward_lstm_layers.len() - 1
+                {
+                    current_input = self.apply_dropout(&current_input)?;
+                }
+
                 log::debug!(
                     "Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
                     layer_idx,
@@ -174,6 +182,15 @@ impl LSTMModel {
                 }
 
                 current_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
+
+                // Apply dropout between layers if enabled and in training mode
+                if training
+                    && self.dropout_config.as_ref().is_some_and(|d| d.enabled)
+                    && i < forward_lstm_layers.len() - 1
+                {
+                    current_output = self.apply_dropout(&current_output)?;
+                }
+
                 log::debug!(
                     "Unidirectional layer {} output shape: {:?}",
                     i,
@@ -278,8 +295,8 @@ impl LSTMModel {
         // Convert sequences to tensor (prediction-optimized version)
         let input_tensor = self.convert_sequences_to_prediction_tensor(sequences)?;
 
-        // Forward pass through network
-        let predictions_tensor = self.forward(&input_tensor)?;
+        // Forward pass through network (inference mode - no dropout)
+        let predictions_tensor = self.forward(&input_tensor, false)?;
 
         // CRITICAL FIX: Handle multi-class outputs for categorical targets
         let final_predictions_tensor = if let Some((_, target_type)) = &self.target_context {
@@ -462,5 +479,37 @@ impl LSTMModel {
 
         Array2::from_shape_vec((rows, cols), data_f64)
             .map_err(|e| VangaError::ModelError(format!("Failed to create Array2: {}", e)))
+    }
+
+    /// Apply dropout with proper rate calculation based on configuration
+    fn apply_dropout(&self, tensor: &Tensor) -> Result<Tensor> {
+        let dropout_config = self
+            .dropout_config
+            .as_ref()
+            .ok_or_else(|| VangaError::ModelError("Dropout configuration not set".to_string()))?;
+
+        // Calculate dropout rate based on configuration
+        let dropout_rate = match &dropout_config.rate {
+            crate::config::model::DropoutRate::Fixed(rate) => *rate,
+            crate::config::model::DropoutRate::Auto { min_rate, max_rate } => {
+                // Use middle value for auto rate (could be enhanced with adaptive logic)
+                (min_rate + max_rate) / 2.0
+            }
+            crate::config::model::DropoutRate::Adaptive => {
+                // Default adaptive rate - could be enhanced based on training progress
+                0.2
+            }
+        };
+
+        // Apply dropout using candle's dropout function
+        let dropped_tensor = dropout(tensor, dropout_rate as f32)?;
+
+        log::debug!(
+            "Applied dropout with rate {:.3} to tensor shape {:?}",
+            dropout_rate,
+            tensor.shape()
+        );
+
+        Ok(dropped_tensor)
     }
 }

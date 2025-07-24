@@ -1343,7 +1343,8 @@ impl LSTMModel {
             let (input_tensor, target_tensor) =
                 self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
-            let predictions = self.forward(&input_tensor)?;
+            // Forward pass (inference mode for loss calculation)
+            let predictions = self.forward(&input_tensor, false)?;
 
             // Convert predictions to class indices
             let pred_data = predictions.to_vec2::<f32>()?;

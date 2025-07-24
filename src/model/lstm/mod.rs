@@ -595,7 +595,7 @@ mod tests {
         )
         .unwrap();
 
-        let predictions = model.forward(&input_tensor).unwrap();
+        let predictions = model.forward(&input_tensor, false).unwrap();
 
         // Verify output shape
         let shape_dims = predictions.shape().dims();
@@ -778,7 +778,7 @@ mod tests {
         )
         .unwrap();
 
-        let predictions = model.forward(&input_tensor).unwrap();
+        let predictions = model.forward(&input_tensor, false).unwrap();
 
         // Verify output shape
         let shape_dims = predictions.shape().dims();

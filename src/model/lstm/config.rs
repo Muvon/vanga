@@ -135,6 +135,8 @@ pub struct LSTMModel {
     pub validation_class_weights: Option<Vec<f32>>,
     /// Architecture configuration for bidirectional detection
     pub architecture: Option<crate::config::model::LSTMArchitecture>,
+    /// Dropout configuration for regularization
+    pub dropout_config: Option<crate::config::model::DropoutConfig>,
     /// Stored validation data for consistent metrics calculation
     /// Used to ensure epoch metrics and final metrics use the same data
     pub stored_val_sequences: Option<ndarray::Array3<f64>>,

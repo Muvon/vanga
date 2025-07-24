@@ -39,6 +39,7 @@ impl LSTMModel {
             training_class_weights: None,           // No global weights initially
             validation_class_weights: None,         // No validation weights initially
             architecture: None,                     // No architecture info by default
+            dropout_config: None,                   // No dropout config by default
             stored_val_sequences: None,             // No stored validation data initially
             stored_val_targets: None,               // No stored validation targets initially
             stored_test_sequences: ndarray::Array3::zeros((0, 1, 1)), // Empty test sequences
@@ -170,6 +171,9 @@ impl LSTMModel {
         // Configure attention if enabled
         model.configure_attention(&model_config.attention, None)?;
 
+        // Configure dropout
+        model.configure_dropout(&model_config.dropout);
+
         // Configure loss function
         model.loss_function = model_config.loss_function.clone();
 
@@ -219,6 +223,17 @@ impl LSTMModel {
         }
 
         Ok(())
+    }
+
+    /// Configure dropout for the model
+    pub fn configure_dropout(&mut self, dropout_config: &crate::config::model::DropoutConfig) {
+        self.dropout_config = Some(dropout_config.clone());
+
+        log::debug!(
+            "✅ Dropout configured: enabled={}, rate={:?}",
+            dropout_config.enabled,
+            dropout_config.rate
+        );
     }
 
     /// Initialize attention layers during model initialization

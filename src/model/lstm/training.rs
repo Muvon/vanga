@@ -783,8 +783,8 @@ impl LSTMModel {
                 let (input_tensor, target_tensor) =
                     self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
-                // Forward pass
-                let predictions = self.forward(&input_tensor)?;
+                // Forward pass (training mode - enable dropout)
+                let predictions = self.forward(&input_tensor, true)?;
 
                 // Calculate loss using configured loss function or default MSE
                 let loss = self.calculate_loss(&predictions, &target_tensor, config, false)?; // false = training
@@ -876,8 +876,8 @@ impl LSTMModel {
                     let (input_tensor, target_tensor) =
                         self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
-                    // Forward pass (no gradient computation for validation)
-                    let predictions = self.forward(&input_tensor)?;
+                    // Forward pass (validation mode - no dropout)
+                    let predictions = self.forward(&input_tensor, false)?;
 
                     // Calculate validation loss using configured loss function
                     let val_loss =
