@@ -547,7 +547,7 @@ impl LSTMModel {
             (u32::MAX, 0.0) // Disable early stopping without validation
         };
 
-        // Calculate global class weights for consistent loss calculation across all batches
+        // Calculate class weights based on strategy
         // Skip if class weighting is disabled via configuration
         if config.training.class_weight_strategy == ClassWeightStrategy::None {
             log::info!("🚫 Class weighting disabled via configuration");
@@ -559,41 +559,73 @@ impl LSTMModel {
                 TargetType::Volatility => 3, // Low=0, Medium=1, High=2
             };
 
-            log::info!(
-                "🌍 Calculating class weights from {} training samples for {:?} with {} classes (strategy: {:?})",
-                train_targets.shape()[0],
-                target_type,
-                num_classes,
-                config.training.class_weight_strategy
-            );
-            self.calculate_training_class_weights(
-                &train_targets,
-                num_classes,
-                class_weights.cloned(),
-            )?;
+            match config.training.class_weight_strategy {
+                ClassWeightStrategy::Global => {
+                    // True Global: Calculate weights from combined training + validation data
+                    if let Some(val_tgt_final) = &val_targets_final {
+                        // Combine training and validation targets for global class weight calculation
+                        let combined_targets =
+                            self.combine_targets_for_global_weights(&train_targets, val_tgt_final)?;
+
+                        log::info!(
+                            "🌍 Calculating GLOBAL class weights from {} training + {} validation = {} total samples for {:?} with {} classes",
+                            train_targets.shape()[0],
+                            val_tgt_final.shape()[0],
+                            combined_targets.shape()[0],
+                            target_type,
+                            num_classes
+                        );
+
+                        self.calculate_training_class_weights(
+                            &combined_targets,
+                            num_classes,
+                            class_weights.cloned(),
+                        )?;
+                    } else {
+                        // No validation data - use training data only
+                        log::info!(
+                            "🌍 Calculating GLOBAL class weights from {} training samples only (no validation) for {:?} with {} classes",
+                            train_targets.shape()[0],
+                            target_type,
+                            num_classes
+                        );
+                        self.calculate_training_class_weights(
+                            &train_targets,
+                            num_classes,
+                            class_weights.cloned(),
+                        )?;
+                    }
+                }
+                _ => {
+                    // For PerWindow, Advanced, etc. - use training data only for training weights
+                    log::info!(
+                        "🎯 Calculating training class weights from {} training samples for {:?} with {} classes (strategy: {:?})",
+                        train_targets.shape()[0],
+                        target_type,
+                        num_classes,
+                        config.training.class_weight_strategy
+                    );
+                    self.calculate_training_class_weights(
+                        &train_targets,
+                        num_classes,
+                        class_weights.cloned(),
+                    )?;
+                }
+            }
 
             // Calculate validation-specific class weights for Advanced strategy
             if config.training.class_weight_strategy
                 == crate::config::training::ClassWeightStrategy::Advanced
             {
-                if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
-                    // Validate that validation sequences and targets have matching dimensions
-                    if val_seq.shape()[0] != val_tgt.shape()[0] {
-                        return Err(VangaError::ModelError(format!(
-                            "Validation data dimension mismatch: sequences {} vs targets {}",
-                            val_seq.shape()[0],
-                            val_tgt.shape()[0]
-                        )));
-                    }
-
+                if let Some(val_tgt_final) = &val_targets_final {
                     log::info!(
                         "🔍 Calculating validation class weights for Advanced strategy from {} validation samples",
-                        val_tgt.shape()[0]
+                        val_tgt_final.shape()[0]
                     );
-                    self.calculate_validation_class_weights(val_tgt, num_classes)?;
+                    self.calculate_validation_class_weights(val_tgt_final, num_classes)?;
                 } else {
                     log::warn!(
-                        "⚠️ Advanced class weighting requested but no validation data provided"
+                        "⚠️ Advanced class weighting requested but no validation data available after processing"
                     );
                 }
             }
@@ -1489,5 +1521,42 @@ impl LSTMModel {
                 initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
             }
         }
+    }
+
+    /// Combine training and validation targets for global class weight calculation
+    fn combine_targets_for_global_weights(
+        &self,
+        train_targets: &Array2<f64>,
+        val_targets: &Array2<f64>,
+    ) -> Result<Array2<f64>> {
+        // Validate that both arrays have the same number of columns (target dimensions)
+        if train_targets.shape()[1] != val_targets.shape()[1] {
+            return Err(VangaError::ModelError(format!(
+                "Cannot combine targets: training has {} columns, validation has {} columns",
+                train_targets.shape()[1],
+                val_targets.shape()[1]
+            )));
+        }
+
+        // Concatenate along the sample axis (axis 0)
+        let combined = ndarray::concatenate(
+            ndarray::Axis(0),
+            &[train_targets.view(), val_targets.view()],
+        )
+        .map_err(|e| {
+            VangaError::ModelError(format!(
+                "Failed to concatenate training and validation targets: {}",
+                e
+            ))
+        })?;
+
+        log::debug!(
+            "🔗 Combined targets: {} train + {} val = {} total samples",
+            train_targets.shape()[0],
+            val_targets.shape()[0],
+            combined.shape()[0]
+        );
+
+        Ok(combined)
     }
 }

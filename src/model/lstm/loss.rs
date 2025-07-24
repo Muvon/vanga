@@ -428,6 +428,17 @@ impl LSTMModel {
         config: &crate::config::TrainingConfig,
         is_validation: bool,
     ) -> Result<Tensor> {
+        let phase = if is_validation {
+            "VALIDATION"
+        } else {
+            "TRAINING"
+        };
+        log::debug!(
+            "🎯 {} CrossEntropy loss calculation for {} classes (strategy: {:?})",
+            phase,
+            num_classes,
+            config.training.class_weight_strategy
+        );
         log::debug!(
             "🔍 CrossEntropy Loss - Pred shape: {:?}, Target shape: {:?}, Classes: {}",
             predictions.shape(),
@@ -473,7 +484,7 @@ impl LSTMModel {
                     {
                         if let Some(ref validation_weights) = self.validation_class_weights {
                             log::debug!(
-                                "🔍 LOSS DEBUG: Using validation-specific class weights for {:?}: {:?}",
+                                "🔍 LOSS DEBUG: Using validation-specific class weights for {:?} (Advanced strategy): {:?}",
                                 target_type,
                                 validation_weights
                             );
@@ -517,8 +528,9 @@ impl LSTMModel {
                             }
 
                             log::debug!(
-                                "🌍 LOSS DEBUG: Using global class weights for {:?}: {:?}",
+                                "🌍 LOSS DEBUG: Using global class weights for {:?} (strategy: {:?}): {:?}",
                                 target_type,
+                                config.training.class_weight_strategy,
                                 global_weights
                             );
                             Some(global_weights.clone())
