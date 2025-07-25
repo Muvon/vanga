@@ -1,409 +1,217 @@
 //! Volatility target generation for cryptocurrency market regime classification
 //!
-//! This module implements volatility regime classification:
-//! - 0: Low volatility regime
-//! - 1: Medium volatility regime
-//! - 2: High volatility regime
+//! This module implements volatility regime classification for risk assessment:
+//! - 0: VeryLow (minimal volatility)
+//! - 1: Low (below average volatility)
+//! - 2: Medium (average volatility)
+//! - 3: High (above average volatility)
+//! - 4: VeryHigh (extreme volatility)
 
+use crate::config::model::VolatilityHead;
 use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-/// Type alias for volatility targets with regime boundaries
-type VolatilityTargetsWithBoundaries = (HashMap<String, Vec<i32>>, (f64, f64));
-
-/// Configuration for volatility target generation
+/// Configuration for volatility target generation (for consistency with direction pattern)
 #[derive(Debug, Clone)]
 pub struct VolatilityConfig {
-    pub volatility_periods: Vec<usize>,
-    pub regime_thresholds: (f64, f64), // (low_percentile, high_percentile)
-    pub smoothing_window: usize,
-    pub use_garch_features: bool,
-    pub min_periods: usize,
+    /// Bandwidth multiplier for volatility sensitivity (default: 1.0)
+    /// - 0.5: More sensitive (smaller volatility thresholds, more classes in extreme ranges)
+    /// - 1.0: Standard behavior
+    /// - 1.5: Less sensitive (larger volatility thresholds, more balanced distribution)
+    pub bandwidth_size: f64,
 }
 
 impl Default for VolatilityConfig {
     fn default() -> Self {
         Self {
-            volatility_periods: vec![24, 48, 168], // 1d, 2d, 1w
-            regime_thresholds: (0.33, 0.67),       // 33rd and 67th percentiles
-            smoothing_window: 12,
-            use_garch_features: false,
-            min_periods: 100,
+            bandwidth_size: 1.0,
         }
     }
 }
 
-/// Volatility regime classes
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum VolatilityRegime {
-    Low = 0,
-    Medium = 1,
-    High = 2,
-}
+impl VolatilityConfig {
+    /// Validate the configuration parameters
+    pub fn validate(&self) -> Result<()> {
+        if self.bandwidth_size <= 0.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "bandwidth_size must be positive, got: {}",
+                self.bandwidth_size
+            )));
+        }
 
-/// Generate volatility targets with consistent regime boundaries
-/// Ensures training and validation use the same volatility thresholds
-pub fn generate_volatility_targets_with_consistent_boundaries(
-    df: &DataFrame,
-    horizons: &[String],
-    config: &VolatilityConfig,
-    train_val_split_idx: Option<usize>,
-) -> Result<VolatilityTargetsWithBoundaries> {
-    let close_prices = extract_close_prices(df)?;
-    let high_prices = extract_high_prices(df)?;
-    let low_prices = extract_low_prices(df)?;
+        if !self.bandwidth_size.is_finite() {
+            return Err(crate::utils::error::VangaError::ConfigError(
+                "bandwidth_size must be a finite number".to_string(),
+            ));
+        }
 
-    // Calculate proper volatility using high/low prices for better accuracy
-    let volatility = if config.use_garch_features {
-        // Use range-based volatility for higher precision
-        calculate_range_based_volatility(
-            &close_prices,
-            &high_prices,
-            &low_prices,
-            config.volatility_periods[0],
-        )?
-    } else {
-        // Use close-to-close volatility as fallback
-        calculate_realized_volatility(&close_prices, config.volatility_periods[0])?
-    };
-
-    // Calculate regime boundaries from training data only
-    let train_volatility = if let Some(split_idx) = train_val_split_idx {
-        &volatility[..split_idx.min(volatility.len())]
-    } else {
-        &volatility
-    };
-
-    let regime_boundaries = calculate_volatility_regime_boundaries(train_volatility, config)?;
-
-    // Apply same boundaries to entire dataset for all horizons
-    let mut all_targets = HashMap::new();
-    for horizon in horizons {
-        let targets = apply_volatility_boundaries(&volatility, &regime_boundaries)?;
-        all_targets.insert(horizon.clone(), targets);
+        Ok(())
     }
-
-    Ok((all_targets, regime_boundaries))
 }
 
-/// Calculate volatility regime boundaries from training data
-fn calculate_volatility_regime_boundaries(
-    train_volatility: &[f64],
-    config: &VolatilityConfig,
-) -> Result<(f64, f64)> {
-    if train_volatility.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Empty volatility data for regime boundary calculation".to_string(),
-        ));
-    }
-
-    let mut sorted_vol = train_volatility.to_vec();
-    sorted_vol.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let (low_percentile, high_percentile) = config.regime_thresholds;
-
-    let low_idx = (sorted_vol.len() as f64 * low_percentile) as usize;
-    let high_idx = (sorted_vol.len() as f64 * high_percentile) as usize;
-
-    let low_threshold = sorted_vol[low_idx.min(sorted_vol.len() - 1)];
-    let high_threshold = sorted_vol[high_idx.min(sorted_vol.len() - 1)];
-
-    Ok((low_threshold, high_threshold))
-}
-
-/// Apply volatility boundaries to generate targets
-fn apply_volatility_boundaries(volatility: &[f64], boundaries: &(f64, f64)) -> Result<Vec<i32>> {
-    let (low_threshold, high_threshold) = *boundaries;
-
-    let targets = volatility
-        .iter()
-        .map(|&vol| {
-            if vol <= low_threshold {
-                0 // Low volatility
-            } else if vol >= high_threshold {
-                2 // High volatility
-            } else {
-                1 // Medium volatility
-            }
-        })
-        .collect();
-
-    Ok(targets)
-}
-
-/// Generate volatility targets for multiple horizons
+/// Generate volatility targets for multiple horizons (ENHANCED: supports both configs)
 pub fn generate_volatility_targets(
     df: &DataFrame,
     horizons: &[String],
-    config: &VolatilityConfig,
+    config: Option<&VolatilityConfig>,
+    model_config: Option<&VolatilityHead>,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
-    let high_prices = extract_high_prices(df).ok();
-    let low_prices = extract_low_prices(df).ok();
-
     let mut targets = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
-        let volatility_targets = calculate_volatility_targets_with_optimal_method(
-            &close_prices,
-            high_prices.as_deref(),
-            low_prices.as_deref(),
-            horizon_steps,
-            config,
-        )?;
+
+        let volatility_targets = if let Some(model_cfg) = model_config {
+            // Use model config (NEW: eliminates hardcoded values)
+            let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
+            let base_percentiles = model_cfg.base_percentiles;
+
+            // Apply bandwidth sensitivity to percentiles
+            let center = 0.5;
+            let adaptive_percentiles: [f64; 4] = base_percentiles.map(|p| {
+                let distance = p - center;
+                let sensitivity = 1.0 / bandwidth_size;
+                center + (distance * sensitivity)
+            });
+
+            apply_volatility_classification(&close_prices, horizon_steps, &adaptive_percentiles)?
+        } else if let Some(legacy_cfg) = config {
+            // Legacy path for backward compatibility
+            calculate_volatility_targets(&close_prices, horizon_steps, legacy_cfg)?
+        } else {
+            return Err(crate::utils::error::VangaError::config(
+                "Either VolatilityConfig or VolatilityHead must be provided",
+            ));
+        };
+
+        // Analyze and log class distribution for this specific horizon
+        analyze_class_distribution(&volatility_targets, 5, horizon)?;
+
         targets.insert(horizon.clone(), volatility_targets);
     }
 
     Ok(targets)
 }
 
-/// Calculate volatility targets for a specific horizon with optimal method selection
-fn calculate_volatility_targets_with_optimal_method(
-    close_prices: &[f64],
-    high_prices: Option<&[f64]>,
-    low_prices: Option<&[f64]>,
+/// Apply volatility classification using model config
+fn apply_volatility_classification(
+    prices: &[f64],
     horizon_steps: usize,
-    config: &VolatilityConfig,
+    adaptive_percentiles: &[f64; 4],
 ) -> Result<Vec<i32>> {
-    if close_prices.len() < config.min_periods + horizon_steps {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient data for volatility target generation".to_string(),
-        ));
+    let volatility_window = 24; // 24-hour rolling window for volatility calculation
+
+    if prices.len() < volatility_window + horizon_steps {
+        return Err(crate::utils::error::VangaError::DataError(format!(
+            "Insufficient data for volatility target generation: need {}, got {}",
+            volatility_window + horizon_steps,
+            prices.len()
+        )));
     }
 
-    // Calculate realized volatility using optimal method
-    let realized_vol = calculate_optimal_volatility(
-        close_prices,
-        high_prices,
-        low_prices,
-        config.volatility_periods[0],
-        config.use_garch_features,
-    )?;
+    let mut targets = vec![-1; prices.len()];
 
-    // Calculate forward-looking volatility
-    let forward_vol =
-        calculate_forward_volatility(close_prices, horizon_steps, config.volatility_periods[0])?;
+    // Calculate current volatility series for threshold determination
+    let current_volatility = calculate_realized_volatility(prices, volatility_window)?;
 
-    // Determine regime thresholds
-    let thresholds = calculate_regime_thresholds(&realized_vol, config)?;
+    // Calculate regime boundaries from current volatility for consistent classification
+    let regime_boundaries =
+        calculate_percentile_boundaries(&current_volatility, adaptive_percentiles)?;
 
-    // Classify volatility regimes
-    let mut targets = vec![-1; close_prices.len()];
+    // For each valid position, calculate future volatility and classify
+    for (i, target) in targets
+        .iter_mut()
+        .enumerate()
+        .take(prices.len() - horizon_steps)
+        .skip(volatility_window)
+    {
+        // Calculate future volatility window starting at horizon
+        let future_start = i + horizon_steps;
+        let future_end = (future_start + volatility_window).min(prices.len());
 
-    for i in config.min_periods..(close_prices.len() - horizon_steps) {
-        if i >= forward_vol.len() {
-            break;
+        if future_end - future_start < volatility_window / 2 {
+            // Skip if insufficient future data for reliable volatility calculation
+            continue;
         }
 
-        let future_volatility = forward_vol[i];
-        let regime = classify_volatility_regime(future_volatility, &thresholds);
-        targets[i] = regime as i32;
+        // Calculate future volatility for this horizon
+        let future_prices = &prices[future_start..future_end];
+        let future_volatility = calculate_future_volatility(future_prices)?;
+
+        // Classify future volatility using current regime boundaries
+        let volatility_class = classify_volatility_regime(future_volatility, &regime_boundaries);
+        *target = volatility_class;
     }
 
     Ok(targets)
 }
 
-/// Calculate volatility targets for a specific horizon (legacy function for backward compatibility)
-#[allow(dead_code)]
+/// Calculate volatility targets using legacy config (for backward compatibility)
 fn calculate_volatility_targets(
-    close_prices: &[f64],
-    high_prices: &[f64],
-    low_prices: &[f64],
+    prices: &[f64],
     horizon_steps: usize,
     config: &VolatilityConfig,
 ) -> Result<Vec<i32>> {
-    // Use the new optimal method with explicit high/low prices
-    calculate_volatility_targets_with_optimal_method(
-        close_prices,
-        Some(high_prices),
-        Some(low_prices),
-        horizon_steps,
-        config,
-    )
+    // Use default percentiles for legacy path
+    let base_percentiles = [0.20, 0.40, 0.60, 0.80];
+    let sensitivity = 1.0 / config.bandwidth_size;
+    let center = 0.5;
+
+    // Apply bandwidth sensitivity to percentiles
+    let adaptive_percentiles: [f64; 4] = base_percentiles.map(|p| {
+        let distance = p - center;
+        center + (distance * sensitivity)
+    });
+
+    apply_volatility_classification(prices, horizon_steps, &adaptive_percentiles)
 }
 
-/// Calculate realized volatility using close-to-close returns
-/// For better accuracy in crypto markets, consider using calculate_range_based_volatility instead
-fn calculate_realized_volatility(prices: &[f64], window: usize) -> Result<Vec<f64>> {
-    if prices.len() < window + 1 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient data for realized volatility".to_string(),
-        ));
+/// Calculate future volatility for horizon-specific prediction
+fn calculate_future_volatility(prices: &[f64]) -> Result<f64> {
+    if prices.len() < 2 {
+        return Ok(0.0); // Default for insufficient data
     }
 
-    let mut volatility = vec![f64::NAN; prices.len()];
-
-    // Calculate log returns
+    // Calculate returns for the future period
     let mut returns = Vec::with_capacity(prices.len() - 1);
     for i in 1..prices.len() {
-        returns.push((prices[i] / prices[i - 1]).ln());
-    }
-
-    // Calculate rolling volatility
-    for i in window..returns.len() {
-        let window_returns = &returns[i - window..i];
-        let mean_return = window_returns.iter().sum::<f64>() / window as f64;
-
-        let variance = window_returns
-            .iter()
-            .map(|r| (r - mean_return).powi(2))
-            .sum::<f64>()
-            / (window - 1) as f64;
-
-        volatility[i + 1] = variance.sqrt() * (24.0_f64).sqrt(); // Annualized
-    }
-
-    Ok(volatility)
-}
-
-/// Calculate forward-looking volatility
-fn calculate_forward_volatility(
-    prices: &[f64],
-    horizon_steps: usize,
-    vol_window: usize,
-) -> Result<Vec<f64>> {
-    if prices.len() < vol_window + horizon_steps {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient data for forward volatility".to_string(),
-        ));
-    }
-
-    let mut forward_vol = vec![f64::NAN; prices.len()];
-
-    let end_range = prices.len() - horizon_steps - vol_window;
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..end_range {
-        let future_start = i + horizon_steps;
-        let future_end = future_start + vol_window;
-
-        if future_end <= prices.len() {
-            let future_prices = &prices[future_start..future_end];
-            let vol = calculate_window_volatility(future_prices)?;
-            forward_vol[i] = vol;
+        if prices[i] > 0.0 && prices[i - 1] > 0.0 {
+            returns.push((prices[i] / prices[i - 1]).ln());
+        } else {
+            returns.push(0.0);
         }
     }
 
-    Ok(forward_vol)
-}
-
-/// Calculate volatility for a specific window
-fn calculate_window_volatility(prices: &[f64]) -> Result<f64> {
-    if prices.len() < 2 {
+    if returns.is_empty() {
         return Ok(0.0);
     }
 
-    let mut returns = Vec::with_capacity(prices.len() - 1);
-    for i in 1..prices.len() {
-        returns.push((prices[i] / prices[i - 1]).ln());
-    }
-
+    // Calculate standard deviation of returns (volatility)
     let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
     let variance = returns
         .iter()
-        .map(|r| (r - mean_return).powi(2))
+        .map(|&r| (r - mean_return).powi(2))
         .sum::<f64>()
-        / (returns.len() - 1) as f64;
+        / returns.len() as f64;
 
-    Ok(variance.sqrt() * (24.0_f64).sqrt())
+    Ok(variance.sqrt())
 }
 
-/// Calculate regime thresholds based on historical volatility distribution
-fn calculate_regime_thresholds(
-    volatility: &[f64],
-    config: &VolatilityConfig,
-) -> Result<(f64, f64)> {
-    let valid_vol: Vec<f64> = volatility
-        .iter()
-        .filter(|&&v| !v.is_nan() && v.is_finite())
-        .copied()
-        .collect();
-
-    if valid_vol.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "No valid volatility data for thresholds".to_string(),
-        ));
-    }
-
-    let mut sorted_vol = valid_vol.clone();
-    sorted_vol.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let low_idx = (config.regime_thresholds.0 * (sorted_vol.len() - 1) as f64) as usize;
-    let high_idx = (config.regime_thresholds.1 * (sorted_vol.len() - 1) as f64) as usize;
-
-    Ok((sorted_vol[low_idx], sorted_vol[high_idx]))
-}
-
-/// Classify volatility into regime
-fn classify_volatility_regime(volatility: f64, thresholds: &(f64, f64)) -> VolatilityRegime {
-    if volatility <= thresholds.0 {
-        VolatilityRegime::Low
-    } else if volatility <= thresholds.1 {
-        VolatilityRegime::Medium
+/// Classify volatility into regime using boundaries
+fn classify_volatility_regime(volatility: f64, boundaries: &[f64; 4]) -> i32 {
+    if volatility <= boundaries[0] {
+        0 // VeryLow
+    } else if volatility <= boundaries[1] {
+        1 // Low
+    } else if volatility <= boundaries[2] {
+        2 // Medium
+    } else if volatility <= boundaries[3] {
+        3 // High
     } else {
-        VolatilityRegime::High
+        4 // VeryHigh
     }
-}
-
-/// Extract close prices from DataFrame
-fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
-    let close_series = df.column("close").map_err(|e| {
-        crate::utils::error::VangaError::DataError(format!("Failed to get close column: {}", e))
-    })?;
-
-    let values: Vec<f64> = close_series
-        .f64()
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to convert close to f64: {}",
-                e
-            ))
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    Ok(values)
-}
-
-/// Extract high prices from DataFrame
-fn extract_high_prices(df: &DataFrame) -> Result<Vec<f64>> {
-    let high_series = df.column("high").map_err(|e| {
-        crate::utils::error::VangaError::DataError(format!("Failed to get high column: {}", e))
-    })?;
-
-    let values: Vec<f64> = high_series
-        .f64()
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to convert high to f64: {}",
-                e
-            ))
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    Ok(values)
-}
-
-/// Extract low prices from DataFrame
-fn extract_low_prices(df: &DataFrame) -> Result<Vec<f64>> {
-    let low_series = df.column("low").map_err(|e| {
-        crate::utils::error::VangaError::DataError(format!("Failed to get low column: {}", e))
-    })?;
-
-    let values: Vec<f64> = low_series
-        .f64()
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to convert low to f64: {}",
-                e
-            ))
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    Ok(values)
 }
 
 /// Parse horizon string to number of steps
@@ -438,68 +246,130 @@ pub fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
     }
 }
 
-/// Calculate range-based volatility using Yang-Zhang estimator
-/// More accurate than close-to-close for cryptocurrency markets with high intraday volatility
-fn calculate_range_based_volatility(
-    close_prices: &[f64],
-    high_prices: &[f64],
-    low_prices: &[f64],
-    window: usize,
-) -> Result<Vec<f64>> {
-    if close_prices.len() != high_prices.len() || close_prices.len() != low_prices.len() {
+/// Volatility regime classes (5-class system)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VolatilityRegime {
+    VeryLow = 0,  // <20th percentile
+    Low = 1,      // 20th-40th percentile
+    Medium = 2,   // 40th-60th percentile
+    High = 3,     // 60th-80th percentile
+    VeryHigh = 4, // >80th percentile
+}
+
+/// Analyze class distribution and log insights for volatility targets per horizon
+fn analyze_class_distribution(targets: &[i32], bins: u32, horizon: &str) -> Result<()> {
+    let mut class_counts = vec![0usize; bins as usize];
+    let mut valid_targets = 0;
+
+    for &target in targets {
+        if target >= 0 && target < bins as i32 {
+            class_counts[target as usize] += 1;
+            valid_targets += 1;
+        }
+    }
+
+    if valid_targets == 0 {
+        log::warn!(
+            "⚠️ No valid volatility targets found for horizon {}",
+            horizon
+        );
+        return Ok(());
+    }
+
+    log::info!(
+        "📊 Volatility Class Distribution for {} (n={})",
+        horizon,
+        valid_targets
+    );
+    for (class, &count) in class_counts.iter().enumerate() {
+        let percentage = (count as f64 / valid_targets as f64) * 100.0;
+        let class_name = match class {
+            0 => "VeryLow",
+            1 => "Low",
+            2 => "Medium",
+            3 => "High",
+            4 => "VeryHigh",
+            _ => "Unknown",
+        };
+        log::info!(
+            "   {} Class {} ({}): {} ({:.1}%)",
+            horizon,
+            class,
+            class_name,
+            count,
+            percentage
+        );
+    }
+
+    Ok(())
+}
+
+/// Extract close prices from DataFrame
+pub fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
+    let close_series = df.column("close").map_err(|e| {
+        crate::utils::error::VangaError::DataError(format!(
+            "Failed to extract 'close' column: {}",
+            e
+        ))
+    })?;
+
+    let values: Vec<f64> = close_series
+        .f64()
+        .map_err(|e| {
+            crate::utils::error::VangaError::DataError(format!(
+                "Failed to convert close prices to f64: {}",
+                e
+            ))
+        })?
+        .into_no_null_iter()
+        .collect();
+
+    if values.is_empty() {
         return Err(crate::utils::error::VangaError::DataError(
-            "Price arrays must have equal length for range-based volatility".to_string(),
+            "No valid close prices found".to_string(),
         ));
     }
 
-    if close_prices.len() < window + 1 {
+    Ok(values)
+}
+
+/// Calculate realized volatility using rolling window
+fn calculate_realized_volatility(prices: &[f64], window: usize) -> Result<Vec<f64>> {
+    if prices.len() < window {
         return Err(crate::utils::error::VangaError::DataError(format!(
-            "Insufficient data for range-based volatility calculation: need {}, got {}",
-            window + 1,
-            close_prices.len()
+            "Insufficient data for volatility calculation: need {}, got {}",
+            window,
+            prices.len()
         )));
     }
 
-    let mut volatility = vec![f64::NAN; close_prices.len()];
+    let mut volatilities = Vec::new();
 
-    #[allow(clippy::needless_range_loop)]
-    for i in window..close_prices.len() {
-        let mut range_variance = 0.0;
-
-        for j in (i - window)..i {
-            // Yang-Zhang range-based volatility estimator
-            if high_prices[j] > 0.0 && low_prices[j] > 0.0 && close_prices[j] > 0.0 {
-                let log_hl = (high_prices[j] / low_prices[j]).ln();
-                range_variance += log_hl * log_hl;
-            }
-        }
-
-        // Calculate range-based volatility
-        let range_vol = (range_variance / window as f64).sqrt();
-
-        // Annualize for 24/7 crypto trading (8760 hours per year)
-        volatility[i] = range_vol * (8760.0_f64).sqrt();
+    for i in window..prices.len() {
+        let window_prices = &prices[i - window..i];
+        let volatility = calculate_future_volatility(window_prices)?;
+        volatilities.push(volatility);
     }
 
-    Ok(volatility)
+    Ok(volatilities)
 }
 
-/// Choose optimal volatility calculation method based on available data and configuration
-fn calculate_optimal_volatility(
-    close_prices: &[f64],
-    high_prices: Option<&[f64]>,
-    low_prices: Option<&[f64]>,
-    window: usize,
-    use_range_based: bool,
-) -> Result<Vec<f64>> {
-    match (high_prices, low_prices, use_range_based) {
-        (Some(highs), Some(lows), true) => {
-            // Use range-based volatility for better accuracy
-            calculate_range_based_volatility(close_prices, highs, lows, window)
-        }
-        _ => {
-            // Fallback to close-to-close volatility
-            calculate_realized_volatility(close_prices, window)
-        }
+/// Calculate percentile boundaries for classification
+fn calculate_percentile_boundaries(values: &[f64], percentiles: &[f64; 4]) -> Result<[f64; 4]> {
+    if values.is_empty() {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Cannot calculate percentiles from empty data".to_string(),
+        ));
     }
+
+    let mut sorted_values = values.to_vec();
+    sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut boundaries = [0.0; 4];
+    for (i, &percentile) in percentiles.iter().enumerate() {
+        let index = ((sorted_values.len() - 1) as f64 * percentile) as usize;
+        boundaries[i] = sorted_values[index.min(sorted_values.len() - 1)];
+    }
+
+    Ok(boundaries)
 }

@@ -33,10 +33,15 @@ distribution_type = "Quantile"
 target_strategy = "PercentageBased"
 
 [model.output_heads.direction]
-enabled = false
+enabled = false  # Keep disabled as in original
+bandwidth_size = 0.8  # More sensitive for crypto direction changes
+base_threshold_factor = 0.5  # 50% of market volatility as base threshold
+extreme_multiplier = 2.5  # 2.5x threshold for pump/dump detection
 
 [model.output_heads.volatility]
-enabled = false
+enabled = false  # Keep disabled as in original
+bandwidth_size = 1.2  # Less sensitive for volatility regimes
+base_percentiles = [0.20, 0.40, 0.60, 0.80]  # 5-class percentile boundaries
 
 loss_function = "Composite"
 

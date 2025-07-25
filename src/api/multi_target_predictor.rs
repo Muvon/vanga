@@ -255,7 +255,18 @@ impl MultiTargetPredictions {
         log::info!("Converting raw predictions to structured format");
 
         // Create output formatter with config
-        let formatter = OutputFormatter::new(config.output_config.clone());
+        let mut formatter = OutputFormatter::new(config.output_config.clone());
+
+        // Get output heads configuration from stored model config
+        let output_heads = model.get_training_config()
+            .ok_or_else(|| {
+                crate::utils::error::VangaError::ConfigError(
+                    "Training configuration not found in model. Model may be corrupted or from an older version.".to_string()
+                )
+            })?
+            .model.output_heads.clone();
+
+        formatter = formatter.with_output_heads(output_heads);
 
         // Smart horizon selection logic
         let horizons_to_predict = if let Some(requested_horizon) = &config.horizon {
@@ -308,25 +319,37 @@ impl MultiTargetPredictions {
                 // Extract predictions for this batch
                 let batch_predictions = self.predictions.row(batch_idx);
 
-                // Convert raw outputs to structured predictions
-                if !batch_predictions.is_empty() {
-                    let price_level_prob = batch_predictions[0];
-                    result = result.with_price_levels(
-                        formatter
-                            .create_price_level_prediction(price_level_prob, self.current_price)?,
-                    );
-                }
+                // Use the formatter's MultiTargetParser
+                if formatter.has_parser() {
+                    // Parse the raw predictions using the multi-target parser
+                    let parsed_output = formatter.parse_raw_predictions(batch_predictions)?;
 
-                if batch_predictions.len() >= 2 {
-                    let direction_prob = batch_predictions[1];
-                    result = result
-                        .with_direction(formatter.create_direction_prediction(direction_prob)?);
-                }
+                    // Convert parsed output to structured predictions
+                    if let Some(price_level_probs) = parsed_output.price_levels {
+                        result =
+                            result.with_price_levels(formatter.create_price_level_prediction(
+                                &price_level_probs,
+                                self.current_price,
+                                formatter.get_sequence_data(),
+                                formatter.get_bandwidth_size(),
+                            )?);
+                    }
 
-                if batch_predictions.len() >= 3 {
-                    let volatility_prob = batch_predictions[2];
-                    result = result
-                        .with_volatility(formatter.create_volatility_prediction(volatility_prob)?);
+                    if let Some(direction_output) = parsed_output.direction {
+                        result = result.with_direction(
+                            formatter.create_direction_prediction(&direction_output)?,
+                        );
+                    }
+
+                    if let Some(volatility_output) = parsed_output.volatility {
+                        result = result.with_volatility(
+                            formatter.create_volatility_prediction(&volatility_output)?,
+                        );
+                    }
+                } else {
+                    return Err(VangaError::PredictionError(
+                        "MultiTargetParser not configured. All predictions must use 5-class system.".to_string()
+                    ));
                 }
 
                 result = result.with_confidence(0.7); // Default confidence
@@ -382,4 +405,63 @@ pub async fn predict_multi_target(
 ) -> Result<MultiTargetPredictions> {
     let predictor = MultiTargetPredictor::new(config);
     predictor.predict(model).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::prediction::OutputConfig;
+    use crate::output::OutputFormatter;
+
+    #[test]
+    fn test_output_formatter_has_parser_after_configuration() {
+        // This test verifies the fix for "MultiTargetParser not configured" error
+
+        // Create output formatter with config (same as multi_target_predictor.rs line 258)
+        let output_config = OutputConfig::default();
+        let mut formatter = OutputFormatter::new(output_config);
+
+        // Initially, formatter should not have parser
+        assert!(
+            !formatter.has_parser(),
+            "Formatter should not have parser initially"
+        );
+
+        // Configure output heads (same as the fix we applied)
+        let output_heads = crate::config::model::OutputHeadsConfig {
+            price_levels: crate::config::model::PriceLevelHead {
+                enabled: true,
+                bandwidth_size: Some(1.0),
+                distribution_type: crate::config::model::DistributionType::Categorical,
+            },
+            direction: crate::config::model::DirectionHead {
+                enabled: true,
+                bandwidth_size: Some(0.8),
+                base_threshold_factor: 0.5,
+                extreme_multiplier: 2.5,
+            },
+            volatility: crate::config::model::VolatilityHead {
+                enabled: true,
+                bandwidth_size: Some(1.2),
+                base_percentiles: [0.20, 0.40, 0.60, 0.80],
+            },
+        };
+
+        formatter = formatter.with_output_heads(output_heads);
+
+        // After configuration, formatter should have parser
+        assert!(
+            formatter.has_parser(),
+            "Formatter should have parser after with_output_heads()"
+        );
+    }
+
+    #[test]
+    fn test_multi_target_predictor_creation() {
+        // Test that MultiTargetPredictor can be created without errors
+        let prediction_config = PredictionConfig::default();
+        let _predictor = MultiTargetPredictor::new(prediction_config);
+
+        // If we reach here without panicking, the test passes
+    }
 }

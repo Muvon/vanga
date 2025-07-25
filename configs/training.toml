@@ -292,15 +292,14 @@ target_strategy = { type = "current" }
 
 [model.output_heads.direction]
 enabled = true
-thresholds = [-0.01, 0.01]  # [down_threshold, up_threshold] - consistent format
-confidence_calibration = true
-use_adaptive_thresholds = true
+bandwidth_size = 1.0  # Unified sensitivity control (0.5=sensitive, 1.0=standard, 1.5=conservative)
+base_threshold_factor = 0.5  # How much of market volatility to use as base
+extreme_multiplier = 2.5  # Multiplier for pump/dump vs normal up/down
 
 [model.output_heads.volatility]
 enabled = true
-method = "Direct"
-horizons = ["1h", "4h", "1d"]
-thresholds = [0.33, 0.67]  # [low_percentile, high_percentile] - consistent format
+bandwidth_size = 1.0  # Unified sensitivity control (0.5=sensitive, 1.0=standard, 1.5=conservative)
+base_percentiles = [0.20, 0.40, 0.60, 0.80]  # Base percentile boundaries for 5-class system
 
 # ✅ FEATURES SECTION - All feature configuration under [features.x]
 [features.technical_indicators]

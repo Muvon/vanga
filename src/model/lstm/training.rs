@@ -622,9 +622,9 @@ impl LSTMModel {
             self.training_class_weights = None;
         } else if let Some((_, target_type)) = &self.target_context {
             let num_classes = match target_type {
-                TargetType::PriceLevel => 6,
-                TargetType::Direction => 3,  // Down=0, Sideways=1, Up=2
-                TargetType::Volatility => 3, // Low=0, Medium=1, High=2
+                TargetType::PriceLevel => crate::config::model::NUM_CLASSES,
+                TargetType::Direction => crate::config::model::NUM_CLASSES,
+                TargetType::Volatility => crate::config::model::NUM_CLASSES,
             };
 
             match config.training.class_weight_strategy {

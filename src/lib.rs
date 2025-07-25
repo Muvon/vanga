@@ -58,7 +58,6 @@ pub use api::trainer::train_model;
 mod integration_tests {
     use crate::config::model::{
         DirectionHead, DistributionType, OutputHeadsConfig, PriceLevelHead, VolatilityHead,
-        VolatilityPredictionMethod,
     };
     use crate::config::ModelConfig;
     use crate::data::TargetConverter;
@@ -75,15 +74,14 @@ mod integration_tests {
             },
             direction: DirectionHead {
                 enabled: true,
-                thresholds: (-0.01, 0.01),
-                confidence_calibration: false,
-                use_adaptive_thresholds: true,
+                bandwidth_size: Some(0.8),
+                base_threshold_factor: 0.5,
+                extreme_multiplier: 2.5,
             },
             volatility: VolatilityHead {
                 enabled: true,
-                method: VolatilityPredictionMethod::Direct,
-                horizons: vec!["1h".to_string()],
-                thresholds: (0.33, 0.67),
+                bandwidth_size: Some(1.2),
+                base_percentiles: [0.20, 0.40, 0.60, 0.80],
             },
         }
     }
@@ -112,7 +110,7 @@ mod integration_tests {
             .price_levels
             .insert("1h".to_string(), vec![0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
 
-        // Directions: 3 classes (0=DOWN, 1=SIDEWAYS, 2=UP)
+        // Directions: 5 classes (0=DUMP, 1=DOWN, 2=SIDEWAYS, 3=UP, 4=PUMP)
         targets
             .directions
             .insert("1h".to_string(), vec![0, 1, 2, 0, 1, 2, 0, 1, 2, 0]);
@@ -133,12 +131,12 @@ mod integration_tests {
         let targets = create_test_targets();
 
         // Test target validation
-        let validation_result = converter.validate_targets(&targets);
+        let validation_result = converter.validate_targets(&targets, "1h");
         assert!(validation_result.is_ok(), "Target validation should pass");
 
         // Test target conversion
         let conversion_result =
-            converter.convert_to_training_array(&targets, &targets.valid_indices);
+            converter.convert_to_training_array(&targets, &targets.valid_indices, "1h");
         assert!(
             conversion_result.is_ok(),
             "Target conversion should succeed"
@@ -149,10 +147,10 @@ mod integration_tests {
         // Verify dimensions
         assert_eq!(training_array.shape()[0], 10); // 10 samples
 
-        // Calculate expected output size: 5 (price) + 3 (direction) + 1 (volatility)
+        // Calculate expected output size: 5 (price) + 5 (direction) + 5 (volatility)
         let expected_output_size = output_heads.calculate_total_output_size();
         assert_eq!(training_array.shape()[1], expected_output_size);
-        assert_eq!(expected_output_size, 9); // 5 + 3 + 1
+        assert_eq!(expected_output_size, 15); // 5 + 5 + 5
 
         // Verify one-hot encoding for first sample
         let first_sample = training_array.row(0);
@@ -263,7 +261,7 @@ mod integration_tests {
             offset += size;
         }
         if output_heads.volatility.enabled {
-            let size = output_heads.volatility.horizons.len();
+            let size = 5; // 5 volatility classes (VeryLow, Low, Medium, High, VeryHigh)
             println!(
                 "Volatility: offset={}, size={}, range=({}, {})",
                 offset,
@@ -296,10 +294,7 @@ mod integration_tests {
         );
         println!("Direction enabled: {}", output_heads.direction.enabled);
         println!("Volatility enabled: {}", output_heads.volatility.enabled);
-        println!(
-            "Volatility horizons: {:?}",
-            output_heads.volatility.horizons
-        );
+        println!("Volatility classes: 5 (VeryLow, Low, Medium, High, VeryHigh)");
 
         // Check what segments the parser actually has
         println!("Parser segments: {:?}", parser.segments);
@@ -409,8 +404,8 @@ mod integration_tests {
         let output_heads = create_test_output_heads();
         let total_size = output_heads.calculate_total_output_size();
 
-        // Expected: 5 (price bins) + 3 (direction classes) + 1 (volatility horizons)
-        assert_eq!(total_size, 9);
+        // Expected: 5 (price bins) + 5 (direction classes) + 5 (volatility classes per horizon)
+        assert_eq!(total_size, 15);
 
         // Test segments
         let segments = output_heads.get_output_segments();
@@ -451,7 +446,7 @@ mod integration_tests {
             .price_levels
             .insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
 
-        let validation_result = converter.validate_targets(&incomplete_targets);
+        let validation_result = converter.validate_targets(&incomplete_targets, "1h");
         assert!(
             validation_result.is_err(),
             "Validation should fail with missing targets"
@@ -459,7 +454,7 @@ mod integration_tests {
 
         // Test with empty valid indices
         let complete_targets = create_test_targets();
-        let conversion_result = converter.convert_to_training_array(&complete_targets, &[]);
+        let conversion_result = converter.convert_to_training_array(&complete_targets, &[], "1h");
         assert!(
             conversion_result.is_err(),
             "Conversion should fail with empty indices"
@@ -479,15 +474,14 @@ mod integration_tests {
             },
             direction: DirectionHead {
                 enabled: false,
-                thresholds: (-0.01, 0.01),
-                confidence_calibration: false,
-                use_adaptive_thresholds: true,
+                bandwidth_size: Some(0.8),
+                base_threshold_factor: 0.5,
+                extreme_multiplier: 2.5,
             },
             volatility: VolatilityHead {
                 enabled: false,
-                method: VolatilityPredictionMethod::Direct,
-                horizons: vec!["1h".to_string()],
-                thresholds: (0.33, 0.67),
+                bandwidth_size: Some(1.2),
+                base_percentiles: [0.20, 0.40, 0.60, 0.80],
             },
         };
 

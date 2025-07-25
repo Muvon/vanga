@@ -8,6 +8,9 @@ pub use model::ModelConfig;
 pub use prediction::PredictionConfig;
 pub use training::TrainingConfig;
 
+// Re-export constants
+// Note: DEFAULT_HORIZONS removed as part of volatility system simplification
+
 /// Global configuration defaults for the LSTM forecasting system
 pub struct GlobalConfig;
 
@@ -20,9 +23,6 @@ impl GlobalConfig {
 
     /// Default configuration directory
     pub const CONFIG_DIR: &'static str = "./configs";
-
-    /// Default prediction horizons
-    pub const DEFAULT_HORIZONS: &'static [&'static str] = &["1h", "4h", "1d", "7d"];
 
     /// Required CSV columns (OHLCV)
     pub const REQUIRED_COLUMNS: &'static [&'static str] =

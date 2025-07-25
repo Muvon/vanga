@@ -1,6 +1,9 @@
 use crate::model::loss::CryptoLossFunction;
 use serde::{Deserialize, Serialize};
 
+/// Unified number of classes for all target types in the 5-class system
+pub const NUM_CLASSES: usize = 5;
+
 /// TFT Variable Selection configuration for model config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TFTVariableSelectionConfig {
@@ -200,7 +203,7 @@ impl PriceLevelHead {
             }
         }
 
-        // Sequence-aware classification always uses 6 bins (fixed architecture)
+        // Unified 5-class system for all targets
         // bandwidth_size only affects breakout sensitivity, not number of bins
         // No validation needed for bins since it's architecturally fixed
 
@@ -211,47 +214,53 @@ impl PriceLevelHead {
 impl DirectionHead {
     /// Validate the direction head configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        let (down_threshold, up_threshold) = self.thresholds;
-        if down_threshold >= 0.0 {
+        if self.base_threshold_factor <= 0.0 {
             return Err(crate::utils::error::VangaError::config(
-                "Direction down_threshold must be negative",
+                "Direction base_threshold_factor must be positive",
             ));
         }
-        if up_threshold <= 0.0 {
+        if self.extreme_multiplier <= 1.0 {
             return Err(crate::utils::error::VangaError::config(
-                "Direction up_threshold must be positive",
+                "Direction extreme_multiplier must be greater than 1.0",
             ));
         }
-        if down_threshold.abs() != up_threshold {
-            log::warn!(
-                "Direction thresholds are not symmetric: {} vs {}",
-                down_threshold,
-                up_threshold
-            );
+        if let Some(bandwidth) = self.bandwidth_size {
+            if bandwidth <= 0.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Direction bandwidth_size must be positive",
+                ));
+            }
         }
         Ok(())
     }
 }
 
 impl VolatilityHead {
-    /// Validate the volatility head configuration
+    /// Validate volatility head configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        let (low_percentile, high_percentile) = self.thresholds;
-        if low_percentile <= 0.0 || low_percentile >= 1.0 {
-            return Err(crate::utils::error::VangaError::config(
-                "Volatility low_percentile must be between 0.0 and 1.0",
-            ));
+        if let Some(bandwidth_size) = self.bandwidth_size {
+            if bandwidth_size <= 0.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Volatility bandwidth_size must be positive",
+                ));
+            }
         }
-        if high_percentile <= 0.0 || high_percentile >= 1.0 {
-            return Err(crate::utils::error::VangaError::config(
-                "Volatility high_percentile must be between 0.0 and 1.0",
-            ));
+
+        // Validate percentiles are in ascending order and within [0, 1]
+        for (i, &percentile) in self.base_percentiles.iter().enumerate() {
+            if !(0.0..=1.0).contains(&percentile) {
+                return Err(crate::utils::error::VangaError::config(
+                    "Volatility base_percentiles must be between 0.0 and 1.0",
+                ));
+            }
+
+            if i > 0 && percentile <= self.base_percentiles[i - 1] {
+                return Err(crate::utils::error::VangaError::config(
+                    "Volatility base_percentiles must be in ascending order",
+                ));
+            }
         }
-        if low_percentile >= high_percentile {
-            return Err(crate::utils::error::VangaError::config(
-                "Volatility low_percentile must be less than high_percentile",
-            ));
-        }
+
         Ok(())
     }
 }
@@ -259,17 +268,16 @@ impl VolatilityHead {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionHead {
     pub enabled: bool,
-    pub thresholds: (f64, f64), // (down_threshold, up_threshold) for consistency
-    pub confidence_calibration: bool,
-    pub use_adaptive_thresholds: bool,
+    pub bandwidth_size: Option<f64>, // Unified sensitivity control
+    pub base_threshold_factor: f64, // How much of market volatility to use as base (replaces hardcoded 0.5)
+    pub extreme_multiplier: f64, // Multiplier for pump/dump vs normal up/down (replaces hardcoded 2.5)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityHead {
     pub enabled: bool,
-    pub method: VolatilityPredictionMethod,
-    pub horizons: Vec<String>,
-    pub thresholds: (f64, f64), // (low_percentile, high_percentile) for consistency
+    pub bandwidth_size: Option<f64>, // Unified sensitivity control
+    pub base_percentiles: [f64; 4], // Base percentile boundaries for 5-class system (replaces hardcoded [0.20, 0.40, 0.60, 0.80])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,15 +333,14 @@ impl Default for ModelConfig {
                 },
                 direction: DirectionHead {
                     enabled: true,
-                    thresholds: (-0.01, 0.01), // 1% symmetric thresholds
-                    confidence_calibration: true,
-                    use_adaptive_thresholds: true,
+                    bandwidth_size: Some(0.8), // More sensitive for crypto direction changes
+                    base_threshold_factor: 0.5, // 50% of market volatility as base threshold (was hardcoded)
+                    extreme_multiplier: 2.5, // 2.5x threshold for pump/dump detection (was hardcoded)
                 },
                 volatility: VolatilityHead {
                     enabled: true,
-                    method: VolatilityPredictionMethod::Direct,
-                    horizons: vec!["1h".to_string(), "4h".to_string(), "24h".to_string()],
-                    thresholds: (0.33, 0.67), // 33rd and 67th percentiles
+                    bandwidth_size: Some(1.2), // Less sensitive for volatility regimes
+                    base_percentiles: [0.20, 0.40, 0.60, 0.80], // 5-class percentile boundaries (was hardcoded)
                 },
             },
             quantile_outputs: None, // Disabled by default for backward compatibility
@@ -452,19 +459,19 @@ impl OutputHeadsConfig {
     pub fn calculate_total_output_size(&self) -> usize {
         let mut total_size = 0;
 
-        // Price level classification outputs (6 bins for sequence-aware classification)
+        // Price level classification outputs (5 classes in unified system)
         if self.price_levels.enabled {
-            total_size += 6; // Fixed: sequence-aware classification always uses 6 bins
+            total_size += NUM_CLASSES;
         }
 
-        // Direction prediction outputs (3 classes: DOWN, SIDEWAYS, UP)
+        // Direction prediction outputs (5 classes: DUMP, DOWN, SIDEWAYS, UP, PUMP)
         if self.direction.enabled {
-            total_size += 3;
+            total_size += NUM_CLASSES;
         }
 
-        // Volatility prediction outputs (one per horizon)
+        // Volatility prediction outputs (5 classes per horizon: VERY_LOW, LOW, MEDIUM, HIGH, VERY_HIGH)
         if self.volatility.enabled {
-            total_size += self.volatility.horizons.len();
+            total_size += NUM_CLASSES * 3; // Default 3 horizons: 1h, 4h, 24h
         }
 
         // Ensure at least one output
@@ -482,19 +489,19 @@ impl OutputHeadsConfig {
         let mut current_offset = 0;
 
         if self.price_levels.enabled {
-            let size = 6; // Fixed: sequence-aware classification always uses 6 bins
+            let size = NUM_CLASSES; // 5 classes: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
             segments.price_levels = Some((current_offset, current_offset + size));
             current_offset += size;
         }
 
         if self.direction.enabled {
-            let size = 3; // DOWN, SIDEWAYS, UP
+            let size = NUM_CLASSES; // 5 classes: Dump, Down, Sideways, Up, Pump
             segments.direction = Some((current_offset, current_offset + size));
             current_offset += size;
         }
 
         if self.volatility.enabled {
-            let size = self.volatility.horizons.len();
+            let size = NUM_CLASSES * 3; // Default 3 horizons: 1h, 4h, 24h
             segments.volatility = Some((current_offset, current_offset + size));
         }
 

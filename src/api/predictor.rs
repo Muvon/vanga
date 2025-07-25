@@ -75,8 +75,34 @@ impl Predictor {
         // Explicit memory cleanup after prediction and data extraction
         drop(prepared_data);
 
-        // Format predictions using output formatter
-        let formatter = OutputFormatter::new(self.config.output_config.clone());
+        // Format predictions using output formatter with 5-class system
+        let mut formatter = OutputFormatter::new(self.config.output_config.clone());
+
+        // Configure formatter with model's output heads for proper 5-class parsing
+        // TODO: Get OutputHeadsConfig from model - for now use default
+        let output_heads = crate::config::model::OutputHeadsConfig {
+            price_levels: crate::config::model::PriceLevelHead {
+                enabled: true,
+                bandwidth_size: Some(1.0),
+                distribution_type: crate::config::model::DistributionType::Categorical,
+            },
+            direction: crate::config::model::DirectionHead {
+                enabled: true,
+                bandwidth_size: Some(0.8),
+                base_threshold_factor: 0.5,
+                extreme_multiplier: 2.5,
+            },
+            volatility: crate::config::model::VolatilityHead {
+                enabled: true,
+                bandwidth_size: Some(1.2),
+                base_percentiles: [0.20, 0.40, 0.60, 0.80],
+            },
+        };
+
+        formatter = formatter.with_output_heads(output_heads);
+
+        // TODO: Add sequence data for sequence-aware price level calculations
+        // formatter = formatter.with_sequence_data(sequence_data);
 
         // Determine horizon
         let horizon = self
@@ -168,7 +194,7 @@ impl Predictor {
 
         // Generate targets using the default configuration
         let target_generator = crate::targets::TargetGenerator::with_defaults();
-        target_generator.generate_all_targets(&df).await
+        target_generator.generate_all_targets(&df, None).await
     }
 }
 

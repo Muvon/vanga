@@ -78,9 +78,9 @@ impl MultiTargetLSTMModel {
         match target_type {
             TargetType::PriceLevel => {
                 if model_config.output_heads.price_levels.enabled {
-                    let bins = 6; // Fixed: sequence-aware classification always uses 6 bins
+                    let bins = crate::config::model::NUM_CLASSES; // Use unified 5-class system
                     log::debug!(
-                        "PriceLevel target: {} output classes (6 bins for sequence-aware classification)",
+                        "PriceLevel target: {} output classes (5-class unified system)",
                         bins
                     );
                     bins
@@ -91,8 +91,11 @@ impl MultiTargetLSTMModel {
             }
             TargetType::Direction => {
                 if model_config.output_heads.direction.enabled {
-                    log::debug!("Direction target: 3 output classes (Up/Down/Sideways)");
-                    3 // Fixed: Up, Down, Sideways
+                    log::debug!(
+                        "Direction target: {} output classes (Dump/Down/Sideways/Up/Pump)",
+                        crate::config::model::NUM_CLASSES
+                    );
+                    crate::config::model::NUM_CLASSES // Use unified 5-class system
                 } else {
                     log::debug!("Direction target disabled, using fallback output size: 1");
                     1 // Fallback
@@ -100,8 +103,11 @@ impl MultiTargetLSTMModel {
             }
             TargetType::Volatility => {
                 if model_config.output_heads.volatility.enabled {
-                    log::debug!("Volatility target: 3 output classes (Low/Medium/High)");
-                    3 // Fixed: Low, Medium, High volatility
+                    log::debug!(
+                        "Volatility target: {} output classes (VeryLow/Low/Medium/High/VeryHigh)",
+                        crate::config::model::NUM_CLASSES
+                    );
+                    crate::config::model::NUM_CLASSES // Use unified 5-class system volatility
                 } else {
                     log::debug!("Volatility target disabled, using fallback output size: 1");
                     1 // Fallback
@@ -162,10 +168,10 @@ impl MultiTargetLSTMModel {
             // Compact structured logging per target
             let config_info = match target_type {
                 TargetType::PriceLevel => {
-                    "bins=6".to_string() // Fixed: sequence-aware classification always uses 6 bins
+                    "bins=5".to_string() // Use unified 5-class system
                 }
-                TargetType::Direction => "classes=3".to_string(),
-                TargetType::Volatility => "classes=3".to_string(),
+                TargetType::Direction => "classes=5".to_string(),
+                TargetType::Volatility => "classes=5".to_string(),
             };
 
             log::info!(

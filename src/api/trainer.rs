@@ -120,7 +120,9 @@ impl ModelTrainer {
         let df = crate::data::loader::DataLoader::new()
             .load_csv(&self.config.data_path)
             .await?;
-        let targets = target_generator.generate_all_targets(&df).await?;
+        let targets = target_generator
+            .generate_all_targets(&df, Some(&self.config.model))
+            .await?;
 
         // Get target names for multi-target model
         let target_names = target_generator.get_target_names();
@@ -201,7 +203,9 @@ impl ModelTrainer {
         let df = crate::data::loader::DataLoader::new()
             .load_csv(&self.config.data_path)
             .await?;
-        let targets = target_generator.generate_all_targets(&df).await?;
+        let targets = target_generator
+            .generate_all_targets(&df, Some(&self.config.model))
+            .await?;
         let target_names = target_generator.get_target_names();
 
         // Convert targets for this window

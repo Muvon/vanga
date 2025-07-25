@@ -295,13 +295,13 @@ impl LSTMModel {
         let expected_output_size = match target_type {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
-                    6 // Fixed: sequence-aware classification always uses 6 bins
+                    crate::config::model::NUM_CLASSES // Use unified 5-class system
                 } else {
                     1 // Regression mode
                 }
             }
-            TargetType::Direction => 3,  // Up/Down/Sideways
-            TargetType::Volatility => 3, // Low/Medium/High
+            TargetType::Direction => crate::config::model::NUM_CLASSES, // Dump/Down/Sideways/Up/Pump
+            TargetType::Volatility => crate::config::model::NUM_CLASSES, // VeryLow/Low/Medium/High/VeryHigh
         };
 
         // CRITICAL CHECK: This catches the main bug we're fixing
@@ -408,14 +408,14 @@ impl LSTMModel {
         match target_type {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
-                    6 // Fixed: sequence-aware classification always uses 6 bins
+                    crate::config::model::NUM_CLASSES // Use unified 5-class system
                 } else {
                     // Use output_size from LSTM config as fallback
                     self.config.output_size
                 }
             }
-            TargetType::Direction => 3,  // Up/Down/Sideways
-            TargetType::Volatility => 3, // Low/Medium/High
+            TargetType::Direction => crate::config::model::NUM_CLASSES, // Dump/Down/Sideways/Up/Pump
+            TargetType::Volatility => crate::config::model::NUM_CLASSES, // VeryLow/Low/Medium/High/VeryHigh
         }
     }
 
@@ -564,11 +564,11 @@ impl LSTMModel {
                     self.apply_label_smoothing(targets, num_classes, 0.1)?
                 }
                 TargetType::Direction => {
-                    // 5% smoothing for direction targets (less aggressive for 3-class)
+                    // 5% smoothing for direction targets (balanced for 5-class system)
                     self.apply_label_smoothing(targets, num_classes, 0.05)?
                 }
                 TargetType::Volatility => {
-                    // 5% smoothing for volatility targets (less aggressive for 3-class)
+                    // 5% smoothing for volatility targets (balanced for 5-class system)
                     self.apply_label_smoothing(targets, num_classes, 0.05)?
                 }
             }
@@ -664,12 +664,12 @@ impl LSTMModel {
                 }
                 TargetType::Direction => {
                     log::debug!(
-                        "🎯 Calculating global class weights for Direction target (3 classes: Down=0, Sideways=1, Up=2)"
+                        "🎯 Calculating global class weights for Direction target (5 classes: Dump=0, Down=1, Sideways=2, Up=3, Pump=4)"
                     );
                 }
                 TargetType::Volatility => {
                     log::debug!(
-                        "🎯 Calculating global class weights for Volatility target (3 classes: Low=0, Medium=1, High=2)"
+                        "🎯 Calculating global class weights for Volatility target (5 classes: VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)"
                     );
                 }
             }
@@ -736,12 +736,12 @@ impl LSTMModel {
                 }
                 TargetType::Direction => {
                     log::debug!(
-                        "🎯 Calculating validation class weights for Direction target (3 classes: Down=0, Sideways=1, Up=2)"
+                        "🎯 Calculating validation class weights for Direction target (5 classes: Dump=0, Down=1, Sideways=2, Up=3, Pump=4)"
                     );
                 }
                 TargetType::Volatility => {
                     log::debug!(
-                        "🎯 Calculating validation class weights for Volatility target (3 classes: Low=0, Medium=1, High=2)"
+                        "🎯 Calculating validation class weights for Volatility target (5 classes: VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)"
                     );
                 }
             }
@@ -785,16 +785,30 @@ impl LSTMModel {
         targets: &Tensor,
         num_classes: usize,
     ) -> Result<Option<Vec<f32>>> {
+        use crate::config::model::NUM_CLASSES;
+
+        // Ensure we're using the unified 5-class system
+        let actual_num_classes = if num_classes == NUM_CLASSES {
+            NUM_CLASSES
+        } else {
+            log::warn!(
+                "⚠️  Class count mismatch: expected {}, got {}. Using provided count for backward compatibility.",
+                NUM_CLASSES,
+                num_classes
+            );
+            num_classes
+        };
+
         // Extract target values to calculate class distribution
         let target_data = targets.to_vec2::<f32>()?;
-        let mut class_counts = vec![0usize; num_classes];
+        let mut class_counts = vec![0usize; actual_num_classes];
         let mut total_samples = 0;
 
         // Count class occurrences
         for row in &target_data {
             if let Some(&target_val) = row.first() {
                 let class_idx = target_val as usize;
-                if class_idx < num_classes {
+                if class_idx < actual_num_classes {
                     class_counts[class_idx] += 1;
                     total_samples += 1;
                 }
@@ -811,7 +825,7 @@ impl LSTMModel {
 
         for &count in &class_counts {
             if count > 0 {
-                let weight = total_samples as f32 / (num_classes as f32 * count as f32);
+                let weight = total_samples as f32 / (actual_num_classes as f32 * count as f32);
                 weights.push(weight);
                 max_weight = max_weight.max(weight);
             } else {
@@ -824,13 +838,14 @@ impl LSTMModel {
         let weight_sum: f32 = weights.iter().sum();
         if weight_sum > 0.0 {
             for weight in &mut weights {
-                *weight = (*weight / weight_sum) * num_classes as f32;
+                *weight = (*weight / weight_sum) * actual_num_classes as f32;
                 *weight = weight.clamp(0.1, 10.0); // Clamp to reasonable range
             }
         }
 
         log::debug!(
-            "📊 Class weights calculated: {:?} (from counts: {:?})",
+            "📊 Class weights calculated for {}-class system: {:?} (from counts: {:?})",
+            actual_num_classes,
             weights,
             class_counts
         );
@@ -1728,7 +1743,7 @@ impl LSTMModel {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
                     // CrossEntropy for categorical price levels
-                    let num_classes = 6; // PriceLevel always uses 6 bins
+                    let num_classes = crate::config::model::NUM_CLASSES; // Use unified 5-class system
                     self.calculate_crossentropy_loss(
                         predictions,
                         targets,
@@ -1750,22 +1765,23 @@ impl LSTMModel {
                 }
             }
             TargetType::Direction => {
-                // Direction targets are ALWAYS 3-class classification (Down=0, Sideways=1, Up=2)
+                // Direction targets use 5-class classification (Dump=0, Down=1, Sideways=2, Up=3, Pump=4)
                 // Use CrossEntropy loss with proper error handling - NO FALLBACKS
                 log::debug!(
-                    "🎯 Direction target: Using CrossEntropy loss for 3-class classification"
+                    "🎯 Direction target: Using CrossEntropy loss for 5-class classification"
                 );
 
-                // Validate model output matches Direction classes (3)
-                if predictions.dims().last() != Some(&3) {
+                // Validate model output matches Direction classes (5)
+                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
                     return Err(VangaError::ModelError(format!(
-                        "Direction target requires model output_size=3, got {}. Please update model configuration.",
+                        "Direction target requires model output_size={}, got {}. Please update model configuration.",
+                        crate::config::model::NUM_CLASSES,
                         predictions.dims().last().unwrap_or(&0)
                     )));
                 }
 
                 // Use proper 3-class CrossEntropy loss
-                let num_classes = 3; // Direction always uses 3 classes
+                let num_classes = crate::config::model::NUM_CLASSES; // Use unified 5-class system
                 self.calculate_crossentropy_loss(
                     predictions,
                     targets,
@@ -1775,22 +1791,23 @@ impl LSTMModel {
                 )
             }
             TargetType::Volatility => {
-                // Volatility targets are ALWAYS 3-class classification (Low=0, Medium=1, High=2)
+                // Volatility targets use 5-class classification (VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)
                 // Use CrossEntropy loss with proper error handling - NO FALLBACKS
                 log::debug!(
-                    "🎯 Volatility target: Using CrossEntropy loss for 3-class classification"
+                    "🎯 Volatility target: Using CrossEntropy loss for 5-class classification"
                 );
 
-                // Validate model output matches Volatility classes (3)
-                if predictions.dims().last() != Some(&3) {
+                // Validate model output matches Volatility classes (5)
+                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
                     return Err(VangaError::ModelError(format!(
-                        "Volatility target requires model output_size=3, got {}. Please update model configuration.",
+                        "Volatility target requires model output_size={}, got {}. Please update model configuration.",
+                        crate::config::model::NUM_CLASSES,
                         predictions.dims().last().unwrap_or(&0)
                     )));
                 }
 
-                // Use proper 3-class CrossEntropy loss
-                let num_classes = 3; // Volatility always uses 3 classes
+                // Use proper 5-class CrossEntropy loss
+                let num_classes = crate::config::model::NUM_CLASSES; // Use unified 5-class system
                 self.calculate_crossentropy_loss(
                     predictions,
                     targets,

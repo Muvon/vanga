@@ -103,7 +103,7 @@ impl Backtester {
         // Step 6: Generate actual targets for test data to calculate metrics
         log::info!("🎯 Generating targets for test data");
         let target_generator = TargetGenerator::with_defaults();
-        let actual_targets = match target_generator.generate_all_targets(&test_df).await {
+        let actual_targets = match target_generator.generate_all_targets(&test_df, None).await {
             Ok(targets) => targets,
             Err(e) => {
                 log::error!("Failed to generate targets for test data: {}", e);

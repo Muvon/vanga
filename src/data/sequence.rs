@@ -577,7 +577,7 @@ impl SequenceGenerator {
         // Generate targets using the original target generation logic
         // Note: Targets are generated from the original raw data, not normalized data
         let target_generator = crate::targets::TargetGenerator::with_defaults();
-        let targets = target_generator.generate_all_targets(df).await?;
+        let targets = target_generator.generate_all_targets(df, None).await?;
 
         Ok((sequences, targets))
     }

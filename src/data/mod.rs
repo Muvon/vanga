@@ -115,15 +115,15 @@ impl DataPipeline {
         let num_classes = match target_type {
             TargetType::PriceLevel => {
                 if config.model.output_heads.price_levels.enabled {
-                    6 // Fixed: sequence-aware classification always uses 6 bins
+                    crate::config::model::NUM_CLASSES // Use unified 5-class system
                 } else {
                     // Fallback: calculate from data but this should not happen
                     let max_class = targets.iter().max().unwrap_or(&0);
                     (*max_class + 1) as usize
                 }
             }
-            TargetType::Direction => 3,  // Down=0, Sideways=1, Up=2
-            TargetType::Volatility => 3, // Low=0, Medium=1, High=2
+            TargetType::Direction => crate::config::model::NUM_CLASSES, // Dump/Down/Sideways/Up/Pump
+            TargetType::Volatility => crate::config::model::NUM_CLASSES, // VeryLow/Low/Medium/High/VeryHigh
         };
 
         // Count class frequencies
@@ -163,16 +163,17 @@ impl DataPipeline {
             return Ok(None);
         }
 
-        // Calculate balanced class weights using sklearn's "balanced" strategy
-        // weight[i] = total_samples / (num_classes * class_count[i])
-        let mut weights = vec![1.0f32; num_classes];
+        // Use advanced class weighting (same as price levels) for all target types
+        use crate::targets::imbalance_mitigation::{
+            AdvancedClassWeighter, ClassDistributionAnalysis, ImbalanceMitigationConfig,
+        };
 
-        for (class_id, weight) in weights.iter_mut().enumerate().take(num_classes) {
-            let class_count = class_counts.get(&(class_id as i32)).unwrap_or(&1);
-            if *class_count > 0 {
-                *weight = total_samples as f32 / (num_classes as f32 * *class_count as f32);
-            }
-        }
+        let mitigation_config = ImbalanceMitigationConfig::default();
+        let analysis = ClassDistributionAnalysis::analyze(targets, num_classes, &mitigation_config);
+        let weights = AdvancedClassWeighter::calculate_weights(
+            &analysis,
+            &mitigation_config.weighting_strategy,
+        )?;
 
         log::debug!(
             "🎯 Window class weights for {:?} horizon {}: {:?} (from {} samples, {} classes configured)",

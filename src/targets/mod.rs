@@ -223,8 +223,12 @@ impl TargetGenerator {
         self.config.horizons.len() * 3
     }
 
-    /// Generate all targets for the given DataFrame
-    pub async fn generate_all_targets(&self, df: &DataFrame) -> Result<PreparedTargets> {
+    /// Generate all targets for the given DataFrame (ENHANCED: supports model config)
+    pub async fn generate_all_targets(
+        &self,
+        df: &DataFrame,
+        model_config: Option<&crate::config::model::ModelConfig>,
+    ) -> Result<PreparedTargets> {
         let data_length = df.height();
         let mut prepared_targets = PreparedTargets::new(data_length);
 
@@ -233,33 +237,61 @@ impl TargetGenerator {
             self.config.horizons.len()
         );
 
-        // PARALLELIZED: Generate all target types concurrently using rayon::join
+        // PARALLELIZED: Generate all target types concurrently
         let (price_targets, (direction_targets, volatility_targets)) = rayon::join(
             || {
                 log::debug!("Generating price level targets in parallel");
-                generate_price_level_targets(
-                    df,
-                    &self.config.horizons,
-                    &self.config.price_level_config,
-                )
+                if let Some(model_cfg) = model_config {
+                    generate_price_level_targets_from_model_config(
+                        df,
+                        &self.config.horizons,
+                        model_cfg,
+                    )
+                } else {
+                    generate_price_level_targets(
+                        df,
+                        &self.config.horizons,
+                        &self.config.price_level_config,
+                    )
+                }
             },
             || {
                 rayon::join(
                     || {
                         log::debug!("Generating direction targets in parallel");
-                        generate_direction_targets(
-                            df,
-                            &self.config.horizons,
-                            &self.config.direction_config,
-                        )
+                        if let Some(model_cfg) = model_config {
+                            generate_direction_targets(
+                                df,
+                                &self.config.horizons,
+                                None,
+                                Some(&model_cfg.output_heads.direction),
+                            )
+                        } else {
+                            generate_direction_targets(
+                                df,
+                                &self.config.horizons,
+                                Some(&self.config.direction_config),
+                                None,
+                            )
+                        }
                     },
                     || {
                         log::debug!("Generating volatility targets in parallel");
-                        generate_volatility_targets(
-                            df,
-                            &self.config.horizons,
-                            &self.config.volatility_config,
-                        )
+                        if let Some(model_cfg) = model_config {
+                            generate_volatility_targets(
+                                df,
+                                &self.config.horizons,
+                                None,
+                                Some(&model_cfg.output_heads.volatility),
+                            )
+                        } else {
+                            generate_volatility_targets(
+                                df,
+                                &self.config.horizons,
+                                Some(&self.config.volatility_config),
+                                None,
+                            )
+                        }
                     },
                 )
             },
@@ -459,7 +491,8 @@ impl TargetGenerator {
         let targets = crate::targets::direction::generate_direction_targets(
             &df,
             &self.config.horizons,
-            &config,
+            Some(&config),
+            None,
         )?;
 
         // Convert HashMap<String, Vec<i32>> to Vec<f64> for backward compatibility
@@ -503,10 +536,14 @@ impl TargetGenerator {
                 })?;
 
         // Use the working implementation with default config
-        let config = crate::targets::volatility::VolatilityConfig::default();
+        let config = crate::targets::VolatilityConfig::default();
 
-        let targets =
-            crate::targets::volatility::generate_volatility_targets(&df, horizons, &config)?;
+        let targets = crate::targets::volatility::generate_volatility_targets(
+            &df,
+            horizons,
+            Some(&config),
+            None,
+        )?;
 
         // Convert HashMap<String, Vec<i32>> to Vec<Vec<f64>> for backward compatibility
         let mut result = Vec::new();

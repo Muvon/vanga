@@ -5,6 +5,7 @@
 //! - 1: Sideways (minimal change)
 //! - 2: Up (significant increase)
 
+use crate::config::model::DirectionHead;
 use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -18,6 +19,8 @@ pub struct DirectionConfig {
     pub use_adaptive_thresholds: bool,
     pub volatility_window: usize,
     pub min_confidence: f64,
+    /// Multiplier for extreme thresholds (pump/dump detection)
+    pub extreme_multiplier: f64,
 }
 
 impl Default for DirectionConfig {
@@ -29,16 +32,29 @@ impl Default for DirectionConfig {
             use_adaptive_thresholds: true,
             volatility_window: 100,
             min_confidence: 0.6,
+            extreme_multiplier: 2.5, // 5% for pump/dump vs 2% for up/down
         }
     }
 }
 
-/// Direction classes
+impl DirectionConfig {
+    /// Create configuration with custom extreme multiplier
+    pub fn with_extreme_multiplier(multiplier: f64) -> Self {
+        Self {
+            extreme_multiplier: multiplier,
+            ..Default::default()
+        }
+    }
+}
+
+/// Direction classes (5-class system)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Direction {
-    Down = 0,
-    Sideways = 1,
-    Up = 2,
+    Dump = 0,     // Extreme down (< extreme_down_threshold)
+    Down = 1,     // Moderate down (extreme_down ≤ x < down_threshold)
+    Sideways = 2, // Minimal change (down_threshold ≤ x < up_threshold)
+    Up = 3,       // Moderate up (up_threshold ≤ x < extreme_up_threshold)
+    Pump = 4,     // Extreme up (≥ extreme_up_threshold)
 }
 
 /// Generate direction targets with volatility-adaptive thresholds
@@ -65,7 +81,7 @@ pub fn generate_direction_targets_with_adaptive_thresholds(
     let thresholds = calculate_volatility_adaptive_thresholds_from_training(train_prices, config)?;
 
     // Apply same thresholds to entire dataset
-    let targets = apply_direction_thresholds(prices, horizon_steps, &thresholds)?;
+    let targets = apply_direction_thresholds(prices, horizon_steps, &thresholds, config)?;
 
     Ok((targets, thresholds))
 }
@@ -126,26 +142,35 @@ fn calculate_volatility_adaptive_thresholds_from_training(
     }
 }
 
-/// Apply direction thresholds to generate targets
+/// Apply direction thresholds to generate targets (5-class system)
 fn apply_direction_thresholds(
     prices: &[f64],
     horizon_steps: usize,
     thresholds: &(f64, f64),
+    config: &DirectionConfig,
 ) -> Result<Vec<i32>> {
     let (down_threshold, up_threshold) = *thresholds;
     let mut targets = vec![-1; prices.len()];
+
+    // Calculate extreme thresholds
+    let extreme_down = down_threshold * config.extreme_multiplier;
+    let extreme_up = up_threshold * config.extreme_multiplier;
 
     for i in 0..(prices.len().saturating_sub(horizon_steps)) {
         let current_price = prices[i];
         let future_price = prices[i + horizon_steps];
         let price_change = (future_price - current_price) / current_price;
 
-        targets[i] = if price_change <= down_threshold {
-            0 // Down
-        } else if price_change >= up_threshold {
-            2 // Up
+        targets[i] = if price_change <= extreme_down {
+            0 // Dump
+        } else if price_change <= down_threshold {
+            1 // Down
+        } else if price_change < up_threshold {
+            2 // Sideways
+        } else if price_change < extreme_up {
+            3 // Up
         } else {
-            1 // Sideways
+            4 // Pump
         };
     }
 
@@ -174,19 +199,103 @@ fn calculate_volatility(prices: &[f64], window: usize) -> f64 {
     variance.sqrt()
 }
 
-/// Generate direction targets for multiple horizons
+/// Generate direction targets for multiple horizons (ENHANCED: supports both configs)
 pub fn generate_direction_targets(
     df: &DataFrame,
     horizons: &[String],
-    config: &DirectionConfig,
+    config: Option<&DirectionConfig>,
+    model_config: Option<&DirectionHead>,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
-        let direction_targets = calculate_direction_targets(&close_prices, horizon_steps, config)?;
+
+        let direction_targets = if let Some(model_cfg) = model_config {
+            // Use model config (NEW: eliminates hardcoded values)
+            let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
+            let market_volatility = calculate_market_volatility(&close_prices)?;
+            let base_threshold = market_volatility * model_cfg.base_threshold_factor;
+            let adaptive_threshold = base_threshold / bandwidth_size;
+
+            let thresholds = [
+                -adaptive_threshold * model_cfg.extreme_multiplier, // Dump
+                -adaptive_threshold,                                // Down
+                adaptive_threshold,                                 // Up
+                adaptive_threshold * model_cfg.extreme_multiplier,  // Pump
+            ];
+
+            apply_direction_classification(&close_prices, horizon_steps, &thresholds)?
+        } else if let Some(legacy_cfg) = config {
+            // Legacy path for backward compatibility
+            calculate_direction_targets(&close_prices, horizon_steps, legacy_cfg)?
+        } else {
+            return Err(crate::utils::error::VangaError::config(
+                "Either DirectionConfig or DirectionHead must be provided",
+            ));
+        };
+
         targets.insert(horizon.clone(), direction_targets);
+    }
+
+    Ok(targets)
+}
+
+/// Calculate market volatility for adaptive threshold scaling
+fn calculate_market_volatility(prices: &[f64]) -> Result<f64> {
+    if prices.len() < 2 {
+        return Ok(0.01); // Default minimum volatility
+    }
+
+    let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
+
+    if returns.is_empty() {
+        return Ok(0.01);
+    }
+
+    let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|r| (r - mean_return).powi(2))
+        .sum::<f64>()
+        / returns.len() as f64;
+
+    Ok(variance.sqrt().max(0.01)) // Ensure minimum volatility
+}
+
+/// Apply direction classification using threshold array
+fn apply_direction_classification(
+    prices: &[f64],
+    horizon_steps: usize,
+    thresholds: &[f64; 4], // [dump, down, up, pump]
+) -> Result<Vec<i32>> {
+    if prices.len() < horizon_steps + 1 {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Insufficient data for direction classification".to_string(),
+        ));
+    }
+
+    let mut targets = vec![-1; prices.len()];
+
+    for i in 0..(prices.len() - horizon_steps) {
+        let current_price = prices[i];
+        let future_price = prices[i + horizon_steps];
+        let price_change = (future_price - current_price) / current_price;
+
+        let direction = if price_change <= thresholds[0] {
+            Direction::Dump as i32
+        } else if price_change <= thresholds[1] {
+            Direction::Down as i32
+        } else if price_change < thresholds[2] {
+            Direction::Sideways as i32
+        } else if price_change < thresholds[3] {
+            Direction::Up as i32
+        } else {
+            Direction::Pump as i32
+        };
+
+        targets[i] = direction;
     }
 
     Ok(targets)
@@ -220,16 +329,23 @@ fn calculate_direction_targets(
 
         let (down_threshold, up_threshold) = thresholds[i];
 
-        // Classify direction based on thresholds
-        let direction = if price_change <= down_threshold {
-            Direction::Down
-        } else if price_change >= up_threshold {
-            Direction::Up
+        // Classify direction based on thresholds (5-class system)
+        let extreme_down = down_threshold * config.extreme_multiplier;
+        let extreme_up = up_threshold * config.extreme_multiplier;
+
+        let direction = if price_change <= extreme_down {
+            Direction::Dump as i32
+        } else if price_change <= down_threshold {
+            Direction::Down as i32
+        } else if price_change < up_threshold {
+            Direction::Sideways as i32
+        } else if price_change < extreme_up {
+            Direction::Up as i32
         } else {
-            Direction::Sideways
+            Direction::Pump as i32
         };
 
-        targets[i] = direction as i32;
+        targets[i] = direction;
     }
 
     Ok(targets)

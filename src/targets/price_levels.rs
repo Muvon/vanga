@@ -67,9 +67,8 @@ pub fn generate_price_level_targets(
             None, // No sequence length override - use default behavior
         )?;
 
-        // Analyze and log class distribution
-        // Analyze and log class distribution (always 6 bins for sequence-aware classification)
-        analyze_class_distribution(&price_targets, horizon, 6)?;
+        // Analyze and log class distribution (5 classes)
+        analyze_class_distribution(&price_targets, horizon, 5)?;
 
         targets.insert(horizon.clone(), price_targets);
     }
@@ -105,25 +104,22 @@ fn calculate_min_data_points(_config: &PriceLevelConfig) -> usize {
     max_feature_window + stability_buffer
 }
 
-/// Classify price level using sequence-aware 6-bin classification
+/// Classify price level using sequence-aware 5-class classification
 ///
-/// This method uses the input sequence to define adaptive boundaries:
-/// - Extracts min, max, and current price from the sequence
-/// - Calculates bandwidth = max - min
-/// - Creates 6 bins relative to sequence context:
-///   - 0: Strong Breakout Down (< min - bandwidth)
-///   - 1: Moderate Down (min - bandwidth ≤ x < min)
-///   - 2: Within Range Low (min ≤ x < current)
-///   - 3: Within Range High (current ≤ x < max)
-///   - 4: Moderate Up (max ≤ x < max + bandwidth)
-///   - 5: Strong Breakout Up (≥ max + bandwidth)
+/// **5-Class System:**
+/// - 0: Strong Breakout Down (< min - bandwidth)
+/// - 1: Moderate Down (min - bandwidth ≤ x < min)
+/// - 2: Neutral (min ≤ x < max) - Merged from previous Range Low + Range High
+/// - 3: Moderate Up (max ≤ x < max + bandwidth)
+/// - 4: Strong Breakout Up (≥ max + bandwidth)
 ///
 /// # Arguments
 /// * `target_price` - The future price to classify
 /// * `sequence_prices` - The input sequence prices (min length: 2)
+/// * `config` - Configuration for bandwidth sensitivity
 ///
 /// # Returns
-/// * `i32` - Classification bin [0-5]
+/// * `i32` - Classification bin [0-4]
 fn classify_price_level_sequence_aware(
     target_price: f64,
     sequence_prices: &[f64],
@@ -137,32 +133,26 @@ fn classify_price_level_sequence_aware(
     let sequence_max = sequence_prices
         .iter()
         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let current_price = sequence_prices[sequence_prices.len() - 1];
     let base_bandwidth = sequence_max - sequence_min;
     let bandwidth = base_bandwidth * config.bandwidth_size;
 
     // Handle edge case: flat sequence (bandwidth = 0)
     if bandwidth == 0.0 {
-        return if target_price >= current_price { 3 } else { 2 };
+        return if target_price >= sequence_min { 3 } else { 2 };
     }
 
-    // 6-bin classification
+    // 5-class classification
     if target_price < sequence_min - bandwidth {
-        return 0; // Strong Breakout Down
+        0 // Strong Breakout Down
+    } else if target_price < sequence_min {
+        1 // Moderate Down
+    } else if target_price < sequence_max {
+        2 // Neutral (merged Range Low + Range High)
+    } else if target_price < sequence_max + bandwidth {
+        3 // Moderate Up
+    } else {
+        4 // Strong Breakout Up
     }
-    if target_price < sequence_min {
-        return 1; // Moderate Down
-    }
-    if target_price < current_price {
-        return 2; // Within Range Low
-    }
-    if target_price < sequence_max {
-        return 3; // Within Range High
-    }
-    if target_price < sequence_max + bandwidth {
-        return 4; // Moderate Up
-    }
-    5 // Strong Breakout Up
 }
 
 /// Calculate price level targets for a specific horizon with consistent global quantiles
@@ -411,37 +401,33 @@ mod tests {
     }
 
     #[test]
-    fn test_sequence_aware_classification() {
+    fn test_sequence_aware_classification_5_classes() {
         // Test case: sequence [10, 15, 12, 18, 14]
-        // min=10, max=18, current=14, base_bandwidth=8, bandwidth=8*1.0=8
+        // min=10, max=18, base_bandwidth=8, bandwidth=8*1.0=8
         let sequence = vec![10.0, 15.0, 12.0, 18.0, 14.0];
         let config = create_test_config();
 
-        // Test each bin
+        // Test each of the 5 classes
         assert_eq!(
             classify_price_level_sequence_aware(1.0, &sequence, &config),
             0
-        ); // < 10-8 = 2
+        ); // < 10-8 = 2 (Strong Breakout Down)
         assert_eq!(
             classify_price_level_sequence_aware(5.0, &sequence, &config),
             1
-        ); // 2 ≤ x < 10
+        ); // 2 ≤ x < 10 (Moderate Down)
         assert_eq!(
-            classify_price_level_sequence_aware(12.0, &sequence, &config),
+            classify_price_level_sequence_aware(14.0, &sequence, &config),
             2
-        ); // 10 ≤ x < 14
-        assert_eq!(
-            classify_price_level_sequence_aware(16.0, &sequence, &config),
-            3
-        ); // 14 ≤ x < 18
+        ); // 10 ≤ x < 18 (Neutral - merged range)
         assert_eq!(
             classify_price_level_sequence_aware(20.0, &sequence, &config),
-            4
-        ); // 18 ≤ x < 26
+            3
+        ); // 18 ≤ x < 26 (Moderate Up)
         assert_eq!(
             classify_price_level_sequence_aware(30.0, &sequence, &config),
-            5
-        ); // ≥ 26
+            4
+        ); // ≥ 26 (Strong Breakout Up)
     }
 
     #[test]
@@ -481,14 +467,14 @@ mod tests {
             bandwidth_size: 0.5,
         };
         // bandwidth = 8 * 0.5 = 4
-        // Breakout thresholds: < 6.0 (bin 0), ≥ 22.0 (bin 5)
+        // Breakout thresholds: < 6.0 (bin 0), ≥ 22.0 (bin 4)
         assert_eq!(
             classify_price_level_sequence_aware(5.0, &sequence, &sensitive_config),
             0
         ); // < 10-4 = 6
         assert_eq!(
             classify_price_level_sequence_aware(23.0, &sequence, &sensitive_config),
-            5
+            4
         ); // ≥ 18+4 = 22
 
         // Test with conservative configuration (bandwidth_size = 1.5)
@@ -496,21 +482,21 @@ mod tests {
             bandwidth_size: 1.5,
         };
         // bandwidth = 8 * 1.5 = 12
-        // Breakout thresholds: < -2.0 (bin 0), ≥ 30.0 (bin 5)
+        // Breakout thresholds: < -2.0 (bin 0), ≥ 30.0 (bin 4)
         assert_eq!(
             classify_price_level_sequence_aware(-3.0, &sequence, &conservative_config),
             0
         ); // < 10-12 = -2
         assert_eq!(
             classify_price_level_sequence_aware(31.0, &sequence, &conservative_config),
-            5
+            4
         ); // ≥ 18+12 = 30
 
         // Same price should be classified differently with different bandwidth_size
         let test_price = 25.0;
         assert_eq!(
             classify_price_level_sequence_aware(test_price, &sequence, &sensitive_config),
-            5
+            4
         ); // Strong breakout (25 ≥ 22)
         assert_eq!(
             classify_price_level_sequence_aware(test_price, &sequence, &conservative_config),
@@ -532,9 +518,9 @@ mod tests {
         let valid_targets: Vec<_> = result.iter().filter(|&&x| x != -1).collect();
         assert!(!valid_targets.is_empty());
 
-        // All valid targets should be in range [0, 5]
+        // All valid targets should be in range [0, 4] for 5-class system
         for &target in &valid_targets {
-            assert!((0..=5).contains(target));
+            assert!((0..=4).contains(target));
         }
     }
 
@@ -553,11 +539,11 @@ mod tests {
 
         let targets = generate_price_level_targets(&df, &horizons, &config).unwrap();
 
-        // Verify targets are in valid range [0, 5]
+        // Verify targets are in valid range [0, 4] for 5-class system
         for target_vec in targets.values() {
             for &target in target_vec {
                 if target != -1 {
-                    assert!((0..=5).contains(&target));
+                    assert!((0..=4).contains(&target));
                 }
             }
         }

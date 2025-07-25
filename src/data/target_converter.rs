@@ -3,7 +3,7 @@
 //! This module handles the conversion from PreparedTargets (HashMap<String, Vec<i32>>)
 //! to the Array2<f64> format expected by the LSTM model for training.
 
-use crate::config::model::OutputHeadsConfig;
+use crate::config::model::{OutputHeadsConfig, NUM_CLASSES};
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
@@ -27,17 +27,11 @@ impl TargetConverter {
     }
 
     /// Convert prepared targets to training array format
-    ///
-    /// # Arguments
-    /// * `targets` - Prepared targets from target generation
-    /// * `valid_indices` - Indices of valid samples for training
-    ///
-    /// # Returns
-    /// Array2<f64> with shape [samples, total_output_size] for LSTM training
     pub fn convert_to_training_array(
         &self,
         targets: &PreparedTargets,
         valid_indices: &[usize],
+        horizon: &str,
     ) -> Result<Array2<f64>> {
         let num_samples = valid_indices.len();
 
@@ -58,13 +52,13 @@ impl TargetConverter {
             if self.output_heads.price_levels.enabled {
                 let price_target = self.extract_target_value(
                     &targets.price_levels,
-                    "1h", // Use default horizon for price levels
+                    horizon,
                     data_idx,
                     "price_levels",
                 )?;
 
-                // Convert to one-hot encoding (sequence-aware classification always uses 6 bins)
-                let num_bins = 6; // Fixed for sequence-aware price level classification
+                // Convert to one-hot encoding (sequence-aware classification uses NUM_CLASSES)
+                let num_bins = NUM_CLASSES;
                 if price_target < num_bins {
                     training_array[[sample_idx, output_idx + price_target]] = 1.0;
                 }
@@ -75,34 +69,30 @@ impl TargetConverter {
             if self.output_heads.direction.enabled {
                 let direction_target = self.extract_target_value(
                     &targets.directions,
-                    "1h", // Use default horizon for directions
+                    horizon,
                     data_idx,
                     "directions",
                 )?;
 
-                // Convert to one-hot encoding (0=DOWN, 1=SIDEWAYS, 2=UP)
-                if direction_target < 3 {
+                // Convert to one-hot encoding (5-class system)
+                if direction_target < NUM_CLASSES {
                     training_array[[sample_idx, output_idx + direction_target]] = 1.0;
                 }
-                output_idx += 3;
+                output_idx += NUM_CLASSES;
             }
 
-            // 3. Volatility Head (Regression - Direct values)
+            // 3. Volatility Head (Classification - One-hot encoding)
             if self.output_heads.volatility.enabled {
-                for horizon in &self.output_heads.volatility.horizons {
-                    let volatility_target = self.extract_target_value(
-                        &targets.volatility,
-                        horizon,
-                        data_idx,
-                        "volatility",
-                    )?;
+                let volatility_target = self.extract_target_value(
+                    &targets.volatility, // CORRECTED: Was using targets.directions
+                    horizon,
+                    data_idx,
+                    "volatility",
+                )?;
 
-                    // Convert to normalized volatility value (0-1 range)
-                    // Assuming volatility classes 0-4 map to 0.0-1.0
-                    let normalized_volatility = volatility_target as f64 / 4.0;
-                    training_array[[sample_idx, output_idx]] =
-                        normalized_volatility.clamp(0.0, 1.0);
-                    output_idx += 1;
+                // Convert to one-hot encoding (5-class system)
+                if volatility_target < NUM_CLASSES {
+                    training_array[[sample_idx, output_idx + volatility_target]] = 1.0;
                 }
             }
         }
@@ -152,31 +142,29 @@ impl TargetConverter {
     }
 
     /// Validate that prepared targets are compatible with output configuration
-    pub fn validate_targets(&self, targets: &PreparedTargets) -> Result<()> {
+    pub fn validate_targets(&self, targets: &PreparedTargets, horizon: &str) -> Result<()> {
         // Check price levels if enabled
-        if self.output_heads.price_levels.enabled && !targets.price_levels.contains_key("1h") {
-            return Err(VangaError::ConfigError(
-                "Missing price level targets for default horizon: 1h".to_string(),
-            ));
+        if self.output_heads.price_levels.enabled && !targets.price_levels.contains_key(horizon) {
+            return Err(VangaError::ConfigError(format!(
+                "Missing price level targets for horizon: {}",
+                horizon
+            )));
         }
 
         // Check directions if enabled
-        if self.output_heads.direction.enabled && !targets.directions.contains_key("1h") {
-            return Err(VangaError::ConfigError(
-                "Missing direction targets for default horizon: 1h".to_string(),
-            ));
+        if self.output_heads.direction.enabled && !targets.directions.contains_key(horizon) {
+            return Err(VangaError::ConfigError(format!(
+                "Missing direction targets for horizon: {}",
+                horizon
+            )));
         }
 
         // Check volatility if enabled
-        if self.output_heads.volatility.enabled {
-            for horizon in &self.output_heads.volatility.horizons {
-                if !targets.volatility.contains_key(horizon) {
-                    return Err(VangaError::ConfigError(format!(
-                        "Missing volatility targets for horizon: {}",
-                        horizon
-                    )));
-                }
-            }
+        if self.output_heads.volatility.enabled && !targets.volatility.contains_key(horizon) {
+            return Err(VangaError::ConfigError(format!(
+                "Missing volatility targets for horizon: {}", // CORRECTED: Was 'direction'
+                horizon
+            )));
         }
 
         log::debug!("Target validation passed for all enabled heads");
@@ -198,15 +186,14 @@ mod tests {
             },
             direction: DirectionHead {
                 enabled: true,
-                thresholds: (-0.01, 0.01),
-                confidence_calibration: false,
-                use_adaptive_thresholds: true,
+                bandwidth_size: Some(0.8),
+                base_threshold_factor: 0.5,
+                extreme_multiplier: 2.5,
             },
             volatility: VolatilityHead {
                 enabled: true,
-                method: crate::config::model::VolatilityPredictionMethod::Direct,
-                horizons: vec!["1h".to_string()],
-                thresholds: (0.33, 0.67),
+                bandwidth_size: Some(1.2),
+                base_percentiles: [0.20, 0.40, 0.60, 0.80],
             },
         }
     }
@@ -218,10 +205,10 @@ mod tests {
             .insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
         targets
             .directions
-            .insert("1h".to_string(), vec![0, 1, 2, 0, 1]);
+            .insert("1h".to_string(), vec![0, 1, 2, 3, 4]); // Use full 5-class range
         targets
             .volatility
-            .insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
+            .insert("1h".to_string(), vec![4, 3, 2, 1, 0]); // Use full 5-class range
         targets.valid_indices = vec![0, 1, 2, 3, 4];
         targets
     }
@@ -232,12 +219,12 @@ mod tests {
         let converter = TargetConverter::new(output_heads);
         let targets = create_test_targets();
 
-        let result = converter.convert_to_training_array(&targets, &targets.valid_indices);
+        let result = converter.convert_to_training_array(&targets, &targets.valid_indices, "1h");
         assert!(result.is_ok());
 
         let training_array = result.unwrap();
         assert_eq!(training_array.shape()[0], 5); // 5 samples
-        assert_eq!(training_array.shape()[1], 9); // 5 + 3 + 1 outputs
+        assert_eq!(training_array.shape()[1], 15); // 5 (price) + 5 (direction) + 5 (volatility)
     }
 
     #[test]
@@ -246,7 +233,7 @@ mod tests {
         let converter = TargetConverter::new(output_heads);
         let targets = create_test_targets();
 
-        let result = converter.validate_targets(&targets);
+        let result = converter.validate_targets(&targets, "1h");
         assert!(result.is_ok());
     }
 }

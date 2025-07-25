@@ -3,7 +3,9 @@
 //! This module bridges the gap between raw LSTM Array2<f64> outputs and the structured
 //! JSON format specified in ARCHITECTURE.md, reusing existing target generation logic.
 
+use crate::config::model::{OutputHeadsConfig, NUM_CLASSES};
 use crate::config::prediction::{OutputConfig, OutputFormat};
+use crate::output::multi_target_parser::{DirectionOutput, MultiTargetParser, VolatilityOutput};
 use crate::output::structures::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
 };
@@ -15,12 +17,62 @@ use std::collections::HashMap;
 /// Output formatter that converts raw LSTM predictions to structured formats
 pub struct OutputFormatter {
     config: OutputConfig,
+    parser: Option<MultiTargetParser>,
+    sequence_data: Option<Vec<f64>>,
+    bandwidth_size: Option<f64>,
 }
 
 impl OutputFormatter {
     /// Create new formatter with configuration
     pub fn new(config: OutputConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            parser: None,
+            sequence_data: None,
+            bandwidth_size: None,
+        }
+    }
+
+    /// Set output heads configuration for proper 5-class parsing
+    pub fn with_output_heads(mut self, output_heads: OutputHeadsConfig) -> Self {
+        // Extract bandwidth_size from price levels config
+        self.bandwidth_size = output_heads.price_levels.bandwidth_size;
+        self.parser = Some(MultiTargetParser::new(output_heads));
+        self
+    }
+
+    /// Set sequence data for sequence-aware price level calculations
+    pub fn with_sequence_data(mut self, sequence_data: Vec<f64>) -> Self {
+        self.sequence_data = Some(sequence_data);
+        self
+    }
+
+    /// Check if multi-target parser is available
+    pub fn has_parser(&self) -> bool {
+        self.parser.is_some()
+    }
+
+    /// Get sequence data reference
+    pub fn get_sequence_data(&self) -> Option<&[f64]> {
+        self.sequence_data.as_deref()
+    }
+
+    /// Get bandwidth size
+    pub fn get_bandwidth_size(&self) -> Option<f64> {
+        self.bandwidth_size
+    }
+
+    /// Parse raw predictions using the internal MultiTargetParser
+    pub fn parse_raw_predictions(
+        &self,
+        raw_output: ndarray::ArrayView1<f64>,
+    ) -> Result<crate::output::multi_target_parser::ParsedOutput> {
+        let parser = self.parser.as_ref().ok_or_else(|| {
+            VangaError::PredictionError(
+                "MultiTargetParser not configured. Use with_output_heads() to set up 5-class parsing.".to_string()
+            )
+        })?;
+        parser.parse_output(raw_output)
     }
 
     /// Format raw LSTM predictions into structured output
@@ -88,7 +140,14 @@ impl OutputFormatter {
             0.7 // Default confidence when no target statistics available
         };
 
-        // For now, create one prediction result per batch
+        // Check if we have the multi-target parser configured
+        let parser = self.parser.as_ref().ok_or_else(|| {
+            VangaError::PredictionError(
+                "MultiTargetParser not configured. Use with_output_heads() to set up 5-class parsing.".to_string()
+            )
+        })?;
+
+        // For each batch in the predictions
         for batch_idx in 0..raw_predictions.nrows() {
             // Get actual feature count and sequence length from the prediction data
             let feature_count = raw_predictions.ncols();
@@ -105,29 +164,27 @@ impl OutputFormatter {
             // Extract predictions for this batch
             let batch_predictions = raw_predictions.row(batch_idx);
 
-            // Convert raw outputs to structured predictions
-            // Note: This is a simplified implementation - in production you'd need
-            // to know which outputs correspond to which prediction heads
+            // Parse the raw predictions using the multi-target parser
+            let parsed_output = parser.parse_output(batch_predictions)?;
 
-            if !batch_predictions.is_empty() {
-                // Assume first output is price level probability
-                let price_level_prob = batch_predictions[0];
-                result = result.with_price_levels(
-                    self.create_price_level_prediction(price_level_prob, current_price)?,
-                );
+            // Convert parsed output to structured predictions
+            if let Some(price_level_probs) = parsed_output.price_levels {
+                result = result.with_price_levels(self.create_price_level_prediction(
+                    &price_level_probs,
+                    current_price,
+                    self.sequence_data.as_deref(),
+                    self.bandwidth_size,
+                )?);
             }
 
-            if batch_predictions.len() >= 2 {
-                // Assume second output is direction probability
-                let direction_prob = batch_predictions[1];
-                result = result.with_direction(self.create_direction_prediction(direction_prob)?);
-            }
-
-            if batch_predictions.len() >= 3 {
-                // Assume third output is volatility
-                let volatility_prob = batch_predictions[2];
+            if let Some(direction_output) = parsed_output.direction {
                 result =
-                    result.with_volatility(self.create_volatility_prediction(volatility_prob)?);
+                    result.with_direction(self.create_direction_prediction(&direction_output)?);
+            }
+
+            if let Some(volatility_output) = parsed_output.volatility {
+                result =
+                    result.with_volatility(self.create_volatility_prediction(&volatility_output)?);
             }
 
             // Apply the calculated confidence to the prediction result
@@ -139,82 +196,195 @@ impl OutputFormatter {
         Ok(results)
     }
 
-    /// Create price level prediction from raw output
-    /// Reuses the bin structure from ARCHITECTURE.md
+    /// Create price level prediction from 5-class probabilities using sequence-aware ranges
     pub fn create_price_level_prediction(
         &self,
-        raw_output: f64,
+        probabilities: &[f64],
         current_price: f64,
+        sequence_prices: Option<&[f64]>,
+        bandwidth_size: Option<f64>,
     ) -> Result<PriceLevelPrediction> {
-        // Convert single output to probability distribution across bins
-        // This is a simplified implementation - in production you'd have
-        // softmax outputs for each bin
+        if probabilities.len() != NUM_CLASSES {
+            return Err(VangaError::PredictionError(format!(
+                "Expected {} price level probabilities, got {}",
+                NUM_CLASSES,
+                probabilities.len()
+            )));
+        }
 
         let mut bins = HashMap::new();
 
-        // Simple distribution based on raw output
-        // In production, this would be proper softmax probabilities
-        let center_bin = ((raw_output + 1.0) / 2.0 * 7.0) as usize;
-        let center_bin = center_bin.min(6);
+        // Calculate sequence-aware ranges using the same logic as target generation
+        let (bin_ranges, bin_names) = if let Some(prices) = sequence_prices {
+            self.calculate_sequence_aware_ranges(
+                prices,
+                current_price,
+                bandwidth_size.unwrap_or(1.0),
+            )
+        } else {
+            // Fallback to reasonable default ranges if no sequence provided
+            (
+                vec![
+                    [-5.0, -2.0], // Strong Down
+                    [-2.0, -1.0], // Moderate Down
+                    [-1.0, 1.0],  // Neutral
+                    [1.0, 2.0],   // Moderate Up
+                    [2.0, 5.0],   // Strong Up
+                ],
+                vec![
+                    "strong_down",
+                    "moderate_down",
+                    "neutral",
+                    "moderate_up",
+                    "strong_up",
+                ],
+            )
+        };
 
-        // Create 7 bins with CRYPTO REALITY ranges and thematic naming
-        let bin_configs = vec![
-            ("rekt", [-100.0, -30.0]), // Total rekt territory (black swan events)
-            ("capitulation", [-30.0, -15.0]), // Capitulation dump (-30% to -15%)
-            ("dump", [-15.0, -3.0]),   // Dump (-15% to -3%)
-            ("sideways", [-3.0, 3.0]), // Sideways consolidation (-3% to +3%)
-            ("pump", [3.0, 15.0]),     // Pump (+3% to +15%)
-            ("parabolic", [15.0, 30.0]), // Parabolic pump (+15% to +30%)
-            ("moon", [30.0, 500.0]),   // Moon territory (+30%+)
-        ];
-
-        for (i, (bin_name, range_pct)) in bin_configs.iter().enumerate() {
-            // Calculate actual price range
-            let price_min = if range_pct[0] == -f64::INFINITY {
-                0.0 // Minimum possible price
-            } else {
-                current_price * (1.0 + range_pct[0] / 100.0)
-            };
-
-            let price_max = if range_pct[1] == f64::INFINITY {
-                current_price * 2.0 // Reasonable upper bound
-            } else {
-                current_price * (1.0 + range_pct[1] / 100.0)
-            };
-
-            let probability = if i == center_bin {
-                0.4 // High probability for predicted bin
-            } else if (i as i32 - center_bin as i32).abs() == 1 {
-                0.2 // Medium probability for adjacent bins
-            } else {
-                0.1 / (bin_configs.len() - 3) as f64 // Low probability for others
-            };
+        for (i, (bin_name, range_pct)) in bin_names.iter().zip(bin_ranges.iter()).enumerate() {
+            let price_min = current_price * (1.0 + range_pct[0] / 100.0);
+            let price_max = current_price * (1.0 + range_pct[1] / 100.0);
 
             bins.insert(
                 bin_name.to_string(),
                 PriceBin {
                     range: *range_pct,
                     price: [price_min, price_max],
-                    probability,
+                    probability: probabilities[i],
                 },
             );
         }
 
-        // Find most likely range using numeric format
-        let most_likely_range = bin_configs[center_bin].1;
-        let price_confidence = 0.8; // Base confidence for price level prediction
+        // Find most likely range based on highest probability
+        let (most_likely_idx, max_prob) = probabilities
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+
+        let most_likely_range = bin_ranges[most_likely_idx];
 
         Ok(PriceLevelPrediction {
             bins,
             most_likely_range,
-            confidence: price_confidence,
+            confidence: *max_prob,
         })
     }
 
-    /// Create direction prediction from raw output
-    pub fn create_direction_prediction(&self, raw_output: f64) -> Result<DirectionPrediction> {
-        // Convert raw output to probability (assuming sigmoid-like output)
-        let up_probability = (raw_output + 1.0) / 2.0; // Normalize -1,1 to 0,1
+    /// Calculate sequence-aware ranges using the same logic as target generation
+    fn calculate_sequence_aware_ranges(
+        &self,
+        sequence_prices: &[f64],
+        current_price: f64,
+        bandwidth_size: f64,
+    ) -> (Vec<[f64; 2]>, Vec<&'static str>) {
+        if sequence_prices.is_empty() {
+            return (
+                vec![
+                    [-5.0, -2.0],
+                    [-2.0, -1.0],
+                    [-1.0, 1.0],
+                    [1.0, 2.0],
+                    [2.0, 5.0],
+                ],
+                vec![
+                    "strong_down",
+                    "moderate_down",
+                    "neutral",
+                    "moderate_up",
+                    "strong_up",
+                ],
+            );
+        }
+
+        let sequence_min = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let sequence_max = sequence_prices
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let base_bandwidth = sequence_max - sequence_min;
+        let bandwidth = base_bandwidth * bandwidth_size;
+
+        // Handle edge case: flat sequence
+        if bandwidth == 0.0 {
+            return (
+                vec![
+                    [-1.0, -0.5],
+                    [-0.5, 0.0],
+                    [0.0, 0.0],
+                    [0.0, 0.5],
+                    [0.5, 1.0],
+                ],
+                vec![
+                    "strong_down",
+                    "moderate_down",
+                    "neutral",
+                    "moderate_up",
+                    "strong_up",
+                ],
+            );
+        }
+
+        // Calculate percentage ranges based on sequence analysis
+        let min_pct = ((sequence_min - current_price) / current_price) * 100.0;
+        let max_pct = ((sequence_max - current_price) / current_price) * 100.0;
+        let bandwidth_pct = (bandwidth / current_price) * 100.0;
+
+        let ranges = vec![
+            [min_pct - bandwidth_pct, min_pct], // Strong Breakout Down
+            [min_pct, min_pct + (max_pct - min_pct) * 0.3], // Moderate Down
+            [min_pct + (max_pct - min_pct) * 0.3, max_pct], // Neutral (merged range)
+            [max_pct, max_pct + bandwidth_pct * 0.5], // Moderate Up
+            [max_pct + bandwidth_pct * 0.5, max_pct + bandwidth_pct], // Strong Breakout Up
+        ];
+
+        let names = vec![
+            "strong_down",
+            "moderate_down",
+            "neutral",
+            "moderate_up",
+            "strong_up",
+        ];
+
+        (ranges, names)
+    }
+
+    /// Create direction prediction from DirectionOutput or single raw value
+    pub fn create_direction_prediction(
+        &self,
+        input: &DirectionOutput,
+    ) -> Result<DirectionPrediction> {
+        // Find the most likely direction from 5-class probabilities
+        let probabilities = [
+            ("DUMP", input.dump_probability),
+            ("DOWN", input.down_probability),
+            ("SIDEWAYS", input.sideways_probability),
+            ("UP", input.up_probability),
+            ("PUMP", input.pump_probability),
+        ];
+
+        let (prediction, max_probability) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        // Calculate up/down probabilities for compatibility with existing structures
+        let up_probability = input.up_probability + input.pump_probability;
+        let down_probability = input.down_probability + input.dump_probability;
+
+        Ok(DirectionPrediction {
+            prediction: prediction.to_string(),
+            up_probability,
+            down_probability,
+            confidence: *max_probability,
+        })
+    }
+
+    /// Legacy method for single raw value direction prediction
+    pub fn create_direction_prediction_legacy(
+        &self,
+        raw_output: f64,
+    ) -> Result<DirectionPrediction> {
+        let up_probability = (raw_output + 1.0) / 2.0;
         let down_probability = 1.0 - up_probability;
 
         let prediction = if up_probability > 0.6 {
@@ -225,7 +395,7 @@ impl OutputFormatter {
             "SIDEWAYS"
         };
 
-        let confidence = (up_probability - 0.5).abs() * 2.0; // Distance from neutral
+        let confidence = (up_probability - 0.5).abs() * 2.0;
 
         Ok(DirectionPrediction {
             up_probability,
@@ -235,25 +405,41 @@ impl OutputFormatter {
         })
     }
 
-    /// Create volatility prediction from raw output
-    pub fn create_volatility_prediction(&self, raw_output: f64) -> Result<VolatilityPrediction> {
-        // Convert raw output to volatility values
-        let base_vol = (raw_output.abs() * 0.1).max(0.001); // Scale to reasonable volatility
+    /// Create volatility prediction from single VolatilityOutput (5-class system)
+    pub fn create_volatility_prediction(
+        &self,
+        volatility_output: &VolatilityOutput,
+    ) -> Result<VolatilityPrediction> {
+        // Find the most likely regime
+        let probabilities = [
+            ("VERY_LOW", volatility_output.very_low_probability),
+            ("LOW", volatility_output.low_probability),
+            ("MEDIUM", volatility_output.medium_probability),
+            ("HIGH", volatility_output.high_probability),
+            ("VERY_HIGH", volatility_output.very_high_probability),
+        ];
 
-        let regime = if base_vol < 0.02 {
-            "LOW"
-        } else if base_vol < 0.05 {
-            "MEDIUM"
-        } else {
-            "HIGH"
+        let (regime, confidence) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        // Map regime to expected volatility values (same for all horizons since no horizon dependency)
+        let base_vol = match *regime {
+            "VERY_LOW" => 0.01,
+            "LOW" => 0.02,
+            "MEDIUM" => 0.05,
+            "HIGH" => 0.08,
+            "VERY_HIGH" => 0.12,
+            _ => 0.05,
         };
 
         Ok(VolatilityPrediction {
-            expected_1h: base_vol * 0.5,
+            expected_1h: base_vol,
             expected_4h: base_vol,
-            expected_24h: base_vol * 2.0,
+            expected_24h: base_vol,
             regime: regime.to_string(),
-            confidence: raw_output.abs().min(1.0),
+            confidence: *confidence,
         })
     }
 

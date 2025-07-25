@@ -3,7 +3,7 @@
 //! This module handles parsing raw LSTM outputs into structured prediction components
 //! based on the configured output heads (price levels, direction, volatility).
 
-use crate::config::model::{OutputHeadsConfig, OutputSegments};
+use crate::config::model::{OutputHeadsConfig, OutputSegments, NUM_CLASSES};
 use crate::utils::error::{Result, VangaError};
 use ndarray::{s, ArrayView1};
 
@@ -33,11 +33,11 @@ impl MultiTargetParser {
             if end <= raw_output.len() {
                 let price_level_logits = raw_output.slice(s![start..end]);
                 println!(
-                    "DEBUG: Price levels slice: start={}, end={}, slice_len={}, expected_bins={}",
+                    "DEBUG: Price levels slice: start={}, end={}, slice_len={}, expected_classes={}",
                     start,
                     end,
                     price_level_logits.len(),
-                    6 // Fixed: sequence-aware classification always uses 6 bins
+                    NUM_CLASSES // Unified 5-class system
                 );
                 println!(
                     "DEBUG: Price levels slice content: {:?}",
@@ -86,9 +86,9 @@ impl MultiTargetParser {
         Ok(parsed)
     }
 
-    /// Parse direction logits into class probabilities
+    /// Parse direction logits into class probabilities (5-class system)
     fn parse_direction(&self, logits: &ArrayView1<f64>) -> Result<DirectionOutput> {
-        let expected_classes = 3; // DOWN, SIDEWAYS, UP
+        let expected_classes = NUM_CLASSES; // DUMP, DOWN, SIDEWAYS, UP, PUMP
         if logits.len() != expected_classes {
             return Err(VangaError::PredictionError(format!(
                 "Expected {} direction classes, got {}",
@@ -118,54 +118,73 @@ impl MultiTargetParser {
         let probabilities: Vec<f64> = exp_logits.iter().map(|&x| x / sum_exp).collect();
 
         Ok(DirectionOutput {
-            down_probability: probabilities[0],
-            sideways_probability: probabilities[1],
-            up_probability: probabilities[2],
+            dump_probability: probabilities[0],     // New: Extreme down
+            down_probability: probabilities[1],     // Shifted from index 0
+            sideways_probability: probabilities[2], // Shifted from index 1
+            up_probability: probabilities[3],       // Shifted from index 2
+            pump_probability: probabilities[4],     // New: Extreme up
         })
     }
 
-    /// Parse volatility values for each horizon
-    fn parse_volatility(&self, values: &ArrayView1<f64>) -> Result<Vec<f64>> {
-        // Validate that volatility head is enabled and horizon count matches
+    /// Parse volatility values (5-class system)
+    fn parse_volatility(&self, values: &ArrayView1<f64>) -> Result<VolatilityOutput> {
+        // Validate that volatility head is enabled and class count matches
         if !self.output_heads.volatility.enabled {
             return Err(VangaError::PredictionError(
                 "Volatility head is disabled but volatility data provided".to_string(),
             ));
         }
 
-        let expected_horizons = self.output_heads.volatility.horizons.len();
-        if values.len() != expected_horizons {
+        let expected_total_classes = NUM_CLASSES;
+
+        if values.len() != expected_total_classes {
             return Err(VangaError::PredictionError(format!(
-                "Expected {} volatility horizons, got {}",
-                expected_horizons,
+                "Expected {} volatility classes, got {}",
+                expected_total_classes,
                 values.len()
             )));
         }
 
-        // Apply sigmoid to ensure positive volatility values
-        let volatilities: Vec<f64> = values
-            .iter()
-            .map(|&x| 1.0 / (1.0 + (-x).exp())) // Sigmoid function
-            .map(|x| x * 0.1) // Scale to reasonable volatility range (0-10%)
-            .collect();
+        // Apply softmax to convert logits to probabilities
+        let probabilities = self.softmax(values);
 
-        Ok(volatilities)
+        Ok(VolatilityOutput {
+            very_low_probability: probabilities[0],
+            low_probability: probabilities[1],
+            medium_probability: probabilities[2],
+            high_probability: probabilities[3],
+            very_high_probability: probabilities[4],
+        })
     }
 
-    /// Parse price level logits with validation
+    /// Apply softmax to convert logits to probabilities
+    fn softmax(&self, logits: &ArrayView1<f64>) -> Vec<f64> {
+        let max_logit = logits.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let exp_logits: Vec<f64> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
+        let sum_exp: f64 = exp_logits.iter().sum();
+
+        if sum_exp == 0.0 {
+            // Return uniform distribution if sum is zero
+            vec![1.0 / logits.len() as f64; logits.len()]
+        } else {
+            exp_logits.iter().map(|&x| x / sum_exp).collect()
+        }
+    }
+
+    /// Parse price level logits with validation (5-class system)
     fn parse_price_levels(&self, logits: &ArrayView1<f64>) -> Result<Vec<f64>> {
-        // Validate that price levels head is enabled and bin count matches
+        // Validate that price levels head is enabled and class count matches
         if !self.output_heads.price_levels.enabled {
             return Err(VangaError::PredictionError(
                 "Price levels head is disabled but price level data provided".to_string(),
             ));
         }
 
-        let expected_bins = 6; // Fixed: sequence-aware classification always uses 6 bins
-        if logits.len() != expected_bins {
+        let expected_classes = NUM_CLASSES; // Unified 5-class system
+        if logits.len() != expected_classes {
             return Err(VangaError::PredictionError(format!(
-                "Expected {} price level bins, got {}",
-                expected_bins,
+                "Expected {} price level classes, got {}",
+                expected_classes,
                 logits.len()
             )));
         }
@@ -192,11 +211,11 @@ pub struct ParsedOutput {
     /// Price level probabilities (if enabled)
     pub price_levels: Option<Vec<f64>>,
 
-    /// Direction probabilities (if enabled)
+    /// Direction probabilities (if enabled) - 5-class system
     pub direction: Option<DirectionOutput>,
 
-    /// Volatility values for each horizon (if enabled)
-    pub volatility: Option<Vec<f64>>,
+    /// Volatility values (if enabled) - 5-class system
+    pub volatility: Option<VolatilityOutput>,
 }
 
 impl Default for ParsedOutput {
@@ -215,32 +234,51 @@ impl ParsedOutput {
     }
 }
 
-/// Direction prediction output
+/// Direction prediction output (5-class system)
 #[derive(Debug, Clone)]
 pub struct DirectionOutput {
-    pub down_probability: f64,
-    pub sideways_probability: f64,
-    pub up_probability: f64,
+    pub dump_probability: f64,     // Extreme down
+    pub down_probability: f64,     // Moderate down
+    pub sideways_probability: f64, // Minimal change
+    pub up_probability: f64,       // Moderate up
+    pub pump_probability: f64,     // Extreme up
+}
+
+/// Volatility prediction output for a single horizon (5-class system)
+#[derive(Debug, Clone)]
+pub struct VolatilityOutput {
+    pub very_low_probability: f64,  // <20th percentile
+    pub low_probability: f64,       // 20th-40th percentile
+    pub medium_probability: f64,    // 40th-60th percentile
+    pub high_probability: f64,      // 60th-80th percentile
+    pub very_high_probability: f64, // >80th percentile
 }
 
 impl DirectionOutput {
-    /// Get the most likely direction
+    /// Get the most likely direction (5-class system)
     pub fn get_prediction(&self) -> String {
-        if self.up_probability > self.down_probability
-            && self.up_probability > self.sideways_probability
-        {
-            "UP".to_string()
-        } else if self.down_probability > self.sideways_probability {
-            "DOWN".to_string()
-        } else {
-            "SIDEWAYS".to_string()
-        }
+        let probabilities = [
+            ("DUMP", self.dump_probability),
+            ("DOWN", self.down_probability),
+            ("SIDEWAYS", self.sideways_probability),
+            ("UP", self.up_probability),
+            ("PUMP", self.pump_probability),
+        ];
+
+        let (prediction, _) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        prediction.to_string()
     }
 
-    /// Get confidence (highest probability)
+    /// Get confidence (highest probability across all 5 classes)
     pub fn get_confidence(&self) -> f64 {
-        self.up_probability
+        self.dump_probability
             .max(self.down_probability)
             .max(self.sideways_probability)
+            .max(self.up_probability)
+            .max(self.pump_probability)
     }
 }

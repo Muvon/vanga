@@ -370,9 +370,11 @@ impl TradingOrders {
         config: &OrderConfig,
     ) -> crate::utils::error::Result<Self> {
         // Check if direction prediction is strong enough for trading
-        let direction = if direction_pred.up_probability > 0.6 {
+        // With 5-class system, combined probabilities (up+pump, down+dump) are typically 0.3-0.8
+        // Lowered threshold from 0.6 to 0.5 to account for more distributed probabilities
+        let direction = if direction_pred.up_probability > 0.5 {
             "LONG"
-        } else if direction_pred.down_probability > 0.6 {
+        } else if direction_pred.down_probability > 0.5 {
             "SHORT"
         } else {
             // Return empty orders when direction is not strong enough
@@ -382,11 +384,13 @@ impl TradingOrders {
             ));
         };
 
-        // Calculate dynamic ATR multiplier based on volatility regime
+        // Calculate dynamic ATR multiplier based on 5-class volatility regime
         let atr_multiplier = match volatility_pred.regime.as_str() {
-            "LOW" => config.base_atr_multiplier * 0.7, // Tighter spacing in low vol
-            "MEDIUM" => config.base_atr_multiplier,    // Normal spacing
-            "HIGH" => config.base_atr_multiplier * 1.4, // Wider spacing in high vol
+            "VERY_LOW" => config.base_atr_multiplier * 0.5, // Very tight spacing in very low vol
+            "LOW" => config.base_atr_multiplier * 0.7,      // Tighter spacing in low vol
+            "MEDIUM" => config.base_atr_multiplier,         // Normal spacing
+            "HIGH" => config.base_atr_multiplier * 1.4,     // Wider spacing in high vol
+            "VERY_HIGH" => config.base_atr_multiplier * 1.8, // Very wide spacing in very high vol
             _ => config.base_atr_multiplier,
         };
 
