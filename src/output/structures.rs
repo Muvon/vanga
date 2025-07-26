@@ -87,23 +87,41 @@ pub struct DirectionPrediction {
     pub confidence: f64,
 }
 
-/// Multi-horizon volatility prediction
+/// Multi-class volatility prediction (5-class system)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityPrediction {
-    /// Expected 1-hour volatility
-    pub expected_1h: f64,
+    /// Probability of very low volatility (<20th percentile)
+    pub very_low_probability: f64,
 
-    /// Expected 4-hour volatility
-    pub expected_4h: f64,
+    /// Probability of low volatility (20th-40th percentile)
+    pub low_probability: f64,
 
-    /// Expected 24-hour volatility
-    pub expected_24h: f64,
+    /// Probability of medium volatility (40th-60th percentile)
+    pub medium_probability: f64,
 
-    /// Volatility regime prediction ("LOW", "MEDIUM", "HIGH")
+    /// Probability of high volatility (60th-80th percentile)
+    pub high_probability: f64,
+
+    /// Probability of very high volatility (>80th percentile)
+    pub very_high_probability: f64,
+
+    /// Volatility regime prediction ("VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH")
     pub regime: String,
 
     /// Confidence in volatility prediction
     pub confidence: f64,
+}
+
+impl VolatilityPrediction {
+    /// Get the most likely volatility regime (5-class system)
+    pub fn get_prediction(&self) -> String {
+        self.regime.clone()
+    }
+
+    /// Get confidence in volatility prediction
+    pub fn get_confidence(&self) -> f64 {
+        self.confidence
+    }
 }
 
 /// Overall confidence scoring
@@ -746,9 +764,11 @@ mod tests {
 
     fn create_test_volatility_prediction(regime: &str) -> VolatilityPrediction {
         VolatilityPrediction {
-            expected_1h: 2.5,
-            expected_4h: 5.0,
-            expected_24h: 10.0,
+            very_low_probability: 0.1,
+            low_probability: 0.2,
+            medium_probability: 0.4,
+            high_probability: 0.2,
+            very_high_probability: 0.1,
             regime: regime.to_string(),
             confidence: 0.8,
         }

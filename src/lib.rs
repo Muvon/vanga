@@ -419,14 +419,14 @@ mod integration_tests {
 
         if let Some((start, end)) = segments.direction {
             assert_eq!(start, 5);
-            assert_eq!(end, 8);
+            assert_eq!(end, 10); // 5 classes for direction
         } else {
             panic!("Direction segment should be defined");
         }
 
         if let Some((start, end)) = segments.volatility {
-            assert_eq!(start, 8);
-            assert_eq!(end, 9);
+            assert_eq!(start, 10);
+            assert_eq!(end, 15); // 5 classes for volatility
         } else {
             panic!("Volatility segment should be defined");
         }

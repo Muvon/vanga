@@ -469,9 +469,9 @@ impl OutputHeadsConfig {
             total_size += NUM_CLASSES;
         }
 
-        // Volatility prediction outputs (5 classes per horizon: VERY_LOW, LOW, MEDIUM, HIGH, VERY_HIGH)
+        // Volatility prediction outputs (5 classes: VERY_LOW, LOW, MEDIUM, HIGH, VERY_HIGH)
         if self.volatility.enabled {
-            total_size += NUM_CLASSES * 3; // Default 3 horizons: 1h, 4h, 24h
+            total_size += NUM_CLASSES; // Unified 5-class volatility output
         }
 
         // Ensure at least one output
@@ -501,7 +501,7 @@ impl OutputHeadsConfig {
         }
 
         if self.volatility.enabled {
-            let size = NUM_CLASSES * 3; // Default 3 horizons: 1h, 4h, 24h
+            let size = NUM_CLASSES; // Unified 5-class volatility output
             segments.volatility = Some((current_offset, current_offset + size));
         }
 

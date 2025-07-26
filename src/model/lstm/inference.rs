@@ -303,22 +303,16 @@ impl LSTMModel {
             log::debug!("Target context found: {:?}", target_type);
             match target_type {
                 TargetType::PriceLevel => {
-                    // For Price Levels: Convert multi-class probabilities to class indices
+                    // For Price Level: Keep multi-class probabilities (don't convert to indices)
                     let tensor_shape = predictions_tensor.shape();
                     log::debug!("Price Level prediction shape: {:?}", tensor_shape);
                     if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
                         log::info!(
-                            "Converting Price Level multi-class output {:?} to class indices",
+                            "Keeping Price Level multi-class output {:?} as probabilities",
                             tensor_shape
                         );
-
-                        // Get argmax (predicted class) for each sample
-                        let class_indices = predictions_tensor.argmax(1)?;
-
-                        // Convert to f32 and add dimension to make it [batch, 1]
-                        class_indices
-                            .to_dtype(candle_core::DType::F32)?
-                            .unsqueeze(1)?
+                        // Return the full probability distribution for multi-target parsing
+                        predictions_tensor
                     } else {
                         log::debug!(
                             "Price Level output already in correct shape: {:?}",
@@ -328,50 +322,38 @@ impl LSTMModel {
                     }
                 }
                 TargetType::Direction => {
-                    // For Direction: Convert multi-class probabilities to class indices
+                    // For Direction: Keep multi-class probabilities (don't convert to indices)
                     let tensor_shape = predictions_tensor.shape();
                     log::debug!("Direction prediction shape: {:?}", tensor_shape);
                     if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
                         log::info!(
-                            "Converting Direction multi-class output {:?} to class indices",
+                            "Keeping Direction multi-class output {:?} as probabilities",
                             tensor_shape
                         );
-
-                        // Get argmax (predicted class) for each sample
-                        let class_indices = predictions_tensor.argmax(1)?;
-
-                        // Convert to f32 and add dimension to make it [batch, 1]
-                        class_indices
-                            .to_dtype(candle_core::DType::F32)?
-                            .unsqueeze(1)?
+                        // Return the full probability distribution for multi-target parsing
+                        predictions_tensor
                     } else {
                         predictions_tensor
                     }
                 }
                 TargetType::Volatility => {
-                    // For Volatility: Convert multi-class probabilities to class indices
+                    // For Volatility: Keep multi-class probabilities (don't convert to indices)
                     let tensor_shape = predictions_tensor.shape();
                     log::debug!("Volatility prediction shape: {:?}", tensor_shape);
                     if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
                         log::info!(
-                            "Converting Volatility multi-class output {:?} to class indices",
+                            "Keeping Volatility multi-class output {:?} as probabilities",
                             tensor_shape
                         );
-
-                        // Get argmax (predicted class) for each sample
-                        let class_indices = predictions_tensor.argmax(1)?;
-
-                        // Convert to f32 and add dimension to make it [batch, 1]
-                        class_indices
-                            .to_dtype(candle_core::DType::F32)?
-                            .unsqueeze(1)?
+                        // Return the full probability distribution for multi-target parsing
+                        predictions_tensor
                     } else {
                         predictions_tensor
                     }
                 }
             }
         } else {
-            // No target context - detect multi-class output automatically
+            // No target context - keep multi-class outputs as probabilities for multi-target parsing
             let tensor_shape = predictions_tensor.shape();
             log::warn!(
                 "No target context set during prediction! Tensor shape: {:?}",
@@ -380,17 +362,11 @@ impl LSTMModel {
 
             if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
                 log::info!(
-                    "Auto-detecting multi-class output {:?}, converting to class indices",
+                    "Auto-detecting multi-class output {:?}, keeping as probabilities for multi-target parsing",
                     tensor_shape
                 );
-
-                // Get argmax (predicted class) for each sample
-                let class_indices = predictions_tensor.argmax(1)?;
-
-                // Convert to f32 and add dimension to make it [batch, 1]
-                class_indices
-                    .to_dtype(candle_core::DType::F32)?
-                    .unsqueeze(1)?
+                // Keep the full probability distribution for multi-target parsing
+                predictions_tensor
             } else {
                 predictions_tensor
             }

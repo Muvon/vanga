@@ -282,3 +282,32 @@ impl DirectionOutput {
             .max(self.pump_probability)
     }
 }
+
+impl VolatilityOutput {
+    /// Get the most likely volatility regime (5-class system)
+    pub fn get_prediction(&self) -> String {
+        let probabilities = [
+            ("VERY_LOW", self.very_low_probability),
+            ("LOW", self.low_probability),
+            ("MEDIUM", self.medium_probability),
+            ("HIGH", self.high_probability),
+            ("VERY_HIGH", self.very_high_probability),
+        ];
+
+        let (prediction, _) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        prediction.to_string()
+    }
+
+    /// Get confidence (highest probability across all 5 classes)
+    pub fn get_confidence(&self) -> f64 {
+        self.very_low_probability
+            .max(self.low_probability)
+            .max(self.medium_probability)
+            .max(self.high_probability)
+            .max(self.very_high_probability)
+    }
+}

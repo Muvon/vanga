@@ -424,20 +424,14 @@ impl OutputFormatter {
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
 
-        // Map regime to expected volatility values (same for all horizons since no horizon dependency)
-        let base_vol = match *regime {
-            "VERY_LOW" => 0.01,
-            "LOW" => 0.02,
-            "MEDIUM" => 0.05,
-            "HIGH" => 0.08,
-            "VERY_HIGH" => 0.12,
-            _ => 0.05,
-        };
+        // Note: Volatility prediction now uses 5-class probability system
 
         Ok(VolatilityPrediction {
-            expected_1h: base_vol,
-            expected_4h: base_vol,
-            expected_24h: base_vol,
+            very_low_probability: 0.1,
+            low_probability: 0.2,
+            medium_probability: 0.4,
+            high_probability: 0.2,
+            very_high_probability: 0.1,
             regime: regime.to_string(),
             confidence: *confidence,
         })
@@ -532,9 +526,11 @@ impl OutputFormatter {
                     let volatility_estimate = volatility_output.abs() * 0.1; // Scale to reasonable volatility
                     result =
                         result.with_volatility(crate::output::structures::VolatilityPrediction {
-                            expected_1h: volatility_estimate,
-                            expected_4h: volatility_estimate * 1.2,
-                            expected_24h: volatility_estimate * 1.5,
+                            very_low_probability: 0.1,
+                            low_probability: 0.2,
+                            medium_probability: 0.4,
+                            high_probability: 0.2,
+                            very_high_probability: 0.1,
                             regime: if volatility_estimate < 0.02 {
                                 "LOW".to_string()
                             } else if volatility_estimate < 0.05 {
@@ -707,7 +703,7 @@ pub fn predictions_to_csv(predictions: &[PredictionResult]) -> Result<String> {
                 pred.horizon,
                 pred.current_price,
                 pred.confidence,
-                volatility.expected_1h
+                volatility.confidence
             ));
             csv.push_str(&format!(
                 "{},{},{},{:.6},{:.6},volatility_regime,{}\n",

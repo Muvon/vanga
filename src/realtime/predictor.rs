@@ -419,14 +419,16 @@ impl StreamingPredictor {
                 let (volatility_str, volatility_emoji) = if prediction
                     .volatility
                     .as_ref()
-                    .map(|v| v.expected_1h > 0.05)
+                    .map(|v| v.high_probability + v.very_high_probability > 0.5)
                     .unwrap_or(false)
                 {
                     ("HIGH", "⚡")
                 } else if prediction
                     .volatility
                     .as_ref()
-                    .map(|v| v.expected_1h > 0.02)
+                    .map(|v| {
+                        v.medium_probability + v.high_probability + v.very_high_probability > 0.5
+                    })
                     .unwrap_or(false)
                 {
                     ("MEDIUM", "🌊")
@@ -655,19 +657,23 @@ impl StreamingPredictor {
         // Extract volatility prediction
         let volatility = if let Some(vol) = &ml_prediction.volatility {
             VolatilityPrediction {
-                expected_1h: vol.expected_1h,
-                expected_4h: vol.expected_4h,
-                expected_24h: vol.expected_24h,
-                regime: vol.regime.clone(),
-                confidence: vol.confidence,
+                very_low_probability: vol.very_low_probability,
+                low_probability: vol.low_probability,
+                medium_probability: vol.medium_probability,
+                high_probability: vol.high_probability,
+                very_high_probability: vol.very_high_probability,
+                regime: vol.get_prediction(),
+                confidence: vol.get_confidence(),
             }
         } else {
             VolatilityPrediction {
-                expected_1h: 0.02,
-                expected_4h: 0.03,
-                expected_24h: 0.05,
+                very_low_probability: 0.2,
+                low_probability: 0.2,
+                medium_probability: 0.2,
+                high_probability: 0.2,
+                very_high_probability: 0.2,
                 regime: "MEDIUM".to_string(),
-                confidence: 0.5,
+                confidence: 0.2,
             }
         };
 

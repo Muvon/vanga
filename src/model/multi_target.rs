@@ -484,7 +484,9 @@ impl MultiTargetLSTMModel {
         );
 
         let batch_size = sequences.shape()[0];
-        let mut all_predictions = Array2::zeros((batch_size, self.num_targets));
+        // Calculate total output size: each target has NUM_CLASSES outputs (5-class system)
+        let total_output_size = self.num_targets * crate::config::model::NUM_CLASSES;
+        let mut all_predictions = Array2::zeros((batch_size, total_output_size));
 
         // Process each model sequentially to avoid memory accumulation
         for (i, model) in self.models.iter().enumerate() {
@@ -498,17 +500,22 @@ impl MultiTargetLSTMModel {
 
             match model.predict(sequences).await {
                 Ok(predictions) => {
-                    // predictions should be [batch_size, 1] since each model has single output
-                    if predictions.shape()[1] != 1 {
+                    // predictions should be [batch_size, NUM_CLASSES] since each model has 5 outputs (5-class system)
+                    let expected_classes = crate::config::model::NUM_CLASSES;
+                    if predictions.shape()[1] != expected_classes {
                         return Err(VangaError::ModelError(format!(
-                            "Model {} returned unexpected prediction shape: {:?}, expected [batch, 1]",
-                            target_name, predictions.shape()
+                            "Model {} returned unexpected prediction shape: {:?}, expected [batch, {}] for 5-class system",
+                            target_name, predictions.shape(), expected_classes
                         )));
                     }
 
-                    // Copy predictions to the appropriate column
+                    // Copy predictions to the appropriate columns (5 columns per target)
+                    let start_col = i * expected_classes;
                     for batch_idx in 0..batch_size {
-                        all_predictions[[batch_idx, i]] = predictions[[batch_idx, 0]];
+                        for class_idx in 0..expected_classes {
+                            all_predictions[[batch_idx, start_col + class_idx]] =
+                                predictions[[batch_idx, class_idx]];
+                        }
                     }
 
                     log::debug!(
@@ -608,7 +615,46 @@ impl MultiTargetLSTMModel {
             let model_path = format!("{}_{}.bin", base_path.to_string_lossy(), i);
             log::debug!("Loading model {} from: {}", i + 1, model_path);
 
-            let mut model = LSTMModel::load(&model_path)?;
+            let mut model = if let Some(training_config) = &state.training_config {
+                log::debug!(
+                    "🔧 Recreating model {} from stored ModelConfig with architecture: {:?}",
+                    i + 1,
+                    training_config.model.architecture
+                );
+
+                // Create model from stored ModelConfig (preserves architecture)
+                let mut model = LSTMModel::from_model_config(
+                    &training_config.model,
+                    state.input_size,
+                    crate::config::model::NUM_CLASSES, // All targets use 5-class system
+                )?;
+
+                log::debug!(
+                    "🔍 Model {} created with output_size: {}",
+                    i + 1,
+                    model.get_output_size()
+                );
+
+                // Initialize network structure
+                model.initialize_network()?;
+
+                // Load weights using existing pattern from load() method
+                let weights_path = std::path::Path::new(&model_path).with_extension("safetensors");
+                model.varmap.load(&weights_path).map_err(|e| {
+                    VangaError::SerializationError(format!("Failed to load model weights: {}", e))
+                })?;
+                model.trained = true;
+
+                log::debug!(
+                    "✅ Model {} weights loaded from: {}",
+                    i + 1,
+                    weights_path.display()
+                );
+                model
+            } else {
+                log::warn!("⚠️ Loading legacy model {} without training config - architecture may be incorrect", i + 1);
+                LSTMModel::load(&model_path)?
+            };
 
             // CRITICAL FIX: Restore target context after loading
             // The target_context is lost during serialization/deserialization

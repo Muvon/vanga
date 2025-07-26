@@ -227,7 +227,7 @@ impl SeededLSTMLayer {
             }
 
             // Concatenate time steps
-            layer_input = Tensor::cat(&layer_outputs, 1)?;
+            layer_input = Tensor::cat(&layer_outputs, 1)?.contiguous()?;
         }
 
         // Return the last hidden state

@@ -457,14 +457,6 @@ impl ObjectiveFunction {
 
                 // Convert prediction value to actual volatility using proper financial scaling
                 // Assume vol_value is a normalized prediction (0-1) that needs to be mapped to realistic volatility
-                let base_daily_vol = 0.02 + (vol_value * 0.08); // Maps 0-1 to 2%-10% daily volatility range
-
-                // Apply proper time horizon scaling using square root of time rule
-                // Formula: σ(t) = σ(daily) × √(t_hours/24)
-                let expected_1h = base_daily_vol * (1.0 / 24.0_f64).sqrt(); // 1h = √(1/24) × daily
-                let expected_4h = base_daily_vol * (4.0 / 24.0_f64).sqrt(); // 4h = √(4/24) × daily
-                let expected_24h = base_daily_vol; // 24h = daily base
-
                 // Classify regime using VANGA's percentile-based thresholds
                 // Based on src/targets/volatility.rs: (0.33, 0.67) percentiles
                 let regime = if vol_value <= 0.33 {
@@ -476,18 +468,22 @@ impl ObjectiveFunction {
                 };
 
                 VolatilityPrediction {
-                    expected_1h,
-                    expected_4h,
-                    expected_24h,
+                    very_low_probability: 0.1,
+                    low_probability: 0.2,
+                    medium_probability: 0.4,
+                    high_probability: 0.2,
+                    very_high_probability: 0.1,
                     regime: regime.to_string(),
                     confidence: 0.8, // High confidence in volatility estimates
                 }
             } else {
-                // Default medium volatility using realistic crypto values
+                // Default medium volatility using 5-class probabilities
                 VolatilityPrediction {
-                    expected_1h: 0.02 * (1.0 / 24.0_f64).sqrt(), // ~0.41% hourly
-                    expected_4h: 0.02 * (4.0 / 24.0_f64).sqrt(), // ~0.82% 4-hourly
-                    expected_24h: 0.02,                          // 2% daily
+                    very_low_probability: 0.1,
+                    low_probability: 0.2,
+                    medium_probability: 0.4,
+                    high_probability: 0.2,
+                    very_high_probability: 0.1,
                     regime: "MEDIUM".to_string(),
                     confidence: 0.5,
                 }
