@@ -429,26 +429,36 @@ impl ObjectiveFunction {
             let direction_pred = if predictions.ncols() > 0 {
                 let up_prob = predictions[[i, 0]].clamp(0.0, 1.0);
                 let down_prob = 1.0 - up_prob;
-                let confidence = (up_prob - 0.5).abs() * 2.0; // Convert to 0-1 confidence
 
-                DirectionPrediction {
-                    up_probability: up_prob,
-                    down_probability: down_prob,
-                    prediction: if up_prob > 0.5 {
-                        "UP".to_string()
-                    } else {
-                        "DOWN".to_string()
-                    },
-                    confidence,
-                }
+                // Convert 2-class to 5-class probabilities for new structure
+                let sideways_prob = 0.2; // Neutral probability
+                let remaining = 1.0 - sideways_prob;
+                let dump_prob = if down_prob > 0.5 {
+                    (down_prob - 0.5) * remaining
+                } else {
+                    0.0
+                };
+                let pump_prob = if up_prob > 0.5 {
+                    (up_prob - 0.5) * remaining
+                } else {
+                    0.0
+                };
+                let down_moderate = down_prob - dump_prob;
+                let up_moderate = up_prob - pump_prob;
+
+                DirectionPrediction::from_probabilities(
+                    dump_prob,
+                    down_moderate,
+                    sideways_prob,
+                    up_moderate,
+                    pump_prob,
+                )
             } else {
                 // Default neutral prediction
-                DirectionPrediction {
-                    up_probability: 0.5,
-                    down_probability: 0.5,
-                    prediction: "SIDEWAYS".to_string(),
-                    confidence: 0.0,
-                }
+                DirectionPrediction::from_probabilities(
+                    0.1, 0.2, 0.4, 0.2,
+                    0.1, // dump, down, sideways, up, pump - neutral distribution
+                )
             };
 
             // Extract volatility prediction (column 1 if available)
@@ -467,26 +477,20 @@ impl ObjectiveFunction {
                     "HIGH"
                 };
 
-                VolatilityPrediction {
-                    very_low_probability: 0.1,
-                    low_probability: 0.2,
-                    medium_probability: 0.4,
-                    high_probability: 0.2,
-                    very_high_probability: 0.1,
-                    regime: regime.to_string(),
-                    confidence: 0.8, // High confidence in volatility estimates
-                }
+                // Create probability distribution based on regime
+                let (very_low, low, medium, high, very_high) = match regime {
+                    "LOW" => (0.2, 0.6, 0.2, 0.0, 0.0),
+                    "MEDIUM" => (0.1, 0.2, 0.4, 0.2, 0.1),
+                    "HIGH" => (0.0, 0.0, 0.2, 0.6, 0.2),
+                    _ => (0.1, 0.2, 0.4, 0.2, 0.1),
+                };
+
+                VolatilityPrediction::from_probabilities(very_low, low, medium, high, very_high)
             } else {
                 // Default medium volatility using 5-class probabilities
-                VolatilityPrediction {
-                    very_low_probability: 0.1,
-                    low_probability: 0.2,
-                    medium_probability: 0.4,
-                    high_probability: 0.2,
-                    very_high_probability: 0.1,
-                    regime: "MEDIUM".to_string(),
-                    confidence: 0.5,
-                }
+                VolatilityPrediction::from_probabilities(
+                    0.1, 0.2, 0.4, 0.2, 0.1, // very_low, low, medium, high, very_high
+                )
             };
 
             // Extract price level predictions (columns 2+ if available)

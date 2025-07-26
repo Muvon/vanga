@@ -336,15 +336,21 @@ impl MultiTargetPredictions {
                     }
 
                     if let Some(direction_output) = parsed_output.direction {
-                        result = result.with_direction(
-                            formatter.create_direction_prediction(&direction_output)?,
-                        );
+                        result = result.with_direction(formatter.create_direction_prediction(
+                            &direction_output,
+                            Some(horizon),
+                            Some(60),  // Default sequence length
+                            Some(3.0), // Default bandwidth percent
+                        )?);
                     }
 
                     if let Some(volatility_output) = parsed_output.volatility {
-                        result = result.with_volatility(
-                            formatter.create_volatility_prediction(&volatility_output)?,
-                        );
+                        result = result.with_volatility(formatter.create_volatility_prediction(
+                            &volatility_output,
+                            Some(horizon),
+                            Some(3.0),  // Default bandwidth percent
+                            Some(50.0), // Default volatility percentile
+                        )?);
                     }
                 } else {
                     return Err(VangaError::PredictionError(

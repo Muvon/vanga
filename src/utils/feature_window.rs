@@ -304,9 +304,78 @@ mod tests {
 
     #[test]
     fn test_calculate_min_data_requirements() {
-        let mut config = FeatureConfig::default();
-        config.technical_indicators.enabled = true;
-        config.technical_indicators.moving_averages.sma_periods = vec![20];
+        // Create minimal config with only 20-period SMA
+        let config = FeatureConfig {
+            technical_indicators: crate::config::features::TechnicalIndicatorsConfig {
+                enabled: true,
+                moving_averages: crate::config::features::MovingAveragesConfig {
+                    sma_periods: vec![20],
+                    ema_periods: vec![], // Empty to avoid larger windows
+                    wma_periods: vec![],
+                    hull_periods: vec![],
+                },
+                momentum: crate::config::features::MomentumConfig {
+                    rsi_periods: vec![],
+                    stochastic: false,
+                    williams_r: false,
+                    cci_periods: vec![],
+                    momentum_periods: vec![],
+                },
+                volatility: crate::config::features::VolatilityIndicatorsConfig {
+                    bollinger_bands: crate::config::features::BollingerBandsConfig {
+                        enabled: false,
+                        period: 20,
+                        std_dev: 2.0,
+                    },
+                    atr_periods: vec![],
+                    keltner_channels: false,
+                    donchian_channels: false,
+                },
+                volume: crate::config::features::VolumeIndicatorsConfig {
+                    obv: false,
+                    volume_sma_periods: vec![],
+                    mfi_periods: vec![],
+                    ad_line: false,
+                    chaikin_oscillator: false,
+                },
+                trend: crate::config::features::TrendIndicatorsConfig {
+                    macd: crate::config::features::MACDConfig {
+                        enabled: false,
+                        fast_period: 12,
+                        slow_period: 26,
+                        signal_period: 9,
+                    },
+                    adx_periods: vec![],
+                    parabolic_sar: false,
+                    aroon: false,
+                    advanced: crate::config::features::AdvancedIndicatorsConfig {
+                        enabled: false,
+                        hurst_window: 100,
+                        fractal_window: 50,
+                        regime_window: 50,
+                        clustering_window: 50,
+                        reversion_window: 50,
+                    },
+                },
+            },
+            cross_asset: crate::config::features::CrossAssetConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            volatility_features: crate::config::features::VolatilityFeaturesConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            engineering: crate::config::features::FeatureEngineeringConfig {
+                rolling_features: crate::config::features::RollingFeaturesConfig {
+                    enabled: false,
+                    window_sizes: vec![],
+                    statistics: vec![],
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let horizons = vec!["1h".to_string()];
         let sequence_length = 60;

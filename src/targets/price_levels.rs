@@ -500,7 +500,7 @@ mod tests {
         ); // Strong breakout (25 ≥ 22)
         assert_eq!(
             classify_price_level_sequence_aware(test_price, &sequence, &conservative_config),
-            4
+            3
         ); // Moderate up (18 ≤ 25 < 30)
     }
 

@@ -4,7 +4,7 @@
 //! post-processing steps to improve prediction quality.
 
 use crate::config::prediction::{PostProcessingConfig, PostProcessingStep};
-use crate::output::structures::PredictionResult;
+use crate::output::structures::{DirectionPrediction, PredictionResult};
 use crate::utils::error::{Result, VangaError};
 
 /// Post-processor for prediction results
@@ -405,17 +405,30 @@ impl PostProcessor {
                 let ensemble_up_prob = up_prob_sum / total_weight;
                 let ensemble_down_prob = down_prob_sum / total_weight;
 
+                // Convert aggregated probabilities to 5-class system
+                let sideways_prob = 0.2;
+                let remaining = 1.0 - sideways_prob;
+                let dump_prob = if ensemble_down_prob > 0.5 {
+                    (ensemble_down_prob - 0.5) * remaining
+                } else {
+                    0.0
+                };
+                let pump_prob = if ensemble_up_prob > 0.5 {
+                    (ensemble_up_prob - 0.5) * remaining
+                } else {
+                    0.0
+                };
+                let down_moderate = ensemble_down_prob - dump_prob;
+                let up_moderate = ensemble_up_prob - pump_prob;
+
                 ensemble_pred =
-                    ensemble_pred.with_direction(crate::output::structures::DirectionPrediction {
-                        up_probability: ensemble_up_prob,
-                        down_probability: ensemble_down_prob,
-                        prediction: if ensemble_up_prob > ensemble_down_prob {
-                            "UP".to_string()
-                        } else {
-                            "DOWN".to_string()
-                        },
-                        confidence: (ensemble_up_prob - ensemble_down_prob).abs(),
-                    });
+                    ensemble_pred.with_direction(DirectionPrediction::from_probabilities(
+                        dump_prob,
+                        down_moderate,
+                        sideways_prob,
+                        up_moderate,
+                        pump_prob,
+                    ));
             }
         }
 

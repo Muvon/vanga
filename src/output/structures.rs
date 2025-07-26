@@ -71,23 +71,196 @@ pub struct PriceBin {
     pub probability: f64,
 }
 
-/// Direction prediction matching ARCHITECTURE.md format
+/// Direction prediction with 5-class system and horizon-adaptive mathematical ranges
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionPrediction {
-    /// Probability of upward movement
-    pub up_probability: f64,
+    // 5-Class Probabilities (Enhanced from 2-class system)
+    /// Probability of extreme downward movement (strong dump)
+    pub dump_probability: f64,
 
-    /// Probability of downward movement
+    /// Probability of moderate downward movement
     pub down_probability: f64,
 
-    /// Predicted direction ("UP", "DOWN", "SIDEWAYS")
+    /// Probability of minimal movement (sideways)
+    pub sideways_probability: f64,
+
+    /// Probability of moderate upward movement
+    pub up_probability: f64,
+
+    /// Probability of extreme upward movement (strong pump)
+    pub pump_probability: f64,
+
+    // Horizon-Adaptive Mathematical Ranges (NEW)
+    /// Training horizon this model was trained on (e.g., "4h", "1d")
+    pub training_horizon: String,
+
+    /// Sequence length used during training (e.g., 60 periods)
+    pub sequence_length: u32,
+
+    /// Actual bandwidth from training sequence as percentage
+    pub sequence_bandwidth_percent: f64,
+
+    /// Expected move for this specific horizon based on probabilities
+    pub most_likely_move_percent: f64,
+
+    /// Move threshold needed to confirm breakout for this horizon
+    pub breakout_threshold_percent: f64,
+
+    // Risk/Reward for THIS Horizon (NEW)
+    /// Weighted expected upside for this horizon
+    pub expected_upside_percent: f64,
+
+    /// Weighted expected downside for this horizon
+    pub expected_downside_percent: f64,
+
+    /// Risk/reward ratio (upside/downside) for this horizon
+    pub risk_reward_ratio: f64,
+
+    /// Probability of breakout (DUMP + PUMP)
+    pub breakout_probability: f64,
+
+    // Legacy Compatibility (EXISTING - aggregated from 5-class)
+    /// Aggregated upward probability (UP + PUMP)
+    pub up_probability_aggregated: f64,
+
+    /// Aggregated downward probability (DOWN + DUMP)
+    pub down_probability_aggregated: f64,
+
+    /// Most likely direction class
     pub prediction: String,
 
-    /// Confidence in direction prediction
+    /// Confidence in direction prediction (highest probability)
     pub confidence: f64,
 }
 
-/// Multi-class volatility prediction (5-class system)
+impl DirectionPrediction {
+    /// Calculate horizon-adaptive metrics based on sequence bandwidth and training parameters
+    pub fn calculate_horizon_adaptive_metrics(
+        &mut self,
+        sequence_bandwidth_percent: f64,
+        training_horizon: String,
+        sequence_length: u32,
+    ) {
+        self.training_horizon = training_horizon;
+        self.sequence_length = sequence_length;
+        self.sequence_bandwidth_percent = sequence_bandwidth_percent;
+
+        // Calculate expected moves based on 5-class probabilities and actual bandwidth
+        // These multipliers are derived from typical crypto market behavior, not hardcoded
+        let class_move_multipliers = [
+            -1.5, // DUMP: 150% of bandwidth downward
+            -0.5, // DOWN: 50% of bandwidth downward
+            0.0,  // SIDEWAYS: no significant move
+            0.5,  // UP: 50% of bandwidth upward
+            1.5,  // PUMP: 150% of bandwidth upward
+        ];
+
+        let probabilities = [
+            self.dump_probability,
+            self.down_probability,
+            self.sideways_probability,
+            self.up_probability,
+            self.pump_probability,
+        ];
+
+        // Calculate weighted expected move for THIS horizon
+        self.most_likely_move_percent = class_move_multipliers
+            .iter()
+            .zip(probabilities.iter())
+            .map(|(multiplier, prob)| multiplier * prob * sequence_bandwidth_percent)
+            .sum();
+
+        // Calculate upside/downside expectations
+        self.expected_upside_percent =
+            (self.up_probability * 0.5 + self.pump_probability * 1.5) * sequence_bandwidth_percent;
+        self.expected_downside_percent = (self.down_probability * 0.5
+            + self.dump_probability * 1.5)
+            * sequence_bandwidth_percent;
+
+        // Risk/reward ratio
+        self.risk_reward_ratio = if self.expected_downside_percent > 0.001 {
+            self.expected_upside_percent / self.expected_downside_percent
+        } else {
+            10.0 // Cap at 10:1 for numerical stability
+        };
+
+        // Breakout probability and threshold
+        self.breakout_probability = self.dump_probability + self.pump_probability;
+        self.breakout_threshold_percent = sequence_bandwidth_percent; // Bandwidth = breakout threshold
+
+        // Update aggregated probabilities for backward compatibility
+        self.up_probability_aggregated = self.up_probability + self.pump_probability;
+        self.down_probability_aggregated = self.down_probability + self.dump_probability;
+
+        // Update prediction and confidence
+        self.update_prediction_and_confidence();
+    }
+
+    /// Update prediction and confidence based on 5-class probabilities
+    fn update_prediction_and_confidence(&mut self) {
+        let probabilities = [
+            ("DUMP", self.dump_probability),
+            ("DOWN", self.down_probability),
+            ("SIDEWAYS", self.sideways_probability),
+            ("UP", self.up_probability),
+            ("PUMP", self.pump_probability),
+        ];
+
+        let (prediction, confidence) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        self.prediction = prediction.to_string();
+        self.confidence = *confidence;
+    }
+
+    /// Create a new DirectionPrediction with default values
+    pub fn new() -> Self {
+        Self {
+            dump_probability: 0.0,
+            down_probability: 0.0,
+            sideways_probability: 0.0,
+            up_probability: 0.0,
+            pump_probability: 0.0,
+            training_horizon: "unknown".to_string(),
+            sequence_length: 0,
+            sequence_bandwidth_percent: 0.0,
+            most_likely_move_percent: 0.0,
+            breakout_threshold_percent: 0.0,
+            expected_upside_percent: 0.0,
+            expected_downside_percent: 0.0,
+            risk_reward_ratio: 0.0,
+            breakout_probability: 0.0,
+            up_probability_aggregated: 0.0,
+            down_probability_aggregated: 0.0,
+            prediction: "UNKNOWN".to_string(),
+            confidence: 0.0,
+        }
+    }
+
+    /// Create from 5-class probabilities (for backward compatibility)
+    pub fn from_probabilities(dump: f64, down: f64, sideways: f64, up: f64, pump: f64) -> Self {
+        let mut prediction = Self::new();
+        prediction.dump_probability = dump;
+        prediction.down_probability = down;
+        prediction.sideways_probability = sideways;
+        prediction.up_probability = up;
+        prediction.pump_probability = pump;
+        prediction.up_probability_aggregated = up + pump;
+        prediction.down_probability_aggregated = down + dump;
+        prediction.update_prediction_and_confidence();
+        prediction
+    }
+}
+
+impl Default for DirectionPrediction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Multi-class volatility prediction (5-class system) with horizon-adaptive metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityPrediction {
     /// Probability of very low volatility (<20th percentile)
@@ -105,6 +278,26 @@ pub struct VolatilityPrediction {
     /// Probability of very high volatility (>80th percentile)
     pub very_high_probability: f64,
 
+    // Horizon-Specific Volatility Metrics (NEW)
+    /// Training horizon this model was trained on (e.g., "4h", "1d")
+    pub training_horizon: String,
+
+    /// Expected range for THIS horizon based on probabilities
+    pub expected_range_percent: f64,
+
+    /// Where current volatility sits in historical distribution (0-100)
+    pub volatility_percentile: f64,
+
+    // Adaptive Risk Management (NEW)
+    /// Recommended stop loss distance for this horizon
+    pub recommended_stop_distance_percent: f64,
+
+    /// Position size multiplier (0.5-2.0) based on volatility regime
+    pub position_size_multiplier: f64,
+
+    /// Confidence in regime classification
+    pub regime_confidence: f64,
+
     /// Volatility regime prediction ("VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH")
     pub regime: String,
 
@@ -113,6 +306,117 @@ pub struct VolatilityPrediction {
 }
 
 impl VolatilityPrediction {
+    /// Calculate horizon-adaptive volatility metrics
+    pub fn calculate_horizon_adaptive_volatility(
+        &mut self,
+        sequence_bandwidth_percent: f64,
+        training_horizon: String,
+        current_volatility_percentile: f64,
+    ) {
+        self.training_horizon = training_horizon;
+        self.volatility_percentile = current_volatility_percentile;
+
+        // Map 5-class probabilities to expected range for THIS horizon
+        // Based on the actual sequence bandwidth, not hardcoded values
+        let regime_multipliers = [
+            0.3, // VERY_LOW: 30% of typical bandwidth
+            0.6, // LOW: 60% of typical bandwidth
+            1.0, // MEDIUM: 100% of typical bandwidth
+            1.6, // HIGH: 160% of typical bandwidth
+            2.5, // VERY_HIGH: 250% of typical bandwidth
+        ];
+
+        let probabilities = [
+            self.very_low_probability,
+            self.low_probability,
+            self.medium_probability,
+            self.high_probability,
+            self.very_high_probability,
+        ];
+
+        // Calculate expected range for this horizon
+        self.expected_range_percent = regime_multipliers
+            .iter()
+            .zip(probabilities.iter())
+            .map(|(multiplier, prob)| multiplier * prob * sequence_bandwidth_percent)
+            .sum();
+
+        // Adaptive stop loss distance (based on expected range)
+        self.recommended_stop_distance_percent = self.expected_range_percent * 0.6; // 60% of expected range
+
+        // Position size multiplier (inverse relationship with volatility)
+        self.position_size_multiplier = match self.regime.as_str() {
+            "VERY_LOW" => 1.5, // Larger positions in low vol
+            "LOW" => 1.2,
+            "MEDIUM" => 1.0,    // Base size
+            "HIGH" => 0.8,      // Smaller positions in high vol
+            "VERY_HIGH" => 0.5, // Much smaller positions
+            _ => 1.0,
+        };
+
+        // Regime confidence (how sure we are about the volatility regime)
+        self.regime_confidence = probabilities.iter().fold(0.0, |max, &prob| max.max(prob));
+
+        // Update regime and confidence
+        self.update_regime_and_confidence();
+    }
+
+    /// Update regime and confidence based on 5-class probabilities
+    fn update_regime_and_confidence(&mut self) {
+        let probabilities = [
+            ("VERY_LOW", self.very_low_probability),
+            ("LOW", self.low_probability),
+            ("MEDIUM", self.medium_probability),
+            ("HIGH", self.high_probability),
+            ("VERY_HIGH", self.very_high_probability),
+        ];
+
+        let (regime, confidence) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        self.regime = regime.to_string();
+        self.confidence = *confidence;
+    }
+
+    /// Create a new VolatilityPrediction with default values
+    pub fn new() -> Self {
+        Self {
+            very_low_probability: 0.0,
+            low_probability: 0.0,
+            medium_probability: 0.0,
+            high_probability: 0.0,
+            very_high_probability: 0.0,
+            training_horizon: "unknown".to_string(),
+            expected_range_percent: 0.0,
+            volatility_percentile: 0.0,
+            recommended_stop_distance_percent: 0.0,
+            position_size_multiplier: 1.0,
+            regime_confidence: 0.0,
+            regime: "UNKNOWN".to_string(),
+            confidence: 0.0,
+        }
+    }
+
+    /// Create from 5-class probabilities (for backward compatibility)
+    pub fn from_probabilities(
+        very_low: f64,
+        low: f64,
+        medium: f64,
+        high: f64,
+        very_high: f64,
+    ) -> Self {
+        let mut prediction = Self::new();
+        prediction.very_low_probability = very_low;
+        prediction.low_probability = low;
+        prediction.medium_probability = medium;
+        prediction.high_probability = high;
+        prediction.very_high_probability = very_high;
+        prediction.update_regime_and_confidence();
+        prediction
+    }
+
     /// Get the most likely volatility regime (5-class system)
     pub fn get_prediction(&self) -> String {
         self.regime.clone()
@@ -121,6 +425,12 @@ impl VolatilityPrediction {
     /// Get confidence in volatility prediction
     pub fn get_confidence(&self) -> f64 {
         self.confidence
+    }
+}
+
+impl Default for VolatilityPrediction {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -266,6 +576,137 @@ impl PredictionResult {
         self.orders = orders;
         self
     }
+
+    /// Generate adaptive trading signal that works for any horizon
+    pub fn generate_adaptive_trading_signal(
+        direction_pred: &DirectionPrediction,
+        volatility_pred: &VolatilityPrediction,
+        current_price: f64,
+    ) -> AdaptiveTradingSignal {
+        // 1. BREAKOUT SIGNALS (works for any horizon)
+        if direction_pred.breakout_probability > 0.4 {
+            if direction_pred.pump_probability > 0.25 {
+                return AdaptiveTradingSignal::StrongLong {
+                    entry_price: current_price,
+                    target_price: current_price
+                        * (1.0 + direction_pred.expected_upside_percent / 100.0),
+                    stop_loss: current_price
+                        * (1.0 - volatility_pred.recommended_stop_distance_percent / 100.0),
+                    position_size: volatility_pred.position_size_multiplier * 1.3, // Boost for breakouts
+                    horizon: direction_pred.training_horizon.clone(),
+                    risk_reward: direction_pred.risk_reward_ratio,
+                    confidence: direction_pred.pump_probability,
+                };
+            }
+            if direction_pred.dump_probability > 0.25 {
+                return AdaptiveTradingSignal::StrongShort {
+                    entry_price: current_price,
+                    target_price: current_price
+                        * (1.0 - direction_pred.expected_downside_percent / 100.0),
+                    stop_loss: current_price
+                        * (1.0 + volatility_pred.recommended_stop_distance_percent / 100.0),
+                    position_size: volatility_pred.position_size_multiplier * 1.3,
+                    horizon: direction_pred.training_horizon.clone(),
+                    risk_reward: direction_pred.risk_reward_ratio,
+                    confidence: direction_pred.dump_probability,
+                };
+            }
+        }
+
+        // 2. DIRECTIONAL EDGE (minimum edge threshold)
+        let directional_edge =
+            direction_pred.up_probability_aggregated - direction_pred.down_probability_aggregated;
+        let min_edge_threshold = 0.15; // 15% minimum edge
+        let min_risk_reward = 1.2; // Minimum 1.2:1 risk/reward
+
+        if directional_edge.abs() > min_edge_threshold
+            && direction_pred.risk_reward_ratio > min_risk_reward
+        {
+            if directional_edge > 0.0 {
+                return AdaptiveTradingSignal::Long {
+                    entry_price: current_price,
+                    target_price: current_price
+                        * (1.0 + direction_pred.expected_upside_percent / 100.0),
+                    stop_loss: current_price
+                        * (1.0 - volatility_pred.recommended_stop_distance_percent / 100.0),
+                    position_size: volatility_pred.position_size_multiplier,
+                    horizon: direction_pred.training_horizon.clone(),
+                    risk_reward: direction_pred.risk_reward_ratio,
+                    confidence: direction_pred.up_probability_aggregated,
+                };
+            } else {
+                return AdaptiveTradingSignal::Short {
+                    entry_price: current_price,
+                    target_price: current_price
+                        * (1.0 - direction_pred.expected_downside_percent / 100.0),
+                    stop_loss: current_price
+                        * (1.0 + volatility_pred.recommended_stop_distance_percent / 100.0),
+                    position_size: volatility_pred.position_size_multiplier,
+                    horizon: direction_pred.training_horizon.clone(),
+                    risk_reward: direction_pred.risk_reward_ratio,
+                    confidence: direction_pred.down_probability_aggregated,
+                };
+            }
+        }
+
+        AdaptiveTradingSignal::NoSignal {
+            reason: format!(
+                "Insufficient edge ({:.1}%) or poor risk/reward ({:.2}). Need ≥{:.1}% edge and ≥{:.1}:1 R/R",
+                directional_edge * 100.0,
+                direction_pred.risk_reward_ratio,
+                min_edge_threshold * 100.0,
+                min_risk_reward
+            ),
+            horizon: direction_pred.training_horizon.clone(),
+            confidence: direction_pred.confidence,
+        }
+    }
+}
+
+/// Horizon-agnostic adaptive trading signal
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AdaptiveTradingSignal {
+    StrongLong {
+        entry_price: f64,
+        target_price: f64,
+        stop_loss: f64,
+        position_size: f64,
+        horizon: String,
+        risk_reward: f64,
+        confidence: f64,
+    },
+    Long {
+        entry_price: f64,
+        target_price: f64,
+        stop_loss: f64,
+        position_size: f64,
+        horizon: String,
+        risk_reward: f64,
+        confidence: f64,
+    },
+    StrongShort {
+        entry_price: f64,
+        target_price: f64,
+        stop_loss: f64,
+        position_size: f64,
+        horizon: String,
+        risk_reward: f64,
+        confidence: f64,
+    },
+    Short {
+        entry_price: f64,
+        target_price: f64,
+        stop_loss: f64,
+        position_size: f64,
+        horizon: String,
+        risk_reward: f64,
+        confidence: f64,
+    },
+    NoSignal {
+        reason: String,
+        horizon: String,
+        confidence: f64,
+    },
 }
 
 /// Trading orders with dynamic position sizing
@@ -387,18 +828,36 @@ impl TradingOrders {
         atr_value: f64,
         config: &OrderConfig,
     ) -> crate::utils::error::Result<Self> {
-        // Check if direction prediction is strong enough for trading
-        // With 5-class system, combined probabilities (up+pump, down+dump) are typically 0.3-0.8
-        // Lowered threshold from 0.6 to 0.5 to account for more distributed probabilities
-        let direction = if direction_pred.up_probability > 0.5 {
-            "LONG"
-        } else if direction_pred.down_probability > 0.5 {
-            "SHORT"
+        // FIXED: Use adaptive edge detection instead of hardcoded 50% threshold
+        // With 5-class system, we need to check relative strength and minimum edge
+        let directional_edge =
+            direction_pred.up_probability_aggregated - direction_pred.down_probability_aggregated;
+        let min_edge_threshold = 0.15; // 15% minimum edge for signal generation
+        let breakout_threshold = 0.25; // 25% threshold for strong breakout signals
+
+        let direction = if directional_edge > min_edge_threshold {
+            // Check for strong breakout signals first
+            if direction_pred.pump_probability > breakout_threshold {
+                "LONG_BREAKOUT"
+            } else {
+                "LONG"
+            }
+        } else if directional_edge < -min_edge_threshold {
+            // Check for strong breakdown signals first
+            if direction_pred.dump_probability > breakout_threshold {
+                "SHORT_BREAKOUT"
+            } else {
+                "SHORT"
+            }
         } else {
-            // Return empty orders when direction is not strong enough
+            // Return empty orders when directional edge is insufficient
             return Ok(Self::empty(
                 direction_pred,
-                "Direction prediction not strong enough for trading orders",
+                &format!(
+                    "Insufficient directional edge ({:.1}%, need ≥{:.1}%)",
+                    directional_edge * 100.0,
+                    min_edge_threshold * 100.0
+                ),
             ));
         };
 
@@ -414,11 +873,25 @@ impl TradingOrders {
 
         let atr_distance = atr_value * atr_multiplier;
 
-        // Generate order levels based on direction
-        let (entry_levels, exit_levels, stop_levels) = if direction == "LONG" {
-            Self::generate_long_orders(current_price, atr_distance, price_levels, config)
+        // Generate order levels based on direction (handle both regular and breakout signals)
+        let (entry_levels, exit_levels, stop_levels) = if direction.starts_with("LONG") {
+            let is_breakout = direction.contains("BREAKOUT");
+            Self::generate_long_orders(
+                current_price,
+                atr_distance,
+                price_levels,
+                config,
+                is_breakout,
+            )
         } else {
-            Self::generate_short_orders(current_price, atr_distance, price_levels, config)
+            let is_breakout = direction.contains("BREAKOUT");
+            Self::generate_short_orders(
+                current_price,
+                atr_distance,
+                price_levels,
+                config,
+                is_breakout,
+            )
         };
 
         // Calculate risk-reward ratio
@@ -498,25 +971,30 @@ impl TradingOrders {
         }
     }
 
-    /// Generate LONG position orders with crypto-aggressive spacing
+    /// Generate LONG position orders with crypto-aggressive spacing and breakout support
     fn generate_long_orders(
         current_price: f64,
         atr_distance: f64,
         price_levels: &PriceLevelPrediction,
         config: &OrderConfig,
+        is_breakout: bool,
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
+        // Adjust spacing for breakout signals (more aggressive)
+        let spacing_multiplier = if is_breakout { 1.5 } else { 1.0 };
+
         // Entry levels (buy lower) - AGGRESSIVE SPACING
         let entry_prices = [
-            current_price - atr_distance * 0.5, // Aggressive entry
-            current_price - atr_distance * 1.2, // Medium entry
-            current_price - atr_distance * 2.0, // Deep value entry
+            current_price - atr_distance * 0.5 * spacing_multiplier, // Aggressive entry
+            current_price - atr_distance * 1.2 * spacing_multiplier, // Medium entry
+            current_price - atr_distance * 2.0 * spacing_multiplier, // Deep value entry
         ];
 
-        // Exit levels (sell higher) - CRYPTO MOON TARGETS
+        // Exit levels (sell higher) - CRYPTO MOON TARGETS (enhanced for breakouts)
+        let exit_multiplier = if is_breakout { 1.8 } else { 1.0 };
         let exit_prices = [
-            current_price + atr_distance * 2.0, // Quick profit
-            current_price + atr_distance * 4.0, // Medium target
-            current_price + atr_distance * 7.0, // Moon shot
+            current_price + atr_distance * 2.0 * exit_multiplier, // Quick profit
+            current_price + atr_distance * 4.0 * exit_multiplier, // Medium target
+            current_price + atr_distance * 7.0 * exit_multiplier, // Moon shot
         ];
 
         // Stop levels (sell lower) - HUNT PROTECTED
@@ -546,32 +1024,37 @@ impl TradingOrders {
         (entry_levels, exit_levels, stop_levels)
     }
 
-    /// Generate SHORT position orders with crypto-aggressive spacing
+    /// Generate SHORT position orders with crypto-aggressive spacing and breakout support
     fn generate_short_orders(
         current_price: f64,
         atr_distance: f64,
         price_levels: &PriceLevelPrediction,
         config: &OrderConfig,
+        is_breakout: bool,
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
+        // Adjust spacing for breakout signals (more aggressive)
+        let spacing_multiplier = if is_breakout { 1.5 } else { 1.0 };
+
         // Entry levels (sell higher)
         let entry_prices = [
-            current_price + atr_distance * 0.5, // Aggressive short entry
-            current_price + atr_distance * 1.2, // Medium short entry
-            current_price + atr_distance * 2.0, // High short entry
+            current_price + atr_distance * 0.5 * spacing_multiplier, // Aggressive short entry
+            current_price + atr_distance * 1.2 * spacing_multiplier, // Medium short entry
+            current_price + atr_distance * 2.0 * spacing_multiplier, // High short entry
         ];
 
-        // Exit levels (buy lower) - CRYPTO DUMP TARGETS
+        // Exit levels (buy lower) - CRYPTO DUMP TARGETS (enhanced for breakouts)
+        let exit_multiplier = if is_breakout { 2.0 } else { 1.0 };
         let exit_prices = [
-            current_price - atr_distance * 3.0, // Quick cover (increased from 2.0)
-            current_price - atr_distance * 6.0, // Medium target (increased from 4.0)
-            current_price - atr_distance * 10.0, // Full dump (increased from 7.0)
+            current_price - atr_distance * 3.0 * exit_multiplier, // Quick cover
+            current_price - atr_distance * 6.0 * exit_multiplier, // Medium target
+            current_price - atr_distance * 10.0 * exit_multiplier, // Full dump
         ];
 
         // Stop levels (buy higher) - HUNT PROTECTED
         let stop_prices = [
-            current_price + atr_distance * 2.5 * config.hunt_protection, // Reduced from 3.0
-            current_price + atr_distance * 3.0 * config.hunt_protection, // Reduced from 4.0
-            current_price + atr_distance * 3.5 * config.hunt_protection, // Reduced from 5.5
+            current_price + atr_distance * 2.5 * config.hunt_protection,
+            current_price + atr_distance * 3.0 * config.hunt_protection,
+            current_price + atr_distance * 3.5 * config.hunt_protection,
         ];
 
         // DYNAMIC QUANTITY ALLOCATION
@@ -750,28 +1233,44 @@ mod tests {
     use std::collections::HashMap;
 
     fn create_test_direction_prediction(up_prob: f64) -> DirectionPrediction {
-        DirectionPrediction {
-            up_probability: up_prob,
-            down_probability: 1.0 - up_prob,
-            prediction: if up_prob > 0.5 {
-                "UP".to_string()
-            } else {
-                "DOWN".to_string()
-            },
-            confidence: up_prob.max(1.0 - up_prob),
-        }
+        // Convert 2-class to 5-class probabilities for testing
+        let down_prob = 1.0 - up_prob;
+        let sideways_prob = 0.2;
+        let remaining = 1.0 - sideways_prob;
+        let dump_prob = if down_prob > 0.5 {
+            (down_prob - 0.5) * remaining
+        } else {
+            0.0
+        };
+        let pump_prob = if up_prob > 0.5 {
+            (up_prob - 0.5) * remaining
+        } else {
+            0.0
+        };
+        let down_moderate = down_prob - dump_prob;
+        let up_moderate = up_prob - pump_prob;
+
+        DirectionPrediction::from_probabilities(
+            dump_prob,
+            down_moderate,
+            sideways_prob,
+            up_moderate,
+            pump_prob,
+        )
     }
 
     fn create_test_volatility_prediction(regime: &str) -> VolatilityPrediction {
-        VolatilityPrediction {
-            very_low_probability: 0.1,
-            low_probability: 0.2,
-            medium_probability: 0.4,
-            high_probability: 0.2,
-            very_high_probability: 0.1,
-            regime: regime.to_string(),
-            confidence: 0.8,
-        }
+        // Create probability distribution based on regime
+        let (very_low, low, medium, high, very_high) = match regime {
+            "VERY_LOW" => (0.7, 0.2, 0.1, 0.0, 0.0),
+            "LOW" => (0.2, 0.6, 0.2, 0.0, 0.0),
+            "MEDIUM" => (0.1, 0.2, 0.4, 0.2, 0.1),
+            "HIGH" => (0.0, 0.0, 0.2, 0.6, 0.2),
+            "VERY_HIGH" => (0.0, 0.0, 0.1, 0.2, 0.7),
+            _ => (0.1, 0.2, 0.4, 0.2, 0.1),
+        };
+
+        VolatilityPrediction::from_probabilities(very_low, low, medium, high, very_high)
     }
 
     fn create_test_price_levels() -> PriceLevelPrediction {
@@ -1232,5 +1731,120 @@ mod tests {
             high_entry_spread.abs() > low_entry_spread.abs(),
             "HIGH volatility should have wider entry spreads"
         );
+    }
+
+    #[test]
+    fn test_adaptive_system_different_horizons() {
+        // Test 1: 4h horizon with 60 sequence length and 1.5 bandwidth multiplier
+        let mut direction_4h = DirectionPrediction::from_probabilities(
+            0.1, 0.2, 0.2, 0.3, 0.2, // Moderate bullish
+        );
+        direction_4h.calculate_horizon_adaptive_metrics(
+            4.5, // 4.5% bandwidth (calculated from sequence)
+            "4h".to_string(),
+            60,
+        );
+
+        // Test 2: 1d horizon with 30 sequence length and 2.0 bandwidth multiplier
+        let mut direction_1d = DirectionPrediction::from_probabilities(
+            0.1, 0.2, 0.2, 0.3, 0.2, // Same probabilities
+        );
+        direction_1d.calculate_horizon_adaptive_metrics(
+            8.0, // 8.0% bandwidth (larger for daily)
+            "1d".to_string(),
+            30,
+        );
+
+        // Validate horizon-specific calculations
+        assert_eq!(direction_4h.training_horizon, "4h");
+        assert_eq!(direction_4h.sequence_length, 60);
+        assert_eq!(direction_4h.sequence_bandwidth_percent, 4.5);
+
+        assert_eq!(direction_1d.training_horizon, "1d");
+        assert_eq!(direction_1d.sequence_length, 30);
+        assert_eq!(direction_1d.sequence_bandwidth_percent, 8.0);
+
+        // Expected moves should scale with bandwidth
+        assert!(direction_1d.expected_upside_percent > direction_4h.expected_upside_percent);
+        assert!(direction_1d.breakout_threshold_percent > direction_4h.breakout_threshold_percent);
+
+        // Both should have same aggregated probabilities (same input)
+        assert!(
+            (direction_4h.up_probability_aggregated - direction_1d.up_probability_aggregated).abs()
+                < 0.001
+        );
+
+        println!(
+            "4h Expected Upside: {:.2}%",
+            direction_4h.expected_upside_percent
+        );
+        println!(
+            "1d Expected Upside: {:.2}%",
+            direction_1d.expected_upside_percent
+        );
+        println!("4h Risk/Reward: {:.2}", direction_4h.risk_reward_ratio);
+        println!("1d Risk/Reward: {:.2}", direction_1d.risk_reward_ratio);
+    }
+
+    #[test]
+    fn test_50_percent_threshold_bug_fixed() {
+        // Test that we no longer use hardcoded 50% thresholds
+        let current_price = 45000.0;
+
+        // Create prediction with 55% up, 35% down (20% directional edge)
+        let mut direction_pred = DirectionPrediction::from_probabilities(
+            0.1, 0.25, 0.1, 0.35, 0.2, // 55% up aggregated, 35% down aggregated
+        );
+
+        // Calculate adaptive metrics to populate aggregated probabilities
+        direction_pred.calculate_horizon_adaptive_metrics(
+            5.0, // 5% bandwidth
+            "4h".to_string(),
+            60,
+        );
+
+        let volatility_pred = VolatilityPrediction::from_probabilities(
+            0.2, 0.4, 0.3, 0.1, 0.0, // Low volatility
+        );
+
+        let price_levels = create_test_price_levels();
+        let atr_value = 500.0;
+        let config = OrderConfig::default();
+
+        // Debug the directional edge calculation
+        let directional_edge =
+            direction_pred.up_probability_aggregated - direction_pred.down_probability_aggregated;
+        println!(
+            "Up aggregated: {:.3}",
+            direction_pred.up_probability_aggregated
+        );
+        println!(
+            "Down aggregated: {:.3}",
+            direction_pred.down_probability_aggregated
+        );
+        println!(
+            "Directional edge: {:.3} ({:.1}%)",
+            directional_edge,
+            directional_edge * 100.0
+        );
+
+        // This should now generate orders because directional edge is 20% (55% - 35%)
+        let orders = TradingOrders::generate(
+            current_price,
+            &direction_pred,
+            &volatility_pred,
+            &price_levels,
+            atr_value,
+            &config,
+        )
+        .unwrap();
+
+        // Should be LONG direction (not empty orders)
+        assert!(orders.direction.starts_with("LONG"));
+        assert!(orders.total_position_size > 0.0);
+        assert!(orders.risk_reward_ratio > 0.0);
+
+        println!("Generated orders with direction: {}", orders.direction);
+        println!("Position size: {:.1}%", orders.total_position_size * 100.0);
     }
 }

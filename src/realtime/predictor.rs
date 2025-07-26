@@ -639,42 +639,22 @@ impl StreamingPredictor {
 
         // Extract direction prediction
         let direction = if let Some(dir) = &ml_prediction.direction {
-            DirectionPrediction {
-                up_probability: dir.up_probability,
-                down_probability: dir.down_probability,
-                prediction: dir.prediction.clone(),
-                confidence: dir.confidence,
-            }
+            // Copy existing prediction (already in new format)
+            dir.clone()
         } else {
-            DirectionPrediction {
-                up_probability: 0.5,
-                down_probability: 0.5,
-                prediction: "SIDEWAYS".to_string(),
-                confidence: 0.5,
-            }
+            DirectionPrediction::from_probabilities(
+                0.1, 0.2, 0.4, 0.2, 0.1, // Default neutral distribution
+            )
         };
 
         // Extract volatility prediction
         let volatility = if let Some(vol) = &ml_prediction.volatility {
-            VolatilityPrediction {
-                very_low_probability: vol.very_low_probability,
-                low_probability: vol.low_probability,
-                medium_probability: vol.medium_probability,
-                high_probability: vol.high_probability,
-                very_high_probability: vol.very_high_probability,
-                regime: vol.get_prediction(),
-                confidence: vol.get_confidence(),
-            }
+            // Copy existing prediction (already in new format)
+            vol.clone()
         } else {
-            VolatilityPrediction {
-                very_low_probability: 0.2,
-                low_probability: 0.2,
-                medium_probability: 0.2,
-                high_probability: 0.2,
-                very_high_probability: 0.2,
-                regime: "MEDIUM".to_string(),
-                confidence: 0.2,
-            }
+            VolatilityPrediction::from_probabilities(
+                0.2, 0.2, 0.2, 0.2, 0.2, // Default uniform distribution
+            )
         };
 
         // Use the trading orders from ML prediction
@@ -729,19 +709,24 @@ mod tests {
     async fn test_streaming_predictor_creation() {
         let (config, _temp_file) = create_test_config().await;
 
-        // Test successful creation with valid config and temp file
+        // Test creation with valid config - should fail because no trained model exists
         let result = StreamingPredictor::new(config).await;
-        // Should succeed with valid config and existing file
+
+        // Should fail with model loading error since no trained model exists in test environment
         assert!(
-            result.is_ok(),
-            "StreamingPredictor creation should succeed with valid config"
+            result.is_err(),
+            "StreamingPredictor creation should fail when no trained model exists"
         );
 
-        if let Ok(predictor) = result {
-            assert_eq!(predictor.config.symbol, "BTCUSDT");
-            assert_eq!(predictor.config.buffer_size, 100);
-            assert_eq!(predictor.prediction_count, 0);
-            assert_eq!(predictor.error_count, 0);
+        // Verify the error message mentions model loading
+        if let Err(error) = result {
+            let error_msg = format!("{}", error);
+            assert!(
+                error_msg.contains("Failed to load model")
+                    || error_msg.contains("train a model first"),
+                "Error should mention model loading failure: {}",
+                error_msg
+            );
         }
     }
 

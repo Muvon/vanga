@@ -446,7 +446,10 @@ mod tests {
 
     #[test]
     fn test_adaptive_bandwidth_sizing() {
-        let targets = vec![2; 100]; // Extreme imbalance - all class 2
+        // Create extreme imbalance: 999 samples in class 2, 1 sample in class 0
+        let mut targets = vec![2; 999];
+        targets.push(0);
+
         let config = ImbalanceMitigationConfig::default();
         let analysis = ClassDistributionAnalysis::analyze(&targets, 6, &config);
 

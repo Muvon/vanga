@@ -67,7 +67,7 @@ mod tests {
         let config = LSTMConfig {
             input_size: 3,
             hidden_sizes: vec![8, 8], // Two layers with 8 hidden units each
-            output_size: 1,
+            output_size: 5,           // Use 5 classes for Direction target
             sequence_length: 5,
             learning_rate: 0.01,
             num_layers: 2, // Default multi-layer
@@ -75,13 +75,24 @@ mod tests {
 
         let mut model = LSTMModel::new(config).expect("Failed to create model");
 
+        // Set target context for regression (single output)
+        model.set_target_context(
+            "test_target".to_string(),
+            crate::targets::TargetType::Direction,
+        );
+
         // Create simple training data (small dataset to trigger early stopping quickly)
         let sequences =
             Array3::from_shape_vec((10, 5, 3), (0..150).map(|i| (i as f64) * 0.1).collect())
                 .expect("Failed to create sequences");
 
-        let targets = Array2::from_shape_vec((10, 1), (0..10).map(|i| (i as f64) * 0.5).collect())
-            .expect("Failed to create targets");
+        let targets = Array2::from_shape_vec(
+            (10, 5),
+            (0..50)
+                .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
+                .collect(),
+        )
+        .expect("Failed to create targets");
 
         // Create training config with early stopping enabled
         let training_config = crate::config::TrainingConfig {
@@ -144,7 +155,7 @@ mod tests {
         let config = LSTMConfig {
             input_size: 3,
             hidden_sizes: vec![8, 8], // Two layers with 8 hidden units each
-            output_size: 1,
+            output_size: 5,           // Use 5 classes for Direction target
             sequence_length: 5,
             learning_rate: 0.01,
             num_layers: 2, // Default multi-layer
@@ -152,13 +163,24 @@ mod tests {
 
         let mut model = LSTMModel::new(config).expect("Failed to create model");
 
+        // Set target context for regression (single output)
+        model.set_target_context(
+            "test_target".to_string(),
+            crate::targets::TargetType::Direction,
+        );
+
         // Create simple training data
         let sequences =
             Array3::from_shape_vec((8, 5, 3), (0..120).map(|i| (i as f64) * 0.1).collect())
                 .expect("Failed to create sequences");
 
-        let targets = Array2::from_shape_vec((8, 1), (0..8).map(|i| (i as f64) * 0.5).collect())
-            .expect("Failed to create targets");
+        let targets = Array2::from_shape_vec(
+            (8, 5),
+            (0..40)
+                .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
+                .collect(),
+        )
+        .expect("Failed to create targets");
 
         // Create training config with fixed epochs (should bypass early stopping)
         let training_config = crate::config::TrainingConfig {
@@ -223,7 +245,7 @@ mod tests {
         let config = LSTMConfig {
             input_size: 3,
             hidden_sizes: vec![8, 8], // Two layers with 8 hidden units each
-            output_size: 1,
+            output_size: 5,           // Use 5 classes for Direction target
             sequence_length: 5,
             learning_rate: 0.01,
             num_layers: 2, // Default multi-layer
@@ -231,13 +253,24 @@ mod tests {
 
         let mut model = LSTMModel::new(config).expect("Failed to create model");
 
+        // Set target context for regression (single output)
+        model.set_target_context(
+            "test_target".to_string(),
+            crate::targets::TargetType::Direction,
+        );
+
         // Create training data
         let sequences =
             Array3::from_shape_vec((10, 5, 3), (0..150).map(|i| (i as f64) * 0.1).collect())
                 .expect("Failed to create sequences");
 
-        let targets = Array2::from_shape_vec((10, 1), (0..10).map(|i| (i as f64) * 0.5).collect())
-            .expect("Failed to create targets");
+        let targets = Array2::from_shape_vec(
+            (10, 5),
+            (0..50)
+                .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
+                .collect(),
+        )
+        .expect("Failed to create targets");
 
         // Train the model with fixed epochs for quick testing
         let training_config = crate::config::TrainingConfig {
@@ -296,7 +329,11 @@ mod tests {
             sequences.shape()[0],
             "Should predict for all sequences"
         );
-        assert_eq!(predictions.ncols(), 1, "Should have single output column");
+        assert_eq!(
+            predictions.ncols(),
+            5,
+            "Should have 5 output columns for Direction target"
+        );
 
         // Verify that the loaded model is properly initialized
         assert!(
@@ -319,7 +356,7 @@ mod tests {
         let config = LSTMConfig {
             input_size: 4,
             hidden_sizes: vec![16, 16, 16], // Three layers with 16 hidden units each
-            output_size: 1,
+            output_size: 5,                 // Use 5 classes for Direction target
             sequence_length: 10,
             learning_rate: 0.01,
             num_layers: 3, // Test 3-layer LSTM
@@ -327,13 +364,24 @@ mod tests {
 
         let mut model = LSTMModel::new(config).expect("Failed to create multi-layer model");
 
+        // Set target context for regression (single output)
+        model.set_target_context(
+            "test_target".to_string(),
+            crate::targets::TargetType::Direction,
+        );
+
         // Create training data with more complexity for multi-layer testing
         let sequences =
             Array3::from_shape_vec((20, 10, 4), (0..800).map(|i| (i as f64) * 0.01).collect())
                 .expect("Failed to create sequences");
 
-        let targets = Array2::from_shape_vec((20, 1), (0..20).map(|i| (i as f64) * 0.3).collect())
-            .expect("Failed to create targets");
+        let targets = Array2::from_shape_vec(
+            (20, 5),
+            (0..100)
+                .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
+                .collect(),
+        )
+        .expect("Failed to create targets");
 
         // Create training config for multi-layer testing
         let training_config = crate::config::TrainingConfig {
@@ -400,7 +448,11 @@ mod tests {
             sequences.shape()[0],
             "Should predict for all sequences"
         );
-        assert_eq!(predictions.ncols(), 1, "Should have single output column");
+        assert_eq!(
+            predictions.ncols(),
+            5,
+            "Should have 5 output columns for Direction target"
+        );
 
         // Verify multi-layer architecture is properly initialized
         assert!(

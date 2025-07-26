@@ -19,6 +19,8 @@ pub struct OutputFormatter {
     config: OutputConfig,
     parser: Option<MultiTargetParser>,
     sequence_data: Option<Vec<f64>>,
+    /// Model config bandwidth_size: sequence bandwidth multiplier (e.g., 1.0, 1.5, 2.0)
+    /// Used in target generation as: sequence_bandwidth = (max - min) * bandwidth_size
     bandwidth_size: Option<f64>,
 }
 
@@ -178,13 +180,93 @@ impl OutputFormatter {
             }
 
             if let Some(direction_output) = parsed_output.direction {
-                result =
-                    result.with_direction(self.create_direction_prediction(&direction_output)?);
+                // Calculate actual sequence bandwidth percentage from sequence data
+                let sequence_bandwidth_percent = if let Some(sequence_prices) = &self.sequence_data
+                {
+                    if sequence_prices.len() >= 2 {
+                        let min_price =
+                            sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                        let max_price = sequence_prices
+                            .iter()
+                            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+                        // Use model config bandwidth_size (sequence bandwidth multiplier)
+                        let model_bandwidth_multiplier = self.bandwidth_size.ok_or_else(|| {
+                            VangaError::PredictionError(
+                                "Model bandwidth_size not configured. This is required for adaptive predictions.".to_string()
+                            )
+                        })?;
+
+                        // Calculate bandwidth as percentage of current price
+                        let sequence_price_range = max_price - min_price;
+                        let model_bandwidth_absolute =
+                            sequence_price_range * model_bandwidth_multiplier;
+                        (model_bandwidth_absolute / current_price) * 100.0 // Convert to percentage
+                    } else {
+                        return Err(VangaError::PredictionError(format!(
+                            "Insufficient sequence data for adaptive predictions: {} prices (need ≥2)",
+                            sequence_prices.len()
+                        )));
+                    }
+                } else {
+                    return Err(VangaError::PredictionError(
+                        "Sequence data not available for adaptive predictions. Use with_sequence_data() to provide it.".to_string()
+                    ));
+                };
+
+                result = result.with_direction(self.create_direction_prediction(
+                    &direction_output,
+                    Some(horizon),
+                    Some(sequence_length as u32),
+                    Some(sequence_bandwidth_percent),
+                )?);
             }
 
             if let Some(volatility_output) = parsed_output.volatility {
-                result =
-                    result.with_volatility(self.create_volatility_prediction(&volatility_output)?);
+                // Calculate sequence bandwidth percentage (same logic as direction)
+                let sequence_bandwidth_percent = if let Some(sequence_prices) = &self.sequence_data
+                {
+                    if sequence_prices.len() >= 2 {
+                        let min_price =
+                            sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                        let max_price = sequence_prices
+                            .iter()
+                            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+                        // Use model config bandwidth_size (sequence bandwidth multiplier)
+                        let model_bandwidth_multiplier = self.bandwidth_size.ok_or_else(|| {
+                            VangaError::PredictionError(
+                                "Model bandwidth_size not configured. This is required for adaptive predictions.".to_string()
+                            )
+                        })?;
+
+                        let sequence_price_range = max_price - min_price;
+                        let model_bandwidth_absolute =
+                            sequence_price_range * model_bandwidth_multiplier;
+                        (model_bandwidth_absolute / current_price) * 100.0 // Convert to percentage
+                    } else {
+                        return Err(VangaError::PredictionError(format!(
+                            "Insufficient sequence data for adaptive predictions: {} prices (need ≥2)",
+                            sequence_prices.len()
+                        )));
+                    }
+                } else {
+                    return Err(VangaError::PredictionError(
+                        "Sequence data not available for adaptive predictions. Use with_sequence_data() to provide it.".to_string()
+                    ));
+                };
+
+                // Calculate volatility percentile from sequence data
+                let volatility_percentile = self.calculate_volatility_percentile(
+                    self.sequence_data.as_ref().unwrap(), // Safe unwrap - already checked above
+                );
+
+                result = result.with_volatility(self.create_volatility_prediction(
+                    &volatility_output,
+                    Some(horizon),
+                    Some(sequence_bandwidth_percent),
+                    Some(volatility_percentile),
+                )?);
             }
 
             // Apply the calculated confidence to the prediction result
@@ -348,35 +430,38 @@ impl OutputFormatter {
         (ranges, names)
     }
 
-    /// Create direction prediction from DirectionOutput or single raw value
+    /// Create direction prediction from DirectionOutput with 5-class system and adaptive metrics
     pub fn create_direction_prediction(
         &self,
         input: &DirectionOutput,
+        training_horizon: Option<&str>,
+        sequence_length: Option<u32>,
+        sequence_bandwidth_percent: Option<f64>,
     ) -> Result<DirectionPrediction> {
-        // Find the most likely direction from 5-class probabilities
-        let probabilities = [
-            ("DUMP", input.dump_probability),
-            ("DOWN", input.down_probability),
-            ("SIDEWAYS", input.sideways_probability),
-            ("UP", input.up_probability),
-            ("PUMP", input.pump_probability),
-        ];
+        // Create prediction with 5-class probabilities
+        let mut prediction = DirectionPrediction::from_probabilities(
+            input.dump_probability,
+            input.down_probability,
+            input.sideways_probability,
+            input.up_probability,
+            input.pump_probability,
+        );
 
-        let (prediction, max_probability) = probabilities
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .unwrap();
+        // Calculate adaptive metrics if we have the required information
+        if let (Some(horizon), Some(seq_len), Some(bandwidth)) = (
+            training_horizon,
+            sequence_length,
+            sequence_bandwidth_percent,
+        ) {
+            prediction.calculate_horizon_adaptive_metrics(bandwidth, horizon.to_string(), seq_len);
+        } else {
+            // Set default values for backward compatibility
+            prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
+            prediction.sequence_length = sequence_length.unwrap_or(0);
+            prediction.sequence_bandwidth_percent = sequence_bandwidth_percent.unwrap_or(0.0);
+        }
 
-        // Calculate up/down probabilities for compatibility with existing structures
-        let up_probability = input.up_probability + input.pump_probability;
-        let down_probability = input.down_probability + input.dump_probability;
-
-        Ok(DirectionPrediction {
-            prediction: prediction.to_string(),
-            up_probability,
-            down_probability,
-            confidence: *max_probability,
-        })
+        Ok(prediction)
     }
 
     /// Legacy method for single raw value direction prediction
@@ -387,54 +472,75 @@ impl OutputFormatter {
         let up_probability = (raw_output + 1.0) / 2.0;
         let down_probability = 1.0 - up_probability;
 
-        let prediction = if up_probability > 0.6 {
-            "UP"
-        } else if down_probability > 0.6 {
-            "DOWN"
+        // Convert 2-class probabilities to 5-class system based on actual calculated values
+        let sideways_prob = 0.2; // Base sideways probability
+        let remaining = 1.0 - sideways_prob;
+
+        // Distribute remaining probability based on direction strength
+        let dump_prob = if down_probability > 0.6 {
+            (down_probability - 0.6) * remaining * 2.0 // Strong down becomes dump
         } else {
-            "SIDEWAYS"
+            0.0
+        };
+        let pump_prob = if up_probability > 0.6 {
+            (up_probability - 0.6) * remaining * 2.0 // Strong up becomes pump
+        } else {
+            0.0
         };
 
-        let confidence = (up_probability - 0.5).abs() * 2.0;
+        // Remaining moderate probabilities
+        let down_moderate = (down_probability - dump_prob).max(0.0);
+        let up_moderate = (up_probability - pump_prob).max(0.0);
 
-        Ok(DirectionPrediction {
-            up_probability,
-            down_probability,
-            prediction: prediction.to_string(),
-            confidence,
-        })
+        // Normalize to ensure probabilities sum to 1.0
+        let total = dump_prob + down_moderate + sideways_prob + up_moderate + pump_prob;
+        let norm_factor = if total > 0.0 { 1.0 / total } else { 1.0 };
+
+        Ok(DirectionPrediction::from_probabilities(
+            dump_prob * norm_factor,
+            down_moderate * norm_factor,
+            sideways_prob * norm_factor,
+            up_moderate * norm_factor,
+            pump_prob * norm_factor,
+        ))
     }
 
-    /// Create volatility prediction from single VolatilityOutput (5-class system)
+    /// Create volatility prediction from VolatilityOutput with 5-class system and adaptive metrics
     pub fn create_volatility_prediction(
         &self,
         volatility_output: &VolatilityOutput,
+        training_horizon: Option<&str>,
+        sequence_bandwidth_percent: Option<f64>,
+        current_volatility_percentile: Option<f64>,
     ) -> Result<VolatilityPrediction> {
-        // Find the most likely regime
-        let probabilities = [
-            ("VERY_LOW", volatility_output.very_low_probability),
-            ("LOW", volatility_output.low_probability),
-            ("MEDIUM", volatility_output.medium_probability),
-            ("HIGH", volatility_output.high_probability),
-            ("VERY_HIGH", volatility_output.very_high_probability),
-        ];
+        // Create prediction with 5-class probabilities
+        let mut prediction = VolatilityPrediction::from_probabilities(
+            volatility_output.very_low_probability,
+            volatility_output.low_probability,
+            volatility_output.medium_probability,
+            volatility_output.high_probability,
+            volatility_output.very_high_probability,
+        );
 
-        let (regime, confidence) = probabilities
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .unwrap();
+        // Calculate adaptive metrics if we have the required information
+        if let (Some(horizon), Some(bandwidth), Some(percentile)) = (
+            training_horizon,
+            sequence_bandwidth_percent,
+            current_volatility_percentile,
+        ) {
+            prediction.calculate_horizon_adaptive_volatility(
+                bandwidth,
+                horizon.to_string(),
+                percentile,
+            );
+        } else {
+            // Set default values for backward compatibility
+            prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
+            prediction.expected_range_percent = sequence_bandwidth_percent.unwrap_or(0.0);
+            prediction.volatility_percentile = current_volatility_percentile.unwrap_or(50.0);
+        }
 
-        // Note: Volatility prediction now uses 5-class probability system
-
-        Ok(VolatilityPrediction {
-            very_low_probability: 0.1,
-            low_probability: 0.2,
-            medium_probability: 0.4,
-            high_probability: 0.2,
-            very_high_probability: 0.1,
-            regime: regime.to_string(),
-            confidence: *confidence,
-        })
+        Ok(prediction)
     }
 
     /// Format as confidence intervals (placeholder)
@@ -508,38 +614,49 @@ impl OutputFormatter {
                             confidence: confidence_interval,
                         });
 
-                    // Add direction prediction
+                    // Add direction prediction using new structure
                     let up_probability = self.sigmoid(direction_output);
-                    result =
-                        result.with_direction(crate::output::structures::DirectionPrediction {
-                            up_probability,
-                            down_probability: 1.0 - up_probability,
-                            prediction: if up_probability > 0.5 {
-                                "UP".to_string()
-                            } else {
-                                "DOWN".to_string()
-                            },
-                            confidence: (up_probability - 0.5).abs() * 2.0,
-                        });
+                    let down_probability = 1.0 - up_probability;
 
-                    // Add volatility prediction
+                    // Convert to 5-class probabilities
+                    let sideways_prob = 0.2;
+                    let remaining = 1.0 - sideways_prob;
+                    let dump_prob = if down_probability > 0.5 {
+                        (down_probability - 0.5) * remaining
+                    } else {
+                        0.0
+                    };
+                    let pump_prob = if up_probability > 0.5 {
+                        (up_probability - 0.5) * remaining
+                    } else {
+                        0.0
+                    };
+                    let down_moderate = down_probability - dump_prob;
+                    let up_moderate = up_probability - pump_prob;
+
+                    result = result.with_direction(DirectionPrediction::from_probabilities(
+                        dump_prob,
+                        down_moderate,
+                        sideways_prob,
+                        up_moderate,
+                        pump_prob,
+                    ));
+
+                    // Add volatility prediction using new structure
                     let volatility_estimate = volatility_output.abs() * 0.1; // Scale to reasonable volatility
-                    result =
-                        result.with_volatility(crate::output::structures::VolatilityPrediction {
-                            very_low_probability: 0.1,
-                            low_probability: 0.2,
-                            medium_probability: 0.4,
-                            high_probability: 0.2,
-                            very_high_probability: 0.1,
-                            regime: if volatility_estimate < 0.02 {
-                                "LOW".to_string()
-                            } else if volatility_estimate < 0.05 {
-                                "MEDIUM".to_string()
-                            } else {
-                                "HIGH".to_string()
-                            },
-                            confidence: 1.0 - (volatility_estimate * 10.0).min(0.9),
-                        });
+
+                    // Map volatility estimate to 5-class probabilities
+                    let (very_low, low, medium, high, very_high) = if volatility_estimate < 0.02 {
+                        (0.6, 0.3, 0.1, 0.0, 0.0) // Low volatility
+                    } else if volatility_estimate < 0.05 {
+                        (0.1, 0.2, 0.4, 0.2, 0.1) // Medium volatility
+                    } else {
+                        (0.0, 0.0, 0.2, 0.3, 0.5) // High volatility
+                    };
+
+                    result = result.with_volatility(VolatilityPrediction::from_probabilities(
+                        very_low, low, medium, high, very_high,
+                    ));
                 } else {
                     // Single output - treat as price change
                     let price_change = (batch_predictions[0] - 0.5) * 0.1; // Normalize to ±5%
@@ -638,6 +755,51 @@ impl OutputFormatter {
         };
 
         (prediction_certainty * target_quality_factor).clamp(0.1, 0.95)
+    }
+
+    /// Calculate volatility percentile from sequence price data
+    fn calculate_volatility_percentile(&self, sequence_prices: &[f64]) -> f64 {
+        if sequence_prices.len() < 3 {
+            // This should never happen if we validated properly above, but be explicit
+            log::warn!(
+                "Insufficient sequence data for volatility percentile calculation: {} prices",
+                sequence_prices.len()
+            );
+            return 50.0; // Return median as last resort
+        }
+
+        // Calculate returns from the sequence
+        let mut returns = Vec::new();
+        for i in 1..sequence_prices.len() {
+            let return_pct = (sequence_prices[i] - sequence_prices[i - 1]) / sequence_prices[i - 1];
+            returns.push(return_pct.abs()); // Use absolute returns for volatility
+        }
+
+        if returns.is_empty() {
+            log::warn!("No returns calculated from sequence data");
+            return 50.0;
+        }
+
+        // Calculate current volatility (standard deviation of returns)
+        let mean_return: f64 = returns.iter().sum::<f64>() / returns.len() as f64;
+        let variance: f64 = returns
+            .iter()
+            .map(|&r| (r - mean_return).powi(2))
+            .sum::<f64>()
+            / returns.len() as f64;
+        let current_volatility = variance.sqrt();
+
+        // Sort returns to find percentile
+        let mut sorted_returns = returns.clone();
+        sorted_returns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // Find where current volatility sits in the distribution
+        let position = sorted_returns
+            .iter()
+            .position(|&r| r >= current_volatility)
+            .unwrap_or(sorted_returns.len());
+
+        (position as f64 / sorted_returns.len() as f64) * 100.0
     }
 
     /// Sigmoid activation function
