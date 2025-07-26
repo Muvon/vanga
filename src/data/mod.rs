@@ -573,6 +573,8 @@ pub struct PreparedPredictionData {
     pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
     pub feature_names: Vec<String>,
     pub metadata: DataMetadata,
+    /// OHLC data for the sequence used in prediction (for ATR calculation)
+    pub sequence_ohlc: Option<Vec<crate::data::structures::MarketDataRow>>,
 }
 
 /// Normalization statistics for features

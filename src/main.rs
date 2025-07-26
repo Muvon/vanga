@@ -665,18 +665,15 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                 );
             }
 
-            // Make predictions using the multi-target API
-            let predictions = vanga::api::predict_multi_target(config.clone(), &model).await?;
+            // Make predictions using the unified predictor API
+            let structured_predictions = {
+                let predictor = vanga::api::Predictor::new(config.clone());
+                predictor.predict(vanga::api::ModelWrapper::MultiTarget(&model)).await?
+            };
 
             // Save predictions if output path specified
             if let Some(ref output_path) = config.output_path {
-                // Convert raw predictions to structured format using OutputFormatter
-                log::info!("Converting raw predictions to structured format...");
-                let structured_predictions = predictions
-                    .to_structured_predictions(&config, &model)
-                    .await?;
-
-                // Use existing formatter method to create JSON
+                log::info!("Saving structured predictions to file...");
                 let output_content =
                     vanga::output::formatter::predictions_to_json(&structured_predictions)?;
 
@@ -684,10 +681,7 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                 log::info!("Structured predictions saved to: {}", output_path.display());
             } else {
                 // If no output path, print structured predictions to console
-                log::info!("Converting raw predictions to structured format for console output...");
-                let structured_predictions = predictions
-                    .to_structured_predictions(&config, &model)
-                    .await?;
+                log::info!("Outputting structured predictions to console...");
                 let output_content =
                     vanga::output::formatter::predictions_to_json(&structured_predictions)?;
                 println!("{}", output_content);
@@ -805,10 +799,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                         }
 
                         // Make prediction using multi-target API
-                        let predictions =
-                            match vanga::api::predict_multi_target(symbol_config.clone(), &model)
-                                .await
-                            {
+                        let predictions = {
+                            let predictor = vanga::api::Predictor::new(symbol_config.clone());
+                            match predictor.predict(vanga::api::ModelWrapper::MultiTarget(&model)).await {
                                 Ok(predictions) => predictions,
                                 Err(e) => {
                                     log::error!(
@@ -818,7 +811,8 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                                     );
                                     continue;
                                 }
-                            };
+                            }
+                        };
 
                         // Save predictions for this symbol
                         let output_path = if let Some(output) = &params.output {
@@ -839,12 +833,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                         };
 
                         if let Some(output_path) = output_path {
-                            let structured_predictions = predictions
-                                .to_structured_predictions(&symbol_config, &model)
-                                .await?;
-                            let output_content = vanga::output::formatter::predictions_to_json(
-                                &structured_predictions,
-                            )?;
+                            log::info!("💾 Saving cross-asset predictions to file...");
+                            let output_content =
+                                vanga::output::formatter::predictions_to_json(&predictions)?;
                             std::fs::write(&output_path, output_content)?;
                             log::info!(
                                 "✅ Cross-asset predictions for {} saved to: {}",
@@ -852,12 +843,8 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                                 output_path.display()
                             );
                         } else {
-                            let structured_predictions = predictions
-                                .to_structured_predictions(&symbol_config, &model)
-                                .await?;
-                            let output_content = vanga::output::formatter::predictions_to_json(
-                                &structured_predictions,
-                            )?;
+                            let output_content =
+                                vanga::output::formatter::predictions_to_json(&predictions)?;
                             println!("=== Cross-Asset Predictions for {} ===", symbol);
                             println!("{}", output_content);
                         }
@@ -926,15 +913,16 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                     // Make prediction for this symbol
                     log::info!("🔮 Making prediction for {}", symbol);
 
-                    let predictions =
-                        match vanga::api::predict_multi_target(symbol_config.clone(), &model).await
-                        {
+                    let predictions = {
+                        let predictor = vanga::api::Predictor::new(symbol_config.clone());
+                        match predictor.predict(vanga::api::ModelWrapper::MultiTarget(&model)).await {
                             Ok(predictions) => predictions,
                             Err(e) => {
                                 log::error!("❌ Prediction failed for {}: {}", symbol, e);
                                 continue;
                             }
-                        };
+                        }
+                    };
 
                     // Save predictions for this symbol
                     let output_path = if let Some(output) = &params.output {
@@ -950,11 +938,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                     };
 
                     if let Some(output_path) = output_path {
-                        let structured_predictions = predictions
-                            .to_structured_predictions(&symbol_config, &model)
-                            .await?;
+                        log::info!("💾 Saving predictions to file...");
                         let output_content =
-                            vanga::output::formatter::predictions_to_json(&structured_predictions)?;
+                            vanga::output::formatter::predictions_to_json(&predictions)?;
                         std::fs::write(&output_path, output_content)?;
                         log::info!(
                             "✅ Predictions for {} saved to: {}",
@@ -962,11 +948,8 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                             output_path.display()
                         );
                     } else {
-                        let structured_predictions = predictions
-                            .to_structured_predictions(&symbol_config, &model)
-                            .await?;
                         let output_content =
-                            vanga::output::formatter::predictions_to_json(&structured_predictions)?;
+                            vanga::output::formatter::predictions_to_json(&predictions)?;
                         println!("=== Predictions for {} ===", symbol);
                         println!("{}", output_content);
                     }

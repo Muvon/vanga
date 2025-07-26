@@ -1,13 +1,9 @@
 pub mod backtester;
-pub mod multi_target_predictor;
 pub mod predictor;
 pub mod trainer;
 
 pub use backtester::{run_backtest, run_batch_backtest, BacktestResults, Backtester};
-pub use multi_target_predictor::{
-    predict_multi_target, MultiTargetPredictions, MultiTargetPredictor,
-};
-pub use predictor::Predictor;
+pub use predictor::{predict, ModelWrapper, Predictor};
 pub use trainer::ModelTrainer;
 
 use crate::config::{PredictionConfig, TrainingConfig};
@@ -21,11 +17,10 @@ pub async fn train_model(
     trainer.train().await
 }
 
-/// High-level prediction function
-pub async fn predict(
+/// High-level prediction function for single-target models
+pub async fn predict_single(
     config: PredictionConfig,
     model: &crate::model::lstm_simple::LSTMModel,
 ) -> Result<Vec<crate::output::PredictionResult>> {
-    let predictor = Predictor::new(config);
-    predictor.predict(model).await
+    predict(config, model).await
 }

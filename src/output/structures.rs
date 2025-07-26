@@ -818,6 +818,19 @@ impl Default for TradingOrders {
     }
 }
 
+/// Configuration for sequence-aware order generation
+#[derive(Debug, Clone)]
+pub struct SequenceAwareOrderConfig<'a> {
+    pub current_price: f64,
+    pub direction_pred: &'a DirectionPrediction,
+    pub volatility_pred: &'a VolatilityPrediction,
+    pub price_levels: &'a PriceLevelPrediction,
+    pub atr_value: f64,
+    pub config: &'a OrderConfig,
+    pub sequence_prices: &'a [f64],
+    pub bandwidth_size: f64,
+}
+
 impl TradingOrders {
     /// Generate trading orders from predictions with crypto-aggressive math
     pub fn generate(
@@ -873,6 +886,12 @@ impl TradingOrders {
 
         let atr_distance = atr_value * atr_multiplier;
 
+        // DEBUG: Log critical parameters for entry level calculation
+        log::debug!(
+            "🔍 Entry Level Debug: direction={}, current_price={:.2}, atr_value={:.2}, atr_multiplier={:.3}, atr_distance={:.2}",
+            direction, current_price, atr_value, atr_multiplier, atr_distance
+        );
+
         // Generate order levels based on direction (handle both regular and breakout signals)
         let (entry_levels, exit_levels, stop_levels) = if direction.starts_with("LONG") {
             let is_breakout = direction.contains("BREAKOUT");
@@ -910,6 +929,341 @@ impl TradingOrders {
         })
     }
 
+    /// Generate sequence-aware trading orders using the same bandwidth logic as price levels
+    /// This ensures consistency between price level predictions and order generation
+    pub fn generate_sequence_aware(
+        config: SequenceAwareOrderConfig,
+    ) -> crate::utils::error::Result<Self> {
+        // Validate that price_levels are consistent with our sequence-aware approach
+        log::debug!("Generating sequence-aware orders with price level confidence: {:.2}", 
+                   config.price_levels.confidence);
+        
+        // Use same directional edge logic as original method
+        let directional_edge =
+            config.direction_pred.up_probability_aggregated - config.direction_pred.down_probability_aggregated;
+        let min_edge_threshold = 0.15; // 15% minimum edge for signal generation
+        let breakout_threshold = 0.25; // 25% threshold for strong breakout signals
+
+        let direction = if directional_edge > min_edge_threshold {
+            "LONG"
+        } else if directional_edge < -min_edge_threshold {
+            "SHORT"
+        } else {
+            // Return empty orders when directional edge is insufficient
+            return Ok(Self::empty(
+                config.direction_pred,
+                &format!(
+                    "Insufficient directional edge ({:.1}%, need ≥{:.1}%)",
+                    directional_edge * 100.0,
+                    min_edge_threshold * 100.0
+                ),
+            ));
+        };
+
+        // Use the formatter's calculate_sequence_aware_ranges (the correct one)
+        let temp_config = crate::config::prediction::OutputConfig::default();
+        let formatter = crate::output::formatter::OutputFormatter::new(temp_config);
+        let (sequence_ranges, _) = formatter.calculate_sequence_aware_ranges(
+            config.sequence_prices,
+            config.current_price,
+            config.bandwidth_size,
+        );
+
+        // Calculate dynamic ATR multiplier based on 5-class volatility regime
+        let atr_multiplier = match config.volatility_pred.regime.as_str() {
+            "VERY_LOW" => config.config.base_atr_multiplier * 0.5, // Very tight spacing in very low vol
+            "LOW" => config.config.base_atr_multiplier * 0.7,      // Tighter spacing in low vol
+            "MEDIUM" => config.config.base_atr_multiplier,         // Normal spacing
+            "HIGH" => config.config.base_atr_multiplier * 1.4,     // Wider spacing in high vol
+            "VERY_HIGH" => config.config.base_atr_multiplier * 1.8, // Very wide spacing in very high vol
+            _ => config.config.base_atr_multiplier,
+        };
+
+        let atr_distance = (config.atr_value / 100.0) * config.current_price * atr_multiplier;
+
+        // Generate sequence-aware order levels based on direction
+        let (entry_levels, exit_levels, stop_levels) = if direction == "LONG" {
+            // Check if this is a breakout signal based on pump probability
+            let is_breakout = config.direction_pred.pump_probability > breakout_threshold;
+            Self::generate_sequence_aware_long_orders(
+                config.current_price,
+                atr_distance,
+                &sequence_ranges,
+                config.config,
+                is_breakout,
+            )
+        } else {
+            // Check if this is a breakout signal based on dump probability
+            let is_breakout = config.direction_pred.dump_probability > breakout_threshold;
+            Self::generate_sequence_aware_short_orders(
+                config.current_price,
+                atr_distance,
+                &sequence_ranges,
+                config.config,
+                is_breakout,
+            )
+        };
+
+        // Calculate risk-reward ratio
+        let risk_reward_ratio =
+            Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels);
+
+        Ok(TradingOrders {
+            direction: direction.to_string(),
+            entry_levels,
+            exit_levels,
+            stop_levels,
+            total_position_size: 1.0,
+            risk_reward_ratio,
+            atr_multiplier,
+            dynamic_sizing: config.config.aggressive_sizing,
+        })
+    }
+
+
+
+    /// Generate sequence-aware long orders using bandwidth-based levels
+    fn generate_sequence_aware_long_orders(
+        current_price: f64,
+        atr_distance: f64,
+        sequence_ranges: &[[f64; 2]],
+        config: &OrderConfig,
+        is_breakout: bool,
+    ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
+        // Use sequence ranges for entry levels
+        // For LONG: enter on moderate_down and strong_down ranges (BUY THE DIP!)
+        let moderate_down_range = &sequence_ranges[1]; // moderate_down
+        let strong_down_range = &sequence_ranges[0];   // strong_down
+
+        // DEBUG: Log sequence ranges to identify the bug
+        log::debug!(
+            "🔍 Sequence-Aware LONG Debug: moderate_down=[{:.2}%, {:.2}%], strong_down=[{:.2}%, {:.2}%]",
+            moderate_down_range[0], moderate_down_range[1], strong_down_range[0], strong_down_range[1]
+        );
+
+        // FIXED: Use sequence ranges properly for LONG entries
+        // For LONG: Use the most negative parts of down ranges (buy the dip strategy)
+        let entry_1_pct = moderate_down_range[0]; // Lower bound of moderate down (more negative)
+        let entry_2_pct = (moderate_down_range[0] + strong_down_range[1]) / 2.0; // Between moderate and strong
+        let entry_3_pct = strong_down_range[0]; // Lower bound of strong down (most negative)
+        
+        // Ensure proper ordering: entry_1 > entry_2 > entry_3 (less negative to more negative)
+        let entry_1_pct = entry_1_pct.max(entry_2_pct + 0.1).max(entry_3_pct + 0.2);
+        let entry_2_pct = entry_2_pct.max(entry_3_pct + 0.1);
+
+        // DEBUG: Log entry percentages and resulting prices
+        log::debug!(
+            "🔍 Entry Percentages: entry_1_pct={:.2}%, entry_2_pct={:.2}%, entry_3_pct={:.2}%",
+            entry_1_pct, entry_2_pct, entry_3_pct
+        );
+        
+        let calculated_entry_1 = current_price * (1.0 + entry_1_pct / 100.0);
+        let calculated_entry_2 = current_price * (1.0 + entry_2_pct / 100.0);
+        let calculated_entry_3 = current_price * (1.0 + entry_3_pct / 100.0);
+        
+        log::debug!(
+            "🟢 LONG Entry Prices: [{:.2}, {:.2}, {:.2}] vs current_price {:.2} (should be BELOW)",
+            calculated_entry_1, calculated_entry_2, calculated_entry_3, current_price
+        );
+
+        let entry_levels = [
+            OrderLevel {
+                price: calculated_entry_1,
+                quantity_percentage: if is_breakout { 0.4 } else { 0.5 },
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: calculated_entry_2,
+                quantity_percentage: 0.3, // Same for both breakout and normal
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.7,
+            },
+            OrderLevel {
+                price: calculated_entry_3,
+                quantity_percentage: if is_breakout { 0.3 } else { 0.2 },
+                atr_distance,
+                order_type: if is_breakout { "STOP_LIMIT".to_string() } else { "LIMIT".to_string() },
+                confidence: if is_breakout { 0.9 } else { 0.6 },
+            },
+        ];
+
+        // Exit levels based on moderate_up and strong_up ranges (SELL THE RIP!)
+        let moderate_up_range = &sequence_ranges[3]; // moderate_up
+        let strong_up_range = &sequence_ranges[4];   // strong_up
+        
+        let exit_1_pct = moderate_up_range[0]; // Start of moderate up
+        let exit_2_pct = (moderate_up_range[0] + moderate_up_range[1]) / 2.0; // Mid moderate up
+        let exit_3_pct = strong_up_range[0]; // Start of strong up (breakout target)
+
+        let exit_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + exit_1_pct / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_2_pct / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.6,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_3_pct / 100.0),
+                quantity_percentage: 0.2,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.4,
+            },
+        ];
+
+        // Stop levels based on sequence ranges (below current price for LONG positions)
+        let neutral_range = &sequence_ranges[2]; // neutral
+        let stop_1_pct = neutral_range[0] - (atr_distance / current_price * 100.0); // Below neutral with ATR buffer
+        let stop_2_pct = sequence_ranges[1][1] - (atr_distance / current_price * 100.0); // Moderate down with ATR buffer  
+        let stop_3_pct = sequence_ranges[0][1] - (atr_distance / current_price * 100.0); // Strong down with ATR buffer
+
+        // Apply hunt protection from config
+        let hunt_protection_multiplier = config.hunt_protection;
+        
+        let stop_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + stop_1_pct / 100.0), // stop_1_pct is already negative percentage
+                quantity_percentage: 0.4,
+                atr_distance: atr_distance * hunt_protection_multiplier,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.9,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + stop_2_pct / 100.0), // stop_2_pct is already negative percentage
+                quantity_percentage: 0.4,
+                atr_distance: atr_distance * hunt_protection_multiplier,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + stop_3_pct / 100.0), // stop_3_pct is already negative percentage
+                quantity_percentage: 0.2,
+                atr_distance: atr_distance * hunt_protection_multiplier,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.7,
+            },
+        ];
+
+        (entry_levels, exit_levels, stop_levels)
+    }
+
+    /// Generate sequence-aware short orders using bandwidth-based levels
+    fn generate_sequence_aware_short_orders(
+        current_price: f64,
+        atr_distance: f64,
+        sequence_ranges: &[[f64; 2]],
+        config: &OrderConfig,
+        is_breakout: bool,
+    ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
+        // Use sequence ranges for entry levels
+        // For SHORT: enter on moderate_down and strong_down ranges
+        let moderate_down_range = &sequence_ranges[1]; // moderate_down
+        let strong_down_range = &sequence_ranges[0];   // strong_down
+
+        let entry_1_pct = moderate_down_range[1]; // End of moderate down
+        let entry_2_pct = (moderate_down_range[0] + moderate_down_range[1]) / 2.0; // Mid moderate down
+        let entry_3_pct = strong_down_range[1]; // End of strong down (breakout level)
+
+        let entry_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + entry_1_pct / 100.0),
+                quantity_percentage: if is_breakout { 0.4 } else { 0.5 },
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + entry_2_pct / 100.0),
+                quantity_percentage: 0.3, // Same for both breakout and normal
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.7,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + entry_3_pct / 100.0),
+                quantity_percentage: if is_breakout { 0.3 } else { 0.2 },
+                atr_distance,
+                order_type: if is_breakout { "STOP_LIMIT".to_string() } else { "LIMIT".to_string() },
+                confidence: if is_breakout { 0.9 } else { 0.6 },
+            },
+        ];
+
+        // Exit levels based on strong_down range
+        let exit_1_pct = strong_down_range[0]; // Start of strong down
+        let exit_2_pct = strong_down_range[0] - (strong_down_range[1] - strong_down_range[0]) * 0.5; // 50% extension
+        let exit_3_pct = strong_down_range[0] - (strong_down_range[1] - strong_down_range[0]) * 1.0; // 100% extension
+
+        let exit_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + exit_1_pct / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_2_pct / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.6,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_3_pct / 100.0),
+                quantity_percentage: 0.2,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.4,
+            },
+        ];
+
+        // Stop levels based on sequence ranges (above neutral)
+        let neutral_range = &sequence_ranges[2]; // neutral
+        let stop_1_pct = neutral_range[1] + atr_distance / current_price * 100.0; // Above neutral with ATR buffer
+        let stop_2_pct = sequence_ranges[3][0] + atr_distance / current_price * 100.0; // Moderate up with ATR buffer
+        let stop_3_pct = sequence_ranges[4][0] + atr_distance / current_price * 100.0; // Strong up with ATR buffer
+
+        // Apply hunt protection from config
+        let hunt_protection_multiplier = config.hunt_protection;
+
+        let stop_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + (stop_1_pct * hunt_protection_multiplier) / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance: atr_distance * hunt_protection_multiplier,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.9,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + (stop_2_pct * hunt_protection_multiplier) / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance: atr_distance * hunt_protection_multiplier,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + (stop_3_pct * hunt_protection_multiplier) / 100.0),
+                quantity_percentage: 0.2,
+                atr_distance: atr_distance * hunt_protection_multiplier,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.7,
+            },
+        ];
+
+        (entry_levels, exit_levels, stop_levels)
+    }
+
     /// Create empty orders when no trading signals are available
     pub fn empty(direction_pred: &DirectionPrediction, reason: &str) -> Self {
         let empty_level = OrderLevel {
@@ -921,9 +1275,9 @@ impl TradingOrders {
         };
 
         let direction = if direction_pred.up_probability > direction_pred.down_probability {
-            "LONG_WEAK"
+            "LONG"
         } else {
-            "SHORT_WEAK"
+            "SHORT"
         };
 
         TradingOrders {
@@ -988,6 +1342,16 @@ impl TradingOrders {
             current_price - atr_distance * 1.2 * spacing_multiplier, // Medium entry
             current_price - atr_distance * 2.0 * spacing_multiplier, // Deep value entry
         ];
+
+        // DEBUG: Log LONG entry calculations
+        log::debug!(
+            "🟢 LONG Entry Calculation: current_price={:.2}, atr_distance={:.2}, spacing_multiplier={:.1}",
+            current_price, atr_distance, spacing_multiplier
+        );
+        log::debug!(
+            "🟢 LONG Entry Prices: [{:.2}, {:.2}, {:.2}] (should be BELOW current_price {:.2})",
+            entry_prices[0], entry_prices[1], entry_prices[2], current_price
+        );
 
         // Exit levels (sell higher) - CRYPTO MOON TARGETS (enhanced for breakouts)
         let exit_multiplier = if is_breakout { 1.8 } else { 1.0 };
@@ -1656,8 +2020,8 @@ mod tests {
 
         // Should return empty orders for weak direction signals
         assert!(
-            orders.direction.contains("WEAK"),
-            "Should indicate weak signal in direction: {}",
+            orders.direction.contains("Insufficient directional edge"),
+            "Should indicate insufficient edge in direction: {}",
             orders.direction
         );
         assert_eq!(

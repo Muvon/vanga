@@ -43,8 +43,7 @@ pub use config::{FeatureConfig, ModelConfig, PredictionConfig, TrainingConfig};
 pub use utils::{Result, VangaError};
 
 // Re-export high-level API functions
-pub use api::multi_target_predictor::predict_multi_target;
-pub use api::predictor::predict;
+pub use api::predict;
 pub use api::trainer::train_model;
 
 // Integration test for the complete multi-target LSTM pipeline

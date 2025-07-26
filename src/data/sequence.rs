@@ -200,6 +200,13 @@ impl SequenceGenerator {
         // FIXED: Ensure prediction pipeline uses same per-sequence normalization as training
         // Extract the last sequence_length rows and normalize only that sequence
         let sequence_df = df.slice(start_idx as i64, sequence_length);
+        
+        // Extract OHLC data from the sequence for ATR calculation - REQUIRED!
+        let sequence_ohlc = self.extract_ohlc_from_sequence(&sequence_df)
+            .map_err(|e| VangaError::DataError(format!(
+                "FATAL: Cannot extract OHLC data from sequence for order generation. This is required for proper ATR calculation and sequence-aware orders: {}", e
+            )))?;
+        
         let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
         let sequences =
             self.create_prediction_sequences(&normalized_sequence, 0, sequence_length)?;
@@ -219,6 +226,7 @@ impl SequenceGenerator {
             sequences,
             feature_names: feature_columns,
             metadata,
+            sequence_ohlc: Some(sequence_ohlc),
         })
     }
 
@@ -599,5 +607,112 @@ impl SequenceGenerator {
         }
 
         Ok(array3)
+    }
+
+    /// Extract OHLC data from sequence DataFrame for ATR calculation
+    fn extract_ohlc_from_sequence(&self, sequence_df: &DataFrame) -> Result<Vec<crate::data::structures::MarketDataRow>> {
+        let mut ohlc_data = Vec::new();
+        
+        // Get required columns
+        let timestamp_col = sequence_df.column("timestamp").map_err(|_| {
+            VangaError::DataError("Missing timestamp column in sequence data".to_string())
+        })?;
+        let open_col = sequence_df.column("open").map_err(|_| {
+            VangaError::DataError("Missing open column in sequence data".to_string())
+        })?;
+        let high_col = sequence_df.column("high").map_err(|_| {
+            VangaError::DataError("Missing high column in sequence data".to_string())
+        })?;
+        let low_col = sequence_df.column("low").map_err(|_| {
+            VangaError::DataError("Missing low column in sequence data".to_string())
+        })?;
+        let close_col = sequence_df.column("close").map_err(|_| {
+            VangaError::DataError("Missing close column in sequence data".to_string())
+        })?;
+        let volume_col = sequence_df.column("volume").map_err(|_| {
+            VangaError::DataError("Missing volume column in sequence data".to_string())
+        })?;
+
+        // Extract data row by row
+        for i in 0..sequence_df.height() {
+            let timestamp = timestamp_col.get(i).map_err(|e| {
+                VangaError::DataError(format!("Failed to extract timestamp at row {}: {}", i, e))
+            })?;
+            let open = open_col.get(i).map_err(|e| {
+                VangaError::DataError(format!("Failed to extract open at row {}: {}", i, e))
+            })?;
+            let high = high_col.get(i).map_err(|e| {
+                VangaError::DataError(format!("Failed to extract high at row {}: {}", i, e))
+            })?;
+            let low = low_col.get(i).map_err(|e| {
+                VangaError::DataError(format!("Failed to extract low at row {}: {}", i, e))
+            })?;
+            let close = close_col.get(i).map_err(|e| {
+                VangaError::DataError(format!("Failed to extract close at row {}: {}", i, e))
+            })?;
+            let volume = volume_col.get(i).map_err(|e| {
+                VangaError::DataError(format!("Failed to extract volume at row {}: {}", i, e))
+            })?;
+
+            // Convert AnyValue to appropriate types
+            let timestamp_i64 = match timestamp {
+                polars::prelude::AnyValue::Datetime(dt, _, _) => dt / 1_000_000, // Convert microseconds to seconds
+                polars::prelude::AnyValue::Int64(ts) => ts,
+                polars::prelude::AnyValue::Utf8(s) => {
+                    // Parse ISO timestamp string
+                    chrono::DateTime::parse_from_rfc3339(s)
+                        .map_err(|e| VangaError::DataError(format!("Failed to parse timestamp '{}': {}", s, e)))?
+                        .timestamp()
+                }
+                _ => return Err(VangaError::DataError(format!("Unsupported timestamp type: {:?}", timestamp))),
+            };
+
+            let open_f64 = match open {
+                polars::prelude::AnyValue::Float64(f) => f,
+                polars::prelude::AnyValue::Float32(f) => f as f64,
+                polars::prelude::AnyValue::Int64(i) => i as f64,
+                _ => return Err(VangaError::DataError(format!("Unsupported open price type: {:?}", open))),
+            };
+
+            let high_f64 = match high {
+                polars::prelude::AnyValue::Float64(f) => f,
+                polars::prelude::AnyValue::Float32(f) => f as f64,
+                polars::prelude::AnyValue::Int64(i) => i as f64,
+                _ => return Err(VangaError::DataError(format!("Unsupported high price type: {:?}", high))),
+            };
+
+            let low_f64 = match low {
+                polars::prelude::AnyValue::Float64(f) => f,
+                polars::prelude::AnyValue::Float32(f) => f as f64,
+                polars::prelude::AnyValue::Int64(i) => i as f64,
+                _ => return Err(VangaError::DataError(format!("Unsupported low price type: {:?}", low))),
+            };
+
+            let close_f64 = match close {
+                polars::prelude::AnyValue::Float64(f) => f,
+                polars::prelude::AnyValue::Float32(f) => f as f64,
+                polars::prelude::AnyValue::Int64(i) => i as f64,
+                _ => return Err(VangaError::DataError(format!("Unsupported close price type: {:?}", close))),
+            };
+
+            let volume_f64 = match volume {
+                polars::prelude::AnyValue::Float64(f) => f,
+                polars::prelude::AnyValue::Float32(f) => f as f64,
+                polars::prelude::AnyValue::Int64(i) => i as f64,
+                _ => return Err(VangaError::DataError(format!("Unsupported volume type: {:?}", volume))),
+            };
+
+            ohlc_data.push(crate::data::structures::MarketDataRow {
+                timestamp: timestamp_i64,
+                open: open_f64,
+                high: high_f64,
+                low: low_f64,
+                close: close_f64,
+                volume: volume_f64,
+            });
+        }
+
+        log::debug!("Extracted {} OHLC rows from sequence for ATR calculation", ohlc_data.len());
+        Ok(ohlc_data)
     }
 }

@@ -3,7 +3,7 @@
 //! This module provides real-time prediction capabilities for cryptocurrency markets,
 //! integrating with the trained VANGA LSTM models for live forecasting.
 
-use crate::api::multi_target_predictor::MultiTargetPredictor;
+use crate::api::{ModelWrapper, Predictor};
 use crate::config::PredictionConfig;
 use crate::data::structures::MarketDataRow;
 use crate::model::multi_target::MultiTargetLSTMModel;
@@ -344,14 +344,12 @@ impl StreamingPredictor {
             horizon: Some("1h".to_string()),
             ..Default::default()
         };
-        let temp_predictor = MultiTargetPredictor::new(temp_config.clone());
-
-        // Generate real ML predictions
+        // Generate real ML predictions using unified predictor
         log::debug!("Generating ML prediction using trained model");
-        let ml_predictions = temp_predictor.predict(&self.model).await?;
-        let structured_predictions = ml_predictions
-            .to_structured_predictions(&temp_config, &self.model)
-            .await?;
+        let structured_predictions = {
+            let predictor = Predictor::new(temp_config);
+            predictor.predict(ModelWrapper::MultiTarget(&self.model)).await?
+        };
 
         // Convert to realtime prediction format
         let prediction = self.convert_to_prediction_result(&structured_predictions)?;

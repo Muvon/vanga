@@ -22,6 +22,10 @@ pub struct OutputFormatter {
     /// Model config bandwidth_size: sequence bandwidth multiplier (e.g., 1.0, 1.5, 2.0)
     /// Used in target generation as: sequence_bandwidth = (max - min) * bandwidth_size
     bandwidth_size: Option<f64>,
+    /// Number of input features used for prediction
+    feature_count: Option<usize>,
+    /// Sequence length used for prediction
+    sequence_length: Option<usize>,
 }
 
 impl OutputFormatter {
@@ -32,6 +36,8 @@ impl OutputFormatter {
             parser: None,
             sequence_data: None,
             bandwidth_size: None,
+            feature_count: None,
+            sequence_length: None,
         }
     }
 
@@ -46,6 +52,13 @@ impl OutputFormatter {
     /// Set sequence data for sequence-aware price level calculations
     pub fn with_sequence_data(mut self, sequence_data: Vec<f64>) -> Self {
         self.sequence_data = Some(sequence_data);
+        self
+    }
+
+    /// Set metadata for prediction results
+    pub fn with_metadata(mut self, feature_count: usize, sequence_length: usize) -> Self {
+        self.feature_count = Some(feature_count);
+        self.sequence_length = Some(sequence_length);
         self
     }
 
@@ -152,8 +165,8 @@ impl OutputFormatter {
         // For each batch in the predictions
         for batch_idx in 0..raw_predictions.nrows() {
             // Get actual feature count and sequence length from the prediction data
-            let feature_count = raw_predictions.ncols();
-            let sequence_length = 60; // Default LSTM sequence length since targets_config doesn't contain this info
+            let feature_count = self.feature_count.unwrap_or(raw_predictions.ncols());
+            let sequence_length = self.sequence_length.unwrap_or(60); // Default LSTM sequence length
 
             let mut result = PredictionResult::new_with_metadata(
                 symbol.to_string(),
@@ -197,11 +210,18 @@ impl OutputFormatter {
                             )
                         })?;
 
-                        // Calculate bandwidth as percentage of current price
+                        // Calculate bandwidth as percentage of current price (FIXED)
                         let sequence_price_range = max_price - min_price;
-                        let model_bandwidth_absolute =
-                            sequence_price_range * model_bandwidth_multiplier;
-                        (model_bandwidth_absolute / current_price) * 100.0 // Convert to percentage
+                        let sequence_range_percent = (sequence_price_range / current_price) * 100.0;
+                        
+                        // Cap the sequence range to reasonable crypto values (max 50%)
+                        let capped_sequence_range_percent = sequence_range_percent.min(50.0);
+                        
+                        // Apply model bandwidth multiplier to the percentage range
+                        let final_bandwidth_percent = capped_sequence_range_percent * model_bandwidth_multiplier;
+                        
+                        // Cap final result to prevent extreme values (max 100%)
+                        final_bandwidth_percent.min(100.0)
                     } else {
                         return Err(VangaError::PredictionError(format!(
                             "Insufficient sequence data for adaptive predictions: {} prices (need ≥2)",
@@ -240,10 +260,18 @@ impl OutputFormatter {
                             )
                         })?;
 
+                        // Calculate bandwidth as percentage of current price (FIXED - same as direction)
                         let sequence_price_range = max_price - min_price;
-                        let model_bandwidth_absolute =
-                            sequence_price_range * model_bandwidth_multiplier;
-                        (model_bandwidth_absolute / current_price) * 100.0 // Convert to percentage
+                        let sequence_range_percent = (sequence_price_range / current_price) * 100.0;
+                        
+                        // Cap the sequence range to reasonable crypto values (max 50%)
+                        let capped_sequence_range_percent = sequence_range_percent.min(50.0);
+                        
+                        // Apply model bandwidth multiplier to the percentage range
+                        let final_bandwidth_percent = capped_sequence_range_percent * model_bandwidth_multiplier;
+                        
+                        // Cap final result to prevent extreme values (max 100%)
+                        final_bandwidth_percent.min(100.0)
                     } else {
                         return Err(VangaError::PredictionError(format!(
                             "Insufficient sequence data for adaptive predictions: {} prices (need ≥2)",
@@ -267,6 +295,81 @@ impl OutputFormatter {
                     Some(sequence_bandwidth_percent),
                     Some(volatility_percentile),
                 )?);
+            }
+
+            // Generate trading orders if we have all required predictions
+            if result.price_levels.is_some() && result.direction.is_some() && result.volatility.is_some() {
+                // Clone the predictions to avoid borrow checker issues
+                let price_levels = result.price_levels.clone().unwrap();
+                let direction = result.direction.clone().unwrap();
+                let volatility = result.volatility.clone().unwrap();
+                
+                // Calculate ATR from sequence data
+                let atr_value = if let Some(sequence_prices) = &self.sequence_data {
+                    // Use price range as ATR estimate since we only have close prices
+                    if sequence_prices.len() >= 2 {
+                        let min_price = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                        let max_price = sequence_prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                        let price_range = max_price - min_price;
+                        
+                        // Calculate average price change as ATR proxy (PERCENTAGE-BASED)
+                        let mut price_changes = Vec::new();
+                        for i in 1..sequence_prices.len() {
+                            let change_pct = ((sequence_prices[i] - sequence_prices[i-1]).abs() / sequence_prices[i-1]) * 100.0;
+                            price_changes.push(change_pct);
+                        }
+                        let avg_change_pct = if !price_changes.is_empty() {
+                            price_changes.iter().sum::<f64>() / price_changes.len() as f64
+                        } else {
+                            2.0
+                        };
+                        
+                        // Convert price range to percentage and use the larger value
+                        let price_range_pct = (price_range / current_price) * 100.0;
+                        avg_change_pct.max(price_range_pct * 0.5).min(10.0) // Cap at 10% for sanity
+                    } else {
+                        2.0 // 2% fallback ATR
+                    }
+                } else {
+                    2.0 // 2% fallback ATR
+                };
+
+                // Get bandwidth_size from training config
+                let bandwidth_size = self.bandwidth_size.unwrap_or(1.0);
+                
+                // Generate sequence-aware orders - sequence data is REQUIRED!
+                let sequence_prices = self.sequence_data.as_ref()
+                    .ok_or_else(|| VangaError::PredictionError(
+                        "FATAL: No sequence data available for order generation. This should have been set during formatter initialization.".to_string()
+                    ))?;
+                
+                let order_config = crate::output::structures::OrderConfig::default();
+                
+                let config = crate::output::structures::SequenceAwareOrderConfig {
+                    current_price,
+                    direction_pred: &direction,
+                    volatility_pred: &volatility,
+                    price_levels: &price_levels,
+                    atr_value,
+                    config: &order_config,
+                    sequence_prices,
+                    bandwidth_size,
+                };
+                
+                let orders = match crate::output::structures::TradingOrders::generate_sequence_aware(config) {
+                    Ok(orders) => {
+                        log::info!("✅ Generated {} trading orders with {:.1}% directional edge", 
+                            orders.direction,
+                            (direction.up_probability_aggregated - direction.down_probability_aggregated) * 100.0);
+                        orders
+                    },
+                    Err(e) => {
+                        log::error!("❌ Failed to generate sequence-aware orders: {}", e);
+                        return Err(e);
+                    }
+                };
+                
+                result = result.with_orders(orders);
             }
 
             // Apply the calculated confidence to the prediction result
@@ -353,25 +456,27 @@ impl OutputFormatter {
         })
     }
 
-    /// Calculate sequence-aware ranges using the same logic as target generation
-    fn calculate_sequence_aware_ranges(
+    /// Calculate 5-class price ranges using EXACT training target generation logic
+    /// Reuses the same bandwidth calculation from src/targets/price_levels.rs
+    pub fn calculate_sequence_aware_ranges(
         &self,
         sequence_prices: &[f64],
         current_price: f64,
         bandwidth_size: f64,
     ) -> (Vec<[f64; 2]>, Vec<&'static str>) {
         if sequence_prices.is_empty() {
+            log::warn!("Empty sequence prices, using fallback ranges");
             return (
                 vec![
-                    [-5.0, -2.0],
                     [-2.0, -1.0],
-                    [-1.0, 1.0],
+                    [-1.0, -0.5],
+                    [-0.5, 0.5],
+                    [0.5, 1.0],
                     [1.0, 2.0],
-                    [2.0, 5.0],
                 ],
                 vec![
                     "strong_down",
-                    "moderate_down",
+                    "moderate_down", 
                     "neutral",
                     "moderate_up",
                     "strong_up",
@@ -379,53 +484,84 @@ impl OutputFormatter {
             );
         }
 
+        // EXACT REUSE: Same logic as src/targets/price_levels.rs:132-156
         let sequence_min = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let sequence_max = sequence_prices
-            .iter()
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let sequence_max = sequence_prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
         let base_bandwidth = sequence_max - sequence_min;
         let bandwidth = base_bandwidth * bandwidth_size;
 
-        // Handle edge case: flat sequence
+        // Handle edge case: flat sequence (bandwidth = 0)
         if bandwidth == 0.0 {
+            log::debug!("Flat sequence detected, using minimal ranges");
             return (
                 vec![
-                    [-1.0, -0.5],
-                    [-0.5, 0.0],
+                    [-0.5, -0.25],
+                    [-0.25, 0.0],
                     [0.0, 0.0],
-                    [0.0, 0.5],
-                    [0.5, 1.0],
+                    [0.0, 0.25],
+                    [0.25, 0.5],
                 ],
                 vec![
                     "strong_down",
                     "moderate_down",
-                    "neutral",
+                    "neutral", 
                     "moderate_up",
                     "strong_up",
                 ],
             );
         }
 
-        // Calculate percentage ranges based on sequence analysis
-        let min_pct = ((sequence_min - current_price) / current_price) * 100.0;
-        let max_pct = ((sequence_max - current_price) / current_price) * 100.0;
-        let bandwidth_pct = (bandwidth / current_price) * 100.0;
+        // Convert absolute price levels to percentage ranges from current price
+        // FIXED: Correct boundaries to match target generation logic exactly
+        // Strong Down: < sequence_min - bandwidth (extend downward)
+        let strong_down_min = sequence_min - (bandwidth * 2.0); // Extend downward for strong breakout
+        let strong_down_max = sequence_min - bandwidth;
+        // Moderate Down: sequence_min - bandwidth ≤ x < sequence_min
+        let moderate_down_min = sequence_min - bandwidth;
+        let moderate_down_max = sequence_min;
+        // Neutral: sequence_min ≤ x < sequence_max
+        let neutral_min = sequence_min;
+        let neutral_max = sequence_max;
+        // Moderate Up: sequence_max ≤ x < sequence_max + bandwidth
+        let moderate_up_min = sequence_max;
+        let moderate_up_max = sequence_max + bandwidth;
+        // Strong Up: ≥ sequence_max + bandwidth (extend upward)
+        let strong_up_min = sequence_max + bandwidth;
+        let strong_up_max = sequence_max + (bandwidth * 2.0); // Extend upward for strong breakout
+
+        // Convert to percentage ranges from current price
+        let to_pct = |price: f64| ((price - current_price) / current_price) * 100.0;
+
+        // DEBUG: Log the absolute price calculations
+        log::debug!(
+            "🔍 Absolute Prices: current={:.2}, seq_min={:.2}, seq_max={:.2}, bandwidth={:.2}",
+            current_price, sequence_min, sequence_max, bandwidth
+        );
+        log::debug!(
+            "🔍 Moderate Down: min={:.2} ({:.2}%), max={:.2} ({:.2}%)",
+            moderate_down_min, to_pct(moderate_down_min), moderate_down_max, to_pct(moderate_down_max)
+        );
 
         let ranges = vec![
-            [min_pct - bandwidth_pct, min_pct], // Strong Breakout Down
-            [min_pct, min_pct + (max_pct - min_pct) * 0.3], // Moderate Down
-            [min_pct + (max_pct - min_pct) * 0.3, max_pct], // Neutral (merged range)
-            [max_pct, max_pct + bandwidth_pct * 0.5], // Moderate Up
-            [max_pct + bandwidth_pct * 0.5, max_pct + bandwidth_pct], // Strong Breakout Up
+            [to_pct(strong_down_min), to_pct(strong_down_max)],     // Strong Breakout Down
+            [to_pct(moderate_down_min), to_pct(moderate_down_max)], // Moderate Down  
+            [to_pct(neutral_min), to_pct(neutral_max)],             // Neutral
+            [to_pct(moderate_up_min), to_pct(moderate_up_max)],     // Moderate Up
+            [to_pct(strong_up_min), to_pct(strong_up_max)],         // Strong Breakout Up
         ];
 
         let names = vec![
             "strong_down",
             "moderate_down",
             "neutral",
-            "moderate_up",
+            "moderate_up", 
             "strong_up",
         ];
+
+        log::debug!("Sequence bandwidth analysis: min={:.2}, max={:.2}, bandwidth={:.2}, bandwidth_size={:.3}", 
+                   sequence_min, sequence_max, bandwidth, bandwidth_size);
+        log::debug!("Price ranges: strong_down=[{:.2}%,{:.2}%], moderate_down=[{:.2}%,{:.2}%], neutral=[{:.2}%,{:.2}%], moderate_up=[{:.2}%,{:.2}%], strong_up=[{:.2}%,{:.2}%]",
+                   ranges[0][0], ranges[0][1], ranges[1][0], ranges[1][1], ranges[2][0], ranges[2][1], ranges[3][0], ranges[3][1], ranges[4][0], ranges[4][1]);
 
         (ranges, names)
     }
@@ -952,5 +1088,71 @@ fn calculate_class_balance(targets: &[i32]) -> f64 {
         entropy / max_entropy
     } else {
         0.0
+    }
+}
+
+impl OutputFormatter {
+    /// Calculate percentage-based ATR from sequence OHLC data
+    /// Uses the same sequence length as training for consistency
+    /// Returns ATR as percentage of current price for crypto-appropriate scaling
+    pub fn calculate_atr_from_sequence(&self, ohlc_data: &[crate::data::structures::MarketDataRow]) -> Result<f64> {
+        if ohlc_data.len() < 2 {
+            return Err(VangaError::PredictionError(
+                "Insufficient OHLC data for ATR calculation (need at least 2 periods)".to_string()
+            ));
+        }
+
+        let current_price = ohlc_data.last().unwrap().close;
+        if current_price <= 0.0 {
+            return Err(VangaError::PredictionError(
+                "Invalid current price for ATR calculation".to_string()
+            ));
+        }
+
+        let mut true_ranges_pct = Vec::with_capacity(ohlc_data.len());
+        
+        // First period: TR = (high - low) / close as percentage
+        let first_tr_pct = ((ohlc_data[0].high - ohlc_data[0].low) / ohlc_data[0].close) * 100.0;
+        true_ranges_pct.push(first_tr_pct);
+        
+        // Calculate True Range as percentage for each subsequent period
+        for i in 1..ohlc_data.len() {
+            let current = &ohlc_data[i];
+            let previous_close = ohlc_data[i - 1].close;
+            
+            let tr1 = (current.high - current.low) / current.close;
+            let tr2 = ((current.high - previous_close).abs()) / current.close;
+            let tr3 = ((current.low - previous_close).abs()) / current.close;
+            
+            let true_range_pct = (tr1.max(tr2).max(tr3)) * 100.0;
+            true_ranges_pct.push(true_range_pct);
+        }
+        
+        // Calculate ATR as percentage (simple moving average)
+        let atr_pct = true_ranges_pct.iter().sum::<f64>() / true_ranges_pct.len() as f64;
+        
+        log::debug!("Calculated percentage ATR from {} periods: {:.2}%", ohlc_data.len(), atr_pct);
+        Ok(atr_pct)
+    }
+
+    /// Apply volatility-based ATR adjustment
+    /// High volatility increases ATR for wider stops, low volatility decreases it
+    pub fn adjust_atr_for_volatility(&self, base_atr_pct: f64, volatility_pred: &crate::output::structures::VolatilityPrediction) -> f64 {
+        // Calculate volatility multiplier based on regime probabilities
+        let volatility_multiplier = match volatility_pred.regime.as_str() {
+            "VERY_LOW" => 0.7,   // Tighter stops in low volatility
+            "LOW" => 0.85,
+            "MEDIUM" => 1.0,     // Base case
+            "HIGH" => 1.3,       // Wider stops in high volatility  
+            "VERY_HIGH" => 1.6,
+            _ => 1.0,
+        };
+
+        let adjusted_atr = base_atr_pct * volatility_multiplier;
+        
+        log::debug!("ATR adjustment: base={:.2}%, regime={}, multiplier={:.2}, adjusted={:.2}%", 
+                   base_atr_pct, volatility_pred.regime, volatility_multiplier, adjusted_atr);
+        
+        adjusted_atr
     }
 }

@@ -3,7 +3,7 @@
 //! Provides comprehensive backtesting capabilities by reusing existing
 //! training, prediction, and metrics infrastructure with minimal code changes.
 
-use crate::api::{predict_multi_target, train_model};
+use crate::api::train_model;
 use crate::config::{FeatureConfig, PredictionConfig, TrainingConfig};
 use crate::data::loader::DataLoader;
 use crate::targets::TargetGenerator;
@@ -98,7 +98,10 @@ impl Backtester {
         // Step 5: Generate predictions on test data
         log::info!("🔮 Generating predictions on {} samples", test_df.height());
         let prediction_config = self.create_prediction_config(&test_path)?;
-        let predictions = predict_multi_target(prediction_config, &trained_model).await?;
+        let predictions = {
+            let predictor = crate::api::Predictor::new(prediction_config);
+            predictor.predict(crate::api::ModelWrapper::MultiTarget(&trained_model)).await?
+        };
 
         // Step 6: Generate actual targets for test data to calculate metrics
         log::info!("🎯 Generating targets for test data");
@@ -146,7 +149,7 @@ impl Backtester {
             directional_accuracy: self
                 .calculate_directional_accuracy(&predictions, &actual_targets)
                 .await?,
-            prediction_count: predictions.predictions.nrows(),
+            prediction_count: predictions.len(),
         };
 
         log::info!("✅ Backtesting completed for {}", self.config.symbol);
@@ -274,34 +277,73 @@ impl Backtester {
     /// Calculate regression metrics from predictions vs actual targets
     async fn calculate_metrics(
         &self,
-        predictions: &crate::api::MultiTargetPredictions,
+        predictions: &[crate::output::PredictionResult], // Updated to use unified predictor output
         actual_targets: &crate::targets::PreparedTargets,
     ) -> Result<RegressionMetrics> {
-        // For now, calculate metrics on the first target (price_level)
-        // In a full implementation, we might aggregate across all targets
-
-        if predictions.predictions.nrows() == 0 {
+        // Calculate metrics from unified predictor output
+        if predictions.is_empty() {
             return Err(VangaError::DataError(
                 "No predictions available for metrics calculation".to_string(),
             ));
         }
 
-        // Get predicted values for first target
-        let predicted_values = predictions.predictions.column(0);
+        // Extract predicted values from the first prediction's price levels
+        // For regression metrics, we'll use the most likely price level as the prediction
+        let predicted_values: Vec<f64> = predictions
+            .iter()
+            .filter_map(|pred| {
+                pred.price_levels.as_ref().and_then(|pl| {
+                    // Find the bin with highest probability and use its midpoint
+                    let mut max_prob = 0.0;
+                    let mut best_price = 0.0;
+                    
+                    for bin in pl.bins.values() {
+                        if bin.probability > max_prob {
+                            max_prob = bin.probability;
+                            // Use midpoint of price range
+                            best_price = (bin.price[0] + bin.price[1]) / 2.0;
+                        }
+                    }
+                    
+                    if max_prob > 0.0 { Some(best_price) } else { None }
+                })
+            })
+            .collect();
+
+        if predicted_values.is_empty() {
+            return Err(VangaError::DataError(
+                "No valid price level predictions found for metrics calculation".to_string(),
+            ));
+        }
 
         // Get actual values for first target (price_level_1h)
         let actual_values = actual_targets.price_levels.get("1h").ok_or_else(|| {
             VangaError::DataError("No actual price_level targets found".to_string())
         })?;
 
-        // Align the data lengths (take minimum)
-        let min_len = predicted_values.len().min(actual_values.len());
-        let predicted: Vec<f64> = predicted_values.iter().take(min_len).cloned().collect();
-        let actual: Vec<f64> = actual_values
+        // Convert actual class indices to price values using current price
+        let current_price = predictions[0].current_price;
+        let actual_prices: Vec<f64> = actual_values
             .iter()
-            .take(min_len)
-            .map(|&x| x as f64)
+            .map(|&class_idx| {
+                // Convert class index to approximate price change
+                // Assuming 5-class system: 0=strong_down, 1=moderate_down, 2=neutral, 3=moderate_up, 4=strong_up
+                let price_change_percent = match class_idx {
+                    0 => -3.5, // strong_down
+                    1 => -1.5, // moderate_down
+                    2 => 0.0,  // neutral
+                    3 => 1.5,  // moderate_up
+                    4 => 3.5,  // strong_up
+                    _ => 0.0,  // fallback
+                };
+                current_price * (1.0 + price_change_percent / 100.0)
+            })
             .collect();
+
+        // Align the data lengths (take minimum)
+        let min_len = predicted_values.len().min(actual_prices.len());
+        let predicted: Vec<f64> = predicted_values.into_iter().take(min_len).collect();
+        let actual: Vec<f64> = actual_prices.into_iter().take(min_len).collect();
 
         if predicted.is_empty() || actual.is_empty() {
             return Err(VangaError::DataError(
@@ -362,19 +404,43 @@ impl Backtester {
     /// Calculate directional accuracy (percentage of correct direction predictions)
     async fn calculate_directional_accuracy(
         &self,
-        predictions: &crate::api::MultiTargetPredictions,
+        predictions: &[crate::output::PredictionResult], // Updated to use unified predictor output
         actual_targets: &crate::targets::PreparedTargets,
     ) -> Result<f64> {
-        // Find direction target in predictions
-        let direction_idx = predictions
-            .target_names
-            .iter()
-            .position(|name| name.contains("direction"))
-            .ok_or_else(|| {
-                VangaError::DataError("No direction target found in predictions".to_string())
-            })?;
+        // Extract direction predictions from unified predictor output
+        if predictions.is_empty() {
+            return Ok(0.0);
+        }
 
-        let predicted_directions = predictions.predictions.column(direction_idx);
+        // Get predicted directions from the first prediction's direction field
+        let predicted_directions: Vec<i32> = predictions
+            .iter()
+            .filter_map(|pred| {
+                pred.direction.as_ref().map(|dir| {
+                    // Convert direction prediction to class index
+                    // Find the most likely direction
+                    let directions = [
+                        ("dump", dir.dump_probability),
+                        ("down", dir.down_probability),
+                        ("sideways", dir.sideways_probability),
+                        ("up", dir.up_probability),
+                        ("pump", dir.pump_probability),
+                    ];
+                    
+                    let (max_idx, _) = directions
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, (_, a)), (_, (_, b))| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                        .unwrap_or((2, &("sideways", 0.0))); // Default to sideways
+                    
+                    max_idx as i32
+                })
+            })
+            .collect();
+
+        if predicted_directions.is_empty() {
+            return Ok(0.0);
+        }
 
         // Get actual direction values
         let actual_directions = actual_targets.directions.get("1h").ok_or_else(|| {
@@ -391,13 +457,9 @@ impl Backtester {
         // Calculate directional accuracy
         let correct_predictions = predicted_directions
             .iter()
-            .zip(actual_directions.iter())
             .take(min_len)
-            .filter(|(pred, actual)| {
-                // Convert predictions to direction (>0.5 = up, <=0.5 = down)
-                let pred_direction = if **pred > 0.5 { 1 } else { 0 };
-                pred_direction == **actual
-            })
+            .zip(actual_directions.iter().take(min_len))
+            .filter(|(pred, actual)| pred == actual)
             .count();
 
         Ok(correct_predictions as f64 / min_len as f64)
