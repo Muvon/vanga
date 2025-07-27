@@ -196,13 +196,19 @@ impl Predictor {
             .ok_or_else(|| VangaError::PredictionError(
                 "FATAL: No sequence OHLC data available for order generation. This is required for proper ATR calculation and sequence-aware orders.".to_string()
             ))?;
-        
+
         let sequence_prices: Vec<f64> = sequence_ohlc.iter().map(|row| row.close).collect();
 
-        log::info!("✅ Sequence OHLC data loaded: {} rows for order generation", sequence_ohlc.len());
-        log::debug!("Sequence price range: {:.2} - {:.2}", 
+        log::info!(
+            "✅ Sequence OHLC data loaded: {} rows for order generation",
+            sequence_ohlc.len()
+        );
+        log::debug!(
+            "Sequence price range: {:.2} - {:.2}",
             sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-            sequence_prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            sequence_prices
+                .iter()
+                .fold(f64::NEG_INFINITY, |a, &b| a.max(b))
         );
 
         // Explicit memory cleanup after prediction and data extraction
@@ -257,14 +263,20 @@ impl Predictor {
                     "Requested horizon '{}' was not trained. Available horizons: {:?}. Using first available horizon.",
                     requested_horizon, trained_horizons
                 );
-                trained_horizons.first().unwrap_or(&"1h".to_string()).clone()
+                trained_horizons
+                    .first()
+                    .unwrap_or(&"1h".to_string())
+                    .clone()
             } else {
                 requested_horizon.clone()
             }
         } else {
             // Use first trained horizon or default to 1h
             let trained_horizons = model.get_trained_horizons();
-            trained_horizons.first().unwrap_or(&"1h".to_string()).clone()
+            trained_horizons
+                .first()
+                .unwrap_or(&"1h".to_string())
+                .clone()
         };
 
         // Generate targets for the prediction data to enable confidence calculation
@@ -300,7 +312,10 @@ impl Predictor {
             if let Some(last_row) = ohlc_data.last() {
                 let current_price = last_row.close;
                 if current_price > 0.0 {
-                    log::debug!("Extracted current price from OHLC data: {:.2}", current_price);
+                    log::debug!(
+                        "Extracted current price from OHLC data: {:.2}",
+                        current_price
+                    );
                     return Ok(current_price);
                 }
             }
@@ -358,5 +373,3 @@ pub async fn predict(config: PredictionConfig, model: &LSTMModel) -> Result<Vec<
     let predictor = Predictor::new(config);
     predictor.predict(ModelWrapper::Single(model)).await
 }
-
-

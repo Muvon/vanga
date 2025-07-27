@@ -668,7 +668,9 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
             // Make predictions using the unified predictor API
             let structured_predictions = {
                 let predictor = vanga::api::Predictor::new(config.clone());
-                predictor.predict(vanga::api::ModelWrapper::MultiTarget(&model)).await?
+                predictor
+                    .predict(vanga::api::ModelWrapper::MultiTarget(&model))
+                    .await?
             };
 
             // Save predictions if output path specified
@@ -801,7 +803,10 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
                         // Make prediction using multi-target API
                         let predictions = {
                             let predictor = vanga::api::Predictor::new(symbol_config.clone());
-                            match predictor.predict(vanga::api::ModelWrapper::MultiTarget(&model)).await {
+                            match predictor
+                                .predict(vanga::api::ModelWrapper::MultiTarget(&model))
+                                .await
+                            {
                                 Ok(predictions) => predictions,
                                 Err(e) => {
                                     log::error!(
@@ -915,7 +920,10 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
 
                     let predictions = {
                         let predictor = vanga::api::Predictor::new(symbol_config.clone());
-                        match predictor.predict(vanga::api::ModelWrapper::MultiTarget(&model)).await {
+                        match predictor
+                            .predict(vanga::api::ModelWrapper::MultiTarget(&model))
+                            .await
+                        {
                             Ok(predictions) => predictions,
                             Err(e) => {
                                 log::error!("❌ Prediction failed for {}: {}", symbol, e);

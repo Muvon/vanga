@@ -1,0 +1,449 @@
+#interaction_features VANGA Training Configuration - OPTIMIZED FOR 3-DAY CRYPTO PREDICTION
+# 🎯 DATASET: 3600 hours (150 days) of 1h crypto data with custom metrics
+# 🚀 TARGET: Maximum precision 3-day price prediction (single horizon)
+# 📊 FOCUS: Deep learning with optimal sequence length and feature engineering
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🏋️ TRAINING CONFIGURATION - Optimized for 3-day prediction precision
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[training]
+seed = 0
+device = "Auto"
+print_every = 1
+class_weight_strategy = "Advanced"
+
+# 🔄 EPOCHS: Conservative for small dataset to prevent overfitting
+# CRITICAL: With only 3600 samples, more epochs = overfitting risk
+# TUNING: Use 80-120 for exploration, 150-200 if validation loss keeps improving
+epochs = { Auto = { max_epochs = 100 } }
+
+# 📦 BATCH SIZE: Smaller for limited data to ensure gradient stability
+# CRITICAL: 16-24 optimal for 3600 samples to avoid batch size > dataset issues
+# TUNING: Use 8-12 if memory limited, 32-48 if you have >10k samples
+batch_size = { Fixed = 16 }
+
+# 📈 OPTIMIZER: AdamW with crypto-optimized parameters
+# CRITICAL: Lower weight_decay for small dataset, higher beta2 for stability
+# TUNING: Increase weight_decay to 0.05-0.1 if overfitting, decrease to 0.005 if underfitting
+optimizer = { AdamW = { weight_decay = 0.1, beta1 = 0.9, beta2 = 0.99 } }
+
+# 🎯 LEARNING RATE: Adaptive with conservative start for 3-day prediction
+# CRITICAL: Start higher (0.001) since we have limited data, reduce aggressively
+# TUNING: Use 0.0005-0.002 initial_lr, patience 3-8, factor 0.7-0.95
+# learning_rate = { Adaptive = { initial_lr = 0.001, patience = 4, factor = 0.8 } }
+learning_rate = { Fixed = 0.0005 }
+# 🔥 WARMUP: Short warmup for small dataset
+# CRITICAL: Too long warmup wastes precious epochs with limited data
+# TUNING: Use 2-3 for very small datasets, 8-12 for larger datasets
+warmup_epochs = 4
+
+# 📉 LEARNING SCHEDULE: Gentle decay to maintain learning throughout training
+# CRITICAL: Prevents learning rate from becoming too small too quickly
+# TUNING: Use 0.95-0.98 for gentler decay, 0.85-0.9 for more aggressive
+learning_schedule = { LinearDecay = { decay_rate = 0.9 } }
+# learning_schedule = { ExponentialDecay = { decay_rate = 0.98 } }
+
+# 🎯 DATA SPLITS: Optimized for time series with limited data
+# CRITICAL: Smaller validation split to maximize training data
+# TUNING: Use 0.15 if desperate for training data, 0.25 for more robust validation
+validation_split = 0.2
+test_split = 0.1
+
+# ⏰ EARLY STOPPING: Higher patience for 3-day prediction convergence
+# CRITICAL: 3-day prediction needs time to learn complex patterns
+# TUNING: Use 15-25 for faster training, 30-40 for maximum patience
+early_stopping = { patience = 30, min_delta = 0.001 }
+
+# ✂️ GRADIENT CLIPPING: Moderate clipping for stability
+# CRITICAL: Prevents exploding gradients in deep LSTM with long sequences
+# TUNING: Use 0.25-0.5 for more aggressive, 1.0-2.0 for less aggressive
+gradient_clip = 0.5
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🧠 MODEL ARCHITECTURE - Optimized for 3-day prediction with limited data
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[model]
+# 🏗️ ARCHITECTURE: Multi-layer LSTM optimized for time series
+# CRITICAL: 3 layers optimal for 3600 samples - more layers = overfitting
+# TUNING: Use 2 layers if overfitting, 4-5 layers if you have >10k samples
+architecture = { MultiLSTM = { layers = 2 } }
+
+# 📏 SEQUENCE LENGTH: Optimized for 3-day prediction (72 hours)
+# CRITICAL: 72 hours = exactly 3 days of context for 3-day prediction
+# TUNING: Use 48-96 for experimentation, 120-168 if you have more data
+sequence_length = { Fixed = 60 }
+
+# 🧮 HIDDEN UNITS: Progressive reduction optimized for feature count
+# CRITICAL: Start with ~1.5x feature count, reduce progressively
+# TUNING: Increase first layer to 256-512 if >200 features, reduce if overfitting
+hidden_units = { Fixed = [128, 64] }
+
+# 🎯 LOSS FUNCTION: MSE foinr regression-focused 3-day price prediction
+# CRITICAL: MSE optimal for price prediction, Huber if you have outliers
+# TUNING: Use Huber for noisy data, MAE for outlier-robust training
+[model.loss_function]
+# MSE = {}
+Composite = { accuracy_weight = 0.25, direction_weight = 0.45, volatility_weight = 0.2, risk_weight = 0.1 }
+
+
+# 🛡️ DROPOUT: Moderate dropout to prevent overfitting with limited data
+[model.dropout]
+enabled = true
+# CRITICAL: 0.3-0.4 optimal for small datasets - higher = underfitting
+# TUNING: Use 0.2-0.3 if underfitting, 0.5-0.6 if severe overfitting
+rate = { Fixed = 0.4 }
+variational = true
+recurrent = true  # Disabled for small dataset to preserve capacity
+
+# 🎯 ATTENTION: Simplified attention for limited data
+[model.attention]
+enabled = true
+mechanism = "VariableSelection"
+# CRITICAL: Fewer heads for small dataset to prevent overfitting
+# TUNING: Use 4-6 for very limited data, 12-16 for larger datasets
+heads = 4
+head_dim = 64
+dropout_rate = 0.5
+temperature_scaling = 0.8
+use_relative_position = true
+
+[model.attention.visualization]
+save_heatmaps = false     # Disabled for performance
+export_analysis = false   # Disabled for performance
+output_dir = "attention_analysis"
+
+[model.attention.variable_selection]
+static_selection = true
+temporal_selection = true
+# CRITICAL: Higher threshold to select only most important features
+# TUNING: Use 0.01-0.03 for more features, 0.1-0.2 for fewer features
+selection_threshold = 0.03
+# CRITICAL: Limit features to prevent overfitting with small dataset
+# TUNING: Use 30-50 for very limited data, 100-150 for larger datasets
+top_k_features = 50
+enable_interpretability = true
+
+# 🎯 MULTI-TARGET: Focused on price prediction for 3-day horizon
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+# CRITICAL: Tighter threshold for meaningful 3-day direction changes
+# TUNING: Use 0.005-0.01 for tighter, 0.02-0.03 for looser
+thresholds = [-0.03, 0.03]
+use_adaptive_thresholds = true
+confidence_calibration = true
+
+[model.output_heads.volatility]
+enabled = true
+method = "Direct"
+thresholds = [0.33, 0.67]  # [low_percentile, high_percentile]
+# CRITICAL: Focus on 3-day horizon only for single-target optimization
+# TUNING: Add "1d", "2d" if you want multi-horizon, remove others
+horizons = ["8h", "16h", "1d"]
+
+# 📊 QUANTILE OUTPUTS: Uncertainty estimation
+[model.quantile_outputs]
+enabled = true
+# CRITICAL: Fewer quantiles for small dataset
+# TUNING: Use [0.25, 0.5, 0.75] for minimal, [0.05, 0.25, 0.5, 0.75, 0.95] for comprehensive
+quantiles = [0.1, 0.25, 0.5, 0.75, 0.9]
+# quantiles = [0.02, 0.15, 0.3, 0.45, 0.6, 0.75, 0.97]
+loss_weighting = "balanced"
+uncertainty_calibration = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📊 DATA PREPROCESSING - Optimized for crypto time series
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[data]
+# 🔄 NORMALIZATION: Robust optimal for crypto with outliers
+# CRITICAL: Robust handles crypto volatility spikes better than Standard
+# TUNING: Use "Standard" for clean data, "MinMaxScale" for bounded features
+normalization = "Robust"
+
+# 🔗 SEQUENCE OVERLAP: High overlap for smooth predictions with limited data CRITICAL: 0.95 maximizes training samples from limited dataset
+# TUNING: Use 0.9 for faster training, 0.98 for maximum data utilization
+sequence_overlap = 0.5
+
+[data.outlier_handling]
+enabled = true
+method = "ModifiedZScore"
+# CRITICAL: Conservative threshold to preserve crypto volatility information
+# TUNING: Use 2.5-3.0 for aggressive outlier removal, 4.0-5.0 for conservative
+threshold = 3.5
+
+[data.feature_selection]
+enabled = true
+# CRITICAL: Limit features for small dataset to prevent curse of dimensionality
+# TUNING: Use 50-80 for very limited data, 150-200 for larger datasets
+max_features = 100
+# CRITICAL: High correlation threshold to keep diverse features
+# TUNING: Use 0.85-0.9 for more aggressive removal, 0.95-0.98 for conservative
+correlation_threshold = 0.85
+# CRITICAL: Lower threshold to include more potentially useful features
+# TUNING: Use 0.001-0.005 for more features, 0.01-0.02 for fewer features
+importance_threshold = 0.005
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔧 HYPERPARAMETER OPTIMIZATION - Efficient for limited data
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[optimization]
+enabled = true
+method = "Bayesian"
+# CRITICAL: Fewer trials for small dataset - more trials won't help much
+# TUNING: Use 10-15 for quick optimization, 30-50 for thorough search
+n_trials = 20
+# CRITICAL: Reasonable timeout for small dataset optimization
+# TUNING: Use 3600-7200 for quick, 43200-86400 for thorough
+timeout_seconds = 21600  # 6 hours
+# CRITICAL: MAPE most relevant for price prediction accuracy
+# TUNING: Use "DirectionalAccuracy" for direction focus, "MSE" for regression focus
+metric = "MAPE"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎨 CUSTOM FEATURES - Your cointrapper-specific indicators
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[features.custom_features]
+enabled = true
+include_all_numeric = true
+auto_include_all = true
+include_features = []
+exclude_features = []
+
+# 📊 FEATURE TRANSFORMATIONS: MinMaxScale for stability
+[features.custom_features.transformations]
+buy_volume_ratio = "MinMaxScale"
+avg_buy_size = "MinMaxScale"
+avg_sell_size = "MinMaxScale"
+pvcs = "MinMaxScale"
+wpvs = "MinMaxScale"
+ofis = "MinMaxScale"
+pis = "MinMaxScale"
+vas = "MinMaxScale"
+lis = "MinMaxScale"
+pmds = "MinMaxScale"
+tfds = "MinMaxScale"
+pvds = "MinMaxScale"
+mdis = "MinMaxScale"
+tsds = "MinMaxScale"
+twpis = "MinMaxScale"
+pas = "MinMaxScale"
+wts = "MinMaxScale"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📈 TECHNICAL INDICATORS - Focused on 3-day prediction relevance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+# CRITICAL: Periods optimized for 3-day prediction (multiples of 24h)
+# TUNING: Add 144, 168 for longer trends, remove 8, 16 for less noise
+sma_periods = [12, 24, 48, 72]
+ema_periods = [12, 24, 48, 72]
+wma_periods = [24, 48, 72]
+hull_periods = [24, 48, 72]
+
+[features.technical_indicators.momentum]
+# CRITICAL: RSI periods aligned with 3-day prediction timeframe
+# TUNING: Add 96, 120 for longer momentum, use only [24, 48] for less features
+rsi_periods = [24, 48, 72]
+stochastic = true
+williams_r = true
+cci_periods = [24, 48, 72]
+momentum_periods = [24, 48, 72]
+
+[features.technical_indicators.volatility]
+# CRITICAL: Bollinger bands with 3-day period and crypto-optimized std_dev
+# TUNING: Use period=48 for 2-day, period=96 for 4-day, std_dev=2.0 for tighter bands
+bollinger_bands = { enabled = true, period = 72, std_dev = 2.4 }
+atr_periods = [24, 48, 72]
+keltner_channels = true
+donchian_channels = true
+
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [24, 48, 72]
+mfi_periods = [24, 48]
+ad_line = true
+chaikin_oscillator = true
+
+[features.technical_indicators.trend]
+# CRITICAL: MACD optimized for 3-day prediction timeframe
+# TUNING: Use fast=8, slow=21 for shorter, fast=21, slow=50 for longer
+macd = { enabled = true, fast_period = 12, slow_period = 26, signal_period = 9 }
+adx_periods = [24, 48]
+parabolic_sar = true
+aroon = true
+
+# 🔬 ADVANCED INDICATORS: Optimized windows for 3-day prediction
+[features.technical_indicators.trend.advanced]
+enabled = true
+# CRITICAL: 72h (3-day) windows aligned with prediction horizon
+# TUNING: Use 48h for 2-day focus, 96-120h for longer-term patterns
+hurst_window = 72
+fractal_window = 72
+regime_window = 96  # 6-day for stable regime detection
+clustering_window = 72
+reversion_window = 72  # 4-day for mean reversion
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🌊 MARKET MICROSTRUCTURE - Focused feature set for limited data
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[features.market_microstructure]
+enabled = true
+
+[features.market_microstructure.price_dynamics]
+# CRITICAL: Periods optimized for 3-day prediction
+# TUNING: Add 48, 72 for longer dynamics, use only [6, 12, 24] for less features
+velocity_periods = [6, 12, 24, 48]
+acceleration_periods = [6, 12, 24]
+jerk_periods = [6, 12]
+
+[features.market_microstructure.volume_price]
+# CRITICAL: VWAP periods aligned with 3-day timeframe
+# TUNING: Add 96, 120 for longer VWAP, use only [24, 48] for less features
+vwap_periods = [24, 48, 72]
+volume_price_trend = true
+ease_of_movement = true
+negative_volume_index = true
+
+[features.market_microstructure.trade_intensity]
+enabled = true
+# CRITICAL: Lookback periods optimized for 3-day prediction
+# TUNING: Add 96, 120 for longer intensity, use only [12, 24, 48] for less features
+lookback_periods = [12, 24, 48, 72]
+intensity_metrics = ["TradesPerMinute", "VolumePerTrade"]
+
+[features.market_microstructure.market_depth]
+bid_ask_spread_proxy = true
+order_book_imbalance_proxy = true
+market_impact_proxy = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📊 VOLATILITY FEATURES - Focused on 3-day prediction horizon
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[features.volatility_features]
+enabled = true
+
+[features.volatility_features.realized_volatility]
+# CRITICAL: Periods focused on 3-day prediction horizon
+# TUNING: Add "4h", "8h" for shorter-term, "96h", "120h" for longer-term
+periods = ["8h", "24h", "72h"]
+estimators = ["Standard", "RangeBasedYangZhang"]
+
+[features.volatility_features.garch_features]
+enabled = true
+# CRITICAL: Simpler GARCH models for limited data
+# TUNING: Use only [[1,1]] for very limited data, add [[2,2], [3,1]] for more data
+model_orders = [[1, 1], [1, 2], [2, 1]]
+conditional_volatility = true
+volatility_forecasts = true
+
+[features.volatility_features.clustering]
+enabled = true
+clustering_strength = true
+persistence_measures = true
+
+[features.volatility_features.regime_detection]
+enabled = true
+methods = ["VolatilityBased", "TrendBased"]
+# CRITICAL: Moderate sensitivity for stable regime detection
+# TUNING: Use 0.2-0.25 for more sensitive, 0.4-0.5 for less sensitive
+sensitivity = 0.35
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔧 FEATURE ENGINEERING - Conservative approach for limited data
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[features.engineering]
+enabled = true
+
+[features.engineering.polynomial_features]
+# WHY disabled: Too many features already, polynomial would create too much noise
+enabled = false
+degree = 2
+include_bias = false
+interaction_only = true
+
+[features.engineering.interaction_features]
+enabled = true
+# CRITICAL: Limited interactions to prevent overfitting
+# TUNING: Use 10-15 for very limited data, 30-50 for larger datasets
+max_interactions = 15
+feature_pairs = []
+
+[features.engineering.lag_features]
+enabled = true
+# CRITICAL: Lag periods optimized for 3-day prediction
+# TUNING: Add 96, 120 for longer lags, use only [1,2,3,6,12,24] for less features
+lag_periods = [6, 12, 24, 48, 72, 96, 120]
+# CRITICAL: Only lag features that exist in your data
+# TUNING: Replace with actual feature names from your dataset
+features_to_lag = ["close", "volume", "buy_volume_ratio", "avg_buy_size", "avg_sell_size"]
+
+[features.engineering.rolling_features]
+enabled = true
+# CRITICAL: Window sizes aligned with 3-day prediction
+# TUNING: Add 96, 120 for longer windows, use only [6,12,24,48] for less features
+window_sizes = [12, 24, 48, 72]
+# CRITICAL: Reduced statistics to prevent overfitting
+# TUNING: Add "Kurtosis", "Median" for more statistics, use only ["Mean", "Std"] for minimal
+statistics = ["Mean", "Std", "Min", "Max"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🌐 CROSS-ASSET FEATURES - Simplified for focused prediction
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[features.cross_asset]
+enabled = false
+# WHY 3: Need multiple symbols for meaningful cross-asset analysis
+min_symbols_required = 3
+required_symbols = ["BTCUSDT", "ETHUSDT"]
+btc_dominance_enabled = true
+eth_btc_ratio_enabled = true
+
+[features.cross_asset.sentiment_analysis]
+enabled = false
+# WHY 48: 2-day lookback for sentiment analysis in 3-day prediction
+lookback_periods = 72
+price_velocity_weight = 0.3
+volume_spike_weight = 0.3
+volatility_weight = 0.4
+
+[features.cross_asset.correlation_analysis]
+enabled = false
+# WHY 100: More periods for stable correlation calculation
+min_periods = 120
+# WHY 48: 2-day correlation window for 3-day prediction
+correlation_window = 72
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 FEATURE SELECTION - Aggressive filtering for limited data
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[features.selection]
+enabled = true
+# CRITICAL: Conservative feature count for small dataset
+# TUNING: Use 60-100 for very limited data, 120-200 for larger datasets
+max_features = 100
+# CRITICAL: High correlation threshold to remove redundant features
+# TUNING: Use 0.85-0.9 for more aggressive, 0.95-0.98 for conservative
+correlation_threshold = 0.85
+# CRITICAL: Higher threshold to keep only important features
+# TUNING: Use 0.001-0.005 for more features, 0.01-0.02 for fewer features
+importance_threshold = 0.005
+methods = ["CorrelationFilter", "ImportanceBased"]
+keep_crypto_features = true

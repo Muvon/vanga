@@ -100,7 +100,9 @@ impl Backtester {
         let prediction_config = self.create_prediction_config(&test_path)?;
         let predictions = {
             let predictor = crate::api::Predictor::new(prediction_config);
-            predictor.predict(crate::api::ModelWrapper::MultiTarget(&trained_model)).await?
+            predictor
+                .predict(crate::api::ModelWrapper::MultiTarget(&trained_model))
+                .await?
         };
 
         // Step 6: Generate actual targets for test data to calculate metrics
@@ -296,7 +298,7 @@ impl Backtester {
                     // Find the bin with highest probability and use its midpoint
                     let mut max_prob = 0.0;
                     let mut best_price = 0.0;
-                    
+
                     for bin in pl.bins.values() {
                         if bin.probability > max_prob {
                             max_prob = bin.probability;
@@ -304,8 +306,12 @@ impl Backtester {
                             best_price = (bin.price[0] + bin.price[1]) / 2.0;
                         }
                     }
-                    
-                    if max_prob > 0.0 { Some(best_price) } else { None }
+
+                    if max_prob > 0.0 {
+                        Some(best_price)
+                    } else {
+                        None
+                    }
                 })
             })
             .collect();
@@ -426,13 +432,15 @@ impl Backtester {
                         ("up", dir.up_probability),
                         ("pump", dir.pump_probability),
                     ];
-                    
+
                     let (max_idx, _) = directions
                         .iter()
                         .enumerate()
-                        .max_by(|(_, (_, a)), (_, (_, b))| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                        .max_by(|(_, (_, a)), (_, (_, b))| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
                         .unwrap_or((2, &("sideways", 0.0))); // Default to sideways
-                    
+
                     max_idx as i32
                 })
             })

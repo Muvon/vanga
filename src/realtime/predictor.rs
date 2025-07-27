@@ -348,7 +348,9 @@ impl StreamingPredictor {
         log::debug!("Generating ML prediction using trained model");
         let structured_predictions = {
             let predictor = Predictor::new(temp_config);
-            predictor.predict(ModelWrapper::MultiTarget(&self.model)).await?
+            predictor
+                .predict(ModelWrapper::MultiTarget(&self.model))
+                .await?
         };
 
         // Convert to realtime prediction format

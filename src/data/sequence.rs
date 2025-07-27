@@ -200,13 +200,13 @@ impl SequenceGenerator {
         // FIXED: Ensure prediction pipeline uses same per-sequence normalization as training
         // Extract the last sequence_length rows and normalize only that sequence
         let sequence_df = df.slice(start_idx as i64, sequence_length);
-        
+
         // Extract OHLC data from the sequence for ATR calculation - REQUIRED!
         let sequence_ohlc = self.extract_ohlc_from_sequence(&sequence_df)
             .map_err(|e| VangaError::DataError(format!(
                 "FATAL: Cannot extract OHLC data from sequence for order generation. This is required for proper ATR calculation and sequence-aware orders: {}", e
             )))?;
-        
+
         let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
         let sequences =
             self.create_prediction_sequences(&normalized_sequence, 0, sequence_length)?;
@@ -610,9 +610,12 @@ impl SequenceGenerator {
     }
 
     /// Extract OHLC data from sequence DataFrame for ATR calculation
-    fn extract_ohlc_from_sequence(&self, sequence_df: &DataFrame) -> Result<Vec<crate::data::structures::MarketDataRow>> {
+    fn extract_ohlc_from_sequence(
+        &self,
+        sequence_df: &DataFrame,
+    ) -> Result<Vec<crate::data::structures::MarketDataRow>> {
         let mut ohlc_data = Vec::new();
-        
+
         // Get required columns
         let timestamp_col = sequence_df.column("timestamp").map_err(|_| {
             VangaError::DataError("Missing timestamp column in sequence data".to_string())
@@ -661,45 +664,80 @@ impl SequenceGenerator {
                 polars::prelude::AnyValue::Utf8(s) => {
                     // Parse ISO timestamp string
                     chrono::DateTime::parse_from_rfc3339(s)
-                        .map_err(|e| VangaError::DataError(format!("Failed to parse timestamp '{}': {}", s, e)))?
+                        .map_err(|e| {
+                            VangaError::DataError(format!(
+                                "Failed to parse timestamp '{}': {}",
+                                s, e
+                            ))
+                        })?
                         .timestamp()
                 }
-                _ => return Err(VangaError::DataError(format!("Unsupported timestamp type: {:?}", timestamp))),
+                _ => {
+                    return Err(VangaError::DataError(format!(
+                        "Unsupported timestamp type: {:?}",
+                        timestamp
+                    )))
+                }
             };
 
             let open_f64 = match open {
                 polars::prelude::AnyValue::Float64(f) => f,
                 polars::prelude::AnyValue::Float32(f) => f as f64,
                 polars::prelude::AnyValue::Int64(i) => i as f64,
-                _ => return Err(VangaError::DataError(format!("Unsupported open price type: {:?}", open))),
+                _ => {
+                    return Err(VangaError::DataError(format!(
+                        "Unsupported open price type: {:?}",
+                        open
+                    )))
+                }
             };
 
             let high_f64 = match high {
                 polars::prelude::AnyValue::Float64(f) => f,
                 polars::prelude::AnyValue::Float32(f) => f as f64,
                 polars::prelude::AnyValue::Int64(i) => i as f64,
-                _ => return Err(VangaError::DataError(format!("Unsupported high price type: {:?}", high))),
+                _ => {
+                    return Err(VangaError::DataError(format!(
+                        "Unsupported high price type: {:?}",
+                        high
+                    )))
+                }
             };
 
             let low_f64 = match low {
                 polars::prelude::AnyValue::Float64(f) => f,
                 polars::prelude::AnyValue::Float32(f) => f as f64,
                 polars::prelude::AnyValue::Int64(i) => i as f64,
-                _ => return Err(VangaError::DataError(format!("Unsupported low price type: {:?}", low))),
+                _ => {
+                    return Err(VangaError::DataError(format!(
+                        "Unsupported low price type: {:?}",
+                        low
+                    )))
+                }
             };
 
             let close_f64 = match close {
                 polars::prelude::AnyValue::Float64(f) => f,
                 polars::prelude::AnyValue::Float32(f) => f as f64,
                 polars::prelude::AnyValue::Int64(i) => i as f64,
-                _ => return Err(VangaError::DataError(format!("Unsupported close price type: {:?}", close))),
+                _ => {
+                    return Err(VangaError::DataError(format!(
+                        "Unsupported close price type: {:?}",
+                        close
+                    )))
+                }
             };
 
             let volume_f64 = match volume {
                 polars::prelude::AnyValue::Float64(f) => f,
                 polars::prelude::AnyValue::Float32(f) => f as f64,
                 polars::prelude::AnyValue::Int64(i) => i as f64,
-                _ => return Err(VangaError::DataError(format!("Unsupported volume type: {:?}", volume))),
+                _ => {
+                    return Err(VangaError::DataError(format!(
+                        "Unsupported volume type: {:?}",
+                        volume
+                    )))
+                }
             };
 
             ohlc_data.push(crate::data::structures::MarketDataRow {
@@ -712,7 +750,10 @@ impl SequenceGenerator {
             });
         }
 
-        log::debug!("Extracted {} OHLC rows from sequence for ATR calculation", ohlc_data.len());
+        log::debug!(
+            "Extracted {} OHLC rows from sequence for ATR calculation",
+            ohlc_data.len()
+        );
         Ok(ohlc_data)
     }
 }
