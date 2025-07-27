@@ -1785,13 +1785,30 @@ impl LSTMModel {
         );
         let lstm_features = self.extract_all_lstm_features(sequences)?;
 
-        log::debug!("📊 LSTM features shape: {:?}", lstm_features.shape());
+        log::info!(
+            "📊 LSTM features extracted: shape={:?}, architecture={:?}",
+            lstm_features.shape(),
+            self.architecture
+        );
 
         // Convert targets to tensor
         let targets_tensor = self.convert_targets_to_tensor(targets)?;
 
         // Determine XGBoost objective and metric based on target type
         let mut xgb_config = config.model.xgboost.clone();
+
+        // Update feature_dim to match actual LSTM architecture
+        let actual_feature_dim = self.get_xgboost_feature_dim();
+        if xgb_config.feature_dim != actual_feature_dim {
+            log::info!(
+                "🔧 Updating XGBoost feature_dim from {} to {} for {:?} architecture",
+                xgb_config.feature_dim,
+                actual_feature_dim,
+                self.architecture
+            );
+            xgb_config.feature_dim = actual_feature_dim;
+        }
+
         if let Some((target_name, target_type)) = &self.target_context {
             let num_classes = targets.shape()[1];
             xgb_config.objective =
@@ -1820,15 +1837,23 @@ impl LSTMModel {
 
         // Log feature importance if available
         if let Some(xgb_model) = &self.xgboost_model {
-            if let Some(importance) = xgb_model.get_feature_importance() {
-                log::info!("📊 XGBoost Feature Importance (top 10):");
-                let mut importance_vec: Vec<_> = importance.iter().collect();
-                importance_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+            log::debug!("🔍 Checking XGBoost feature importance...");
+            match xgb_model.get_feature_importance() {
+                Some(importance) => {
+                    log::info!("📊 XGBoost Feature Importance (top 10):");
+                    let mut importance_vec: Vec<_> = importance.iter().collect();
+                    importance_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
 
-                for (i, (feature, score)) in importance_vec.iter().take(10).enumerate() {
-                    log::info!("   {}. {}: {:.4}", i + 1, feature, score);
+                    for (i, (feature, score)) in importance_vec.iter().take(10).enumerate() {
+                        log::info!("   {}. {}: {:.4}", i + 1, feature, score);
+                    }
+                }
+                None => {
+                    log::warn!("⚠️  XGBoost feature importance not available - check save_feature_importance config");
                 }
             }
+        } else {
+            log::error!("❌ XGBoost model not found after training");
         }
 
         log::info!("✅ XGBoost hybrid training completed successfully");
