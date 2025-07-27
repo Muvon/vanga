@@ -123,7 +123,22 @@ impl XGBoostRegressor {
 
         // Extract feature importance if enabled
         if self.config.save_feature_importance {
-            self.feature_importance = Some(self.extract_feature_importance(&booster)?);
+            log::debug!("🔍 Extracting XGBoost feature importance...");
+            match self.extract_feature_importance(&booster) {
+                Ok(importance) => {
+                    log::debug!(
+                        "✅ Feature importance extracted: {} features",
+                        importance.len()
+                    );
+                    self.feature_importance = Some(importance);
+                }
+                Err(e) => {
+                    log::warn!("⚠️  Failed to extract feature importance: {}", e);
+                    self.feature_importance = None;
+                }
+            }
+        } else {
+            log::debug!("📊 Feature importance extraction disabled in config");
         }
 
         self.booster = Some(booster);
@@ -402,12 +417,15 @@ impl XGBoostRegressor {
 
     /// Extract feature importance from trained booster
     fn extract_feature_importance(&self, booster: &Booster) -> Result<HashMap<String, f32>> {
+        log::debug!("🔍 Attempting to extract feature importance from XGBoost booster...");
+
         // XGB crate provides feature names, not importance scores
         // We'll create a placeholder based on feature names if available
         let mut importance_map = HashMap::new();
 
         match booster.get_feature_names() {
-            Ok(feature_names) => {
+            Ok(feature_names) if !feature_names.is_empty() => {
+                log::debug!("✅ Got {} feature names from booster", feature_names.len());
                 // Use actual feature names from the model
                 let uniform_importance = 1.0 / feature_names.len() as f32;
                 for name in feature_names {
@@ -418,7 +436,26 @@ impl XGBoostRegressor {
                     importance_map.len()
                 );
             }
-            Err(_) => {
+            Ok(feature_names) => {
+                log::debug!(
+                    "⚠️  Booster returned {} empty feature names, using fallback",
+                    feature_names.len()
+                );
+                // Fallback to generic feature names when booster returns empty list
+                for i in 0..self.config.feature_dim {
+                    importance_map.insert(
+                        format!("lstm_feature_{}", i),
+                        1.0 / self.config.feature_dim as f32,
+                    );
+                }
+                log::info!(
+                    "📊 Generated placeholder feature importance for {} features (feature_dim={})",
+                    importance_map.len(),
+                    self.config.feature_dim
+                );
+            }
+            Err(e) => {
+                log::debug!("⚠️  Failed to get feature names from booster: {}", e);
                 // Fallback to generic feature names
                 for i in 0..self.config.feature_dim {
                     importance_map.insert(
@@ -427,12 +464,23 @@ impl XGBoostRegressor {
                     );
                 }
                 log::info!(
-                    "📊 Generated placeholder feature importance for {} features",
-                    importance_map.len()
+                    "📊 Generated placeholder feature importance for {} features (feature_dim={})",
+                    importance_map.len(),
+                    self.config.feature_dim
                 );
             }
         }
 
+        if importance_map.is_empty() {
+            return Err(VangaError::model(
+                "Failed to generate any feature importance scores",
+            ));
+        }
+
+        log::debug!(
+            "✅ Feature importance extraction completed with {} features",
+            importance_map.len()
+        );
         Ok(importance_map)
     }
 }

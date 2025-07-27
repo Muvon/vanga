@@ -548,7 +548,7 @@ impl LSTMModel {
         log::debug!("🔍 Extracting LSTM features for XGBoost");
 
         // Ensure model is initialized
-        let lstm_layers = self
+        let forward_lstm_layers = self
             .lstm_layers
             .as_ref()
             .ok_or_else(|| VangaError::model("LSTM layers not initialized"))?;
@@ -564,11 +564,94 @@ impl LSTMModel {
             input_size
         );
 
-        // Forward pass through LSTM layers
+        // Check if this is bidirectional architecture
+        let is_bidirectional = matches!(
+            self.architecture,
+            Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
+        );
+
         let mut current_input = sequences.clone();
+
+        if is_bidirectional {
+            // Bidirectional processing - mirror the forward() method logic
+            let backward_lstm_layers = self.backward_lstm_layers.as_ref().ok_or_else(|| {
+                VangaError::ModelError(
+                    "Backward LSTM layers not initialized for bidirectional model".to_string(),
+                )
+            })?;
+
+            log::debug!("🔄 Processing bidirectional LSTM for feature extraction");
+
+            // Process each layer bidirectionally
+            for (layer_idx, (forward_layer, backward_layer)) in forward_lstm_layers
+                .iter()
+                .zip(backward_lstm_layers.iter())
+                .enumerate()
+            {
+                // Process forward direction
+                let forward_states = forward_layer.seq(&current_input)?;
+                if forward_states.is_empty() {
+                    return Err(VangaError::ModelError(format!(
+                        "Forward layer {} produced no states",
+                        layer_idx
+                    )));
+                }
+
+                let mut forward_hidden_states = Vec::new();
+                for state in &forward_states {
+                    forward_hidden_states.push(state.h().clone());
+                }
+                let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
+
+                // Process backward direction
+                let backward_states = backward_layer.seq(&current_input)?;
+                if backward_states.is_empty() {
+                    return Err(VangaError::ModelError(format!(
+                        "Backward layer {} produced no states",
+                        layer_idx
+                    )));
+                }
+
+                let mut backward_hidden_states = Vec::new();
+                for state in &backward_states {
+                    backward_hidden_states.push(state.h().clone());
+                }
+                let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
+
+                // Concatenate forward and backward outputs along the feature dimension
+                // forward_output: [batch_size, seq_len, hidden_size]
+                // backward_output: [batch_size, seq_len, hidden_size]
+                // Result: [batch_size, seq_len, 2*hidden_size]
+                current_input =
+                    Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
+
+                log::debug!(
+                    "🔄 Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
+                    layer_idx,
+                    forward_output.shape(),
+                    backward_output.shape(),
+                    current_input.shape()
+                );
+            }
+
+            // Extract final timestep features from bidirectional output
+            let final_timestep_idx = seq_len - 1;
+            let lstm_features = current_input
+                .narrow(1, final_timestep_idx, 1)? // Get last timestep
+                .squeeze(1)?; // Remove sequence dimension
+
+            log::info!(
+                "✅ Extracted bidirectional LSTM features shape: {:?}",
+                lstm_features.shape()
+            );
+
+            return Ok(lstm_features);
+        }
+
+        // Standard (non-bidirectional) processing
         let mut final_hidden_states = Vec::new();
 
-        for (layer_idx, lstm_layer) in lstm_layers.iter().enumerate() {
+        for (layer_idx, lstm_layer) in forward_lstm_layers.iter().enumerate() {
             // LSTM forward pass using seq method
             let lstm_states = lstm_layer.seq(&current_input)?;
 
@@ -587,7 +670,7 @@ impl LSTMModel {
             let layer_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
 
             log::debug!(
-                "🔄 Layer {} output shape: {:?}",
+                "🔄 Standard layer {} output shape: {:?}",
                 layer_idx,
                 layer_output.shape()
             );
@@ -610,8 +693,8 @@ impl LSTMModel {
             .narrow(1, final_timestep_idx, 1)? // Get last timestep
             .squeeze(1)?; // Remove sequence dimension
 
-        log::debug!(
-            "✅ Extracted LSTM features shape: {:?}",
+        log::info!(
+            "✅ Extracted standard LSTM features shape: {:?}",
             lstm_features.shape()
         );
 
@@ -697,13 +780,25 @@ impl LSTMModel {
     }
 
     /// Get expected XGBoost feature dimension from configuration
-    fn get_xgboost_feature_dim(&self) -> usize {
-        // Use XGBoost config feature_dim if available, otherwise default to LSTM hidden size
+    pub fn get_xgboost_feature_dim(&self) -> usize {
+        // Use XGBoost config feature_dim if available, otherwise calculate from LSTM architecture
         if let Some(ref xgboost_model) = self.xgboost_model {
             xgboost_model.get_config().feature_dim
         } else {
-            // Fallback to LSTM last layer hidden size or default
-            self.config.hidden_sizes.last().copied().unwrap_or(64)
+            // Calculate based on LSTM architecture
+            let base_hidden_size = self.config.hidden_sizes.last().copied().unwrap_or(64);
+
+            // Check if this is bidirectional architecture - doubles the feature dimension
+            let is_bidirectional = matches!(
+                self.architecture,
+                Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
+            );
+
+            if is_bidirectional {
+                base_hidden_size * 2 // Bidirectional concatenates forward + backward
+            } else {
+                base_hidden_size // Standard architectures use base size
+            }
         }
     }
 
