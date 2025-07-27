@@ -33,7 +33,7 @@ pub enum OptimizationMetric {
 }
 
 /// Market regime classification for regime-aware optimization
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MarketRegime {
     /// Low volatility, sideways movement
     LowVolatility,

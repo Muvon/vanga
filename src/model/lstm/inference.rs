@@ -75,7 +75,11 @@ impl LSTMModel {
         Ok((seq_tensor, target_tensor))
     }
 
-    /// Forward pass through multi-layer LSTM network - Enhanced with bidirectional support and dropout
+    /// Forward pass through multi-layer LSTM network - Enhanced with bidirectional support and consistent dropout
+    ///
+    /// CRITICAL FIX: Dropout consistency between training and validation
+    /// - training=true: Apply dropout for regularization during training
+    /// - training=false: NO dropout for consistent validation behavior
     pub fn forward(&self, input: &Tensor, training: bool) -> Result<Tensor> {
         let forward_lstm_layers = self.lstm_layers.as_ref().ok_or_else(|| {
             VangaError::ModelError("Forward LSTM layers not initialized".to_string())
@@ -146,12 +150,24 @@ impl LSTMModel {
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
                 // Apply dropout between layers if enabled and in training mode
-                if training
-                    && self.dropout_config.as_ref().is_some_and(|d| d.enabled)
-                    && layer_idx < forward_lstm_layers.len() - 1
-                {
+                // CRITICAL FIX: Use dropout consistency configuration
+                let should_apply_dropout = self.dropout_consistency_config.should_apply_dropout(
+                    training,
+                    self.dropout_config.as_ref().is_some_and(|d| d.enabled),
+                );
+
+                if should_apply_dropout && layer_idx < forward_lstm_layers.len() - 1 {
+                    self.dropout_consistency_config
+                        .log_dropout_behavior(training, true);
                     current_input = self.apply_dropout(&current_input)?;
+                } else if self.dropout_consistency_config.log_dropout_changes {
+                    self.dropout_consistency_config
+                        .log_dropout_behavior(training, false);
                 }
+
+                // Track dropout behavior in metrics collector if available
+                // Note: This is a simplified tracking - in practice, you'd need access to the metrics collector
+                // which would require passing it through the forward pass or storing it in the model
 
                 log::debug!(
                     "Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
@@ -184,12 +200,24 @@ impl LSTMModel {
                 current_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
 
                 // Apply dropout between layers if enabled and in training mode
-                if training
-                    && self.dropout_config.as_ref().is_some_and(|d| d.enabled)
-                    && i < forward_lstm_layers.len() - 1
-                {
+                // CRITICAL FIX: Use dropout consistency configuration
+                let should_apply_dropout = self.dropout_consistency_config.should_apply_dropout(
+                    training,
+                    self.dropout_config.as_ref().is_some_and(|d| d.enabled),
+                );
+
+                if should_apply_dropout && i < forward_lstm_layers.len() - 1 {
+                    self.dropout_consistency_config
+                        .log_dropout_behavior(training, true);
                     current_output = self.apply_dropout(&current_output)?;
+                } else if self.dropout_consistency_config.log_dropout_changes {
+                    self.dropout_consistency_config
+                        .log_dropout_behavior(training, false);
                 }
+
+                // Track dropout behavior in metrics collector if available
+                // Note: This is a simplified tracking - in practice, you'd need access to the metrics collector
+                // which would require passing it through the forward pass or storing it in the model
 
                 log::debug!(
                     "Unidirectional layer {} output shape: {:?}",

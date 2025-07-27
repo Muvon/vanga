@@ -146,7 +146,6 @@ impl CsvStreamer {
                                 e
                             );
                             // Continue processing other lines
-                            continue;
                         }
                     }
                 }
@@ -315,7 +314,7 @@ mod tests {
         let result = streamer.read_new_lines().await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].timestamp, 1640995200);
+        assert_eq!(result[0].timestamp, 1_640_995_200);
         assert_eq!(result[0].open, 47000.5);
         assert_eq!(result[0].close, 47050.0);
     }
@@ -357,7 +356,7 @@ mod tests {
         let line = "1640995200,47000.5,47100.0,46900.0,47050.0,1234.56";
         let result = streamer.parse_csv_line(line).unwrap();
 
-        assert_eq!(result.timestamp, 1640995200);
+        assert_eq!(result.timestamp, 1_640_995_200);
         assert_eq!(result.open, 47000.5);
         assert_eq!(result.high, 47100.0);
         assert_eq!(result.low, 46900.0);

@@ -557,23 +557,26 @@ impl LSTMModel {
         };
 
         // Apply label smoothing for categorical targets
-        let smoothed_targets = if let Some((_, target_type)) = &self.target_context {
-            match target_type {
-                TargetType::PriceLevel => {
-                    // 10% smoothing for price levels (existing behavior)
-                    self.apply_label_smoothing(targets, num_classes, 0.1)?
-                }
-                TargetType::Direction => {
-                    // 5% smoothing for direction targets (balanced for 5-class system)
-                    self.apply_label_smoothing(targets, num_classes, 0.05)?
-                }
-                TargetType::Volatility => {
-                    // 5% smoothing for volatility targets (balanced for 5-class system)
-                    self.apply_label_smoothing(targets, num_classes, 0.05)?
-                }
+        // CRITICAL: target_context MUST be set - no fallbacks, fail fast to find root cause
+        let Some((_, target_type)) = &self.target_context else {
+            return Err(VangaError::ModelError(
+                "🚨 FATAL: target_context not set during loss calculation. This indicates a programming error - models must have target context initialized before training/validation.".to_string()
+            ));
+        };
+
+        let smoothed_targets = match target_type {
+            TargetType::PriceLevel => {
+                // 10% smoothing for price levels (existing behavior)
+                self.apply_label_smoothing(targets, num_classes, 0.1)?
             }
-        } else {
-            targets.clone()
+            TargetType::Direction => {
+                // 5% smoothing for direction targets (balanced for 5-class system)
+                self.apply_label_smoothing(targets, num_classes, 0.05)?
+            }
+            TargetType::Volatility => {
+                // 5% smoothing for volatility targets (balanced for 5-class system)
+                self.apply_label_smoothing(targets, num_classes, 0.05)?
+            }
         };
 
         // Check the smoothed targets shape to determine loss calculation path

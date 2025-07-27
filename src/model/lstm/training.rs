@@ -707,6 +707,14 @@ impl LSTMModel {
         log::info!("  - Adaptive factor: {:.3}", adaptive_factor);
         log::info!("  - Target learning rate: {:.6}", target_lr);
 
+        // Initialize dual loss system if not already initialized
+        if self.dual_loss_system.is_none() {
+            let dual_loss_config = crate::model::dual_loss_system::DualLossConfig::default();
+            self.dual_loss_system = Some(crate::model::dual_loss_system::DualLossSystem::new(
+                dual_loss_config,
+            )?);
+        }
+
         // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
         for epoch in 0..self.training_config.epochs {
             // Initialize epoch tracking variables
@@ -786,8 +794,27 @@ impl LSTMModel {
                 // Forward pass (training mode - enable dropout)
                 let predictions = self.forward(&input_tensor, true)?;
 
-                // Calculate loss using configured loss function or default MSE
-                let loss = self.calculate_loss(&predictions, &target_tensor, config, false)?; // false = training
+                // Calculate loss using dual loss system (UNIFIED: regime-aware training with original method)
+                let loss = if self.dual_loss_system.is_some() {
+                    // Extract dual_loss_system temporarily to avoid borrowing conflicts
+                    let mut dual_loss_system = self.dual_loss_system.take().unwrap();
+
+                    // Use dual loss system that reuses original method but applies regime calibration
+                    let result = dual_loss_system.calculate_training_loss(
+                        self,
+                        &predictions,
+                        &target_tensor,
+                        config,
+                    )?;
+
+                    // Put dual_loss_system back
+                    self.dual_loss_system = Some(dual_loss_system);
+
+                    result
+                } else {
+                    // Fallback to original method if dual loss system is not initialized
+                    self.calculate_loss(&predictions, &target_tensor, config, false)?
+                };
 
                 // Backward pass with gradient computation
                 let grads = loss.backward()?;
@@ -879,9 +906,27 @@ impl LSTMModel {
                     // Forward pass (validation mode - no dropout)
                     let predictions = self.forward(&input_tensor, false)?;
 
-                    // Calculate validation loss using configured loss function
-                    let val_loss =
-                        self.calculate_loss(&predictions, &target_tensor, config, true)?; // true = validation
+                    // Calculate validation loss using dual loss system (UNIFIED: regime-agnostic evaluation)
+                    let val_loss = if self.dual_loss_system.is_some() {
+                        // Extract dual_loss_system temporarily to avoid borrowing conflicts
+                        let mut dual_loss_system = self.dual_loss_system.take().unwrap();
+
+                        // Use dual loss system that reuses original method for consistent evaluation
+                        let result = dual_loss_system.calculate_evaluation_loss(
+                            self,
+                            &predictions,
+                            &target_tensor,
+                            config,
+                        )?;
+
+                        // Put dual_loss_system back
+                        self.dual_loss_system = Some(dual_loss_system);
+
+                        result
+                    } else {
+                        // Fallback to original method if dual loss system is not initialized
+                        self.calculate_loss(&predictions, &target_tensor, config, true)?
+                    };
                     let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
                         VangaError::ModelError(format!(
                             "Validation loss scalar conversion failed: {}",

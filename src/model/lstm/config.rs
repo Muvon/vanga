@@ -4,6 +4,8 @@
 //! for LSTM model setup and training parameters.
 
 use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
+use crate::model::dropout_consistency::DropoutConsistencyConfig;
+use crate::model::dual_loss_system::DualLossSystem;
 use crate::model::loss::CryptoLossFunction;
 use crate::utils::error::{Result, VangaError};
 
@@ -137,6 +139,10 @@ pub struct LSTMModel {
     pub architecture: Option<crate::config::model::LSTMArchitecture>,
     /// Dropout configuration for regularization
     pub dropout_config: Option<crate::config::model::DropoutConfig>,
+    /// Dropout consistency configuration for training/validation behavior
+    pub dropout_consistency_config: DropoutConsistencyConfig,
+    /// Dual loss system for regime-aware training and regime-agnostic validation
+    pub dual_loss_system: Option<DualLossSystem>,
     /// Stored validation data for consistent metrics calculation
     /// Used to ensure epoch metrics and final metrics use the same data
     pub stored_val_sequences: Option<ndarray::Array3<f64>>,
@@ -145,7 +151,8 @@ pub struct LSTMModel {
     /// Check sequences.shape()[0] > 0 to determine if test data is available
     pub stored_test_sequences: ndarray::Array3<f64>,
     pub stored_test_targets: ndarray::Array2<f64>,
-    /// XGBoost hybrid model for two-phase training (LSTM → XGBoost)
+    /// Regime metrics collector for comprehensive logging
+    pub regime_metrics_collector: Option<crate::model::regime_metrics::RegimeMetricsCollector>,
     /// None if XGBoost is disabled in configuration
     pub xgboost_model: Option<crate::model::xgboost::XGBoostRegressor>,
 }

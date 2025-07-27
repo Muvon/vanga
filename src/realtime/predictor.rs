@@ -758,7 +758,7 @@ mod tests {
         let mut feature_buffer = VecDeque::with_capacity(config.buffer_size);
 
         let test_row = MarketDataRow {
-            timestamp: 1640995200,
+            timestamp: 1_640_995_200,
             open: 47000.5,
             high: 47100.0,
             low: 46900.0,
@@ -779,7 +779,7 @@ mod tests {
         // Add more items than buffer size
         for i in 0..10 {
             let row = MarketDataRow {
-                timestamp: 1640995200 + i,
+                timestamp: 1_640_995_200 + i,
                 open: 47000.0,
                 high: 47100.0,
                 low: 46900.0,
@@ -813,7 +813,7 @@ mod tests {
         // Add 5 items - not enough
         for i in 0..5 {
             feature_buffer.push_back(MarketDataRow {
-                timestamp: 1640995200 + i,
+                timestamp: 1_640_995_200 + i,
                 open: 47000.0,
                 high: 47100.0,
                 low: 46900.0,
@@ -827,7 +827,7 @@ mod tests {
         // Add 5 more items - now enough
         for i in 5..10 {
             feature_buffer.push_back(MarketDataRow {
-                timestamp: 1640995200 + i,
+                timestamp: 1_640_995_200 + i,
                 open: 47000.0,
                 high: 47100.0,
                 low: 46900.0,

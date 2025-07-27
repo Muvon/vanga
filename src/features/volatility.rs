@@ -119,7 +119,7 @@ fn calculate_garch_volatility(returns: &[f64]) -> Result<Vec<f64>> {
     }
 
     // GARCH(1,1) parameters
-    let omega = 0.000001;
+    let omega = 0.000_001;
     let alpha = 0.1;
     let beta = 0.85;
 
@@ -143,7 +143,7 @@ fn calculate_garch_volatility(returns: &[f64]) -> Result<Vec<f64>> {
     // Initialize with first valid squared return
     let mut variance = returns[start_idx].powi(2);
     if !variance.is_finite() || variance < 0.0 {
-        variance = 0.000001; // Fallback to small positive value
+        variance = 0.000_001; // Fallback to small positive value
     }
 
     volatility[start_idx] = variance.sqrt();
@@ -161,7 +161,7 @@ fn calculate_garch_volatility(returns: &[f64]) -> Result<Vec<f64>> {
 
         // Ensure variance is positive and finite
         if !variance.is_finite() || variance < 0.0 {
-            variance = 0.000001; // Reset to small positive value
+            variance = 0.000_001; // Reset to small positive value
         }
 
         let vol = variance.sqrt() * (24.0_f64).sqrt(); // Annualized
