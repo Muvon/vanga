@@ -7,6 +7,7 @@ pub mod lstm;
 pub mod lstm_simple;
 pub mod multi_target;
 pub mod tft;
+pub mod xgboost;
 
 #[cfg(test)]
 pub mod loss_validation_tests;
@@ -24,4 +25,7 @@ pub use multi_target::MultiTargetLSTMModel;
 pub use tft::{
     QuantileMultiTargetModel, QuantileOutputConfig, QuantileRegressionHead,
     VariableSelectionAttention, VariableSelectionConfig, VariableSelectionNetwork,
+};
+pub use xgboost::{
+    get_eval_metric_for_target, get_objective_for_target, XGBoostMetadata, XGBoostRegressor,
 };

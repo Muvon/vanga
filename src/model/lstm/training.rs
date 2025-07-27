@@ -1159,6 +1159,12 @@ impl LSTMModel {
             }
         }
 
+        // Phase 2: XGBoost Training (NEW)
+        if config.model.xgboost.enabled {
+            log::info!("🔄 Starting XGBoost hybrid training phase...");
+            self.train_xgboost_phase(sequences, targets, config).await?;
+        }
+
         Ok(())
     }
     fn setup_advanced_optimizer(
@@ -1708,5 +1714,95 @@ impl LSTMModel {
         }
 
         log::info!("🎯 ═══════════════════════════════════════════════════════════");
+    }
+
+    /// Train XGBoost phase of hybrid model (Phase 2)
+    ///
+    /// This method implements the second phase of the hybrid training where
+    /// XGBoost learns the nonlinear mapping from LSTM features to targets.
+    ///
+    /// # Arguments
+    /// * `sequences` - Training sequences [batch_size, seq_len, features]
+    /// * `targets` - Training targets [batch_size, output_size]
+    /// * `config` - Training configuration with XGBoost settings
+    async fn train_xgboost_phase(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &Array2<f64>,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        log::info!("🌲 Phase 2: XGBoost training on LSTM features");
+
+        // Extract LSTM features for all training sequences
+        log::info!(
+            "🔍 Extracting LSTM features from {} sequences...",
+            sequences.shape()[0]
+        );
+        let lstm_features = self.extract_all_lstm_features(sequences)?;
+
+        log::debug!("📊 LSTM features shape: {:?}", lstm_features.shape());
+
+        // Convert targets to tensor
+        let targets_tensor = self.convert_targets_to_tensor(targets)?;
+
+        // Determine XGBoost objective and metric based on target type
+        let mut xgb_config = config.model.xgboost.clone();
+        if let Some((target_name, target_type)) = &self.target_context {
+            let num_classes = targets.shape()[1];
+            xgb_config.objective =
+                crate::model::xgboost::get_objective_for_target(target_name, num_classes);
+            xgb_config.eval_metric =
+                crate::model::xgboost::get_eval_metric_for_target(target_name, num_classes);
+
+            log::info!(
+                "🎯 Target: {} ({:?}) - Objective: {}, Metric: {}",
+                target_name,
+                target_type,
+                xgb_config.objective,
+                xgb_config.eval_metric
+            );
+        }
+
+        // Create XGBoost regressor
+        let mut xgb_regressor =
+            crate::model::xgboost::XGBoostRegressor::new(xgb_config, self.device.clone());
+
+        // Train XGBoost model
+        xgb_regressor.train(&lstm_features, &targets_tensor)?;
+
+        // Store trained XGBoost model
+        self.xgboost_model = Some(xgb_regressor);
+
+        // Log feature importance if available
+        if let Some(xgb_model) = &self.xgboost_model {
+            if let Some(importance) = xgb_model.get_feature_importance() {
+                log::info!("📊 XGBoost Feature Importance (top 10):");
+                let mut importance_vec: Vec<_> = importance.iter().collect();
+                importance_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+
+                for (i, (feature, score)) in importance_vec.iter().take(10).enumerate() {
+                    log::info!("   {}. {}: {:.4}", i + 1, feature, score);
+                }
+            }
+        }
+
+        log::info!("✅ XGBoost hybrid training completed successfully");
+        Ok(())
+    }
+
+    /// Convert targets ndarray to Candle tensor
+    fn convert_targets_to_tensor(&self, targets: &Array2<f64>) -> Result<candle_core::Tensor> {
+        let batch_size = targets.shape()[0];
+        let output_size = targets.shape()[1];
+
+        let mut target_data: Vec<f32> = Vec::with_capacity(batch_size * output_size);
+        for batch_idx in 0..batch_size {
+            for output_idx in 0..output_size {
+                target_data.push(targets[[batch_idx, output_idx]] as f32);
+            }
+        }
+
+        candle_core::Tensor::from_vec(target_data, (batch_size, output_size), &self.device)
+            .map_err(|e| VangaError::model(format!("Failed to create targets tensor: {}", e)))
     }
 }

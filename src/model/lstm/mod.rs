@@ -494,6 +494,7 @@ mod tests {
                 use_relative_position: false,
                 visualization: VisualizationConfig::default(),
             },
+            xgboost: crate::config::model::XGBoostConfig::default(),
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
@@ -589,6 +590,7 @@ mod tests {
             },
             quantile_outputs: None,
             loss_function: CryptoLossFunction::MSE,
+            xgboost: crate::config::model::XGBoostConfig::default(),
         };
 
         let input_size = 4;
@@ -706,6 +708,7 @@ mod tests {
             },
             quantile_outputs: None,
             loss_function: CryptoLossFunction::MSE,
+            xgboost: crate::config::model::XGBoostConfig::default(),
         };
 
         // Test bidirectional LSTM
@@ -774,6 +777,7 @@ mod tests {
             },
             quantile_outputs: None,
             loss_function: CryptoLossFunction::MSE,
+            xgboost: crate::config::model::XGBoostConfig::default(),
         };
 
         let input_size = 4;

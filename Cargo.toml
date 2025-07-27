@@ -60,6 +60,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 linemux = "0.3"
 csv-async = "1.2"
+xgb = "3.0.4"
 
 # macOS-specific Metal support
 [target.'cfg(target_os = "macos")'.dependencies]

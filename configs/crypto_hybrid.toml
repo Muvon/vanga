@@ -1,0 +1,125 @@
+# Crypto-Optimized LSTM+XGBoost Configuration
+# Optimized hyperparameters for cryptocurrency prediction
+# Based on research findings for volatile crypto markets
+
+[training]
+epochs = { max_epochs = 150 }     # More epochs for crypto complexity
+learning_rate = { initial_lr = 0.0005, patience = 8, factor = 0.7 }
+batch_size = 64                   # Larger batch for stable gradients
+validation_split = 0.15           # Smaller validation for more training data
+early_stopping = { patience = 20, min_delta = 0.0005 }
+device = "auto"
+
+[training.optimizer]
+name = "adamw"                    # Best for crypto according to research
+weight_decay = 0.05               # Higher weight decay for crypto volatility
+beta1 = 0.9
+beta2 = 0.999
+eps = 1e-8
+
+[model]
+architecture = { type = "MultiLSTM", layers = 3 }  # Deeper for crypto patterns
+sequence_length = { type = "Fixed", length = 60 }   # 60 timesteps for crypto
+hidden_units = { type = "Fixed", units = 256 }      # Fixed size for consistency
+
+[model.dropout]
+enabled = true
+rate = { type = "Fixed", rate = 0.2 }               # Fixed dropout for crypto
+variational = true
+recurrent = true
+
+[model.attention]
+enabled = true
+mechanism = "MultiHeadAttention"  # Multi-head for crypto complexity
+heads = 12                        # More heads for crypto patterns
+dropout_rate = 0.15
+temperature_scaling = 0.8         # Lower temperature for crypto volatility
+use_relative_position = true
+
+# Crypto-optimized XGBoost configuration
+[model.xgboost]
+enabled = true
+feature_dim = 64                  # Standard feature dimension
+n_estimators = 200                # More trees for crypto complexity
+max_depth = 8                     # Deeper trees for nonlinear crypto patterns
+learning_rate = 0.05              # Conservative learning rate
+subsample = 0.8                   # Prevent overfitting on crypto noise
+colsample_bytree = 0.8            # Feature sampling
+reg_alpha = 0.1                   # L1 regularization for feature selection
+reg_lambda = 2.0                  # Higher L2 for crypto volatility
+early_stopping_rounds = 15        # More patience for crypto convergence
+eval_metric = "rmse"
+objective = "reg:squarederror"
+save_feature_importance = true
+importance_type = "gain"
+
+[model.output_heads]
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.5              # Wider bandwidth for crypto volatility
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+bandwidth_size = 1.0              # Standard bandwidth for direction
+base_threshold_factor = 0.4       # Lower threshold for crypto sensitivity
+extreme_multiplier = 3.0          # Higher multiplier for crypto extremes
+
+[model.output_heads.volatility]
+enabled = true
+bandwidth_size = 2.0              # Much wider for crypto volatility regimes
+base_percentiles = [0.15, 0.35, 0.65, 0.85]  # Adjusted for crypto distribution
+
+loss_function = "Composite"
+
+# Crypto-specific feature engineering
+[features]
+[features.technical]
+enabled = true
+indicators = [
+    # Core crypto indicators
+    "sma", "ema", "rsi", "macd", "bollinger_bands",
+    # Volatility indicators (important for crypto)
+    "average_true_range", "stochastic", "williams_r",
+    # Momentum indicators (crypto trend following)
+    "momentum", "rate_of_change", "cci",
+    # Volume indicators (crypto market structure)
+    "obv", "volume_sma", "volume_ema"
+]
+
+[features.cross_asset]
+enabled = true                    # Enable for crypto market analysis
+btc_dominance = true             # Important for altcoin prediction
+eth_btc_ratio = true             # Secondary market indicator
+market_sentiment = true          # Crypto sentiment analysis
+
+[features.preprocessing]
+normalization = "robust"          # Robust normalization for crypto outliers
+handle_missing = "forward_fill"   # Forward fill for crypto gaps
+outlier_detection = true
+outlier_threshold = 4.0           # Higher threshold for crypto volatility
+
+# Crypto-specific horizons
+horizons = ["15m", "1h", "4h", "1d"]  # Include short-term for crypto
+
+symbol = "BTCUSDT"
+data_path = "data/BTCUSDT.csv"
+fresh_training = false
+continue_training = false
+
+[validation]
+method = "chronological"
+test_split = 0.08                 # Smaller test set for more training data
+shuffle = false
+
+[logging]
+level = "info"
+save_metrics = true
+metrics_file = "crypto_hybrid_metrics.json"
+save_predictions = true           # Save predictions for crypto analysis
+predictions_file = "crypto_predictions.csv"
+
+[performance]
+num_threads = 6                   # More threads for crypto processing
+memory_limit = "12GB"            # Higher memory for crypto features
+batch_processing = true
