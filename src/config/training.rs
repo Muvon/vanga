@@ -997,6 +997,18 @@ impl TrainingConfig {
         self
     }
 
+    /// Enable or disable XGBoost hybrid model
+    pub fn with_xgboost_enabled(mut self, enabled: bool) -> Self {
+        self.model.xgboost.enabled = enabled;
+        if enabled {
+            log::info!("✅ XGBoost hybrid model enabled in model configuration");
+            log::info!("🔄 Two-phase training: LSTM → XGBoost regression");
+        } else {
+            log::info!("❌ XGBoost hybrid model disabled - using pure LSTM");
+        }
+        self
+    }
+
     /// Load training configuration from TOML file
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
         let content = std::fs::read_to_string(&path).map_err(|e| {

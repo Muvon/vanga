@@ -295,8 +295,25 @@ impl LSTMModel {
         // Convert sequences to tensor (prediction-optimized version)
         let input_tensor = self.convert_sequences_to_prediction_tensor(sequences)?;
 
-        // Forward pass through network (inference mode - no dropout)
-        let predictions_tensor = self.forward(&input_tensor, false)?;
+        // Hybrid Prediction: Use XGBoost if available, otherwise pure LSTM
+        let predictions_tensor = if let Some(xgb_model) = &self.xgboost_model {
+            log::info!("🔄 Using hybrid LSTM+XGBoost prediction");
+
+            // Extract LSTM features
+            let lstm_features = self.extract_lstm_features(&input_tensor)?;
+            log::debug!("📊 LSTM features for XGBoost: {:?}", lstm_features.shape());
+
+            // XGBoost prediction
+            let xgb_predictions = xgb_model.predict(&lstm_features)?;
+            log::debug!("📊 XGBoost predictions: {:?}", xgb_predictions.shape());
+
+            xgb_predictions
+        } else {
+            log::info!("🔄 Using pure LSTM prediction");
+
+            // Forward pass through network (inference mode - no dropout)
+            self.forward(&input_tensor, false)?
+        };
 
         // CRITICAL FIX: Handle multi-class outputs for categorical targets
         let final_predictions_tensor = if let Some((_, target_type)) = &self.target_context {
@@ -487,5 +504,209 @@ impl LSTMModel {
         );
 
         Ok(dropped_tensor)
+    }
+
+    /// Extract LSTM features for XGBoost (z = h_n from paper)
+    ///
+    /// This method performs a forward pass through the LSTM layers and extracts
+    /// the final hidden state as features for XGBoost regression.
+    ///
+    /// # Arguments
+    /// * `sequences` - Input sequences tensor [batch_size, seq_len, features]
+    ///
+    /// # Returns
+    /// * `Result<Tensor>` - LSTM features tensor [batch_size, feature_dim]
+    pub fn extract_lstm_features(&self, sequences: &Tensor) -> Result<Tensor> {
+        log::debug!("🔍 Extracting LSTM features for XGBoost");
+
+        // Ensure model is initialized
+        let lstm_layers = self
+            .lstm_layers
+            .as_ref()
+            .ok_or_else(|| VangaError::model("LSTM layers not initialized"))?;
+
+        let batch_size = sequences.dim(0)?;
+        let seq_len = sequences.dim(1)?;
+        let input_size = sequences.dim(2)?;
+
+        log::debug!(
+            "📊 Input shape: batch={}, seq_len={}, features={}",
+            batch_size,
+            seq_len,
+            input_size
+        );
+
+        // Forward pass through LSTM layers
+        let mut current_input = sequences.clone();
+        let mut final_hidden_states = Vec::new();
+
+        for (layer_idx, lstm_layer) in lstm_layers.iter().enumerate() {
+            // LSTM forward pass using seq method
+            let lstm_states = lstm_layer.seq(&current_input)?;
+
+            if lstm_states.is_empty() {
+                return Err(VangaError::ModelError(format!(
+                    "LSTM layer {} produced no states",
+                    layer_idx
+                )));
+            }
+
+            // Extract hidden states from LSTM states
+            let mut hidden_states = Vec::new();
+            for state in &lstm_states {
+                hidden_states.push(state.h().clone());
+            }
+            let layer_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
+
+            log::debug!(
+                "🔄 Layer {} output shape: {:?}",
+                layer_idx,
+                layer_output.shape()
+            );
+
+            // For next layer input
+            current_input = layer_output.clone();
+
+            // Store final hidden state from this layer
+            final_hidden_states.push(layer_output);
+        }
+
+        // Get the final hidden state from the last layer
+        let final_layer_output = final_hidden_states
+            .last()
+            .ok_or_else(|| VangaError::model("No LSTM layers processed"))?;
+
+        // Extract final timestep: z = h_n (equation 8 from paper)
+        let final_timestep_idx = seq_len - 1;
+        let lstm_features = final_layer_output
+            .narrow(1, final_timestep_idx, 1)? // Get last timestep
+            .squeeze(1)?; // Remove sequence dimension
+
+        log::debug!(
+            "✅ Extracted LSTM features shape: {:?}",
+            lstm_features.shape()
+        );
+
+        // Apply attention if enabled (optional enhancement)
+        let features = if self.use_attention {
+            if let Some(attention) = &self.attention_layers {
+                log::debug!("🎯 Applying attention to LSTM features");
+                let attention_result = attention.forward(&lstm_features.unsqueeze(1)?)?;
+                // Handle attention output (may be tuple)
+                let (attended_features, _) = attention_result;
+                attended_features.squeeze(1)?
+            } else {
+                lstm_features
+            }
+        } else {
+            lstm_features
+        };
+
+        // Ensure feature dimension matches configuration
+        let expected_dim = self.get_xgboost_feature_dim();
+        let actual_dim = features.dim(1)?;
+
+        if actual_dim != expected_dim {
+            log::warn!(
+                "⚠️  Feature dimension mismatch: expected={}, actual={}",
+                expected_dim,
+                actual_dim
+            );
+
+            // Add projection layer if needed (simple linear transformation)
+            if let Some(output_layer) = &self.output_layer {
+                log::debug!("🔄 Applying output projection to match feature dimension");
+                let projected = output_layer.forward(&features)?;
+
+                // Take first expected_dim features if output is larger
+                if projected.dim(1)? >= expected_dim {
+                    let final_features = projected.narrow(1, 0, expected_dim)?;
+                    log::debug!("✅ Final LSTM features shape: {:?}", final_features.shape());
+                    return Ok(final_features);
+                }
+            }
+
+            // Fallback: pad or truncate to match expected dimension
+            return self.adjust_feature_dimension(features, expected_dim);
+        }
+
+        log::debug!("✅ Final LSTM features shape: {:?}", features.shape());
+        Ok(features)
+    }
+
+    /// Extract LSTM features for all sequences in a batch (for training)
+    ///
+    /// # Arguments
+    /// * `sequences` - Input sequences array [batch_size, seq_len, features]
+    ///
+    /// # Returns
+    /// * `Result<Tensor>` - LSTM features tensor [batch_size, feature_dim]
+    pub fn extract_all_lstm_features(&self, sequences: &Array3<f64>) -> Result<Tensor> {
+        log::info!(
+            "🔄 Extracting LSTM features for {} sequences",
+            sequences.shape()[0]
+        );
+
+        // Convert ndarray to tensor
+        let batch_size = sequences.shape()[0];
+        let seq_len = sequences.shape()[1];
+        let features = sequences.shape()[2];
+
+        let mut seq_data: Vec<f32> = Vec::with_capacity(batch_size * seq_len * features);
+        for batch_idx in 0..batch_size {
+            for seq_idx in 0..seq_len {
+                for feature_idx in 0..features {
+                    seq_data.push(sequences[[batch_idx, seq_idx, feature_idx]] as f32);
+                }
+            }
+        }
+
+        let seq_tensor = Tensor::from_vec(seq_data, (batch_size, seq_len, features), &self.device)
+            .map_err(|e| VangaError::model(format!("Failed to create sequence tensor: {}", e)))?;
+
+        // Extract features using the single-batch method
+        self.extract_lstm_features(&seq_tensor)
+    }
+
+    /// Get expected XGBoost feature dimension from configuration
+    fn get_xgboost_feature_dim(&self) -> usize {
+        // Use XGBoost config feature_dim if available, otherwise default to LSTM hidden size
+        if let Some(ref xgboost_model) = self.xgboost_model {
+            xgboost_model.get_config().feature_dim
+        } else {
+            // Fallback to LSTM last layer hidden size or default
+            self.config.hidden_sizes.last().copied().unwrap_or(64)
+        }
+    }
+
+    /// Adjust feature dimension to match expected size
+    fn adjust_feature_dimension(&self, features: Tensor, expected_dim: usize) -> Result<Tensor> {
+        let actual_dim = features.dim(1)?;
+
+        if actual_dim > expected_dim {
+            // Truncate to expected dimension
+            log::debug!(
+                "🔧 Truncating features from {} to {}",
+                actual_dim,
+                expected_dim
+            );
+            Ok(features.narrow(1, 0, expected_dim)?)
+        } else if actual_dim < expected_dim {
+            // Pad with zeros to expected dimension
+            log::debug!(
+                "🔧 Padding features from {} to {}",
+                actual_dim,
+                expected_dim
+            );
+            let batch_size = features.dim(0)?;
+            let padding_size = expected_dim - actual_dim;
+
+            let zeros = Tensor::zeros((batch_size, padding_size), features.dtype(), &self.device)?;
+            let padded = Tensor::cat(&[&features, &zeros], 1)?;
+            Ok(padded)
+        } else {
+            // Dimension already matches
+            Ok(features)
+        }
     }
 }

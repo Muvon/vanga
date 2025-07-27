@@ -1,0 +1,132 @@
+# VANGA Hybrid LSTM+XGBoost Training Configuration
+# This configuration enables the two-phase hybrid training approach
+# as described in the research paper for cryptocurrency prediction
+
+[training]
+epochs = { max_epochs = 100 }
+learning_rate = { initial_lr = 0.001, patience = 10, factor = 0.5 }
+batch_size = 32
+validation_split = 0.2
+early_stopping = { patience = 15, min_delta = 0.001 }
+device = "auto"
+
+# Optimizer configuration - AdamW recommended for crypto
+[training.optimizer]
+name = "adamw"
+weight_decay = 0.01
+beta1 = 0.9
+beta2 = 0.999
+eps = 1e-8
+
+# Model architecture configuration
+[model]
+# LSTM layers configuration
+architecture = { type = "MultiLSTM", layers = 2 }
+sequence_length = { type = "Auto", min_length = 30, max_length = 120 }
+hidden_units = { type = "Auto", min_units = 128, max_units = 512 }
+
+# Dropout for regularization
+[model.dropout]
+enabled = true
+rate = { type = "Auto", min_rate = 0.1, max_rate = 0.3 }
+variational = true
+recurrent = true
+
+# Attention mechanism (optional enhancement)
+[model.attention]
+enabled = true
+mechanism = "SelfAttention"
+heads = 8
+dropout_rate = 0.1
+temperature_scaling = 1.0
+use_relative_position = true
+
+# XGBoost hybrid configuration (MAIN FEATURE)
+[model.xgboost]
+enabled = true                    # Enable hybrid LSTM+XGBoost training
+feature_dim = 64                  # LSTM feature dimension (k in paper)
+n_estimators = 100                # Number of trees (M in equation 9)
+max_depth = 6                     # Maximum tree depth
+learning_rate = 0.1               # XGBoost learning rate (eta)
+subsample = 0.8                   # Row sampling ratio
+colsample_bytree = 0.8            # Column sampling ratio
+reg_alpha = 0.0                   # L1 regularization
+reg_lambda = 1.0                  # L2 regularization (λ in equation 11)
+early_stopping_rounds = 10        # Early stopping for efficiency
+eval_metric = "rmse"              # Default evaluation metric
+objective = "reg:squarederror"    # Default objective (auto-adjusted per target)
+save_feature_importance = true    # Enable feature analysis
+importance_type = "gain"          # Information gain importance
+
+# Output heads configuration
+[model.output_heads]
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0
+distribution_type = "Categorical"
+
+[model.output_heads.direction]
+enabled = true
+bandwidth_size = 0.8
+base_threshold_factor = 0.5
+extreme_multiplier = 2.5
+
+[model.output_heads.volatility]
+enabled = true
+bandwidth_size = 1.2
+base_percentiles = [0.20, 0.40, 0.60, 0.80]
+
+# Loss function configuration
+loss_function = "Composite"       # Use composite loss for multi-target
+
+# Feature engineering configuration
+[features]
+[features.technical]
+enabled = true
+indicators = [
+    "sma", "ema", "rsi", "macd", "bollinger_bands",
+    "stochastic", "williams_r", "cci", "momentum",
+    "rate_of_change", "average_true_range", "obv"
+]
+
+[features.cross_asset]
+enabled = false                   # Disable for single-symbol training
+btc_dominance = false
+eth_btc_ratio = false
+market_sentiment = false
+
+# Data preprocessing
+[features.preprocessing]
+normalization = "zscore"
+handle_missing = "interpolate"
+outlier_detection = true
+outlier_threshold = 3.0
+
+# Horizons for multi-target training
+horizons = ["1h", "4h", "1d"]
+
+# Training data configuration
+symbol = "BTCUSDT"               # Will be overridden by CLI
+data_path = "data/BTCUSDT.csv"   # Will be overridden by CLI
+fresh_training = false           # Continue from existing model if available
+continue_training = false        # Start fresh training
+
+# Validation configuration
+[validation]
+method = "chronological"         # Prevent data leakage
+test_split = 0.1                # Hold out 10% for final testing
+shuffle = false                  # Never shuffle time series data
+
+# Logging and monitoring
+[logging]
+level = "info"
+save_metrics = true
+metrics_file = "training_metrics.json"
+save_predictions = false         # Disable to save disk space
+predictions_file = "predictions.csv"
+
+# Performance optimization
+[performance]
+num_threads = 4                  # Parallel processing threads
+memory_limit = "8GB"            # Memory usage limit
+batch_processing = true          # Enable batch processing optimizations

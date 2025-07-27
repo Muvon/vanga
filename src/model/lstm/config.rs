@@ -145,6 +145,9 @@ pub struct LSTMModel {
     /// Check sequences.shape()[0] > 0 to determine if test data is available
     pub stored_test_sequences: ndarray::Array3<f64>,
     pub stored_test_targets: ndarray::Array2<f64>,
+    /// XGBoost hybrid model for two-phase training (LSTM → XGBoost)
+    /// None if XGBoost is disabled in configuration
+    pub xgboost_model: Option<crate::model::xgboost::XGBoostRegressor>,
 }
 
 /// Serializable model state for persistence - SAME as original
