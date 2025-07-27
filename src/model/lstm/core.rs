@@ -40,11 +40,15 @@ impl LSTMModel {
             validation_class_weights: None,         // No validation weights initially
             architecture: None,                     // No architecture info by default
             dropout_config: None,                   // No dropout config by default
-            stored_val_sequences: None,             // No stored validation data initially
-            stored_val_targets: None,               // No stored validation targets initially
+            dropout_consistency_config:
+                crate::model::dropout_consistency::DropoutConsistencyConfig::default(),
+            dual_loss_system: None,         // No dual loss system initially
+            regime_metrics_collector: None, // No metrics collector initially
+            stored_val_sequences: None,     // No stored validation data initially
+            stored_val_targets: None,       // No stored validation targets initially
             stored_test_sequences: ndarray::Array3::zeros((0, 1, 1)), // Empty test sequences
             stored_test_targets: ndarray::Array2::zeros((0, 1)), // Empty test targets
-            xgboost_model: None,                    // No XGBoost model initially
+            xgboost_model: None,            // No XGBoost model initially
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support

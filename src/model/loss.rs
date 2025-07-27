@@ -840,8 +840,22 @@ impl TensorCryptoLossFunction {
 
     /// Base MSE loss using tensor operations
     fn calculate_mse_tensor_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        // Handle shape broadcasting for MSE calculation
+        let targets_broadcasted = if predictions.dims() != targets.dims() {
+            log::debug!(
+                "🔧 Broadcasting targets from {:?} to {:?} for MSE",
+                targets.dims(),
+                predictions.dims()
+            );
+            targets.broadcast_as(predictions.dims()).map_err(|e| {
+                VangaError::ModelError(format!("MSE target broadcasting failed: {}", e))
+            })?
+        } else {
+            targets.clone()
+        };
+
         predictions
-            .sub(targets)?
+            .sub(&targets_broadcasted)?
             .contiguous()?
             .sqr()?
             .mean_all()
@@ -1089,25 +1103,13 @@ impl TensorCryptoLossFunction {
         Ok(self.cached_weights.as_ref().unwrap())
     }
 
-    /// Get regime multiplier for market conditions
-    fn get_regime_multiplier(&self, market_regime: MarketRegime) -> f64 {
-        match market_regime {
-            MarketRegime::LowVolatility => 0.9,
-            MarketRegime::MediumVolatility => 1.0,
-            MarketRegime::HighVolatility => 1.2,
-            MarketRegime::BullMarket => 1.1,
-            MarketRegime::BearMarket => 1.3,
-            MarketRegime::RangeBound => 0.8,
-        }
-    }
-
     /// Crypto composite loss combining multiple factors with caching and normalization
     fn calculate_crypto_composite_tensor_loss(
         &mut self,
         predictions: &Tensor,
         targets: &Tensor,
         config: &CryptoCompositeConfig,
-        market_regime: MarketRegime,
+        _market_regime: MarketRegime,
     ) -> Result<Tensor> {
         // ADDED: Validate tensor shapes and log for debugging
         log::debug!(
@@ -1162,7 +1164,9 @@ impl TensorCryptoLossFunction {
         let has_multiple_components = has_directional || has_volatility;
 
         // Get regime multiplier and cached weights
-        let regime_multiplier = self.get_regime_multiplier(market_regime);
+        // Use statistical normalization instead of hardcoded multipliers
+        // The regime multiplier concept is replaced by RegimeCalibrator
+        let regime_multiplier = 1.0; // No artificial scaling
         let weights = self.get_cached_weights(config, regime_multiplier, predictions.device())?;
 
         // FIXED: For categorical targets with only base loss, normalize accuracy weight to 1.0

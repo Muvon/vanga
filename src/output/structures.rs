@@ -634,19 +634,18 @@ impl PredictionResult {
                     risk_reward: direction_pred.risk_reward_ratio,
                     confidence: direction_pred.up_probability_aggregated,
                 };
-            } else {
-                return AdaptiveTradingSignal::Short {
-                    entry_price: current_price,
-                    target_price: current_price
-                        * (1.0 - direction_pred.expected_downside_percent / 100.0),
-                    stop_loss: current_price
-                        * (1.0 + volatility_pred.recommended_stop_distance_percent / 100.0),
-                    position_size: volatility_pred.position_size_multiplier,
-                    horizon: direction_pred.training_horizon.clone(),
-                    risk_reward: direction_pred.risk_reward_ratio,
-                    confidence: direction_pred.down_probability_aggregated,
-                };
             }
+            return AdaptiveTradingSignal::Short {
+                entry_price: current_price,
+                target_price: current_price
+                    * (1.0 - direction_pred.expected_downside_percent / 100.0),
+                stop_loss: current_price
+                    * (1.0 + volatility_pred.recommended_stop_distance_percent / 100.0),
+                position_size: volatility_pred.position_size_multiplier,
+                horizon: direction_pred.training_horizon.clone(),
+                risk_reward: direction_pred.risk_reward_ratio,
+                confidence: direction_pred.down_probability_aggregated,
+            };
         }
 
         AdaptiveTradingSignal::NoSignal {
