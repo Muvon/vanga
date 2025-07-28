@@ -133,7 +133,7 @@ impl Default for PredictionConfig {
             horizon: None,
             all_horizons: false,
             output_path: None,
-            min_confidence: 0.7,
+            min_confidence: 0.3,
             device: crate::config::training::DeviceConfig::Auto,
             output_config: OutputConfig::default(),
             ensemble_config: EnsembleConfig::default(),

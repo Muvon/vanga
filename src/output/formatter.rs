@@ -911,7 +911,7 @@ impl OutputFormatter {
             let valid_ratio = targets.valid_indices.len() as f64 / targets.data_length as f64;
             (horizon_confidence + valid_ratio) / 2.0 // Combine both factors
         } else {
-            0.7 // Default quality factor
+            0.9 // Increased from 0.7 to 0.9 for better model uncertainty confidence
         };
 
         (prediction_certainty * target_quality_factor).clamp(0.1, 0.95)

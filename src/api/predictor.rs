@@ -44,9 +44,14 @@ impl<'a> ModelWrapper<'a> {
     /// Get trained horizons
     pub fn get_trained_horizons(&self) -> Vec<String> {
         match self {
-            ModelWrapper::Single(_model) => {
-                // Single models default to 1h
-                vec!["1h".to_string()]
+            ModelWrapper::Single(model) => {
+                // Try to get horizons from model's training config if available
+                if let Some(training_config) = model.get_training_config() {
+                    training_config.horizons.clone()
+                } else {
+                    // Fallback to 1h for models without stored config
+                    vec!["1h".to_string()]
+                }
             }
             ModelWrapper::MultiTarget(model) => model.get_trained_horizons().to_vec(),
         }
@@ -182,14 +187,9 @@ impl Predictor {
 
         log::info!("Generated {} predictions", raw_predictions.nrows());
 
-        // Generate targets for confidence calculation (before cleanup) - make optional
-        let targets_config = match self.generate_targets_for_confidence(&prepared_data).await {
-            Ok(config) => Some(config),
-            Err(e) => {
-                log::warn!("Could not generate targets for confidence calculation: {}. Predictions will proceed without confidence scores.", e);
-                None
-            }
-        };
+        // Confidence calculation for predictions should use model uncertainty, not target generation
+        // Target generation is inappropriate for prediction data as it requires full historical context
+        let targets_config = None; // Use model uncertainty-based confidence instead
 
         // Extract sequence data for order generation before cleanup - REQUIRED!
         let sequence_ohlc = prepared_data.sequence_ohlc.clone()
@@ -291,13 +291,39 @@ impl Predictor {
         // Apply post-processing if configured
         let post_processor = PostProcessor::new(self.config.post_processing.clone());
         let final_predictions = if self.config.min_confidence > 0.0 {
-            log::debug!(
-                "Applying confidence threshold: {}",
+            log::info!(
+                "Applying confidence threshold: {} (predictions with confidence below this will be filtered out)",
                 self.config.min_confidence
             );
             let processed = post_processor.process(formatted_predictions)?;
-            post_processor.filter_by_confidence(processed, self.config.min_confidence)
+
+            // Log confidence values before filtering (promote to INFO level for debugging)
+            for (i, pred) in processed.iter().enumerate() {
+                log::info!("Prediction {}: confidence = {:.3}", i, pred.confidence);
+            }
+
+            let processed_count = processed.len();
+            let filtered =
+                post_processor.filter_by_confidence(processed, self.config.min_confidence);
+
+            // Warn if all predictions are filtered out
+            if filtered.is_empty() && processed_count > 0 {
+                log::warn!(
+                    "⚠️  All {} predictions filtered out by confidence threshold {:.1}%. Consider lowering min_confidence or check model confidence calculation.",
+                    processed_count,
+                    self.config.min_confidence * 100.0
+                );
+            }
+
+            log::info!(
+                "Confidence filtering: {} predictions before, {} predictions after (threshold: {:.1}%)",
+                processed_count,
+                filtered.len(),
+                self.config.min_confidence * 100.0
+            );
+            filtered
         } else {
+            log::info!("No confidence threshold applied (min_confidence = 0.0)");
             post_processor.process(formatted_predictions)?
         };
 
@@ -325,46 +351,6 @@ impl Predictor {
         Err(crate::utils::error::VangaError::DataError(
             "OHLC data is required for price extraction but not available. Cannot use normalized tensor data for price calculations.".to_string(),
         ))
-    }
-
-    /// Generate targets from prediction data for confidence calculation
-    async fn generate_targets_for_confidence(
-        &self,
-        prepared_data: &PreparedPredictionData,
-    ) -> Result<crate::targets::PreparedTargets> {
-        // Create a minimal DataFrame from the prepared data for target generation
-        // This allows us to calculate target statistics for confidence assessment
-
-        // Extract the most recent data point for target generation
-        let last_sequence_idx = prepared_data.sequences.shape()[0].saturating_sub(1);
-        let sequence = prepared_data
-            .sequences
-            .slice(ndarray::s![last_sequence_idx, .., ..]);
-
-        // Find close price feature (assuming it's one of the features)
-        let close_feature_idx = prepared_data
-            .feature_names
-            .iter()
-            .position(|name| name.contains("close"))
-            .unwrap_or(0); // Default to first feature if close not found
-
-        // Extract close prices from the sequence
-        let close_prices: Vec<f64> = sequence.column(close_feature_idx).to_vec();
-
-        // Create a minimal DataFrame for target generation
-        let close_series = polars::prelude::Series::from_iter(close_prices.iter().cloned());
-        let df = polars::prelude::DataFrame::new(vec![close_series.with_name("close")]).map_err(
-            |e| {
-                crate::utils::error::VangaError::DataError(format!(
-                    "Failed to create DataFrame for target generation: {}",
-                    e
-                ))
-            },
-        )?;
-
-        // Generate targets using the default configuration
-        let target_generator = crate::targets::TargetGenerator::with_defaults();
-        target_generator.generate_all_targets(&df, None).await
     }
 }
 

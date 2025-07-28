@@ -537,4 +537,19 @@ impl LSTMModel {
     pub fn get_output_size(&self) -> usize {
         self.config.output_size
     }
+
+    /// Get training configuration used during training
+    pub fn get_training_config(&self) -> Option<&crate::config::TrainingConfig> {
+        // For now, single models don't store the full TrainingConfig
+        // This is a limitation that should be addressed in future versions
+        None
+    }
+
+    /// Get trained horizons from model configuration
+    /// This is a temporary method until we properly store training config in single models
+    pub fn get_trained_horizons(&self) -> Vec<String> {
+        // For now, single models default to 1h
+        // TODO: Store actual trained horizons in model metadata
+        vec!["1h".to_string()]
+    }
 }

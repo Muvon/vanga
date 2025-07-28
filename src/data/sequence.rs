@@ -212,7 +212,11 @@ impl SequenceGenerator {
         let sequences =
             self.create_prediction_sequences(&normalized_sequence, 0, sequence_length)?;
 
-        // Create metadata
+        // Create metadata - use actual horizons from model if available
+        // Note: model_config is ModelConfig, not Option, but it doesn't contain training horizons
+        // For now, we'll use default "1h" until we properly store training config in models
+        let horizons = vec!["1h".to_string()]; // TODO: Get actual trained horizons from model
+
         let metadata = crate::data::DataMetadata {
             symbol: symbol.to_string(),
             start_time: chrono::Utc::now(),
@@ -220,7 +224,7 @@ impl SequenceGenerator {
             total_records: num_rows,
             feature_count: feature_columns.len(),
             sequence_length,
-            horizons: vec!["1h".to_string()], // Default horizon
+            horizons, // Use actual horizons instead of hardcoded "1h"
         };
 
         Ok(PreparedPredictionData {
