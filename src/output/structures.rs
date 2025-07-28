@@ -907,15 +907,6 @@ impl TradingOrders {
             ));
         };
 
-        // Use the formatter's calculate_sequence_aware_ranges (the correct one)
-        let temp_config = crate::config::prediction::OutputConfig::default();
-        let formatter = crate::output::formatter::OutputFormatter::new(temp_config);
-        let (_sequence_ranges, _) = formatter.calculate_sequence_aware_ranges(
-            config.sequence_prices,
-            config.current_price,
-            config.bandwidth_size,
-        );
-
         // 🎯 PROPER ATR CALCULATION: Base multiplier adjusted by market volatility
         let volatility_factor = config.volatility_pred.expected_range_percent / 5.0; // Scale to reasonable range (5% baseline)
         let atr_multiplier = config.config.base_atr_multiplier * volatility_factor.clamp(0.5, 3.0); // Cap between 0.5x-3.0x

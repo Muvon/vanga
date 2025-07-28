@@ -5,6 +5,7 @@
 
 use crate::config::model::{OutputHeadsConfig, NUM_CLASSES};
 use crate::config::prediction::{OutputConfig, OutputFormat};
+use crate::data::structures::MarketDataRow;
 use crate::output::multi_target_parser::{DirectionOutput, MultiTargetParser, VolatilityOutput};
 use crate::output::structures::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
@@ -18,7 +19,7 @@ use std::collections::HashMap;
 pub struct OutputFormatter {
     config: OutputConfig,
     parser: Option<MultiTargetParser>,
-    sequence_data: Option<Vec<f64>>,
+    sequence_ohlcv: Option<Vec<MarketDataRow>>,
     /// Model config bandwidth_size: sequence bandwidth multiplier (e.g., 1.0, 1.5, 2.0)
     /// Used in target generation as: sequence_bandwidth = (max - min) * bandwidth_size
     bandwidth_size: Option<f64>,
@@ -34,7 +35,7 @@ impl OutputFormatter {
         Self {
             config,
             parser: None,
-            sequence_data: None,
+            sequence_ohlcv: None,
             bandwidth_size: None,
             feature_count: None,
             sequence_length: None,
@@ -50,8 +51,9 @@ impl OutputFormatter {
     }
 
     /// Set sequence data for sequence-aware price level calculations
-    pub fn with_sequence_data(mut self, sequence_data: Vec<f64>) -> Self {
-        self.sequence_data = Some(sequence_data);
+    /// Set OHLCV sequence data for VWAP-based range calculation (matches training approach)
+    pub fn with_sequence_ohlcv(mut self, sequence_ohlcv: Vec<MarketDataRow>) -> Self {
+        self.sequence_ohlcv = Some(sequence_ohlcv);
         self
     }
 
@@ -67,9 +69,9 @@ impl OutputFormatter {
         self.parser.is_some()
     }
 
-    /// Get sequence data reference
-    pub fn get_sequence_data(&self) -> Option<&[f64]> {
-        self.sequence_data.as_deref()
+    /// Get sequence OHLCV data reference
+    pub fn get_sequence_ohlcv(&self) -> Option<&[MarketDataRow]> {
+        self.sequence_ohlcv.as_deref()
     }
 
     /// Get bandwidth size
@@ -187,15 +189,16 @@ impl OutputFormatter {
                 result = result.with_price_levels(self.create_price_level_prediction(
                     &price_level_probs,
                     current_price,
-                    self.sequence_data.as_deref(),
                     self.bandwidth_size,
                 )?);
             }
 
             if let Some(direction_output) = parsed_output.direction {
-                // Calculate actual sequence bandwidth percentage from sequence data
-                let sequence_bandwidth_percent = if let Some(sequence_prices) = &self.sequence_data
-                {
+                // Calculate sequence bandwidth percentage using OHLCV data
+                let sequence_bandwidth_percent = if let Some(ohlcv_data) = &self.sequence_ohlcv {
+                    // Extract close prices from OHLCV data
+                    let sequence_prices: Vec<f64> =
+                        ohlcv_data.iter().map(|row| row.close).collect();
                     if sequence_prices.len() >= 2 {
                         let min_price =
                             sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
@@ -225,13 +228,13 @@ impl OutputFormatter {
                         final_bandwidth_percent.min(100.0)
                     } else {
                         return Err(VangaError::PredictionError(format!(
-                            "Insufficient sequence data for adaptive predictions: {} prices (need ≥2)",
-                            sequence_prices.len()
+                            "Insufficient OHLCV data for adaptive predictions: {} rows (need ≥2)",
+                            ohlcv_data.len()
                         )));
                     }
                 } else {
                     return Err(VangaError::PredictionError(
-                        "Sequence data not available for adaptive predictions. Use with_sequence_data() to provide it.".to_string()
+                        "OHLCV sequence data not available. Use with_sequence_ohlcv() to provide it.".to_string()
                     ));
                 };
 
@@ -244,9 +247,11 @@ impl OutputFormatter {
             }
 
             if let Some(volatility_output) = parsed_output.volatility {
-                // Calculate sequence bandwidth percentage (same logic as direction)
-                let sequence_bandwidth_percent = if let Some(sequence_prices) = &self.sequence_data
-                {
+                // Calculate sequence bandwidth percentage using OHLCV data
+                let sequence_bandwidth_percent = if let Some(ohlcv_data) = &self.sequence_ohlcv {
+                    // Extract close prices from OHLCV data
+                    let sequence_prices: Vec<f64> =
+                        ohlcv_data.iter().map(|row| row.close).collect();
                     if sequence_prices.len() >= 2 {
                         let min_price =
                             sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
@@ -276,20 +281,27 @@ impl OutputFormatter {
                         final_bandwidth_percent.min(100.0)
                     } else {
                         return Err(VangaError::PredictionError(format!(
-                            "Insufficient sequence data for adaptive predictions: {} prices (need ≥2)",
-                            sequence_prices.len()
+                            "Insufficient OHLCV data for adaptive predictions: {} rows (need ≥2)",
+                            ohlcv_data.len()
                         )));
                     }
                 } else {
                     return Err(VangaError::PredictionError(
-                        "Sequence data not available for adaptive predictions. Use with_sequence_data() to provide it.".to_string()
+                        "OHLCV sequence data not available. Use with_sequence_ohlcv() to provide it.".to_string()
                     ));
                 };
 
-                // Calculate volatility percentile from sequence data
-                let volatility_percentile = self.calculate_volatility_percentile(
-                    self.sequence_data.as_ref().unwrap(), // Safe unwrap - already checked above
-                );
+                // Calculate volatility percentile from OHLCV close prices
+                let sequence_prices_for_volatility: Vec<f64> = self
+                    .sequence_ohlcv
+                    .as_ref()
+                    .unwrap() // Safe unwrap - already checked above
+                    .iter()
+                    .map(|row| row.close)
+                    .collect();
+
+                let volatility_percentile =
+                    self.calculate_volatility_percentile(&sequence_prices_for_volatility);
 
                 result = result.with_volatility(self.create_volatility_prediction(
                     &volatility_output,
@@ -309,34 +321,33 @@ impl OutputFormatter {
                 let direction = result.direction.clone().unwrap();
                 let volatility = result.volatility.clone().unwrap();
 
-                // Calculate ATR from sequence data
-                let atr_value = if let Some(sequence_prices) = &self.sequence_data {
-                    // Use price range as ATR estimate since we only have close prices
-                    if sequence_prices.len() >= 2 {
-                        let min_price =
-                            sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        let max_price = sequence_prices
-                            .iter()
-                            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                        let price_range = max_price - min_price;
+                // Calculate ATR from OHLCV sequence data
+                let atr_value = if let Some(ohlcv_data) = &self.sequence_ohlcv {
+                    if ohlcv_data.len() >= 2 {
+                        // Calculate true range for each period
+                        let mut true_ranges = Vec::new();
+                        for i in 1..ohlcv_data.len() {
+                            let current = &ohlcv_data[i];
+                            let previous = &ohlcv_data[i - 1];
 
-                        // Calculate average price change as ATR proxy (PERCENTAGE-BASED)
-                        let mut price_changes = Vec::new();
-                        for i in 1..sequence_prices.len() {
-                            let change_pct = ((sequence_prices[i] - sequence_prices[i - 1]).abs()
-                                / sequence_prices[i - 1])
-                                * 100.0;
-                            price_changes.push(change_pct);
+                            // True Range = max(high - low, |high - prev_close|, |low - prev_close|)
+                            let tr = (current.high - current.low)
+                                .max((current.high - previous.close).abs())
+                                .max((current.low - previous.close).abs());
+
+                            // Convert to percentage
+                            let tr_pct = (tr / current.close) * 100.0;
+                            true_ranges.push(tr_pct);
                         }
-                        let avg_change_pct = if !price_changes.is_empty() {
-                            price_changes.iter().sum::<f64>() / price_changes.len() as f64
+
+                        // Average True Range as percentage
+                        let atr_pct = if !true_ranges.is_empty() {
+                            true_ranges.iter().sum::<f64>() / true_ranges.len() as f64
                         } else {
                             2.0
                         };
 
-                        // Convert price range to percentage and use the larger value
-                        let price_range_pct = (price_range / current_price) * 100.0;
-                        avg_change_pct.max(price_range_pct * 0.5).min(10.0) // Cap at 10% for sanity
+                        atr_pct.min(10.0) // Cap at 10% for sanity
                     } else {
                         2.0 // 2% fallback ATR
                     }
@@ -347,11 +358,14 @@ impl OutputFormatter {
                 // Get bandwidth_size from training config
                 let bandwidth_size = self.bandwidth_size.unwrap_or(1.0);
 
-                // Generate sequence-aware orders - sequence data is REQUIRED!
-                let sequence_prices = self.sequence_data.as_ref()
+                // Generate sequence-aware orders - OHLCV data is REQUIRED!
+                let ohlcv_data = self.sequence_ohlcv.as_ref()
                     .ok_or_else(|| VangaError::PredictionError(
-                        "FATAL: No sequence data available for order generation. This should have been set during formatter initialization.".to_string()
+                        "FATAL: No OHLCV sequence data available for order generation. This should have been set during formatter initialization.".to_string()
                     ))?;
+
+                // Extract close prices for order generation (backward compatibility)
+                let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
                 let order_config = crate::output::structures::OrderConfig::default();
 
@@ -362,7 +376,7 @@ impl OutputFormatter {
                     price_levels: &price_levels,
                     atr_value,
                     config: &order_config,
-                    sequence_prices,
+                    sequence_prices: &sequence_prices,
                     bandwidth_size,
                 };
 
@@ -402,7 +416,6 @@ impl OutputFormatter {
         &self,
         probabilities: &[f64],
         current_price: f64,
-        sequence_prices: Option<&[f64]>,
         bandwidth_size: Option<f64>,
     ) -> Result<PriceLevelPrediction> {
         if probabilities.len() != NUM_CLASSES {
@@ -415,31 +428,19 @@ impl OutputFormatter {
 
         let mut bins = HashMap::new();
 
-        // Calculate sequence-aware ranges using the same logic as target generation
-        let (bin_ranges, bin_names) = if let Some(prices) = sequence_prices {
-            self.calculate_sequence_aware_ranges(
-                prices,
+        // Calculate VWAP-based ranges using OHLCV data (matches training approach)
+        let (bin_ranges, bin_names) = if let Some(ohlcv_data) = &self.sequence_ohlcv {
+            // Use VWAP-based calculation (matches new training approach)
+            self.calculate_vwap_sequence_aware_ranges(
+                ohlcv_data,
                 current_price,
                 bandwidth_size.unwrap_or(1.0),
             )
         } else {
-            // Fallback to reasonable default ranges if no sequence provided
-            (
-                vec![
-                    [-5.0, -2.0], // Strong Down
-                    [-2.0, -1.0], // Moderate Down
-                    [-1.0, 1.0],  // Neutral
-                    [1.0, 2.0],   // Moderate Up
-                    [2.0, 5.0],   // Strong Up
-                ],
-                vec![
-                    "strong_down",
-                    "moderate_down",
-                    "neutral",
-                    "moderate_up",
-                    "strong_up",
-                ],
-            )
+            return Err(VangaError::PredictionError(
+                "OHLCV sequence data not available. Use with_sequence_ohlcv() to provide it."
+                    .to_string(),
+            ));
         };
 
         for (i, (bin_name, range_pct)) in bin_names.iter().zip(bin_ranges.iter()).enumerate() {
@@ -472,23 +473,22 @@ impl OutputFormatter {
         })
     }
 
-    /// Calculate 5-class price ranges using EXACT training target generation logic
-    /// Reuses the same bandwidth calculation from src/targets/price_levels.rs
-    pub fn calculate_sequence_aware_ranges(
+    /// Calculate VWAP-based sequence-aware ranges (matches new training approach)
+    fn calculate_vwap_sequence_aware_ranges(
         &self,
-        sequence_prices: &[f64],
+        sequence_ohlcv: &[MarketDataRow],
         current_price: f64,
         bandwidth_size: f64,
     ) -> (Vec<[f64; 2]>, Vec<&'static str>) {
-        if sequence_prices.is_empty() {
-            log::warn!("Empty sequence prices, using fallback ranges");
+        if sequence_ohlcv.len() < 2 {
+            log::warn!("Insufficient OHLCV data for VWAP range calculation, using defaults");
             return (
                 vec![
-                    [-2.0, -1.0],
-                    [-1.0, -0.5],
-                    [-0.5, 0.5],
-                    [0.5, 1.0],
-                    [1.0, 2.0],
+                    [-5.0, -2.0], // Strong Down
+                    [-2.0, -1.0], // Moderate Down
+                    [-1.0, 1.0],  // Neutral
+                    [1.0, 2.0],   // Moderate Up
+                    [2.0, 5.0],   // Strong Up
                 ],
                 vec![
                     "strong_down",
@@ -500,17 +500,34 @@ impl OutputFormatter {
             );
         }
 
-        // EXACT REUSE: Same logic as src/targets/price_levels.rs:132-156
-        let sequence_min = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let sequence_max = sequence_prices
+        // Calculate VWAP-weighted prices for sequence (matches training approach)
+        let mut sequence_vwap_prices = Vec::new();
+        for candle in sequence_ohlcv {
+            let vwap_price = if candle.volume > 0.0 {
+                // Use volume-weighted OHLC4 for this candle
+                (candle.open + candle.high + candle.low + candle.close) / 4.0
+            } else {
+                // Fallback to simple OHLC4 if no volume
+                (candle.open + candle.high + candle.low + candle.close) / 4.0
+            };
+            sequence_vwap_prices.push(vwap_price);
+        }
+
+        // Find min/max from VWAP-weighted sequence (same as training approach)
+        let sequence_min = sequence_vwap_prices
+            .iter()
+            .fold(f64::INFINITY, |a, &b| a.min(b));
+        let sequence_max = sequence_vwap_prices
             .iter()
             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+        // Calculate bandwidth (same as training approach)
         let base_bandwidth = sequence_max - sequence_min;
         let bandwidth = base_bandwidth * bandwidth_size;
 
         // Handle edge case: flat sequence (bandwidth = 0)
         if bandwidth == 0.0 {
-            log::debug!("Flat sequence detected, using minimal ranges");
+            log::debug!("Flat VWAP sequence detected, using minimal ranges");
             return (
                 vec![
                     [-0.5, -0.25],
@@ -529,41 +546,33 @@ impl OutputFormatter {
             );
         }
 
+        // Calculate target price using horizon VWAP (matches training approach)
+        // For prediction, we use current_price as the "horizon VWAP" equivalent
+        let _target_price = current_price;
+
         // Convert absolute price levels to percentage ranges from current price
-        // FIXED: Correct boundaries to match target generation logic exactly
-        // Strong Down: < sequence_min - bandwidth (extend downward)
+        // Same boundaries as training classification logic
         let strong_down_min = sequence_min - (bandwidth * 2.0); // Extend downward for strong breakout
         let strong_down_max = sequence_min - bandwidth;
-        // Moderate Down: sequence_min - bandwidth ≤ x < sequence_min
         let moderate_down_min = sequence_min - bandwidth;
         let moderate_down_max = sequence_min;
-        // Neutral: sequence_min ≤ x < sequence_max
         let neutral_min = sequence_min;
         let neutral_max = sequence_max;
-        // Moderate Up: sequence_max ≤ x < sequence_max + bandwidth
         let moderate_up_min = sequence_max;
         let moderate_up_max = sequence_max + bandwidth;
-        // Strong Up: ≥ sequence_max + bandwidth (extend upward)
         let strong_up_min = sequence_max + bandwidth;
         let strong_up_max = sequence_max + (bandwidth * 2.0); // Extend upward for strong breakout
 
         // Convert to percentage ranges from current price
         let to_pct = |price: f64| ((price - current_price) / current_price) * 100.0;
 
-        // DEBUG: Log the absolute price calculations
+        // DEBUG: Log the VWAP-based calculations
         log::debug!(
-            "🔍 Absolute Prices: current={:.2}, seq_min={:.2}, seq_max={:.2}, bandwidth={:.2}",
+            "🔍 VWAP Ranges: current={:.2}, seq_min={:.2}, seq_max={:.2}, bandwidth={:.2}",
             current_price,
             sequence_min,
             sequence_max,
             bandwidth
-        );
-        log::debug!(
-            "🔍 Moderate Down: min={:.2} ({:.2}%), max={:.2} ({:.2}%)",
-            moderate_down_min,
-            to_pct(moderate_down_min),
-            moderate_down_max,
-            to_pct(moderate_down_max)
         );
 
         let ranges = vec![
@@ -582,9 +591,14 @@ impl OutputFormatter {
             "strong_up",
         ];
 
-        log::debug!("Sequence bandwidth analysis: min={:.2}, max={:.2}, bandwidth={:.2}, bandwidth_size={:.3}",
-                   sequence_min, sequence_max, bandwidth, bandwidth_size);
-        log::debug!("Price ranges: strong_down=[{:.2}%,{:.2}%], moderate_down=[{:.2}%,{:.2}%], neutral=[{:.2}%,{:.2}%], moderate_up=[{:.2}%,{:.2}%], strong_up=[{:.2}%,{:.2}%]",
+        log::debug!(
+            "VWAP bandwidth analysis: min={:.2}, max={:.2}, bandwidth={:.2}, bandwidth_size={:.3}",
+            sequence_min,
+            sequence_max,
+            bandwidth,
+            bandwidth_size
+        );
+        log::debug!("VWAP price ranges: strong_down=[{:.2}%,{:.2}%], moderate_down=[{:.2}%,{:.2}%], neutral=[{:.2}%,{:.2}%], moderate_up=[{:.2}%,{:.2}%], strong_up=[{:.2}%,{:.2}%]",
                    ranges[0][0], ranges[0][1], ranges[1][0], ranges[1][1], ranges[2][0], ranges[2][1], ranges[3][0], ranges[3][1], ranges[4][0], ranges[4][1]);
 
         (ranges, names)

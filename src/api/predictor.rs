@@ -197,12 +197,16 @@ impl Predictor {
                 "FATAL: No sequence OHLC data available for order generation. This is required for proper ATR calculation and sequence-aware orders.".to_string()
             ))?;
 
-        let sequence_prices: Vec<f64> = sequence_ohlc.iter().map(|row| row.close).collect();
+        // Extract OHLCV data for VWAP-based range calculation (matches training approach)
+        let sequence_ohlcv = sequence_ohlc.clone();
 
         log::info!(
-            "✅ Sequence OHLC data loaded: {} rows for order generation",
-            sequence_ohlc.len()
+            "✅ Sequence OHLCV data loaded: {} rows for VWAP-based order generation",
+            sequence_ohlcv.len()
         );
+
+        // Also extract close prices for backward compatibility and logging
+        let sequence_prices: Vec<f64> = sequence_ohlcv.iter().map(|row| row.close).collect();
         log::debug!(
             "Sequence price range: {:.2} - {:.2}",
             sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
@@ -217,8 +221,8 @@ impl Predictor {
         // Format predictions using output formatter with 5-class system
         let mut formatter = OutputFormatter::new(self.config.output_config.clone());
 
-        // Pass sequence data to formatter for order generation - REQUIRED!
-        formatter = formatter.with_sequence_data(sequence_prices);
+        // Pass OHLCV data to formatter for VWAP-based range calculation - REQUIRED!
+        formatter = formatter.with_sequence_ohlcv(sequence_ohlcv);
 
         // Pass metadata to formatter for accurate PredictionResult creation
         formatter = formatter.with_metadata(input_feature_count, sequence_length);
@@ -247,9 +251,6 @@ impl Predictor {
         };
 
         formatter = formatter.with_output_heads(output_heads);
-
-        // TODO: Add sequence data for sequence-aware price level calculations
-        // formatter = formatter.with_sequence_data(sequence_data);
 
         // Determine horizon using smart selection logic
         let horizon = if let Some(requested_horizon) = &self.config.horizon {
