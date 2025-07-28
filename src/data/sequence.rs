@@ -83,6 +83,7 @@ impl SequenceGenerator {
                 horizons,
                 &df,
                 data_config,
+                model_config,
             )
             .await?;
 
@@ -310,7 +311,7 @@ impl SequenceGenerator {
         // Check minimum data requirements for all horizons
         let min_required_rows = horizons
             .iter()
-            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+            .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
             .max()
             .unwrap_or(1)
             * 2; // At least 2x the largest horizon for reliable training
@@ -325,7 +326,7 @@ impl SequenceGenerator {
         }
 
         // Validate required columns exist
-        let required_columns = ["close", "high", "low", "volume"];
+        let required_columns = ["open", "close", "high", "low", "volume"];
         for col in required_columns {
             if df.column(col).is_err() {
                 return Err(crate::utils::error::VangaError::DataError(format!(
@@ -378,7 +379,7 @@ impl SequenceGenerator {
         // Calculate minimum data requirements
         let max_horizon_steps = horizons
             .iter()
-            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+            .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
             .max()
             .unwrap_or(1);
 
@@ -515,11 +516,12 @@ impl SequenceGenerator {
         horizons: &[String],
         df: &DataFrame,
         data_config: &crate::config::training::DataConfig,
+        model_config: &crate::config::ModelConfig,
     ) -> Result<(Array3<f64>, crate::targets::PreparedTargets)> {
         // Calculate maximum horizon steps
         let max_horizon_steps = horizons
             .iter()
-            .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+            .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
             .max()
             .unwrap_or(1);
 
@@ -582,10 +584,15 @@ impl SequenceGenerator {
         // Convert sequences to Array3
         let sequences = self.convert_sequences_to_array3(all_sequences)?;
 
-        // Generate targets using the original target generation logic
+        // Generate targets using proper configuration extracted from model_config
         // Note: Targets are generated from the original raw data, not normalized data
-        let target_generator = crate::targets::TargetGenerator::with_defaults();
-        let targets = target_generator.generate_all_targets(df, None).await?;
+        let target_config =
+            crate::targets::MultiTargetConfig::from_model_config(model_config, horizons.to_vec());
+
+        let target_generator = crate::targets::TargetGenerator::new(target_config);
+        let targets = target_generator
+            .generate_all_targets(df, Some(model_config))
+            .await?;
 
         Ok((sequences, targets))
     }

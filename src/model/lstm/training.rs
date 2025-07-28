@@ -242,7 +242,7 @@ impl LSTMModel {
             config
                 .horizons
                 .iter()
-                .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+                .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
                 .max()
                 .unwrap_or(72)
         } else {
@@ -417,7 +417,7 @@ impl LSTMModel {
                 config
                     .horizons
                     .iter()
-                    .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+                    .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
                     .max()
                     .unwrap_or(72)
             } else {

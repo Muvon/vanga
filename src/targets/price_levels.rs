@@ -4,6 +4,7 @@
 //! Price levels are calculated using dynamic quantiles to create balanced target distributions.
 
 use crate::utils::error::Result;
+use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
 
@@ -351,38 +352,6 @@ pub fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
         .collect();
 
     Ok(values)
-}
-
-/// Parse horizon string to number of steps
-fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
-    match horizon {
-        "1h" => Ok(1),
-        "4h" => Ok(4),
-        "1d" => Ok(24),
-        "7d" => Ok(168),
-        _ => {
-            if let Some(num_str) = horizon.strip_suffix('h') {
-                num_str.parse::<usize>().map_err(|_| {
-                    crate::utils::error::VangaError::DataError(format!(
-                        "Invalid horizon format: {}",
-                        horizon
-                    ))
-                })
-            } else if let Some(num_str) = horizon.strip_suffix('d') {
-                num_str.parse::<usize>().map(|d| d * 24).map_err(|_| {
-                    crate::utils::error::VangaError::DataError(format!(
-                        "Invalid horizon format: {}",
-                        horizon
-                    ))
-                })
-            } else {
-                Err(crate::utils::error::VangaError::DataError(format!(
-                    "Unsupported horizon format: {}",
-                    horizon
-                )))
-            }
-        }
-    }
 }
 
 #[cfg(test)]
