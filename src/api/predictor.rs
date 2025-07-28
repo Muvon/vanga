@@ -237,9 +237,7 @@ impl Predictor {
                 },
                 direction: crate::config::model::DirectionHead {
                     enabled: true,
-                    bandwidth_size: Some(0.8),
-                    base_threshold_factor: 0.5,
-                    extreme_multiplier: 2.5,
+                    bandwidth_size: Some(1.0), // Standard bandwidth for momentum-based direction
                 },
                 volatility: crate::config::model::VolatilityHead {
                     enabled: true,

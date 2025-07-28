@@ -1,9 +1,18 @@
 //! Direction target generation for cryptocurrency price movement prediction
 //!
-//! This module implements directional classification for price movements:
-//! - 0: Down (significant decrease)
-//! - 1: Sideways (minimal change)
-//! - 2: Up (significant increase)
+//! This module implements momentum-based directional classification using sequence-to-horizon analysis:
+//! - 0: DUMP (extreme downward momentum - much below sequence baseline)
+//! - 1: DOWN (moderate downward momentum - below sequence baseline)  
+//! - 2: SIDEWAYS (minimal momentum - around sequence baseline)
+//! - 3: UP (moderate upward momentum - above sequence baseline)
+//! - 4: PUMP (extreme upward momentum - much above sequence baseline)
+//!
+//! **Key Features:**
+//! - Uses (max-min)/avg momentum calculation from input sequence as baseline
+//! - Compares horizon period momentum against sequence baseline
+//! - Adaptive bandwidth_size for symbol-specific sensitivity
+//! - Symbol-agnostic through percentage-based calculations
+//! - Same architecture pattern as volatility.rs for consistency
 
 use crate::config::model::DirectionHead;
 use crate::utils::error::Result;

@@ -296,9 +296,7 @@ target_strategy = { type = "current" }
 
 [model.output_heads.direction]
 enabled = true
-bandwidth_size = 1.0  # Unified sensitivity control (0.5=sensitive, 1.0=standard, 1.5=conservative)
-base_threshold_factor = 0.5  # How much of market volatility to use as base
-extreme_multiplier = 2.5  # Multiplier for pump/dump vs normal up/down
+bandwidth_size = 1.0  # Unified sensitivity control for momentum-based direction (0.5=sensitive, 1.0=standard, 1.5=conservative)
 
 [model.output_heads.volatility]
 enabled = true

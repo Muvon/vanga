@@ -508,8 +508,6 @@ mod tests {
                 direction: DirectionHead {
                     enabled: false,
                     bandwidth_size: Some(0.8),
-                    base_threshold_factor: 0.5,
-                    extreme_multiplier: 2.5,
                 },
                 volatility: VolatilityHead {
                     enabled: false,
@@ -582,8 +580,6 @@ mod tests {
                 direction: DirectionHead {
                     enabled: false,
                     bandwidth_size: Some(0.8),
-                    base_threshold_factor: 0.5,
-                    extreme_multiplier: 2.5,
                 },
                 volatility: VolatilityHead {
                     enabled: false,
@@ -699,8 +695,6 @@ mod tests {
                 direction: DirectionHead {
                     enabled: false,
                     bandwidth_size: Some(0.8),
-                    base_threshold_factor: 0.5,
-                    extreme_multiplier: 2.5,
                 },
                 volatility: VolatilityHead {
                     enabled: false,
@@ -767,8 +761,6 @@ mod tests {
                 direction: DirectionHead {
                     enabled: false,
                     bandwidth_size: Some(0.8),
-                    base_threshold_factor: 0.5,
-                    extreme_multiplier: 2.5,
                 },
                 volatility: VolatilityHead {
                     enabled: false,

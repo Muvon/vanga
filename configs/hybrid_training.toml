@@ -67,9 +67,7 @@ distribution_type = "Categorical"
 
 [model.output_heads.direction]
 enabled = true
-bandwidth_size = 0.8
-base_threshold_factor = 0.5
-extreme_multiplier = 2.5
+bandwidth_size = 0.8  # Momentum-based direction sensitivity
 
 [model.output_heads.volatility]
 enabled = true

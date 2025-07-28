@@ -61,9 +61,7 @@ distribution_type = "Categorical"
 
 [model.output_heads.direction]
 enabled = true
-bandwidth_size = 1.0              # Standard bandwidth for direction
-base_threshold_factor = 0.4       # Lower threshold for crypto sensitivity
-extreme_multiplier = 3.0          # Higher multiplier for crypto extremes
+bandwidth_size = 1.0              # Standard bandwidth for momentum-based direction
 
 [model.output_heads.volatility]
 enabled = true

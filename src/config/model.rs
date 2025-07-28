@@ -245,16 +245,6 @@ impl PriceLevelHead {
 impl DirectionHead {
     /// Validate the direction head configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        if self.base_threshold_factor <= 0.0 {
-            return Err(crate::utils::error::VangaError::config(
-                "Direction base_threshold_factor must be positive",
-            ));
-        }
-        if self.extreme_multiplier <= 1.0 {
-            return Err(crate::utils::error::VangaError::config(
-                "Direction extreme_multiplier must be greater than 1.0",
-            ));
-        }
         if let Some(bandwidth) = self.bandwidth_size {
             if bandwidth <= 0.0 {
                 return Err(crate::utils::error::VangaError::config(
@@ -285,8 +275,6 @@ impl VolatilityHead {
 pub struct DirectionHead {
     pub enabled: bool,
     pub bandwidth_size: Option<f64>, // Unified sensitivity control
-    pub base_threshold_factor: f64, // How much of market volatility to use as base (replaces hardcoded 0.5)
-    pub extreme_multiplier: f64, // Multiplier for pump/dump vs normal up/down (replaces hardcoded 2.5)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,8 +338,6 @@ impl Default for ModelConfig {
                 direction: DirectionHead {
                     enabled: true,
                     bandwidth_size: Some(0.8), // More sensitive for crypto direction changes
-                    base_threshold_factor: 0.5, // 50% of market volatility as base threshold (was hardcoded)
-                    extreme_multiplier: 2.5, // 2.5x threshold for pump/dump detection (was hardcoded)
                 },
                 volatility: VolatilityHead {
                     enabled: true,
