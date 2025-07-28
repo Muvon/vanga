@@ -5,6 +5,7 @@
 
 use crate::utils::error::Result;
 use crate::utils::parser::parse_horizon_to_steps;
+use crate::utils::market_data::extract_close_prices;
 use polars::prelude::*;
 use std::collections::HashMap;
 
@@ -351,26 +352,6 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
     }
 
     Ok(())
-}
-
-/// Extract close prices from DataFrame
-pub fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
-    let close_series = df.column("close").map_err(|e| {
-        crate::utils::error::VangaError::DataError(format!("Failed to get close column: {}", e))
-    })?;
-
-    let values: Vec<f64> = close_series
-        .f64()
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to convert close to f64: {}",
-                e
-            ))
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    Ok(values)
 }
 
 #[cfg(test)]

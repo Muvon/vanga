@@ -277,21 +277,6 @@ impl VolatilityHead {
             }
         }
 
-        // Validate percentiles are in ascending order and within [0, 1]
-        for (i, &percentile) in self.base_percentiles.iter().enumerate() {
-            if !(0.0..=1.0).contains(&percentile) {
-                return Err(crate::utils::error::VangaError::config(
-                    "Volatility base_percentiles must be between 0.0 and 1.0",
-                ));
-            }
-
-            if i > 0 && percentile <= self.base_percentiles[i - 1] {
-                return Err(crate::utils::error::VangaError::config(
-                    "Volatility base_percentiles must be in ascending order",
-                ));
-            }
-        }
-
         Ok(())
     }
 }
@@ -307,8 +292,7 @@ pub struct DirectionHead {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityHead {
     pub enabled: bool,
-    pub bandwidth_size: Option<f64>, // Unified sensitivity control
-    pub base_percentiles: [f64; 4], // Base percentile boundaries for 5-class system (replaces hardcoded [0.20, 0.40, 0.60, 0.80])
+    pub bandwidth_size: Option<f64>, // Unified sensitivity control (same as DirectionHead)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,7 +356,6 @@ impl Default for ModelConfig {
                 volatility: VolatilityHead {
                     enabled: true,
                     bandwidth_size: Some(1.2), // Less sensitive for volatility regimes
-                    base_percentiles: [0.20, 0.40, 0.60, 0.80], // 5-class percentile boundaries (was hardcoded)
                 },
             },
             quantile_outputs: None, // Disabled by default for backward compatibility

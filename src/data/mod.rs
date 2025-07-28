@@ -232,6 +232,152 @@ impl DataPipeline {
         Ok(target_weights)
     }
 
+    /// Create distributed validation samples with optional gaps to prevent information leakage
+    /// Returns (clean_training_data, validation_data)
+    fn create_distributed_validation(
+        data: &polars::prelude::DataFrame,
+        train_size: usize,
+        val_size: usize,
+        gap_steps: usize,
+    ) -> Result<(polars::prelude::DataFrame, polars::prelude::DataFrame)> {
+        if train_size + val_size > data.height() {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Insufficient data for distributed validation".to_string(),
+            ));
+        }
+
+        // Distribute validation samples across 3 periods: early, middle, late
+        let samples_per_period = val_size / 3;
+        let remaining_samples = val_size % 3;
+
+        // Calculate positions with gaps
+        let available_for_sampling = train_size.saturating_sub(gap_steps * 3);
+        let period_size = available_for_sampling / 3;
+
+        let early_start = period_size / 4;
+        let middle_start = period_size + (period_size / 2);
+        let late_start = 2 * period_size + (period_size * 3 / 4);
+
+        log::debug!(
+            "📊 Distributed validation sampling: train_size={}, val_size={}, gap_steps={}",
+            train_size,
+            val_size,
+            gap_steps
+        );
+        log::debug!(
+            "   Early: {}-{}, Middle: {}-{}, Late: {}-{} (samples_per_period={})",
+            early_start,
+            early_start + samples_per_period,
+            middle_start,
+            middle_start + samples_per_period,
+            late_start,
+            late_start + samples_per_period + remaining_samples,
+            samples_per_period
+        );
+
+        // Collect validation samples
+        let mut val_samples = Vec::new();
+
+        // Early period
+        let early_end = (early_start + samples_per_period).min(train_size - gap_steps);
+        if early_start < early_end {
+            val_samples.push(data.slice(early_start as i64, early_end - early_start));
+        }
+
+        // Middle period
+        let middle_end = (middle_start + samples_per_period).min(train_size - gap_steps);
+        if middle_start < middle_end && middle_start < train_size {
+            val_samples.push(data.slice(middle_start as i64, middle_end - middle_start));
+        }
+
+        // Late period (include remaining samples)
+        let late_samples = samples_per_period + remaining_samples;
+        let late_end = (late_start + late_samples).min(train_size - gap_steps);
+        if late_start < late_end && late_start < train_size {
+            val_samples.push(data.slice(late_start as i64, late_end - late_start));
+        }
+
+        // Combine validation samples
+        let val_samples_count = val_samples.len();
+        let val_df = if val_samples.is_empty() {
+            return Err(crate::utils::error::VangaError::DataError(
+                "Could not create validation samples with current parameters".to_string(),
+            ));
+        } else if val_samples.len() == 1 {
+            val_samples.into_iter().next().unwrap()
+        } else {
+            let mut combined = val_samples[0].clone();
+            for sample in val_samples.iter().skip(1) {
+                combined = combined.vstack(sample).map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to combine validation samples: {}",
+                        e
+                    ))
+                })?;
+            }
+            combined
+        };
+
+        log::info!(
+            "✅ Distributed validation created: {} samples from {} periods (vs traditional end-only approach)",
+            val_df.height(), val_samples_count
+        );
+
+        // Create clean training data (exclude validation samples and gaps)
+        let mut train_ranges = Vec::new();
+
+        // Add range before early validation
+        if early_start > 0 {
+            train_ranges.push(data.slice(0, early_start));
+        }
+
+        // Add range between early and middle (with gaps)
+        let early_gap_end = early_end + gap_steps;
+        if early_gap_end < middle_start {
+            train_ranges.push(data.slice(early_gap_end as i64, middle_start - early_gap_end));
+        }
+
+        // Add range between middle and late (with gaps)
+        let middle_gap_end = middle_end + gap_steps;
+        if middle_gap_end < late_start {
+            train_ranges.push(data.slice(middle_gap_end as i64, late_start - middle_gap_end));
+        }
+
+        // Add range after late validation
+        let late_gap_end = late_end + gap_steps;
+        if late_gap_end < train_size {
+            train_ranges.push(data.slice(late_gap_end as i64, train_size - late_gap_end));
+        }
+
+        let train_ranges_count = train_ranges.len();
+        let train_df = if train_ranges.is_empty() {
+            return Err(crate::utils::error::VangaError::DataError(
+                "No training data remaining after validation sampling".to_string(),
+            ));
+        } else if train_ranges.len() == 1 {
+            train_ranges.into_iter().next().unwrap()
+        } else {
+            let mut combined = train_ranges[0].clone();
+            for range in train_ranges.iter().skip(1) {
+                combined = combined.vstack(range).map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to combine training ranges: {}",
+                        e
+                    ))
+                })?;
+            }
+            combined
+        };
+
+        log::debug!(
+            "🔧 Training data after gap removal: {} samples from {} ranges",
+            train_df.height(),
+            train_ranges_count
+        );
+
+        Ok((train_df, val_df))
+    }
+
     /// Create walk-forward analysis windows with proper three-way split
     /// Reserves test_split for final evaluation while maximizing training data utilization
     async fn create_walk_forward_windows(
@@ -283,13 +429,35 @@ impl DataPipeline {
             config.training.validation_split * 100.0
         );
 
-        // Create progressive windows - no gap needed for validation (FIXED: Remove unnecessary gap)
-        while train_end + validation_size <= available_for_training {
-            let val_start = train_end; // Direct continuation - no gap needed
-            let _val_end = val_start + validation_size;
+        // Parse validation gap
+        let gap_steps = if config.training.validation_gap == "0" {
+            0
+        } else {
+            crate::utils::parser::parse_horizon_to_steps(&config.training.validation_gap)
+                .unwrap_or_else(|e| {
+                    log::warn!(
+                        "Invalid validation_gap '{}': {}. Using 0.",
+                        config.training.validation_gap,
+                        e
+                    );
+                    0
+                })
+        };
 
-            let train_df = raw_processed_data.slice(0, train_end);
-            let val_df = raw_processed_data.slice(val_start as i64, validation_size);
+        log::info!(
+            "🔄 Distributed validation: gap={} steps, sampling from multiple periods within training windows",
+            gap_steps
+        );
+
+        // Create progressive windows with distributed validation
+        while train_end + validation_size <= available_for_training {
+            // Create distributed validation samples with gaps
+            let (train_df, val_df) = Self::create_distributed_validation(
+                &raw_processed_data,
+                train_end,
+                validation_size,
+                gap_steps,
+            )?;
 
             // Test data is reserved - only include in final window
             let _test_df =
@@ -411,12 +579,11 @@ impl DataPipeline {
             train_end += validation_size / 4; // Increment by 25% of validation size for smooth progression
 
             log::debug!(
-                "📊 Window {}: train_samples={}, val_samples={}, test_samples={}, val_start={}",
+                "📊 Window {}: train_samples={}, val_samples={}, test_samples={}, distributed_validation=true",
                 windows.len(),
                 train_end,
                 validation_size,
-                test_sequences.sequences.shape()[0],
-                val_start
+                test_sequences.sequences.shape()[0]
             );
         }
 

@@ -135,6 +135,10 @@ batch_size = { Auto = { min_size = 32, max_size = 512 } }
 # VALIDATION AND EARLY STOPPING
 # ============================================================================
 validation_split = 0.2          # 20% of data for validation
+validation_gap = "1h"           # Gap between training and validation samples
+                                # Prevents information leakage from features with lookback periods
+                                # Options: "1h", "2h", "30m", "0" (no gap)
+                                # Recommended: "1h" for crypto (24/7 markets)
 test_split = 0.1               # 10% of data for final testing
 early_stopping = { patience = 50, min_delta = 0.001 }   # Stop after 50 epochs without improvement >= min_delta (adjusted for new loss scale)
 

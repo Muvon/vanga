@@ -193,7 +193,6 @@ mod tests {
             volatility: VolatilityHead {
                 enabled: true,
                 bandwidth_size: Some(1.2),
-                base_percentiles: [0.20, 0.40, 0.60, 0.80],
             },
         }
     }

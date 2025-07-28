@@ -282,6 +282,7 @@ impl Backtester {
                 warmup_epochs: 0, // No warmup for short backtesting
                 learning_schedule: None,
                 validation_split: 0.2,
+                validation_gap: "1h".to_string(), // Add validation gap for backtesting
                 test_split: 0.0, // No separate test split since we handle this in backtesting
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 3, // Quick early stopping
