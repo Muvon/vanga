@@ -9,6 +9,7 @@ use crate::data::loader::DataLoader;
 use crate::targets::TargetGenerator;
 use crate::utils::error::{Result, VangaError};
 use crate::utils::metrics::RegressionMetrics;
+use crate::utils::sequence_utils::calculate_sequence_indices;
 use polars::prelude::*;
 use std::path::Path;
 
@@ -108,7 +109,28 @@ impl Backtester {
         // Step 6: Generate actual targets for test data to calculate metrics
         log::info!("🎯 Generating targets for test data");
         let target_generator = TargetGenerator::with_defaults();
-        let actual_targets = match target_generator.generate_all_targets(&test_df, None).await {
+        
+        // Calculate sequence parameters for target generation
+        let model_config = crate::config::ModelConfig::default();
+        let sequence_length = match &model_config.sequence_length {
+            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+            crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
+            crate::config::model::SequenceLengthConfig::Adaptive => 60,
+        };
+        
+        // Calculate sequence indices for test data
+        let test_data_length = test_df.height();
+        let max_horizon_steps = 24; // Default horizon for "1h" with hourly data
+        let step_size = 1; // Default step size
+        
+        let sequence_indices = calculate_sequence_indices(
+            test_data_length,
+            sequence_length,
+            step_size,
+            max_horizon_steps,
+        ).map_err(|e| VangaError::DataError(format!("Failed to calculate sequence indices: {}", e)))?;
+        
+        let actual_targets = match target_generator.generate_all_targets(&test_df, None, &sequence_indices, sequence_length).await {
             Ok(targets) => targets,
             Err(e) => {
                 log::error!("Failed to generate targets for test data: {}", e);

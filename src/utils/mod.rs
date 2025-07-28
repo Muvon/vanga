@@ -6,6 +6,7 @@ pub mod file_discovery;
 pub mod metrics;
 pub mod model_path;
 pub mod parser;
+pub mod sequence_utils;
 
 pub use error::{Result, VangaError};
 pub use feature_window::{

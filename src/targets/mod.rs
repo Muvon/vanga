@@ -14,7 +14,7 @@ use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-// Re-export configurations (deprecated configs removed)
+// Re-export configurations
 pub use direction::{generate_direction_targets, Direction};
 pub use price_levels::{
     generate_price_level_targets, generate_price_level_targets_from_model_config, PriceLevelConfig,
@@ -64,17 +64,20 @@ pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,
     pub directions: HashMap<String, Vec<i32>>,
     pub volatility: HashMap<String, Vec<i32>>,
+    pub target_names: Vec<String>,  // ADDED: Avoid redundant TargetGenerator creation
     pub data_length: usize,
     pub valid_indices: Vec<usize>,
 }
 
 impl PreparedTargets {
     /// Create new empty PreparedTargets
+    /// Create new empty PreparedTargets
     pub fn new(data_length: usize) -> Self {
         Self {
             price_levels: HashMap::new(),
             directions: HashMap::new(),
             volatility: HashMap::new(),
+            target_names: Vec::new(),  // Initialize empty target names
             data_length,
             valid_indices: Vec::new(),
         }
@@ -235,18 +238,21 @@ impl TargetGenerator {
         self.config.horizons.len() * 3
     }
 
-    /// Generate all targets for the given DataFrame (ENHANCED: supports model config)
+    /// Generate all targets aligned with specific sequence indices (FIXED: for proper synchronization)
     pub async fn generate_all_targets(
         &self,
         df: &DataFrame,
         model_config: Option<&crate::config::model::ModelConfig>,
+        sequence_indices: &[usize],
+        sequence_length: usize,
     ) -> Result<PreparedTargets> {
-        let data_length = df.height();
+        // FIXED: Data length should be the number of sequences, not original data length
+        let data_length = sequence_indices.len();
         let mut prepared_targets = PreparedTargets::new(data_length);
 
         log::info!(
-            "Generating all targets in parallel for {} horizons",
-            self.config.horizons.len()
+            "🎯 Generating aligned targets for {} sequences at specific indices",
+            sequence_indices.len()
         );
 
         // PARALLELIZED: Generate all target types concurrently
@@ -258,12 +264,16 @@ impl TargetGenerator {
                         df,
                         &self.config.horizons,
                         model_cfg,
+                        sequence_indices,
+                        sequence_length,
                     )
                 } else {
                     generate_price_level_targets(
                         df,
                         &self.config.horizons,
                         &self.config.price_level_config,
+                        sequence_indices,
+                        sequence_length,
                     )
                 }
             },
@@ -271,35 +281,23 @@ impl TargetGenerator {
                 rayon::join(
                     || {
                         log::debug!("Generating direction targets in parallel");
-                        if let Some(model_cfg) = model_config {
-                            generate_direction_targets(
-                                df,
-                                &self.config.horizons,
-                                Some(&model_cfg.output_heads.direction),
-                            )
-                        } else {
-                            generate_direction_targets(
-                                df,
-                                &self.config.horizons,
-                                None, // No DirectionHead available in legacy path
-                            )
-                        }
+                        generate_direction_targets(
+                            df,
+                            &self.config.horizons,
+                            model_config.map(|cfg| &cfg.output_heads.direction),
+                            sequence_indices,
+                            sequence_length,
+                        )
                     },
                     || {
                         log::debug!("Generating volatility targets in parallel");
-                        if let Some(model_cfg) = model_config {
-                            generate_volatility_targets(
-                                df,
-                                &self.config.horizons,
-                                Some(&model_cfg.output_heads.volatility),
-                            )
-                        } else {
-                            generate_volatility_targets(
-                                df,
-                                &self.config.horizons,
-                                None, // No VolatilityHead available in legacy path
-                            )
-                        }
+                        generate_volatility_targets(
+                            df,
+                            &self.config.horizons,
+                            model_config.map(|cfg| &cfg.output_heads.volatility),
+                            sequence_indices,
+                            sequence_length,
+                        )
                     },
                 )
             },
@@ -309,88 +307,34 @@ impl TargetGenerator {
         prepared_targets.price_levels = price_targets?;
         prepared_targets.directions = direction_targets?;
         prepared_targets.volatility = volatility_targets?;
+        
+        // FIXED: Set target names to avoid redundant TargetGenerator creation
+        prepared_targets.target_names = self.get_target_names();
 
-        // Calculate valid indices (where all targets are available)
-        prepared_targets.valid_indices = self.calculate_valid_indices(&prepared_targets)?;
+        // FIXED: Calculate valid indices based on sequence alignment
+        // Valid indices should be 0, 1, 2, ... sequence_count-1 (not original data indices)
+        prepared_targets.valid_indices = (0..sequence_indices.len()).collect();
+
+        // FIXED: Validate target-sequence alignment
+        crate::utils::sequence_utils::validate_target_sequence_alignment(
+            sequence_indices.len(),
+            &prepared_targets.valid_indices,
+            &(0..sequence_indices.len()).collect::<Vec<_>>(), // Use sequence positions, not original indices
+            sequence_indices.len(),                           // Data length is now sequence count
+        )?;
 
         // Validate targets
         prepared_targets.validate()?;
 
         log::info!(
-            "Successfully generated targets with {} valid samples",
+            "✅ Successfully generated aligned targets with {} valid samples",
             prepared_targets.valid_indices.len()
         );
 
         Ok(prepared_targets)
     }
 
-    /// Calculate indices where all targets are valid (not -1)
-    fn calculate_valid_indices(&self, targets: &PreparedTargets) -> Result<Vec<usize>> {
-        let mut valid_indices = Vec::new();
 
-        if targets.data_length == 0 {
-            return Ok(valid_indices);
-        }
-
-        // Use first horizon to validate configuration consistency
-        let first_horizon = self.config.horizons.first().ok_or_else(|| {
-            crate::utils::error::VangaError::DataError("No horizons configured".to_string())
-        })?;
-
-        // Validate that the first horizon exists in all target types
-        if !targets.price_levels.contains_key(first_horizon) {
-            return Err(crate::utils::error::VangaError::DataError(format!(
-                "First horizon '{}' missing from price level targets",
-                first_horizon
-            )));
-        }
-        if !targets.directions.contains_key(first_horizon) {
-            return Err(crate::utils::error::VangaError::DataError(format!(
-                "First horizon '{}' missing from direction targets",
-                first_horizon
-            )));
-        }
-        if !targets.volatility.contains_key(first_horizon) {
-            return Err(crate::utils::error::VangaError::DataError(format!(
-                "First horizon '{}' missing from volatility targets",
-                first_horizon
-            )));
-        }
-
-        for i in 0..targets.data_length {
-            let mut all_valid = true;
-
-            // Check if all target types have valid values for this index
-            for horizon in &self.config.horizons {
-                if let Some(price_targets) = targets.price_levels.get(horizon) {
-                    if i >= price_targets.len() || price_targets[i] < 0 {
-                        all_valid = false;
-                        break;
-                    }
-                }
-
-                if let Some(direction_targets) = targets.directions.get(horizon) {
-                    if i >= direction_targets.len() || direction_targets[i] < 0 {
-                        all_valid = false;
-                        break;
-                    }
-                }
-
-                if let Some(volatility_targets) = targets.volatility.get(horizon) {
-                    if i >= volatility_targets.len() || volatility_targets[i] < 0 {
-                        all_valid = false;
-                        break;
-                    }
-                }
-            }
-
-            if all_valid {
-                valid_indices.push(i);
-            }
-        }
-
-        Ok(valid_indices)
-    }
 }
 
 /// Calculate class distribution for target analysis
@@ -419,149 +363,6 @@ fn calculate_class_distribution(targets: &[i32]) -> ClassDistribution {
 /// These methods are kept for API compatibility but should not be used
 /// Use the new generate_all_targets() method instead
 impl TargetGenerator {
-    /// Generate price level targets (DEPRECATED - use generate_all_targets)
-    #[deprecated(note = "Use generate_all_targets() instead")]
-    pub fn generate_price_level_targets_legacy(
-        &self,
-        prices: &[f64],
-        _bins: u32,          // Deprecated parameter, ignored
-        _range_percent: f64, // Acknowledge unused parameter
-    ) -> Result<Vec<Vec<f64>>> {
-        log::warn!(
-            "DEPRECATED: Use generate_all_targets() instead of legacy price level generation"
-        );
-
-        // For backward compatibility, create a temporary DataFrame and delegate to the working implementation
-        if prices.is_empty() {
-            return Err(crate::utils::error::VangaError::DataError(
-                "Empty price data provided to deprecated method".to_string(),
-            ));
-        }
-
-        // Create a minimal DataFrame for compatibility
-        let df =
-            polars::prelude::DataFrame::new(vec![polars::prelude::Series::new("close", prices)])
-                .map_err(|e| {
-                    crate::utils::error::VangaError::DataError(format!(
-                        "Failed to create DataFrame for backward compatibility: {}",
-                        e
-                    ))
-                })?;
-
-        // Use the working implementation with adapted config
-        let config = PriceLevelConfig {
-            bandwidth_size: 1.0, // Default bandwidth size for backward compatibility
-        };
-
-        let targets = generate_price_level_targets(&df, &self.config.horizons, &config)?;
-
-        // Convert HashMap<String, Vec<i32>> to Vec<Vec<f64>> for backward compatibility
-        let mut result = Vec::new();
-        for horizon in &self.config.horizons {
-            if let Some(horizon_targets) = targets.get(horizon) {
-                let float_targets: Vec<f64> = horizon_targets.iter().map(|&x| x as f64).collect();
-                result.push(float_targets);
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Generate direction targets (DEPRECATED - use generate_all_targets)
-    #[deprecated(note = "Use generate_all_targets() instead")]
-    pub fn generate_direction_targets(&self, prices: &[f64], _threshold: f64) -> Result<Vec<f64>> {
-        log::warn!("DEPRECATED: Use generate_all_targets() instead of legacy direction generation");
-
-        // For backward compatibility, create a temporary DataFrame and delegate to the working implementation
-        if prices.is_empty() {
-            return Err(crate::utils::error::VangaError::DataError(
-                "Empty price data provided to deprecated method".to_string(),
-            ));
-        }
-
-        // Create a minimal DataFrame for compatibility
-        let df =
-            polars::prelude::DataFrame::new(vec![polars::prelude::Series::new("close", prices)])
-                .map_err(|e| {
-                    crate::utils::error::VangaError::DataError(format!(
-                        "Failed to create DataFrame for backward compatibility: {}",
-                        e
-                    ))
-                })?;
-
-        // Use the working implementation with default DirectionHead
-        let model_config = crate::config::model::ModelConfig::default();
-        let direction_head = &model_config.output_heads.direction;
-
-        let targets = crate::targets::direction::generate_direction_targets(
-            &df,
-            &self.config.horizons,
-            Some(direction_head),
-        )?;
-
-        // Convert HashMap<String, Vec<i32>> to Vec<f64> for backward compatibility
-        // Take the first horizon's targets or return empty if none
-        if let Some(first_horizon) = self.config.horizons.first() {
-            if let Some(horizon_targets) = targets.get(first_horizon) {
-                let float_targets: Vec<f64> = horizon_targets.iter().map(|&x| x as f64).collect();
-                return Ok(float_targets);
-            }
-        }
-
-        Ok(vec![])
-    }
-
-    /// Generate volatility targets (DEPRECATED - use generate_all_targets)
-    #[deprecated(note = "Use generate_all_targets() instead")]
-    pub fn generate_volatility_targets(
-        &self,
-        prices: &[f64],
-        horizons: &[String],
-    ) -> Result<Vec<Vec<f64>>> {
-        log::warn!(
-            "DEPRECATED: Use generate_all_targets() instead of legacy volatility generation"
-        );
-
-        // For backward compatibility, create a temporary DataFrame and delegate to the working implementation
-        if prices.is_empty() {
-            return Err(crate::utils::error::VangaError::DataError(
-                "Empty price data provided to deprecated method".to_string(),
-            ));
-        }
-
-        // Create a minimal DataFrame for compatibility
-        let df =
-            polars::prelude::DataFrame::new(vec![polars::prelude::Series::new("close", prices)])
-                .map_err(|e| {
-                    crate::utils::error::VangaError::DataError(format!(
-                        "Failed to create DataFrame for backward compatibility: {}",
-                        e
-                    ))
-                })?;
-
-        // Use the working implementation with default config (deprecated path)
-        // Note: This is a legacy function that should not be used in new code
-        let model_config = crate::config::model::ModelConfig::default();
-        let _target_config = MultiTargetConfig::from_model_config(&model_config, horizons.to_vec());
-
-        let targets = crate::targets::volatility::generate_volatility_targets(
-            &df,
-            horizons,
-            Some(&model_config.output_heads.volatility), // Use VolatilityHead from model config
-        )?;
-
-        // Convert HashMap<String, Vec<i32>> to Vec<Vec<f64>> for backward compatibility
-        let mut result = Vec::new();
-        for horizon in horizons {
-            if let Some(horizon_targets) = targets.get(horizon) {
-                let float_targets: Vec<f64> = horizon_targets.iter().map(|&x| x as f64).collect();
-                result.push(float_targets);
-            }
-        }
-
-        Ok(result)
-    }
-
     /// Generate price level targets using model configuration
     pub async fn generate_price_level_targets_with_model_config(
         &self,
@@ -573,6 +374,25 @@ impl TargetGenerator {
             self.config.horizons.len()
         );
 
-        generate_price_level_targets_from_model_config(df, &self.config.horizons, model_config)
+        // Calculate sequence parameters for legacy method
+        let sequence_length = match &model_config.sequence_length {
+            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+            crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
+            crate::config::model::SequenceLengthConfig::Adaptive => 60,
+        };
+        
+        // Calculate sequence indices for the data
+        let data_length = df.height();
+        let max_horizon_steps = 24; // Default horizon for "1h" with hourly data
+        let step_size = 1; // Default step size
+        
+        let sequence_indices = crate::utils::sequence_utils::calculate_sequence_indices(
+            data_length,
+            sequence_length,
+            step_size,
+            max_horizon_steps,
+        )?;
+
+        generate_price_level_targets_from_model_config(df, &self.config.horizons, model_config, &sequence_indices, sequence_length)
     }
 }
