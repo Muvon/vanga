@@ -802,6 +802,16 @@ impl LSTMModel {
         }
     }
 
+    /// Get expected XGBoost feature dimension with explicit config parameter
+    /// This method prioritizes the provided XGBoost config over calculated values
+    pub fn get_xgboost_feature_dim_with_config(
+        &self,
+        xgb_config: &crate::config::model::XGBoostConfig,
+    ) -> usize {
+        // ALWAYS prioritize the explicit config value
+        xgb_config.feature_dim
+    }
+
     /// Adjust feature dimension to match expected size
     fn adjust_feature_dimension(&self, features: Tensor, expected_dim: usize) -> Result<Tensor> {
         let actual_dim = features.dim(1)?;
@@ -831,5 +841,111 @@ impl LSTMModel {
             // Dimension already matches
             Ok(features)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::model::XGBoostConfig;
+
+    #[test]
+    fn test_xgboost_feature_dim_with_config() {
+        // Create a test LSTM model
+        let config = crate::model::lstm::config::LSTMConfig {
+            input_size: 10,
+            hidden_sizes: vec![128],
+            output_size: 1,
+            sequence_length: 60,
+            learning_rate: 0.001,
+            num_layers: 1,
+        };
+
+        let model = LSTMModel::new(config).unwrap();
+
+        // Create XGBoost config with custom feature_dim
+        let xgb_config = XGBoostConfig {
+            enabled: true,
+            feature_dim: 256, // Custom value different from default
+            n_estimators: 100,
+            max_depth: 6,
+            learning_rate: 0.1,
+            subsample: 0.8,
+            colsample_bytree: 0.8,
+            reg_alpha: 0.0,
+            reg_lambda: 1.0,
+            early_stopping_rounds: Some(10),
+            eval_metric: "rmse".to_string(),
+            objective: "reg:squarederror".to_string(),
+            save_feature_importance: true,
+            importance_type: "gain".to_string(),
+        };
+
+        // Test that the method returns the config value, not calculated value
+        let feature_dim = model.get_xgboost_feature_dim_with_config(&xgb_config);
+        assert_eq!(feature_dim, 256, "Should return config feature_dim value");
+
+        // Test with different config value
+        let mut xgb_config2 = xgb_config.clone();
+        xgb_config2.feature_dim = 512;
+        let feature_dim2 = model.get_xgboost_feature_dim_with_config(&xgb_config2);
+        assert_eq!(
+            feature_dim2, 512,
+            "Should return updated config feature_dim value"
+        );
+    }
+
+    #[test]
+    fn test_config_loading_integration() {
+        // Test that config loading works with custom feature_dim
+        let toml_content = r#"
+[model]
+[model.xgboost]
+enabled = true
+feature_dim = 999
+n_estimators = 50
+max_depth = 4
+learning_rate = 0.1
+subsample = 0.8
+colsample_bytree = 0.8
+reg_alpha = 0.0
+reg_lambda = 1.0
+early_stopping_rounds = 5
+eval_metric = "rmse"
+objective = "reg:squarederror"
+save_feature_importance = true
+importance_type = "gain"
+"#;
+
+        // Parse the TOML config
+        let parsed: toml::Value = toml::from_str(toml_content).unwrap();
+        let xgb_config: XGBoostConfig = parsed["model"]["xgboost"].clone().try_into().unwrap();
+
+        // Verify the custom feature_dim is loaded correctly
+        assert_eq!(
+            xgb_config.feature_dim, 999,
+            "Config should load custom feature_dim"
+        );
+        assert_eq!(
+            xgb_config.n_estimators, 50,
+            "Config should load custom n_estimators"
+        );
+
+        // Test with LSTM model
+        let lstm_config = crate::model::lstm::config::LSTMConfig {
+            input_size: 10,
+            hidden_sizes: vec![128],
+            output_size: 1,
+            sequence_length: 60,
+            learning_rate: 0.001,
+            num_layers: 1,
+        };
+
+        let model = LSTMModel::new(lstm_config).unwrap();
+        let feature_dim = model.get_xgboost_feature_dim_with_config(&xgb_config);
+        assert_eq!(
+            feature_dim, 999,
+            "Should use config value, not calculated value"
+        );
     }
 }
