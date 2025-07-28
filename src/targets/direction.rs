@@ -2,7 +2,7 @@
 //!
 //! This module implements momentum-based directional classification using sequence-to-horizon analysis:
 //! - 0: DUMP (extreme downward momentum - much below sequence baseline)
-//! - 1: DOWN (moderate downward momentum - below sequence baseline)  
+//! - 1: DOWN (moderate downward momentum - below sequence baseline)
 //! - 2: SIDEWAYS (minimal momentum - around sequence baseline)
 //! - 3: UP (moderate upward momentum - above sequence baseline)
 //! - 4: PUMP (extreme upward momentum - much above sequence baseline)
@@ -85,59 +85,146 @@ pub fn generate_direction_targets(
     Ok(targets)
 }
 
-/// Classify direction using sequence-to-horizon momentum calculation (same pattern as volatility)
+/// Classify direction using adaptive percentile-based approach
 ///
 /// FLOW:
-/// 1. Get momentum baseline from INPUT sequence (training window)
-/// 2. Get momentum from sequence END to target horizon (prediction period)
-/// 3. Compare horizon momentum vs sequence baseline (same logic as volatility)
-/// 4. Apply bandwidth sensitivity and classify into 5 classes
+/// 1. Calculate price changes within the input sequence
+/// 2. Build percentile distribution from sequence price changes
+/// 3. Use bandwidth_size to define middle class (SIDEWAYS) boundaries
+/// 4. Apply extreme_multiplier for DUMP/PUMP classification
+/// 5. Compare horizon price change against adaptive percentile thresholds
 fn classify_direction(
-    sequence_prices: &[f64], // Input sequence for baseline
+    sequence_prices: &[f64], // Input sequence for adaptive baseline
     horizon_prices: &[f64],  // From sequence end to target horizon
     model_config: Option<&DirectionHead>,
 ) -> Result<i32> {
-    // Step 1: Get momentum baseline from INPUT sequence (like volatility's sequence baseline)
-    let sequence_baseline = get_sequence_momentum_baseline(sequence_prices)?;
+    if sequence_prices.len() < 2 || horizon_prices.is_empty() {
+        return Ok(2); // Default to SIDEWAYS for insufficient data
+    }
 
-    // Step 2: Get momentum from sequence END to target horizon (the actual prediction period)
-    let horizon_momentum = get_horizon_momentum(horizon_prices)?;
+    // Step 1: Calculate actual price change from sequence to horizon
+    let sequence_avg = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+    let horizon_avg = horizon_prices.iter().sum::<f64>() / horizon_prices.len() as f64;
 
-    // Step 3: Get config parameters with crypto-tuned defaults
-    let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(1.0);
-    let base_threshold = model_config.and_then(|c| c.base_threshold).unwrap_or(0.12); // 12% momentum change
-    let extreme_multiplier = model_config.and_then(|c| c.extreme_multiplier).unwrap_or(2.0);
+    if sequence_avg <= 0.0 {
+        return Ok(2); // Default to SIDEWAYS for invalid data
+    }
 
-    // FIXED: Use percentage-based momentum change (not ratio)
-    let momentum_change = (horizon_momentum - sequence_baseline) / sequence_baseline;
+    let actual_price_change = horizon_avg - sequence_avg;
 
-    // Calculate adaptive thresholds
-    let adaptive_threshold = base_threshold / bandwidth_size;
-    let extreme_threshold = adaptive_threshold * extreme_multiplier;
+    // Step 2: Build adaptive baseline from sequence price changes
+    let sequence_changes: Vec<f64> = sequence_prices.windows(2).map(|w| w[1] - w[0]).collect();
 
-    // Debug logging with threshold values
-    log::debug!(
-        "🎯 Direction Classification: momentum_change={:.3}, adaptive_threshold={:.3}, extreme_threshold={:.3}, bandwidth_size={}",
-        momentum_change, adaptive_threshold, extreme_threshold, bandwidth_size
-    );
+    if sequence_changes.is_empty() {
+        return Ok(2); // Default to SIDEWAYS
+    }
 
-    // FIXED: 5-class system with proper percentage thresholds
-    let class = if momentum_change <= -extreme_threshold {
-        0 // DUMP: Much below sequence baseline
-    } else if momentum_change <= -adaptive_threshold {
-        1 // DOWN: Below sequence baseline
-    } else if momentum_change >= extreme_threshold {
-        4 // PUMP: Much above sequence baseline
-    } else if momentum_change >= adaptive_threshold {
-        3 // UP: Above sequence baseline
+    // Step 3: Calculate adaptive percentile thresholds
+    let adaptive_thresholds =
+        calculate_adaptive_percentile_thresholds(&sequence_changes, model_config)?;
+
+    // Step 4: Classify using adaptive thresholds
+    let class = if actual_price_change <= adaptive_thresholds.extreme_down {
+        0 // DUMP: Much below sequence distribution
+    } else if actual_price_change <= adaptive_thresholds.moderate_down {
+        1 // DOWN: Below sequence distribution
+    } else if actual_price_change >= adaptive_thresholds.extreme_up {
+        4 // PUMP: Much above sequence distribution
+    } else if actual_price_change >= adaptive_thresholds.moderate_up {
+        3 // UP: Above sequence distribution
     } else {
-        2 // SIDEWAYS: Around sequence baseline
+        2 // SIDEWAYS: Within sequence distribution
     };
+
+    // Debug logging with actual values
+    log::debug!(
+        "🎯 Adaptive Direction: price_change={:.6}, thresholds=[down:{:.6}, moderate_down:{:.6}, moderate_up:{:.6}, up:{:.6}]",
+        actual_price_change,
+        adaptive_thresholds.extreme_down,
+        adaptive_thresholds.moderate_down,
+        adaptive_thresholds.moderate_up,
+        adaptive_thresholds.extreme_up
+    );
 
     Ok(class)
 }
 
-/// Log direction class distribution with momentum-based analysis
+/// Adaptive percentile thresholds for direction classification
+#[derive(Debug)]
+struct AdaptiveDirectionThresholds {
+    extreme_down: f64,  // DUMP threshold
+    moderate_down: f64, // DOWN threshold
+    moderate_up: f64,   // UP threshold
+    extreme_up: f64,    // PUMP threshold
+}
+
+/// Calculate adaptive percentile thresholds from sequence price changes
+///
+/// LOGIC:
+/// - bandwidth_size controls the middle class (SIDEWAYS) definition
+/// - Smaller bandwidth_size = narrower SIDEWAYS = more UP/DOWN classifications
+/// - Larger bandwidth_size = wider SIDEWAYS = more SIDEWAYS classifications
+/// - extreme_multiplier extends the thresholds for DUMP/PUMP classes
+fn calculate_adaptive_percentile_thresholds(
+    sequence_changes: &[f64],
+    model_config: Option<&DirectionHead>,
+) -> Result<AdaptiveDirectionThresholds> {
+    if sequence_changes.is_empty() {
+        return Ok(AdaptiveDirectionThresholds {
+            extreme_down: -0.01,
+            moderate_down: -0.005,
+            moderate_up: 0.005,
+            extreme_up: 0.01,
+        });
+    }
+
+    // Get config parameters
+    let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(1.0);
+    let extreme_multiplier = model_config
+        .and_then(|c| c.extreme_multiplier)
+        .unwrap_or(2.0);
+
+    // Sort sequence changes for percentile calculation
+    let mut sorted_changes = sequence_changes.to_vec();
+    sorted_changes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Calculate base percentiles (bandwidth_size controls middle class width)
+    // bandwidth_size = 1.0 means 40% middle class (20th-80th percentiles)
+    // bandwidth_size = 0.5 means 20% middle class (40th-60th percentiles)
+    // bandwidth_size = 2.0 means 80% middle class (10th-90th percentiles)
+    let base_percentile = bandwidth_size * 0.3; // FIXED: Direct scaling
+    let base_percentile = base_percentile.clamp(0.05, 0.45); // Clamp to reasonable range
+
+    // Calculate percentile positions
+    let len = sorted_changes.len();
+    let down_idx = ((base_percentile * len as f64) as usize).min(len - 1);
+    let up_idx = (((1.0 - base_percentile) * len as f64) as usize).min(len - 1);
+
+    // Get base thresholds from percentiles
+    let moderate_down = sorted_changes[down_idx];
+    let moderate_up = sorted_changes[up_idx];
+
+    // FIXED: Extreme thresholds should be FURTHER from zero
+    let extreme_down = moderate_down * extreme_multiplier; // FIXED: More negative
+    let extreme_up = moderate_up * extreme_multiplier; // FIXED: More positive
+
+    let thresholds = AdaptiveDirectionThresholds {
+        extreme_down,
+        moderate_down,
+        moderate_up,
+        extreme_up,
+    };
+
+    log::debug!(
+        "📊 FIXED Thresholds: bandwidth_size={}, middle_class={:.1}%, percentiles=[{:.1}%, {:.1}%], thresholds=[{:.6}, {:.6}, {:.6}, {:.6}]",
+        bandwidth_size, (1.0 - 2.0 * base_percentile) * 100.0, base_percentile * 100.0, (1.0 - base_percentile) * 100.0,
+        extreme_down, moderate_down, moderate_up, extreme_up
+    );
+
+    Ok(thresholds)
+}
+
+/// Log direction class distribution with adaptive percentile analysis
 fn log_direction_distribution(targets: &[i32], horizon: &str) {
     let class_names = ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"];
     let mut class_counts = [0usize; 5];
@@ -152,7 +239,7 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
 
     if valid_targets == 0 {
         log::warn!(
-            "📊 Direction Momentum Analysis [{}]: No valid targets found",
+            "📊 Adaptive Direction Analysis [{}]: No valid targets found",
             horizon
         );
         return;
@@ -177,36 +264,10 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Direction Momentum Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        "📊 Adaptive Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
         horizon,
         valid_targets,
         imbalance_ratio,
         class_percentages.join(", ")
     );
-}
-
-/// Get momentum baseline from sequence prices (same pattern as volatility's ATR baseline)
-fn get_sequence_momentum_baseline(sequence_prices: &[f64]) -> Result<f64> {
-    if sequence_prices.len() < 2 {
-        return Ok(0.02); // Minimal fallback
-    }
-
-    let max_price = sequence_prices
-        .iter()
-        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let min_price = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let avg_price = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
-
-    if avg_price <= 0.0 {
-        return Ok(0.02); // Fallback for invalid prices
-    }
-
-    // Baseline = (max - min) / avg (normalized range - symbol agnostic)
-    Ok((max_price - min_price) / avg_price)
-}
-
-/// Get horizon momentum (same calculation as baseline)
-fn get_horizon_momentum(horizon_prices: &[f64]) -> Result<f64> {
-    // Same calculation as baseline (without bandwidth_size)
-    get_sequence_momentum_baseline(horizon_prices)
 }

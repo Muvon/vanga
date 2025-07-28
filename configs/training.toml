@@ -296,9 +296,8 @@ target_strategy = { type = "current" }
 
 [model.output_heads.direction]
 enabled = true
-bandwidth_size = 1.0              # Sensitivity control (0.5=sensitive, 1.0=standard, 2.0=conservative)
-base_threshold = 0.12             # 12% momentum change base threshold
-extreme_multiplier = 2.0          # 2.0x multiplier for extreme classes
+bandwidth_size = 1.0              # FIXED: Small=narrow SIDEWAYS, Large=wide SIDEWAYS
+extreme_multiplier = 2.0          # 2.0x multiplier for extreme classes (DUMP/PUMP)
 
 [model.output_heads.volatility]
 enabled = true
