@@ -1797,17 +1797,14 @@ impl LSTMModel {
         // Determine XGBoost objective and metric based on target type
         let mut xgb_config = config.model.xgboost.clone();
 
-        // Update feature_dim to match actual LSTM architecture
-        let actual_feature_dim = self.get_xgboost_feature_dim();
-        if xgb_config.feature_dim != actual_feature_dim {
-            log::info!(
-                "🔧 Updating XGBoost feature_dim from {} to {} for {:?} architecture",
-                xgb_config.feature_dim,
-                actual_feature_dim,
-                self.architecture
-            );
-            xgb_config.feature_dim = actual_feature_dim;
-        }
+        // Use the config's feature_dim directly - prioritize user configuration
+        let config_feature_dim = self.get_xgboost_feature_dim_with_config(&xgb_config);
+        log::info!(
+            "📊 Using XGBoost feature_dim from config: {} for {:?} architecture",
+            config_feature_dim,
+            self.architecture
+        );
+        // No need to update xgb_config.feature_dim as it already contains the correct value
 
         if let Some((target_name, target_type)) = &self.target_context {
             let num_classes = targets.shape()[1];
