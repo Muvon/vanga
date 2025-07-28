@@ -4,8 +4,8 @@
 //! Price levels are calculated using dynamic quantiles to create balanced target distributions.
 
 use crate::utils::error::Result;
-use crate::utils::parser::parse_horizon_to_steps;
 use crate::utils::market_data::extract_close_prices;
+use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
 

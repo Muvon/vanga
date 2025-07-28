@@ -10,15 +10,22 @@
 use crate::config::model::VolatilityHead;
 use crate::data::structures::MarketDataRow;
 use crate::utils::error::Result;
-use crate::utils::parser::parse_horizon_to_steps;
 use crate::utils::market_data::extract_ohlcv_data;
+use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
 
 // DEPRECATED: VolatilityConfig has been removed in favor of VolatilityHead in src/config/model.rs
 // All volatility configuration is now handled through model_config.output_heads.volatility
 
-/// Generate volatility targets for multiple horizons using ATR-based classification
+/// Generate volatility targets for multiple horizons using sequence-to-horizon ATR
+///
+/// FLOW:
+/// 1. Extract OHLCV data from DataFrame
+/// 2. For each sequence position:
+///    - Get INPUT sequence candles (for ATR baseline)
+///    - Get HORIZON sequence candles (from sequence end to target horizon)
+///    - Classify volatility using sequence-to-horizon comparison
 pub fn generate_volatility_targets(
     df: &DataFrame,
     horizons: &[String],
@@ -34,22 +41,27 @@ pub fn generate_volatility_targets(
         let mut horizon_targets = vec![-1; sequence_indices.len()];
 
         for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
-            let target_idx = seq_idx + sequence_length + horizon_steps;
+            let sequence_end_idx = seq_idx + sequence_length;
+            let target_end_idx = sequence_end_idx + horizon_steps;
 
-            // Check boundaries (same as direction)
-            if target_idx < ohlcv_data.len() && seq_idx + sequence_length <= ohlcv_data.len() {
-                // Get sequence candles for baseline
-                let sequence_candles = &ohlcv_data[seq_idx..seq_idx + sequence_length];
-                // Get target candle for comparison
-                let target_candle = &ohlcv_data[target_idx];
+            // Check boundaries - need both sequence and horizon data
+            if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
+                // Get INPUT sequence candles (for ATR baseline)
+                let sequence_candles = &ohlcv_data[seq_idx..sequence_end_idx];
 
-                let target_class = classify_volatility(
-                    sequence_candles,
-                    target_candle,
-                    model_config,
-                )?;
+                // Get HORIZON sequence candles (from sequence end to target horizon)
+                let horizon_candles = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                horizon_targets[seq_position] = target_class;
+                // Only classify if we have enough horizon data for ATR calculation
+                if horizon_candles.len() >= 2 {
+                    let target_class = classify_volatility(
+                        sequence_candles,
+                        horizon_candles, // Now using horizon sequence, not single candle
+                        model_config,
+                    )?;
+
+                    horizon_targets[seq_position] = target_class;
+                }
             }
         }
 
@@ -65,83 +77,66 @@ fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> 
     if sequence_candles.len() < 2 {
         return Ok(0.02); // Minimal fallback
     }
-    
+
     let mut true_ranges = Vec::new();
-    
+
     // Calculate ATR for each candle in the sequence
     for i in 1..sequence_candles.len() {
         let current = &sequence_candles[i];
         let previous = &sequence_candles[i - 1];
-        
+
         // True Range: max(high-low, |high-prev_close|, |low-prev_close|)
         let hl = current.high - current.low;
         let hc = (current.high - previous.close).abs();
         let lc = (current.low - previous.close).abs();
-        
+
         let true_range = hl.max(hc).max(lc);
         if true_range.is_finite() && true_range > 0.0 {
             true_ranges.push(true_range / current.close); // Normalize by price
         }
     }
-    
+
     if true_ranges.is_empty() {
         return Ok(0.02);
     }
-    
+
     // Average True Range of the sequence - this is our baseline
     Ok(true_ranges.iter().sum::<f64>() / true_ranges.len() as f64)
 }
 
-/// Get single candle ATR (same pattern as direction's target price)
-fn get_candle_atr(
-    target_candle: &MarketDataRow,
-    previous_candle: &MarketDataRow,
-) -> Result<f64> {
-    // Single candle ATR calculation
-    let hl = target_candle.high - target_candle.low;
-    let hc = (target_candle.high - previous_candle.close).abs();
-    let lc = (target_candle.low - previous_candle.close).abs();
-    
-    let true_range = hl.max(hc).max(lc);
-    if true_range.is_finite() && true_range > 0.0 {
-        Ok(true_range / target_candle.close) // Normalize by price
-    } else {
-        Ok(0.02) // Fallback
-    }
-}
-
-/// Classify volatility (EXACT same logic as direction classification)
+/// Classify volatility using sequence-to-horizon ATR calculation
+///
+/// FLOW:
+/// 1. Get ATR baseline from INPUT sequence (training window)
+/// 2. Get ATR from sequence END to target horizon (prediction period)
+/// 3. Compare horizon ATR vs sequence baseline (same logic as direction)
+/// 4. Apply bandwidth sensitivity and classify into 5 classes
 fn classify_volatility(
     sequence_candles: &[MarketDataRow],
-    target_candle: &MarketDataRow,
+    horizon_candles: &[MarketDataRow], // From sequence end to target horizon
     model_config: Option<&VolatilityHead>,
 ) -> Result<i32> {
-    // Get ATR baseline from sequence (like market volatility in direction)
+    // Step 1: Get ATR baseline from INPUT sequence (like market volatility in direction)
     let sequence_baseline = get_sequence_atr_baseline(sequence_candles)?;
-    
-    // Get target candle ATR (like target price in direction)
-    let previous_candle = sequence_candles.last().ok_or_else(|| {
-        crate::utils::error::VangaError::DataError("Empty sequence for volatility calculation".to_string())
-    })?;
-    let target_atr = get_candle_atr(target_candle, previous_candle)?;
-    
-    // Same logic as direction classification
-    let bandwidth_size = model_config
-        .and_then(|c| c.bandwidth_size)
-        .unwrap_or(1.0);
-    
+
+    // Step 2: Get ATR from sequence END to target horizon (the actual prediction period)
+    let horizon_atr = get_sequence_atr_baseline(horizon_candles)?;
+
+    // Step 3: Same logic as direction classification
+    let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(1.0);
+
     // Same factors as direction (crypto-adapted for ATR)
     let base_threshold_factor = 0.5; // 50% of baseline
     let extreme_multiplier = 2.0; // 2x for extreme
-    
+
     // Calculate thresholds (identical to direction)
     let base_threshold = base_threshold_factor * sequence_baseline;
     let adaptive_threshold = base_threshold / bandwidth_size;
     let extreme_threshold = adaptive_threshold * extreme_multiplier;
-    
-    // Compare target ATR to baseline (like price change in direction)
-    let atr_ratio = target_atr / sequence_baseline;
-    
+
+    // Step 4: Compare horizon ATR to sequence baseline (like price change in direction)
+    let atr_ratio = horizon_atr / sequence_baseline;
+
     // 5-class system (same logic as direction)
     let class = if atr_ratio <= (1.0 - extreme_threshold) {
         0 // VeryLow: Much below sequence baseline
@@ -154,7 +149,7 @@ fn classify_volatility(
     } else {
         2 // Medium: Around sequence baseline (sideways equivalent)
     };
-    
+
     Ok(class)
 }
 

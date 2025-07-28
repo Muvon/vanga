@@ -233,11 +233,11 @@ pub struct DirectionOutput {
 /// Volatility prediction output for a single horizon (5-class system)
 #[derive(Debug, Clone)]
 pub struct VolatilityOutput {
-    pub very_low_probability: f64,  // <20th percentile
-    pub low_probability: f64,       // 20th-40th percentile
-    pub medium_probability: f64,    // 40th-60th percentile
-    pub high_probability: f64,      // 60th-80th percentile
-    pub very_high_probability: f64, // >80th percentile
+    pub very_low_probability: f64,  // Class 0: Much below sequence baseline
+    pub low_probability: f64,       // Class 1: Below sequence baseline
+    pub medium_probability: f64,    // Class 2: Around sequence baseline
+    pub high_probability: f64,      // Class 3: Above sequence baseline
+    pub very_high_probability: f64, // Class 4: Much above sequence baseline
 }
 
 impl DirectionOutput {

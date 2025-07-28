@@ -7,8 +7,8 @@
 
 use crate::config::model::DirectionHead;
 use crate::utils::error::Result;
-use crate::utils::parser::parse_horizon_to_steps;
 use crate::utils::market_data::extract_close_prices;
+use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
 
@@ -166,4 +166,3 @@ fn calculate_market_volatility(prices: &[f64]) -> Result<f64> {
 
     Ok(variance.sqrt().max(0.005)) // Minimum 0.5% volatility
 }
-

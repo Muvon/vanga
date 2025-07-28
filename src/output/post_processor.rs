@@ -59,13 +59,15 @@ impl PostProcessor {
             return Ok(predictions);
         }
 
-        // Adjust confidence based on market volatility
+        // Adjust confidence based on market volatility (5-class system)
         for pred in &mut predictions {
             if let Some(ref volatility) = pred.volatility {
                 let vol_factor = match volatility.regime.as_str() {
-                    "HIGH" => 0.8,   // Reduce confidence in high volatility
-                    "MEDIUM" => 0.9, // Slightly reduce confidence
-                    "LOW" => 1.0,    // Keep confidence in low volatility
+                    "VERY_HIGH" => 0.7, // Significantly reduce confidence in extreme volatility
+                    "HIGH" => 0.8,      // Reduce confidence in high volatility
+                    "MEDIUM" => 0.9,    // Slightly reduce confidence in medium volatility
+                    "LOW" => 1.0,       // Keep confidence in low volatility
+                    "VERY_LOW" => 1.0,  // Keep confidence in very low volatility
                     _ => 1.0,
                 };
 
