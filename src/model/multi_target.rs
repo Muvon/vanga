@@ -809,6 +809,7 @@ mod tests {
                 warmup_epochs: 0,
                 learning_schedule: None,
                 validation_split: 0.0,
+                validation_gap: "0".to_string(), // No gap needed when no validation
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 10,

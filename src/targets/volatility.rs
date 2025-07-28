@@ -8,15 +8,17 @@
 //! - 4: VeryHigh (extreme volatility)
 
 use crate::config::model::VolatilityHead;
+use crate::data::structures::MarketDataRow;
 use crate::utils::error::Result;
 use crate::utils::parser::parse_horizon_to_steps;
+use crate::utils::market_data::extract_ohlcv_data;
 use polars::prelude::*;
 use std::collections::HashMap;
 
 // DEPRECATED: VolatilityConfig has been removed in favor of VolatilityHead in src/config/model.rs
 // All volatility configuration is now handled through model_config.output_heads.volatility
 
-/// Generate volatility targets for multiple horizons
+/// Generate volatility targets for multiple horizons using ATR-based classification
 pub fn generate_volatility_targets(
     df: &DataFrame,
     horizons: &[String],
@@ -24,7 +26,7 @@ pub fn generate_volatility_targets(
     sequence_indices: &[usize],
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    let close_prices = extract_close_prices(df)?;
+    let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
 
     for horizon in horizons {
@@ -34,15 +36,18 @@ pub fn generate_volatility_targets(
         for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
             let target_idx = seq_idx + sequence_length + horizon_steps;
 
-            if target_idx < close_prices.len()
-                && seq_idx + sequence_length + horizon_steps <= close_prices.len()
-            {
-                // Calculate volatility for the horizon period after the sequence
-                let volatility_window = &close_prices
-                    [seq_idx + sequence_length..seq_idx + sequence_length + horizon_steps];
+            // Check boundaries (same as direction)
+            if target_idx < ohlcv_data.len() && seq_idx + sequence_length <= ohlcv_data.len() {
+                // Get sequence candles for baseline
+                let sequence_candles = &ohlcv_data[seq_idx..seq_idx + sequence_length];
+                // Get target candle for comparison
+                let target_candle = &ohlcv_data[target_idx];
 
-                let target_class =
-                    calculate_volatility_class(volatility_window, &close_prices, model_config)?;
+                let target_class = classify_volatility(
+                    sequence_candles,
+                    target_candle,
+                    model_config,
+                )?;
 
                 horizon_targets[seq_position] = target_class;
             }
@@ -55,46 +60,101 @@ pub fn generate_volatility_targets(
     Ok(targets)
 }
 
-/// Calculate volatility class for a price window
-fn calculate_volatility_class(
-    price_window: &[f64],
-    all_prices: &[f64],
+/// Get ATR baseline from sequence candles (same pattern as direction's market volatility)
+fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> {
+    if sequence_candles.len() < 2 {
+        return Ok(0.02); // Minimal fallback
+    }
+    
+    let mut true_ranges = Vec::new();
+    
+    // Calculate ATR for each candle in the sequence
+    for i in 1..sequence_candles.len() {
+        let current = &sequence_candles[i];
+        let previous = &sequence_candles[i - 1];
+        
+        // True Range: max(high-low, |high-prev_close|, |low-prev_close|)
+        let hl = current.high - current.low;
+        let hc = (current.high - previous.close).abs();
+        let lc = (current.low - previous.close).abs();
+        
+        let true_range = hl.max(hc).max(lc);
+        if true_range.is_finite() && true_range > 0.0 {
+            true_ranges.push(true_range / current.close); // Normalize by price
+        }
+    }
+    
+    if true_ranges.is_empty() {
+        return Ok(0.02);
+    }
+    
+    // Average True Range of the sequence - this is our baseline
+    Ok(true_ranges.iter().sum::<f64>() / true_ranges.len() as f64)
+}
+
+/// Get single candle ATR (same pattern as direction's target price)
+fn get_candle_atr(
+    target_candle: &MarketDataRow,
+    previous_candle: &MarketDataRow,
+) -> Result<f64> {
+    // Single candle ATR calculation
+    let hl = target_candle.high - target_candle.low;
+    let hc = (target_candle.high - previous_candle.close).abs();
+    let lc = (target_candle.low - previous_candle.close).abs();
+    
+    let true_range = hl.max(hc).max(lc);
+    if true_range.is_finite() && true_range > 0.0 {
+        Ok(true_range / target_candle.close) // Normalize by price
+    } else {
+        Ok(0.02) // Fallback
+    }
+}
+
+/// Classify volatility (EXACT same logic as direction classification)
+fn classify_volatility(
+    sequence_candles: &[MarketDataRow],
+    target_candle: &MarketDataRow,
     model_config: Option<&VolatilityHead>,
 ) -> Result<i32> {
-    let volatility = calculate_future_volatility(price_window)?;
-
-    let percentiles = if let Some(model_cfg) = model_config {
-        let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
-        let base_percentiles = model_cfg.base_percentiles;
-
-        // Apply bandwidth sensitivity to percentiles
-        let center = 0.5;
-        base_percentiles.map(|p| {
-            let distance = p - center;
-            let sensitivity = 1.0 / bandwidth_size;
-            center + (distance * sensitivity)
-        })
+    // Get ATR baseline from sequence (like market volatility in direction)
+    let sequence_baseline = get_sequence_atr_baseline(sequence_candles)?;
+    
+    // Get target candle ATR (like target price in direction)
+    let previous_candle = sequence_candles.last().ok_or_else(|| {
+        crate::utils::error::VangaError::DataError("Empty sequence for volatility calculation".to_string())
+    })?;
+    let target_atr = get_candle_atr(target_candle, previous_candle)?;
+    
+    // Same logic as direction classification
+    let bandwidth_size = model_config
+        .and_then(|c| c.bandwidth_size)
+        .unwrap_or(1.0);
+    
+    // Same factors as direction (crypto-adapted for ATR)
+    let base_threshold_factor = 0.5; // 50% of baseline
+    let extreme_multiplier = 2.0; // 2x for extreme
+    
+    // Calculate thresholds (identical to direction)
+    let base_threshold = base_threshold_factor * sequence_baseline;
+    let adaptive_threshold = base_threshold / bandwidth_size;
+    let extreme_threshold = adaptive_threshold * extreme_multiplier;
+    
+    // Compare target ATR to baseline (like price change in direction)
+    let atr_ratio = target_atr / sequence_baseline;
+    
+    // 5-class system (same logic as direction)
+    let class = if atr_ratio <= (1.0 - extreme_threshold) {
+        0 // VeryLow: Much below sequence baseline
+    } else if atr_ratio <= (1.0 - adaptive_threshold) {
+        1 // Low: Below sequence baseline
+    } else if atr_ratio >= (1.0 + extreme_threshold) {
+        4 // VeryHigh: Much above sequence baseline
+    } else if atr_ratio >= (1.0 + adaptive_threshold) {
+        3 // High: Above sequence baseline
     } else {
-        [0.20, 0.40, 0.60, 0.80]
+        2 // Medium: Around sequence baseline (sideways equivalent)
     };
-
-    // Calculate boundaries from all prices for consistent classification
-    let all_volatilities = calculate_realized_volatility(all_prices, price_window.len().max(2))?;
-    let boundaries = calculate_percentile_boundaries(&all_volatilities, &percentiles)?;
-
-    // Classify using boundaries
-    let class = if volatility <= boundaries[0] {
-        0 // VeryLow
-    } else if volatility <= boundaries[1] {
-        1 // Low
-    } else if volatility <= boundaries[2] {
-        2 // Medium
-    } else if volatility <= boundaries[3] {
-        3 // High
-    } else {
-        4 // VeryHigh
-    };
-
+    
     Ok(class)
 }
 
@@ -276,35 +336,6 @@ pub enum VolatilityRegime {
     Medium = 2,   // 40th-60th percentile
     High = 3,     // 60th-80th percentile
     VeryHigh = 4, // >80th percentile
-}
-
-/// Extract close prices from DataFrame
-pub fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
-    let close_series = df.column("close").map_err(|e| {
-        crate::utils::error::VangaError::DataError(format!(
-            "Failed to extract 'close' column: {}",
-            e
-        ))
-    })?;
-
-    let values: Vec<f64> = close_series
-        .f64()
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to convert close prices to f64: {}",
-                e
-            ))
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    if values.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "No valid close prices found".to_string(),
-        ));
-    }
-
-    Ok(values)
 }
 
 /// Calculate realized volatility using rolling window

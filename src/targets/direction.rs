@@ -8,6 +8,7 @@
 use crate::config::model::DirectionHead;
 use crate::utils::error::Result;
 use crate::utils::parser::parse_horizon_to_steps;
+use crate::utils::market_data::extract_close_prices;
 use polars::prelude::*;
 use std::collections::HashMap;
 
@@ -166,22 +167,3 @@ fn calculate_market_volatility(prices: &[f64]) -> Result<f64> {
     Ok(variance.sqrt().max(0.005)) // Minimum 0.5% volatility
 }
 
-/// Extract close prices from DataFrame
-fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
-    let close_series = df.column("close").map_err(|e| {
-        crate::utils::error::VangaError::DataError(format!("Failed to get close column: {}", e))
-    })?;
-
-    let close_prices: Vec<f64> = close_series
-        .f64()
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to convert close to f64: {}",
-                e
-            ))
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    Ok(close_prices)
-}

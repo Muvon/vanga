@@ -63,6 +63,10 @@ pub struct TrainingParams {
     /// Validation split ratio
     pub validation_split: f64,
 
+    /// Gap between training and validation samples (e.g., "1h", "30m", "0")
+    /// Prevents information leakage from features with lookback periods
+    pub validation_gap: String,
+
     /// Test split ratio
     pub test_split: f64,
 
@@ -808,9 +812,10 @@ impl Default for TrainingParams {
                 beta1: 0.9,
                 beta2: 0.999,
             }, // AdamW by default for better performance
-            warmup_epochs: 5,        // 5 epochs warmup by default
-            learning_schedule: None, // No schedule by default
-            validation_split: 0.2,   // 20% validation for early stopping
+            warmup_epochs: 5,                 // 5 epochs warmup by default
+            learning_schedule: None,          // No schedule by default
+            validation_split: 0.2,            // 20% validation for early stopping
+            validation_gap: "1h".to_string(), // 1 hour gap by default for feature independence
             test_split: 0.1,
             device: DeviceConfig::Auto,
             early_stopping: EarlyStoppingConfig {

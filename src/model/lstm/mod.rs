@@ -120,7 +120,8 @@ mod tests {
                     min_delta: 0.0001,
                 },
                 gradient_clip: Some(1.0),
-                validation_split: 0.2, // 20% validation
+                validation_split: 0.2,            // 20% validation
+                validation_gap: "1h".to_string(), // Default gap for tests
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
                 class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
@@ -203,6 +204,7 @@ mod tests {
                 warmup_epochs: 0,
                 learning_schedule: None,
                 validation_split: 0.2,
+                validation_gap: "1h".to_string(), // Default gap for tests
                 device: crate::config::training::DeviceConfig::Auto,
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
@@ -288,7 +290,8 @@ mod tests {
                 optimizer: OptimizerType::SGD { momentum: None },
                 warmup_epochs: 0,
                 learning_schedule: None,
-                validation_split: 0.0, // No validation for this test
+                validation_split: 0.0,           // No validation for this test
+                validation_gap: "0".to_string(), // No gap needed when no validation
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 10,
@@ -407,6 +410,7 @@ mod tests {
                 warmup_epochs: 0, // No warmup for tests
                 learning_schedule: None,
                 validation_split: 0.2,
+                validation_gap: "1h".to_string(), // Default gap for tests
                 device: crate::config::training::DeviceConfig::Auto,
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
@@ -510,7 +514,6 @@ mod tests {
                 volatility: VolatilityHead {
                     enabled: false,
                     bandwidth_size: Some(1.2),
-                    base_percentiles: [0.20, 0.40, 0.60, 0.80],
                 },
             },
             quantile_outputs: None,
@@ -585,7 +588,6 @@ mod tests {
                 volatility: VolatilityHead {
                     enabled: false,
                     bandwidth_size: Some(1.2),
-                    base_percentiles: [0.20, 0.40, 0.60, 0.80],
                 },
             },
             quantile_outputs: None,
@@ -703,7 +705,6 @@ mod tests {
                 volatility: VolatilityHead {
                     enabled: false,
                     bandwidth_size: Some(1.2),
-                    base_percentiles: [0.20, 0.40, 0.60, 0.80],
                 },
             },
             quantile_outputs: None,
@@ -772,7 +773,6 @@ mod tests {
                 volatility: VolatilityHead {
                     enabled: false,
                     bandwidth_size: Some(1.2),
-                    base_percentiles: [0.20, 0.40, 0.60, 0.80],
                 },
             },
             quantile_outputs: None,
