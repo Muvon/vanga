@@ -73,9 +73,7 @@ mod integration_tests {
             },
             direction: DirectionHead {
                 enabled: true,
-                bandwidth_size: Some(0.8),
-                base_threshold_factor: 0.5,
-                extreme_multiplier: 2.5,
+                bandwidth_size: Some(0.8), // Momentum-based direction sensitivity
             },
             volatility: VolatilityHead {
                 enabled: true,
@@ -472,9 +470,7 @@ mod integration_tests {
             },
             direction: DirectionHead {
                 enabled: false,
-                bandwidth_size: Some(0.8),
-                base_threshold_factor: 0.5,
-                extreme_multiplier: 2.5,
+                bandwidth_size: Some(0.8), // Momentum-based direction sensitivity
             },
             volatility: VolatilityHead {
                 enabled: false,
