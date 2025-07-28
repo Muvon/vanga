@@ -16,45 +16,134 @@ use std::collections::HashMap;
 // DEPRECATED: VolatilityConfig has been removed in favor of VolatilityHead in src/config/model.rs
 // All volatility configuration is now handled through model_config.output_heads.volatility
 
-/// Generate volatility targets for multiple horizons (ENHANCED: supports both configs)
+/// Generate volatility targets for multiple horizons
 pub fn generate_volatility_targets(
     df: &DataFrame,
     horizons: &[String],
     model_config: Option<&VolatilityHead>,
+    sequence_indices: &[usize],
+    sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let mut horizon_targets = vec![-1; sequence_indices.len()];
 
-        let volatility_targets = if let Some(model_cfg) = model_config {
-            // Use model config (NEW: eliminates hardcoded values)
-            let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
-            let base_percentiles = model_cfg.base_percentiles;
+        for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
+            let target_idx = seq_idx + sequence_length + horizon_steps;
 
-            // Apply bandwidth sensitivity to percentiles (CRITICAL: This logic was working!)
-            let center = 0.5;
-            let adaptive_percentiles: [f64; 4] = base_percentiles.map(|p| {
-                let distance = p - center;
-                let sensitivity = 1.0 / bandwidth_size;
-                center + (distance * sensitivity)
-            });
+            if target_idx < close_prices.len()
+                && seq_idx + sequence_length + horizon_steps <= close_prices.len()
+            {
+                // Calculate volatility for the horizon period after the sequence
+                let volatility_window = &close_prices
+                    [seq_idx + sequence_length..seq_idx + sequence_length + horizon_steps];
 
-            apply_volatility_classification(&close_prices, horizon_steps, &adaptive_percentiles)?
-        } else {
-            // Fallback to default configuration
-            let default_percentiles = [0.20, 0.40, 0.60, 0.80];
-            apply_volatility_classification(&close_prices, horizon_steps, &default_percentiles)?
-        };
+                let target_class =
+                    calculate_volatility_class(volatility_window, &close_prices, model_config)?;
 
-        // Analyze and log class distribution for this specific horizon
-        analyze_class_distribution(&volatility_targets, 5, horizon)?;
+                horizon_targets[seq_position] = target_class;
+            }
+        }
 
-        targets.insert(horizon.clone(), volatility_targets);
+        log_volatility_distribution(&horizon_targets, horizon);
+        targets.insert(horizon.clone(), horizon_targets);
     }
 
     Ok(targets)
+}
+
+/// Calculate volatility class for a price window
+fn calculate_volatility_class(
+    price_window: &[f64],
+    all_prices: &[f64],
+    model_config: Option<&VolatilityHead>,
+) -> Result<i32> {
+    let volatility = calculate_future_volatility(price_window)?;
+
+    let percentiles = if let Some(model_cfg) = model_config {
+        let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
+        let base_percentiles = model_cfg.base_percentiles;
+
+        // Apply bandwidth sensitivity to percentiles
+        let center = 0.5;
+        base_percentiles.map(|p| {
+            let distance = p - center;
+            let sensitivity = 1.0 / bandwidth_size;
+            center + (distance * sensitivity)
+        })
+    } else {
+        [0.20, 0.40, 0.60, 0.80]
+    };
+
+    // Calculate boundaries from all prices for consistent classification
+    let all_volatilities = calculate_realized_volatility(all_prices, price_window.len().max(2))?;
+    let boundaries = calculate_percentile_boundaries(&all_volatilities, &percentiles)?;
+
+    // Classify using boundaries
+    let class = if volatility <= boundaries[0] {
+        0 // VeryLow
+    } else if volatility <= boundaries[1] {
+        1 // Low
+    } else if volatility <= boundaries[2] {
+        2 // Medium
+    } else if volatility <= boundaries[3] {
+        3 // High
+    } else {
+        4 // VeryHigh
+    };
+
+    Ok(class)
+}
+
+/// Log volatility class distribution
+fn log_volatility_distribution(targets: &[i32], horizon: &str) {
+    let class_names = ["VeryLow", "Low", "Medium", "High", "VeryHigh"];
+    let mut class_counts = [0usize; 5];
+    let mut valid_targets = 0;
+
+    for &target in targets {
+        if (0..5).contains(&target) {
+            class_counts[target as usize] += 1;
+            valid_targets += 1;
+        }
+    }
+
+    if valid_targets == 0 {
+        log::warn!(
+            "📊 Volatility Analysis [{}]: No valid targets found",
+            horizon
+        );
+        return;
+    }
+
+    let total_samples = valid_targets as f64;
+    let class_percentages: Vec<String> = class_counts
+        .iter()
+        .enumerate()
+        .map(|(i, &count)| {
+            let percentage = (count as f64 / total_samples) * 100.0;
+            format!("{}:{:.1}%", class_names[i], percentage)
+        })
+        .collect();
+
+    let min_class_size = class_counts.iter().filter(|&&c| c > 0).min().unwrap_or(&0);
+    let max_class_size = class_counts.iter().max().unwrap_or(&0);
+    let imbalance_ratio = if *min_class_size > 0 {
+        *max_class_size as f64 / *min_class_size as f64
+    } else {
+        f64::INFINITY
+    };
+
+    log::info!(
+        "📊 Volatility Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        horizon,
+        valid_targets,
+        imbalance_ratio,
+        class_percentages.join(", ")
+    );
 }
 
 /// Apply volatility classification using model config
@@ -103,7 +192,8 @@ fn apply_volatility_classification(
         let future_volatility = calculate_future_volatility(future_prices)?;
 
         // Classify future volatility using current regime boundaries
-        let volatility_class = classify_volatility_regime(future_volatility, &regime_boundaries);
+        let volatility_class =
+            classify_volatility_regime_legacy(future_volatility, &regime_boundaries);
         *target = volatility_class;
     }
 
@@ -163,8 +253,12 @@ fn calculate_future_volatility(prices: &[f64]) -> Result<f64> {
     Ok(variance.sqrt())
 }
 
-/// Classify volatility into regime using boundaries
-fn classify_volatility_regime(volatility: f64, boundaries: &[f64; 4]) -> i32 {
+
+
+
+
+/// Classify volatility into regime using boundaries (legacy single-value version)
+fn classify_volatility_regime_legacy(volatility: f64, boundaries: &[f64; 4]) -> i32 {
     if volatility <= boundaries[0] {
         0 // VeryLow
     } else if volatility <= boundaries[1] {
@@ -186,54 +280,6 @@ pub enum VolatilityRegime {
     Medium = 2,   // 40th-60th percentile
     High = 3,     // 60th-80th percentile
     VeryHigh = 4, // >80th percentile
-}
-
-/// Analyze class distribution and log insights for volatility targets per horizon
-fn analyze_class_distribution(targets: &[i32], bins: u32, horizon: &str) -> Result<()> {
-    let mut class_counts = vec![0usize; bins as usize];
-    let mut valid_targets = 0;
-
-    for &target in targets {
-        if target >= 0 && target < bins as i32 {
-            class_counts[target as usize] += 1;
-            valid_targets += 1;
-        }
-    }
-
-    if valid_targets == 0 {
-        log::warn!(
-            "⚠️ No valid volatility targets found for horizon {}",
-            horizon
-        );
-        return Ok(());
-    }
-
-    log::info!(
-        "📊 Volatility Class Distribution for {} (n={})",
-        horizon,
-        valid_targets
-    );
-    for (class, &count) in class_counts.iter().enumerate() {
-        let percentage = (count as f64 / valid_targets as f64) * 100.0;
-        let class_name = match class {
-            0 => "VeryLow",
-            1 => "Low",
-            2 => "Medium",
-            3 => "High",
-            4 => "VeryHigh",
-            _ => "Unknown",
-        };
-        log::info!(
-            "   {} Class {} ({}): {} ({:.1}%)",
-            horizon,
-            class,
-            class_name,
-            count,
-            percentage
-        );
-    }
-
-    Ok(())
 }
 
 /// Extract close prices from DataFrame

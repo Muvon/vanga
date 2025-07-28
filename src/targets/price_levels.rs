@@ -51,27 +51,41 @@ pub fn generate_price_level_targets(
     df: &DataFrame,
     horizons: &[String],
     config: &PriceLevelConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    // Validate configuration
     config.validate()?;
-
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
-        let price_targets = calculate_price_level_targets(
-            &close_prices,
-            horizon_steps,
-            config,
-            None,
-            None, // No sequence length override - use default behavior
-        )?;
+        let mut horizon_targets = vec![-1; sequence_indices.len()];
+
+        for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
+            let target_idx = seq_idx + sequence_length + horizon_steps;
+
+            if target_idx < close_prices.len() && seq_idx + sequence_length <= close_prices.len() {
+                let sequence = &close_prices[seq_idx..seq_idx + sequence_length];
+                let target_price = close_prices[target_idx];
+
+                let target_class =
+                    classify_price_level_sequence_aware(target_price, sequence, config);
+                horizon_targets[seq_position] = target_class;
+            }
+        }
 
         // Analyze and log class distribution (5 classes)
-        analyze_class_distribution(&price_targets, horizon, 5)?;
+        let valid_targets: Vec<i32> = horizon_targets
+            .iter()
+            .filter(|&&x| x != -1)
+            .cloned()
+            .collect();
+        if !valid_targets.is_empty() {
+            analyze_class_distribution(&valid_targets, horizon, 5)?;
+        }
 
-        targets.insert(horizon.clone(), price_targets);
+        targets.insert(horizon.clone(), horizon_targets);
     }
 
     Ok(targets)
@@ -82,6 +96,8 @@ pub fn generate_price_level_targets_from_model_config(
     df: &DataFrame,
     horizons: &[String],
     model_config: &crate::config::model::ModelConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let config = PriceLevelConfig {
         bandwidth_size: model_config
@@ -90,10 +106,11 @@ pub fn generate_price_level_targets_from_model_config(
             .bandwidth_size
             .unwrap_or(1.0),
     };
-    generate_price_level_targets(df, horizons, &config)
+    generate_price_level_targets(df, horizons, &config, sequence_indices, sequence_length)
 }
 
 /// Calculate minimum data points required for target generation (fallback when FeatureConfig not available)
+#[cfg(test)]
 fn calculate_min_data_points(_config: &PriceLevelConfig) -> usize {
     // Default maximum feature window from technical indicators
     // Based on maximum periods used in feature engineering:
@@ -157,6 +174,7 @@ fn classify_price_level_sequence_aware(
 }
 
 /// Calculate price level targets for a specific horizon with consistent global quantiles
+#[cfg(test)]
 fn calculate_price_level_targets(
     prices: &[f64],
     horizon_steps: usize,
@@ -187,6 +205,7 @@ fn calculate_price_level_targets(
 /// This function generates targets using the sequence-aware approach where each prediction
 /// point uses its own sequence context (min, max, current) to define adaptive boundaries.
 /// No global quantiles are needed - each sequence defines its own classification boundaries.
+#[cfg(test)]
 fn calculate_sequence_aware_targets(
     prices: &[f64],
     horizon_steps: usize,
@@ -505,8 +524,21 @@ mod tests {
 
         let horizons = vec!["1h".to_string()];
         let config = create_test_config();
+        
+        // Calculate sequence parameters for test
+        let sequence_length = 60; // Default sequence length
+        let data_length = df.height();
+        let max_horizon_steps = 24; // Default horizon for "1h" with hourly data
+        let step_size = 1; // Default step size
+        
+        let sequence_indices = crate::utils::sequence_utils::calculate_sequence_indices(
+            data_length,
+            sequence_length,
+            step_size,
+            max_horizon_steps,
+        ).unwrap();
 
-        let targets = generate_price_level_targets(&df, &horizons, &config).unwrap();
+        let targets = generate_price_level_targets(&df, &horizons, &config, &sequence_indices, sequence_length).unwrap();
 
         // Verify targets are in valid range [0, 4] for 5-class system
         for target_vec in targets.values() {

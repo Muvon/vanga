@@ -262,15 +262,6 @@ impl DataPipeline {
         let mut windows = Vec::new();
         let mut train_end = min_train_size;
 
-        // CRITICAL FIX: Calculate proper gap for walk-forward validation to prevent data leakage
-        let sequence_length = match &config.model.sequence_length {
-            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
-            crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => {
-                *min_length as usize
-            }
-            crate::config::model::SequenceLengthConfig::Adaptive => 60,
-        };
-
         let max_horizon_steps = if !config.horizons.is_empty() {
             config
                 .horizons
@@ -282,15 +273,6 @@ impl DataPipeline {
             72
         };
 
-        let gap_size = sequence_length + max_horizon_steps;
-
-        log::info!(
-            "🔒 Walk-forward gap calculation: sequence_length({}) + max_horizon_steps({}) = {} total gap",
-            sequence_length,
-            max_horizon_steps,
-            gap_size
-        );
-
         log::info!(
             "📊 Three-way split setup: total={}, test_reserved={} ({:.1}%), available_for_training={}, val_size={} ({:.1}%)",
             total_samples,
@@ -301,24 +283,24 @@ impl DataPipeline {
             config.training.validation_split * 100.0
         );
 
-        // STEP 3: Create progressive windows with proper gap to prevent data leakage
-        // Only use available_for_training data, keep test set completely separate
-        while train_end + gap_size + validation_size <= available_for_training {
-            let val_start = train_end + gap_size; // PROPER GAP ADDED
+        // Create progressive windows - no gap needed for validation (FIXED: Remove unnecessary gap)
+        while train_end + validation_size <= available_for_training {
+            let val_start = train_end; // Direct continuation - no gap needed
             let _val_end = val_start + validation_size;
 
             let train_df = raw_processed_data.slice(0, train_end);
             let val_df = raw_processed_data.slice(val_start as i64, validation_size);
 
             // Test data is reserved - only include in final window
-            let _test_df =
-                if train_end + gap_size + validation_size + gap_size >= available_for_training {
-                    // Final window - include test data for final evaluation
-                    Some(raw_processed_data.slice(available_for_training as i64, test_size))
-                } else {
-                    // Intermediate window - no test data
-                    None
-                };
+            let _test_df = if train_end + validation_size + max_horizon_steps
+                >= available_for_training
+            {
+                // Final window - include test data for final evaluation
+                Some(raw_processed_data.slice(available_for_training as i64, test_size))
+            } else {
+                // Intermediate window - no test data
+                None
+            };
 
             // Generate sequences with per-sequence normalization
             let train_sequences = self
@@ -343,7 +325,9 @@ impl DataPipeline {
 
             // Generate test sequences - empty for intermediate windows, populated for final window
             let test_sequences =
-                if train_end + gap_size + validation_size + gap_size >= available_for_training {
+                if train_end + validation_size + max_horizon_steps
+                    >= available_for_training
+                {
                     // Final window - include test data for final evaluation
                     self.sequence_generator
                         .generate_training_sequences(

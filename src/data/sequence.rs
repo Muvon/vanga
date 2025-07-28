@@ -529,15 +529,18 @@ impl SequenceGenerator {
             .max()
             .unwrap_or(1);
 
-        // Calculate gap size (same logic as walk-forward windows)
-        let gap_size = max_horizon_steps; // Gap to prevent data leakage
+        // FIXED: Use unified step size calculation
+        let step_size = crate::utils::sequence_utils::calculate_step_size(
+            data_config.sequence_overlap,
+            sequence_length,
+        );
 
-        // Total window size: sequence + gap + horizon
-        let total_window_size = sequence_length + gap_size + max_horizon_steps;
+        // Total window size: sequence + horizon (no gap needed)
+        let total_window_size = sequence_length + max_horizon_steps;
 
         log::info!(
-            "🔧 Per-sequence normalization: sequence_length({}) + gap({}) + max_horizon({}) = {} total window",
-            sequence_length, gap_size, max_horizon_steps, total_window_size
+            "🔧 Per-sequence normalization: sequence_length({}) + max_horizon({}) = {} total window",
+            sequence_length, max_horizon_steps, total_window_size
         );
 
         let total_records = df.height();
@@ -548,21 +551,41 @@ impl SequenceGenerator {
             )));
         }
 
+        // FIXED: Calculate sequence indices for proper alignment
+        let sequence_indices = crate::utils::sequence_utils::calculate_sequence_indices(
+            total_records,
+            sequence_length,
+            step_size,
+            max_horizon_steps,
+        )?;
+
+        // FIXED: Validate sequence overlap parameter
+        crate::utils::sequence_utils::validate_sequence_overlap(data_config.sequence_overlap)?;
+
+        // FIXED: Log detailed synchronization information
+        crate::utils::sequence_utils::log_synchronization_details(
+            &sequence_indices,
+            step_size,
+            sequence_length,
+            max_horizon_steps,
+            data_config.sequence_overlap,
+        );
+
+        log::info!(
+            "📊 Sequence generation plan: step_size={}, total_sequences={}, overlap={:.1}%",
+            step_size,
+            sequence_indices.len(),
+            data_config.sequence_overlap * 100.0
+        );
+
         let mut all_sequences = Vec::new();
 
-        // Generate sequences with proper normalization
-        let step_size = if data_config.sequence_overlap > 0.0 {
-            1
-        } else {
-            sequence_length
-        };
-        let mut i = 0;
+        // Generate sequences using calculated indices
+        for &start_idx in &sequence_indices {
+            // Extract the complete window (sequence + horizon)
+            let window_df = df.slice(start_idx as i64, total_window_size);
 
-        while i + total_window_size <= total_records {
-            // Extract the complete window (sequence + gap + horizon)
-            let window_df = df.slice(i as i64, total_window_size);
-
-            // FIXED: Only normalize the input sequence part, NOT gap+targets
+            // FIXED: Only normalize the input sequence part, NOT targets
             let sequence_df = window_df.slice(0, sequence_length);
             let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
             let feature_columns: Vec<String> = df
@@ -576,26 +599,23 @@ impl SequenceGenerator {
 
             // Convert to sequence format [sequence_length, features]
             all_sequences.push(sequence_matrix);
-
-            i += step_size;
         }
 
         log::info!(
-            "✅ Generated {} sequences with per-sequence normalization",
+            "✅ Generated {} sequences with per-sequence normalization using unified step calculation",
             all_sequences.len()
         );
 
         // Convert sequences to Array3
         let sequences = self.convert_sequences_to_array3(all_sequences)?;
 
-        // Generate targets using proper configuration extracted from model_config
-        // Note: Targets are generated from the original raw data, not normalized data
+        // FIXED: Generate targets using aligned sequence indices
         let target_config =
             crate::targets::MultiTargetConfig::from_model_config(model_config, horizons.to_vec());
 
         let target_generator = crate::targets::TargetGenerator::new(target_config);
         let targets = target_generator
-            .generate_all_targets(df, Some(model_config))
+            .generate_all_targets(df, Some(model_config), &sequence_indices, sequence_length)
             .await?;
 
         Ok((sequences, targets))

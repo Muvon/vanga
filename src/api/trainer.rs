@@ -2,7 +2,7 @@
 use crate::config::TrainingConfig;
 use crate::data::DataPipeline;
 use crate::model::multi_target::{MultiTargetLSTMModel, TrainingContext};
-use crate::targets::{PreparedTargets, TargetGenerator};
+use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 
@@ -107,41 +107,17 @@ impl ModelTrainer {
             self.config.horizons.len()
         );
 
-        // Generate targets with training config horizons - FIXED: Use model config for price levels
-        let target_config = crate::targets::MultiTargetConfig::from_model_config(
-            &self.config.model,
-            self.config.horizons.clone(),
-        );
-
-        let target_generator = TargetGenerator::new(target_config);
-        let df = crate::data::loader::DataLoader::new()
-            .load_csv(&self.config.data_path)
-            .await?;
-        let targets = target_generator
-            .generate_all_targets(&df, Some(&self.config.model))
-            .await?;
-
-        // Get target names for multi-target model
-        let target_names = target_generator.get_target_names();
+        // FIXED: Use target names from prepared data (eliminates redundant TargetGenerator creation)
+        let target_names = &window.train_data.targets.target_names;
         log::info!(
-            "Generated {} targets: {:?}",
+            "Using targets from prepared data: {} targets: {:?}",
             target_names.len(),
             target_names
         );
 
-        // Convert raw targets to Array2 format for training and validation
-        let training_targets = convert_raw_targets_to_array2(&targets, &target_names)?;
-
-        // Ensure targets match sequence lengths for this window
-        let train_len = window.train_data.sequences.shape()[0];
-        let val_len = window.val_data.sequences.shape()[0];
-
-        let train_targets = training_targets
-            .slice(ndarray::s![..train_len, ..])
-            .to_owned();
-        let val_targets = training_targets
-            .slice(ndarray::s![train_len..train_len + val_len, ..])
-            .to_owned();
+        // Convert raw targets to Array2 format for training and validation separately
+        let train_targets = convert_raw_targets_to_array2(&window.train_data.targets, target_names)?;
+        let val_targets = convert_raw_targets_to_array2(&window.val_data.targets, target_names)?;
 
         log::info!(
             "Window {} training targets: {} train samples x {} outputs, {} validation samples",
@@ -187,37 +163,12 @@ impl ModelTrainer {
             self.config.horizons.len()
         );
 
-        // Generate targets for new window using model configuration - FIXED: Use model config for price levels
-        let target_config = crate::targets::MultiTargetConfig::from_model_config(
-            &self.config.model,
-            self.config.horizons.clone(),
-        );
+        // FIXED: Use target names from prepared data (eliminates redundant TargetGenerator creation)
+        let target_names = &window.train_data.targets.target_names;
 
-        let target_generator = TargetGenerator::new(target_config);
-        let df = crate::data::loader::DataLoader::new()
-            .load_csv(&self.config.data_path)
-            .await?;
-        let targets = target_generator
-            .generate_all_targets(&df, Some(&self.config.model))
-            .await?;
-        let target_names = target_generator.get_target_names();
-
-        // Convert targets for this window
-        let training_targets = convert_raw_targets_to_array2(&targets, &target_names)?;
-        let train_len = window.train_data.sequences.shape()[0];
-        let val_len = window.val_data.sequences.shape()[0];
-
-        // Calculate offset for this window's targets
-        let window_offset = window.train_samples - train_len;
-        let train_targets = training_targets
-            .slice(ndarray::s![window_offset..window_offset + train_len, ..])
-            .to_owned();
-        let val_targets = training_targets
-            .slice(ndarray::s![
-                window_offset + train_len..window_offset + train_len + val_len,
-                ..
-            ])
-            .to_owned();
+        // FIXED: Use targets directly from prepared data (already aligned with sequences)
+        let train_targets = convert_raw_targets_to_array2(&window.train_data.targets, target_names)?;
+        let val_targets = convert_raw_targets_to_array2(&window.val_data.targets, target_names)?;
 
         log::info!(
             "Window {} continue training: {} new train samples, {} validation samples",
@@ -249,7 +200,7 @@ impl ModelTrainer {
     async fn get_or_create_multi_target_model(
         &self,
         input_size: usize,
-        target_names: Vec<String>,
+        target_names: &[String],
     ) -> Result<MultiTargetLSTMModel> {
         // Create new model since we're not loading from file anymore
         // The caller (main.rs) will handle loading/saving based on training config
@@ -257,7 +208,7 @@ impl ModelTrainer {
         MultiTargetLSTMModel::new(
             &self.config.model,
             input_size,
-            target_names,
+            target_names.to_vec(),
             self.config.horizons.clone(),
         )
     }

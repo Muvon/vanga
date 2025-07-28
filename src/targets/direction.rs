@@ -11,9 +11,6 @@ use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-// DEPRECATED: DirectionConfig has been removed in favor of DirectionHead in src/config/model.rs
-// All direction configuration is now handled through model_config.output_heads.direction
-
 /// Direction classes (5-class system)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Direction {
@@ -29,85 +26,129 @@ pub fn generate_direction_targets(
     df: &DataFrame,
     horizons: &[String],
     model_config: Option<&DirectionHead>,
+    sequence_indices: &[usize],
+    sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let mut horizon_targets = vec![-1; sequence_indices.len()];
 
-        let direction_targets = if let Some(model_cfg) = model_config {
-            // Use model config (NEW: eliminates hardcoded values)
-            let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
-            let market_volatility = calculate_market_volatility(&close_prices)?;
+        for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
+            let target_idx = seq_idx + sequence_length + horizon_steps;
 
-            // Calculate thresholds from DirectionHead with bandwidth sensitivity
-            let base_threshold = model_cfg.base_threshold_factor * market_volatility;
-            let adaptive_threshold = base_threshold / bandwidth_size; // Higher bandwidth = more sensitive (lower thresholds)
-            let extreme_threshold = adaptive_threshold * model_cfg.extreme_multiplier;
+            if target_idx < close_prices.len() && seq_idx + sequence_length <= close_prices.len() {
+                let current_price = close_prices[seq_idx + sequence_length - 1];
+                let target_price = close_prices[target_idx];
 
-            apply_direction_classification(
-                &close_prices,
-                horizon_steps,
-                adaptive_threshold,
-                extreme_threshold,
-            )?
-        } else {
-            // Fallback to default configuration
-            let default_threshold = 0.02; // 2%
-            let extreme_threshold = default_threshold * 2.5; // 5%
-            apply_direction_classification(
-                &close_prices,
-                horizon_steps,
-                default_threshold,
-                extreme_threshold,
-            )?
-        };
+                let target_class = calculate_direction_class(
+                    current_price,
+                    target_price,
+                    &close_prices,
+                    model_config,
+                )?;
 
-        targets.insert(horizon.clone(), direction_targets);
+                horizon_targets[seq_position] = target_class;
+            }
+        }
+
+        log_direction_distribution(&horizon_targets, horizon);
+        targets.insert(horizon.clone(), horizon_targets);
     }
 
     Ok(targets)
 }
 
-/// Apply direction classification using thresholds
-fn apply_direction_classification(
-    prices: &[f64],
-    horizon_steps: usize,
-    base_threshold: f64,
-    extreme_threshold: f64,
-) -> Result<Vec<i32>> {
-    if prices.len() < horizon_steps + 1 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient price data for direction classification".to_string(),
-        ));
-    }
+/// Calculate direction class for a single price pair
+fn calculate_direction_class(
+    current_price: f64,
+    target_price: f64,
+    all_prices: &[f64],
+    model_config: Option<&DirectionHead>,
+) -> Result<i32> {
+    let price_change = (target_price - current_price) / current_price;
 
-    let mut targets = vec![-1; prices.len()];
+    let (base_threshold, extreme_threshold) = if let Some(model_cfg) = model_config {
+        let market_volatility = calculate_market_volatility(all_prices)?;
+        let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
+        let base_threshold = model_cfg.base_threshold_factor * market_volatility;
+        let adaptive_threshold = base_threshold / bandwidth_size;
+        let extreme_threshold = adaptive_threshold * model_cfg.extreme_multiplier;
+        (adaptive_threshold, extreme_threshold)
+    } else {
+        let market_volatility = calculate_market_volatility(all_prices)?;
+        let default_threshold = 0.02 * market_volatility;
+        let extreme_threshold = default_threshold * 2.0;
+        (default_threshold, extreme_threshold)
+    };
 
-    for i in 0..prices.len().saturating_sub(horizon_steps) {
-        let current_price = prices[i];
-        let future_price = prices[i + horizon_steps];
-        let price_change = (future_price - current_price) / current_price;
+    // 5-class system: DUMP(0), DOWN(1), SIDEWAYS(2), UP(3), PUMP(4)
+    let class = if price_change <= -extreme_threshold {
+        0 // DUMP
+    } else if price_change <= -base_threshold {
+        1 // DOWN
+    } else if price_change >= extreme_threshold {
+        4 // PUMP
+    } else if price_change >= base_threshold {
+        3 // UP
+    } else {
+        2 // SIDEWAYS
+    };
 
-        // 5-class system: DUMP(-2), DOWN(-1), SIDEWAYS(0), UP(1), PUMP(2)
-        let target = if price_change <= -extreme_threshold {
-            0 // DUMP
-        } else if price_change <= -base_threshold {
-            1 // DOWN
-        } else if price_change >= extreme_threshold {
-            4 // PUMP
-        } else if price_change >= base_threshold {
-            3 // UP
-        } else {
-            2 // SIDEWAYS
-        };
-
-        targets[i] = target;
-    }
-
-    Ok(targets)
+    Ok(class)
 }
+
+/// Log direction class distribution
+fn log_direction_distribution(targets: &[i32], horizon: &str) {
+    let class_names = ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"];
+    let mut class_counts = [0usize; 5];
+    let mut valid_targets = 0;
+
+    for &target in targets {
+        if (0..5).contains(&target) {
+            class_counts[target as usize] += 1;
+            valid_targets += 1;
+        }
+    }
+
+    if valid_targets == 0 {
+        log::warn!(
+            "📊 Direction Analysis [{}]: No valid targets found",
+            horizon
+        );
+        return;
+    }
+
+    let total_samples = valid_targets as f64;
+    let class_percentages: Vec<String> = class_counts
+        .iter()
+        .enumerate()
+        .map(|(i, &count)| {
+            let percentage = (count as f64 / total_samples) * 100.0;
+            format!("{}:{:.1}%", class_names[i], percentage)
+        })
+        .collect();
+
+    let min_class_size = class_counts.iter().filter(|&&c| c > 0).min().unwrap_or(&0);
+    let max_class_size = class_counts.iter().max().unwrap_or(&0);
+    let imbalance_ratio = if *min_class_size > 0 {
+        *max_class_size as f64 / *min_class_size as f64
+    } else {
+        f64::INFINITY
+    };
+
+    log::info!(
+        "📊 Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        horizon,
+        valid_targets,
+        imbalance_ratio,
+        class_percentages.join(", ")
+    );
+}
+
+
 
 /// Calculate market volatility for adaptive thresholds
 fn calculate_market_volatility(prices: &[f64]) -> Result<f64> {
@@ -116,10 +157,6 @@ fn calculate_market_volatility(prices: &[f64]) -> Result<f64> {
     }
 
     let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
-
-    if returns.is_empty() {
-        return Ok(0.02);
-    }
 
     let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
     let variance = returns
@@ -134,25 +171,19 @@ fn calculate_market_volatility(prices: &[f64]) -> Result<f64> {
 /// Extract close prices from DataFrame
 fn extract_close_prices(df: &DataFrame) -> Result<Vec<f64>> {
     let close_series = df.column("close").map_err(|e| {
-        crate::utils::error::VangaError::DataError(format!("Missing 'close' column: {}", e))
+        crate::utils::error::VangaError::DataError(format!("Failed to get close column: {}", e))
     })?;
 
     let close_prices: Vec<f64> = close_series
         .f64()
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
-                "Failed to convert 'close' column to f64: {}",
+                "Failed to convert close to f64: {}",
                 e
             ))
         })?
         .into_no_null_iter()
         .collect();
-
-    if close_prices.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "No valid close prices found".to_string(),
-        ));
-    }
 
     Ok(close_prices)
 }
