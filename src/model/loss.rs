@@ -662,12 +662,7 @@ impl TensorCryptoLossFunction {
                     volatility_weight: *volatility_weight,
                     risk_weight: *risk_weight,
                 };
-                self.calculate_crypto_composite_tensor_loss(
-                    predictions,
-                    targets,
-                    &composite_config,
-                    market_regime,
-                )
+                self.calculate_crypto_composite_tensor_loss(predictions, targets, &composite_config)
             }
             CryptoLossFunction::DirectionalFocused { direction_penalty } => self
                 .calculate_directional_focused_tensor_loss(
@@ -1109,7 +1104,6 @@ impl TensorCryptoLossFunction {
         predictions: &Tensor,
         targets: &Tensor,
         config: &CryptoCompositeConfig,
-        _market_regime: MarketRegime,
     ) -> Result<Tensor> {
         // ADDED: Validate tensor shapes and log for debugging
         log::debug!(

@@ -408,21 +408,6 @@ impl LSTMModel {
                 layer_hidden_size,
                 is_bidirectional
             );
-
-            // GRADIENT STABILITY CHECK: Warn about configurations that cause exploding gradients
-            if self.config.sequence_length > 60 {
-                log::warn!(
-                    "⚠️ LONG SEQUENCE WARNING: sequence_length={} > 60 may cause exploding gradients. Consider reducing to 30-60 for stability.",
-                    self.config.sequence_length
-                );
-            }
-
-            if layer_hidden_size > 256 && self.config.sequence_length > 30 {
-                log::warn!(
-                    "⚠️ LARGE MODEL WARNING: layer {} hidden_size={} with sequence_length={} may cause gradient instability. Consider reducing one or both.",
-                    layer_idx, layer_hidden_size, self.config.sequence_length
-                );
-            }
         }
 
         // Store the layers

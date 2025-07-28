@@ -14,19 +14,17 @@ use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-// Re-export configurations
-pub use direction::{generate_direction_targets, Direction, DirectionConfig};
+// Re-export configurations (deprecated configs removed)
+pub use direction::{generate_direction_targets, Direction};
 pub use price_levels::{
     generate_price_level_targets, generate_price_level_targets_from_model_config, PriceLevelConfig,
 };
-pub use volatility::{generate_volatility_targets, VolatilityConfig, VolatilityRegime};
+pub use volatility::{generate_volatility_targets, VolatilityRegime};
 
 /// Comprehensive target configuration
 #[derive(Debug, Clone)]
 pub struct MultiTargetConfig {
     pub price_level_config: PriceLevelConfig,
-    pub direction_config: DirectionConfig,
-    pub volatility_config: VolatilityConfig,
     pub horizons: Vec<String>,
 }
 
@@ -34,14 +32,28 @@ impl Default for MultiTargetConfig {
     fn default() -> Self {
         Self {
             price_level_config: PriceLevelConfig::default(),
-            direction_config: DirectionConfig::default(),
-            volatility_config: VolatilityConfig::default(),
             horizons: vec![
-                "1h".to_string(),
-                "4h".to_string(),
-                "1d".to_string(),
-                "7d".to_string(),
+                "1h".to_string(), // FIXED: Default to single horizon - should be overridden by training config
             ],
+        }
+    }
+}
+
+impl MultiTargetConfig {
+    /// Create MultiTargetConfig from ModelConfig, extracting parameters from Head configurations
+    pub fn from_model_config(
+        model_config: &crate::config::model::ModelConfig,
+        horizons: Vec<String>,
+    ) -> Self {
+        Self {
+            price_level_config: PriceLevelConfig {
+                bandwidth_size: model_config
+                    .output_heads
+                    .price_levels
+                    .bandwidth_size
+                    .unwrap_or(1.0),
+            },
+            horizons,
         }
     }
 }
@@ -263,15 +275,13 @@ impl TargetGenerator {
                             generate_direction_targets(
                                 df,
                                 &self.config.horizons,
-                                None,
                                 Some(&model_cfg.output_heads.direction),
                             )
                         } else {
                             generate_direction_targets(
                                 df,
                                 &self.config.horizons,
-                                Some(&self.config.direction_config),
-                                None,
+                                None, // No DirectionHead available in legacy path
                             )
                         }
                     },
@@ -281,15 +291,13 @@ impl TargetGenerator {
                             generate_volatility_targets(
                                 df,
                                 &self.config.horizons,
-                                None,
                                 Some(&model_cfg.output_heads.volatility),
                             )
                         } else {
                             generate_volatility_targets(
                                 df,
                                 &self.config.horizons,
-                                Some(&self.config.volatility_config),
-                                None,
+                                None, // No VolatilityHead available in legacy path
                             )
                         }
                     },
@@ -461,7 +469,7 @@ impl TargetGenerator {
 
     /// Generate direction targets (DEPRECATED - use generate_all_targets)
     #[deprecated(note = "Use generate_all_targets() instead")]
-    pub fn generate_direction_targets(&self, prices: &[f64], threshold: f64) -> Result<Vec<f64>> {
+    pub fn generate_direction_targets(&self, prices: &[f64], _threshold: f64) -> Result<Vec<f64>> {
         log::warn!("DEPRECATED: Use generate_all_targets() instead of legacy direction generation");
 
         // For backward compatibility, create a temporary DataFrame and delegate to the working implementation
@@ -481,18 +489,14 @@ impl TargetGenerator {
                     ))
                 })?;
 
-        // Use the working implementation with adapted config
-        let config = crate::targets::direction::DirectionConfig {
-            up_threshold: threshold,
-            down_threshold: -threshold,
-            ..Default::default()
-        };
+        // Use the working implementation with default DirectionHead
+        let model_config = crate::config::model::ModelConfig::default();
+        let direction_head = &model_config.output_heads.direction;
 
         let targets = crate::targets::direction::generate_direction_targets(
             &df,
             &self.config.horizons,
-            Some(&config),
-            None,
+            Some(direction_head),
         )?;
 
         // Convert HashMap<String, Vec<i32>> to Vec<f64> for backward compatibility
@@ -535,14 +539,15 @@ impl TargetGenerator {
                     ))
                 })?;
 
-        // Use the working implementation with default config
-        let config = crate::targets::VolatilityConfig::default();
+        // Use the working implementation with default config (deprecated path)
+        // Note: This is a legacy function that should not be used in new code
+        let model_config = crate::config::model::ModelConfig::default();
+        let _target_config = MultiTargetConfig::from_model_config(&model_config, horizons.to_vec());
 
         let targets = crate::targets::volatility::generate_volatility_targets(
             &df,
             horizons,
-            Some(&config),
-            None,
+            Some(&model_config.output_heads.volatility), // Use VolatilityHead from model config
         )?;
 
         // Convert HashMap<String, Vec<i32>> to Vec<Vec<f64>> for backward compatibility

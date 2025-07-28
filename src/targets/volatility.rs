@@ -9,52 +9,17 @@
 
 use crate::config::model::VolatilityHead;
 use crate::utils::error::Result;
+use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-/// Configuration for volatility target generation (for consistency with direction pattern)
-#[derive(Debug, Clone)]
-pub struct VolatilityConfig {
-    /// Bandwidth multiplier for volatility sensitivity (default: 1.0)
-    /// - 0.5: More sensitive (smaller volatility thresholds, more classes in extreme ranges)
-    /// - 1.0: Standard behavior
-    /// - 1.5: Less sensitive (larger volatility thresholds, more balanced distribution)
-    pub bandwidth_size: f64,
-}
-
-impl Default for VolatilityConfig {
-    fn default() -> Self {
-        Self {
-            bandwidth_size: 1.0,
-        }
-    }
-}
-
-impl VolatilityConfig {
-    /// Validate the configuration parameters
-    pub fn validate(&self) -> Result<()> {
-        if self.bandwidth_size <= 0.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(format!(
-                "bandwidth_size must be positive, got: {}",
-                self.bandwidth_size
-            )));
-        }
-
-        if !self.bandwidth_size.is_finite() {
-            return Err(crate::utils::error::VangaError::ConfigError(
-                "bandwidth_size must be a finite number".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-}
+// DEPRECATED: VolatilityConfig has been removed in favor of VolatilityHead in src/config/model.rs
+// All volatility configuration is now handled through model_config.output_heads.volatility
 
 /// Generate volatility targets for multiple horizons (ENHANCED: supports both configs)
 pub fn generate_volatility_targets(
     df: &DataFrame,
     horizons: &[String],
-    config: Option<&VolatilityConfig>,
     model_config: Option<&VolatilityHead>,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
@@ -68,7 +33,7 @@ pub fn generate_volatility_targets(
             let bandwidth_size = model_cfg.bandwidth_size.unwrap_or(1.0);
             let base_percentiles = model_cfg.base_percentiles;
 
-            // Apply bandwidth sensitivity to percentiles
+            // Apply bandwidth sensitivity to percentiles (CRITICAL: This logic was working!)
             let center = 0.5;
             let adaptive_percentiles: [f64; 4] = base_percentiles.map(|p| {
                 let distance = p - center;
@@ -77,13 +42,10 @@ pub fn generate_volatility_targets(
             });
 
             apply_volatility_classification(&close_prices, horizon_steps, &adaptive_percentiles)?
-        } else if let Some(legacy_cfg) = config {
-            // Legacy path for backward compatibility
-            calculate_volatility_targets(&close_prices, horizon_steps, legacy_cfg)?
         } else {
-            return Err(crate::utils::error::VangaError::config(
-                "Either VolatilityConfig or VolatilityHead must be provided",
-            ));
+            // Fallback to default configuration
+            let default_percentiles = [0.20, 0.40, 0.60, 0.80];
+            apply_volatility_classification(&close_prices, horizon_steps, &default_percentiles)?
         };
 
         // Analyze and log class distribution for this specific horizon
@@ -149,14 +111,16 @@ fn apply_volatility_classification(
 }
 
 /// Calculate volatility targets using legacy config (for backward compatibility)
-fn calculate_volatility_targets(
+/// DEPRECATED: This function is kept for backward compatibility only
+#[allow(dead_code)]
+fn calculate_volatility_targets_legacy(
     prices: &[f64],
     horizon_steps: usize,
-    config: &VolatilityConfig,
+    bandwidth_size: f64,
 ) -> Result<Vec<i32>> {
     // Use default percentiles for legacy path
     let base_percentiles = [0.20, 0.40, 0.60, 0.80];
-    let sensitivity = 1.0 / config.bandwidth_size;
+    let sensitivity = 1.0 / bandwidth_size;
     let center = 0.5;
 
     // Apply bandwidth sensitivity to percentiles
@@ -211,38 +175,6 @@ fn classify_volatility_regime(volatility: f64, boundaries: &[f64; 4]) -> i32 {
         3 // High
     } else {
         4 // VeryHigh
-    }
-}
-
-/// Parse horizon string to number of steps
-pub fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
-    match horizon {
-        "1h" => Ok(1),
-        "4h" => Ok(4),
-        "1d" => Ok(24),
-        "7d" => Ok(168),
-        _ => {
-            if let Some(num_str) = horizon.strip_suffix('h') {
-                num_str.parse::<usize>().map_err(|_| {
-                    crate::utils::error::VangaError::DataError(format!(
-                        "Invalid horizon format: {}",
-                        horizon
-                    ))
-                })
-            } else if let Some(num_str) = horizon.strip_suffix('d') {
-                num_str.parse::<usize>().map(|d| d * 24).map_err(|_| {
-                    crate::utils::error::VangaError::DataError(format!(
-                        "Invalid horizon format: {}",
-                        horizon
-                    ))
-                })
-            } else {
-                Err(crate::utils::error::VangaError::DataError(format!(
-                    "Unsupported horizon format: {}",
-                    horizon
-                )))
-            }
-        }
     }
 }
 

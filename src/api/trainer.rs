@@ -101,21 +101,18 @@ impl ModelTrainer {
         &self,
         window: &crate::data::TrainingWindow,
     ) -> Result<MultiTargetLSTMModel> {
+        log::info!(
+            "🎯 [train_window_from_scratch] Training config horizons: {:?} (count: {})",
+            self.config.horizons,
+            self.config.horizons.len()
+        );
+
         // Generate targets with training config horizons - FIXED: Use model config for price levels
-        let target_config = crate::targets::MultiTargetConfig {
-            price_level_config: crate::targets::PriceLevelConfig {
-                bandwidth_size: self
-                    .config
-                    .model
-                    .output_heads
-                    .price_levels
-                    .bandwidth_size
-                    .unwrap_or(1.0),
-            },
-            direction_config: crate::targets::DirectionConfig::default(),
-            volatility_config: crate::targets::VolatilityConfig::default(),
-            horizons: self.config.horizons.clone(),
-        };
+        let target_config = crate::targets::MultiTargetConfig::from_model_config(
+            &self.config.model,
+            self.config.horizons.clone(),
+        );
+
         let target_generator = TargetGenerator::new(target_config);
         let df = crate::data::loader::DataLoader::new()
             .load_csv(&self.config.data_path)
@@ -184,21 +181,18 @@ impl ModelTrainer {
         mut model: MultiTargetLSTMModel,
         window: &crate::data::TrainingWindow,
     ) -> Result<MultiTargetLSTMModel> {
+        log::info!(
+            "🎯 [continue_training_window] Training config horizons: {:?} (count: {})",
+            self.config.horizons,
+            self.config.horizons.len()
+        );
+
         // Generate targets for new window using model configuration - FIXED: Use model config for price levels
-        let target_config = crate::targets::MultiTargetConfig {
-            price_level_config: crate::targets::PriceLevelConfig {
-                bandwidth_size: self
-                    .config
-                    .model
-                    .output_heads
-                    .price_levels
-                    .bandwidth_size
-                    .unwrap_or(1.0),
-            },
-            direction_config: crate::targets::DirectionConfig::default(),
-            volatility_config: crate::targets::VolatilityConfig::default(),
-            horizons: self.config.horizons.clone(),
-        };
+        let target_config = crate::targets::MultiTargetConfig::from_model_config(
+            &self.config.model,
+            self.config.horizons.clone(),
+        );
+
         let target_generator = TargetGenerator::new(target_config);
         let df = crate::data::loader::DataLoader::new()
             .load_csv(&self.config.data_path)

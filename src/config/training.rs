@@ -779,7 +779,7 @@ impl Default for TrainingConfig {
             data_path: PathBuf::new(),
             fresh_training: false,
             continue_training: false,
-            horizons: vec!["1h".to_string(), "4h".to_string(), "1d".to_string()],
+            horizons: vec!["1h".to_string()], // FIXED: Default to single horizon instead of multiple
             features: FeatureConfig::default(),
             model: ModelConfig::default(),
             training: TrainingParams::default(),

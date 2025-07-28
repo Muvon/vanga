@@ -196,7 +196,7 @@ pub fn calculate_min_data_requirements(
     // Calculate maximum horizon steps
     let max_horizon_steps = horizons
         .iter()
-        .map(|h| crate::targets::volatility::parse_horizon_to_steps(h).unwrap_or(1))
+        .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
         .max()
         .unwrap_or(1);
 
