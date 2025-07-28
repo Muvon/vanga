@@ -122,29 +122,34 @@ fn classify_volatility(
     // Step 2: Get ATR from sequence END to target horizon (the actual prediction period)
     let horizon_atr = get_sequence_atr_baseline(horizon_candles)?;
 
-    // Step 3: Same logic as direction classification
+    // Step 3: Get config parameters with crypto-tuned defaults
     let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(1.0);
+    let base_threshold = model_config.and_then(|c| c.base_threshold).unwrap_or(0.15); // 15% ATR change
+    let extreme_multiplier = model_config
+        .and_then(|c| c.extreme_multiplier)
+        .unwrap_or(1.8);
 
-    // Same factors as direction (crypto-adapted for ATR)
-    let base_threshold_factor = 0.5; // 50% of baseline
-    let extreme_multiplier = 2.0; // 2x for extreme
+    // FIXED: Use percentage-based ATR change (not ratio)
+    let atr_change = (horizon_atr - sequence_baseline) / sequence_baseline;
 
-    // Calculate thresholds (identical to direction)
-    let base_threshold = base_threshold_factor * sequence_baseline;
+    // Calculate adaptive thresholds
     let adaptive_threshold = base_threshold / bandwidth_size;
     let extreme_threshold = adaptive_threshold * extreme_multiplier;
 
-    // Step 4: Compare horizon ATR to sequence baseline (like price change in direction)
-    let atr_ratio = horizon_atr / sequence_baseline;
+    // Debug logging with threshold values
+    log::debug!(
+        "🎯 Volatility Classification: atr_change={:.3}, adaptive_threshold={:.3}, extreme_threshold={:.3}, bandwidth_size={}",
+        atr_change, adaptive_threshold, extreme_threshold, bandwidth_size
+    );
 
-    // 5-class system (same logic as direction)
-    let class = if atr_ratio <= (1.0 - extreme_threshold) {
+    // FIXED: 5-class system with proper percentage thresholds
+    let class = if atr_change <= -extreme_threshold {
         0 // VeryLow: Much below sequence baseline
-    } else if atr_ratio <= (1.0 - adaptive_threshold) {
+    } else if atr_change <= -adaptive_threshold {
         1 // Low: Below sequence baseline
-    } else if atr_ratio >= (1.0 + extreme_threshold) {
+    } else if atr_change >= extreme_threshold {
         4 // VeryHigh: Much above sequence baseline
-    } else if atr_ratio >= (1.0 + adaptive_threshold) {
+    } else if atr_change >= adaptive_threshold {
         3 // High: Above sequence baseline
     } else {
         2 // Medium: Around sequence baseline (sideways equivalent)

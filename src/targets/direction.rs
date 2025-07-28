@@ -103,29 +103,32 @@ fn classify_direction(
     // Step 2: Get momentum from sequence END to target horizon (the actual prediction period)
     let horizon_momentum = get_horizon_momentum(horizon_prices)?;
 
-    // Step 3: Same logic as volatility classification
+    // Step 3: Get config parameters with crypto-tuned defaults
     let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(1.0);
+    let base_threshold = model_config.and_then(|c| c.base_threshold).unwrap_or(0.12); // 12% momentum change
+    let extreme_multiplier = model_config.and_then(|c| c.extreme_multiplier).unwrap_or(2.0);
 
-    // Same factors as volatility (hardcoded values)
-    let base_threshold_factor = 0.5; // 50% of baseline
-    let extreme_multiplier = 2.0; // 2x for extreme
+    // FIXED: Use percentage-based momentum change (not ratio)
+    let momentum_change = (horizon_momentum - sequence_baseline) / sequence_baseline;
 
-    // Calculate thresholds (identical to volatility)
-    let base_threshold = base_threshold_factor * sequence_baseline;
+    // Calculate adaptive thresholds
     let adaptive_threshold = base_threshold / bandwidth_size;
     let extreme_threshold = adaptive_threshold * extreme_multiplier;
 
-    // Step 4: Compare horizon momentum to sequence baseline (like momentum ratio in volatility)
-    let momentum_ratio = horizon_momentum / sequence_baseline;
+    // Debug logging with threshold values
+    log::debug!(
+        "🎯 Direction Classification: momentum_change={:.3}, adaptive_threshold={:.3}, extreme_threshold={:.3}, bandwidth_size={}",
+        momentum_change, adaptive_threshold, extreme_threshold, bandwidth_size
+    );
 
-    // 5-class system (same logic as volatility)
-    let class = if momentum_ratio <= (1.0 - extreme_threshold) {
+    // FIXED: 5-class system with proper percentage thresholds
+    let class = if momentum_change <= -extreme_threshold {
         0 // DUMP: Much below sequence baseline
-    } else if momentum_ratio <= (1.0 - adaptive_threshold) {
+    } else if momentum_change <= -adaptive_threshold {
         1 // DOWN: Below sequence baseline
-    } else if momentum_ratio >= (1.0 + extreme_threshold) {
+    } else if momentum_change >= extreme_threshold {
         4 // PUMP: Much above sequence baseline
-    } else if momentum_ratio >= (1.0 + adaptive_threshold) {
+    } else if momentum_change >= adaptive_threshold {
         3 // UP: Above sequence baseline
     } else {
         2 // SIDEWAYS: Around sequence baseline

@@ -252,6 +252,20 @@ impl DirectionHead {
                 ));
             }
         }
+        if let Some(base_threshold) = self.base_threshold {
+            if base_threshold <= 0.0 || base_threshold > 1.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Direction base_threshold must be between 0.0 and 1.0",
+                ));
+            }
+        }
+        if let Some(extreme_multiplier) = self.extreme_multiplier {
+            if extreme_multiplier <= 1.0 || extreme_multiplier > 10.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Direction extreme_multiplier must be between 1.0 and 10.0",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -266,7 +280,20 @@ impl VolatilityHead {
                 ));
             }
         }
-
+        if let Some(base_threshold) = self.base_threshold {
+            if base_threshold <= 0.0 || base_threshold > 1.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Volatility base_threshold must be between 0.0 and 1.0",
+                ));
+            }
+        }
+        if let Some(extreme_multiplier) = self.extreme_multiplier {
+            if extreme_multiplier <= 1.0 || extreme_multiplier > 10.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Volatility extreme_multiplier must be between 1.0 and 10.0",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -275,12 +302,16 @@ impl VolatilityHead {
 pub struct DirectionHead {
     pub enabled: bool,
     pub bandwidth_size: Option<f64>, // Unified sensitivity control
+    pub base_threshold: Option<f64>, // Base momentum threshold (default: 0.12 = 12%)
+    pub extreme_multiplier: Option<f64>, // Extreme class multiplier (default: 2.0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityHead {
     pub enabled: bool,
     pub bandwidth_size: Option<f64>, // Unified sensitivity control (same as DirectionHead)
+    pub base_threshold: Option<f64>, // Base ATR threshold (default: 0.15 = 15%)
+    pub extreme_multiplier: Option<f64>, // Extreme class multiplier (default: 1.8)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,10 +369,14 @@ impl Default for ModelConfig {
                 direction: DirectionHead {
                     enabled: true,
                     bandwidth_size: Some(0.8), // More sensitive for crypto direction changes
+                    base_threshold: Some(0.12), // 12% momentum threshold
+                    extreme_multiplier: Some(2.0), // 2x for extreme classes
                 },
                 volatility: VolatilityHead {
                     enabled: true,
                     bandwidth_size: Some(1.2), // Less sensitive for volatility regimes
+                    base_threshold: Some(0.15), // 15% ATR threshold
+                    extreme_multiplier: Some(1.8), // 1.8x for extreme classes
                 },
             },
             quantile_outputs: None, // Disabled by default for backward compatibility
