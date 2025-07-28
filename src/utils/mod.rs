@@ -3,11 +3,11 @@ pub mod device;
 pub mod error;
 pub mod feature_window;
 pub mod file_discovery;
+pub mod market_data;
 pub mod metrics;
 pub mod model_path;
 pub mod parser;
 pub mod sequence_utils;
-pub mod market_data;
 
 pub use error::{Result, VangaError};
 pub use feature_window::{
