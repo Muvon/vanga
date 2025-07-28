@@ -148,8 +148,6 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
     );
 }
 
-
-
 /// Calculate market volatility for adaptive thresholds
 fn calculate_market_volatility(prices: &[f64]) -> Result<f64> {
     if prices.len() < 2 {

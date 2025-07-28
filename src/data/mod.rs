@@ -292,15 +292,14 @@ impl DataPipeline {
             let val_df = raw_processed_data.slice(val_start as i64, validation_size);
 
             // Test data is reserved - only include in final window
-            let _test_df = if train_end + validation_size + max_horizon_steps
-                >= available_for_training
-            {
-                // Final window - include test data for final evaluation
-                Some(raw_processed_data.slice(available_for_training as i64, test_size))
-            } else {
-                // Intermediate window - no test data
-                None
-            };
+            let _test_df =
+                if train_end + validation_size + max_horizon_steps >= available_for_training {
+                    // Final window - include test data for final evaluation
+                    Some(raw_processed_data.slice(available_for_training as i64, test_size))
+                } else {
+                    // Intermediate window - no test data
+                    None
+                };
 
             // Generate sequences with per-sequence normalization
             let train_sequences = self
@@ -325,9 +324,7 @@ impl DataPipeline {
 
             // Generate test sequences - empty for intermediate windows, populated for final window
             let test_sequences =
-                if train_end + validation_size + max_horizon_steps
-                    >= available_for_training
-                {
+                if train_end + validation_size + max_horizon_steps >= available_for_training {
                     // Final window - include test data for final evaluation
                     self.sequence_generator
                         .generate_training_sequences(

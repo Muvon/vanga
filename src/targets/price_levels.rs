@@ -524,21 +524,29 @@ mod tests {
 
         let horizons = vec!["1h".to_string()];
         let config = create_test_config();
-        
+
         // Calculate sequence parameters for test
         let sequence_length = 60; // Default sequence length
         let data_length = df.height();
         let max_horizon_steps = 24; // Default horizon for "1h" with hourly data
         let step_size = 1; // Default step size
-        
+
         let sequence_indices = crate::utils::sequence_utils::calculate_sequence_indices(
             data_length,
             sequence_length,
             step_size,
             max_horizon_steps,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let targets = generate_price_level_targets(&df, &horizons, &config, &sequence_indices, sequence_length).unwrap();
+        let targets = generate_price_level_targets(
+            &df,
+            &horizons,
+            &config,
+            &sequence_indices,
+            sequence_length,
+        )
+        .unwrap();
 
         // Verify targets are in valid range [0, 4] for 5-class system
         for target_vec in targets.values() {

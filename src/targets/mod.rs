@@ -64,7 +64,7 @@ pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,
     pub directions: HashMap<String, Vec<i32>>,
     pub volatility: HashMap<String, Vec<i32>>,
-    pub target_names: Vec<String>,  // ADDED: Avoid redundant TargetGenerator creation
+    pub target_names: Vec<String>, // ADDED: Avoid redundant TargetGenerator creation
     pub data_length: usize,
     pub valid_indices: Vec<usize>,
 }
@@ -77,7 +77,7 @@ impl PreparedTargets {
             price_levels: HashMap::new(),
             directions: HashMap::new(),
             volatility: HashMap::new(),
-            target_names: Vec::new(),  // Initialize empty target names
+            target_names: Vec::new(), // Initialize empty target names
             data_length,
             valid_indices: Vec::new(),
         }
@@ -307,7 +307,7 @@ impl TargetGenerator {
         prepared_targets.price_levels = price_targets?;
         prepared_targets.directions = direction_targets?;
         prepared_targets.volatility = volatility_targets?;
-        
+
         // FIXED: Set target names to avoid redundant TargetGenerator creation
         prepared_targets.target_names = self.get_target_names();
 
@@ -333,8 +333,6 @@ impl TargetGenerator {
 
         Ok(prepared_targets)
     }
-
-
 }
 
 /// Calculate class distribution for target analysis
@@ -377,15 +375,17 @@ impl TargetGenerator {
         // Calculate sequence parameters for legacy method
         let sequence_length = match &model_config.sequence_length {
             crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
-            crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
+            crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => {
+                *min_length as usize
+            }
             crate::config::model::SequenceLengthConfig::Adaptive => 60,
         };
-        
+
         // Calculate sequence indices for the data
         let data_length = df.height();
         let max_horizon_steps = 24; // Default horizon for "1h" with hourly data
         let step_size = 1; // Default step size
-        
+
         let sequence_indices = crate::utils::sequence_utils::calculate_sequence_indices(
             data_length,
             sequence_length,
@@ -393,6 +393,12 @@ impl TargetGenerator {
             max_horizon_steps,
         )?;
 
-        generate_price_level_targets_from_model_config(df, &self.config.horizons, model_config, &sequence_indices, sequence_length)
+        generate_price_level_targets_from_model_config(
+            df,
+            &self.config.horizons,
+            model_config,
+            &sequence_indices,
+            sequence_length,
+        )
     }
 }
