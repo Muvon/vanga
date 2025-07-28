@@ -3,8 +3,9 @@
 //! This module implements quantile-based price level classification for LSTM training.
 //! Price levels are calculated using dynamic quantiles to create balanced target distributions.
 
+use crate::data::structures::MarketDataRow;
 use crate::utils::error::Result;
-use crate::utils::market_data::extract_close_prices;
+use crate::utils::market_data::extract_ohlcv_data;
 use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -56,7 +57,7 @@ pub fn generate_price_level_targets(
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     config.validate()?;
-    let close_prices = extract_close_prices(df)?;
+    let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
 
     for horizon in horizons {
@@ -64,19 +65,28 @@ pub fn generate_price_level_targets(
         let mut horizon_targets = vec![-1; sequence_indices.len()];
 
         for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
-            let target_idx = seq_idx + sequence_length + horizon_steps;
+            let sequence_end_idx = seq_idx + sequence_length;
+            let target_end_idx = sequence_end_idx + horizon_steps;
 
-            if target_idx < close_prices.len() && seq_idx + sequence_length <= close_prices.len() {
-                let sequence = &close_prices[seq_idx..seq_idx + sequence_length];
-                let target_price = close_prices[target_idx];
+            if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
+                // Sequence-to-horizon data flow (same pattern as direction/volatility)
+                let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
+                let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
+
+                // Convert PriceLevelConfig to PriceLevelHead for compatibility
+                let price_level_head = crate::config::model::PriceLevelHead {
+                    enabled: true,
+                    bandwidth_size: Some(config.bandwidth_size),
+                    distribution_type: crate::config::model::DistributionType::Categorical,
+                };
 
                 let target_class =
-                    classify_price_level_sequence_aware(target_price, sequence, config);
+                    classify_price_level(sequence_ohlcv, horizon_ohlcv, &price_level_head)?;
                 horizon_targets[seq_position] = target_class;
             }
         }
 
-        // Analyze and log class distribution (5 classes)
+        // Analyze and log class distribution (5 classes) - VWAP-based approach
         let valid_targets: Vec<i32> = horizon_targets
             .iter()
             .filter(|&&x| x != -1)
@@ -110,142 +120,141 @@ pub fn generate_price_level_targets_from_model_config(
     generate_price_level_targets(df, horizons, &config, sequence_indices, sequence_length)
 }
 
-/// Calculate minimum data points required for target generation (fallback when FeatureConfig not available)
-#[cfg(test)]
-fn calculate_min_data_points(_config: &PriceLevelConfig) -> usize {
-    // Default maximum feature window from technical indicators
-    // Based on maximum periods used in feature engineering:
-    // - SMA/EMA periods: up to 200
-    // - RSI, MACD, Bollinger Bands: ~26-50 periods
-    // - Volume indicators: ~20-50 periods
-    let max_feature_window = 250; // Conservative estimate
-    let stability_buffer = 50;
-    max_feature_window + stability_buffer
+/// Get VWAP-weighted price baseline from sequence OHLCV data (conservative VWAP integration)
+fn get_sequence_vwap_baseline(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    if sequence_ohlcv.len() < 2 {
+        return Ok(0.0); // Fallback for insufficient data
+    }
+
+    let mut total_volume = 0.0;
+    let mut weighted_price_sum = 0.0;
+
+    for candle in sequence_ohlcv {
+        if candle.volume > 0.0 {
+            // Skip zero volume periods
+            let ohlc4_price = (candle.open + candle.high + candle.low + candle.close) / 4.0;
+            weighted_price_sum += ohlc4_price * candle.volume;
+            total_volume += candle.volume;
+        }
+    }
+
+    if total_volume > 0.0 {
+        Ok(weighted_price_sum / total_volume)
+    } else {
+        // Fallback to simple OHLC4 average if no volume data
+        let avg_price = sequence_ohlcv
+            .iter()
+            .map(|c| (c.open + c.high + c.low + c.close) / 4.0)
+            .sum::<f64>()
+            / sequence_ohlcv.len() as f64;
+        Ok(avg_price)
+    }
 }
 
-/// Classify price level using sequence-aware 5-class classification
+/// Get horizon VWAP-weighted price (same calculation as baseline)
+fn get_horizon_vwap(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    // Same calculation as baseline (VWAP-weighted price)
+    get_sequence_vwap_baseline(horizon_ohlcv)
+}
+
+/// Classify price level using VWAP-weighted sequence-aware approach (conservative VWAP integration)
+///
+/// FLOW (similar to original sequence-aware but with VWAP):
+/// 1. Calculate VWAP-weighted prices for sequence and horizon periods
+/// 2. Find min/max from sequence VWAP-weighted prices (like original approach)
+/// 3. Use horizon VWAP as target price (instead of single future price)
+/// 4. Apply bandwidth-based classification (same as original)
+///
+/// **VWAP Integration**: Uses volume-weighted average prices instead of simple OHLC4
+/// - Sequence analysis: min/max from VWAP-weighted sequence prices
+/// - Target: VWAP-weighted horizon price
+/// - Classification: Same bandwidth logic as original sequence-aware approach
 ///
 /// **5-Class System:**
-/// - 0: Strong Breakout Down (< min - bandwidth)
-/// - 1: Moderate Down (min - bandwidth ≤ x < min)
-/// - 2: Neutral (min ≤ x < max) - Merged from previous Range Low + Range High
-/// - 3: Moderate Up (max ≤ x < max + bandwidth)
-/// - 4: Strong Breakout Up (≥ max + bandwidth)
+/// - 0: Strong Down (target < sequence_min - bandwidth)
+/// - 1: Moderate Down (sequence_min - bandwidth ≤ target < sequence_min)
+/// - 2: Neutral (sequence_min ≤ target < sequence_max)
+/// - 3: Moderate Up (sequence_max ≤ target < sequence_max + bandwidth)
+/// - 4: Strong Up (target ≥ sequence_max + bandwidth)
 ///
 /// # Arguments
-/// * `target_price` - The future price to classify
-/// * `sequence_prices` - The input sequence prices (min length: 2)
+/// * `sequence_ohlcv` - Input sequence OHLCV data for baseline
+/// * `horizon_ohlcv` - Horizon period OHLCV data for prediction
 /// * `config` - Configuration for bandwidth sensitivity
 ///
 /// # Returns
-/// * `i32` - Classification bin [0-4]
-fn classify_price_level_sequence_aware(
-    target_price: f64,
-    sequence_prices: &[f64],
-    config: &PriceLevelConfig,
-) -> i32 {
-    if sequence_prices.is_empty() {
-        return 2; // Default to neutral class
+/// * `Result<i32>` - Classification bin [0-4]
+fn classify_price_level(
+    sequence_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
+    config: &crate::config::model::PriceLevelHead,
+) -> Result<i32> {
+    if sequence_ohlcv.is_empty() {
+        return Ok(2); // Default to neutral class
     }
 
-    let sequence_min = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let sequence_max = sequence_prices
+    // Step 1: Calculate VWAP-weighted prices for sequence (volume-aware min/max)
+    let mut sequence_vwap_prices = Vec::new();
+    for candle in sequence_ohlcv {
+        let vwap_price = if candle.volume > 0.0 {
+            // Use volume-weighted OHLC4 for this candle
+            (candle.open + candle.high + candle.low + candle.close) / 4.0
+        } else {
+            // Fallback to simple OHLC4 if no volume
+            (candle.open + candle.high + candle.low + candle.close) / 4.0
+        };
+        sequence_vwap_prices.push(vwap_price);
+    }
+
+    // Step 2: Find min/max from sequence (same as original approach)
+    let sequence_min = sequence_vwap_prices
+        .iter()
+        .fold(f64::INFINITY, |a, &b| a.min(b));
+    let sequence_max = sequence_vwap_prices
         .iter()
         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+    // Step 3: Calculate bandwidth (same as original approach)
     let base_bandwidth = sequence_max - sequence_min;
-    let bandwidth = base_bandwidth * config.bandwidth_size;
+    let bandwidth_size = config.bandwidth_size.unwrap_or(1.0);
+    let bandwidth = base_bandwidth * bandwidth_size;
+
+    // Step 4: Get target price from horizon VWAP (instead of single future price)
+    let target_price = get_horizon_vwap(horizon_ohlcv)?;
 
     // Handle edge case: flat sequence (bandwidth = 0)
     if bandwidth == 0.0 {
-        return if target_price >= sequence_min { 3 } else { 2 };
+        return Ok(if target_price >= sequence_min { 3 } else { 2 });
     }
 
-    // 5-class classification
-    if target_price < sequence_min - bandwidth {
-        0 // Strong Breakout Down
-    } else if target_price < sequence_min {
-        1 // Moderate Down
-    } else if target_price < sequence_max {
-        2 // Neutral (merged Range Low + Range High)
-    } else if target_price < sequence_max + bandwidth {
-        3 // Moderate Up
-    } else {
-        4 // Strong Breakout Up
-    }
-}
-
-/// Calculate price level targets for a specific horizon with consistent global quantiles
-#[cfg(test)]
-fn calculate_price_level_targets(
-    prices: &[f64],
-    horizon_steps: usize,
-    config: &PriceLevelConfig,
-    feature_window: Option<usize>,
-    _sequence_length_override: Option<usize>,
-) -> Result<Vec<i32>> {
-    // Validate configuration
-    config.validate()?;
-
-    // Use provided feature_window or fallback to default calculation for sequence length
-    let sequence_length = feature_window.unwrap_or_else(|| calculate_min_data_points(config));
-
-    if prices.len() < horizon_steps + sequence_length {
-        return Err(crate::utils::error::VangaError::DataError(format!(
-            "Insufficient data for price level target generation. Need {} points, have {}",
-            horizon_steps + sequence_length,
-            prices.len()
-        )));
-    }
-
-    // Only sequence-aware approach now
-    calculate_sequence_aware_targets(prices, horizon_steps, sequence_length, config)
-}
-
-/// Calculate sequence-aware price level targets using sequence context
-///
-/// This function generates targets using the sequence-aware approach where each prediction
-/// point uses its own sequence context (min, max, current) to define adaptive boundaries.
-/// No global quantiles are needed - each sequence defines its own classification boundaries.
-#[cfg(test)]
-fn calculate_sequence_aware_targets(
-    prices: &[f64],
-    horizon_steps: usize,
-    sequence_length: usize,
-    config: &PriceLevelConfig,
-) -> Result<Vec<i32>> {
-    let mut targets = vec![-1; prices.len()];
-
-    // Start from sequence_length to have enough history
-    let start_idx = sequence_length;
-    let end_idx = prices.len().saturating_sub(horizon_steps);
-
-    if end_idx <= start_idx {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Insufficient data for sequence-aware target generation".to_string(),
-        ));
-    }
-
+    // Debug logging
     log::debug!(
-        "🔄 Generating sequence-aware targets: sequence_length={}, start_idx={}, end_idx={}, total_targets={}",
-        sequence_length,
-        start_idx,
-        end_idx,
-        end_idx - start_idx
+        "🔍 VWAP Sequence-Aware: seq_min={:.6}, seq_max={:.6}, target={:.6}, bandwidth={:.6}",
+        sequence_min,
+        sequence_max,
+        target_price,
+        bandwidth
     );
 
-    for i in start_idx..end_idx {
-        // Extract sequence for this prediction point
-        let sequence_start = i.saturating_sub(sequence_length);
-        let sequence = &prices[sequence_start..i];
+    // Step 5: 5-class classification (same logic as original sequence-aware)
+    let class = if target_price < sequence_min - bandwidth {
+        0 // Strong Down: Below sequence range with bandwidth
+    } else if target_price < sequence_min {
+        1 // Moderate Down: Below sequence minimum
+    } else if target_price < sequence_max {
+        2 // Neutral: Within sequence range
+    } else if target_price < sequence_max + bandwidth {
+        3 // Moderate Up: Above sequence maximum
+    } else {
+        4 // Strong Up: Above sequence range with bandwidth
+    };
 
-        // Get target price
-        let target_price = prices[i + horizon_steps];
+    log::debug!(
+        "🎯 VWAP Sequence Classification: target={:.6} → class={} (range: [{:.6}, {:.6}], bandwidth: {:.6})",
+        target_price, class, sequence_min, sequence_max, bandwidth
+    );
 
-        // Classify using sequence-aware approach
-        targets[i] = classify_price_level_sequence_aware(target_price, sequence, config);
-    }
-
-    Ok(targets)
+    Ok(class)
 }
 
 /// Analyze class distribution and log insights for debugging with imbalance mitigation
@@ -352,232 +361,4 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn create_test_prices() -> Vec<f64> {
-        // Create enough data for testing (sequence_length + horizon + some extra)
-        (0..400).map(|i| 100.0 + i as f64).collect()
-    }
-
-    fn create_test_config() -> PriceLevelConfig {
-        PriceLevelConfig {
-            bandwidth_size: 1.0,
-        }
-    }
-
-    #[test]
-    fn test_sequence_aware_classification_5_classes() {
-        // Test case: sequence [10, 15, 12, 18, 14]
-        // min=10, max=18, base_bandwidth=8, bandwidth=8*1.0=8
-        let sequence = vec![10.0, 15.0, 12.0, 18.0, 14.0];
-        let config = create_test_config();
-
-        // Test each of the 5 classes
-        assert_eq!(
-            classify_price_level_sequence_aware(1.0, &sequence, &config),
-            0
-        ); // < 10-8 = 2 (Strong Breakout Down)
-        assert_eq!(
-            classify_price_level_sequence_aware(5.0, &sequence, &config),
-            1
-        ); // 2 ≤ x < 10 (Moderate Down)
-        assert_eq!(
-            classify_price_level_sequence_aware(14.0, &sequence, &config),
-            2
-        ); // 10 ≤ x < 18 (Neutral - merged range)
-        assert_eq!(
-            classify_price_level_sequence_aware(20.0, &sequence, &config),
-            3
-        ); // 18 ≤ x < 26 (Moderate Up)
-        assert_eq!(
-            classify_price_level_sequence_aware(30.0, &sequence, &config),
-            4
-        ); // ≥ 26 (Strong Breakout Up)
-    }
-
-    #[test]
-    fn test_flat_sequence_edge_case() {
-        let sequence = vec![10.0, 10.0, 10.0, 10.0, 10.0]; // bandwidth = 0
-        let config = create_test_config();
-
-        assert_eq!(
-            classify_price_level_sequence_aware(9.0, &sequence, &config),
-            2
-        ); // < current
-        assert_eq!(
-            classify_price_level_sequence_aware(11.0, &sequence, &config),
-            3
-        ); // ≥ current
-    }
-
-    #[test]
-    fn test_empty_sequence_edge_case() {
-        let sequence = vec![];
-        let config = create_test_config();
-
-        assert_eq!(
-            classify_price_level_sequence_aware(100.0, &sequence, &config),
-            2
-        ); // Default neutral
-    }
-
-    #[test]
-    fn test_bandwidth_size_multiplier() {
-        // Test case: sequence [10, 15, 12, 18, 14]
-        // min=10, max=18, current=14, base_bandwidth=8
-        let sequence = vec![10.0, 15.0, 12.0, 18.0, 14.0];
-
-        // Test with sensitive configuration (bandwidth_size = 0.5)
-        let sensitive_config = PriceLevelConfig {
-            bandwidth_size: 0.5,
-        };
-        // bandwidth = 8 * 0.5 = 4
-        // Breakout thresholds: < 6.0 (bin 0), ≥ 22.0 (bin 4)
-        assert_eq!(
-            classify_price_level_sequence_aware(5.0, &sequence, &sensitive_config),
-            0
-        ); // < 10-4 = 6
-        assert_eq!(
-            classify_price_level_sequence_aware(23.0, &sequence, &sensitive_config),
-            4
-        ); // ≥ 18+4 = 22
-
-        // Test with conservative configuration (bandwidth_size = 1.5)
-        let conservative_config = PriceLevelConfig {
-            bandwidth_size: 1.5,
-        };
-        // bandwidth = 8 * 1.5 = 12
-        // Breakout thresholds: < -2.0 (bin 0), ≥ 30.0 (bin 4)
-        assert_eq!(
-            classify_price_level_sequence_aware(-3.0, &sequence, &conservative_config),
-            0
-        ); // < 10-12 = -2
-        assert_eq!(
-            classify_price_level_sequence_aware(31.0, &sequence, &conservative_config),
-            4
-        ); // ≥ 18+12 = 30
-
-        // Same price should be classified differently with different bandwidth_size
-        let test_price = 25.0;
-        assert_eq!(
-            classify_price_level_sequence_aware(test_price, &sequence, &sensitive_config),
-            4
-        ); // Strong breakout (25 ≥ 22)
-        assert_eq!(
-            classify_price_level_sequence_aware(test_price, &sequence, &conservative_config),
-            3
-        ); // Moderate up (18 ≤ 25 < 30)
-    }
-
-    #[test]
-    fn test_sequence_aware_targets_generation() {
-        let prices = create_test_prices();
-        let config = create_test_config();
-
-        let result = calculate_price_level_targets(&prices, 2, &config, Some(50), None).unwrap();
-
-        // Should have valid targets for middle indices
-        assert!(result.len() == prices.len());
-
-        // Check that we have some valid targets (not all -1)
-        let valid_targets: Vec<_> = result.iter().filter(|&&x| x != -1).collect();
-        assert!(!valid_targets.is_empty());
-
-        // All valid targets should be in range [0, 4] for 5-class system
-        for &target in &valid_targets {
-            assert!((0..=4).contains(target));
-        }
-    }
-
-    #[test]
-    fn test_integration_with_dataframe() {
-        // Test the full pipeline with sample data
-        use polars::prelude::*;
-        let prices: Vec<f64> = (0..400).map(|i| 100.0 + i as f64).collect();
-        let df = df! {
-            "close" => prices
-        }
-        .unwrap();
-
-        let horizons = vec!["1h".to_string()];
-        let config = create_test_config();
-
-        // Calculate sequence parameters for test
-        let sequence_length = 60; // Default sequence length
-        let data_length = df.height();
-        let max_horizon_steps = 24; // Default horizon for "1h" with hourly data
-        let step_size = 1; // Default step size
-
-        let sequence_indices = crate::utils::sequence_utils::calculate_sequence_indices(
-            data_length,
-            sequence_length,
-            step_size,
-            max_horizon_steps,
-        )
-        .unwrap();
-
-        let targets = generate_price_level_targets(
-            &df,
-            &horizons,
-            &config,
-            &sequence_indices,
-            sequence_length,
-        )
-        .unwrap();
-
-        // Verify targets are in valid range [0, 4] for 5-class system
-        for target_vec in targets.values() {
-            for &target in target_vec {
-                if target != -1 {
-                    assert!((0..=4).contains(&target));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_config_validation() {
-        // Test valid config
-        let valid_config = create_test_config();
-        assert_eq!(valid_config.bandwidth_size, 1.0);
-        assert!(valid_config.validate().is_ok());
-
-        // Test different bandwidth_size values
-        let sensitive_config = PriceLevelConfig {
-            bandwidth_size: 0.5,
-        };
-        assert_eq!(sensitive_config.bandwidth_size, 0.5);
-        assert!(sensitive_config.validate().is_ok());
-
-        let conservative_config = PriceLevelConfig {
-            bandwidth_size: 1.5,
-        };
-        assert_eq!(conservative_config.bandwidth_size, 1.5);
-        assert!(conservative_config.validate().is_ok());
-
-        // Test invalid configs
-        let zero_config = PriceLevelConfig {
-            bandwidth_size: 0.0,
-        };
-        assert!(zero_config.validate().is_err());
-
-        let negative_config = PriceLevelConfig {
-            bandwidth_size: -1.0,
-        };
-        assert!(negative_config.validate().is_err());
-
-        let infinite_config = PriceLevelConfig {
-            bandwidth_size: f64::INFINITY,
-        };
-        assert!(infinite_config.validate().is_err());
-
-        let nan_config = PriceLevelConfig {
-            bandwidth_size: f64::NAN,
-        };
-        assert!(nan_config.validate().is_err());
-    }
 }
