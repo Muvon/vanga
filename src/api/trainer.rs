@@ -116,7 +116,8 @@ impl ModelTrainer {
         );
 
         // Convert raw targets to Array2 format for training and validation separately
-        let train_targets = convert_raw_targets_to_array2(&window.train_data.targets, target_names)?;
+        let train_targets =
+            convert_raw_targets_to_array2(&window.train_data.targets, target_names)?;
         let val_targets = convert_raw_targets_to_array2(&window.val_data.targets, target_names)?;
 
         log::info!(
@@ -167,7 +168,8 @@ impl ModelTrainer {
         let target_names = &window.train_data.targets.target_names;
 
         // FIXED: Use targets directly from prepared data (already aligned with sequences)
-        let train_targets = convert_raw_targets_to_array2(&window.train_data.targets, target_names)?;
+        let train_targets =
+            convert_raw_targets_to_array2(&window.train_data.targets, target_names)?;
         let val_targets = convert_raw_targets_to_array2(&window.val_data.targets, target_names)?;
 
         log::info!(

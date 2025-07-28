@@ -253,10 +253,6 @@ fn calculate_future_volatility(prices: &[f64]) -> Result<f64> {
     Ok(variance.sqrt())
 }
 
-
-
-
-
 /// Classify volatility into regime using boundaries (legacy single-value version)
 fn classify_volatility_regime_legacy(volatility: f64, boundaries: &[f64; 4]) -> i32 {
     if volatility <= boundaries[0] {

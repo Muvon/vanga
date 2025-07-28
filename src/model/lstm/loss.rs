@@ -10,24 +10,57 @@ use crate::utils::error::{Result, VangaError};
 use candle_core::Tensor;
 use ndarray::{Array2, Array3};
 
-impl LSTMModel {
-    pub fn calculate_mse_loss(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
-        // CRITICAL FIX: Validate shapes before operations - SAME as original
-        if predictions.shape() != targets.shape() {
-            log::error!(
-                "Shape mismatch in MSE calculation: predictions={:?}, targets={:?}",
-                predictions.shape(),
-                targets.shape()
-            );
-            return f64::INFINITY;
-        }
-
-        let diff = predictions - targets;
-        let squared_diff = &diff * &diff;
-        squared_diff.mean().unwrap_or(f64::INFINITY)
+/// Calculate Mean Squared Error between predictions and targets
+///
+/// **Core MSE Implementation**: Standard mathematical MSE calculation used throughout the system.
+/// Pure function with no dependencies - can be called from anywhere.
+///
+/// # Arguments
+/// * `predictions` - Model predictions as 2D array
+/// * `targets` - Ground truth targets as 2D array
+///
+/// # Returns
+/// * `f64` - MSE value, or `f64::INFINITY` on shape mismatch
+pub fn calculate_mse(predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
+    // CRITICAL FIX: Validate shapes before operations
+    if predictions.shape() != targets.shape() {
+        log::error!(
+            "Shape mismatch in MSE calculation: predictions={:?}, targets={:?}",
+            predictions.shape(),
+            targets.shape()
+        );
+        return f64::INFINITY;
     }
 
-    /// Calculate MAPE (Mean Absolute Percentage Error) for better understanding - EXACT same as original
+    // Log input statistics for debugging
+    log::debug!(
+        "MSE calculation - Pred shape: {:?}, Target shape: {:?}, Pred mean: {:.6}, Target mean: {:.6}",
+        predictions.shape(),
+        targets.shape(),
+        predictions.mean().unwrap_or(0.0),
+        targets.mean().unwrap_or(0.0)
+    );
+
+    let diff = predictions - targets;
+    let squared_diff = &diff * &diff;
+    let mse_result = squared_diff.mean().unwrap_or(f64::INFINITY);
+
+    log::debug!("📊 MSE Result: {:.6}", mse_result);
+    mse_result
+}
+
+impl LSTMModel {
+    /// Calculate MSE (Mean Squared Error) - delegates to core implementation
+    ///
+    /// **Delegates to**: `calculate_mse()` function for consistency.
+    pub fn calculate_mse_loss(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
+        calculate_mse(predictions, targets)
+    }
+
+    /// Calculate MAPE (Mean Absolute Percentage Error) for regression targets
+    ///
+    /// **STANDARD METHOD**: Used for continuous/regression targets where percentage error is meaningful.
+    /// For categorical targets, use `calculate_categorical_mape()` instead.
     pub fn calculate_mape(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> f64 {
         // CRITICAL FIX: Validate shapes before operations - SAME as original
         if predictions.shape() != targets.shape() {
@@ -63,10 +96,14 @@ impl LSTMModel {
         }
     }
 
-    /// Calculate MAPE for categorical data (price levels)
+    /// Calculate MAPE for categorical/ordinal targets (Direction, PriceLevel, Volatility)
     ///
-    /// For ordinal categorical data (price levels 0,1,2,3,4), we calculate MAPE as
-    /// the percentage of the maximum possible error. This gives meaningful results:
+    /// **CATEGORICAL METHOD**: Used by all target types in validation metrics.
+    /// Calculates percentage error relative to maximum possible class distance.
+    ///
+    /// **Formula**: `MAPE = (|predicted - actual| / max_class_value) * 100`
+    ///
+    /// **Examples**:
     /// - If max_class=4, predicting class 4 when actual is class 0 = 100% error
     /// - If max_class=4, predicting class 2 when actual is class 0 = 50% error
     /// - If max_class=4, predicting class 1 when actual is class 0 = 25% error
@@ -1520,14 +1557,10 @@ impl LSTMModel {
 
             match target_type {
                 TargetType::Direction => {
-                    // For Direction: MAPE is less meaningful, focus on accuracy
+                    // For Direction: Show MAPE with directional interpretation
                     log::info!(
-                        "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3} (Directional correctness), Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}",
-                        target_type_name, metric_label, accuracy, precision, recall, f1, mse
-                    );
-                    log::debug!(
-                        "📈 Direction MAPE: {:.2}% (Note: Distance-based metric, interpret as classification error)",
-                        categorical_mape
+                        "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3} (Directional correctness), Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}% (Classification error)",
+                        target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
                     );
                 }
                 TargetType::PriceLevel | TargetType::Volatility => {

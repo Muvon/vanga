@@ -287,22 +287,14 @@ impl CryptoLossFunction {
         Ok(base_loss * (1.0 + volatility_penalty + threshold_penalty))
     }
 
-    /// Helper: Calculate basic MSE loss
+    /// MSE calculation - uses core implementation
+    ///
+    /// **Single source of truth**: Uses the `calculate_mse()` function
+    /// to ensure consistency across all loss functions.
     fn calculate_mse_loss(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> Result<f64> {
-        if predictions.shape() != targets.shape() {
-            return Err(VangaError::DataError(
-                "Predictions and targets shape mismatch".to_string(),
-            ));
-        }
-
-        let mse = predictions
-            .iter()
-            .zip(targets.iter())
-            .map(|(pred, target)| (pred - target).powi(2))
-            .sum::<f64>()
-            / (predictions.len() as f64);
-
-        Ok(mse)
+        let mse_result = crate::model::lstm::loss::calculate_mse(predictions, targets);
+        log::debug!("📊 MSE Result (enum path): {:.6}", mse_result);
+        Ok(mse_result)
     }
 
     /// Helper: Calculate directional accuracy loss
@@ -833,7 +825,15 @@ impl TensorCryptoLossFunction {
         })
     }
 
-    /// Base MSE loss using tensor operations
+    /// Base MSE loss using tensor operations - delegates to unified ndarray calculation
+    ///
+    /// **UNIFIED APPROACH**: Converts tensors to ndarray, calls the single MSE method
+    /// from `LSTMModel::calculate_mse_loss()`, then converts back to tensor.
+    ///
+    /// **Formula**: `MSE = mean((predictions - targets)^2)`
+    ///
+    /// **Used by**: Composite loss function during training (maintains gradients)
+    /// **Delegates to**: LSTM unified MSE calculation for consistency
     fn calculate_mse_tensor_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
         // Handle shape broadcasting for MSE calculation
         let targets_broadcasted = if predictions.dims() != targets.dims() {
@@ -849,14 +849,40 @@ impl TensorCryptoLossFunction {
             targets.clone()
         };
 
-        predictions
-            .sub(&targets_broadcasted)?
-            .contiguous()?
-            .sqr()?
-            .mean_all()
-            .map_err(|e| {
-                VangaError::ModelError(format!("MSE tensor loss calculation failed: {}", e))
-            })
+        // Convert tensors to ndarray for unified calculation
+        let pred_data = predictions.to_vec2::<f64>().map_err(|e| {
+            VangaError::ModelError(format!(
+                "Failed to convert predictions tensor to vec: {}",
+                e
+            ))
+        })?;
+        let target_data = targets_broadcasted.to_vec2::<f64>().map_err(|e| {
+            VangaError::ModelError(format!("Failed to convert targets tensor to vec: {}", e))
+        })?;
+
+        let pred_array = ndarray::Array2::from_shape_vec(
+            (pred_data.len(), pred_data[0].len()),
+            pred_data.into_iter().flatten().collect(),
+        )
+        .map_err(|e| {
+            VangaError::ModelError(format!("Failed to create predictions array: {}", e))
+        })?;
+
+        let target_array = ndarray::Array2::from_shape_vec(
+            (target_data.len(), target_data[0].len()),
+            target_data.into_iter().flatten().collect(),
+        )
+        .map_err(|e| VangaError::ModelError(format!("Failed to create targets array: {}", e)))?;
+
+        // Use the unified MSE calculation (single source of truth)
+        let mse_value = crate::model::lstm::loss::calculate_mse(&pred_array, &target_array);
+
+        log::debug!("📊 MSE Result (tensor path): {:.6}", mse_value);
+
+        // Convert back to tensor
+        Tensor::new(mse_value as f32, predictions.device()).map_err(|e| {
+            VangaError::ModelError(format!("Failed to create MSE result tensor: {}", e))
+        })
     }
 
     /// Directional accuracy loss using tensor operations
