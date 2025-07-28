@@ -296,12 +296,15 @@ target_strategy = { type = "current" }
 
 [model.output_heads.direction]
 enabled = true
-bandwidth_size = 1.0  # Unified sensitivity control for momentum-based direction (0.5=sensitive, 1.0=standard, 1.5=conservative)
+bandwidth_size = 1.0              # Sensitivity control (0.5=sensitive, 1.0=standard, 2.0=conservative)
+base_threshold = 0.12             # 12% momentum change base threshold
+extreme_multiplier = 2.0          # 2.0x multiplier for extreme classes
 
 [model.output_heads.volatility]
 enabled = true
-bandwidth_size = 1.0  # Unified sensitivity control (0.5=sensitive, 1.0=standard, 1.5=conservative)
-base_percentiles = [0.20, 0.40, 0.60, 0.80]  # Base percentile boundaries for 5-class system
+bandwidth_size = 1.0              # Sensitivity control (0.5=sensitive, 1.0=standard, 2.0=conservative)
+base_threshold = 0.15             # 15% ATR change base threshold
+extreme_multiplier = 1.8          # 1.8x multiplier for extreme volatility regimes
 
 # ✅ FEATURES SECTION - All feature configuration under [features.x]
 [features.technical_indicators]
