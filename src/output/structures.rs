@@ -978,167 +978,60 @@ impl TradingOrders {
         config: &OrderConfig,
         is_breakout: bool,
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
-        // 🎯 PROBABILITY-BASED ENTRY SELECTION: Use price level bins with highest probabilities
-        let mut down_ranges: Vec<_> = price_levels
-            .bins
-            .iter()
-            .filter(|(_, bin)| bin.range[1] <= 0.0) // Negative ranges for LONG entries
-            .collect();
+        // 🎯 SIMPLE ADAPTIVE LOGIC: Use sequence bandwidth for realistic ranges
+        let sequence_bandwidth_pct = direction_pred.sequence_bandwidth_percent;
+        let expected_upside = direction_pred.expected_upside_percent;
 
-        // Sort by probability (highest first)
-        down_ranges.sort_by(|a, b| b.1.probability.partial_cmp(&a.1.probability).unwrap());
+        // ENTRY LOGIC: Use most likely downside range but keep it realistic
+        let neutral_bin = price_levels.bins.get("neutral");
+        let moderate_down_bin = price_levels.bins.get("moderate_down");
 
-        // Calculate dynamic threshold from probability distribution
-        let total_down_prob: f64 = down_ranges.iter().map(|(_, bin)| bin.probability).sum();
-        let avg_down_prob = if !down_ranges.is_empty() {
-            total_down_prob / down_ranges.len() as f64
-        } else {
-            0.0
-        };
+        // Use neutral range lower bound as primary entry (most conservative)
+        let primary_entry_pct = neutral_bin
+            .map(|bin| bin.range[0]) // Lower bound of neutral
+            .unwrap_or(-sequence_bandwidth_pct * 0.3); // Fallback: 30% of bandwidth
 
-        // Select top probability ranges for entries
-        let mut selected_entries: Vec<(&str, f64, f64)> = Vec::new();
-        for (name, bin) in &down_ranges {
-            if bin.probability > avg_down_prob * 0.8 && selected_entries.len() < 3 {
-                // Use better entry price (less negative) from each range
-                let entry_pct = bin.range[1]; // Upper bound = less negative = better entry
-                selected_entries.push((name.as_str(), entry_pct, bin.probability));
-            }
-        }
+        // Secondary entries: scale down from primary
+        let entry_1_pct = primary_entry_pct; // Best entry
+        let entry_2_pct = primary_entry_pct - sequence_bandwidth_pct * 0.2; // 20% bandwidth deeper
+        let entry_3_pct = primary_entry_pct - sequence_bandwidth_pct * 0.4; // 40% bandwidth deeper
 
-        // Fallback to neutral range if no good down ranges
-        if selected_entries.is_empty() {
-            if let Some((name, neutral_bin)) = price_levels
-                .bins
-                .iter()
-                .find(|(name, _)| name.contains("neutral"))
-            {
-                let entry_pct = neutral_bin.range[0]; // Lower bound of neutral
-                selected_entries.push((name.as_str(), entry_pct, neutral_bin.probability));
-            }
-        }
-
-        // Ensure we have 3 entries (pad if needed)
-        while selected_entries.len() < 3 {
-            if let Some((_, last_pct, last_prob)) = selected_entries.last() {
-                let new_pct = last_pct - 0.5; // 0.5% further down
-                selected_entries.push(("extended", new_pct, *last_prob * 0.8));
-            } else {
-                selected_entries.push(("fallback", -1.0, 0.1)); // 1% below current
-            }
-        }
-
-        let entry_1_pct = selected_entries[0].1;
-        let entry_2_pct = selected_entries[1].1;
-        let entry_3_pct = selected_entries[2].1;
-
-        // DEBUG: Log entry percentages and resulting prices
-        log::debug!(
-            "🔍 Entry Percentages: entry_1_pct={:.2}%, entry_2_pct={:.2}%, entry_3_pct={:.2}%",
-            entry_1_pct,
-            entry_2_pct,
-            entry_3_pct
-        );
-
-        let calculated_entry_1 = current_price * (1.0 + entry_1_pct / 100.0);
-        let calculated_entry_2 = current_price * (1.0 + entry_2_pct / 100.0);
-        let calculated_entry_3 = current_price * (1.0 + entry_3_pct / 100.0);
-
-        log::debug!(
-            "🟢 LONG Entry Prices: [{:.2}, {:.2}, {:.2}] vs current_price {:.2} (should be BELOW)",
-            calculated_entry_1,
-            calculated_entry_2,
-            calculated_entry_3,
-            current_price
-        );
-
-        // 🎯 MATHEMATICAL POSITION SIZING: Use probability weights and risk-reward expectation
-        let natural_risk_reward = if direction_pred.expected_downside_percent > 0.0 {
-            direction_pred.expected_upside_percent / direction_pred.expected_downside_percent
-        } else {
-            2.0 // Default if no downside risk
-        };
-
-        let confidence_multiplier = direction_pred.confidence * price_levels.confidence;
-
-        // Calculate probability-weighted allocations
-        let mut allocations = Vec::new();
-        for (_, entry_pct, prob) in &selected_entries {
-            let distance_factor = entry_pct.abs() / 100.0; // Distance from current price
-            let expected_return = distance_factor * natural_risk_reward * confidence_multiplier;
-            let base_allocation = prob / selected_entries.iter().map(|(_, _, p)| p).sum::<f64>();
-            let risk_adjusted = base_allocation * (1.0 + expected_return);
-            allocations.push(risk_adjusted);
-        }
-
-        // Normalize to total = 1.0
-        let total_allocation: f64 = allocations.iter().sum();
-        if total_allocation > 0.0 {
-            allocations.iter_mut().for_each(|a| *a /= total_allocation);
-        }
-
-        let calculated_entry_1 = current_price * (1.0 + entry_1_pct / 100.0);
-        let calculated_entry_2 = current_price * (1.0 + entry_2_pct / 100.0);
-        let calculated_entry_3 = current_price * (1.0 + entry_3_pct / 100.0);
-
-        log::debug!(
-            "🎯 ADAPTIVE LONG Entries: [{:.2}@{:.1}%, {:.2}@{:.1}%, {:.2}@{:.1}%] vs current {:.2}",
-            calculated_entry_1,
-            allocations.first().unwrap_or(&0.0) * 100.0,
-            calculated_entry_2,
-            allocations.get(1).unwrap_or(&0.0) * 100.0,
-            calculated_entry_3,
-            allocations.get(2).unwrap_or(&0.0) * 100.0,
-            current_price
-        );
+        // POSITION SIZING: Simple probability weighting
+        let neutral_prob = neutral_bin.map(|bin| bin.probability).unwrap_or(0.4);
+        let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.3);
 
         let entry_levels = [
             OrderLevel {
-                price: calculated_entry_1,
-                quantity_percentage: *allocations.first().unwrap_or(&0.4),
+                price: current_price * (1.0 + entry_1_pct / 100.0),
+                quantity_percentage: neutral_prob.min(0.5), // Cap at 50%
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: selected_entries.first().map(|(_, _, c)| *c).unwrap_or(0.8),
+                confidence: neutral_prob,
             },
             OrderLevel {
-                price: calculated_entry_2,
-                quantity_percentage: *allocations.get(1).unwrap_or(&0.3),
+                price: current_price * (1.0 + entry_2_pct / 100.0),
+                quantity_percentage: moderate_down_prob.min(0.3), // Cap at 30%
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: selected_entries.get(1).map(|(_, _, c)| *c).unwrap_or(0.7),
+                confidence: moderate_down_prob,
             },
             OrderLevel {
-                price: calculated_entry_3,
-                quantity_percentage: *allocations.get(2).unwrap_or(&0.3),
+                price: current_price * (1.0 + entry_3_pct / 100.0),
+                quantity_percentage: (1.0 - neutral_prob - moderate_down_prob).max(0.2), // Remainder, min 20%
                 atr_distance,
                 order_type: if is_breakout {
                     "STOP_LIMIT".to_string()
                 } else {
                     "LIMIT".to_string()
                 },
-                confidence: selected_entries.get(2).map(|(_, _, c)| *c).unwrap_or(0.6),
+                confidence: 0.2,
             },
         ];
 
-        // 🎯 PROBABILITY-BASED EXITS: Use upside price level bins
-        let mut up_ranges: Vec<_> = price_levels
-            .bins
-            .iter()
-            .filter(|(_, bin)| bin.range[0] > 0.0) // Positive ranges for LONG exits
-            .collect();
-
-        // Sort by range start (ascending for progressive exits)
-        up_ranges.sort_by(|a, b| a.1.range[0].partial_cmp(&b.1.range[0]).unwrap());
-
-        let exit_1_pct = up_ranges
-            .first()
-            .map(|(_, bin)| bin.range[0])
-            .unwrap_or(2.0); // First upside range
-        let exit_2_pct = up_ranges.get(1).map(|(_, bin)| bin.range[0]).unwrap_or(4.0); // Second upside range
-        let exit_3_pct = up_ranges
-            .first()
-            .map(|(_, bin)| bin.range[1])
-            .unwrap_or(6.0); // Upper bound of first range
+        // EXIT LOGIC: Use expected upside with progressive scaling
+        let exit_1_pct = expected_upside * 0.5; // 50% of expected upside
+        let exit_2_pct = expected_upside * 0.8; // 80% of expected upside
+        let exit_3_pct = expected_upside; // Full expected upside
 
         let exit_levels = [
             OrderLevel {
@@ -1164,45 +1057,71 @@ impl TradingOrders {
             },
         ];
 
-        // 🎯 RISK-REWARD ENFORCED STOPS: Calculate required stop distance
-        let avg_exit_pct = (exit_1_pct + exit_2_pct + exit_3_pct) / 3.0;
-        let max_allowed_stop_pct = avg_exit_pct / config.min_risk_reward; // e.g., 8% exit / 4.0 = 2% max stop
+        // STOP LOGIC: ENFORCE RISK-REWARD RATIO MATHEMATICALLY
+        let avg_entry_price =
+            (entry_levels[0].price + entry_levels[1].price + entry_levels[2].price) / 3.0;
+        let avg_exit_price =
+            (exit_levels[0].price + exit_levels[1].price + exit_levels[2].price) / 3.0;
 
-        let base_stop_distance = volatility_pred
-            .recommended_stop_distance_percent
-            .min(max_allowed_stop_pct);
+        // Calculate required stop distance to maintain min_risk_reward
+        let expected_profit = avg_exit_price - avg_entry_price;
+        let max_allowed_loss = expected_profit / config.min_risk_reward; // Enforce 4:1 ratio
 
-        // Tight progressive stops for better risk-reward
-        let stop_1_pct = -base_stop_distance; // Base stop
-        let stop_2_pct = -base_stop_distance * 1.05; // 5% wider
-        let stop_3_pct = -base_stop_distance * 1.1; // 10% wider
+        // Use volatility recommendation but cap by risk-reward requirement
+        let volatility_stop_distance =
+            volatility_pred.recommended_stop_distance_percent / 100.0 * avg_entry_price;
+        let required_stop_distance = max_allowed_loss.min(volatility_stop_distance);
 
-        // Apply hunt protection from config
-        let hunt_protection_multiplier = config.hunt_protection;
+        // CRITICAL: Stops must be BELOW entry prices for LONG
+        let stop_price_1 = avg_entry_price - required_stop_distance;
+        let stop_price_2 = avg_entry_price - required_stop_distance * 1.1; // 10% wider
+        let stop_price_3 = avg_entry_price - required_stop_distance * 1.2; // 20% wider
 
         let stop_levels = [
             OrderLevel {
-                price: current_price * (1.0 + stop_1_pct / 100.0), // stop_1_pct is already negative percentage
+                price: stop_price_1,
                 quantity_percentage: 0.4,
-                atr_distance: atr_distance * hunt_protection_multiplier,
+                atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.9,
             },
             OrderLevel {
-                price: current_price * (1.0 + stop_2_pct / 100.0), // stop_2_pct is already negative percentage
+                price: stop_price_2,
                 quantity_percentage: 0.4,
-                atr_distance: atr_distance * hunt_protection_multiplier,
+                atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
-                price: current_price * (1.0 + stop_3_pct / 100.0), // stop_3_pct is already negative percentage
+                price: stop_price_3,
                 quantity_percentage: 0.2,
-                atr_distance: atr_distance * hunt_protection_multiplier,
+                atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.7,
             },
         ];
+
+        // VALIDATION: Ensure mathematical correctness
+        let actual_risk_reward = expected_profit / required_stop_distance;
+
+        log::info!(
+            "🎯 LONG Orders: Avg Entry={:.2} | Avg Exit={:.2} | Avg Stop={:.2} | R:R={:.2} (min={:.1})",
+            avg_entry_price, avg_exit_price, (stop_price_1 + stop_price_2 + stop_price_3) / 3.0,
+            actual_risk_reward, config.min_risk_reward
+        );
+
+        // Ensure stops are below entries
+        for (i, stop) in stop_levels.iter().enumerate() {
+            if stop.price >= entry_levels[i].price {
+                log::error!(
+                    "🚨 CRITICAL: Stop {} ({:.2}) >= Entry {} ({:.2})",
+                    i,
+                    stop.price,
+                    i,
+                    entry_levels[i].price
+                );
+            }
+        }
 
         (entry_levels, exit_levels, stop_levels)
     }
