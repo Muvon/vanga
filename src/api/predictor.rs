@@ -230,9 +230,11 @@ impl Predictor {
         // Configure formatter with model's output heads for proper 5-class parsing
         let output_heads = if let Some(training_config) = model.get_training_config() {
             // Use output heads from model's training configuration
+            log::info!("✅ Using training configuration for prediction parameters");
             training_config.model.output_heads.clone()
         } else {
-            // Fallback to default configuration for older models
+            // Fallback to updated default configuration (matches new training defaults)
+            log::warn!("⚠️  No training configuration available, using fallback defaults. This may cause prediction inconsistency with training.");
             crate::config::model::OutputHeadsConfig {
                 price_levels: crate::config::model::PriceLevelHead {
                     enabled: true,
@@ -241,9 +243,9 @@ impl Predictor {
                 },
                 direction: crate::config::model::DirectionHead {
                     enabled: true,
-                    slope_sensitivity: Some(1.0), // Standard sensitivity for momentum-based direction
-                    base_threshold: Some(0.12),   // 12% momentum threshold
-                    extreme_multiplier: Some(2.0), // 2x for extreme classes
+                    slope_sensitivity: Some(0.02), // Updated crypto-optimized sensitivity
+                    base_threshold: Some(0.12),    // 12% momentum threshold
+                    extreme_multiplier: Some(2.5), // Updated 2.5x for better extreme detection
                 },
                 volatility: crate::config::model::VolatilityHead {
                     enabled: true,

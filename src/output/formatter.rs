@@ -10,7 +10,9 @@ use crate::output::multi_target_parser::{DirectionOutput, MultiTargetParser, Vol
 use crate::output::structures::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
 };
-use crate::targets::PreparedTargets;
+use crate::targets::{
+    PreparedTargets, SequenceAnalyzer, SequenceReconstructionConfig, SequenceReconstructor,
+};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use std::collections::HashMap;
@@ -23,6 +25,8 @@ pub struct OutputFormatter {
     /// Model config bandwidth_size: sequence bandwidth multiplier (e.g., 1.0, 1.5, 2.0)
     /// Used in target generation as: sequence_bandwidth = (max - min) * bandwidth_size
     bandwidth_size: Option<f64>,
+    /// Percentiles for price level calculation [lower, upper] (e.g., [0.1, 0.9])
+    percentiles: Option<[f64; 2]>,
     /// Number of input features used for prediction
     feature_count: Option<usize>,
     /// Sequence length used for prediction
@@ -37,17 +41,89 @@ impl OutputFormatter {
             parser: None,
             sequence_ohlcv: None,
             bandwidth_size: None,
+            percentiles: None,
             feature_count: None,
             sequence_length: None,
         }
     }
 
-    /// Set output heads configuration for proper 5-class parsing
+    /// Set output heads configuration for proper 5-class parsing with validation
     pub fn with_output_heads(mut self, output_heads: OutputHeadsConfig) -> Self {
-        // Extract bandwidth_size from price levels config
+        // Extract bandwidth_size and percentiles from price levels config
         self.bandwidth_size = output_heads.price_levels.bandwidth_size;
+        self.percentiles = output_heads.price_levels.percentiles;
+
+        // Validate training-prediction parameter consistency
+        self.validate_training_prediction_consistency(&output_heads);
+
         self.parser = Some(MultiTargetParser::new(output_heads));
         self
+    }
+
+    /// Validate that prediction parameters match training configuration
+    fn validate_training_prediction_consistency(&self, output_heads: &OutputHeadsConfig) {
+        // Validate price level parameters
+        if let Some(percentiles) = output_heads.price_levels.percentiles {
+            log::info!(
+                "✅ Using training percentiles: [{:.1}%, {:.1}%] for price level predictions",
+                percentiles[0] * 100.0,
+                percentiles[1] * 100.0
+            );
+        } else {
+            log::warn!(
+                "⚠️  No percentiles found in training config, using fallback defaults [10%, 90%]. This may cause prediction inconsistency."
+            );
+        }
+
+        if let Some(bandwidth_size) = output_heads.price_levels.bandwidth_size {
+            log::info!(
+                "✅ Using training bandwidth_size: {:.2} for price level predictions",
+                bandwidth_size
+            );
+        } else {
+            log::warn!(
+                "⚠️  No bandwidth_size found in training config, using fallback default 1.0. This may cause prediction inconsistency."
+            );
+        }
+
+        // Validate direction parameters
+        if let Some(slope_sensitivity) = output_heads.direction.slope_sensitivity {
+            if !(0.01..=0.1).contains(&slope_sensitivity) {
+                log::warn!(
+                    "⚠️  Direction slope_sensitivity {:.3} is outside recommended crypto range [0.01, 0.1]. This may indicate training-prediction mismatch.",
+                    slope_sensitivity
+                );
+            } else {
+                log::info!(
+                    "✅ Using training slope_sensitivity: {:.3} for direction predictions",
+                    slope_sensitivity
+                );
+            }
+        }
+
+        if let Some(extreme_multiplier) = output_heads.direction.extreme_multiplier {
+            if !(2.0..=4.0).contains(&extreme_multiplier) {
+                log::warn!(
+                    "⚠️  Direction extreme_multiplier {:.1} is outside recommended range [2.0, 4.0]. This may indicate training-prediction mismatch.",
+                    extreme_multiplier
+                );
+            } else {
+                log::info!(
+                    "✅ Using training extreme_multiplier: {:.1} for direction predictions",
+                    extreme_multiplier
+                );
+            }
+        }
+
+        // Validate volatility parameters
+        if let Some(volatility_bandwidth) = output_heads.volatility.bandwidth_size {
+            log::info!(
+                "✅ Using training volatility bandwidth_size: {:.2}",
+                volatility_bandwidth
+            );
+        }
+
+        log::info!("🔍 Training-prediction parameter validation completed");
     }
 
     /// Set sequence data for sequence-aware price level calculations
@@ -77,6 +153,11 @@ impl OutputFormatter {
     /// Get bandwidth size
     pub fn get_bandwidth_size(&self) -> Option<f64> {
         self.bandwidth_size
+    }
+
+    /// Get percentiles
+    pub fn get_percentiles(&self) -> Option<[f64; 2]> {
+        self.percentiles
     }
 
     /// Parse raw predictions using the internal MultiTargetParser
@@ -190,21 +271,38 @@ impl OutputFormatter {
                     &price_level_probs,
                     current_price,
                     self.bandwidth_size,
+                    self.percentiles,
                 )?);
             }
 
             if let Some(direction_output) = parsed_output.direction {
-                // Calculate sequence bandwidth percentage using OHLCV data
+                // Calculate sequence bandwidth percentage using OHLCV data with percentiles (matches training)
                 let sequence_bandwidth_percent = if let Some(ohlcv_data) = &self.sequence_ohlcv {
-                    // Extract close prices from OHLCV data
-                    let sequence_prices: Vec<f64> =
-                        ohlcv_data.iter().map(|row| row.close).collect();
-                    if sequence_prices.len() >= 2 {
-                        let min_price =
-                            sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        let max_price = sequence_prices
-                            .iter()
-                            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    // Calculate VWAP-weighted prices for sequence (matches training approach)
+                    let mut sequence_vwap_prices = Vec::new();
+                    for candle in ohlcv_data {
+                        let vwap_price = if candle.volume > 0.0 {
+                            // Use volume-weighted OHLC4 for this candle
+                            (candle.open + candle.high + candle.low + candle.close) / 4.0
+                        } else {
+                            // Fallback to simple OHLC4 if no volume
+                            (candle.open + candle.high + candle.low + candle.close) / 4.0
+                        };
+                        sequence_vwap_prices.push(vwap_price);
+                    }
+
+                    if sequence_vwap_prices.len() >= 2 {
+                        // Use percentile boundaries (matches training approach)
+                        let percentiles = self.percentiles.unwrap_or([0.1, 0.9]);
+                        let mut sorted_prices = sequence_vwap_prices.clone();
+                        sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                        let n = sorted_prices.len();
+                        let lower_idx = ((n as f64 * percentiles[0]) as usize).min(n - 1);
+                        let upper_idx = ((n as f64 * percentiles[1]) as usize).min(n - 1);
+
+                        let sequence_min = sorted_prices[lower_idx];
+                        let sequence_max = sorted_prices[upper_idx];
 
                         // Use model config bandwidth_size (sequence bandwidth multiplier)
                         let model_bandwidth_multiplier = self.bandwidth_size.ok_or_else(|| {
@@ -213,8 +311,8 @@ impl OutputFormatter {
                             )
                         })?;
 
-                        // Calculate bandwidth as percentage of current price (FIXED)
-                        let sequence_price_range = max_price - min_price;
+                        // Calculate bandwidth as percentage of current price (using percentile range)
+                        let sequence_price_range = sequence_max - sequence_min;
                         let sequence_range_percent = (sequence_price_range / current_price) * 100.0;
 
                         // Cap the sequence range to reasonable crypto values (max 50%)
@@ -247,17 +345,33 @@ impl OutputFormatter {
             }
 
             if let Some(volatility_output) = parsed_output.volatility {
-                // Calculate sequence bandwidth percentage using OHLCV data
+                // Calculate sequence bandwidth percentage using OHLCV data with percentiles (matches training)
                 let sequence_bandwidth_percent = if let Some(ohlcv_data) = &self.sequence_ohlcv {
-                    // Extract close prices from OHLCV data
-                    let sequence_prices: Vec<f64> =
-                        ohlcv_data.iter().map(|row| row.close).collect();
-                    if sequence_prices.len() >= 2 {
-                        let min_price =
-                            sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        let max_price = sequence_prices
-                            .iter()
-                            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    // Calculate VWAP-weighted prices for sequence (matches training approach)
+                    let mut sequence_vwap_prices = Vec::new();
+                    for candle in ohlcv_data {
+                        let vwap_price = if candle.volume > 0.0 {
+                            // Use volume-weighted OHLC4 for this candle
+                            (candle.open + candle.high + candle.low + candle.close) / 4.0
+                        } else {
+                            // Fallback to simple OHLC4 if no volume
+                            (candle.open + candle.high + candle.low + candle.close) / 4.0
+                        };
+                        sequence_vwap_prices.push(vwap_price);
+                    }
+
+                    if sequence_vwap_prices.len() >= 2 {
+                        // Use percentile boundaries (matches training approach)
+                        let percentiles = self.percentiles.unwrap_or([0.1, 0.9]);
+                        let mut sorted_prices = sequence_vwap_prices.clone();
+                        sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                        let n = sorted_prices.len();
+                        let lower_idx = ((n as f64 * percentiles[0]) as usize).min(n - 1);
+                        let upper_idx = ((n as f64 * percentiles[1]) as usize).min(n - 1);
+
+                        let sequence_min = sorted_prices[lower_idx];
+                        let sequence_max = sorted_prices[upper_idx];
 
                         // Use model config bandwidth_size (sequence bandwidth multiplier)
                         let model_bandwidth_multiplier = self.bandwidth_size.ok_or_else(|| {
@@ -266,8 +380,8 @@ impl OutputFormatter {
                             )
                         })?;
 
-                        // Calculate bandwidth as percentage of current price (FIXED - same as direction)
-                        let sequence_price_range = max_price - min_price;
+                        // Calculate bandwidth as percentage of current price (using percentile range)
+                        let sequence_price_range = sequence_max - sequence_min;
                         let sequence_range_percent = (sequence_price_range / current_price) * 100.0;
 
                         // Cap the sequence range to reasonable crypto values (max 50%)
@@ -411,12 +525,13 @@ impl OutputFormatter {
         Ok(results)
     }
 
-    /// Create price level prediction from 5-class probabilities using sequence-aware ranges
+    /// Create price level prediction from 5-class probabilities using percentile-based ranges
     pub fn create_price_level_prediction(
         &self,
         probabilities: &[f64],
         current_price: f64,
         bandwidth_size: Option<f64>,
+        percentiles: Option<[f64; 2]>,
     ) -> Result<PriceLevelPrediction> {
         if probabilities.len() != NUM_CLASSES {
             return Err(VangaError::PredictionError(format!(
@@ -430,11 +545,12 @@ impl OutputFormatter {
 
         // Calculate VWAP-based ranges using OHLCV data (matches training approach)
         let (bin_ranges, bin_names) = if let Some(ohlcv_data) = &self.sequence_ohlcv {
-            // Use VWAP-based calculation (matches new training approach)
+            // Use percentile-based calculation (matches new training approach)
             self.calculate_vwap_sequence_aware_ranges(
                 ohlcv_data,
                 current_price,
                 bandwidth_size.unwrap_or(1.0),
+                percentiles.unwrap_or([0.1, 0.9]), // Default percentiles
             )
         } else {
             return Err(VangaError::PredictionError(
@@ -473,13 +589,22 @@ impl OutputFormatter {
         })
     }
 
-    /// Calculate VWAP-based sequence-aware ranges (matches new training approach)
+    /// Calculate VWAP-based percentile ranges using centralized sequence reconstruction logic
     fn calculate_vwap_sequence_aware_ranges(
         &self,
         sequence_ohlcv: &[MarketDataRow],
         current_price: f64,
         bandwidth_size: f64,
+        percentiles: [f64; 2],
     ) -> (Vec<[f64; 2]>, Vec<&'static str>) {
+        // Use centralized sequence reconstruction logic
+        let config = SequenceReconstructionConfig {
+            percentiles,
+            bandwidth_size,
+        };
+        let analyzer = SequenceAnalyzer::new(config);
+
+        // Handle insufficient data case
         if sequence_ohlcv.len() < 2 {
             log::warn!("Insufficient OHLCV data for VWAP range calculation, using defaults");
             return (
@@ -500,108 +625,49 @@ impl OutputFormatter {
             );
         }
 
-        // Calculate VWAP-weighted prices for sequence (matches training approach)
-        let mut sequence_vwap_prices = Vec::new();
-        for candle in sequence_ohlcv {
-            let vwap_price = if candle.volume > 0.0 {
-                // Use volume-weighted OHLC4 for this candle
-                (candle.open + candle.high + candle.low + candle.close) / 4.0
-            } else {
-                // Fallback to simple OHLC4 if no volume
-                (candle.open + candle.high + candle.low + candle.close) / 4.0
-            };
-            sequence_vwap_prices.push(vwap_price);
-        }
-
-        // Find min/max from VWAP-weighted sequence (same as training approach)
-        let sequence_min = sequence_vwap_prices
-            .iter()
-            .fold(f64::INFINITY, |a, &b| a.min(b));
-        let sequence_max = sequence_vwap_prices
-            .iter()
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-        // Calculate bandwidth (same as training approach)
-        let base_bandwidth = sequence_max - sequence_min;
-        let bandwidth = base_bandwidth * bandwidth_size;
-
-        // Handle edge case: flat sequence (bandwidth = 0)
-        if bandwidth == 0.0 {
-            log::debug!("Flat VWAP sequence detected, using minimal ranges");
-            return (
-                vec![
-                    [-0.5, -0.25],
-                    [-0.25, 0.0],
-                    [0.0, 0.0],
-                    [0.0, 0.25],
-                    [0.25, 0.5],
-                ],
-                vec![
+        // Calculate ranges using centralized logic
+        match analyzer.sequences_to_ranges(sequence_ohlcv, current_price) {
+            Ok(ranges) => {
+                let names = vec![
                     "strong_down",
                     "moderate_down",
                     "neutral",
                     "moderate_up",
                     "strong_up",
-                ],
-            );
+                ];
+
+                // Log the centralized calculation results
+                log::debug!(
+                    "✅ Centralized Sequence Ranges: percentiles=[{:.1}%, {:.1}%], current={:.2}, bandwidth_size={:.3}",
+                    percentiles[0] * 100.0,
+                    percentiles[1] * 100.0,
+                    current_price,
+                    bandwidth_size
+                );
+
+                (ranges, names)
+            }
+            Err(e) => {
+                log::error!("Failed to calculate sequence ranges: {}", e);
+                // Fallback to default ranges
+                (
+                    vec![
+                        [-5.0, -2.0], // Strong Down
+                        [-2.0, -1.0], // Moderate Down
+                        [-1.0, 1.0],  // Neutral
+                        [1.0, 2.0],   // Moderate Up
+                        [2.0, 5.0],   // Strong Up
+                    ],
+                    vec![
+                        "strong_down",
+                        "moderate_down",
+                        "neutral",
+                        "moderate_up",
+                        "strong_up",
+                    ],
+                )
+            }
         }
-
-        // Calculate target price using horizon VWAP (matches training approach)
-        // For prediction, we use current_price as the "horizon VWAP" equivalent
-        let _target_price = current_price;
-
-        // Convert absolute price levels to percentage ranges from current price
-        // Same boundaries as training classification logic
-        let strong_down_min = sequence_min - (bandwidth * 2.0); // Extend downward for strong breakout
-        let strong_down_max = sequence_min - bandwidth;
-        let moderate_down_min = sequence_min - bandwidth;
-        let moderate_down_max = sequence_min;
-        let neutral_min = sequence_min;
-        let neutral_max = sequence_max;
-        let moderate_up_min = sequence_max;
-        let moderate_up_max = sequence_max + bandwidth;
-        let strong_up_min = sequence_max + bandwidth;
-        let strong_up_max = sequence_max + (bandwidth * 2.0); // Extend upward for strong breakout
-
-        // Convert to percentage ranges from current price
-        let to_pct = |price: f64| ((price - current_price) / current_price) * 100.0;
-
-        // DEBUG: Log the VWAP-based calculations
-        log::debug!(
-            "🔍 VWAP Ranges: current={:.2}, seq_min={:.2}, seq_max={:.2}, bandwidth={:.2}",
-            current_price,
-            sequence_min,
-            sequence_max,
-            bandwidth
-        );
-
-        let ranges = vec![
-            [to_pct(strong_down_min), to_pct(strong_down_max)], // Strong Breakout Down
-            [to_pct(moderate_down_min), to_pct(moderate_down_max)], // Moderate Down
-            [to_pct(neutral_min), to_pct(neutral_max)],         // Neutral
-            [to_pct(moderate_up_min), to_pct(moderate_up_max)], // Moderate Up
-            [to_pct(strong_up_min), to_pct(strong_up_max)],     // Strong Breakout Up
-        ];
-
-        let names = vec![
-            "strong_down",
-            "moderate_down",
-            "neutral",
-            "moderate_up",
-            "strong_up",
-        ];
-
-        log::debug!(
-            "VWAP bandwidth analysis: min={:.2}, max={:.2}, bandwidth={:.2}, bandwidth_size={:.3}",
-            sequence_min,
-            sequence_max,
-            bandwidth,
-            bandwidth_size
-        );
-        log::debug!("VWAP price ranges: strong_down=[{:.2}%,{:.2}%], moderate_down=[{:.2}%,{:.2}%], neutral=[{:.2}%,{:.2}%], moderate_up=[{:.2}%,{:.2}%], strong_up=[{:.2}%,{:.2}%]",
-                   ranges[0][0], ranges[0][1], ranges[1][0], ranges[1][1], ranges[2][0], ranges[2][1], ranges[3][0], ranges[3][1], ranges[4][0], ranges[4][1]);
-
-        (ranges, names)
     }
 
     /// Create direction prediction from DirectionOutput with 5-class system and adaptive metrics
