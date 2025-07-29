@@ -146,6 +146,7 @@ impl CsvStreamer {
                                 e
                             );
                             // Continue processing other lines
+                            continue;
                         }
                     }
                 }
