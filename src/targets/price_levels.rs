@@ -121,7 +121,7 @@ pub fn generate_price_level_targets(
                 let price_level_head = crate::config::model::PriceLevelHead {
                     enabled: true,
                     bandwidth_size: Some(config.bandwidth_size),
-                    distribution_type: crate::config::model::DistributionType::Categorical,
+                    percentiles: Some([0.1, 0.9]), // Default percentiles for compatibility
                 };
 
                 let target_class =
@@ -344,13 +344,13 @@ fn get_horizon_vwap(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
 /// - **Class 4**: Strong resistance breakout → Bullish signal
 ///
 /// # Arguments
-/// * `sequence_ohlcv` - Input sequence OHLCV data for range calculation
+/// * `sequence_ohlcv` - Input sequence OHLCV data for percentile calculation
 /// * `horizon_ohlcv` - Horizon period OHLCV data for target price
-/// * `config` - Configuration for bandwidth sensitivity
+/// * `config` - Configuration with percentiles array and bandwidth sensitivity
 ///
 /// # Returns
-/// * `Result<i32>` - Classification bin [0-4]
-fn classify_price_level(
+/// * `Result<i32>` - Classification bin [0-4] based on percentile boundaries
+pub fn classify_price_level(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
     config: &crate::config::model::PriceLevelHead,
@@ -372,13 +372,18 @@ fn classify_price_level(
         sequence_vwap_prices.push(vwap_price);
     }
 
-    // Step 2: Find min/max from sequence (same as original approach)
-    let sequence_min = sequence_vwap_prices
-        .iter()
-        .fold(f64::INFINITY, |a, &b| a.min(b));
-    let sequence_max = sequence_vwap_prices
-        .iter()
-        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    // Step 2: Calculate percentile boundaries from sequence distribution
+    let percentiles = config.percentiles.unwrap_or([0.1, 0.9]); // Default 10th/90th percentiles
+
+    let mut sorted_prices = sequence_vwap_prices.clone();
+    sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let n = sorted_prices.len();
+    let lower_idx = ((n as f64 * percentiles[0]) as usize).min(n - 1);
+    let upper_idx = ((n as f64 * percentiles[1]) as usize).min(n - 1);
+
+    let sequence_min = sorted_prices[lower_idx];
+    let sequence_max = sorted_prices[upper_idx];
 
     // Step 3: Calculate bandwidth (same as original approach)
     let base_bandwidth = sequence_max - sequence_min;
@@ -395,28 +400,25 @@ fn classify_price_level(
 
     // Debug logging
     log::debug!(
-        "🔍 VWAP Sequence-Aware: seq_min={:.6}, seq_max={:.6}, target={:.6}, bandwidth={:.6}",
-        sequence_min,
-        sequence_max,
-        target_price,
-        bandwidth
+        "🔍 Percentile-Based Classification: percentiles=[{:.1}%, {:.1}%], seq_range=[{:.6}, {:.6}], target={:.6}, bandwidth={:.6}",
+        percentiles[0] * 100.0, percentiles[1] * 100.0, sequence_min, sequence_max, target_price, bandwidth
     );
 
-    // Step 5: 5-class classification (same logic as original sequence-aware)
+    // Step 5: 5-class classification using percentile boundaries
     let class = if target_price < sequence_min - bandwidth {
-        0 // Strong Down: Below sequence range with bandwidth
+        0 // Strong Down: Below lower percentile with bandwidth
     } else if target_price < sequence_min {
-        1 // Moderate Down: Below sequence minimum
+        1 // Moderate Down: Below lower percentile
     } else if target_price < sequence_max {
-        2 // Neutral: Within sequence range
+        2 // Neutral: Within percentile range
     } else if target_price < sequence_max + bandwidth {
-        3 // Moderate Up: Above sequence maximum
+        3 // Moderate Up: Above upper percentile
     } else {
-        4 // Strong Up: Above sequence range with bandwidth
+        4 // Strong Up: Above upper percentile with bandwidth
     };
 
     log::debug!(
-        "🎯 VWAP Sequence Classification: target={:.6} → class={} (range: [{:.6}, {:.6}], bandwidth: {:.6})",
+        "🎯 Percentile Classification: target={:.6} → class={} (percentile_range: [{:.6}, {:.6}], bandwidth: {:.6})",
         target_price, class, sequence_min, sequence_max, bandwidth
     );
 

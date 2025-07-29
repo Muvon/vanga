@@ -318,7 +318,6 @@ use_relative_position = true                   # Include position encoding
 enabled = true                                 # Enable price level prediction
 bins = 10                                      # Number of price bins (5-20 range)
 range_percent = 0.05                          # Price range (±5%)
-distribution_type = "Categorical"              # Output distribution type
 
 # Direction prediction (up/down)
 [model.output_heads.direction]

@@ -94,11 +94,12 @@ output_dir = "cross_asset_attention"
 
 [model.output_heads.price_levels]
 enabled = true
-bandwidth_size = 1.0             # Breakout sensitivity multiplier for cross-asset training
-# TUNING: Lower values (0.5-0.8) = more sensitive cross-asset breakout detection
+bandwidth_size = 1.2             # Breakout sensitivity multiplier for cross-asset training
+# TUNING: Lower values (0.8-1.0) = more sensitive cross-asset breakout detection
 # EFFECT: Controls threshold for strong breakout classification across multiple assets
-range_percent = 0.06         # Slightly wider range for cross-asset volatility
-distribution_type = "Categorical"
+percentiles = [0.15, 0.85]      # Percentile boundaries for cross-asset range [lower, upper]
+# TUNING: [0.15, 0.85] = 15th/85th percentiles (tighter range for cross-asset volatility)
+# EFFECT: Tighter percentiles account for increased volatility in cross-asset scenarios
 
 # TARGET STRATEGY: For cross-asset training, momentum VWAP often works better
 # Option 1: Current strategy (default)
@@ -109,10 +110,11 @@ target_strategy = { type = "current" }
 
 [model.output_heads.direction]
 enabled = true
-threshold = 0.008            # Lower threshold for cross-asset sensitivity
-# TUNING: Reduce to 0.005 for high-frequency cross-asset signals
-# EFFECT: Lower threshold captures cross-asset influence on direction
-confidence_calibration = true
+slope_sensitivity = 0.01             # Lower sensitivity for cross-asset complexity
+# TUNING: 0.005-0.015 for cross-asset, lower values capture cross-asset momentum interactions
+# EFFECT: Cross-asset models need more sensitive direction detection
+base_threshold = 0.10               # Slightly lower threshold for cross-asset signals
+extreme_multiplier = 3.5            # Higher multiplier for better extreme detection in complex scenarios
 
 [model.output_heads.volatility]
 enabled = true

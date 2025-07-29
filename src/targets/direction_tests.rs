@@ -13,34 +13,59 @@ mod tests {
     use crate::config::model::DirectionHead;
     use approx::assert_relative_eq;
 
-    /// Test linear regression slope calculation with known data
+    /// Test linear regression slope calculation with known data and volatility normalization
     #[test]
     fn test_linear_trend_slope_calculation() {
-        // Test case 1: Perfect upward trend
+        // Test case 1: Perfect upward trend with volatility normalization
         let upward_prices = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let slope = calculate_linear_trend_slope(&upward_prices).unwrap();
-        assert_relative_eq!(slope, 1.0, epsilon = 1e-10);
+        // With volatility normalization, slope should be normalized by price std dev
+        // Price mean = 3.0, std dev ≈ 1.58, raw slope = 1.0, normalized ≈ 1.0/1.58 ≈ 0.63
+        assert!(
+            slope > 0.5 && slope < 0.8,
+            "Normalized slope should be ~0.63, got {}",
+            slope
+        );
 
-        // Test case 2: Perfect downward trend
+        // Test case 2: Perfect downward trend with volatility normalization
         let downward_prices = vec![5.0, 4.0, 3.0, 2.0, 1.0];
         let slope = calculate_linear_trend_slope(&downward_prices).unwrap();
-        assert_relative_eq!(slope, -1.0, epsilon = 1e-10);
+        // Should be negative of upward case
+        assert!(
+            slope < -0.5 && slope > -0.8,
+            "Normalized slope should be ~-0.63, got {}",
+            slope
+        );
 
         // Test case 3: Flat trend
         let flat_prices = vec![3.0, 3.0, 3.0, 3.0, 3.0];
         let slope = calculate_linear_trend_slope(&flat_prices).unwrap();
         assert_relative_eq!(slope, 0.0, epsilon = 1e-10);
 
-        // Test case 4: Realistic crypto price trend (BTC-like)
+        // Test case 4: Realistic crypto price trend (BTC-like) with volatility normalization
         let btc_prices = vec![50000.0, 50100.0, 50050.0, 50200.0, 50150.0];
         let slope = calculate_linear_trend_slope(&btc_prices).unwrap();
-        // Should be positive but small
-        assert!(slope > 0.0 && slope < 100.0);
+        // Should be positive but normalized by price volatility
+        assert!(
+            slope > 0.0 && slope < 1.0,
+            "Normalized BTC slope should be small positive, got {}",
+            slope
+        );
 
         // Test case 5: Edge case - insufficient data
         let short_prices = vec![100.0];
         let slope = calculate_linear_trend_slope(&short_prices).unwrap();
         assert_eq!(slope, 0.0);
+
+        // Test case 6: Low volatility fallback to mean normalization
+        let low_vol_prices = vec![1000.0, 1000.001, 1000.002, 1000.001, 1000.0];
+        let slope = calculate_linear_trend_slope(&low_vol_prices).unwrap();
+        // Should use mean normalization when volatility is very low
+        assert!(
+            slope.abs() < 1e-6,
+            "Low volatility should result in very small normalized slope, got {}",
+            slope
+        );
     }
 
     /// Test threshold calculation with different configurations

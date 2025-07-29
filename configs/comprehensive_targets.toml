@@ -57,7 +57,10 @@ bandwidth_size = 1.0              # Breakout sensitivity multiplier
                                   # 0.5: More sensitive (smaller breakout thresholds)
                                   # 1.0: Standard behavior (balanced)
                                   # 1.5: Less sensitive (larger breakout thresholds)
-distribution_type = "Categorical"
+percentiles = [0.1, 0.9]          # Percentile boundaries for sequence range [lower, upper]
+                                  # [0.1, 0.9]: 10th/90th percentiles (standard range)
+                                  # [0.05, 0.95]: 5th/95th percentiles (wider range)
+                                  # [0.2, 0.8]: 20th/80th percentiles (tighter range)
 
 # Target strategy for price level calculation
 target_strategy = { type = "standard_vwap" }  # Volume-weighted average price
@@ -77,15 +80,15 @@ target_strategy = { type = "standard_vwap" }  # Volume-weighted average price
 
 [model.output_heads.direction]
 enabled = true
-slope_sensitivity = 0.4           # Controls slope acceleration thresholds for trend momentum detection
+slope_sensitivity = 0.02             # Controls slope acceleration thresholds for trend momentum detection
                                   # Lower values = more sensitive (tighter thresholds)
                                   # Higher values = less sensitive (wider thresholds)
-                                  # Recommended ranges:
-                                  #   Conservative: 0.2-0.3 (detects subtle momentum changes)
-                                  #   Standard: 0.4-0.6 (balanced sensitivity)
-                                  #   Aggressive: 0.8-1.2 (only major momentum shifts)
+                                  # Crypto-optimized ranges (with volatility normalization):
+                                  #   Sensitive: 0.01-0.015 (detects subtle momentum changes)
+                                  #   Standard: 0.02-0.03 (balanced sensitivity)
+                                  #   Conservative: 0.05-0.1 (only major momentum shifts)
 base_threshold = 0.12             # Base momentum threshold (12% for crypto volatility)
-extreme_multiplier = 2.0          # Multiplier for extreme class boundaries (DUMP/PUMP vs DOWN/UP)
+extreme_multiplier = 2.5          # Multiplier for extreme class boundaries (DUMP/PUMP vs DOWN/UP)
 
 # Classification system (trend acceleration):
 # 0: DUMP     - Strong deceleration/reversal (acceleration ≤ -extreme_sensitivity)

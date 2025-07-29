@@ -125,6 +125,28 @@ pub fn generate_direction_targets(
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
+    // ADAPTIVE CALIBRATION: Auto-calibrate slope sensitivity if not provided or if using default
+    let should_calibrate = model_config
+        .and_then(|c| c.slope_sensitivity)
+        .map(|s| s >= 0.4) // Calibrate if using old default values
+        .unwrap_or(true); // Calibrate if no config provided
+
+    let calibrated_sensitivity = if should_calibrate {
+        // Use first horizon for calibration
+        let first_horizon_steps = parse_horizon_to_steps(&horizons[0])?;
+        calibrate_slope_sensitivity(&close_prices, sequence_length, first_horizon_steps, 0.15)?
+    } else {
+        model_config
+            .and_then(|c| c.slope_sensitivity)
+            .unwrap_or(0.02)
+    };
+
+    log::info!(
+        "🎯 Direction targets using slope_sensitivity: {:.6} (calibrated: {})",
+        calibrated_sensitivity,
+        should_calibrate
+    );
+
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
@@ -143,10 +165,18 @@ pub fn generate_direction_targets(
 
                 // Only classify if we have enough horizon data for momentum calculation
                 if horizon_prices.len() >= 2 {
+                    // Create config with calibrated sensitivity
+                    let calibrated_config = model_config.map(|c| DirectionHead {
+                        enabled: c.enabled,
+                        slope_sensitivity: Some(calibrated_sensitivity),
+                        base_threshold: c.base_threshold,
+                        extreme_multiplier: c.extreme_multiplier,
+                    });
+
                     let target_class = classify_direction(
                         sequence_prices,
                         horizon_prices, // Now using horizon sequence, not single price
-                        model_config,
+                        calibrated_config.as_ref(),
                     )?;
 
                     horizon_targets[seq_position] = target_class;
@@ -254,10 +284,17 @@ pub struct TrendAccelerationThresholds {
                            // Above up_max = PUMP (strong positive acceleration)
 }
 
-/// Calculate linear regression slope for trend analysis
+/// Calculate linear regression slope for trend analysis with sequence volatility normalization
 ///
-/// Uses least squares method to find the best-fit line slope
-/// Returns slope normalized per time unit (price change per period)
+/// Uses least squares method to find the best-fit line slope, normalized by sequence price volatility
+/// to ensure consistent trend detection across different price levels and market conditions.
+///
+/// ## Normalization Strategy
+/// - Uses sequence price standard deviation for volatility-based normalization
+/// - Fallback to price mean for low-volatility periods (< 0.1% of mean)
+/// - Ensures slope values are comparable across different price ranges and symbols
+///
+/// Returns slope normalized by sequence volatility (dimensionless trend strength)
 pub fn calculate_linear_trend_slope(prices: &[f64]) -> Result<f64> {
     if prices.len() < 2 {
         return Ok(0.0); // No trend for insufficient data
@@ -286,7 +323,99 @@ pub fn calculate_linear_trend_slope(prices: &[f64]) -> Result<f64> {
     }
 
     let slope = (n * sum_xy - sum_x * sum_y) / denominator;
-    Ok(slope)
+
+    // ADAPTIVE NORMALIZATION: Use sequence price volatility for normalization
+    let price_mean = sum_y / n;
+    let price_variance = prices.iter().map(|x| (x - price_mean).powi(2)).sum::<f64>() / n;
+    let price_std = price_variance.sqrt();
+
+    // Normalize by volatility, fallback to mean for low-volatility periods
+    let normalization_factor = if price_std > price_mean * 0.001 {
+        price_std // Use volatility for normal market conditions
+    } else {
+        price_mean.max(1e-8) // Fallback to mean for extremely low volatility
+    };
+
+    let normalized_slope = slope / normalization_factor;
+
+    log::trace!(
+        "🎯 Slope Calculation: raw_slope={:.6}, price_mean={:.2}, price_std={:.4}, norm_factor={:.4}, normalized_slope={:.6}",
+        slope, price_mean, price_std, normalization_factor, normalized_slope
+    );
+
+    Ok(normalized_slope)
+}
+
+/// Calculate adaptive slope sensitivity based on actual price data
+///
+/// This function analyzes the distribution of normalized slope differences in the data
+/// to automatically determine appropriate slope_sensitivity thresholds that will
+/// produce balanced class distributions.
+///
+/// # Algorithm
+/// 1. Calculate normalized slopes for all sequences and horizons
+/// 2. Compute slope acceleration distribution
+/// 3. Use percentiles to set balanced thresholds
+/// 4. Return calibrated slope_sensitivity value
+pub fn calibrate_slope_sensitivity(
+    close_prices: &[f64],
+    sequence_length: usize,
+    horizon_steps: usize,
+    target_balance: f64, // Target percentage for extreme classes (e.g., 0.15 for 15%)
+) -> Result<f64> {
+    if close_prices.len() < sequence_length + horizon_steps + 10 {
+        return Ok(0.02); // Default fallback for insufficient data
+    }
+
+    let mut accelerations = Vec::new();
+
+    // Sample accelerations from the data
+    for i in 0..(close_prices.len() - sequence_length - horizon_steps) {
+        let sequence_prices = &close_prices[i..i + sequence_length];
+        let horizon_prices =
+            &close_prices[i + sequence_length..i + sequence_length + horizon_steps];
+
+        if sequence_prices.len() >= 2 && horizon_prices.len() >= 2 {
+            let seq_slope = calculate_linear_trend_slope(sequence_prices)?;
+            let hor_slope = calculate_linear_trend_slope(horizon_prices)?;
+            let acceleration = hor_slope - seq_slope;
+
+            if acceleration.is_finite() {
+                accelerations.push(acceleration.abs()); // Use absolute values for threshold calculation
+            }
+        }
+    }
+
+    if accelerations.is_empty() {
+        return Ok(0.02); // Default fallback
+    }
+
+    // Sort accelerations to find percentiles
+    accelerations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = accelerations.len();
+
+    // Find the percentile that corresponds to target_balance for extreme classes
+    // We want target_balance% in each extreme class, so (1.0 - 2*target_balance) in middle classes
+    let extreme_percentile = 1.0 - target_balance;
+    let extreme_idx = ((n as f64) * extreme_percentile) as usize;
+    let extreme_threshold = accelerations[extreme_idx.min(n - 1)];
+
+    // The slope_sensitivity should be set so that extreme_threshold becomes the extreme boundary
+    // With extreme_multiplier = 2.0: extreme_boundary = slope_sensitivity * 2.0
+    // So: slope_sensitivity = extreme_threshold / 2.0
+    let calibrated_sensitivity = extreme_threshold / 2.0;
+
+    // Ensure reasonable bounds
+    let final_sensitivity = calibrated_sensitivity.clamp(0.001, 0.5);
+
+    log::info!(
+        "🎯 Calibrated slope_sensitivity: {:.6} (from {} samples, extreme_threshold: {:.6})",
+        final_sensitivity,
+        n,
+        extreme_threshold
+    );
+
+    Ok(final_sensitivity)
 }
 
 /// Calculate trend acceleration thresholds for direction classification

@@ -50,9 +50,9 @@ pub use config::{
 mod tests {
     use super::*;
     use crate::config::model::{
-        AttentionConfig, AttentionMechanism, DirectionHead, DistributionType, DropoutConfig,
-        DropoutRate, HiddenUnitsConfig, LSTMArchitecture, ModelConfig, OutputHeadsConfig,
-        PriceLevelHead, SequenceLengthConfig, VisualizationConfig, VolatilityHead,
+        AttentionConfig, AttentionMechanism, DirectionHead, DropoutConfig, DropoutRate,
+        HiddenUnitsConfig, LSTMArchitecture, ModelConfig, OutputHeadsConfig, PriceLevelHead,
+        SequenceLengthConfig, VisualizationConfig, VolatilityHead,
     };
     use crate::config::training::ClassWeightStrategy;
     use crate::config::training::OptimizerType;
@@ -502,8 +502,8 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bandwidth_size: Some(1.0), // Default bandwidth size
-                    distribution_type: DistributionType::Categorical,
+                    bandwidth_size: Some(1.0),     // Default bandwidth size
+                    percentiles: Some([0.1, 0.9]), // Default percentiles
                 },
                 direction: DirectionHead {
                     enabled: true,
@@ -578,8 +578,8 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bandwidth_size: Some(1.0), // Default bandwidth size
-                    distribution_type: DistributionType::Categorical,
+                    bandwidth_size: Some(1.0),     // Default bandwidth size
+                    percentiles: Some([0.1, 0.9]), // Default percentiles
                 },
                 direction: DirectionHead {
                     enabled: true,
@@ -697,8 +697,8 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bandwidth_size: Some(1.0), // Default bandwidth size
-                    distribution_type: DistributionType::Categorical,
+                    bandwidth_size: Some(1.0),     // Default bandwidth size
+                    percentiles: Some([0.1, 0.9]), // Default percentiles
                 },
                 direction: DirectionHead {
                     enabled: true,
@@ -767,8 +767,8 @@ mod tests {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bandwidth_size: Some(1.0), // Default bandwidth size
-                    distribution_type: DistributionType::Categorical,
+                    bandwidth_size: Some(1.0),     // Default bandwidth size
+                    percentiles: Some([0.1, 0.9]), // Default percentiles
                 },
                 direction: DirectionHead {
                     enabled: false,

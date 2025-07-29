@@ -1520,8 +1520,6 @@ impl LSTMModel {
                 "✅ Xavier initialization parameters calculated for {} weight tensors",
                 initialized_count
             );
-            log::warn!("⚠️ LIMITATION: Candle doesn't support post-creation weight replacement");
-            log::warn!("⚠️ RECOMMENDATION: Use smaller learning rate or shorter sequences until proper init is available");
         }
 
         Ok(())

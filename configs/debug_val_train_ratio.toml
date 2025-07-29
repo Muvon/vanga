@@ -79,7 +79,6 @@ enabled = false
 enabled = true
 bandwidth_size = 1.0  # Breakout sensitivity multiplier (reduced complexity)
 range_percent = 0.03
-distribution_type = "Categorical"
 
 # ============================================================================
 # FEATURES - Minimal set for debugging

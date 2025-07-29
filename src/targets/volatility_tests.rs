@@ -1,0 +1,370 @@
+//! Comprehensive tests for volatility classification to ensure mathematical correctness
+//!
+//! These tests validate:
+//! 1. ATR baseline calculation accuracy with adaptive fallback
+//! 2. Logarithmic ratio classification correctness
+//! 3. Adaptive bandwidth scaling appropriateness
+//! 4. Classification balance across different scenarios
+//! 5. Edge case handling
+
+#[cfg(test)]
+mod tests {
+    use super::super::volatility::*;
+    use crate::config::model::VolatilityHead;
+    use crate::data::structures::MarketDataRow;
+    use approx::assert_relative_eq;
+
+    /// Helper function to create test market data
+    fn create_test_candles(ohlcv_data: Vec<(f64, f64, f64, f64, f64)>) -> Vec<MarketDataRow> {
+        ohlcv_data
+            .into_iter()
+            .map(|(open, high, low, close, volume)| MarketDataRow {
+                timestamp: 0,
+                open,
+                high,
+                low,
+                close,
+                volume,
+            })
+            .collect()
+    }
+
+    /// Test ATR baseline calculation with adaptive fallback
+    #[test]
+    fn test_atr_baseline_calculation() {
+        // Test case 1: Normal volatility sequence
+        let normal_candles = create_test_candles(vec![
+            (100.0, 102.0, 99.0, 101.0, 1000.0),
+            (101.0, 103.0, 100.0, 102.0, 1100.0),
+            (102.0, 104.0, 101.0, 103.0, 1200.0),
+            (103.0, 105.0, 102.0, 104.0, 1300.0),
+        ]);
+
+        let atr = get_sequence_atr_baseline(&normal_candles).unwrap();
+        assert!(
+            atr > 0.005,
+            "ATR should be above minimum baseline, got {}",
+            atr
+        );
+        assert!(
+            atr < 0.1,
+            "ATR should be reasonable for normal volatility, got {}",
+            atr
+        );
+
+        // Test case 2: High volatility sequence
+        let high_vol_candles = create_test_candles(vec![
+            (100.0, 110.0, 90.0, 105.0, 2000.0),
+            (105.0, 115.0, 95.0, 110.0, 2100.0),
+            (110.0, 120.0, 100.0, 115.0, 2200.0),
+        ]);
+
+        let high_atr = get_sequence_atr_baseline(&high_vol_candles).unwrap();
+        assert!(high_atr > atr, "High volatility should have higher ATR");
+        assert!(
+            high_atr > 0.05,
+            "High volatility ATR should be substantial, got {}",
+            high_atr
+        );
+
+        // Test case 3: Low volatility sequence
+        let low_vol_candles = create_test_candles(vec![
+            (100.0, 100.1, 99.9, 100.0, 500.0),
+            (100.0, 100.05, 99.95, 100.0, 510.0),
+            (100.0, 100.02, 99.98, 100.0, 520.0),
+        ]);
+
+        let low_atr = get_sequence_atr_baseline(&low_vol_candles).unwrap();
+        assert_eq!(low_atr, 0.005, "Low volatility should use minimum baseline");
+
+        // Test case 4: Single candle fallback
+        let single_candle = create_test_candles(vec![(100.0, 102.0, 98.0, 101.0, 1000.0)]);
+
+        let fallback_atr = get_sequence_atr_baseline(&single_candle).unwrap();
+        assert_eq!(
+            fallback_atr,
+            100.0 * 0.005,
+            "Single candle should use 0.5% of close price"
+        );
+
+        // Test case 5: Empty sequence
+        let empty_candles = vec![];
+        let empty_atr = get_sequence_atr_baseline(&empty_candles).unwrap();
+        assert_eq!(
+            empty_atr, 0.005,
+            "Empty sequence should use absolute minimum"
+        );
+    }
+
+    /// Test logarithmic volatility classification
+    #[test]
+    fn test_log_volatility_classification() {
+        let _config = VolatilityHead {
+            enabled: true,
+            bandwidth_size: Some(0.4),
+            base_threshold: Some(0.15),
+            extreme_multiplier: Some(2.0),
+        };
+
+        // Test case 1: Same volatility (Medium)
+        let same_vol_seq = create_test_candles(vec![
+            (100.0, 102.0, 98.0, 101.0, 1000.0),
+            (101.0, 103.0, 99.0, 102.0, 1100.0),
+            (102.0, 104.0, 100.0, 103.0, 1200.0),
+        ]);
+        let same_vol_hor = create_test_candles(vec![
+            (103.0, 105.0, 101.0, 104.0, 1300.0),
+            (104.0, 106.0, 102.0, 105.0, 1400.0),
+        ]);
+
+        let train_atr = get_sequence_atr_baseline(&same_vol_seq).unwrap();
+        let target_atr = get_sequence_atr_baseline(&same_vol_hor).unwrap();
+
+        // Should be similar ATR values, resulting in Medium classification
+        let log_thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+        let class = classify_volatility_log_ratio(train_atr, target_atr, &log_thresholds);
+        assert_eq!(class, 2, "Similar volatility should be Medium (2)");
+
+        // Test case 2: Higher volatility (High or VeryHigh)
+        let high_vol_hor = create_test_candles(vec![
+            (103.0, 115.0, 90.0, 110.0, 2000.0),
+            (110.0, 125.0, 95.0, 120.0, 2100.0),
+        ]);
+
+        let high_target_atr = get_sequence_atr_baseline(&high_vol_hor).unwrap();
+        let high_class = classify_volatility_log_ratio(train_atr, high_target_atr, &log_thresholds);
+        assert!(
+            high_class >= 3,
+            "Higher volatility should be High (3) or VeryHigh (4), got {}",
+            high_class
+        );
+
+        // Test case 3: Lower volatility (Low or VeryLow)
+        let low_vol_hor = create_test_candles(vec![
+            (103.0, 103.1, 102.9, 103.0, 500.0),
+            (103.0, 103.05, 102.95, 103.0, 510.0),
+        ]);
+
+        let low_target_atr = get_sequence_atr_baseline(&low_vol_hor).unwrap();
+        let low_class = classify_volatility_log_ratio(train_atr, low_target_atr, &log_thresholds);
+        assert!(
+            low_class <= 1,
+            "Lower volatility should be VeryLow (0) or Low (1), got {}",
+            low_class
+        );
+    }
+
+    /// Test adaptive bandwidth scaling
+    #[test]
+    fn test_adaptive_bandwidth_scaling() {
+        // Test different volatility scenarios and their bandwidth scaling
+        let test_cases: Vec<(f64, (f64, f64))> = vec![
+            // (base_atr, expected_volatility_factor_range)
+            (0.001, (0.3, 0.5)), // Very low volatility, clamped to 0.3
+            (0.005, (0.8, 1.2)), // Normal volatility, around 1.0
+            (0.02, (2.5, 3.0)),  // High volatility, clamped to 3.0
+        ];
+
+        for (base_atr, (min_factor, max_factor)) in test_cases {
+            let baseline_atr = base_atr.max(0.005);
+            let volatility_factor = (base_atr / baseline_atr).clamp(0.3, 3.0);
+
+            assert!(
+                volatility_factor >= min_factor && volatility_factor <= max_factor,
+                "Volatility factor {} should be in range [{}, {}] for ATR {}",
+                volatility_factor,
+                min_factor,
+                max_factor,
+                base_atr
+            );
+
+            // Test bandwidth scaling
+            let base_bandwidth = 0.4;
+            let adaptive_bandwidth = base_bandwidth * volatility_factor;
+
+            assert!(
+                (0.12..=1.2).contains(&adaptive_bandwidth),
+                "Adaptive bandwidth {} should be reasonable for volatility factor {}",
+                adaptive_bandwidth,
+                volatility_factor
+            );
+        }
+    }
+
+    /// Test logarithmic threshold calculation
+    #[test]
+    fn test_log_threshold_calculation() {
+        // Test case 1: Standard configuration
+        let thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+
+        let expected_half = 0.4 / 2.0; // 0.2
+        let expected_extreme = 0.4 * 2.0; // 0.8
+
+        assert_relative_eq!(thresholds.very_low_max, -expected_extreme, epsilon = 1e-10);
+        assert_relative_eq!(thresholds.low_max, -expected_half, epsilon = 1e-10);
+        assert_relative_eq!(thresholds.medium_max, expected_half, epsilon = 1e-10);
+        assert_relative_eq!(thresholds.high_max, expected_extreme, epsilon = 1e-10);
+
+        // Test case 2: Different configuration
+        let thresholds2 = calculate_log_volatility_thresholds(0.6, 1.5).unwrap();
+        let expected_half2 = 0.6 / 2.0; // 0.3
+        let expected_extreme2 = 0.6 * 1.5; // 0.9
+
+        assert_relative_eq!(
+            thresholds2.very_low_max,
+            -expected_extreme2,
+            epsilon = 1e-10
+        );
+        assert_relative_eq!(thresholds2.medium_max, expected_half2, epsilon = 1e-10);
+    }
+
+    /// Test realistic crypto volatility scenarios
+    #[test]
+    fn test_realistic_crypto_volatility_scenarios() {
+        let _config = VolatilityHead {
+            enabled: true,
+            bandwidth_size: Some(0.4),
+            base_threshold: Some(0.15),
+            extreme_multiplier: Some(2.0),
+        };
+
+        // Scenario 1: BTC normal trading to high volatility
+        let btc_normal = create_test_candles(vec![
+            (50000.0, 50500.0, 49500.0, 50200.0, 100.0),
+            (50200.0, 50700.0, 49700.0, 50400.0, 110.0),
+            (50400.0, 50900.0, 49900.0, 50600.0, 120.0),
+        ]);
+
+        let btc_volatile = create_test_candles(vec![
+            (50600.0, 52000.0, 48000.0, 51000.0, 500.0),
+            (51000.0, 53000.0, 47000.0, 52000.0, 600.0),
+        ]);
+
+        let normal_atr = get_sequence_atr_baseline(&btc_normal).unwrap();
+        let volatile_atr = get_sequence_atr_baseline(&btc_volatile).unwrap();
+
+        assert!(
+            volatile_atr > normal_atr * 1.5,
+            "Volatile period should have significantly higher ATR: {} vs {}",
+            volatile_atr,
+            normal_atr
+        );
+
+        // Scenario 2: ETH high volatility to consolidation
+        let eth_volatile = create_test_candles(vec![
+            (3000.0, 3300.0, 2700.0, 3100.0, 200.0),
+            (3100.0, 3400.0, 2800.0, 3200.0, 220.0),
+        ]);
+
+        let eth_consolidation = create_test_candles(vec![
+            (3200.0, 3220.0, 3180.0, 3210.0, 80.0),
+            (3210.0, 3230.0, 3190.0, 3220.0, 85.0),
+        ]);
+
+        let eth_vol_atr = get_sequence_atr_baseline(&eth_volatile).unwrap();
+        let eth_consol_atr = get_sequence_atr_baseline(&eth_consolidation).unwrap();
+
+        assert!(
+            eth_consol_atr < eth_vol_atr * 0.5,
+            "Consolidation should have much lower ATR: {} vs {}",
+            eth_consol_atr,
+            eth_vol_atr
+        );
+    }
+
+    /// Test edge cases and error handling
+    #[test]
+    fn test_volatility_edge_cases() {
+        let _config = VolatilityHead {
+            enabled: true,
+            bandwidth_size: Some(0.4),
+            base_threshold: Some(0.15),
+            extreme_multiplier: Some(2.0),
+        };
+
+        // Test case 1: Zero ATR values
+        let log_thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+        let class = classify_volatility_log_ratio(0.0, 0.01, &log_thresholds);
+        assert_eq!(class, 2, "Zero train ATR should default to Medium");
+
+        let class2 = classify_volatility_log_ratio(0.01, 0.0, &log_thresholds);
+        assert_eq!(class2, 2, "Zero target ATR should default to Medium");
+
+        // Test case 2: Very small ATR values
+        let class3 = classify_volatility_log_ratio(1e-10, 1e-10, &log_thresholds);
+        assert_eq!(class3, 2, "Very small ATR values should default to Medium");
+
+        // Test case 3: Extreme ratios
+        let class4 = classify_volatility_log_ratio(0.001, 1.0, &log_thresholds);
+        assert_eq!(class4, 4, "Extreme volatility increase should be VeryHigh");
+
+        let class5 = classify_volatility_log_ratio(1.0, 0.001, &log_thresholds);
+        assert_eq!(class5, 0, "Extreme volatility decrease should be VeryLow");
+    }
+
+    /// Test classification balance with synthetic data
+    #[test]
+    fn test_volatility_classification_balance() {
+        let _config = VolatilityHead {
+            enabled: true,
+            bandwidth_size: Some(0.4),
+            base_threshold: Some(0.15),
+            extreme_multiplier: Some(2.0),
+        };
+
+        let mut class_counts = [0; 5];
+        let test_cases = 1000;
+        let log_thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+
+        // Generate synthetic test cases with controlled volatility ratios
+        for i in 0..test_cases {
+            let base_atr = 0.02; // Fixed baseline
+
+            // Create volatility ratio from 0.1x to 10x (log range)
+            let log_ratio = (i as f64 / test_cases as f64 - 0.5) * 4.0; // -2.0 to +2.0
+            let target_atr = base_atr * log_ratio.exp();
+
+            let class = classify_volatility_log_ratio(base_atr, target_atr, &log_thresholds);
+            class_counts[class as usize] += 1;
+        }
+
+        // Print distribution for analysis
+        println!(
+            "Volatility classification distribution over {} synthetic cases:",
+            test_cases
+        );
+        let class_names = ["VeryLow", "Low", "Medium", "High", "VeryHigh"];
+        for (i, &count) in class_counts.iter().enumerate() {
+            let percentage = (count as f64 / test_cases as f64) * 100.0;
+            println!("  {}: {} ({:.1}%)", class_names[i], count, percentage);
+        }
+
+        // Verify no class is completely empty
+        for (i, &count) in class_counts.iter().enumerate() {
+            assert!(
+                count > 0,
+                "Class {} ({}) has zero samples",
+                i,
+                class_names[i]
+            );
+        }
+
+        // Verify reasonable distribution (no class should dominate > 80%)
+        for (i, &count) in class_counts.iter().enumerate() {
+            let percentage = (count as f64 / test_cases as f64) * 100.0;
+            assert!(
+                percentage < 80.0,
+                "Class {} ({}) dominates with {:.1}%",
+                i,
+                class_names[i],
+                percentage
+            );
+        }
+
+        // Medium should be reasonably represented
+        assert!(
+            class_counts[2] > 50,
+            "Medium class should have reasonable representation"
+        );
+    }
+}

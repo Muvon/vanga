@@ -182,7 +182,7 @@ mod tests {
             price_levels: PriceLevelHead {
                 enabled: true,
                 bandwidth_size: Some(1.0), // Default bandwidth size for testing
-                distribution_type: crate::config::model::DistributionType::Categorical,
+                percentiles: Some([0.1, 0.9]), // Default percentiles
             },
             direction: DirectionHead {
                 enabled: true,

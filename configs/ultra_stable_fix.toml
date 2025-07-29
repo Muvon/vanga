@@ -29,7 +29,6 @@ mechanism = "None"
 enabled = true
 bandwidth_size = 1.0  # Breakout sensitivity multiplier
 range_percent = 2.0
-distribution_type = "Quantile"
 target_strategy = "PercentageBased"
 
 [model.output_heads.direction]

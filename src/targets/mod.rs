@@ -9,8 +9,14 @@ pub mod direction;
 #[cfg(test)]
 mod direction_tests;
 pub mod imbalance_mitigation;
+#[cfg(test)]
+mod math_consistency_tests;
+#[cfg(test)]
+mod price_level_tests;
 pub mod price_levels;
 pub mod volatility;
+#[cfg(test)]
+mod volatility_tests;
 
 use crate::utils::error::Result;
 use polars::prelude::*;

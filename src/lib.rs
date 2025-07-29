@@ -55,9 +55,7 @@ pub use api::trainer::train_model;
 // 4. Prediction with structured JSON output
 #[cfg(test)]
 mod integration_tests {
-    use crate::config::model::{
-        DirectionHead, DistributionType, OutputHeadsConfig, PriceLevelHead, VolatilityHead,
-    };
+    use crate::config::model::{DirectionHead, OutputHeadsConfig, PriceLevelHead, VolatilityHead};
     use crate::config::ModelConfig;
     use crate::data::TargetConverter;
     use crate::output::MultiTargetParser;
@@ -68,8 +66,8 @@ mod integration_tests {
         OutputHeadsConfig {
             price_levels: PriceLevelHead {
                 enabled: true,
-                bandwidth_size: Some(1.0), // Default bandwidth size
-                distribution_type: DistributionType::Categorical,
+                bandwidth_size: Some(1.0),     // Default bandwidth size
+                percentiles: Some([0.1, 0.9]), // Default percentiles
             },
             direction: DirectionHead {
                 enabled: true,
@@ -469,8 +467,8 @@ mod integration_tests {
         let mut disabled_heads = OutputHeadsConfig {
             price_levels: PriceLevelHead {
                 enabled: false,
-                bandwidth_size: Some(1.0), // Default bandwidth size
-                distribution_type: DistributionType::Categorical,
+                bandwidth_size: Some(1.0),     // Default bandwidth size
+                percentiles: Some([0.1, 0.9]), // Default percentiles
             },
             direction: DirectionHead {
                 enabled: true,

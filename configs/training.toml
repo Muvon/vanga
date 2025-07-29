@@ -271,7 +271,6 @@ output_dir = "attention_analysis"
 [model.output_heads.price_levels]
 enabled = true
 bandwidth_size = 1.0  # Breakout sensitivity multiplier (0.5=sensitive, 1.0=standard, 1.5=conservative)
-distribution_type = "Categorical"
 
 # ✅ CONSISTENT: All strategies use same format with internally tagged enum
 # See docs/target_strategy_configuration.md for detailed guide

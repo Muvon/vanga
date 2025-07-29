@@ -34,14 +34,13 @@ enabled = false  # Disabled for quick start
 [model.output_heads.price_levels]
 enabled = true
 bandwidth_size = 1.0  # Breakout sensitivity multiplier
-range_percent = 0.05
-distribution_type = "Categorical"
+percentiles = [0.1, 0.9]  # 10th/90th percentiles for range boundaries
 
 [model.output_heads.direction]
 enabled = true
-slope_sensitivity = 0.4           # Slope acceleration threshold sensitivity (balanced for quick start)
-base_threshold = 0.12             # Base momentum threshold (12%)
-extreme_multiplier = 2.0          # Multiplier for extreme classes
+slope_sensitivity = 0.02             # Adaptive slope acceleration threshold (crypto-optimized for volatility normalization)
+base_threshold = 0.12               # Base momentum threshold (12%)
+extreme_multiplier = 2.5            # Multiplier for extreme classes (higher for better DUMP/PUMP detection)
 
 [model.output_heads.volatility]
 enabled = true
