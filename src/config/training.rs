@@ -81,6 +81,11 @@ pub struct TrainingParams {
 
     /// Class weight strategy for handling imbalanced datasets
     pub class_weight_strategy: ClassWeightStrategy,
+
+    /// Window-based learning rate decay for walk-forward training
+    /// 0.8 = 20% reduction per window, 1.0 = no decay
+    #[serde(default = "default_window_decay")]
+    pub window_decay: f64,
 }
 
 /// Strategy for calculating class weights in imbalanced datasets
@@ -185,6 +190,11 @@ pub enum LearningRateConfig {
         factor: f64,
     },
     Fixed(f64),
+}
+
+/// Default window decay (no decay)
+fn default_window_decay() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -825,6 +835,7 @@ impl Default for TrainingParams {
             gradient_clip: Some(1.0), // Prevent exploding gradients
             print_every: 1,           // Print every epoch by default for better monitoring
             class_weight_strategy: ClassWeightStrategy::Global, // Use global weights by default for backward compatibility
+            window_decay: 1.0,                                  // No decay by default
         }
     }
 }

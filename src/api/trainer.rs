@@ -1,69 +1,69 @@
 //! # Model Trainer - Multi-Target LSTM Training Pipeline
 //!
 //! This module implements the training pipeline for VANGA's multi-target LSTM architecture.
-//! 
+//!
 //! ## Architecture Overview
-//! 
+//!
 //! VANGA uses a **multi-model architecture** where each target gets its own dedicated LSTM model:
-//! 
+//!
 //! ```text
 //! MultiTargetLSTMModel {
 //!     models: Vec<LSTMModel>,  // Separate LSTM for each target
 //!     target_names: ["price_level_1h", "direction_1h", "volatility_1h"]
 //! }
-//! 
+//!
 //! Target Processing:
 //! Raw Data → [2, 1, 3] → Each value goes to separate LSTM
 //!            ↓   ↓   ↓
 //!         LSTM1 LSTM2 LSTM3
 //! ```
-//! 
+//!
 //! ## Alternative Architecture (Not Used)
-//! 
+//!
 //! For comparison, a **single-model-multi-head** architecture would look like:
-//! 
+//!
 //! ```text
 //! SingleLSTMModel {
 //!     lstm: LSTMModel,
 //!     output_heads: 3  // Multiple output heads from one LSTM
 //! }
-//! 
+//!
 //! Target Processing (via TargetConverter):
 //! Raw Data → [2, 1, 3] → One-hot encode → [0,0,1,0,0, 0,1,0,0,0, 0,0,0,1,0]
 //!                                         ↓
 //!                                    Single LSTM
 //! ```
-//! 
+//!
 //! ## Why Multi-Model Architecture?
-//! 
+//!
 //! 1. **Target Independence**: Each target can have different optimal hyperparameters
 //! 2. **Specialized Learning**: Each LSTM can specialize in its specific prediction task
 //! 3. **Robustness**: Failure in one target doesn't affect others
 //! 4. **Flexibility**: Can easily add/remove targets without architectural changes
-//! 
+//!
 //! ## Target Format Requirements
-//! 
+//!
 //! - **Multi-model**: Raw integer values (0,1,2,3,4) - used by this module
 //! - **Single-model-multi-head**: One-hot encoded vectors - use `TargetConverter`
-//! 
+//!
 //! ## Walk-Forward Training with Distributed Validation
-//! 
+//!
 //! The trainer implements walk-forward analysis with **distributed validation sampling**:
-//! 
+//!
 //! ```text
 //! Window 1: Train from [0-1000] excluding validation samples
 //!           ↓ Validation sampled from 3 periods within [0-1000]:
 //!           Early: ~250, Middle: ~500, Late: ~750 (with validation_gap)
-//! 
-//! Window 2: Train from [0-1250] excluding validation samples  
+//!
+//! Window 2: Train from [0-1250] excluding validation samples
 //!           ↓ Validation sampled from 3 periods within [0-1250]:
 //!           Early: ~312, Middle: ~625, Late: ~937 (with validation_gap)
-//! 
+//!
 //! Window 3: Train from [0-1500] excluding validation samples
 //!           ↓ Validation sampled from 3 periods within [0-1500]:
 //!           Early: ~375, Middle: ~750, Late: ~1125 (with validation_gap)
 //! ```
-//! 
+//!
 //! **Key Features:**
 //! - **Distributed validation**: Samples from multiple periods, not just the end
 //! - **Validation gap**: Temporal separation prevents data leakage
@@ -78,10 +78,10 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 
 /// Model trainer for multi-target LSTM architecture
-/// 
+///
 /// Orchestrates the complete training pipeline including:
 /// - Walk-forward chronological validation
-/// - Multi-model target processing  
+/// - Multi-model target processing
 /// - Progressive learning across time windows
 /// - Normalization consistency for prediction
 pub struct ModelTrainer {
@@ -95,13 +95,13 @@ impl ModelTrainer {
     }
 
     /// Execute complete multi-target LSTM training pipeline
-    /// 
+    ///
     /// Implements walk-forward analysis with progressive learning:
     /// 1. Load and prepare chronological training windows
-    /// 2. Train first window from scratch  
+    /// 2. Train first window from scratch
     /// 3. Continue training on subsequent windows with expanded data
     /// 4. Save complete training config and normalization stats for prediction consistency
-    /// 
+    ///
     /// Returns trained MultiTargetLSTMModel ready for prediction or further training.
     pub async fn train(&self) -> Result<MultiTargetLSTMModel> {
         log::info!("Starting model training for symbol: {}", self.config.symbol);
@@ -136,25 +136,51 @@ impl ModelTrainer {
             windows.len()
         );
 
-        // Train model using walk-forward analysis
+        // Train model using walk-forward analysis with window-based learning rate decay
         let mut model = None;
 
-        for (i, window) in windows.iter().enumerate() {
+        // Get base learning rate from config
+        let base_lr = match &self.config.training.learning_rate {
+            crate::config::training::LearningRateConfig::Fixed(lr) => *lr,
+            crate::config::training::LearningRateConfig::Adaptive { initial_lr, .. } => *initial_lr,
+            crate::config::training::LearningRateConfig::Auto { max_lr, .. } => *max_lr,
+        };
+
+        // Log window decay strategy
+        if self.config.training.window_decay != 1.0 {
             log::info!(
-                "🔄 Walk-forward window {}/{}: {} train samples → {} validation samples",
+                "📊 Walk-forward learning rate decay: factor={:.3} (base_lr={:.6})",
+                self.config.training.window_decay,
+                base_lr
+            );
+        } else {
+            log::info!(
+                "📊 Walk-forward training: Fixed learning rate {:.6} for all windows",
+                base_lr
+            );
+        }
+
+        for (i, window) in windows.iter().enumerate() {
+            // Calculate window-specific learning rate: base_lr * decay^window_id
+            let window_lr = base_lr * self.config.training.window_decay.powi(i as i32);
+
+            log::info!(
+                "🔄 Walk-forward window {}/{}: lr={:.6} ({:.1}% of base) → {} train samples, {} validation samples",
                 i + 1,
                 windows.len(),
+                window_lr,
+                (window_lr / base_lr) * 100.0,
                 window.train_samples,
                 window.val_samples
             );
 
             if i == 0 {
                 // First window: train from scratch
-                model = Some(self.train_window_from_scratch(window).await?);
+                model = Some(self.train_window_from_scratch(window, window_lr).await?);
             } else {
                 // Subsequent windows: continue training on expanded data
                 model = Some(
-                    self.continue_training_window(model.unwrap(), window)
+                    self.continue_training_window(model.unwrap(), window, window_lr)
                         .await?,
                 );
             }
@@ -184,10 +210,11 @@ impl ModelTrainer {
         Ok(final_model)
     }
 
-    /// Train model from scratch on first window
+    /// Train model from scratch on first window with window-specific learning rate
     async fn train_window_from_scratch(
         &self,
         window: &crate::data::TrainingWindow,
+        window_lr: f64,
     ) -> Result<MultiTargetLSTMModel> {
         log::info!(
             "🎯 [train_window_from_scratch] Training config horizons: {:?} (count: {})",
@@ -205,6 +232,16 @@ impl ModelTrainer {
             .get_or_create_multi_target_model(input_size, target_names)
             .await?;
 
+        // Create config with window-specific learning rate
+        let mut window_config = self.config.clone();
+        window_config.training.learning_rate =
+            crate::config::training::LearningRateConfig::Fixed(window_lr);
+
+        log::info!(
+            "🎯 Training from scratch with window learning rate: {:.6}",
+            window_lr
+        );
+
         // Train the model with chronological validation
         model
             .train(
@@ -215,7 +252,7 @@ impl ModelTrainer {
                     val_targets: Some(&val_targets),
                     target_class_weights: Some(&window.target_class_weights),
                 },
-                &self.config,
+                &window_config,
             )
             .await?;
 
@@ -223,11 +260,12 @@ impl ModelTrainer {
         Ok(model)
     }
 
-    /// Continue training existing model on new window
+    /// Continue training existing model on new window with window-specific learning rate
     async fn continue_training_window(
         &self,
         mut model: MultiTargetLSTMModel,
         window: &crate::data::TrainingWindow,
+        window_lr: f64,
     ) -> Result<MultiTargetLSTMModel> {
         log::info!(
             "🎯 [continue_training_window] Training config horizons: {:?} (count: {})",
@@ -236,7 +274,18 @@ impl ModelTrainer {
         );
 
         // Process targets for multi-model architecture
-        let (train_targets, _val_targets) = self.process_window_targets(window, "continue training")?;
+        let (train_targets, _val_targets) =
+            self.process_window_targets(window, "continue training")?;
+
+        // Create config with window-specific learning rate
+        let mut window_config = self.config.clone();
+        window_config.training.learning_rate =
+            crate::config::training::LearningRateConfig::Fixed(window_lr);
+
+        log::info!(
+            "🎯 Continue training with window learning rate: {:.6}",
+            window_lr
+        );
 
         // Continue training with new data
         model
@@ -246,7 +295,7 @@ impl ModelTrainer {
                     new_targets: &train_targets,
                     target_class_weights: Some(&window.target_class_weights),
                 },
-                &self.config,
+                &window_config,
             )
             .await?;
 
@@ -355,16 +404,16 @@ pub async fn train_model(config: TrainingConfig) -> Result<MultiTargetLSTMModel>
 }
 
 /// Extract raw integer targets for multi-model architecture
-/// 
+///
 /// **Architecture Note**: This function is designed for MultiTargetLSTMModel which contains
 /// separate LSTM models for each target. Each model expects raw integer values (0,1,2,3,4)
 /// for classification, NOT one-hot encoded vectors.
-/// 
+///
 /// **Alternative Architecture**: For single LSTM with multiple output heads, use TargetConverter
 /// which creates one-hot encoded outputs (e.g., [0,0,1,0,0] for class 2).
-/// 
+///
 /// **Current Usage**: Each column in the returned Array2 goes to a separate LSTM model.
-/// 
+///
 /// **Validation**: Ensures target values are in valid range (0-4) for classification.
 fn extract_targets_for_multi_model(
     targets: &PreparedTargets,
@@ -400,17 +449,19 @@ fn extract_targets_for_multi_model(
         }
 
         // Handle compound target types like "price_level"
-        let (target_type, horizon) =
-            if parts.len() == 3 && parts[0] == "price" && parts[1] == "level" {
-                ("price_level", parts[2])
-            } else if parts.len() == 2 {
-                (parts[0], parts[1])
-            } else {
-                return Err(VangaError::DataError(format!(
+        let (target_type, horizon) = if parts.len() == 3
+            && parts[0] == "price"
+            && parts[1] == "level"
+        {
+            ("price_level", parts[2])
+        } else if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            return Err(VangaError::DataError(format!(
                     "Invalid target name format '{}' - expected format: 'type_horizon' or 'price_level_horizon'",
                     target_name
                 )));
-            };
+        };
 
         // Get the appropriate target data based on type
         let target_data = match target_type {
@@ -419,9 +470,9 @@ fn extract_targets_for_multi_model(
             "volatility" => targets.volatility.get(horizon),
             _ => {
                 return Err(VangaError::DataError(format!(
-                    "Unknown target type '{}' - supported types: price_level, direction, volatility",
-                    target_type
-                )))
+                "Unknown target type '{}' - supported types: price_level, direction, volatility",
+                target_type
+            )))
             }
         };
 
@@ -437,12 +488,14 @@ fn extract_targets_for_multi_model(
             if data_idx >= data.len() {
                 return Err(VangaError::DataError(format!(
                     "Data index {} out of bounds for target '{}' (length: {})",
-                    data_idx, target_name, data.len()
+                    data_idx,
+                    target_name,
+                    data.len()
                 )));
             }
 
             let target_value = data[data_idx] as f64;
-            
+
             // Validate target value range (0-4 for classification)
             if !(0.0..=4.0).contains(&target_value) || target_value.fract() != 0.0 {
                 return Err(VangaError::DataError(format!(
@@ -460,7 +513,7 @@ fn extract_targets_for_multi_model(
         num_targets,
         training_array.shape()
     );
-    
+
     // Final validation: check for any NaN or infinite values
     if training_array.iter().any(|&x| !x.is_finite()) {
         return Err(VangaError::DataError(
