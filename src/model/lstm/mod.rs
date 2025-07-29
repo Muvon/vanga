@@ -125,6 +125,7 @@ mod tests {
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
                 class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+                window_decay: 1.0,                                  // No decay for tests
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -206,6 +207,7 @@ mod tests {
                 validation_split: 0.2,
                 validation_gap: "1h".to_string(), // Default gap for tests
                 device: crate::config::training::DeviceConfig::Auto,
+                window_decay: 1.0, // No decay for tests
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 10,
@@ -301,6 +303,7 @@ mod tests {
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
                 class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+                window_decay: 1.0,                                  // No decay for tests
             },
 
             data: crate::config::training::DataConfig::default(),
@@ -420,6 +423,7 @@ mod tests {
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
                 class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+                window_decay: 1.0,                                  // No decay for tests
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),

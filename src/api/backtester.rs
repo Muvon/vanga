@@ -291,6 +291,7 @@ impl Backtester {
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
                 class_weight_strategy: crate::config::training::ClassWeightStrategy::Global, // Use global for backtesting
+                window_decay: 1.0, // No decay for backtesting
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),

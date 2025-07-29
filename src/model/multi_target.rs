@@ -811,6 +811,7 @@ mod tests {
                 validation_split: 0.0,
                 validation_gap: "0".to_string(), // No gap needed when no validation
                 test_split: 0.0,
+                window_decay: 1.0, // No decay for tests
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 10,
                     min_delta: 0.0001,
