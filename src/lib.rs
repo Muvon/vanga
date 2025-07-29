@@ -73,7 +73,7 @@ mod integration_tests {
             },
             direction: DirectionHead {
                 enabled: true,
-                bandwidth_size: Some(0.8), // Momentum-based direction sensitivity
+                slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
                 base_threshold: Some(0.12),
                 extreme_multiplier: Some(2.0),
             },
@@ -473,8 +473,8 @@ mod integration_tests {
                 distribution_type: DistributionType::Categorical,
             },
             direction: DirectionHead {
-                enabled: false,
-                bandwidth_size: Some(0.8), // Momentum-based direction sensitivity
+                enabled: true,
+                slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
                 base_threshold: Some(0.12),
                 extreme_multiplier: Some(2.0),
             },

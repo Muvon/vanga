@@ -186,7 +186,7 @@ mod tests {
             },
             direction: DirectionHead {
                 enabled: true,
-                bandwidth_size: Some(0.8), // Momentum-based direction sensitivity
+                slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
                 base_threshold: Some(0.12),
                 extreme_multiplier: Some(2.0),
             },

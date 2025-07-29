@@ -39,13 +39,15 @@ distribution_type = "Categorical"
 
 [model.output_heads.direction]
 enabled = true
-threshold = 0.01
-confidence_calibration = true
+slope_sensitivity = 0.4           # Slope acceleration threshold sensitivity (balanced for quick start)
+base_threshold = 0.12             # Base momentum threshold (12%)
+extreme_multiplier = 2.0          # Multiplier for extreme classes
 
 [model.output_heads.volatility]
 enabled = true
-method = "Direct"
-horizons = ["1h", "4h", "1d"]
+bandwidth_size = 0.4              # Logarithmic ratio threshold sensitivity (balanced for quick start)
+base_threshold = 0.15             # Base volatility threshold (15%)
+extreme_multiplier = 2.0          # Multiplier for extreme volatility regimes
 
 # Essential features only
 [features.technical_indicators]

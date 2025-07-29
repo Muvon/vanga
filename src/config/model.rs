@@ -245,10 +245,10 @@ impl PriceLevelHead {
 impl DirectionHead {
     /// Validate the direction head configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        if let Some(bandwidth) = self.bandwidth_size {
-            if bandwidth <= 0.0 {
+        if let Some(slope_sensitivity) = self.slope_sensitivity {
+            if slope_sensitivity <= 0.0 {
                 return Err(crate::utils::error::VangaError::config(
-                    "Direction bandwidth_size must be positive",
+                    "Direction slope_sensitivity must be positive",
                 ));
             }
         }
@@ -301,8 +301,8 @@ impl VolatilityHead {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionHead {
     pub enabled: bool,
-    pub bandwidth_size: Option<f64>, // Unified sensitivity control
-    pub base_threshold: Option<f64>, // Base momentum threshold (default: 0.12 = 12%)
+    pub slope_sensitivity: Option<f64>, // Controls slope acceleration thresholds for trend momentum detection
+    pub base_threshold: Option<f64>,    // Base momentum threshold (default: 0.12 = 12%)
     pub extreme_multiplier: Option<f64>, // Extreme class multiplier (default: 2.0)
 }
 
@@ -368,8 +368,8 @@ impl Default for ModelConfig {
                 },
                 direction: DirectionHead {
                     enabled: true,
-                    bandwidth_size: Some(0.8), // More sensitive for crypto direction changes
-                    base_threshold: Some(0.12), // 12% momentum threshold
+                    slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
+                    base_threshold: Some(0.12),   // 12% momentum threshold
                     extreme_multiplier: Some(2.0), // 2x for extreme classes
                 },
                 volatility: VolatilityHead {

@@ -296,14 +296,21 @@ target_strategy = { type = "current" }
 
 [model.output_heads.direction]
 enabled = true
-bandwidth_size = 1.0              # FIXED: Small=narrow SIDEWAYS, Large=wide SIDEWAYS
+slope_sensitivity = 0.8           # Controls slope acceleration thresholds for trend momentum detection
+                                  # Lower values = more sensitive (tighter thresholds)
+                                  # Higher values = less sensitive (wider thresholds)
+                                  # Recommended: 0.4-0.8 for crypto markets
+base_threshold = 0.12             # Base momentum threshold (12% for crypto volatility)
 extreme_multiplier = 2.0          # 2.0x multiplier for extreme classes (DUMP/PUMP)
 
 [model.output_heads.volatility]
 enabled = true
-bandwidth_size = 1.0              # Sensitivity control (0.5=sensitive, 1.0=standard, 2.0=conservative)
-base_threshold = 0.15             # 15% ATR change base threshold
-extreme_multiplier = 1.8          # 1.8x multiplier for extreme volatility regimes
+bandwidth_size = 0.4              # Controls logarithmic ratio thresholds for volatility regime detection
+                                  # Lower values = more sensitive to volatility changes
+                                  # Higher values = less sensitive, only major regime shifts
+                                  # Recommended: 0.4-0.6 for crypto volatility regimes
+base_threshold = 0.15             # Base volatility threshold (15% for crypto markets)
+extreme_multiplier = 2.0          # 2.0x multiplier for extreme volatility regimes (VeryLow/VeryHigh)
 
 # ✅ FEATURES SECTION - All feature configuration under [features.x]
 [features.technical_indicators]

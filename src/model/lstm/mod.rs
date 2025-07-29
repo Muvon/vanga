@@ -506,8 +506,8 @@ mod tests {
                     distribution_type: DistributionType::Categorical,
                 },
                 direction: DirectionHead {
-                    enabled: false,
-                    bandwidth_size: Some(0.8),
+                    enabled: true,
+                    slope_sensitivity: Some(0.8),
                     base_threshold: Some(0.12),
                     extreme_multiplier: Some(2.0),
                 },
@@ -582,8 +582,8 @@ mod tests {
                     distribution_type: DistributionType::Categorical,
                 },
                 direction: DirectionHead {
-                    enabled: false,
-                    bandwidth_size: Some(0.8),
+                    enabled: true,
+                    slope_sensitivity: Some(0.8),
                     base_threshold: Some(0.12),
                     extreme_multiplier: Some(2.0),
                 },
@@ -701,8 +701,8 @@ mod tests {
                     distribution_type: DistributionType::Categorical,
                 },
                 direction: DirectionHead {
-                    enabled: false,
-                    bandwidth_size: Some(0.8),
+                    enabled: true,
+                    slope_sensitivity: Some(0.8),
                     base_threshold: Some(0.12),
                     extreme_multiplier: Some(2.0),
                 },
@@ -772,8 +772,8 @@ mod tests {
                 },
                 direction: DirectionHead {
                     enabled: false,
-                    bandwidth_size: Some(0.8),
                     base_threshold: Some(0.12),
+                    slope_sensitivity: Some(0.8),
                     extreme_multiplier: Some(2.0),
                 },
                 volatility: VolatilityHead {

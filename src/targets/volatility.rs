@@ -1,11 +1,105 @@
 //! Volatility target generation for cryptocurrency market regime classification
 //!
-//! This module implements volatility regime classification for risk assessment:
-//! - 0: VeryLow (minimal volatility)
-//! - 1: Low (below average volatility)
-//! - 2: Medium (average volatility)
-//! - 3: High (above average volatility)
-//! - 4: VeryHigh (extreme volatility)
+//! This module implements logarithmic ratio-based volatility regime classification:
+//! - 0: VeryLow (target_atr << train_atr, extreme decrease)
+//! - 1: Low (target_atr < train_atr, moderate decrease)
+//! - 2: Medium (target_atr ≈ train_atr, similar volatility)
+//! - 3: High (target_atr > train_atr, moderate increase)
+//! - 4: VeryHigh (target_atr >> train_atr, extreme increase)
+//!
+//! ## Mathematical Approach: Logarithmic Ratio Classification
+//!
+//! **Why Logarithmic Space?**
+//! Volatility ratios are naturally multiplicative and asymmetric. A 2x increase (ratio=2.0)
+//! should be treated equally to a 0.5x decrease (ratio=0.5), but in linear space:
+//! - 2.0 - 1.0 = +1.0 (increase)
+//! - 0.5 - 1.0 = -0.5 (decrease) ← Asymmetric!
+//!
+//! In logarithmic space, ratios become symmetric:
+//! - ln(2.0) = +0.693 (increase)
+//! - ln(0.5) = -0.693 (decrease) ← Perfectly symmetric!
+//!
+//! **Algorithm:**
+//! 1. **ATR Calculation**: Compute Average True Range for both periods
+//!    - `train_atr`: ATR from input sequence (baseline volatility)
+//!    - `target_atr`: ATR from horizon period (volatility to classify)
+//! 2. **Logarithmic Ratio**: `log_ratio = ln(target_atr / train_atr)`
+//! 3. **Symmetric Classification**: Apply bandwidth_size-based thresholds to log_ratio
+//!
+//! ## Configuration Parameters
+//!
+//! ### `bandwidth_size` (default: 0.4)
+//! Controls the sensitivity of volatility regime detection. In volatility context,
+//! this parameter defines the logarithmic threshold boundaries for classification.
+//!
+//! **Threshold Calculation:**
+//! ```text
+//! half_bandwidth = bandwidth_size / 2.0
+//! extreme_bandwidth = bandwidth_size * extreme_multiplier
+//!
+//! VeryLow:  log_ratio <= -extreme_bandwidth  (e.g., <= -0.8)
+//! Low:      -extreme_bandwidth < log_ratio <= -half_bandwidth  (e.g., -0.8 to -0.2)
+//! Medium:   -half_bandwidth < log_ratio <= +half_bandwidth  (e.g., -0.2 to +0.2)
+//! High:     +half_bandwidth < log_ratio <= +extreme_bandwidth  (e.g., +0.2 to +0.8)
+//! VeryHigh: log_ratio > +extreme_bandwidth  (e.g., > +0.8)
+//! ```
+//!
+//! **Ratio Interpretation:**
+//! With bandwidth_size=0.4 and extreme_multiplier=2.0:
+//! - VeryLow: target_atr ≤ 0.45 × train_atr (55%+ decrease)
+//! - Low: 0.45 × train_atr < target_atr ≤ 0.82 × train_atr (18-55% decrease)
+//! - Medium: 0.82 × train_atr < target_atr ≤ 1.22 × train_atr (±18% change)
+//! - High: 1.22 × train_atr < target_atr ≤ 2.23 × train_atr (22-123% increase)
+//! - VeryHigh: target_atr > 2.23 × train_atr (123%+ increase)
+//!
+//! **Recommended Values:**
+//! - **Sensitive (0.2-0.3)**: Detects subtle volatility regime changes
+//! - **Standard (0.4-0.6)**: Balanced for most crypto volatility patterns
+//! - **Conservative (0.8-1.2)**: Only major volatility regime shifts
+//!
+//! ### `extreme_multiplier` (default: 2.0)
+//! Multiplier for extreme class boundaries (VeryLow/VeryHigh vs Low/High).
+//! Higher values = fewer extreme classifications, more moderate classifications.
+//!
+//! ## Usage Examples
+//!
+//! ```rust
+//! use crate::config::model::VolatilityHead;
+//!
+//! // Sensitive: Detects subtle volatility changes
+//! let sensitive_config = VolatilityHead {
+//!     enabled: true,
+//!     bandwidth_size: Some(0.3),
+//!     base_threshold: Some(0.15),
+//!     extreme_multiplier: Some(2.0),
+//! };
+//!
+//! // Standard: Balanced volatility regime detection
+//! let standard_config = VolatilityHead {
+//!     enabled: true,
+//!     bandwidth_size: Some(0.4),
+//!     base_threshold: Some(0.15),
+//!     extreme_multiplier: Some(2.0),
+//! };
+//!
+//! // Conservative: Only major volatility shifts
+//! let conservative_config = VolatilityHead {
+//!     enabled: true,
+//!     bandwidth_size: Some(0.8),
+//!     base_threshold: Some(0.15),
+//!     extreme_multiplier: Some(1.5),
+//! };
+//! ```
+//!
+//! ## Target Differentiation Strategy
+//!
+//! **Volatility vs Other Targets:**
+//! - **VOLATILITY**: "How volatile will it be?" (risk assessment)
+//! - **DIRECTION**: "How is trend momentum changing?" (acceleration/deceleration)
+//! - **PRICE_LEVELS**: "Where will price be?" (range/breakout analysis)
+//!
+//! Volatility provides risk assessment complementary to directional and price predictions,
+//! enabling comprehensive market regime analysis for position sizing and risk management.
 
 use crate::config::model::VolatilityHead;
 use crate::data::structures::MarketDataRow;
@@ -15,17 +109,45 @@ use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-// DEPRECATED: VolatilityConfig has been removed in favor of VolatilityHead in src/config/model.rs
-// All volatility configuration is now handled through model_config.output_heads.volatility
-
-/// Generate volatility targets for multiple horizons using sequence-to-horizon ATR
+/// Generate volatility targets for multiple horizons using logarithmic ratio approach
 ///
-/// FLOW:
-/// 1. Extract OHLCV data from DataFrame
-/// 2. For each sequence position:
-///    - Get INPUT sequence candles (for ATR baseline)
-///    - Get HORIZON sequence candles (from sequence end to target horizon)
-///    - Classify volatility using sequence-to-horizon comparison
+/// This is the main function that generates volatility regime classifications for
+/// cryptocurrency market data using ATR-based logarithmic ratio analysis.
+///
+/// ## Algorithm
+/// 1. **Extract OHLCV Data**: Get Open, High, Low, Close, Volume from DataFrame
+/// 2. **For Each Sequence Position**:
+///    - Calculate `train_atr`: ATR from input sequence (baseline volatility)
+///    - Calculate `target_atr`: ATR from horizon period (volatility to classify)
+///    - Compute `log_ratio = ln(target_atr / train_atr)` for symmetric classification
+///    - Apply bandwidth_size-based thresholds to classify volatility regime
+///
+/// ## Parameters
+/// - `df`: Market data DataFrame with OHLCV columns
+/// - `horizons`: Prediction horizons (e.g., ["1h", "4h", "1d"])
+/// - `model_config`: Optional VolatilityHead configuration
+/// - `sequence_indices`: Starting indices for each sequence
+/// - `sequence_length`: Length of input sequences for ATR calculation
+///
+/// ## Returns
+/// HashMap mapping horizon strings to vectors of volatility class integers:
+/// - 0: VeryLow (extreme volatility decrease)
+/// - 1: Low (moderate volatility decrease)
+/// - 2: Medium (similar volatility)
+/// - 3: High (moderate volatility increase)
+/// - 4: VeryHigh (extreme volatility increase)
+///
+/// ## Configuration
+/// Uses `bandwidth_size` from model_config to control regime sensitivity:
+/// - Default: 0.4 (balanced regime detection)
+/// - Lower values: More sensitive to volatility changes
+/// - Higher values: Less sensitive, only major regime shifts
+///
+/// ## Mathematical Foundation
+/// The logarithmic approach ensures symmetric treatment of volatility ratios:
+/// - 2x volatility increase: ln(2.0) = +0.693
+/// - 0.5x volatility decrease: ln(0.5) = -0.693 (perfectly symmetric)
+///   This prevents bias toward volatility increases in linear space.
 pub fn generate_volatility_targets(
     df: &DataFrame,
     horizons: &[String],
@@ -46,22 +168,29 @@ pub fn generate_volatility_targets(
 
             // Check boundaries - need both sequence and horizon data
             if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
-                // Get INPUT sequence candles (for ATR baseline)
+                // Get INPUT sequence candles (for adaptive thresholds)
                 let sequence_candles = &ohlcv_data[seq_idx..sequence_end_idx];
 
-                // Get HORIZON sequence candles (from sequence end to target horizon)
+                // Get HORIZON candles (from sequence end to target horizon)
                 let horizon_candles = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                // Only classify if we have enough horizon data for ATR calculation
-                if horizon_candles.len() >= 2 {
-                    let target_class = classify_volatility(
-                        sequence_candles,
-                        horizon_candles, // Now using horizon sequence, not single candle
-                        model_config,
-                    )?;
+                // Get ATR values for train (sequence) and target (horizon)
+                let train_atr = get_sequence_atr_baseline(sequence_candles)?;
+                let target_atr = get_sequence_atr_baseline(horizon_candles)?;
 
-                    horizon_targets[seq_position] = target_class;
-                }
+                // Calculate logarithmic ratio thresholds
+                let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(0.4);
+                let extreme_multiplier = model_config
+                    .and_then(|c| c.extreme_multiplier)
+                    .unwrap_or(2.0);
+
+                let log_thresholds =
+                    calculate_log_volatility_thresholds(bandwidth_size, extreme_multiplier)?;
+
+                // Classify using logarithmic ratio approach
+                let volatility_class =
+                    classify_volatility_log_ratio(train_atr, target_atr, &log_thresholds);
+                horizon_targets[seq_position] = volatility_class;
             }
         }
 
@@ -72,7 +201,7 @@ pub fn generate_volatility_targets(
     Ok(targets)
 }
 
-/// Get ATR baseline from sequence candles (same pattern as direction's market volatility)
+/// Calculate ATR baseline for a sequence of candles
 fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> {
     if sequence_candles.len() < 2 {
         return Ok(0.02); // Minimal fallback
@@ -104,61 +233,137 @@ fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> 
     Ok(true_ranges.iter().sum::<f64>() / true_ranges.len() as f64)
 }
 
-/// Classify volatility using sequence-to-horizon ATR calculation
+/// Logarithmic volatility thresholds for regime classification
 ///
-/// FLOW:
-/// 1. Get ATR baseline from INPUT sequence (training window)
-/// 2. Get ATR from sequence END to target horizon (prediction period)
-/// 3. Compare horizon ATR vs sequence baseline (same logic as direction)
-/// 4. Apply bandwidth sensitivity and classify into 5 classes
-fn classify_volatility(
-    sequence_candles: &[MarketDataRow],
-    horizon_candles: &[MarketDataRow], // From sequence end to target horizon
-    model_config: Option<&VolatilityHead>,
-) -> Result<i32> {
-    // Step 1: Get ATR baseline from INPUT sequence (like market volatility in direction)
-    let sequence_baseline = get_sequence_atr_baseline(sequence_candles)?;
-
-    // Step 2: Get ATR from sequence END to target horizon (the actual prediction period)
-    let horizon_atr = get_sequence_atr_baseline(horizon_candles)?;
-
-    // Step 3: Get config parameters with crypto-tuned defaults
-    let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(1.0);
-    let base_threshold = model_config.and_then(|c| c.base_threshold).unwrap_or(0.15); // 15% ATR change
-    let extreme_multiplier = model_config
-        .and_then(|c| c.extreme_multiplier)
-        .unwrap_or(1.8);
-
-    // FIXED: Use percentage-based ATR change (not ratio)
-    let atr_change = (horizon_atr - sequence_baseline) / sequence_baseline;
-
-    // Calculate adaptive thresholds
-    let adaptive_threshold = base_threshold / bandwidth_size;
-    let extreme_threshold = adaptive_threshold * extreme_multiplier;
-
-    // Debug logging with threshold values
-    log::debug!(
-        "🎯 Volatility Classification: atr_change={:.3}, adaptive_threshold={:.3}, extreme_threshold={:.3}, bandwidth_size={}",
-        atr_change, adaptive_threshold, extreme_threshold, bandwidth_size
-    );
-
-    // FIXED: 5-class system with proper percentage thresholds
-    let class = if atr_change <= -extreme_threshold {
-        0 // VeryLow: Much below sequence baseline
-    } else if atr_change <= -adaptive_threshold {
-        1 // Low: Below sequence baseline
-    } else if atr_change >= extreme_threshold {
-        4 // VeryHigh: Much above sequence baseline
-    } else if atr_change >= adaptive_threshold {
-        3 // High: Above sequence baseline
-    } else {
-        2 // Medium: Around sequence baseline (sideways equivalent)
-    };
-
-    Ok(class)
+/// This struct defines the boundary values used to classify volatility ratios
+/// in logarithmic space into the 5-class volatility regime system.
+/// All threshold values are in log space (natural logarithm).
+///
+/// ## Threshold Structure (Log Space)
+/// ```text
+/// VeryLow:  log_ratio <= very_low_max (most negative)
+/// Low:      very_low_max < log_ratio <= low_max (moderate negative)
+/// Medium:   low_max < log_ratio <= medium_max (around zero)
+/// High:     medium_max < log_ratio <= high_max (moderate positive)
+/// VeryHigh: log_ratio > high_max (most positive)
+/// ```
+///
+/// ## Field Meanings
+/// - `very_low_max`: Maximum log ratio for VeryLow class (extreme volatility decrease)
+/// - `low_max`: Maximum log ratio for Low class (moderate volatility decrease)
+/// - `medium_max`: Maximum log ratio for Medium class (similar volatility)
+/// - `high_max`: Maximum log ratio for High class (moderate volatility increase)
+/// - Values above `high_max` are classified as VeryHigh (extreme volatility increase)
+///
+/// ## Conversion to Ratio Space
+/// To convert log thresholds back to ratio space: `ratio = exp(log_threshold)`
+/// - Example: log_threshold = -0.693 → ratio = exp(-0.693) = 0.5 (50% of baseline)
+#[derive(Debug)]
+struct LogVolatilityThresholds {
+    very_low_max: f64, // VeryLow threshold (log space)
+    low_max: f64,      // Low threshold (log space)
+    medium_max: f64,   // Medium threshold (log space)
+    high_max: f64,     // High threshold (log space)
+                       // Above high_max = VeryHigh
 }
 
-/// Log volatility class distribution
+/// Calculate logarithmic ratio thresholds for volatility classification
+///
+/// This function computes the threshold boundaries used to classify volatility ratios
+/// into the 5-class volatility regime system (VeryLow, Low, Medium, High, VeryHigh).
+/// Uses logarithmic space for mathematically symmetric ratio classification.
+///
+/// ## Parameters
+/// - `bandwidth_size`: Controls threshold sensitivity in log space (default: 0.4)
+///   - Lower values = more sensitive (tighter thresholds)
+///   - Higher values = less sensitive (wider thresholds)
+/// - `extreme_multiplier`: Multiplier for extreme boundaries (default: 2.0)
+///   - Controls the ratio between moderate and extreme classifications
+///
+/// ## Logarithmic Threshold Logic
+/// ```text
+/// half_bandwidth = bandwidth_size / 2.0
+/// extreme_bandwidth = bandwidth_size * extreme_multiplier
+///
+/// Classification boundaries (in log space):
+/// VeryLow:  log_ratio <= -extreme_bandwidth
+/// Low:      -extreme_bandwidth < log_ratio <= -half_bandwidth
+/// Medium:   -half_bandwidth < log_ratio <= +half_bandwidth
+/// High:     +half_bandwidth < log_ratio <= +extreme_bandwidth
+/// VeryHigh: log_ratio > +extreme_bandwidth
+/// ```
+///
+/// ## Ratio Space Interpretation
+/// With bandwidth_size=0.4 and extreme_multiplier=2.0:
+/// - VeryLow: target_atr ≤ 0.45 × train_atr (55%+ volatility decrease)
+/// - Low: 0.45 × train_atr < target_atr ≤ 0.82 × train_atr (18-55% decrease)
+/// - Medium: 0.82 × train_atr < target_atr ≤ 1.22 × train_atr (±18% change)
+/// - High: 1.22 × train_atr < target_atr ≤ 2.23 × train_atr (22-123% increase)
+/// - VeryHigh: target_atr > 2.23 × train_atr (123%+ volatility increase)
+///
+/// ## Mathematical Symmetry
+/// The logarithmic approach ensures that multiplicative changes are treated symmetrically:
+/// - 2x increase: ln(2.0) = +0.693
+/// - 0.5x decrease: ln(0.5) = -0.693 (perfectly symmetric)
+fn calculate_log_volatility_thresholds(
+    bandwidth_size: f64,
+    extreme_multiplier: f64,
+) -> Result<LogVolatilityThresholds> {
+    let half_bandwidth = bandwidth_size / 2.0;
+    let extreme_bandwidth = bandwidth_size * extreme_multiplier;
+
+    let thresholds = LogVolatilityThresholds {
+        very_low_max: -extreme_bandwidth, // Most negative in log space
+        low_max: -half_bandwidth,         // Negative side of medium
+        medium_max: half_bandwidth,       // Positive side of medium
+        high_max: extreme_bandwidth,      // Most positive before very high
+    };
+
+    // Convert log thresholds back to ratio ranges for logging
+    let very_low_ratio = (-extreme_bandwidth).exp();
+    let low_ratio = (-half_bandwidth).exp();
+    let medium_high_ratio = half_bandwidth.exp();
+    let high_ratio = extreme_bandwidth.exp();
+
+    log::debug!(
+        "🎯 Log Volatility Thresholds: bandwidth_size={}, extreme_factor={}, log_thresholds=[{:.4}, {:.4}, {:.4}, {:.4}], ratio_ranges=[{:.3}, {:.3}, {:.3}, {:.3}]",
+        bandwidth_size, extreme_multiplier,
+        thresholds.very_low_max, thresholds.low_max, thresholds.medium_max, thresholds.high_max,
+        very_low_ratio, low_ratio, medium_high_ratio, high_ratio
+    );
+
+    Ok(thresholds)
+}
+
+/// Classify volatility using logarithmic ratio approach
+fn classify_volatility_log_ratio(
+    train_atr: f64,
+    target_atr: f64,
+    thresholds: &LogVolatilityThresholds,
+) -> i32 {
+    // Handle edge cases
+    if train_atr <= 0.0 || target_atr <= 0.0 {
+        return 2; // Default to medium for invalid ATR values
+    }
+
+    // Calculate log ratio (symmetric around 0)
+    let log_ratio = (target_atr / train_atr).ln();
+
+    // Classify using log space thresholds
+    if log_ratio <= thresholds.very_low_max {
+        0 // VeryLow
+    } else if log_ratio <= thresholds.low_max {
+        1 // Low
+    } else if log_ratio <= thresholds.medium_max {
+        2 // Medium (balanced around ln(1.0) = 0)
+    } else if log_ratio <= thresholds.high_max {
+        3 // High
+    } else {
+        4 // VeryHigh
+    }
+}
+
+/// Log volatility class distribution with logarithmic ratio analysis
 fn log_volatility_distribution(targets: &[i32], horizon: &str) {
     let class_names = ["VeryLow", "Low", "Medium", "High", "VeryHigh"];
     let mut class_counts = [0usize; 5];
@@ -173,7 +378,7 @@ fn log_volatility_distribution(targets: &[i32], horizon: &str) {
 
     if valid_targets == 0 {
         log::warn!(
-            "📊 Volatility Analysis [{}]: No valid targets found",
+            "📊 Log Ratio Volatility Analysis [{}]: No valid targets found",
             horizon
         );
         return;
@@ -189,6 +394,7 @@ fn log_volatility_distribution(targets: &[i32], horizon: &str) {
         })
         .collect();
 
+    // Calculate imbalance ratio
     let min_class_size = class_counts.iter().filter(|&&c| c > 0).min().unwrap_or(&0);
     let max_class_size = class_counts.iter().max().unwrap_or(&0);
     let imbalance_ratio = if *min_class_size > 0 {
@@ -198,183 +404,10 @@ fn log_volatility_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Volatility Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        "📊 Log Ratio Volatility Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
         horizon,
         valid_targets,
         imbalance_ratio,
         class_percentages.join(", ")
     );
-}
-
-/// Apply volatility classification using model config
-fn apply_volatility_classification(
-    prices: &[f64],
-    horizon_steps: usize,
-    adaptive_percentiles: &[f64; 4],
-) -> Result<Vec<i32>> {
-    let volatility_window = 24; // 24-hour rolling window for volatility calculation
-
-    if prices.len() < volatility_window + horizon_steps {
-        return Err(crate::utils::error::VangaError::DataError(format!(
-            "Insufficient data for volatility target generation: need {}, got {}",
-            volatility_window + horizon_steps,
-            prices.len()
-        )));
-    }
-
-    let mut targets = vec![-1; prices.len()];
-
-    // Calculate current volatility series for threshold determination
-    let current_volatility = calculate_realized_volatility(prices, volatility_window)?;
-
-    // Calculate regime boundaries from current volatility for consistent classification
-    let regime_boundaries =
-        calculate_percentile_boundaries(&current_volatility, adaptive_percentiles)?;
-
-    // For each valid position, calculate future volatility and classify
-    for (i, target) in targets
-        .iter_mut()
-        .enumerate()
-        .take(prices.len() - horizon_steps)
-        .skip(volatility_window)
-    {
-        // Calculate future volatility window starting at horizon
-        let future_start = i + horizon_steps;
-        let future_end = (future_start + volatility_window).min(prices.len());
-
-        if future_end - future_start < volatility_window / 2 {
-            // Skip if insufficient future data for reliable volatility calculation
-            continue;
-        }
-
-        // Calculate future volatility for this horizon
-        let future_prices = &prices[future_start..future_end];
-        let future_volatility = calculate_future_volatility(future_prices)?;
-
-        // Classify future volatility using current regime boundaries
-        let volatility_class =
-            classify_volatility_regime_legacy(future_volatility, &regime_boundaries);
-        *target = volatility_class;
-    }
-
-    Ok(targets)
-}
-
-/// Calculate volatility targets using legacy config (for backward compatibility)
-/// DEPRECATED: This function is kept for backward compatibility only
-#[allow(dead_code)]
-fn calculate_volatility_targets_legacy(
-    prices: &[f64],
-    horizon_steps: usize,
-    bandwidth_size: f64,
-) -> Result<Vec<i32>> {
-    // Use default percentiles for legacy path
-    let base_percentiles = [0.20, 0.40, 0.60, 0.80];
-    let sensitivity = 1.0 / bandwidth_size;
-    let center = 0.5;
-
-    // Apply bandwidth sensitivity to percentiles
-    let adaptive_percentiles: [f64; 4] = base_percentiles.map(|p| {
-        let distance = p - center;
-        center + (distance * sensitivity)
-    });
-
-    apply_volatility_classification(prices, horizon_steps, &adaptive_percentiles)
-}
-
-/// Calculate future volatility for horizon-specific prediction
-fn calculate_future_volatility(prices: &[f64]) -> Result<f64> {
-    if prices.len() < 2 {
-        return Ok(0.0); // Default for insufficient data
-    }
-
-    // Calculate returns for the future period
-    let mut returns = Vec::with_capacity(prices.len() - 1);
-    for i in 1..prices.len() {
-        if prices[i] > 0.0 && prices[i - 1] > 0.0 {
-            returns.push((prices[i] / prices[i - 1]).ln());
-        } else {
-            returns.push(0.0);
-        }
-    }
-
-    if returns.is_empty() {
-        return Ok(0.0);
-    }
-
-    // Calculate standard deviation of returns (volatility)
-    let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
-    let variance = returns
-        .iter()
-        .map(|&r| (r - mean_return).powi(2))
-        .sum::<f64>()
-        / returns.len() as f64;
-
-    Ok(variance.sqrt())
-}
-
-/// Classify volatility into regime using boundaries (legacy single-value version)
-fn classify_volatility_regime_legacy(volatility: f64, boundaries: &[f64; 4]) -> i32 {
-    if volatility <= boundaries[0] {
-        0 // VeryLow
-    } else if volatility <= boundaries[1] {
-        1 // Low
-    } else if volatility <= boundaries[2] {
-        2 // Medium
-    } else if volatility <= boundaries[3] {
-        3 // High
-    } else {
-        4 // VeryHigh
-    }
-}
-
-/// Volatility regime classes (5-class system)
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum VolatilityRegime {
-    VeryLow = 0,  // <20th percentile
-    Low = 1,      // 20th-40th percentile
-    Medium = 2,   // 40th-60th percentile
-    High = 3,     // 60th-80th percentile
-    VeryHigh = 4, // >80th percentile
-}
-
-/// Calculate realized volatility using rolling window
-fn calculate_realized_volatility(prices: &[f64], window: usize) -> Result<Vec<f64>> {
-    if prices.len() < window {
-        return Err(crate::utils::error::VangaError::DataError(format!(
-            "Insufficient data for volatility calculation: need {}, got {}",
-            window,
-            prices.len()
-        )));
-    }
-
-    let mut volatilities = Vec::new();
-
-    for i in window..prices.len() {
-        let window_prices = &prices[i - window..i];
-        let volatility = calculate_future_volatility(window_prices)?;
-        volatilities.push(volatility);
-    }
-
-    Ok(volatilities)
-}
-
-/// Calculate percentile boundaries for classification
-fn calculate_percentile_boundaries(values: &[f64], percentiles: &[f64; 4]) -> Result<[f64; 4]> {
-    if values.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Cannot calculate percentiles from empty data".to_string(),
-        ));
-    }
-
-    let mut sorted_values = values.to_vec();
-    sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut boundaries = [0.0; 4];
-    for (i, &percentile) in percentiles.iter().enumerate() {
-        let index = ((sorted_values.len() - 1) as f64 * percentile) as usize;
-        boundaries[i] = sorted_values[index.min(sorted_values.len() - 1)];
-    }
-
-    Ok(boundaries)
 }

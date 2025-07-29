@@ -1,0 +1,262 @@
+# VANGA Comprehensive Multi-Target Configuration
+# Complete example showcasing all three target types with detailed parameter explanations
+# This configuration demonstrates the complementary nature of price_levels, direction, and volatility targets
+# Usage: vanga train --symbol BTCUSDT --data data.csv --config configs/comprehensive_targets.toml
+
+[training]
+# Training configuration optimized for multi-target learning
+epochs = { Auto = { max_epochs = 1000 } }
+learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+validation_split = 0.2
+validation_gap = "1h"
+test_split = 0.1
+early_stopping = { patience = 50, min_delta = 0.001 }
+gradient_clip = 1.0
+
+# Multi-objective loss function for balanced target learning
+[model.loss_function]
+Composite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
+
+[model]
+# Architecture optimized for multi-target prediction
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+hidden_units = { Auto = { min_units = 128, max_units = 512 } }
+
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.2 }
+variational = true
+recurrent = true
+
+[model.attention]
+enabled = true
+mechanism = "SelfAttention"
+heads = 8
+head_dim = 64
+dropout_rate = 0.1
+
+# ============================================================================
+# COMPREHENSIVE TARGET CONFIGURATION
+# ============================================================================
+# This section demonstrates all three target types working together to provide
+# complete market analysis: WHERE (price_levels), HOW (direction), and RISK (volatility)
+
+[model.output_heads]
+
+# ============================================================================
+# PRICE LEVELS TARGET: "WHERE WILL PRICE BE?"
+# ============================================================================
+# VWAP-weighted range analysis for support/resistance breakout detection
+# Answers: "Will the future price break above/below the recent trading range?"
+
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0              # Breakout sensitivity multiplier
+                                  # 0.5: More sensitive (smaller breakout thresholds)
+                                  # 1.0: Standard behavior (balanced)
+                                  # 1.5: Less sensitive (larger breakout thresholds)
+distribution_type = "Categorical"
+
+# Target strategy for price level calculation
+target_strategy = { type = "standard_vwap" }  # Volume-weighted average price
+
+# Classification system:
+# 0: Strong Down    - target < sequence_min - bandwidth (Support breakdown)
+# 1: Moderate Down  - sequence_min - bandwidth ≤ target < sequence_min (Below range)
+# 2: Neutral        - sequence_min ≤ target < sequence_max (Within range)
+# 3: Moderate Up    - sequence_max ≤ target < sequence_max + bandwidth (Above range)
+# 4: Strong Up      - target ≥ sequence_max + bandwidth (Resistance breakout)
+
+# ============================================================================
+# DIRECTION TARGET: "HOW IS TREND MOMENTUM CHANGING?"
+# ============================================================================
+# Trend acceleration-based directional classification using slope analysis
+# Answers: "Is the trend accelerating, decelerating, or continuing?"
+
+[model.output_heads.direction]
+enabled = true
+slope_sensitivity = 0.4           # Controls slope acceleration thresholds for trend momentum detection
+                                  # Lower values = more sensitive (tighter thresholds)
+                                  # Higher values = less sensitive (wider thresholds)
+                                  # Recommended ranges:
+                                  #   Conservative: 0.2-0.3 (detects subtle momentum changes)
+                                  #   Standard: 0.4-0.6 (balanced sensitivity)
+                                  #   Aggressive: 0.8-1.2 (only major momentum shifts)
+base_threshold = 0.12             # Base momentum threshold (12% for crypto volatility)
+extreme_multiplier = 2.0          # Multiplier for extreme class boundaries (DUMP/PUMP vs DOWN/UP)
+
+# Classification system (trend acceleration):
+# 0: DUMP     - Strong deceleration/reversal (acceleration ≤ -extreme_sensitivity)
+# 1: DOWN     - Moderate deceleration (moderate negative acceleration)
+# 2: SIDEWAYS - Trend continuation (minimal acceleration change)
+# 3: UP       - Moderate acceleration (moderate positive acceleration)
+# 4: PUMP     - Strong acceleration (acceleration > +extreme_sensitivity)
+
+# ============================================================================
+# VOLATILITY TARGET: "HOW VOLATILE WILL IT BE?"
+# ============================================================================
+# Logarithmic ratio-based volatility regime classification using ATR analysis
+# Answers: "Will volatility increase, decrease, or remain similar?"
+
+[model.output_heads.volatility]
+enabled = true
+bandwidth_size = 0.4              # Controls logarithmic ratio thresholds for volatility regime detection
+                                  # Lower values = more sensitive to volatility changes
+                                  # Higher values = less sensitive, only major regime shifts
+                                  # Recommended ranges:
+                                  #   Sensitive: 0.2-0.3 (detects subtle volatility changes)
+                                  #   Standard: 0.4-0.6 (balanced regime detection)
+                                  #   Conservative: 0.8-1.2 (only major volatility shifts)
+base_threshold = 0.15             # Base volatility threshold (15% for crypto markets)
+extreme_multiplier = 2.0          # Multiplier for extreme volatility boundaries (VeryLow/VeryHigh)
+
+# Classification system (logarithmic ATR ratios):
+# 0: VeryLow  - Extreme volatility decrease (target_atr << train_atr)
+# 1: Low      - Moderate volatility decrease (target_atr < train_atr)
+# 2: Medium   - Similar volatility (target_atr ≈ train_atr)
+# 3: High     - Moderate volatility increase (target_atr > train_atr)
+# 4: VeryHigh - Extreme volatility increase (target_atr >> train_atr)
+
+# ============================================================================
+# TARGET INTEGRATION EXAMPLES
+# ============================================================================
+# How the three targets work together for comprehensive market analysis:
+#
+# BULLISH BREAKOUT SCENARIO:
+# - Price Levels: Strong Up (4) - Price breaks above resistance
+# - Direction: PUMP (4) - Strong trend acceleration
+# - Volatility: High (3) - Increased volatility confirms move
+#
+# BEARISH BREAKDOWN SCENARIO:
+# - Price Levels: Strong Down (0) - Price breaks below support
+# - Direction: DUMP (0) - Strong trend deceleration/reversal
+# - Volatility: High (3) - Increased volatility confirms move
+#
+# CONSOLIDATION SCENARIO:
+# - Price Levels: Neutral (2) - Price stays within range
+# - Direction: SIDEWAYS (2) - Trend continuation
+# - Volatility: Medium (2) - Stable volatility regime
+#
+# RISK ASSESSMENT:
+# - High volatility + Strong directional move = High conviction signal
+# - Low volatility + Moderate move = Lower conviction, range-bound
+# - Conflicting signals = Market uncertainty, proceed with caution
+
+# ============================================================================
+# FEATURE CONFIGURATION
+# ============================================================================
+# Comprehensive feature set to support all three target types
+
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 10, 20, 50, 200]
+ema_periods = [5, 10, 20, 50, 200]
+wma_periods = [10, 20]
+hull_periods = [9, 21]
+
+[features.technical_indicators.momentum]
+rsi_periods = [14, 21]
+stochastic = true
+williams_r = true
+cci_periods = [14, 20]
+momentum_periods = [10, 20]
+
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14, 21]  # Critical for volatility target
+keltner_channels = true
+donchian_channels = true
+
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [10, 20]
+mfi_periods = [14]
+volume_profile = true  # Important for price levels VWAP calculation
+
+[features.market_microstructure]
+enabled = true
+
+[features.market_microstructure.spread_analysis]
+bid_ask_spread = true
+effective_spread = true
+price_impact = true
+
+[features.market_microstructure.order_flow]
+volume_imbalance = true
+trade_intensity = true
+arrival_rate = true
+
+[features.volatility_features]
+enabled = true
+
+[features.volatility_features.realized_volatility]
+periods = ["1h", "4h", "24h"]
+estimators = ["Standard", "RangeBasedYangZhang"]
+
+[features.volatility_features.garch_features]
+enabled = true
+model_orders = [[1, 1], [1, 2], [2, 1]]
+conditional_volatility = true
+volatility_forecasts = true
+
+[features.custom_features]
+enabled = true
+include_all_numeric = true
+exclude_features = []
+
+[features.engineering]
+enabled = true
+
+[features.engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3, 5, 10]
+features_to_lag = ["close", "volume", "rsi_14", "atr_14"]
+
+[features.engineering.rolling_features]
+enabled = true
+window_sizes = [5, 10, 20]
+statistics = ["Mean", "Std", "Min", "Max"]
+
+[features.selection]
+enabled = true
+max_features = 150  # Increased for multi-target learning
+correlation_threshold = 0.95
+importance_threshold = 0.001
+methods = ["CorrelationFilter", "ImportanceBased"]
+keep_crypto_features = true
+
+[features.cross_asset]
+enabled = true
+min_symbols_required = 2
+required_symbols = ["BTCUSDT"]
+btc_dominance_enabled = true
+eth_btc_ratio_enabled = true
+
+[features.cross_asset.sentiment_analysis]
+enabled = true
+lookback_periods = 24
+price_velocity_weight = 0.3
+volume_spike_weight = 0.3
+volatility_weight = 0.4
+
+[features.cross_asset.correlation_analysis]
+enabled = true
+min_periods = 50
+correlation_window = 20
+
+[data]
+normalization = "Robust"
+sequence_overlap = 0.8
+
+[data.outlier_handling]
+enabled = true
+method = "ModifiedZScore"
+threshold = 3.5
+
+[optimization]
+enabled = false
+method = "None"
