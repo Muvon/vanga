@@ -272,7 +272,7 @@ impl RegimeCalibrator {
 
     /// Get calibration progress (percentage of regimes with sufficient samples)
     pub fn calibration_progress(&self) -> f64 {
-        let total_regimes = 6; // Number of MarketRegime variants
+        let total_regimes = std::mem::variant_count::<MarketRegime>(); // Programmatically derived count of MarketRegime variants
         let calibrated_regimes = self.regime_stats.len();
         (calibrated_regimes as f64 / total_regimes as f64) * 100.0
     }
