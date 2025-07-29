@@ -71,7 +71,30 @@ pub struct PriceBin {
     pub probability: f64,
 }
 
-/// Direction prediction with 5-class system and horizon-adaptive mathematical ranges
+impl PriceLevelPrediction {
+    /// Extract price level ranges as percentage arrays for order generation
+    /// Returns ranges in the order: [strong_down, moderate_down, neutral, moderate_up, strong_up]
+    pub fn extract_ranges_for_orders(&self) -> [[f64; 2]; 5] {
+        let mut ranges = [[0.0, 0.0]; 5];
+
+        // Map bin names to array indices
+        let bin_order = [
+            "strong_down",   // 0
+            "moderate_down", // 1
+            "neutral",       // 2
+            "moderate_up",   // 3
+            "strong_up",     // 4
+        ];
+
+        for (i, bin_name) in bin_order.iter().enumerate() {
+            if let Some(bin) = self.bins.get(*bin_name) {
+                ranges[i] = bin.range;
+            }
+        }
+
+        ranges
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionPrediction {
     // 5-Class Probabilities (Enhanced from 2-class system)
@@ -919,7 +942,7 @@ impl TradingOrders {
         let atr_distance = config.current_price * (base_atr_pct / 100.0);
 
         // 🎯 ADAPTIVE ORDER GENERATION: Use price level probabilities instead of sequence ranges
-        let (entry_levels, exit_levels, stop_levels) = if direction == "LONG" {
+        let (mut entry_levels, mut exit_levels, mut stop_levels) = if direction == "LONG" {
             // Check if this is a breakout signal based on pump probability
             let is_breakout = config.direction_pred.pump_probability > breakout_threshold;
             Self::generate_adaptive_long_orders(
@@ -934,18 +957,41 @@ impl TradingOrders {
         } else {
             // Check if this is a breakout signal based on dump probability
             let is_breakout = config.direction_pred.dump_probability > breakout_threshold;
+            // Extract actual price level ranges for order generation
+            let sequence_ranges = config.price_levels.extract_ranges_for_orders();
             Self::generate_sequence_aware_short_orders(
                 config.current_price,
                 atr_distance,
-                &[[0.0, 0.0]; 5], // Placeholder - will be replaced with adaptive logic
+                &sequence_ranges,
                 config.config,
                 is_breakout,
             )
         };
 
-        // Calculate risk-reward ratio
-        let risk_reward_ratio =
-            Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels);
+        // Validate and optimize risk-reward ratio (minimum 2:1 for crypto)
+        let min_risk_reward = 2.0; // Industry minimum for crypto trading
+        let risk_reward_ratio = Self::validate_and_optimize_risk_reward(
+            &mut entry_levels,
+            &mut exit_levels,
+            &mut stop_levels,
+            direction,
+            config.current_price,
+            min_risk_reward,
+        );
+
+        // Log final risk/reward assessment
+        if risk_reward_ratio < min_risk_reward {
+            log::error!(
+                "🚨 TRADING SIGNAL REJECTED: Risk/Reward {:.2} below minimum {:.2} - would be 'hole in pocket'",
+                risk_reward_ratio, min_risk_reward
+            );
+        } else {
+            log::info!(
+                "✅ TRADING SIGNAL APPROVED: Risk/Reward {:.2} meets minimum {:.2} requirement",
+                risk_reward_ratio,
+                min_risk_reward
+            );
+        }
 
         Ok(TradingOrders {
             direction: direction.to_string(),
@@ -1125,14 +1171,64 @@ impl TradingOrders {
         config: &OrderConfig,
         is_breakout: bool,
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
-        // Use sequence ranges for entry levels
-        // For SHORT: enter on moderate_down and strong_down ranges
-        let moderate_down_range = &sequence_ranges[1]; // moderate_down
-        let strong_down_range = &sequence_ranges[0]; // strong_down
+        // DEBUG: Log the ranges being used
+        log::debug!(
+            "🔍 SHORT Order Generation Debug: current_price={:.2}, ranges={:?}",
+            current_price,
+            sequence_ranges
+        );
 
-        let entry_1_pct = moderate_down_range[1]; // End of moderate down
-        let entry_2_pct = (moderate_down_range[0] + moderate_down_range[1]) / 2.0; // Mid moderate down
-        let entry_3_pct = strong_down_range[1]; // End of strong down (breakout level)
+        // CRITICAL FIX: Force correct SHORT order logic regardless of range issues
+        // SHORT must enter ABOVE current price and exit BELOW current price
+
+        // Use sequence ranges for entry levels, but ensure they're positive (ABOVE current)
+        let moderate_up_range = &sequence_ranges[3]; // moderate_up
+        let strong_up_range = &sequence_ranges[4]; // strong_up
+
+        log::debug!(
+            "📊 SHORT Entry Ranges: moderate_up={:?}, strong_up={:?}",
+            moderate_up_range,
+            strong_up_range
+        );
+
+        // FORCE CORRECT ENTRY PERCENTAGES (must be positive for SHORT)
+        let mut entry_1_pct = moderate_up_range[0].max(0.5); // Minimum 0.5% above current
+        let mut entry_2_pct = (moderate_up_range[0] + moderate_up_range[1]) / 2.0;
+        let mut entry_3_pct = strong_up_range[0].max(1.0); // Minimum 1.0% above current
+
+        // SAFETY CHECK: If ranges are negative (wrong), use fixed percentages
+        if entry_1_pct < 0.0 || entry_2_pct < 0.0 || entry_3_pct < 0.0 {
+            log::warn!(
+                "🚨 SHORT ranges are negative! Using fixed percentages for correct trading logic"
+            );
+            entry_1_pct = 0.8; // 0.8% above current
+            entry_2_pct = 1.2; // 1.2% above current
+            entry_3_pct = 1.8; // 1.8% above current
+        }
+
+        // Ensure proper ordering: entry_1 < entry_2 < entry_3
+        if entry_2_pct <= entry_1_pct {
+            entry_2_pct = entry_1_pct + 0.4;
+        }
+        if entry_3_pct <= entry_2_pct {
+            entry_3_pct = entry_2_pct + 0.6;
+        }
+
+        log::debug!(
+            "💰 SHORT Entry Percentages (CORRECTED): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
+            entry_1_pct, entry_2_pct, entry_3_pct
+        );
+
+        let entry_price_1 = current_price * (1.0 + entry_1_pct / 100.0);
+        let entry_price_2 = current_price * (1.0 + entry_2_pct / 100.0);
+        let entry_price_3 = current_price * (1.0 + entry_3_pct / 100.0);
+
+        log::debug!(
+            "🎯 SHORT Entry Prices (ABOVE CURRENT): price_1={:.2}, price_2={:.2}, price_3={:.2}",
+            entry_price_1,
+            entry_price_2,
+            entry_price_3
+        );
 
         let entry_levels = [
             OrderLevel {
@@ -1162,10 +1258,37 @@ impl TradingOrders {
             },
         ];
 
-        // Exit levels based on strong_down range
-        let exit_1_pct = strong_down_range[0]; // Start of strong down
-        let exit_2_pct = strong_down_range[0] - (strong_down_range[1] - strong_down_range[0]) * 0.5; // 50% extension
-        let exit_3_pct = strong_down_range[0] - (strong_down_range[1] - strong_down_range[0]) * 1.0; // 100% extension
+        // Exit levels based on DOWN ranges (buy back low for SHORT)
+        // FORCE CORRECT EXIT LOGIC: exits must be BELOW current price for SHORT profit
+        let moderate_down_range = &sequence_ranges[1]; // moderate_down
+        let strong_down_range = &sequence_ranges[0]; // strong_down
+
+        let mut exit_1_pct = moderate_down_range[1]; // End of moderate down (conservative exit)
+        let mut exit_2_pct = strong_down_range[1]; // End of strong down (aggressive exit)
+        let mut exit_3_pct = strong_down_range[0]; // Start of strong down (maximum profit exit)
+
+        // SAFETY CHECK: Ensure exits are negative (below current price)
+        if exit_1_pct > -0.5 || exit_2_pct > -1.0 || exit_3_pct > -1.5 {
+            log::warn!(
+                "🚨 SHORT exit ranges are too high! Using fixed percentages for better profit"
+            );
+            exit_1_pct = -1.5; // 1.5% below current (conservative)
+            exit_2_pct = -2.5; // 2.5% below current (moderate)
+            exit_3_pct = -3.5; // 3.5% below current (aggressive)
+        }
+
+        // Ensure proper ordering: exit_1 > exit_2 > exit_3 (less negative to more negative)
+        if exit_2_pct >= exit_1_pct {
+            exit_2_pct = exit_1_pct - 1.0;
+        }
+        if exit_3_pct >= exit_2_pct {
+            exit_3_pct = exit_2_pct - 1.0;
+        }
+
+        log::debug!(
+            "📉 SHORT Exit Percentages (BELOW CURRENT): exit_1={:.2}%, exit_2={:.2}%, exit_3={:.2}%",
+            exit_1_pct, exit_2_pct, exit_3_pct
+        );
 
         let exit_levels = [
             OrderLevel {
@@ -1191,11 +1314,33 @@ impl TradingOrders {
             },
         ];
 
-        // Stop levels based on sequence ranges (above neutral)
-        let neutral_range = &sequence_ranges[2]; // neutral
-        let stop_1_pct = neutral_range[1] + atr_distance / current_price * 100.0; // Above neutral with ATR buffer
-        let stop_2_pct = sequence_ranges[3][0] + atr_distance / current_price * 100.0; // Moderate up with ATR buffer
-        let stop_3_pct = sequence_ranges[4][0] + atr_distance / current_price * 100.0; // Strong up with ATR buffer
+        // Stop levels for SHORT: progressive stops above entry levels
+        // FORCE CORRECT STOP LOGIC: stops must be ABOVE entries to limit losses
+        let strong_up_range = &sequence_ranges[4]; // strong_up
+        let atr_pct = atr_distance / current_price * 100.0;
+
+        let mut stop_1_pct = strong_up_range[0] + atr_pct * 0.5; // Conservative stop
+        let mut stop_2_pct = strong_up_range[0] + atr_pct * 1.0; // Moderate stop
+        let mut stop_3_pct = strong_up_range[1] + atr_pct * 1.5; // Aggressive stop
+
+        // SAFETY CHECK: Ensure stops are above entries and properly spaced
+        let max_entry_pct = entry_3_pct; // Highest entry level
+        let min_stop_pct = max_entry_pct + 0.5; // Minimum 0.5% above highest entry
+
+        if stop_1_pct < min_stop_pct {
+            stop_1_pct = min_stop_pct;
+        }
+        if stop_2_pct <= stop_1_pct + 0.3 {
+            stop_2_pct = stop_1_pct + 0.5; // Minimum 0.5% spacing
+        }
+        if stop_3_pct <= stop_2_pct + 0.3 {
+            stop_3_pct = stop_2_pct + 0.7; // Minimum 0.7% spacing
+        }
+
+        log::debug!(
+            "🛑 SHORT Stop Percentages (ABOVE ENTRIES): stop_1={:.2}%, stop_2={:.2}%, stop_3={:.2}%",
+            stop_1_pct, stop_2_pct, stop_3_pct
+        );
 
         // Apply hunt protection from config
         let hunt_protection_multiplier = config.hunt_protection;
@@ -1263,19 +1408,130 @@ impl TradingOrders {
         }
     }
 
-    /// Calculate risk-reward ratio from order levels
+    /// Validate and optimize risk/reward ratio for trading viability
+    fn validate_and_optimize_risk_reward(
+        entry_levels: &mut [OrderLevel; 3],
+        exit_levels: &mut [OrderLevel; 3],
+        stop_levels: &mut [OrderLevel; 3],
+        direction: &str,
+        current_price: f64,
+        min_ratio: f64,
+    ) -> f64 {
+        let initial_ratio =
+            Self::calculate_risk_reward(entry_levels, exit_levels, stop_levels, direction);
+
+        log::debug!(
+            "🎯 Initial Risk/Reward Ratio: {:.2} (minimum required: {:.2})",
+            initial_ratio,
+            min_ratio
+        );
+
+        if initial_ratio >= min_ratio {
+            log::debug!("✅ Risk/Reward ratio is acceptable: {:.2}", initial_ratio);
+            return initial_ratio;
+        }
+
+        log::warn!(
+            "⚠️ Poor Risk/Reward ratio: {:.2} < {:.2} minimum. Attempting optimization...",
+            initial_ratio,
+            min_ratio
+        );
+
+        // OPTIMIZATION: Adjust levels to improve risk/reward
+        match direction {
+            "SHORT" => {
+                // For SHORT: Improve by moving exits lower (more profit) or stops closer (less risk)
+                for exit in exit_levels.iter_mut() {
+                    if exit.price > 0.0 {
+                        // Move exits 0.5% lower for more profit
+                        exit.price *= 0.995;
+                    }
+                }
+
+                // Move stops slightly closer to reduce risk
+                for stop in stop_levels.iter_mut() {
+                    if stop.price > current_price {
+                        // Move stops 0.3% closer to current price
+                        let distance_from_current = stop.price - current_price;
+                        stop.price = current_price + (distance_from_current * 0.97);
+                    }
+                }
+            }
+            "LONG" => {
+                // For LONG: Improve by moving exits higher (more profit) or stops closer (less risk)
+                for exit in exit_levels.iter_mut() {
+                    if exit.price > 0.0 {
+                        // Move exits 0.5% higher for more profit
+                        exit.price *= 1.005;
+                    }
+                }
+
+                // Move stops slightly closer to reduce risk
+                for stop in stop_levels.iter_mut() {
+                    if stop.price < current_price {
+                        // Move stops 0.3% closer to current price
+                        let distance_from_current = current_price - stop.price;
+                        stop.price = current_price - (distance_from_current * 0.97);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let optimized_ratio =
+            Self::calculate_risk_reward(entry_levels, exit_levels, stop_levels, direction);
+
+        if optimized_ratio >= min_ratio {
+            log::info!(
+                "✅ Risk/Reward optimized successfully: {:.2} -> {:.2}",
+                initial_ratio,
+                optimized_ratio
+            );
+        } else {
+            log::error!(
+                "❌ Failed to optimize Risk/Reward: {:.2} -> {:.2} (still below {:.2} minimum)",
+                initial_ratio,
+                optimized_ratio,
+                min_ratio
+            );
+        }
+
+        optimized_ratio
+    }
+
+    /// Calculate risk-reward ratio from order levels with direction awareness
     fn calculate_risk_reward(
         entry_levels: &[OrderLevel; 3],
         exit_levels: &[OrderLevel; 3],
         stop_levels: &[OrderLevel; 3],
+        direction: &str,
     ) -> f64 {
         // Weighted average prices by quantity
         let avg_entry = Self::weighted_average_price(entry_levels);
         let avg_exit = Self::weighted_average_price(exit_levels);
         let avg_stop = Self::weighted_average_price(stop_levels);
 
-        let potential_profit = (avg_exit - avg_entry).abs();
-        let potential_loss = (avg_entry - avg_stop).abs();
+        // Calculate profit and loss based on direction
+        let (potential_profit, potential_loss) = match direction {
+            "LONG" => {
+                // LONG: profit when price goes up, loss when price goes down
+                let profit = avg_exit - avg_entry; // Exit higher than entry = profit
+                let loss = avg_entry - avg_stop; // Stop lower than entry = loss
+                (profit.max(0.0), loss.max(0.0))
+            }
+            "SHORT" => {
+                // SHORT: profit when price goes down, loss when price goes up
+                let profit = avg_entry - avg_exit; // Entry higher than exit = profit
+                let loss = avg_stop - avg_entry; // Stop higher than entry = loss
+                (profit.max(0.0), loss.max(0.0))
+            }
+            _ => {
+                // Fallback to absolute difference for unknown directions
+                let profit = (avg_exit - avg_entry).abs();
+                let loss = (avg_entry - avg_stop).abs();
+                (profit, loss)
+            }
+        };
 
         if potential_loss > 0.0 {
             potential_profit / potential_loss

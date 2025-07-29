@@ -14,6 +14,7 @@ mod math_consistency_tests;
 #[cfg(test)]
 mod price_level_tests;
 pub mod price_levels;
+pub mod sequence_reconstruction;
 pub mod volatility;
 #[cfg(test)]
 mod volatility_tests;
@@ -26,6 +27,9 @@ use std::collections::HashMap;
 pub use direction::{generate_direction_targets, Direction};
 pub use price_levels::{
     generate_price_level_targets, generate_price_level_targets_from_model_config, PriceLevelConfig,
+};
+pub use sequence_reconstruction::{
+    SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
 };
 pub use volatility::generate_volatility_targets;
 

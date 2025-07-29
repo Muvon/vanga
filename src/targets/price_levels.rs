@@ -48,6 +48,7 @@
 //! - **Training**: Provides "where" while others provide "how" and "risk"
 
 use crate::data::structures::MarketDataRow;
+use crate::targets::sequence_reconstruction::{SequenceAnalyzer, SequenceReconstructionConfig};
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_ohlcv_data;
 use crate::utils::parser::parse_horizon_to_steps;
@@ -359,67 +360,48 @@ pub fn classify_price_level(
         return Ok(2); // Default to neutral class
     }
 
-    // Step 1: Calculate VWAP-weighted prices for sequence (volume-aware min/max)
-    let mut sequence_vwap_prices = Vec::new();
-    for candle in sequence_ohlcv {
-        let vwap_price = if candle.volume > 0.0 {
-            // Use volume-weighted OHLC4 for this candle
-            (candle.open + candle.high + candle.low + candle.close) / 4.0
-        } else {
-            // Fallback to simple OHLC4 if no volume
-            (candle.open + candle.high + candle.low + candle.close) / 4.0
-        };
-        sequence_vwap_prices.push(vwap_price);
-    }
-
-    // Step 2: Calculate percentile boundaries from sequence distribution
-    let percentiles = config.percentiles.unwrap_or([0.1, 0.9]); // Default 10th/90th percentiles
-
-    let mut sorted_prices = sequence_vwap_prices.clone();
-    sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let n = sorted_prices.len();
-    let lower_idx = ((n as f64 * percentiles[0]) as usize).min(n - 1);
-    let upper_idx = ((n as f64 * percentiles[1]) as usize).min(n - 1);
-
-    let sequence_min = sorted_prices[lower_idx];
-    let sequence_max = sorted_prices[upper_idx];
-
-    // Step 3: Calculate bandwidth (same as original approach)
-    let base_bandwidth = sequence_max - sequence_min;
+    // Use centralized sequence reconstruction logic
+    let percentiles = config.percentiles.unwrap_or([0.1, 0.9]);
     let bandwidth_size = config.bandwidth_size.unwrap_or(1.0);
-    let bandwidth = base_bandwidth * bandwidth_size;
 
-    // Step 4: Get target price from horizon VWAP (instead of single future price)
+    let reconstruction_config = SequenceReconstructionConfig {
+        percentiles,
+        bandwidth_size,
+    };
+    let analyzer = SequenceAnalyzer::new(reconstruction_config);
+
+    // Calculate boundaries using centralized logic
+    let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
+
+    // Get target price from horizon VWAP (instead of single future price)
     let target_price = get_horizon_vwap(horizon_ohlcv)?;
 
     // Handle edge case: flat sequence (bandwidth = 0)
-    if bandwidth == 0.0 {
-        return Ok(if target_price >= sequence_min { 3 } else { 2 });
+    if boundaries.bandwidth == 0.0 {
+        return Ok(if target_price >= boundaries.sequence_min {
+            3
+        } else {
+            2
+        });
     }
 
     // Debug logging
     log::debug!(
-        "🔍 Percentile-Based Classification: percentiles=[{:.1}%, {:.1}%], seq_range=[{:.6}, {:.6}], target={:.6}, bandwidth={:.6}",
-        percentiles[0] * 100.0, percentiles[1] * 100.0, sequence_min, sequence_max, target_price, bandwidth
+        "🔍 Centralized Classification: percentiles=[{:.1}%, {:.1}%], seq_range=[{:.6}, {:.6}], target={:.6}, bandwidth={:.6}",
+        percentiles[0] * 100.0,
+        percentiles[1] * 100.0,
+        boundaries.sequence_min,
+        boundaries.sequence_max,
+        target_price,
+        boundaries.bandwidth
     );
 
-    // Step 5: 5-class classification using percentile boundaries
-    let class = if target_price < sequence_min - bandwidth {
-        0 // Strong Down: Below lower percentile with bandwidth
-    } else if target_price < sequence_min {
-        1 // Moderate Down: Below lower percentile
-    } else if target_price < sequence_max {
-        2 // Neutral: Within percentile range
-    } else if target_price < sequence_max + bandwidth {
-        3 // Moderate Up: Above upper percentile
-    } else {
-        4 // Strong Up: Above upper percentile with bandwidth
-    };
+    // Use centralized classification logic
+    let class = boundaries.classify_price(target_price);
 
     log::debug!(
-        "🎯 Percentile Classification: target={:.6} → class={} (percentile_range: [{:.6}, {:.6}], bandwidth: {:.6})",
-        target_price, class, sequence_min, sequence_max, bandwidth
+        "🎯 Centralized Classification: target={:.6} → class={} (percentile_range: [{:.6}, {:.6}], bandwidth: {:.6})",
+        target_price, class, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
     );
 
     Ok(class)
