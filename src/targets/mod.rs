@@ -6,6 +6,8 @@
 //! - Volatility: Low/medium/high volatility regime classification
 
 pub mod direction;
+#[cfg(test)]
+mod direction_tests;
 pub mod imbalance_mitigation;
 pub mod price_levels;
 pub mod volatility;
@@ -19,7 +21,7 @@ pub use direction::{generate_direction_targets, Direction};
 pub use price_levels::{
     generate_price_level_targets, generate_price_level_targets_from_model_config, PriceLevelConfig,
 };
-pub use volatility::{generate_volatility_targets, VolatilityRegime};
+pub use volatility::generate_volatility_targets;
 
 /// Comprehensive target configuration
 #[derive(Debug, Clone)]

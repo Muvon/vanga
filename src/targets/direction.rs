@@ -1,18 +1,93 @@
 //! Direction target generation for cryptocurrency price movement prediction
 //!
-//! This module implements momentum-based directional classification using sequence-to-horizon analysis:
-//! - 0: DUMP (extreme downward momentum - much below sequence baseline)
-//! - 1: DOWN (moderate downward momentum - below sequence baseline)
-//! - 2: SIDEWAYS (minimal momentum - around sequence baseline)
-//! - 3: UP (moderate upward momentum - above sequence baseline)
-//! - 4: PUMP (extreme upward momentum - much above sequence baseline)
+//! This module implements trend acceleration-based directional classification:
+//! - 0: DUMP (strong trend deceleration/reversal - negative acceleration)
+//! - 1: DOWN (moderate trend deceleration - slight negative acceleration)
+//! - 2: SIDEWAYS (trend continuation - minimal acceleration change)
+//! - 3: UP (moderate trend acceleration - slight positive acceleration)
+//! - 4: PUMP (strong trend acceleration - positive acceleration)
+//!
+//! ## Mathematical Approach
+//!
+//! **Trend Acceleration Detection:**
+//! 1. Calculate linear regression slope for sequence prices (recent trend)
+//! 2. Calculate linear regression slope for horizon prices (future trend)
+//! 3. Compute trend acceleration: `horizon_slope - sequence_slope`
+//! 4. Classify based on acceleration magnitude using slope_sensitivity thresholds
 //!
 //! **Key Features:**
-//! - Uses (max-min)/avg momentum calculation from input sequence as baseline
-//! - Compares horizon period momentum against sequence baseline
-//! - Adaptive bandwidth_size for symbol-specific sensitivity
-//! - Symbol-agnostic through percentage-based calculations
-//! - Same architecture pattern as volatility.rs for consistency
+//! - Uses linear regression slopes to measure trend strength
+//! - Compares sequence trend vs horizon trend (acceleration/deceleration)
+//! - Uses absolute slope differences (no price normalization needed)
+//! - Detects trend momentum changes rather than just price changes
+//! - Complementary to price_levels (range) and volatility (risk) targets
+//!
+//! ## Configuration Parameters
+//!
+//! ### `slope_sensitivity` (default: 0.4)
+//! Controls the sensitivity of slope acceleration thresholds for trend momentum detection.
+//! Higher values = less sensitive (wider thresholds), lower values = more sensitive (tighter thresholds).
+//!
+//! **Threshold Calculation:**
+//! ```text
+//! half_sensitivity = slope_sensitivity / 2.0
+//! extreme_sensitivity = slope_sensitivity * extreme_multiplier
+//!
+//! DUMP:     acceleration <= -extreme_sensitivity  (e.g., <= -8.0)
+//! DOWN:     -extreme_sensitivity < acceleration <= -half_sensitivity  (e.g., -8.0 to -2.0)
+//! SIDEWAYS: -half_sensitivity < acceleration <= half_sensitivity  (e.g., -2.0 to +2.0)
+//! UP:       half_sensitivity < acceleration <= extreme_sensitivity  (e.g., +2.0 to +8.0)
+//! PUMP:     acceleration > extreme_sensitivity  (e.g., > +8.0)
+//! ```
+//!
+//! **Recommended Values:**
+//! - **Conservative (0.2-0.3)**: More sensitive, detects subtle momentum changes
+//! - **Standard (0.4-0.6)**: Balanced sensitivity for most crypto pairs
+//! - **Aggressive (0.8-1.2)**: Less sensitive, only major momentum shifts
+//!
+//! ### `extreme_multiplier` (default: 2.0)
+//! Multiplier for extreme class boundaries (DUMP/PUMP vs DOWN/UP).
+//! Higher values = fewer extreme classifications, more moderate classifications.
+//!
+//! ## Usage Examples
+//!
+//! ```rust
+//! use crate::config::model::DirectionHead;
+//!
+//! // Conservative: Detects subtle momentum changes
+//! let conservative_config = DirectionHead {
+//!     enabled: true,
+//!     slope_sensitivity: Some(0.3),
+//!     base_threshold: Some(0.12),
+//!     extreme_multiplier: Some(2.0),
+//! };
+//!
+//! // Standard: Balanced for most crypto trading
+//! let standard_config = DirectionHead {
+//!     enabled: true,
+//!     slope_sensitivity: Some(0.4),
+//!     base_threshold: Some(0.12),
+//!     extreme_multiplier: Some(2.0),
+//! };
+//!
+//! // Aggressive: Only major momentum shifts
+//! let aggressive_config = DirectionHead {
+//!     enabled: true,
+//!     slope_sensitivity: Some(0.8),
+//!     base_threshold: Some(0.12),
+//!     extreme_multiplier: Some(1.5),
+//! };
+//! ```
+//!
+//! ## Target Differentiation Strategy
+//!
+//! **Direction vs Other Targets:**
+//! - **DIRECTION**: "How is trend momentum changing?" (acceleration/deceleration)
+//! - **PRICE_LEVELS**: "Where will price be?" (range/breakout analysis)
+//! - **VOLATILITY**: "How volatile will it be?" (risk assessment)
+//!
+//! Each target serves a different purpose in the multi-target prediction system,
+//! providing complementary information for comprehensive market analysis.
 
 use crate::config::model::DirectionHead;
 use crate::utils::error::Result;
@@ -31,14 +106,15 @@ pub enum Direction {
     Pump = 4,     // Extreme up movement
 }
 
-/// Generate direction targets for multiple horizons using sequence-to-horizon momentum analysis
+/// Generate direction targets for multiple horizons using trend acceleration analysis
 ///
 /// FLOW:
 /// 1. Extract close prices from DataFrame
 /// 2. For each sequence position:
-///    - Get INPUT sequence prices (for momentum baseline)
-///    - Get HORIZON sequence prices (from sequence end to target horizon)
-///    - Classify direction using sequence-to-horizon comparison
+///    - Get INPUT sequence prices (for trend baseline calculation)
+///    - Get HORIZON sequence prices (for trend comparison)
+///    - Calculate linear regression slopes for both periods
+///    - Classify based on trend acceleration (slope change)
 pub fn generate_direction_targets(
     df: &DataFrame,
     horizons: &[String],
@@ -85,146 +161,228 @@ pub fn generate_direction_targets(
     Ok(targets)
 }
 
-/// Classify direction using adaptive percentile-based approach
+/// Classify direction using trend acceleration approach
 ///
-/// FLOW:
-/// 1. Calculate price changes within the input sequence
-/// 2. Build percentile distribution from sequence price changes
-/// 3. Use bandwidth_size to define middle class (SIDEWAYS) boundaries
-/// 4. Apply extreme_multiplier for DUMP/PUMP classification
-/// 5. Compare horizon price change against adaptive percentile thresholds
-fn classify_direction(
-    sequence_prices: &[f64], // Input sequence for adaptive baseline
+/// This is the main classification function that determines the directional class
+/// based on the acceleration/deceleration of price trends between sequence and horizon periods.
+///
+/// ## Algorithm
+/// 1. **Trend Analysis**: Calculate linear regression slopes for both periods
+///    - `sequence_slope`: Trend strength in the input sequence (recent history)
+///    - `horizon_slope`: Trend strength in the prediction horizon (future)
+/// 2. **Acceleration Calculation**: `trend_acceleration = horizon_slope - sequence_slope`
+/// 3. **Classification**: Compare acceleration against slope_sensitivity-based thresholds
+///
+/// ## Parameters
+/// - `sequence_prices`: Input sequence prices for establishing trend baseline
+/// - `horizon_prices`: Prices from sequence end to target horizon
+/// - `model_config`: Optional DirectionHead configuration (uses defaults if None)
+///
+/// ## Returns
+/// Direction class as i32:
+/// - 0: DUMP (strong deceleration/reversal)
+/// - 1: DOWN (moderate deceleration)
+/// - 2: SIDEWAYS (trend continuation)
+/// - 3: UP (moderate acceleration)
+/// - 4: PUMP (strong acceleration)
+///
+/// ## Configuration
+/// Uses `slope_sensitivity` from model_config to determine threshold sensitivity:
+/// - Default: 0.4 (balanced sensitivity)
+/// - Lower values: More sensitive to momentum changes
+/// - Higher values: Less sensitive, only major shifts
+///
+/// ## Example
+/// ```rust
+/// let sequence = vec![100.0, 101.0, 102.0, 103.0, 104.0]; // +1.0/period trend
+/// let horizon = vec![104.0, 106.0, 108.0, 110.0, 112.0];  // +2.0/period trend
+/// // Acceleration = 2.0 - 1.0 = 1.0 (positive acceleration)
+/// // With default config: likely UP or PUMP class
+/// ```
+pub fn classify_direction(
+    sequence_prices: &[f64], // Input sequence for trend baseline
     horizon_prices: &[f64],  // From sequence end to target horizon
     model_config: Option<&DirectionHead>,
 ) -> Result<i32> {
-    if sequence_prices.len() < 2 || horizon_prices.is_empty() {
+    if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
         return Ok(2); // Default to SIDEWAYS for insufficient data
     }
 
-    // Step 1: Calculate actual price change from sequence to horizon
-    let sequence_avg = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
-    let horizon_avg = horizon_prices.iter().sum::<f64>() / horizon_prices.len() as f64;
-
-    if sequence_avg <= 0.0 {
-        return Ok(2); // Default to SIDEWAYS for invalid data
-    }
-
-    let actual_price_change = horizon_avg - sequence_avg;
-
-    // Step 2: Build adaptive baseline from sequence price changes
-    let sequence_changes: Vec<f64> = sequence_prices.windows(2).map(|w| w[1] - w[0]).collect();
-
-    if sequence_changes.is_empty() {
-        return Ok(2); // Default to SIDEWAYS
-    }
-
-    // Step 3: Calculate adaptive percentile thresholds
-    let adaptive_thresholds =
-        calculate_adaptive_percentile_thresholds(&sequence_changes, model_config)?;
-
-    // Step 4: Classify using adaptive thresholds
-    let class = if actual_price_change <= adaptive_thresholds.extreme_down {
-        0 // DUMP: Much below sequence distribution
-    } else if actual_price_change <= adaptive_thresholds.moderate_down {
-        1 // DOWN: Below sequence distribution
-    } else if actual_price_change >= adaptive_thresholds.extreme_up {
-        4 // PUMP: Much above sequence distribution
-    } else if actual_price_change >= adaptive_thresholds.moderate_up {
-        3 // UP: Above sequence distribution
-    } else {
-        2 // SIDEWAYS: Within sequence distribution
-    };
-
-    // Debug logging with actual values
-    log::debug!(
-        "🎯 Adaptive Direction: price_change={:.6}, thresholds=[down:{:.6}, moderate_down:{:.6}, moderate_up:{:.6}, up:{:.6}]",
-        actual_price_change,
-        adaptive_thresholds.extreme_down,
-        adaptive_thresholds.moderate_down,
-        adaptive_thresholds.moderate_up,
-        adaptive_thresholds.extreme_up
-    );
-
-    Ok(class)
-}
-
-/// Adaptive percentile thresholds for direction classification
-#[derive(Debug)]
-struct AdaptiveDirectionThresholds {
-    extreme_down: f64,  // DUMP threshold
-    moderate_down: f64, // DOWN threshold
-    moderate_up: f64,   // UP threshold
-    extreme_up: f64,    // PUMP threshold
-}
-
-/// Calculate adaptive percentile thresholds from sequence price changes
-///
-/// LOGIC:
-/// - bandwidth_size controls the middle class (SIDEWAYS) definition
-/// - Smaller bandwidth_size = narrower SIDEWAYS = more UP/DOWN classifications
-/// - Larger bandwidth_size = wider SIDEWAYS = more SIDEWAYS classifications
-/// - extreme_multiplier extends the thresholds for DUMP/PUMP classes
-fn calculate_adaptive_percentile_thresholds(
-    sequence_changes: &[f64],
-    model_config: Option<&DirectionHead>,
-) -> Result<AdaptiveDirectionThresholds> {
-    if sequence_changes.is_empty() {
-        return Ok(AdaptiveDirectionThresholds {
-            extreme_down: -0.01,
-            moderate_down: -0.005,
-            moderate_up: 0.005,
-            extreme_up: 0.01,
-        });
-    }
-
     // Get config parameters
-    let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(1.0);
+    let slope_sensitivity = model_config
+        .and_then(|c| c.slope_sensitivity)
+        .unwrap_or(0.4);
     let extreme_multiplier = model_config
         .and_then(|c| c.extreme_multiplier)
         .unwrap_or(2.0);
 
-    // Sort sequence changes for percentile calculation
-    let mut sorted_changes = sequence_changes.to_vec();
-    sorted_changes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Calculate trend acceleration thresholds
+    let thresholds =
+        calculate_trend_acceleration_thresholds(slope_sensitivity, extreme_multiplier)?;
 
-    // Calculate base percentiles (bandwidth_size controls middle class width)
-    // bandwidth_size = 1.0 means 40% middle class (20th-80th percentiles)
-    // bandwidth_size = 0.5 means 20% middle class (40th-60th percentiles)
-    // bandwidth_size = 2.0 means 80% middle class (10th-90th percentiles)
-    let base_percentile = bandwidth_size * 0.3; // FIXED: Direct scaling
-    let base_percentile = base_percentile.clamp(0.05, 0.45); // Clamp to reasonable range
+    // Classify using trend acceleration approach
+    classify_direction_trend_acceleration(sequence_prices, horizon_prices, &thresholds)
+}
 
-    // Calculate percentile positions
-    let len = sorted_changes.len();
-    let down_idx = ((base_percentile * len as f64) as usize).min(len - 1);
-    let up_idx = (((1.0 - base_percentile) * len as f64) as usize).min(len - 1);
+/// Trend acceleration thresholds for direction classification
+///
+/// This struct defines the boundary values used to classify trend acceleration
+/// into the 5-class direction system. The thresholds are calculated based on
+/// `slope_sensitivity` and `extreme_multiplier` parameters.
+///
+/// ## Threshold Structure
+/// ```text
+/// DUMP:     acceleration <= dump_max (most negative)
+/// DOWN:     dump_max < acceleration <= down_max (moderate negative)
+/// SIDEWAYS: down_max < acceleration <= sideways_max (minimal change)
+/// UP:       sideways_max < acceleration <= up_max (moderate positive)
+/// PUMP:     acceleration > up_max (most positive)
+/// ```
+///
+/// ## Field Meanings
+/// - `dump_max`: Maximum acceleration for DUMP class (strong deceleration)
+/// - `down_max`: Maximum acceleration for DOWN class (moderate deceleration)
+/// - `sideways_max`: Maximum acceleration for SIDEWAYS class (trend continuation)
+/// - `up_max`: Maximum acceleration for UP class (moderate acceleration)
+/// - Values above `up_max` are classified as PUMP (strong acceleration)
+#[derive(Debug)]
+pub struct TrendAccelerationThresholds {
+    pub dump_max: f64,     // DUMP threshold (most negative acceleration)
+    pub down_max: f64,     // DOWN threshold (moderate negative acceleration)
+    pub sideways_max: f64, // SIDEWAYS threshold (minimal acceleration)
+    pub up_max: f64,       // UP threshold (moderate positive acceleration)
+                           // Above up_max = PUMP (strong positive acceleration)
+}
 
-    // Get base thresholds from percentiles
-    let moderate_down = sorted_changes[down_idx];
-    let moderate_up = sorted_changes[up_idx];
+/// Calculate linear regression slope for trend analysis
+///
+/// Uses least squares method to find the best-fit line slope
+/// Returns slope normalized per time unit (price change per period)
+pub fn calculate_linear_trend_slope(prices: &[f64]) -> Result<f64> {
+    if prices.len() < 2 {
+        return Ok(0.0); // No trend for insufficient data
+    }
 
-    // FIXED: Extreme thresholds should be FURTHER from zero
-    let extreme_down = moderate_down * extreme_multiplier; // FIXED: More negative
-    let extreme_up = moderate_up * extreme_multiplier; // FIXED: More positive
+    let n = prices.len() as f64;
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_x2 = 0.0;
 
-    let thresholds = AdaptiveDirectionThresholds {
-        extreme_down,
-        moderate_down,
-        moderate_up,
-        extreme_up,
+    // Calculate sums for least squares regression
+    for (i, &price) in prices.iter().enumerate() {
+        let x = i as f64;
+        sum_x += x;
+        sum_y += price;
+        sum_xy += x * price;
+        sum_x2 += x * x;
+    }
+
+    // Calculate slope using least squares formula: slope = (n*Σxy - Σx*Σy) / (n*Σx² - (Σx)²)
+    let denominator = n * sum_x2 - sum_x * sum_x;
+
+    if denominator.abs() < 1e-10 {
+        return Ok(0.0); // Avoid division by zero
+    }
+
+    let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+    Ok(slope)
+}
+
+/// Calculate trend acceleration thresholds for direction classification
+///
+/// This function computes the threshold boundaries used to classify trend acceleration
+/// into the 5-class direction system (DUMP, DOWN, SIDEWAYS, UP, PUMP).
+///
+/// ## Parameters
+/// - `slope_sensitivity`: Controls threshold sensitivity (default: 0.4)
+///   - Lower values = more sensitive (tighter thresholds)
+///   - Higher values = less sensitive (wider thresholds)
+/// - `extreme_multiplier`: Multiplier for extreme boundaries (default: 2.0)
+///   - Controls the ratio between moderate and extreme classifications
+///
+/// ## Threshold Logic
+/// ```text
+/// half_sensitivity = slope_sensitivity / 2.0
+/// extreme_sensitivity = slope_sensitivity * extreme_multiplier
+///
+/// Classification boundaries:
+/// DUMP:     acceleration <= -extreme_sensitivity
+/// DOWN:     -extreme_sensitivity < acceleration <= -half_sensitivity
+/// SIDEWAYS: -half_sensitivity < acceleration <= +half_sensitivity
+/// UP:       +half_sensitivity < acceleration <= +extreme_sensitivity
+/// PUMP:     acceleration > +extreme_sensitivity
+/// ```
+///
+/// ## Example
+/// With slope_sensitivity=4.0 and extreme_multiplier=2.0:
+/// - DUMP: acceleration <= -8.0 (strong deceleration)
+/// - DOWN: -8.0 < acceleration <= -2.0 (moderate deceleration)
+/// - SIDEWAYS: -2.0 < acceleration <= +2.0 (trend continuation)
+/// - UP: +2.0 < acceleration <= +8.0 (moderate acceleration)
+/// - PUMP: acceleration > +8.0 (strong acceleration)
+pub fn calculate_trend_acceleration_thresholds(
+    slope_sensitivity: f64,
+    extreme_multiplier: f64,
+) -> Result<TrendAccelerationThresholds> {
+    // Use slope_sensitivity directly - it should be configured appropriately for slope differences
+    // No magic scaling factor needed - let the user configure slope_sensitivity properly
+    let half_sensitivity = slope_sensitivity / 2.0;
+    let extreme_sensitivity = slope_sensitivity * extreme_multiplier;
+
+    let thresholds = TrendAccelerationThresholds {
+        dump_max: -extreme_sensitivity, // Most negative acceleration
+        down_max: -half_sensitivity,    // Moderate negative acceleration
+        sideways_max: half_sensitivity, // Minimal acceleration (around 0)
+        up_max: extreme_sensitivity,    // Moderate positive acceleration
+                                        // Above up_max = PUMP (strong positive acceleration)
     };
 
     log::debug!(
-        "📊 FIXED Thresholds: bandwidth_size={}, middle_class={:.1}%, percentiles=[{:.1}%, {:.1}%], thresholds=[{:.6}, {:.6}, {:.6}, {:.6}]",
-        bandwidth_size, (1.0 - 2.0 * base_percentile) * 100.0, base_percentile * 100.0, (1.0 - base_percentile) * 100.0,
-        extreme_down, moderate_down, moderate_up, extreme_up
+        "🎯 Trend Acceleration Thresholds: slope_sensitivity={}, extreme_factor={}, thresholds=[{:.6}, {:.6}, {:.6}, {:.6}]",
+        slope_sensitivity, extreme_multiplier,
+        thresholds.dump_max, thresholds.down_max, thresholds.sideways_max, thresholds.up_max
     );
 
     Ok(thresholds)
 }
 
-/// Log direction class distribution with adaptive percentile analysis
+/// Classify direction using trend acceleration approach
+fn classify_direction_trend_acceleration(
+    sequence_prices: &[f64],
+    horizon_prices: &[f64],
+    thresholds: &TrendAccelerationThresholds,
+) -> Result<i32> {
+    // Step 1: Calculate linear regression slopes
+    let sequence_trend = calculate_linear_trend_slope(sequence_prices)?;
+    let horizon_trend = calculate_linear_trend_slope(horizon_prices)?;
+
+    // Step 2: Calculate trend acceleration (change in slope) - NO NORMALIZATION
+    let trend_acceleration = horizon_trend - sequence_trend;
+
+    // Step 3: Classify using absolute acceleration thresholds
+    let class = if trend_acceleration <= thresholds.dump_max {
+        0 // DUMP: Strong deceleration/reversal
+    } else if trend_acceleration <= thresholds.down_max {
+        1 // DOWN: Moderate deceleration
+    } else if trend_acceleration <= thresholds.sideways_max {
+        2 // SIDEWAYS: Trend continuation
+    } else if trend_acceleration <= thresholds.up_max {
+        3 // UP: Moderate acceleration
+    } else {
+        4 // PUMP: Strong acceleration
+    };
+
+    log::debug!(
+        "🎯 Trend Acceleration: seq_slope={:.6}, horizon_slope={:.6}, acceleration={:.6} → class={} (thresholds: [{:.6}, {:.6}, {:.6}, {:.6}])",
+        sequence_trend, horizon_trend, trend_acceleration, class,
+        thresholds.dump_max, thresholds.down_max, thresholds.sideways_max, thresholds.up_max
+    );
+
+    Ok(class)
+}
+
+/// Log direction class distribution with trend acceleration analysis
 fn log_direction_distribution(targets: &[i32], horizon: &str) {
     let class_names = ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"];
     let mut class_counts = [0usize; 5];
@@ -239,7 +397,7 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
 
     if valid_targets == 0 {
         log::warn!(
-            "📊 Adaptive Direction Analysis [{}]: No valid targets found",
+            "📊 Trend Acceleration Direction Analysis [{}]: No valid targets found",
             horizon
         );
         return;
@@ -264,7 +422,7 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Adaptive Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        "📊 Trend Acceleration Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
         horizon,
         valid_targets,
         imbalance_ratio,
