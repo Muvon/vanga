@@ -121,14 +121,15 @@ output_dir = "attention_analysis"  # Directory for attention outputs
 [model.output_heads]
 
 # PRICE LEVELS PREDICTION
-# Predicts probability distribution of future price changes
+# Predicts probability distribution of future price changes using percentile-based classification
 [model.output_heads.price_levels]
 enabled = true                # Enable price level prediction (RECOMMENDED)
-bandwidth_size = 1.0          # Breakout sensitivity multiplier (0.5=sensitive, 1.0=standard, 1.5=conservative)
+bandwidth_size = 0.8          # Breakout sensitivity multiplier (0.5=sensitive, 1.0=standard, 1.5=conservative)
 # TUNING: Lower values = more sensitive breakout detection, higher values = more conservative
-# EFFECT: Controls the threshold for strong breakout classification (bins 0 and 5)
-range_percent = 0.05         # Price change range (±5% = ±0.05)
-distribution_type = "Categorical"  # Output type (Categorical for probability distribution)
+# EFFECT: Controls the threshold for strong breakout classification (classes 0 and 4)
+percentiles = [0.05, 0.95]    # Percentile boundaries for sequence range [lower, upper]
+# TUNING: [0.1, 0.9] = 10th/90th percentiles (standard), [0.05, 0.95] = 5th/95th (wider range)
+# EFFECT: Defines the "normal" price range - values outside trigger breakout classifications
 
 # TARGET STRATEGY: Choose how to calculate target prices
 # Option 1: Current strategy (default) - simple future price point
@@ -141,13 +142,15 @@ target_strategy = { type = "current" }
 # target_strategy = { type = "momentum_vwap", momentum_window = 20, bias_strength = 0.3 }
 
 # DIRECTION PREDICTION
-# Predicts whether price will go up or down
+# Predicts trend momentum changes using volatility-normalized slope analysis
 [model.output_heads.direction]
 enabled = true               # Enable direction prediction (RECOMMENDED)
-threshold = 0.01            # Minimum price change to consider significant (1% = 0.01)
-# TUNING: Lower threshold = more sensitive to small moves, higher = focus on major moves
-# EFFECT: 0.01 filters out noise and focuses on meaningful price movements
-confidence_calibration = true  # Calibrate confidence scores for better reliability
+slope_sensitivity = 0.015    # Slope acceleration threshold (crypto-optimized for volatility normalization)
+# TUNING: 0.01-0.02 for balanced distribution, 0.005-0.01 for more sensitive, 0.02-0.05 for conservative
+# EFFECT: Lower values = more DUMP/PUMP classifications, higher values = more SIDEWAYS
+base_threshold = 0.12        # Base momentum threshold (12%)
+extreme_multiplier = 3.0     # Multiplier for extreme boundaries (higher = better extreme detection)
+# TUNING: 2.0-4.0 range, higher values = fewer extreme classes but better separation
 
 # VOLATILITY PREDICTION
 # Predicts expected price volatility over different time horizons

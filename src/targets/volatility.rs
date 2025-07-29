@@ -178,14 +178,21 @@ pub fn generate_volatility_targets(
                 let train_atr = get_sequence_atr_baseline(sequence_candles)?;
                 let target_atr = get_sequence_atr_baseline(horizon_candles)?;
 
-                // Calculate logarithmic ratio thresholds
-                let bandwidth_size = model_config.and_then(|c| c.bandwidth_size).unwrap_or(0.4);
+                // ADAPTIVE BANDWIDTH: Use sequence ATR as adaptive baseline
+                let baseline_atr = train_atr.max(0.005); // 0.5% minimum baseline
+                let volatility_factor = (train_atr / baseline_atr).clamp(0.3, 3.0);
+
+                // Get base configuration
+                let base_bandwidth = model_config.and_then(|c| c.bandwidth_size).unwrap_or(0.4);
                 let extreme_multiplier = model_config
                     .and_then(|c| c.extreme_multiplier)
                     .unwrap_or(2.0);
 
+                // Apply adaptive bandwidth scaling
+                let adaptive_bandwidth = base_bandwidth * volatility_factor;
+
                 let log_thresholds =
-                    calculate_log_volatility_thresholds(bandwidth_size, extreme_multiplier)?;
+                    calculate_log_volatility_thresholds(adaptive_bandwidth, extreme_multiplier)?;
 
                 // Classify using logarithmic ratio approach
                 let volatility_class =
@@ -201,10 +208,19 @@ pub fn generate_volatility_targets(
     Ok(targets)
 }
 
-/// Calculate ATR baseline for a sequence of candles
-fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> {
+/// Calculate ATR baseline for a sequence of candles with adaptive fallback
+///
+/// Computes Average True Range for the sequence, using sequence-specific baseline
+/// instead of hardcoded values. Provides adaptive fallback based on sequence price volatility.
+pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> {
     if sequence_candles.len() < 2 {
-        return Ok(0.02); // Minimal fallback
+        // ADAPTIVE FALLBACK: Use 0.5% of first candle's close price as minimum baseline
+        let fallback_atr = if !sequence_candles.is_empty() {
+            sequence_candles[0].close * 0.005 // 0.5% minimum volatility assumption
+        } else {
+            0.005 // Absolute minimum for edge cases
+        };
+        return Ok(fallback_atr);
     }
 
     let mut true_ranges = Vec::new();
@@ -226,11 +242,25 @@ fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> 
     }
 
     if true_ranges.is_empty() {
-        return Ok(0.02);
+        // ADAPTIVE FALLBACK: Use sequence price range as volatility estimate
+        let prices: Vec<f64> = sequence_candles.iter().map(|c| c.close).collect();
+        let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let price_range = (max_price - min_price) / min_price;
+        return Ok(price_range.max(0.005)); // At least 0.5% volatility
     }
 
-    // Average True Range of the sequence - this is our baseline
-    Ok(true_ranges.iter().sum::<f64>() / true_ranges.len() as f64)
+    // Average True Range of the sequence - this is our adaptive baseline
+    let sequence_atr = true_ranges.iter().sum::<f64>() / true_ranges.len() as f64;
+
+    log::trace!(
+        "🎯 Sequence ATR Baseline: {} candles, {} true_ranges, atr={:.6}",
+        sequence_candles.len(),
+        true_ranges.len(),
+        sequence_atr
+    );
+
+    Ok(sequence_atr.max(0.005)) // Ensure minimum 0.5% volatility baseline
 }
 
 /// Logarithmic volatility thresholds for regime classification
@@ -259,12 +289,12 @@ fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> 
 /// To convert log thresholds back to ratio space: `ratio = exp(log_threshold)`
 /// - Example: log_threshold = -0.693 → ratio = exp(-0.693) = 0.5 (50% of baseline)
 #[derive(Debug)]
-struct LogVolatilityThresholds {
-    very_low_max: f64, // VeryLow threshold (log space)
-    low_max: f64,      // Low threshold (log space)
-    medium_max: f64,   // Medium threshold (log space)
-    high_max: f64,     // High threshold (log space)
-                       // Above high_max = VeryHigh
+pub struct LogVolatilityThresholds {
+    pub very_low_max: f64, // VeryLow threshold (log space)
+    pub low_max: f64,      // Low threshold (log space)
+    pub medium_max: f64,   // Medium threshold (log space)
+    pub high_max: f64,     // High threshold (log space)
+                           // Above high_max = VeryHigh
 }
 
 /// Calculate logarithmic ratio thresholds for volatility classification
@@ -305,7 +335,7 @@ struct LogVolatilityThresholds {
 /// The logarithmic approach ensures that multiplicative changes are treated symmetrically:
 /// - 2x increase: ln(2.0) = +0.693
 /// - 0.5x decrease: ln(0.5) = -0.693 (perfectly symmetric)
-fn calculate_log_volatility_thresholds(
+pub fn calculate_log_volatility_thresholds(
     bandwidth_size: f64,
     extreme_multiplier: f64,
 ) -> Result<LogVolatilityThresholds> {
@@ -336,7 +366,7 @@ fn calculate_log_volatility_thresholds(
 }
 
 /// Classify volatility using logarithmic ratio approach
-fn classify_volatility_log_ratio(
+pub fn classify_volatility_log_ratio(
     train_atr: f64,
     target_atr: f64,
     thresholds: &LogVolatilityThresholds,

@@ -60,7 +60,6 @@ output_dir = "attention_analysis"
 enabled = true
 bandwidth_size = 1.0  # Breakout sensitivity multiplier
 range_percent = 0.05
-distribution_type = "Categorical"
 
 [model.output_heads.direction]
 enabled = true

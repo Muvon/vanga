@@ -59,7 +59,6 @@ enabled = false
 enabled = true
 bandwidth_size = 1.0  # Breakout sensitivity multiplier
 range_percent = 0.03
-distribution_type = "Categorical"
 
 target_strategy = { type = "current" }
 

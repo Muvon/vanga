@@ -215,7 +215,7 @@ pub struct OutputHeadsConfig {
 pub struct PriceLevelHead {
     pub enabled: bool,
     pub bandwidth_size: Option<f64>, // Optional for backward compatibility
-    pub distribution_type: DistributionType,
+    pub percentiles: Option<[f64; 2]>, // [lower, upper] percentiles e.g., [0.1, 0.9]
 }
 
 impl PriceLevelHead {
@@ -230,6 +230,25 @@ impl PriceLevelHead {
             if !bandwidth_size.is_finite() {
                 return Err(crate::utils::error::VangaError::config(
                     "Price level bandwidth_size must be finite",
+                ));
+            }
+        }
+
+        // Validate percentiles if provided
+        if let Some(percentiles) = self.percentiles {
+            if percentiles[0] >= percentiles[1] {
+                return Err(crate::utils::error::VangaError::config(
+                    "Price level percentiles[0] must be less than percentiles[1]",
+                ));
+            }
+            if percentiles[0] < 0.0 || percentiles[0] > 1.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Price level percentiles[0] must be between 0.0 and 1.0",
+                ));
+            }
+            if percentiles[1] < 0.0 || percentiles[1] > 1.0 {
+                return Err(crate::utils::error::VangaError::config(
+                    "Price level percentiles[1] must be between 0.0 and 1.0",
                 ));
             }
         }
@@ -315,13 +334,6 @@ pub struct VolatilityHead {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DistributionType {
-    Categorical,
-    Beta,
-    Dirichlet,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VolatilityPredictionMethod {
     Direct,
     GARCH,
@@ -363,14 +375,14 @@ impl Default for ModelConfig {
             output_heads: OutputHeadsConfig {
                 price_levels: PriceLevelHead {
                     enabled: true,
-                    bandwidth_size: Some(1.0), // Default bandwidth size
-                    distribution_type: DistributionType::Categorical,
+                    bandwidth_size: Some(1.0),     // Default bandwidth size
+                    percentiles: Some([0.1, 0.9]), // Default 10th/90th percentiles
                 },
                 direction: DirectionHead {
                     enabled: true,
-                    slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
-                    base_threshold: Some(0.12),   // 12% momentum threshold
-                    extreme_multiplier: Some(2.0), // 2x for extreme classes
+                    slope_sensitivity: Some(0.02), // Crypto-optimized for volatility normalization
+                    base_threshold: Some(0.12),    // 12% momentum threshold
+                    extreme_multiplier: Some(2.5), // 2.5x for better extreme detection
                 },
                 volatility: VolatilityHead {
                     enabled: true,

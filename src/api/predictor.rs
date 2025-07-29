@@ -237,7 +237,7 @@ impl Predictor {
                 price_levels: crate::config::model::PriceLevelHead {
                     enabled: true,
                     bandwidth_size: Some(1.0),
-                    distribution_type: crate::config::model::DistributionType::Categorical,
+                    percentiles: Some([0.1, 0.9]), // Default percentiles
                 },
                 direction: crate::config::model::DirectionHead {
                     enabled: true,

@@ -57,7 +57,6 @@ importance_type = "gain"
 [model.output_heads.price_levels]
 enabled = true
 bandwidth_size = 1.5              # Wider bandwidth for crypto volatility
-distribution_type = "Categorical"
 
 [model.output_heads.direction]
 enabled = true
