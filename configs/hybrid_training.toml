@@ -56,7 +56,9 @@ early_stopping_rounds = 10        # Early stopping for efficiency
 eval_metric = "rmse"              # Default evaluation metric
 objective = "reg:squarederror"    # Default objective (auto-adjusted per target)
 save_feature_importance = true    # Enable feature analysis
-importance_type = "gain"          # Information gain importance
+importance_type = "gain"          # Information gain importance (legacy)
+importance_method = "shap"        # Use SHAP-based real importance (not placeholder)
+importance_validation_size = 50   # Number of samples for SHAP calculation
 
 # Output heads configuration
 [model.output_heads]

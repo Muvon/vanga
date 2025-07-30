@@ -376,7 +376,8 @@ impl DataPipeline {
         // FIXED: Loop condition ensures we have enough data for validation AFTER training + gap
         while train_end + gap_steps + validation_size <= available_for_training {
             // Check if this will be the final window (next iteration would exceed available data)
-            let is_final_window = train_end + validation_size + gap_steps + validation_size > available_for_training;
+            let is_final_window =
+                train_end + validation_size + gap_steps + validation_size > available_for_training;
             // Create expanding window validation with proper chronological split
             let (train_df, val_df) = Self::create_distributed_validation(
                 &raw_processed_data,

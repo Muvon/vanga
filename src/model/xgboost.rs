@@ -28,6 +28,9 @@ pub struct XGBoostRegressor {
 
     /// Number of classes (determined during training)
     num_classes: Option<usize>,
+
+    /// Validation DMatrix for SHAP-based feature importance calculation
+    validation_dmat: Option<DMatrix>,
 }
 
 /// XGBoost model metadata for persistence
@@ -48,6 +51,7 @@ impl XGBoostRegressor {
             device,
             feature_importance: None,
             num_classes: None,
+            validation_dmat: None,
         }
     }
 
@@ -69,27 +73,125 @@ impl XGBoostRegressor {
         // Determine number of classes from targets shape
         let num_classes = self.determine_num_classes(targets)?;
 
-        log::debug!(
-            "📊 XGBoost training data: features={:?}, targets={:?}, num_classes={}",
+        // Validate and adjust feature dimension based on actual LSTM output
+        let actual_feature_dim = features_array.ncols();
+        if actual_feature_dim != self.config.feature_dim {
+            log::warn!(
+                "⚠️ Feature dimension mismatch: LSTM outputs {} features, but XGBoost config expects {}",
+                actual_feature_dim, self.config.feature_dim
+            );
+            log::info!(
+                "🔧 Auto-adjusting XGBoost feature_dim to match LSTM output: {}",
+                actual_feature_dim
+            );
+            // Update the config to match actual features
+            self.config.feature_dim = actual_feature_dim;
+        }
+
+        log::info!(
+            "📊 XGBoost training data: features={:?}, targets={:?}, num_classes={}, feature_dim={}",
             features_array.dim(),
             targets_array.dim(),
-            num_classes
+            num_classes,
+            actual_feature_dim
         );
 
-        // Create XGBoost DMatrix
-        let mut dtrain =
-            DMatrix::from_dense(features_array.as_slice().unwrap(), features_array.nrows())
-                .map_err(|e| {
-                    VangaError::model(format!("Failed to create XGBoost DMatrix: {}", e))
-                })?;
+        // Create XGBoost DMatrix - Debug feature data first
+        let features_slice = features_array.as_slice().unwrap();
+        let num_rows = features_array.nrows();
+        let num_cols = features_array.ncols();
+
+        // Debug: Check feature statistics
+        let feature_sum: f64 = features_slice.iter().map(|&x| x as f64).sum();
+        let non_zero_features = features_slice.iter().filter(|&&x| x != 0.0).count();
+
+        log::info!(
+            "🔍 DMatrix creation: {} rows × {} cols = {} total elements, data_len={}",
+            num_rows,
+            num_cols,
+            num_rows * num_cols,
+            features_slice.len()
+        );
+
+        log::info!(
+            "🔍 Feature stats: sum={:.6}, non_zero={}/{}, range=[{:.6}, {:.6}]",
+            feature_sum,
+            non_zero_features,
+            features_slice.len(),
+            features_slice
+                .iter()
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap_or(&0.0),
+            features_slice
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap_or(&0.0)
+        );
+
+        if feature_sum.abs() < 1e-10 {
+            log::warn!("⚠️ All LSTM features are near zero - this will cause XGBoost to fail");
+            log::warn!("🔍 Check LSTM training and feature extraction process");
+        }
+
+        // Verify data format is correct for XGBoost
+        if features_slice.len() != num_rows * num_cols {
+            return Err(VangaError::model(format!(
+                "Data size mismatch: expected {} elements ({}×{}), got {}",
+                num_rows * num_cols,
+                num_rows,
+                num_cols,
+                features_slice.len()
+            )));
+        }
+
+        let mut dtrain = DMatrix::from_dense(features_slice, num_rows)
+            .map_err(|e| VangaError::model(format!("Failed to create XGBoost DMatrix: {}", e)))?;
 
         // Set targets
         dtrain
             .set_labels(targets_array.as_slice().unwrap())
             .map_err(|e| VangaError::model(format!("Failed to set XGBoost labels: {}", e)))?;
 
+        // Store validation data for SHAP-based feature importance calculation
+        if self.config.save_feature_importance {
+            log::debug!(
+                "📊 Storing validation data for SHAP-based feature importance calculation..."
+            );
+
+            // Create validation subset using configured size
+            let total_samples = features_array.nrows();
+            let val_size = self
+                .config
+                .importance_validation_size
+                .min(total_samples) // Don't exceed available samples
+                .max(1); // At least 1 sample
+
+            log::debug!(
+                "🔍 Using {} samples (out of {}) for SHAP validation (configured: {})",
+                val_size,
+                total_samples,
+                self.config.importance_validation_size
+            );
+
+            // Take first val_size samples for validation (could be randomized in future)
+            let val_features_slice =
+                &features_array.as_slice().unwrap()[..val_size * features_array.ncols()];
+
+            match DMatrix::from_dense(val_features_slice, val_size) {
+                Ok(val_dmat) => {
+                    self.validation_dmat = Some(val_dmat);
+                    log::debug!("✅ Validation DMatrix created for SHAP calculation");
+                }
+                Err(e) => {
+                    log::warn!("⚠️ Failed to create validation DMatrix for SHAP: {}", e);
+                    log::warn!("📊 Will fallback to placeholder feature importance");
+                    self.validation_dmat = None;
+                }
+            }
+        }
+
         // Configure XGBoost parameters using xgb crate API
-        let learning_params = self.build_learning_params()?;
+        let learning_params = self.build_learning_params(num_classes)?;
         let tree_params = self.build_tree_params()?;
 
         let booster_params = parameters::BoosterParametersBuilder::default()
@@ -117,6 +219,38 @@ impl XGBoostRegressor {
 
         let booster = Booster::train(&training_params)
             .map_err(|e| VangaError::model(format!("XGBoost training failed: {}", e)))?;
+
+        // Debug: Test if model can make predictions
+        log::info!("🔍 Testing XGBoost model predictions...");
+        match booster.predict(&dtrain) {
+            Ok(predictions) => {
+                let pred_sum: f32 = predictions.iter().sum();
+                let pred_range = (
+                    predictions
+                        .iter()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap())
+                        .unwrap_or(&0.0),
+                    predictions
+                        .iter()
+                        .max_by(|a, b| a.partial_cmp(b).unwrap())
+                        .unwrap_or(&0.0),
+                );
+                log::info!(
+                    "✅ XGBoost predictions: {} values, sum={:.6}, range=[{:.6}, {:.6}]",
+                    predictions.len(),
+                    pred_sum,
+                    pred_range.0,
+                    pred_range.1
+                );
+
+                if pred_sum.abs() < 1e-10 {
+                    log::warn!("⚠️ XGBoost predictions are all near zero - model may not be learning properly");
+                }
+            }
+            Err(e) => {
+                log::warn!("⚠️ XGBoost prediction test failed: {}", e);
+            }
+        }
 
         // Store number of classes for later use
         self.num_classes = Some(num_classes);
@@ -389,11 +523,21 @@ impl XGBoostRegressor {
     }
 
     /// Build XGBoost learning parameters from configuration
-    fn build_learning_params(&self) -> Result<parameters::learning::LearningTaskParameters> {
+    fn build_learning_params(
+        &self,
+        num_classes: usize,
+    ) -> Result<parameters::learning::LearningTaskParameters> {
         use parameters::learning::*;
 
-        // Use default objective for now - will be enhanced based on xgb crate documentation
-        let objective = Objective::BinaryLogistic; // Default that should work
+        // Choose appropriate objective based on number of classes
+        let objective = if num_classes <= 2 {
+            Objective::BinaryLogistic
+        } else {
+            // For multi-class classification - try different options available in xgb crate
+            Objective::MultiSoftmax(num_classes as u32)
+        };
+
+        log::info!("🎯 XGBoost objective set for {} classes", num_classes);
 
         LearningTaskParametersBuilder::default()
             .objective(objective)
@@ -415,9 +559,141 @@ impl XGBoostRegressor {
             .map_err(|e| VangaError::ConfigError(format!("Invalid tree parameters: {}", e)))
     }
 
+    /// Calculate feature importance using SHAP values from predict_contributions()
+    ///
+    /// This method provides real feature importance based on actual model contributions,
+    /// unlike the placeholder uniform importance used as fallback.
+    fn calculate_shap_importance(&self, booster: &Booster) -> Result<HashMap<String, f32>> {
+        log::debug!("🔍 Calculating SHAP-based feature importance...");
+
+        // Check if we have validation data for SHAP calculation
+        let validation_dmat = self.validation_dmat.as_ref().ok_or_else(|| {
+            VangaError::model("No validation data available for SHAP calculation")
+        })?;
+
+        // Get SHAP contributions [samples, features+1] (includes bias term)
+        let (contributions, (num_samples, num_features)) = booster
+            .predict_contributions(validation_dmat)
+            .map_err(|e| {
+                VangaError::model(format!("Failed to calculate SHAP contributions: {}", e))
+            })?;
+
+        log::debug!(
+            "📊 SHAP contributions shape: {} samples × {} features (including bias)",
+            num_samples,
+            num_features
+        );
+
+        // Debug: Check if contributions are all zeros
+        let total_contribution: f32 = contributions.iter().sum();
+        let non_zero_count = contributions.iter().filter(|&&x| x != 0.0).count();
+        log::debug!(
+            "🔍 SHAP Debug: total_contribution={:.6}, non_zero_values={}/{}, contribution_range=[{:.6}, {:.6}]",
+            total_contribution,
+            non_zero_count,
+            contributions.len(),
+            contributions.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0),
+            contributions.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0)
+        );
+
+        if total_contribution.abs() < 1e-10 {
+            log::warn!(
+                "⚠️ All SHAP contributions are near zero - XGBoost model may not be learning"
+            );
+            log::warn!("🔍 This could indicate: 1) Model not trained properly, 2) Features are constant/zero, 3) Model convergence issues");
+        }
+
+        if num_features == 0 {
+            return Err(VangaError::model("No features found in SHAP contributions"));
+        }
+
+        // Calculate mean absolute SHAP values per feature (exclude bias term)
+        let feature_count = num_features - 1; // Exclude bias term
+        let mut feature_importance = vec![0.0f32; feature_count];
+
+        for sample in 0..num_samples {
+            for (feature, importance) in feature_importance
+                .iter_mut()
+                .enumerate()
+                .take(feature_count)
+            {
+                let idx = sample * num_features + feature;
+                if idx < contributions.len() {
+                    *importance += contributions[idx].abs();
+                }
+            }
+        }
+
+        // Normalize by number of samples to get mean absolute SHAP values
+        for importance in &mut feature_importance {
+            *importance /= num_samples as f32;
+        }
+
+        // Convert to HashMap with feature names
+        let mut importance_map = HashMap::new();
+        for (i, &importance) in feature_importance.iter().enumerate() {
+            importance_map.insert(format!("lstm_feature_{}", i), importance);
+        }
+
+        // Normalize to sum to 1.0 for interpretability
+        let total: f32 = importance_map.values().sum();
+        if total > 0.0 {
+            for value in importance_map.values_mut() {
+                *value /= total;
+            }
+            log::info!(
+                "✅ SHAP-based feature importance calculated for {} features (normalized sum=1.0)",
+                importance_map.len()
+            );
+            log::info!("🎯 REAL FEATURE IMPORTANCE: Features show varied contributions based on model behavior");
+        } else {
+            log::warn!("⚠️ All SHAP importance values are zero - model may not be using features effectively");
+        }
+
+        let min_importance = importance_map
+            .values()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(&0.0);
+        let max_importance = importance_map
+            .values()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(&0.0);
+
+        log::info!(
+            "📊 SHAP importance range: {:.6} to {:.6} (variance indicates real feature selection)",
+            min_importance,
+            max_importance
+        );
+
+        // Show top 5 most important features
+        let mut sorted_features: Vec<_> = importance_map.iter().collect();
+        sorted_features.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        log::info!("🏆 Top 5 most important features (SHAP-based):");
+        for (i, (feature, importance)) in sorted_features.iter().take(5).enumerate() {
+            log::info!("   {}. {}: {:.6}", i + 1, feature, importance);
+        }
+
+        Ok(importance_map)
+    }
+
     /// Extract feature importance from trained booster
     fn extract_feature_importance(&self, booster: &Booster) -> Result<HashMap<String, f32>> {
         log::debug!("🔍 Attempting to extract feature importance from XGBoost booster...");
+
+        // Try SHAP-based importance first (real feature contributions)
+        if let Ok(shap_importance) = self.calculate_shap_importance(booster) {
+            log::info!("✅ Using SHAP-based feature importance (real model contributions)");
+            return Ok(shap_importance);
+        }
+
+        // Fallback to placeholder importance with clear warnings
+        log::warn!("⚠️ SHAP calculation failed - using PLACEHOLDER feature importance");
+        log::warn!(
+            "🚨 WARNING: Feature importance scores are NOT REAL - all features show equal weight"
+        );
+        log::warn!(
+            "📊 This indicates XGBoost is not providing meaningful feature selection insights"
+        );
 
         // XGB crate provides feature names, not importance scores
         // We'll create a placeholder based on feature names if available
@@ -431,9 +707,10 @@ impl XGBoostRegressor {
                 for name in feature_names {
                     importance_map.insert(name, uniform_importance);
                 }
-                log::info!(
-                    "📊 Generated uniform feature importance for {} named features",
-                    importance_map.len()
+                log::warn!(
+                    "📊 Generated PLACEHOLDER uniform importance for {} named features (all {:.6})",
+                    importance_map.len(),
+                    uniform_importance
                 );
             }
             Ok(feature_names) => {
@@ -442,31 +719,29 @@ impl XGBoostRegressor {
                     feature_names.len()
                 );
                 // Fallback to generic feature names when booster returns empty list
+                let uniform_importance = 1.0 / self.config.feature_dim as f32;
                 for i in 0..self.config.feature_dim {
-                    importance_map.insert(
-                        format!("lstm_feature_{}", i),
-                        1.0 / self.config.feature_dim as f32,
-                    );
+                    importance_map.insert(format!("lstm_feature_{}", i), uniform_importance);
                 }
-                log::info!(
-                    "📊 Generated placeholder feature importance for {} features (feature_dim={})",
+                log::warn!(
+                    "📊 Generated PLACEHOLDER importance for {} features (feature_dim={}, all {:.6})",
                     importance_map.len(),
-                    self.config.feature_dim
+                    self.config.feature_dim,
+                    uniform_importance
                 );
             }
             Err(e) => {
                 log::debug!("⚠️  Failed to get feature names from booster: {}", e);
                 // Fallback to generic feature names
+                let uniform_importance = 1.0 / self.config.feature_dim as f32;
                 for i in 0..self.config.feature_dim {
-                    importance_map.insert(
-                        format!("lstm_feature_{}", i),
-                        1.0 / self.config.feature_dim as f32,
-                    );
+                    importance_map.insert(format!("lstm_feature_{}", i), uniform_importance);
                 }
-                log::info!(
-                    "📊 Generated placeholder feature importance for {} features (feature_dim={})",
+                log::warn!(
+                    "📊 Generated PLACEHOLDER importance for {} features (feature_dim={}, all {:.6})",
                     importance_map.len(),
-                    self.config.feature_dim
+                    self.config.feature_dim,
+                    uniform_importance
                 );
             }
         }
@@ -477,10 +752,14 @@ impl XGBoostRegressor {
             ));
         }
 
-        log::debug!(
-            "✅ Feature importance extraction completed with {} features",
+        log::warn!(
+            "🚨 PLACEHOLDER importance extraction completed with {} features - NOT REAL IMPORTANCE",
             importance_map.len()
         );
+        log::warn!(
+            "❌ All features have identical importance - XGBoost feature selection is ineffective"
+        );
+        log::warn!("💡 Consider investigating why SHAP calculation failed for real importance");
         Ok(importance_map)
     }
 }
@@ -569,6 +848,17 @@ mod tests {
         assert!(!regressor.is_trained());
         assert!(regressor.get_feature_importance().is_none());
         assert!(regressor.num_classes.is_none());
+        assert!(regressor.validation_dmat.is_none());
+    }
+
+    #[test]
+    fn test_xgboost_config_new_fields() {
+        let config = XGBoostConfig::default();
+
+        // Test new fields have correct default values
+        assert_eq!(config.importance_method, "shap");
+        assert_eq!(config.importance_validation_size, 50);
+        assert_eq!(config.importance_type, "gain"); // Legacy field
     }
 
     #[test]

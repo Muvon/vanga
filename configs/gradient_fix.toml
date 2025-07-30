@@ -1,0 +1,45 @@
+# GRADIENT CLIPPING FIX CONFIGURATION
+# Optimized gradient clipping values for crypto LSTM training
+
+[training]
+# CRITICAL: Increased gradient clipping threshold
+# Old value: 1.0 (too restrictive, causing constant clipping)
+# New values by scenario:
+
+# CONSERVATIVE (recommended for stable training)
+gradient_clip = 5.0            # Allows natural gradients while preventing explosion
+
+# MODERATE (for faster convergence)
+# gradient_clip = 10.0         # Higher threshold for aggressive learning
+
+# AGGRESSIVE (for very stable models)
+# gradient_clip = 20.0         # Minimal clipping, maximum learning potential
+
+# DEBUGGING (to see actual gradient norms)
+# gradient_clip = 1000.0       # Effectively disables clipping for analysis
+
+# Other training parameters (keep your existing values)
+epochs = 100
+batch_size = 32
+learning_rate = 0.001
+validation_split = 0.2
+early_stopping_patience = 20
+
+# Learning rate schedule
+[training.learning_schedule]
+type = "LinearDecay"
+warmup_epochs = 5
+
+# Optimizer (AdamW recommended for crypto)
+[training.optimizer]
+type = "AdamW"
+weight_decay = 0.01
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1e-8
+
+# EXPECTED RESULTS:
+# - Grad: values should vary (not constant 1.00e0)
+# - Training should converge faster
+# - Validation loss should remain stable (1.3-1.5x ratio)
+# - Model performance should improve
