@@ -286,64 +286,18 @@ impl LSTMModel {
 
         // INCREMENTAL TRAINING DETECTION AND OPTIMIZATION - SAME logic as original continue_training
         let final_config = if self.trained {
-            log::info!(
-                "🔄 INCREMENTAL TRAINING: Adding {} new samples to existing model with preserved weights",
-                total_samples
-            );
-            log::info!("   🧠 Weight preservation: Existing LSTM parameters will be fine-tuned, not recreated");
-            log::info!("   📉 Learning rate reduction: Applying 10x reduction to preserve existing knowledge");
-
             // Configure training with typically lower learning rate for incremental training - SAME logic as original
             let mut incremental_config = config.clone();
-
-            // Reduce learning rate for incremental training to preserve existing knowledge - SAME logic as original
-            incremental_config.training.learning_rate = match &config.training.learning_rate {
-                crate::config::training::LearningRateConfig::Fixed(lr) => {
-                    let reduced_lr = lr * 0.1; // 10x smaller for incremental
-                    log::info!(
-                        "🔽 Reducing learning rate for incremental training: {:.6} → {:.6}",
-                        lr,
-                        reduced_lr
-                    );
-                    crate::config::training::LearningRateConfig::Fixed(reduced_lr)
-                }
-                crate::config::training::LearningRateConfig::Adaptive {
-                    initial_lr,
-                    patience,
-                    factor,
-                } => {
-                    let reduced_lr = initial_lr * 0.1;
-                    log::info!(
-                        "🔽 Reducing initial learning rate for incremental training: {:.6} → {:.6}",
-                        initial_lr,
-                        reduced_lr
-                    );
-                    crate::config::training::LearningRateConfig::Adaptive {
-                        initial_lr: reduced_lr,
-                        patience: *patience,
-                        factor: *factor,
-                    }
-                }
-                crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
-                    let reduced_max = max_lr * 0.1;
-                    let reduced_min = min_lr * 0.1;
-                    log::info!("🔽 Reducing learning rate range for incremental training: {:.6}-{:.6} → {:.6}-{:.6}",
-                        min_lr, max_lr, reduced_min, reduced_max);
-                    crate::config::training::LearningRateConfig::Auto {
-                        min_lr: reduced_min,
-                        max_lr: reduced_max,
-                    }
-                }
-            };
 
             // Use smaller patience for incremental training (faster convergence expected) - SAME logic as original
             incremental_config.training.early_stopping.patience =
                 (config.training.early_stopping.patience / 2).max(10);
 
             log::info!(
-                "⚙️  Incremental training config: patience={}, min_delta={:.6}, reduced_lr=true",
+                "⚙️ Incremental training config: patience={}, min_delta={:.6}, new_samples={}",
                 incremental_config.training.early_stopping.patience,
-                incremental_config.training.early_stopping.min_delta
+                incremental_config.training.early_stopping.min_delta,
+                total_samples
             );
 
             incremental_config
