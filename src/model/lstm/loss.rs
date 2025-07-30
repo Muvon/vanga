@@ -1356,22 +1356,19 @@ impl LSTMModel {
         &self,
         val_sequences: &Array3<f64>,
         val_targets: &Array2<f64>,
-        _batch_size: usize,
+        batch_size: usize,
         epoch: usize,
         _config: &crate::config::TrainingConfig,
     ) -> Result<()> {
-        // Only calculate detailed metrics every 10 epochs to avoid overhead
-        if epoch % 10 != 0 {
+        // Only calculate detailed metrics every 5 epochs to avoid overhead
+        if epoch < 1 || epoch % 5 != 0 {
             return Ok(());
         }
 
         // Check if this is test data evaluation (when called with epoch=10 for final metrics)
-        let is_test_evaluation = epoch == 10
-            && self.stored_test_sequences.shape()[0] > 0
-            && val_sequences.shape()[0] == self.stored_test_sequences.shape()[0];
+        let is_test_evaluation = val_sequences.shape()[0] == self.stored_test_sequences.shape()[0];
 
         let total_val_samples = val_sequences.shape()[0];
-        let validation_batch_size = 64; // Fixed batch size for validation metrics
         let mut all_predictions = Vec::new();
         let mut all_targets = Vec::new();
 
@@ -1385,8 +1382,8 @@ impl LSTMModel {
         log::debug!("🎯 Detected target format: {:?}", target_format);
 
         // Collect all predictions and targets
-        for batch_start in (0..total_val_samples).step_by(validation_batch_size) {
-            let batch_end = std::cmp::min(batch_start + validation_batch_size, total_val_samples);
+        for batch_start in (0..total_val_samples).step_by(batch_size) {
+            let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
 
             let batch_sequences = val_sequences
                 .slice(ndarray::s![batch_start..batch_end, .., ..])
@@ -1521,19 +1518,6 @@ impl LSTMModel {
             f64::INFINITY
         };
 
-        // Debug logging for first few samples to verify target extraction
-        if epoch == 10 {
-            log::debug!("🔍 Target extraction verification (first 5 samples):");
-            for i in 0..std::cmp::min(5, all_predictions.len()) {
-                log::debug!(
-                    "  Sample {}: Predicted={}, True={}",
-                    i,
-                    all_predictions[i],
-                    all_targets[i]
-                );
-            }
-        }
-
         // Log comprehensive categorical metrics with target-type aware interpretation
         let target_type_name = if let Some((_, target_type)) = &self.target_context {
             match target_type {
@@ -1546,46 +1530,16 @@ impl LSTMModel {
         };
 
         // Target-type aware metric interpretation (reuse existing target context)
-        if let Some((_, target_type)) = &self.target_context {
-            let metric_label = if is_test_evaluation {
-                "Final Test"
-            } else if epoch == 10 {
-                "Final Validation"
-            } else {
-                "Validation"
-            };
-
-            match target_type {
-                TargetType::Direction => {
-                    // For Direction: Show MAPE with directional interpretation
-                    log::info!(
-                        "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3} (Directional correctness), Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}% (Classification error)",
-                        target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
-                    );
-                }
-                TargetType::PriceLevel | TargetType::Volatility => {
-                    // For ordinal targets: All metrics including MAPE are meaningful
-                    log::info!(
-                        "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}% (Ordinal distance)",
-                        target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
-                    );
-                }
-            }
+        let metric_label = if is_test_evaluation {
+            "Test"
         } else {
-            // Fallback for unknown target type
-            let metric_label = if is_test_evaluation {
-                "Final Test"
-            } else if epoch == 10 {
-                "Final Validation"
-            } else {
-                "Validation"
-            };
+            "Validation"
+        };
 
-            log::info!(
-                "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
-                target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
-            );
-        }
+        log::info!(
+            "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
+            target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
+        );
 
         log::debug!(
             "📈 Class Distribution [{}]: Pred: {:?}, True: {:?}",
