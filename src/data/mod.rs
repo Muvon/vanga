@@ -375,6 +375,8 @@ impl DataPipeline {
         // Create progressive expanding windows with proper chronological validation
         // FIXED: Loop condition ensures we have enough data for validation AFTER training + gap
         while train_end + gap_steps + validation_size <= available_for_training {
+            // Check if this will be the final window (next iteration would exceed available data)
+            let is_final_window = train_end + validation_size + gap_steps + validation_size > available_for_training;
             // Create expanding window validation with proper chronological split
             let (train_df, val_df) = Self::create_distributed_validation(
                 &raw_processed_data,
@@ -419,31 +421,30 @@ impl DataPipeline {
                 .await?;
 
             // Generate test sequences - empty for intermediate windows, populated for final window
-            let test_sequences =
-                if train_end + validation_size + max_horizon_steps >= available_for_training {
-                    // Final window - include test data for final evaluation
-                    self.sequence_generator
-                        .generate_training_sequences(
-                            raw_processed_data.slice(available_for_training as i64, test_size),
-                            &config.horizons,
-                            &config.model,
-                            &config.data,
-                        )
-                        .await?
-                } else {
-                    // Intermediate window - create empty test data with same structure
-                    PreparedData {
-                        sequences: ndarray::Array3::zeros((
-                            0,
-                            train_sequences.sequences.shape()[1],
-                            train_sequences.sequences.shape()[2],
-                        )),
-                        targets: crate::targets::PreparedTargets::new(0),
-                        feature_names: train_sequences.feature_names.clone(),
-                        normalization_stats: train_sequences.normalization_stats.clone(),
-                        metadata: train_sequences.metadata.clone(),
-                    }
-                };
+            let test_sequences = if is_final_window && test_size > 0 {
+                // Final window - include test data for final evaluation
+                self.sequence_generator
+                    .generate_training_sequences(
+                        raw_processed_data.slice(available_for_training as i64, test_size),
+                        &config.horizons,
+                        &config.model,
+                        &config.data,
+                    )
+                    .await?
+            } else {
+                // Intermediate window - create empty test data with same structure
+                PreparedData {
+                    sequences: ndarray::Array3::zeros((
+                        0,
+                        train_sequences.sequences.shape()[1],
+                        train_sequences.sequences.shape()[2],
+                    )),
+                    targets: crate::targets::PreparedTargets::new(0),
+                    feature_names: train_sequences.feature_names.clone(),
+                    normalization_stats: train_sequences.normalization_stats.clone(),
+                    metadata: train_sequences.metadata.clone(),
+                }
+            };
 
             // Calculate target-specific per-window class weights based on configuration strategy
             let target_class_weights = match config.training.class_weight_strategy {
