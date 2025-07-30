@@ -103,6 +103,8 @@ mod tests {
                 strategy: strategy.clone(),
                 log_dropout_changes: false, // Disable logging for tests
                 warn_validation_inconsistency: false,
+                attention_dropout_config:
+                    crate::model::dropout_consistency::AttentionDropoutConfig::default(),
             };
 
             // Test training behavior

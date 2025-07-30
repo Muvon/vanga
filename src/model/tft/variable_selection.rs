@@ -134,14 +134,18 @@ impl VariableSelectionAttention {
     }
 
     /// Forward pass with variable selection + existing attention
-    pub fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor, Option<Tensor>)> {
+    pub fn forward(
+        &self,
+        input: &Tensor,
+        training: bool,
+    ) -> Result<(Tensor, Tensor, Option<Tensor>)> {
         // Step 1: Apply variable selection to input features
         let (selected_features, importance_scores) =
             self.variable_selector.select_variables(input)?;
 
-        // Step 2: Apply existing attention mechanism to selected features
+        // Step 2: Apply existing attention mechanism to selected features with proper training mode
         let (attention_output, attention_weights) =
-            self.base_attention.forward(&selected_features)?;
+            self.base_attention.forward(&selected_features, training)?; // Use proper training mode
 
         // Return: (output, attention_weights, feature_importance)
         Ok((attention_output, attention_weights, importance_scores))
