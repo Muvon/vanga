@@ -141,14 +141,34 @@ impl ModelTrainer {
 
         // Get base learning rate from config
         log::info!("🔧 Walk-forward training configuration:");
-        log::info!("   📊 Test split: {:.1}% ({} samples reserved)", self.config.training.test_split * 100.0, (windows.len() as f64 * self.config.training.test_split) as usize);
-        log::info!("   📊 Validation split: {:.1}%", self.config.training.validation_split * 100.0);
-        log::info!("   🔄 Window decay: {:.3}", self.config.training.window_decay);
+        log::info!(
+            "   📊 Test split: {:.1}% ({} samples reserved)",
+            self.config.training.test_split * 100.0,
+            (windows.len() as f64 * self.config.training.test_split) as usize
+        );
+        log::info!(
+            "   📊 Validation split: {:.1}%",
+            self.config.training.validation_split * 100.0
+        );
+        log::info!(
+            "   🔄 Window decay: {:.3}",
+            self.config.training.window_decay
+        );
 
         log::info!("🔧 Walk-forward training configuration:");
-        log::info!("   📊 Test split: {:.1}% ({} samples reserved)", self.config.training.test_split * 100.0, (windows.len() as f64 * self.config.training.test_split) as usize);
-        log::info!("   📊 Validation split: {:.1}%", self.config.training.validation_split * 100.0);
-        log::info!("   🔄 Window decay: {:.3}", self.config.training.window_decay);
+        log::info!(
+            "   📊 Test split: {:.1}% ({} samples reserved)",
+            self.config.training.test_split * 100.0,
+            (windows.len() as f64 * self.config.training.test_split) as usize
+        );
+        log::info!(
+            "   📊 Validation split: {:.1}%",
+            self.config.training.validation_split * 100.0
+        );
+        log::info!(
+            "   🔄 Window decay: {:.3}",
+            self.config.training.window_decay
+        );
 
         let base_lr = match &self.config.training.learning_rate {
             crate::config::training::LearningRateConfig::Fixed(lr) => *lr,

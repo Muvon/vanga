@@ -179,7 +179,9 @@ pub struct XGBoostConfig {
 
     /// Feature importance analysis
     pub save_feature_importance: bool,
-    pub importance_type: String, // "weight", "gain", "cover"
+    pub importance_type: String, // "weight", "gain", "cover" (legacy - not used with SHAP)
+    pub importance_method: String, // "shap", "placeholder" - method for calculating importance
+    pub importance_validation_size: usize, // Number of samples for SHAP calculation
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,7 +603,9 @@ impl Default for XGBoostConfig {
             eval_metric: "rmse".to_string(),           // Default regression metric
             objective: "reg:squarederror".to_string(), // Default regression objective
             save_feature_importance: true,             // Enable feature analysis
-            importance_type: "gain".to_string(),       // Information gain importance
+            importance_type: "gain".to_string(),       // Information gain importance (legacy)
+            importance_method: "shap".to_string(),     // Use SHAP-based importance by default
+            importance_validation_size: 50,            // 50 samples for SHAP calculation
         }
     }
 }

@@ -1,0 +1,31 @@
+# VANGA Window Decay Example Configuration
+# Simple window-based learning rate decay for walk-forward training
+
+[training]
+# Base learning rate configuration
+learning_rate = { Fixed = 0.001 }
+
+# Window decay factor (simple exponential decay)
+# 0.8 = 20% reduction per window
+# 1.0 = no decay (same LR for all windows)
+window_decay = 0.8
+
+# Example progression with window_decay = 0.8:
+# Window 1: lr = 0.001 * 0.8^0 = 0.001000 (100%)
+# Window 2: lr = 0.001 * 0.8^1 = 0.000800 (80%)
+# Window 3: lr = 0.001 * 0.8^2 = 0.000640 (64%)
+# Window 4: lr = 0.001 * 0.8^3 = 0.000512 (51%)
+
+# Other training parameters
+epochs = { Auto = { max_epochs = 1000 } }
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+validation_split = 0.2
+test_split = 0.1
+early_stopping = { patience = 50, min_delta = 0.001 }
+
+# Recommended window_decay values:
+# - 0.9: Conservative (10% reduction per window)
+# - 0.8: Standard (20% reduction per window) - RECOMMENDED for crypto
+# - 0.7: Aggressive (30% reduction per window)
+# - 1.0: No decay (current behavior)

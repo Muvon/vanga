@@ -901,6 +901,8 @@ mod tests {
             objective: "reg:squarederror".to_string(),
             save_feature_importance: true,
             importance_type: "gain".to_string(),
+            importance_method: "shap".to_string(),
+            importance_validation_size: 50,
         };
 
         // Test that the method returns the config value, not calculated value
