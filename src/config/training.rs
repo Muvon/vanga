@@ -206,6 +206,7 @@ pub enum OptimizerType {
         weight_decay: f64,
         beta1: f64,
         beta2: f64,
+        eps: f64,
     },
     // New optimizers from candle-optimisers crate
     Adam {
@@ -265,6 +266,7 @@ impl OptimizerType {
                 weight_decay: 0.01,
                 beta1: 0.9,
                 beta2: 0.999,
+                eps: 1e-8,
             },
             "Adam" => OptimizerType::Adam {
                 beta1: 0.9,
@@ -314,6 +316,7 @@ impl OptimizerType {
                 weight_decay: 0.01,
                 beta1: 0.9,
                 beta2: 0.999,
+                eps: 1e-8,
             }, // Default to AdamW
         }
     }
@@ -435,6 +438,7 @@ impl TrainingParams {
                 weight_decay,
                 beta1,
                 beta2,
+                eps,
             } => {
                 if *weight_decay < 0.0 {
                     return Err(VangaError::ConfigError(format!(
@@ -452,6 +456,12 @@ impl TrainingParams {
                     return Err(VangaError::ConfigError(format!(
                         "AdamW beta2 must be between 0.0 and 1.0, got: {}",
                         beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "AdamW eps must be positive, got: {}",
+                        eps
                     )));
                 }
             }
@@ -821,6 +831,7 @@ impl Default for TrainingParams {
                 weight_decay: 0.01,
                 beta1: 0.9,
                 beta2: 0.999,
+                eps: 1e-8,
             }, // AdamW by default for better performance
             warmup_epochs: 5,                 // 5 epochs warmup by default
             learning_schedule: None,          // No schedule by default

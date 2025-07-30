@@ -8,7 +8,7 @@ use crate::config::training::ClassWeightStrategy;
 use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
 
-use candle_nn::optim::{self, Optimizer};
+use candle_nn::optim::{self, Optimizer, ParamsAdamW};
 use candle_optimisers::{
     adadelta::{Adadelta, ParamsAdaDelta},
     adagrad::{Adagrad, ParamsAdaGrad},
@@ -1256,19 +1256,30 @@ impl LSTMModel {
                 weight_decay,
                 beta1,
                 beta2,
+                eps,
             } => {
                 log::info!(
                     "Using AdamW optimizer with learning rate: {:.6}",
                     learning_rate
                 );
                 log::info!(
-                    "AdamW parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}",
+                    "AdamW parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
                     weight_decay,
                     beta1,
-                    beta2
+                    beta2,
+                    eps
                 );
+
+                let params = ParamsAdamW {
+                    lr: learning_rate,
+                    beta1: *beta1,
+                    beta2: *beta2,
+                    weight_decay: *weight_decay,
+                    eps: *eps,
+                };
+
                 Ok(OptimizerWrapper::AdamW(
-                    optim::AdamW::new_lr(self.varmap.all_vars(), learning_rate).map_err(|e| {
+                    optim::AdamW::new(self.varmap.all_vars(), params).map_err(|e| {
                         VangaError::ModelError(format!("AdamW optimizer creation failed: {}", e))
                     })?,
                 ))

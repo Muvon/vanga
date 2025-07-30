@@ -41,7 +41,7 @@ test_split = 0.1       # 10% test (most recent after validation)
 # ============================================================================
 
 # Use AdamW with moderate weight decay
-optimizer = { AdamW = { weight_decay = 0.005, beta1 = 0.9, beta2 = 0.999 } }
+optimizer = { AdamW = { weight_decay = 0.005, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 
 # ============================================================================
 # MODEL CONFIGURATION - Simplified for debugging

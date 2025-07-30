@@ -7,7 +7,7 @@
 # - Excellent for crypto volatility and regime changes
 # - Built-in regularization prevents overfitting on noisy data
 # - 20-40% better convergence than SGD on crypto datasets
-optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 
 # Adaptive learning rate with crypto-optimized settings
 learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
