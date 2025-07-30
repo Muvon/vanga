@@ -240,9 +240,12 @@ impl DataPipeline {
         train_end: usize, // FIXED: This is the END of training data (not size)
         val_size: usize,
         gap_steps: usize,
+        validation_start_override: Option<usize>, // NEW: Override default validation position
     ) -> Result<(polars::prelude::DataFrame, polars::prelude::DataFrame)> {
         let total_data_size = data.height();
-        let val_start = train_end + gap_steps;
+
+        // Use smart validation start if provided
+        let val_start = validation_start_override.unwrap_or(train_end + gap_steps);
         let val_end = val_start + val_size;
 
         // Validate we have enough data
@@ -263,15 +266,13 @@ impl DataPipeline {
         let val_df = data.slice(val_start as i64, val_size);
 
         log::info!(
-            "✅ Expanding window created: train=[0..{}] ({} samples), gap=[{}..{}] ({} steps), val=[{}..{}] ({} samples)",
+            "✅ Smart validation: train=[0..{}] ({} samples), val=[{}..{}] ({} samples), gap_maintained={}",
             train_end,
             train_df.height(),
-            train_end,
-            val_start,
-            gap_steps,
             val_start,
             val_end,
-            val_df.height()
+            val_df.height(),
+            val_start >= train_end + gap_steps
         );
 
         // Validate the split worked correctly
@@ -328,6 +329,7 @@ impl DataPipeline {
             let mut windows = Vec::new();
             let mut train_end = min_train_size;
             let mut total_used = min_train_size;
+            let mut next_fresh_validation_start = min_train_size + gap_steps;
 
             for i in 0..window_count {
                 // Calculate remaining data after this window's training
@@ -355,9 +357,23 @@ impl DataPipeline {
                     break;
                 }
 
+                // 🧠 SMART VALIDATION SCHEDULING
+                let (validation_start, is_fresh) =
+                    if next_fresh_validation_start + validation_size <= available_for_training {
+                        // Use fresh validation data
+                        let start = next_fresh_validation_start;
+                        next_fresh_validation_start += validation_size + (gap_steps * 2); // Reserve space
+                        (Some(start), true)
+                    } else {
+                        // Use default validation positioning (may reuse, but with proper gap)
+                        (None, false)
+                    };
+
                 windows.push(WindowConfig {
                     train_end,
                     validation_size,
+                    validation_start,
+                    is_fresh_validation: is_fresh,
                 });
 
                 total_used = train_end + gap_steps + validation_size;
@@ -401,6 +417,7 @@ impl DataPipeline {
             let simple_increment = data_for_expansion / 3;
             let mut windows = Vec::new();
             let mut train_end = min_train_size;
+            let mut next_fresh_validation_start = min_train_size + gap_steps;
 
             for i in 0..3 {
                 let validation_size = if i == 2 {
@@ -409,9 +426,23 @@ impl DataPipeline {
                     base_validation_size
                 };
 
+                // 🧠 SMART VALIDATION SCHEDULING (Fallback)
+                let (validation_start, is_fresh) =
+                    if next_fresh_validation_start + validation_size <= available_for_training {
+                        // Use fresh validation data
+                        let start = next_fresh_validation_start;
+                        next_fresh_validation_start += validation_size + (gap_steps * 2); // Reserve space
+                        (Some(start), true)
+                    } else {
+                        // Use default validation positioning (may reuse, but with proper gap)
+                        (None, false)
+                    };
+
                 windows.push(WindowConfig {
                     train_end,
                     validation_size,
+                    validation_start,
+                    is_fresh_validation: is_fresh,
                 });
 
                 if i < 2 {
@@ -509,12 +540,34 @@ impl DataPipeline {
             let current_validation_size = window_config.validation_size;
             let is_final_window = window_idx == optimal_config.windows.len() - 1;
 
+            // Log smart validation scheduling
+            log::info!(
+                "📊 Window {}: train=[0..{}], validation={} ({})",
+                window_idx,
+                train_end,
+                if let Some(start) = window_config.validation_start {
+                    format!("[{}..{}]", start, start + current_validation_size)
+                } else {
+                    format!(
+                        "[{}..{}]",
+                        train_end + gap_steps,
+                        train_end + gap_steps + current_validation_size
+                    )
+                },
+                if window_config.is_fresh_validation {
+                    "FRESH"
+                } else {
+                    "REUSED"
+                }
+            );
+
             // Create expanding window validation with proper chronological split
             let (train_df, val_df) = Self::create_distributed_validation(
                 &raw_processed_data,
                 train_end,
                 current_validation_size,
                 gap_steps,
+                window_config.validation_start, // NEW: Pass smart validation start
             )?;
 
             // Store DataFrame heights before moving them
@@ -863,6 +916,10 @@ pub struct DataMetadata {
 struct WindowConfig {
     pub train_end: usize,
     pub validation_size: usize,
+    /// Override default validation position for smart scheduling
+    pub validation_start: Option<usize>,
+    /// Track whether this window uses fresh validation data
+    pub is_fresh_validation: bool,
 }
 
 /// Optimal walk-forward window configuration
