@@ -176,9 +176,21 @@ impl ModelTrainer {
 
             if i == 0 {
                 // First window: train from scratch
+                log::info!("🆕 Window 1: Training fresh model from scratch with new weights");
                 model = Some(self.train_window_from_scratch(window, window_lr).await?);
             } else {
                 // Subsequent windows: continue training on expanded data
+                log::info!(
+                    "🔄 Window {}: Continuing training with PRESERVED weights from previous window",
+                    i + 1
+                );
+                log::info!(
+                    "   ✅ Weight continuity: Using same model instance with existing parameters"
+                );
+                log::info!(
+                    "   📈 Progressive learning: Building on knowledge from {} previous windows",
+                    i
+                );
                 model = Some(
                     self.continue_training_window(model.unwrap(), window, window_lr)
                         .await?,

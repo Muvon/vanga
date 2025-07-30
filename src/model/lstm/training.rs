@@ -287,9 +287,11 @@ impl LSTMModel {
         // INCREMENTAL TRAINING DETECTION AND OPTIMIZATION - SAME logic as original continue_training
         let final_config = if self.trained {
             log::info!(
-                "🔄 INCREMENTAL TRAINING: Adding {} new samples to existing model",
+                "🔄 INCREMENTAL TRAINING: Adding {} new samples to existing model with preserved weights",
                 total_samples
             );
+            log::info!("   🧠 Weight preservation: Existing LSTM parameters will be fine-tuned, not recreated");
+            log::info!("   📉 Learning rate reduction: Applying 10x reduction to preserve existing knowledge");
 
             // Configure training with typically lower learning rate for incremental training - SAME logic as original
             let mut incremental_config = config.clone();
@@ -354,7 +356,20 @@ impl LSTMModel {
 
         // Initialize network if not already done
         if self.lstm_layers.is_none() || self.output_layer.is_none() {
+            log::info!("🆕 FRESH TRAINING: Initializing new LSTM network layers and weights");
             self.initialize_network()?;
+        } else {
+            log::info!("🔄 CONTINUE TRAINING: Reusing existing LSTM network layers and weights (NO reinitialization)");
+            log::info!(
+                "   ✅ LSTM layers preserved: {} layers with existing parameters",
+                self.config.num_layers
+            );
+            log::info!(
+                "   ✅ Output layer preserved: {} → {} with existing weights",
+                self.config
+                    .get_hidden_size_for_layer(self.config.num_layers - 1),
+                self.config.output_size
+            );
         }
 
         // Determine if we need validation split
