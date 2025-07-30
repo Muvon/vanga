@@ -692,7 +692,7 @@ mod tests {
         let unidirectional_config = ModelConfig {
             architecture: LSTMArchitecture::MultiLSTM { layers: 1 },
             sequence_length: SequenceLengthConfig::default(),
-            hidden_units: HiddenUnitsConfig::default(),
+            hidden_units: HiddenUnitsConfig::Fixed(vec![hidden_size]),
             dropout: DropoutConfig::default(),
             attention: AttentionConfig {
                 enabled: true,
