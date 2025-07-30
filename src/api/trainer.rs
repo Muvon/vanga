@@ -277,19 +277,39 @@ impl ModelTrainer {
                                 );
 
                                 for (target_idx, target_name) in target_names.iter().enumerate() {
-                                    if target_idx < test_predictions.shape()[1]
+                                    // Multi-target predictions have shape [batch_size, num_targets * NUM_CLASSES]
+                                    // Each target has NUM_CLASSES (5) probability outputs
+                                    const NUM_CLASSES: usize = 5;
+                                    let start_col = target_idx * NUM_CLASSES;
+                                    let end_col = start_col + NUM_CLASSES;
+
+                                    if end_col <= test_predictions.shape()[1]
                                         && target_idx < test_targets_array.shape()[1]
                                     {
-                                        // Extract predictions and targets for this specific target
-                                        let target_predictions =
-                                            test_predictions.column(target_idx);
+                                        // Extract 5-column probability slice for this target
+                                        let target_predictions_slice = test_predictions
+                                            .slice(ndarray::s![.., start_col..end_col]);
                                         let target_actual = test_targets_array.column(target_idx);
 
-                                        // Convert to integer predictions (argmax for classification)
-                                        let pred_classes: Vec<i32> = target_predictions
-                                            .iter()
-                                            .map(|&pred| pred.round() as i32)
+                                        // Convert predictions to class indices using argmax (like validation metrics)
+                                        let pred_classes: Vec<i32> = target_predictions_slice
+                                            .rows()
+                                            .into_iter()
+                                            .map(|pred_row| {
+                                                // Find class with highest probability (argmax)
+                                                pred_row
+                                                    .iter()
+                                                    .enumerate()
+                                                    .max_by(|(_, a), (_, b)| {
+                                                        a.partial_cmp(b)
+                                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                                    })
+                                                    .map(|(idx, _)| idx as i32)
+                                                    .unwrap_or(0)
+                                            })
                                             .collect();
+
+                                        // Convert targets to class indices (targets are already class indices)
                                         let actual_classes: Vec<i32> = target_actual
                                             .iter()
                                             .map(|&actual| actual.round() as i32)
