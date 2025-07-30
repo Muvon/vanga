@@ -805,6 +805,7 @@ mod tests {
                     weight_decay: 0.01,
                     beta1: 0.9,
                     beta2: 0.999,
+                    eps: 1e-8,
                 },
                 warmup_epochs: 0,
                 learning_schedule: None,

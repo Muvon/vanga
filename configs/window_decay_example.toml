@@ -19,7 +19,7 @@ window_decay = 0.8
 # Other training parameters
 epochs = { Auto = { max_epochs = 1000 } }
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
-optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 validation_split = 0.2
 test_split = 0.1
 early_stopping = { patience = 50, min_delta = 0.001 }

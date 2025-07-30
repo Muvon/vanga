@@ -103,7 +103,8 @@ optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0
 optimizer = { AdamW = {
     weight_decay = 0.01,    # 0.001-0.1 range, higher for more regularization
     beta1 = 0.9,           # 0.8-0.95 range, momentum parameter
-    beta2 = 0.999          # 0.99-0.9999 range, variance parameter
+    beta2 = 0.999,         # 0.99-0.9999 range, variance parameter
+    eps = 1e-8             # 1e-10 to 1e-6 range, numerical stability
 }}
 ```
 

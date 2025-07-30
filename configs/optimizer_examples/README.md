@@ -60,11 +60,12 @@ Each configuration file can be customized by:
 
 #### **AdamW (Recommended)**
 ```toml
-optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 ```
 - `weight_decay`: Built-in regularization (0.01 = 1% weight decay)
 - `beta1`: Momentum parameter for first moment (0.9 standard)
 - `beta2`: Momentum parameter for second moment (0.999 standard)
+- `eps`: Numerical stability parameter (1e-8 standard)
 
 #### **RMSprop (Volatile Markets)**
 ```toml

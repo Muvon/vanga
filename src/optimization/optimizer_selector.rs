@@ -473,6 +473,7 @@ impl OptimizerSelector {
                 },
                 beta1: 0.9,
                 beta2: 0.999,
+                eps: 1e-8,
             },
             "RMSprop" => OptimizerType::RMSprop {
                 alpha: if characteristics.volatility > 0.05 {
@@ -533,6 +534,7 @@ impl OptimizerSelector {
                 weight_decay: 0.01,
                 beta1: 0.9,
                 beta2: 0.999,
+                eps: 1e-8,
             },
         }
     }

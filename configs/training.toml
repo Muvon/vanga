@@ -19,7 +19,7 @@ epochs = { Auto = { max_epochs = 1000 } }
 # - Better convergence for most cryptocurrency datasets
 # - Handles sparse gradients well
 # - Built-in weight decay for regularization
-optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 
 # SGD: Traditional optimizer, good for fine-tuning
 # optimizer = { SGD = { momentum = 0.9 } }  # momentum not yet implemented in Candle
