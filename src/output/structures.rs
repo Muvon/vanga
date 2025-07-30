@@ -99,10 +99,26 @@ impl PriceLevelPrediction {
     /// Returns (up_portions, down_portions) for SHORT position logic
     pub fn extract_probability_portions(&self) -> ([f64; 3], [f64; 3]) {
         // For SHORT: entries use UP probabilities, exits use DOWN probabilities
-        let moderate_up_prob = self.bins.get("moderate_up").map(|b| b.probability).unwrap_or(0.0);
-        let strong_up_prob = self.bins.get("strong_up").map(|b| b.probability).unwrap_or(0.0);
-        let moderate_down_prob = self.bins.get("moderate_down").map(|b| b.probability).unwrap_or(0.0);
-        let strong_down_prob = self.bins.get("strong_down").map(|b| b.probability).unwrap_or(0.0);
+        let moderate_up_prob = self
+            .bins
+            .get("moderate_up")
+            .map(|b| b.probability)
+            .unwrap_or(0.0);
+        let strong_up_prob = self
+            .bins
+            .get("strong_up")
+            .map(|b| b.probability)
+            .unwrap_or(0.0);
+        let moderate_down_prob = self
+            .bins
+            .get("moderate_down")
+            .map(|b| b.probability)
+            .unwrap_or(0.0);
+        let strong_down_prob = self
+            .bins
+            .get("strong_down")
+            .map(|b| b.probability)
+            .unwrap_or(0.0);
 
         let up_total = moderate_up_prob + strong_up_prob;
         let down_total = moderate_down_prob + strong_down_prob;
@@ -113,9 +129,9 @@ impl PriceLevelPrediction {
             let strong_portion = strong_up_prob / up_total;
             // Split into 3 orders: moderate_lower, moderate_upper, strong_lower
             [
-                moderate_portion * 0.6,  // 60% of moderate_up probability
-                moderate_portion * 0.4,  // 40% of moderate_up probability  
-                strong_portion,          // 100% of strong_up probability
+                moderate_portion * 0.6, // 60% of moderate_up probability
+                moderate_portion * 0.4, // 40% of moderate_up probability
+                strong_portion,         // 100% of strong_up probability
             ]
         } else {
             [0.33, 0.33, 0.34] // Fallback to equal distribution
@@ -127,9 +143,9 @@ impl PriceLevelPrediction {
             let strong_portion = strong_down_prob / down_total;
             // Split into 3 orders: moderate_center, strong_upper, strong_lower
             [
-                moderate_portion,        // 100% of moderate_down probability
-                strong_portion * 0.5,    // 50% of strong_down probability
-                strong_portion * 0.5,    // 50% of strong_down probability
+                moderate_portion,     // 100% of moderate_down probability
+                strong_portion * 0.5, // 50% of strong_down probability
+                strong_portion * 0.5, // 50% of strong_down probability
             ]
         } else {
             [0.33, 0.33, 0.34] // Fallback to equal distribution
@@ -148,20 +164,21 @@ impl PriceLevelPrediction {
         // Entry positions (UP ranges for SHORT)
         let entry_positions = if let (Some(mod_up), Some(str_up)) = (moderate_up, strong_up) {
             vec![
-                mod_up.range[0],                                    // moderate_up lower
-                (mod_up.range[0] + mod_up.range[1]) / 2.0,         // moderate_up center
-                str_up.range[0],                                    // strong_up lower
+                mod_up.range[0],                           // moderate_up lower
+                (mod_up.range[0] + mod_up.range[1]) / 2.0, // moderate_up center
+                str_up.range[0],                           // strong_up lower
             ]
         } else {
             vec![0.8, 1.2, 1.8] // Fallback percentages
         };
 
         // Exit positions (DOWN ranges for SHORT)
-        let exit_positions = if let (Some(mod_down), Some(str_down)) = (moderate_down, strong_down) {
+        let exit_positions = if let (Some(mod_down), Some(str_down)) = (moderate_down, strong_down)
+        {
             vec![
-                (mod_down.range[0] + mod_down.range[1]) / 2.0,     // moderate_down center
-                str_down.range[1],                                  // strong_down upper (closer to current)
-                (str_down.range[0] + str_down.range[1]) / 2.0,     // strong_down center
+                (mod_down.range[0] + mod_down.range[1]) / 2.0, // moderate_down center
+                str_down.range[1], // strong_down upper (closer to current)
+                (str_down.range[0] + str_down.range[1]) / 2.0, // strong_down center
             ]
         } else {
             vec![-1.5, -2.5, -3.5] // Fallback percentages
@@ -171,73 +188,87 @@ impl PriceLevelPrediction {
     }
 
     /// Validate probability-driven orders for consistency and eliminate duplicates
-    pub fn validate_orders(&self, entry_levels: &[OrderLevel; 3], exit_levels: &[OrderLevel; 3], stop_levels: &[OrderLevel; 3]) -> crate::utils::error::Result<()> {
+    pub fn validate_orders(
+        &self,
+        entry_levels: &[OrderLevel; 3],
+        exit_levels: &[OrderLevel; 3],
+        stop_levels: &[OrderLevel; 3],
+    ) -> crate::utils::error::Result<()> {
         // 1. Validate probability portions sum to 1.0
         let (entry_portions, exit_portions) = self.extract_probability_portions();
         let entry_sum: f64 = entry_portions.iter().sum();
         let exit_sum: f64 = exit_portions.iter().sum();
-        
+
         if (entry_sum - 1.0).abs() > 0.001 {
-            return Err(crate::utils::error::VangaError::PredictionError(
-                format!("Entry portions sum to {:.6}, expected 1.0", entry_sum)
-            ));
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Entry portions sum to {:.6}, expected 1.0",
+                entry_sum
+            )));
         }
-        
+
         if (exit_sum - 1.0).abs() > 0.001 {
-            return Err(crate::utils::error::VangaError::PredictionError(
-                format!("Exit portions sum to {:.6}, expected 1.0", exit_sum)
-            ));
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Exit portions sum to {:.6}, expected 1.0",
+                exit_sum
+            )));
         }
 
         // 2. Validate no duplicate prices
         let entry_prices: Vec<f64> = entry_levels.iter().map(|l| l.price).collect();
         let exit_prices: Vec<f64> = exit_levels.iter().map(|l| l.price).collect();
         let stop_prices: Vec<f64> = stop_levels.iter().map(|l| l.price).collect();
-        
+
         for i in 0..3 {
-            for j in (i+1)..3 {
+            for j in (i + 1)..3 {
                 if (entry_prices[i] - entry_prices[j]).abs() < 0.01 {
-                    return Err(crate::utils::error::VangaError::PredictionError(
-                        format!("Duplicate entry prices: {:.2} and {:.2}", entry_prices[i], entry_prices[j])
-                    ));
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "Duplicate entry prices: {:.2} and {:.2}",
+                        entry_prices[i], entry_prices[j]
+                    )));
                 }
                 if (exit_prices[i] - exit_prices[j]).abs() < 0.01 {
-                    return Err(crate::utils::error::VangaError::PredictionError(
-                        format!("Duplicate exit prices: {:.2} and {:.2}", exit_prices[i], exit_prices[j])
-                    ));
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "Duplicate exit prices: {:.2} and {:.2}",
+                        exit_prices[i], exit_prices[j]
+                    )));
                 }
                 if (stop_prices[i] - stop_prices[j]).abs() < 0.01 {
-                    return Err(crate::utils::error::VangaError::PredictionError(
-                        format!("Duplicate stop prices: {:.2} and {:.2}", stop_prices[i], stop_prices[j])
-                    ));
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "Duplicate stop prices: {:.2} and {:.2}",
+                        stop_prices[i], stop_prices[j]
+                    )));
                 }
             }
         }
 
         // 3. Validate proper order sequencing for SHORT
-        let current_price = entry_levels[0].price / (1.0 + self.get_natural_price_positions().0[0] / 100.0);
-        
+        let current_price =
+            entry_levels[0].price / (1.0 + self.get_natural_price_positions().0[0] / 100.0);
+
         for level in entry_levels {
             if level.price <= current_price {
-                return Err(crate::utils::error::VangaError::PredictionError(
-                    format!("SHORT entry price {:.2} must be above current price {:.2}", level.price, current_price)
-                ));
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "SHORT entry price {:.2} must be above current price {:.2}",
+                    level.price, current_price
+                )));
             }
         }
-        
+
         for level in exit_levels {
             if level.price >= current_price {
-                return Err(crate::utils::error::VangaError::PredictionError(
-                    format!("SHORT exit price {:.2} must be below current price {:.2}", level.price, current_price)
-                ));
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "SHORT exit price {:.2} must be below current price {:.2}",
+                    level.price, current_price
+                )));
             }
         }
-        
+
         for (i, level) in stop_levels.iter().enumerate() {
             if level.price <= entry_levels[i].price {
-                return Err(crate::utils::error::VangaError::PredictionError(
-                    format!("SHORT stop price {:.2} must be above entry price {:.2}", level.price, entry_levels[i].price)
-                ));
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "SHORT stop price {:.2} must be above entry price {:.2}",
+                    level.price, entry_levels[i].price
+                )));
             }
         }
 
@@ -1119,7 +1150,7 @@ impl TradingOrders {
                 &sequence_ranges,
                 config.config,
                 is_breakout,
-                config.price_levels, // NEW: Add price_levels parameter
+                config.price_levels,    // NEW: Add price_levels parameter
                 config.volatility_pred, // NEW: Add volatility_pred parameter
             )
         };
@@ -1367,7 +1398,9 @@ impl TradingOrders {
 
         log::debug!(
             "💰 SHORT Entry Percentages (ADAPTIVE): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
-            entry_1_pct, entry_2_pct, entry_3_pct
+            entry_1_pct,
+            entry_2_pct,
+            entry_3_pct
         );
 
         let entry_levels = [
@@ -1400,12 +1433,14 @@ impl TradingOrders {
 
         // 🎯 NEW: Exit levels using probability-based allocation and natural positions
         let exit_1_pct = exit_positions[0]; // moderate_down center
-        let exit_2_pct = exit_positions[1]; // strong_down upper  
+        let exit_2_pct = exit_positions[1]; // strong_down upper
         let exit_3_pct = exit_positions[2]; // strong_down center
 
         log::debug!(
             "📉 SHORT Exit Percentages (ADAPTIVE): exit_1={:.2}%, exit_2={:.2}%, exit_3={:.2}%",
-            exit_1_pct, exit_2_pct, exit_3_pct
+            exit_1_pct,
+            exit_2_pct,
+            exit_3_pct
         );
 
         let exit_levels = [
@@ -1437,20 +1472,22 @@ impl TradingOrders {
         let recommended_stop_distance = volatility_pred.recommended_stop_distance_percent;
         let expected_range = volatility_pred.expected_range_percent;
         let regime_confidence = volatility_pred.confidence;
-        
+
         // Calculate adaptive buffer based on volatility regime confidence
         // Lower confidence = higher uncertainty = wider buffer needed
         let confidence_buffer = (1.0 - regime_confidence) * expected_range;
         let adaptive_stop_distance = recommended_stop_distance + confidence_buffer;
-        
+
         log::info!(
             "🎯 Adaptive Stop Calculation: base={:.3}% + buffer={:.3}% = total={:.3}%",
-            recommended_stop_distance, confidence_buffer, adaptive_stop_distance
+            recommended_stop_distance,
+            confidence_buffer,
+            adaptive_stop_distance
         );
-        
+
         // Position stops at adaptive distance above each entry
         let stop_1_pct = entry_1_pct + adaptive_stop_distance;
-        let stop_2_pct = entry_2_pct + adaptive_stop_distance;  
+        let stop_2_pct = entry_2_pct + adaptive_stop_distance;
         let stop_3_pct = entry_3_pct + adaptive_stop_distance;
 
         log::debug!(

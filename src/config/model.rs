@@ -104,6 +104,15 @@ pub enum SequenceLengthConfig {
     Adaptive,
 }
 
+impl Default for SequenceLengthConfig {
+    fn default() -> Self {
+        Self::Auto {
+            min_length: 24,
+            max_length: 168,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HiddenUnitsConfig {
     Auto {
@@ -117,12 +126,35 @@ pub enum HiddenUnitsConfig {
     },
 }
 
+impl Default for HiddenUnitsConfig {
+    fn default() -> Self {
+        Self::Auto {
+            min_units: 32,
+            max_units: 256,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropoutConfig {
     pub enabled: bool,
     pub rate: DropoutRate,
     pub variational: bool,
     pub recurrent: bool,
+}
+
+impl Default for DropoutConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rate: DropoutRate::Auto {
+                min_rate: 0.1,
+                max_rate: 0.5,
+            },
+            variational: false,
+            recurrent: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
