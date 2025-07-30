@@ -295,7 +295,7 @@ impl LSTMModel {
         &self,
         predictions: &Tensor,
         targets: &Tensor,
-        config: &crate::config::TrainingConfig,
+        _config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         let pred_shape = predictions.shape();
         let target_shape = targets.shape();
@@ -329,21 +329,10 @@ impl LSTMModel {
         // Output size validation for classification targets
         let target_type = self.get_target_type()?;
         let pred_output_size = pred_shape.dims()[1];
-        let expected_output_size = match target_type {
-            TargetType::PriceLevel => {
-                if config.model.output_heads.price_levels.enabled {
-                    crate::config::model::NUM_CLASSES // Use unified 5-class system
-                } else {
-                    1 // Regression mode
-                }
-            }
-            TargetType::Direction => crate::config::model::NUM_CLASSES, // Dump/Down/Sideways/Up/Pump
-            TargetType::Volatility => crate::config::model::NUM_CLASSES, // VeryLow/Low/Medium/High/VeryHigh
-        };
+        let expected_output_size = crate::config::model::NUM_CLASSES;
 
         // CRITICAL CHECK: This catches the main bug we're fixing
-        if config.model.output_heads.price_levels.enabled
-            && target_type == TargetType::PriceLevel
+        if target_type == TargetType::PriceLevel
             && pred_output_size == 1
             && expected_output_size > 1
         {
@@ -439,21 +428,10 @@ impl LSTMModel {
     /// Get target size for a specific target type based on configuration
     fn get_target_size(
         &self,
-        target_type: TargetType,
-        config: &crate::config::TrainingConfig,
+        _target_type: TargetType,
+        _config: &crate::config::TrainingConfig,
     ) -> usize {
-        match target_type {
-            TargetType::PriceLevel => {
-                if config.model.output_heads.price_levels.enabled {
-                    crate::config::model::NUM_CLASSES // Use unified 5-class system
-                } else {
-                    // Use output_size from LSTM config as fallback
-                    self.config.output_size
-                }
-            }
-            TargetType::Direction => crate::config::model::NUM_CLASSES, // Dump/Down/Sideways/Up/Pump
-            TargetType::Volatility => crate::config::model::NUM_CLASSES, // VeryLow/Low/Medium/High/VeryHigh
-        }
+        crate::config::model::NUM_CLASSES // Use unified 5-class system
     }
 
     /// Calculate CrossEntropy loss for categorical targets with optional class weighting
@@ -976,145 +954,6 @@ impl LSTMModel {
         );
 
         Ok(mean_loss)
-    }
-
-    /// Calculate MSE loss with class weights for categorical targets
-    /// This applies the same class weighting logic as CrossEntropy but uses MSE loss
-    fn calculate_mse_with_class_weights(
-        &self,
-        predictions: &Tensor,
-        targets: &Tensor,
-        num_classes: usize,
-        config: &crate::config::TrainingConfig,
-        is_validation: bool,
-    ) -> Result<Tensor> {
-        log::debug!(
-            "🔍 MSE with class weights - Pred shape: {:?}, Target shape: {:?}, Classes: {}",
-            predictions.shape(),
-            targets.shape(),
-            num_classes
-        );
-
-        // Get appropriate class weights based on context (training vs validation)
-        let class_weights = if let Some((_target_name, target_type)) = &self.target_context {
-            match target_type {
-                TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
-                    // For Advanced class weighting, use validation-specific weights during validation
-                    if is_validation
-                        && config.training.class_weight_strategy
-                            == crate::config::training::ClassWeightStrategy::Advanced
-                    {
-                        if let Some(ref validation_weights) = self.validation_class_weights {
-                            log::debug!(
-                                "🔍 MSE DEBUG: Using validation-specific class weights for {:?}: {:?}",
-                                target_type,
-                                validation_weights
-                            );
-                            Some(validation_weights.clone())
-                        } else if let Some(ref global_weights) = self.training_class_weights {
-                            log::debug!(
-                                "⚠️ MSE DEBUG: Validation weights not available for {:?}, falling back to global weights",
-                                target_type
-                            );
-                            Some(global_weights.clone())
-                        } else {
-                            log::debug!(
-                                "⚠️ MSE DEBUG: No weights available for {:?}, using unweighted MSE",
-                                target_type
-                            );
-                            None
-                        }
-                    } else {
-                        // For training or non-Advanced strategies, use global weights
-                        if let Some(ref global_weights) = self.training_class_weights {
-                            // CRITICAL: Validate class weights match expected target size
-                            if let Some((_target_name, target_type)) = &self.target_context {
-                                let expected_classes = self.get_target_size(*target_type, config);
-                                if global_weights.len() != expected_classes {
-                                    log::error!(
-                                        "🚨 MSE CRITICAL: Class weights length {} doesn't match target type {:?} expected classes {}",
-                                        global_weights.len(),
-                                        target_type,
-                                        expected_classes
-                                    );
-                                }
-                            }
-
-                            log::debug!(
-                                "🌍 MSE DEBUG: Using global class weights for {:?}: {:?}",
-                                self.target_context.as_ref().map(|(_, t)| t),
-                                global_weights
-                            );
-                            Some(global_weights.clone())
-                        } else {
-                            log::debug!(
-                                "⚠️ MSE DEBUG: Global weights not available for {:?}, using unweighted MSE",
-                                target_type
-                            );
-                            None
-                        }
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
-        // Calculate basic MSE loss
-        let mse_loss = predictions.sub(targets)?.sqr()?.mean_all()?;
-
-        // Apply class weights if available
-        if let Some(weights) = class_weights {
-            // For MSE with class weights, we need to weight the loss based on target classes
-            // Convert targets to class indices for weighting
-            let target_indices = targets.to_dtype(candle_core::DType::I64)?;
-
-            // Calculate weighted MSE by applying class weights to each sample
-            let batch_size = targets.dim(0)?;
-            let mut weighted_losses = Vec::with_capacity(batch_size);
-
-            let target_data = target_indices.to_vec1::<i64>()?;
-            let mse_per_sample = predictions
-                .sub(targets)?
-                .sqr()?
-                .mean(candle_core::D::Minus1)?;
-            let mse_data = mse_per_sample.to_vec1::<f32>()?;
-
-            for (i, &target_class) in target_data.iter().enumerate() {
-                let class_idx = target_class as usize;
-                if class_idx < weights.len() {
-                    let weight = weights[class_idx];
-                    let weighted_loss = mse_data[i] * weight;
-                    weighted_losses.push(weighted_loss);
-                } else {
-                    // Fallback for invalid class indices
-                    weighted_losses.push(mse_data[i]);
-                }
-            }
-
-            // Convert back to tensor and calculate mean
-            let weighted_tensor = Tensor::from_vec(
-                weighted_losses.clone(),
-                (weighted_losses.len(),),
-                predictions.device(),
-            )?;
-            let final_loss = weighted_tensor.mean_all()?;
-
-            log::debug!(
-                "⚖️ Weighted MSE: {:.6} (vs unweighted: {:.6}) for {} samples",
-                final_loss.to_scalar::<f32>().unwrap_or(0.0),
-                mse_loss.to_scalar::<f32>().unwrap_or(0.0),
-                batch_size
-            );
-
-            Ok(final_loss)
-        } else {
-            log::debug!(
-                "📈 Unweighted MSE: {:.6}",
-                mse_loss.to_scalar::<f32>().unwrap_or(0.0)
-            );
-            Ok(mse_loss)
-        }
     }
 
     /// Calculate weighted soft CrossEntropy loss for one-hot encoded targets
@@ -1731,28 +1570,15 @@ impl LSTMModel {
 
         match target_type {
             TargetType::PriceLevel => {
-                if config.model.output_heads.price_levels.enabled {
-                    // CrossEntropy for categorical price levels
-                    let num_classes = crate::config::model::NUM_CLASSES; // Use unified 5-class system
-                    self.calculate_crossentropy_loss(
-                        predictions,
-                        targets,
-                        num_classes,
-                        config,
-                        is_validation,
-                    )
-                } else {
-                    // MSE for continuous price prediction with class weights for categorical targets
-                    log::debug!("🎯 PriceLevel target: Using MSE loss with class weights");
-                    let num_classes = self.get_target_size(target_type, config);
-                    self.calculate_mse_with_class_weights(
-                        predictions,
-                        targets,
-                        num_classes,
-                        config,
-                        is_validation,
-                    )
-                }
+                // Always use CrossEntropy for categorical price levels (5-class system)
+                let num_classes = crate::config::model::NUM_CLASSES;
+                self.calculate_crossentropy_loss(
+                    predictions,
+                    targets,
+                    num_classes,
+                    config,
+                    is_validation,
+                )
             }
             TargetType::Direction => {
                 // Direction targets use 5-class classification (Dump=0, Down=1, Sideways=2, Up=3, Pump=4)

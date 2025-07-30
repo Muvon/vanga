@@ -5,9 +5,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::config::model::PriceLevelHead;
+    use crate::config::model::TargetsConfig;
     use crate::data::structures::MarketDataRow;
-    use crate::targets::direction::calculate_linear_trend_slope;
+    use crate::targets::direction::calculate_raw_linear_slope;
     use crate::targets::price_levels::classify_price_level;
     use crate::targets::volatility::{
         calculate_log_volatility_thresholds, classify_volatility_log_ratio,
@@ -58,8 +58,8 @@ mod tests {
                 base_price * 1.12,
             ];
 
-            let seq_slope = calculate_linear_trend_slope(&sequence_1pct).unwrap();
-            let hor_slope = calculate_linear_trend_slope(&horizon_2pct).unwrap();
+            let seq_slope = calculate_raw_linear_slope(&sequence_1pct).unwrap();
+            let hor_slope = calculate_raw_linear_slope(&horizon_2pct).unwrap();
 
             println!(
                 "{}: seq_slope={:.6}, hor_slope={:.6}",
@@ -93,11 +93,8 @@ mod tests {
     /// Test that price level targets are consistent across different price ranges
     #[test]
     fn test_price_level_consistency_across_ranges() {
-        let config = PriceLevelHead {
-            enabled: true,
-            bandwidth_size: Some(1.0),
-            percentiles: Some([0.1, 0.9]),
-        };
+        // Create default targets config for testing
+        let targets_config = TargetsConfig::default();
 
         let test_cases = vec![
             // (base_price, description)
@@ -133,7 +130,7 @@ mod tests {
                     1000.0,
                 )]);
 
-                let class = classify_price_level(&sequence, &target, &config).unwrap();
+                let class = classify_price_level(&sequence, &target, &targets_config).unwrap();
 
                 assert!(
                     expected_range.contains(&class),
@@ -192,7 +189,13 @@ mod tests {
             ];
 
             let train_atr = get_sequence_atr_baseline(&sequence).unwrap();
-            let thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+            let targets_config = TargetsConfig {
+                base_sensitivity: 0.4,
+                balance_target: 0.2,
+                momentum_weighting: 1.2,
+                extreme_multiplier: 2.0,
+            };
+            let thresholds = calculate_log_volatility_thresholds(&targets_config).unwrap();
 
             for (target_vol, vol_desc, expected_range) in volatility_tests {
                 let target_sequence = create_test_candles(vec![
@@ -246,7 +249,7 @@ mod tests {
                 base_price * 1.02,
                 base_price * 1.03,
             ];
-            let slope = calculate_linear_trend_slope(&prices).unwrap();
+            let slope = calculate_raw_linear_slope(&prices).unwrap();
             normalized_slopes.push(slope);
         }
 
@@ -266,11 +269,8 @@ mod tests {
         );
 
         // Test 2: Price level percentiles preserve relative positions
-        let config = PriceLevelHead {
-            enabled: true,
-            bandwidth_size: Some(1.0),
-            percentiles: Some([0.2, 0.8]), // 20th/80th percentiles
-        };
+        // Create default targets config for testing
+        let targets_config = TargetsConfig::default();
 
         for base_price in [10.0, 1000.0] {
             let sequence = create_test_candles(
@@ -298,7 +298,7 @@ mod tests {
                     1000.0,
                 )]);
 
-                let class = classify_price_level(&sequence, &target, &config).unwrap();
+                let class = classify_price_level(&sequence, &target, &targets_config).unwrap();
                 assert!(expected_range.contains(&class),
                     "Percentile classification should be consistent at price level {}: target={:.2}, class={}",
                     base_price, target_price, class);
@@ -307,7 +307,13 @@ mod tests {
 
         // Test 3: Volatility log ratios preserve multiplicative relationships
         let base_atr = 0.02;
-        let thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+        let targets_config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        };
+        let thresholds = calculate_log_volatility_thresholds(&targets_config).unwrap();
 
         let volatility_ratios = vec![0.5, 1.0, 2.0, 4.0];
         let mut classifications = Vec::new();
@@ -333,7 +339,7 @@ mod tests {
     fn test_edge_case_consistency() {
         // Test 1: Very small price movements
         let tiny_sequence = vec![1.0, 1.0001, 1.0002, 1.0001, 1.0];
-        let tiny_slope = calculate_linear_trend_slope(&tiny_sequence).unwrap();
+        let tiny_slope = calculate_raw_linear_slope(&tiny_sequence).unwrap();
         assert!(
             tiny_slope.abs() < 1e-3,
             "Tiny movements should have tiny normalized slopes"
@@ -351,11 +357,8 @@ mod tests {
         );
 
         // Test 3: Extreme percentile configurations
-        let extreme_config = PriceLevelHead {
-            enabled: true,
-            bandwidth_size: Some(1.0),
-            percentiles: Some([0.01, 0.99]), // Very wide percentiles
-        };
+        // Create default targets config for testing
+        let targets_config = TargetsConfig::default();
 
         let sequence = create_test_candles(vec![
             (100.0, 100.0, 100.0, 100.0, 1000.0),
@@ -364,7 +367,7 @@ mod tests {
 
         let target = create_test_candles(vec![(105.0, 105.0, 105.0, 105.0, 1000.0)]);
 
-        let class = classify_price_level(&sequence, &target, &extreme_config).unwrap();
+        let class = classify_price_level(&sequence, &target, &targets_config).unwrap();
         assert_eq!(
             class, 2,
             "Target within extreme percentiles should be Neutral"

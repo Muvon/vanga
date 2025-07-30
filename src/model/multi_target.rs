@@ -74,44 +74,29 @@ struct MultiTargetModelState {
 impl MultiTargetLSTMModel {
     /// Calculate output size for individual target model based on configuration
     /// Each target gets its own separate LSTM model with appropriate output size
-    fn get_output_size_for_target(target_type: TargetType, model_config: &ModelConfig) -> usize {
+    fn get_output_size_for_target(target_type: TargetType, _model_config: &ModelConfig) -> usize {
         match target_type {
             TargetType::PriceLevel => {
-                if model_config.output_heads.price_levels.enabled {
-                    let bins = crate::config::model::NUM_CLASSES; // Use unified 5-class system
-                    log::debug!(
-                        "PriceLevel target: {} output classes (5-class unified system)",
-                        bins
-                    );
+                let bins = crate::config::model::NUM_CLASSES; // Use unified 5-class system
+                log::debug!(
+                    "PriceLevel target: {} output classes (5-class unified system)",
                     bins
-                } else {
-                    log::debug!("PriceLevel target disabled, using fallback output size: 1");
-                    1 // Fallback for regression mode
-                }
+                );
+                bins
             }
             TargetType::Direction => {
-                if model_config.output_heads.direction.enabled {
-                    log::debug!(
-                        "Direction target: {} output classes (Dump/Down/Sideways/Up/Pump)",
-                        crate::config::model::NUM_CLASSES
-                    );
-                    crate::config::model::NUM_CLASSES // Use unified 5-class system
-                } else {
-                    log::debug!("Direction target disabled, using fallback output size: 1");
-                    1 // Fallback
-                }
+                log::debug!(
+                    "Direction target: {} output classes (Dump/Down/Sideways/Up/Pump)",
+                    crate::config::model::NUM_CLASSES
+                );
+                crate::config::model::NUM_CLASSES // Use unified 5-class system
             }
             TargetType::Volatility => {
-                if model_config.output_heads.volatility.enabled {
-                    log::debug!(
-                        "Volatility target: {} output classes (VeryLow/Low/Medium/High/VeryHigh)",
-                        crate::config::model::NUM_CLASSES
-                    );
-                    crate::config::model::NUM_CLASSES // Use unified 5-class system volatility
-                } else {
-                    log::debug!("Volatility target disabled, using fallback output size: 1");
-                    1 // Fallback
-                }
+                log::debug!(
+                    "Volatility target: {} output classes (VeryLow/Low/Medium/High/VeryHigh)",
+                    crate::config::model::NUM_CLASSES
+                );
+                crate::config::model::NUM_CLASSES // Use unified 5-class system volatility
             }
         }
     }
@@ -185,8 +170,7 @@ impl MultiTargetLSTMModel {
             if actual_output_size != output_size {
                 return Err(VangaError::ModelError(format!(
                     "🚨 CRITICAL: Target '{}' output size mismatch! Expected {} classes but model has {} classes. \
-                    This indicates a bins configuration mismatch between target generation and model creation. \
-                    Check that model.output_heads.price_levels.bins matches the target generation configuration.",
+                    This indicates a bins configuration mismatch between target generation and model creation.",
                     target_name,
                     output_size,
                     actual_output_size

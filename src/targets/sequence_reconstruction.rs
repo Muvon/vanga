@@ -122,10 +122,10 @@ impl SequenceAnalyzer {
     }
 
     /// Create from model configuration (for consistency with training)
-    pub fn from_model_config(model_config: &crate::config::model::PriceLevelHead) -> Self {
+    pub fn from_model_config(model_config: &crate::config::model::TargetsConfig) -> Self {
         let config = SequenceReconstructionConfig {
-            percentiles: model_config.percentiles.unwrap_or([0.1, 0.9]),
-            bandwidth_size: model_config.bandwidth_size.unwrap_or(1.0),
+            percentiles: [0.1, 0.9], // Default percentiles for 5-class system
+            bandwidth_size: model_config.base_sensitivity, // Use base_sensitivity as bandwidth
         };
         Self::new(config)
     }

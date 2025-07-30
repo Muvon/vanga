@@ -3,7 +3,7 @@
 //! This module handles the conversion from PreparedTargets (HashMap<String, Vec<i32>>)
 //! to the Array2<f64> format expected by the LSTM model for training.
 
-use crate::config::model::{OutputHeadsConfig, NUM_CLASSES};
+use crate::config::model::NUM_CLASSES;
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
@@ -11,19 +11,21 @@ use std::collections::HashMap;
 
 /// Converts prepared targets to training arrays for LSTM model
 pub struct TargetConverter {
-    output_heads: OutputHeadsConfig,
     total_output_size: usize,
+}
+
+impl Default for TargetConverter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TargetConverter {
     /// Create new target converter with output configuration
-    pub fn new(output_heads: OutputHeadsConfig) -> Self {
-        let total_output_size = output_heads.calculate_total_output_size();
+    pub fn new() -> Self {
+        let total_output_size = NUM_CLASSES * 3;
 
-        Self {
-            output_heads,
-            total_output_size,
-        }
+        Self { total_output_size }
     }
 
     /// Convert prepared targets to training array format
@@ -49,51 +51,41 @@ impl TargetConverter {
             let mut output_idx = 0;
 
             // 1. Price Level Head (Classification - One-hot encoding)
-            if self.output_heads.price_levels.enabled {
-                let price_target = self.extract_target_value(
-                    &targets.price_levels,
-                    horizon,
-                    data_idx,
-                    "price_levels",
-                )?;
+            let price_target = self.extract_target_value(
+                &targets.price_levels,
+                horizon,
+                data_idx,
+                "price_levels",
+            )?;
 
-                // Convert to one-hot encoding (sequence-aware classification uses NUM_CLASSES)
-                let num_bins = NUM_CLASSES;
-                if price_target < num_bins {
-                    training_array[[sample_idx, output_idx + price_target]] = 1.0;
-                }
-                output_idx += num_bins;
+            // Convert to one-hot encoding (sequence-aware classification uses NUM_CLASSES)
+            let num_bins = NUM_CLASSES;
+            if price_target < num_bins {
+                training_array[[sample_idx, output_idx + price_target]] = 1.0;
             }
+            output_idx += num_bins;
 
             // 2. Direction Head (Classification - One-hot encoding)
-            if self.output_heads.direction.enabled {
-                let direction_target = self.extract_target_value(
-                    &targets.directions,
-                    horizon,
-                    data_idx,
-                    "directions",
-                )?;
+            let direction_target =
+                self.extract_target_value(&targets.directions, horizon, data_idx, "directions")?;
 
-                // Convert to one-hot encoding (5-class system)
-                if direction_target < NUM_CLASSES {
-                    training_array[[sample_idx, output_idx + direction_target]] = 1.0;
-                }
-                output_idx += NUM_CLASSES;
+            // Convert to one-hot encoding (5-class system)
+            if direction_target < NUM_CLASSES {
+                training_array[[sample_idx, output_idx + direction_target]] = 1.0;
             }
+            output_idx += NUM_CLASSES;
 
             // 3. Volatility Head (Classification - One-hot encoding)
-            if self.output_heads.volatility.enabled {
-                let volatility_target = self.extract_target_value(
-                    &targets.volatility, // CORRECTED: Was using targets.directions
-                    horizon,
-                    data_idx,
-                    "volatility",
-                )?;
+            let volatility_target = self.extract_target_value(
+                &targets.volatility, // CORRECTED: Was using targets.directions
+                horizon,
+                data_idx,
+                "volatility",
+            )?;
 
-                // Convert to one-hot encoding (5-class system)
-                if volatility_target < NUM_CLASSES {
-                    training_array[[sample_idx, output_idx + volatility_target]] = 1.0;
-                }
+            // Convert to one-hot encoding (5-class system)
+            if volatility_target < NUM_CLASSES {
+                training_array[[sample_idx, output_idx + volatility_target]] = 1.0;
             }
         }
 
@@ -144,7 +136,7 @@ impl TargetConverter {
     /// Validate that prepared targets are compatible with output configuration
     pub fn validate_targets(&self, targets: &PreparedTargets, horizon: &str) -> Result<()> {
         // Check price levels if enabled
-        if self.output_heads.price_levels.enabled && !targets.price_levels.contains_key(horizon) {
+        if !targets.price_levels.contains_key(horizon) {
             return Err(VangaError::ConfigError(format!(
                 "Missing price level targets for horizon: {}",
                 horizon
@@ -152,7 +144,7 @@ impl TargetConverter {
         }
 
         // Check directions if enabled
-        if self.output_heads.direction.enabled && !targets.directions.contains_key(horizon) {
+        if !targets.directions.contains_key(horizon) {
             return Err(VangaError::ConfigError(format!(
                 "Missing direction targets for horizon: {}",
                 horizon
@@ -160,7 +152,7 @@ impl TargetConverter {
         }
 
         // Check volatility if enabled
-        if self.output_heads.volatility.enabled && !targets.volatility.contains_key(horizon) {
+        if !targets.volatility.contains_key(horizon) {
             return Err(VangaError::ConfigError(format!(
                 "Missing volatility targets for horizon: {}", // CORRECTED: Was 'direction'
                 horizon
@@ -175,29 +167,6 @@ impl TargetConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::model::{DirectionHead, PriceLevelHead, VolatilityHead};
-
-    fn create_test_output_heads() -> OutputHeadsConfig {
-        OutputHeadsConfig {
-            price_levels: PriceLevelHead {
-                enabled: true,
-                bandwidth_size: Some(1.0), // Default bandwidth size for testing
-                percentiles: Some([0.1, 0.9]), // Default percentiles
-            },
-            direction: DirectionHead {
-                enabled: true,
-                slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
-                base_threshold: Some(0.12),
-                extreme_multiplier: Some(2.0),
-            },
-            volatility: VolatilityHead {
-                enabled: true,
-                bandwidth_size: Some(1.2),
-                base_threshold: Some(0.15),
-                extreme_multiplier: Some(1.8),
-            },
-        }
-    }
 
     fn create_test_targets() -> PreparedTargets {
         let mut targets = PreparedTargets::new(100);
@@ -216,8 +185,7 @@ mod tests {
 
     #[test]
     fn test_target_conversion() {
-        let output_heads = create_test_output_heads();
-        let converter = TargetConverter::new(output_heads);
+        let converter = TargetConverter::new();
         let targets = create_test_targets();
 
         let result = converter.convert_to_training_array(&targets, &targets.valid_indices, "1h");
@@ -230,8 +198,7 @@ mod tests {
 
     #[test]
     fn test_target_validation() {
-        let output_heads = create_test_output_heads();
-        let converter = TargetConverter::new(output_heads);
+        let converter = TargetConverter::new();
         let targets = create_test_targets();
 
         let result = converter.validate_targets(&targets, "1h");

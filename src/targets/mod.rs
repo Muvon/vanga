@@ -19,6 +19,7 @@ pub mod volatility;
 #[cfg(test)]
 mod volatility_tests;
 
+use crate::config::model::TargetsConfig;
 use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -26,7 +27,8 @@ use std::collections::HashMap;
 // Re-export configurations
 pub use direction::{generate_direction_targets, Direction};
 pub use price_levels::{
-    generate_price_level_targets, generate_price_level_targets_from_model_config, PriceLevelConfig,
+    generate_price_level_targets, generate_price_level_targets_from_model_config,
+    generate_price_level_targets_with_targets_config, PriceLevelConfig,
 };
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
@@ -52,18 +54,15 @@ impl Default for MultiTargetConfig {
 }
 
 impl MultiTargetConfig {
-    /// Create MultiTargetConfig from ModelConfig, extracting parameters from Head configurations
+    /// DEPRECATED: Create MultiTargetConfig from ModelConfig (use TargetsConfig directly instead)
     pub fn from_model_config(
         model_config: &crate::config::model::ModelConfig,
         horizons: Vec<String>,
     ) -> Self {
+        // Use the new TargetsConfig approach
         Self {
             price_level_config: PriceLevelConfig {
-                bandwidth_size: model_config
-                    .output_heads
-                    .price_levels
-                    .bandwidth_size
-                    .unwrap_or(1.0),
+                bandwidth_size: model_config.targets.base_sensitivity,
             },
             horizons,
         }
@@ -271,23 +270,15 @@ impl TargetGenerator {
         let (price_targets, (direction_targets, volatility_targets)) = rayon::join(
             || {
                 log::debug!("Generating price level targets in parallel");
-                if let Some(model_cfg) = model_config {
-                    generate_price_level_targets_from_model_config(
-                        df,
-                        &self.config.horizons,
-                        model_cfg,
-                        sequence_indices,
-                        sequence_length,
-                    )
-                } else {
-                    generate_price_level_targets(
-                        df,
-                        &self.config.horizons,
-                        &self.config.price_level_config,
-                        sequence_indices,
-                        sequence_length,
-                    )
-                }
+                generate_price_level_targets_with_targets_config(
+                    df,
+                    &self.config.horizons,
+                    model_config
+                        .map(|cfg| &cfg.targets)
+                        .unwrap_or(&TargetsConfig::default()),
+                    sequence_indices,
+                    sequence_length,
+                )
             },
             || {
                 rayon::join(
@@ -296,7 +287,9 @@ impl TargetGenerator {
                         generate_direction_targets(
                             df,
                             &self.config.horizons,
-                            model_config.map(|cfg| &cfg.output_heads.direction),
+                            model_config
+                                .map(|cfg| &cfg.targets)
+                                .unwrap_or(&TargetsConfig::default()),
                             sequence_indices,
                             sequence_length,
                         )
@@ -306,7 +299,9 @@ impl TargetGenerator {
                         generate_volatility_targets(
                             df,
                             &self.config.horizons,
-                            model_config.map(|cfg| &cfg.output_heads.volatility),
+                            model_config
+                                .map(|cfg| &cfg.targets)
+                                .unwrap_or(&TargetsConfig::default()),
                             sequence_indices,
                             sequence_length,
                         )
@@ -405,10 +400,10 @@ impl TargetGenerator {
             max_horizon_steps,
         )?;
 
-        generate_price_level_targets_from_model_config(
+        generate_price_level_targets_with_targets_config(
             df,
             &self.config.horizons,
-            model_config,
+            &model_config.targets,
             &sequence_indices,
             sequence_length,
         )

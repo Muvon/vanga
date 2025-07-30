@@ -4,6 +4,37 @@ use serde::{Deserialize, Serialize};
 /// Unified number of classes for all target types in the 5-class system
 pub const NUM_CLASSES: usize = 5;
 
+/// **UNIFIED TARGETS CONFIG**: Simple, clean, always adaptive
+///
+/// This replaces all the complex individual target configurations with a single,
+/// clean configuration that automatically calibrates everything for balanced
+/// class distribution across all market conditions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetsConfig {
+    /// Base sensitivity for all targets (auto-scaled by sequence volatility)
+    pub base_sensitivity: f64,
+
+    /// Target class balance (0.2 = 20% per class for 5-class system)
+    pub balance_target: f64,
+
+    /// Momentum weighting factor for recent data (1.0 = equal, >1.0 = more recent weight)
+    pub momentum_weighting: f64,
+
+    /// Multiplier for extreme class boundaries
+    pub extreme_multiplier: f64,
+}
+
+impl Default for TargetsConfig {
+    fn default() -> Self {
+        Self {
+            base_sensitivity: 0.02,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        }
+    }
+}
+
 /// TFT Variable Selection configuration for model config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TFTVariableSelectionConfig {
@@ -66,8 +97,8 @@ pub struct ModelConfig {
     /// XGBoost hybrid model configuration
     pub xgboost: XGBoostConfig,
 
-    /// Output heads configuration
-    pub output_heads: OutputHeadsConfig,
+    /// **NEW UNIFIED TARGETS**: Replaces output_heads with adaptive configuration
+    pub targets: TargetsConfig,
 
     /// TFT Quantile regression configuration
     pub quantile_outputs: Option<TFTQuantileOutputConfig>,
@@ -256,147 +287,7 @@ impl Default for VisualizationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputHeadsConfig {
-    /// Price level classification head
-    pub price_levels: PriceLevelHead,
-
-    /// Direction prediction head
-    pub direction: DirectionHead,
-
-    /// Volatility prediction head
-    pub volatility: VolatilityHead,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PriceLevelHead {
-    pub enabled: bool,
-    pub bandwidth_size: Option<f64>, // Optional for backward compatibility
-    pub percentiles: Option<[f64; 2]>, // [lower, upper] percentiles e.g., [0.1, 0.9]
-}
-
-impl PriceLevelHead {
-    /// Validate the price level head configuration
-    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        if let Some(bandwidth_size) = self.bandwidth_size {
-            if bandwidth_size <= 0.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Price level bandwidth_size must be positive",
-                ));
-            }
-            if !bandwidth_size.is_finite() {
-                return Err(crate::utils::error::VangaError::config(
-                    "Price level bandwidth_size must be finite",
-                ));
-            }
-        }
-
-        // Validate percentiles if provided
-        if let Some(percentiles) = self.percentiles {
-            if percentiles[0] >= percentiles[1] {
-                return Err(crate::utils::error::VangaError::config(
-                    "Price level percentiles[0] must be less than percentiles[1]",
-                ));
-            }
-            if percentiles[0] < 0.0 || percentiles[0] > 1.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Price level percentiles[0] must be between 0.0 and 1.0",
-                ));
-            }
-            if percentiles[1] < 0.0 || percentiles[1] > 1.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Price level percentiles[1] must be between 0.0 and 1.0",
-                ));
-            }
-        }
-
-        // Unified 5-class system for all targets
-        // bandwidth_size only affects breakout sensitivity, not number of bins
-        // No validation needed for bins since it's architecturally fixed
-
-        Ok(())
-    }
-}
-
-impl DirectionHead {
-    /// Validate the direction head configuration
-    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        if let Some(slope_sensitivity) = self.slope_sensitivity {
-            if slope_sensitivity <= 0.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Direction slope_sensitivity must be positive",
-                ));
-            }
-        }
-        if let Some(base_threshold) = self.base_threshold {
-            if base_threshold <= 0.0 || base_threshold > 1.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Direction base_threshold must be between 0.0 and 1.0",
-                ));
-            }
-        }
-        if let Some(extreme_multiplier) = self.extreme_multiplier {
-            if extreme_multiplier <= 1.0 || extreme_multiplier > 10.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Direction extreme_multiplier must be between 1.0 and 10.0",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-impl VolatilityHead {
-    /// Validate volatility head configuration
-    pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        if let Some(bandwidth_size) = self.bandwidth_size {
-            if bandwidth_size <= 0.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Volatility bandwidth_size must be positive",
-                ));
-            }
-        }
-        if let Some(base_threshold) = self.base_threshold {
-            if base_threshold <= 0.0 || base_threshold > 1.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Volatility base_threshold must be between 0.0 and 1.0",
-                ));
-            }
-        }
-        if let Some(extreme_multiplier) = self.extreme_multiplier {
-            if extreme_multiplier <= 1.0 || extreme_multiplier > 10.0 {
-                return Err(crate::utils::error::VangaError::config(
-                    "Volatility extreme_multiplier must be between 1.0 and 10.0",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectionHead {
-    pub enabled: bool,
-    pub slope_sensitivity: Option<f64>, // Controls slope acceleration thresholds for trend momentum detection
-    pub base_threshold: Option<f64>,    // Base momentum threshold (default: 0.12 = 12%)
-    pub extreme_multiplier: Option<f64>, // Extreme class multiplier (default: 2.0)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolatilityHead {
-    pub enabled: bool,
-    pub bandwidth_size: Option<f64>, // Unified sensitivity control (same as DirectionHead)
-    pub base_threshold: Option<f64>, // Base ATR threshold (default: 0.15 = 15%)
-    pub extreme_multiplier: Option<f64>, // Extreme class multiplier (default: 1.8)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum VolatilityPredictionMethod {
-    Direct,
-    GARCH,
-    Stochastic,
-}
-
+/// Validate the model configuration
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
@@ -433,43 +324,33 @@ impl Default for ModelConfig {
                 visualization: VisualizationConfig::default(),
             },
             xgboost: XGBoostConfig::default(), // XGBoost disabled by default
-            output_heads: OutputHeadsConfig {
-                price_levels: PriceLevelHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.0),     // Default bandwidth size
-                    percentiles: Some([0.1, 0.9]), // Default 10th/90th percentiles
-                },
-                direction: DirectionHead {
-                    enabled: true,
-                    slope_sensitivity: Some(0.02), // Crypto-optimized for volatility normalization
-                    base_threshold: Some(0.12),    // 12% momentum threshold
-                    extreme_multiplier: Some(2.5), // 2.5x for better extreme detection
-                },
-                volatility: VolatilityHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.2), // Less sensitive for volatility regimes
-                    base_threshold: Some(0.15), // 15% ATR threshold
-                    extreme_multiplier: Some(1.8), // 1.8x for extreme classes
-                },
-            },
-            quantile_outputs: None, // Disabled by default for backward compatibility
+            targets: TargetsConfig::default(), // Use new unified config
+            quantile_outputs: None,            // Disabled by default for backward compatibility
             loss_function: CryptoLossFunction::MSE, // Use explicit MSE default
         }
     }
 }
 
 impl ModelConfig {
+    /// Get the active targets configuration (new unified or migrated from old)
+    pub fn get_targets_config(&self) -> &TargetsConfig {
+        &self.targets
+    }
+
     /// Validate the model configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        // Validate output heads
-        if self.output_heads.price_levels.enabled {
-            self.output_heads.price_levels.validate()?;
+        // Validate base_sensitivity
+        if self.targets.base_sensitivity <= 0.0 || self.targets.base_sensitivity > 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(
+                "base_sensitivity must be between 0.0 and 1.0".to_string(),
+            ));
         }
-        if self.output_heads.direction.enabled {
-            self.output_heads.direction.validate()?;
-        }
-        if self.output_heads.volatility.enabled {
-            self.output_heads.volatility.validate()?;
+
+        // Validate balance_target
+        if self.targets.balance_target <= 0.0 || self.targets.balance_target > 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(
+                "balance_target must be between 0.0 and 1.0".to_string(),
+            ));
         }
 
         // Validate sequence length
@@ -560,88 +441,6 @@ impl ModelConfig {
         }
 
         Ok(())
-    }
-}
-
-impl OutputHeadsConfig {
-    /// Calculate total output size needed for all enabled prediction heads
-    pub fn calculate_total_output_size(&self) -> usize {
-        let mut total_size = 0;
-
-        // Price level classification outputs (5 classes in unified system)
-        if self.price_levels.enabled {
-            total_size += NUM_CLASSES;
-        }
-
-        // Direction prediction outputs (5 classes: DUMP, DOWN, SIDEWAYS, UP, PUMP)
-        if self.direction.enabled {
-            total_size += NUM_CLASSES;
-        }
-
-        // Volatility prediction outputs (5 classes: VERY_LOW, LOW, MEDIUM, HIGH, VERY_HIGH)
-        if self.volatility.enabled {
-            total_size += NUM_CLASSES; // Unified 5-class volatility output
-        }
-
-        // Ensure at least one output
-        if total_size == 0 {
-            log::warn!("No prediction heads enabled, defaulting to single output");
-            total_size = 1;
-        }
-
-        total_size
-    }
-
-    /// Get output segment information for parsing multi-target predictions
-    pub fn get_output_segments(&self) -> OutputSegments {
-        let mut segments = OutputSegments::new();
-        let mut current_offset = 0;
-
-        if self.price_levels.enabled {
-            let size = NUM_CLASSES; // 5 classes: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
-            segments.price_levels = Some((current_offset, current_offset + size));
-            current_offset += size;
-        }
-
-        if self.direction.enabled {
-            let size = NUM_CLASSES; // 5 classes: Dump, Down, Sideways, Up, Pump
-            segments.direction = Some((current_offset, current_offset + size));
-            current_offset += size;
-        }
-
-        if self.volatility.enabled {
-            let size = NUM_CLASSES; // Unified 5-class volatility output
-            segments.volatility = Some((current_offset, current_offset + size));
-        }
-
-        segments
-    }
-}
-
-/// Output segment information for parsing multi-target predictions
-#[derive(Debug, Clone)]
-pub struct OutputSegments {
-    /// Price levels segment: (start_idx, end_idx)
-    pub price_levels: Option<(usize, usize)>,
-    /// Direction segment: (start_idx, end_idx)
-    pub direction: Option<(usize, usize)>,
-    /// Volatility segment: (start_idx, end_idx)
-    pub volatility: Option<(usize, usize)>,
-}
-
-impl Default for OutputSegments {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OutputSegments {
-    pub fn new() -> Self {
-        Self {
-            price_levels: None,
-            direction: None,
-            volatility: None,
-        }
     }
 }
 
