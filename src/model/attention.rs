@@ -158,7 +158,14 @@ impl MultiHeadAttention {
     }
 
     /// Forward pass with attention mechanism optimized for crypto sequences
-    pub fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    ///
+    /// # Arguments
+    /// * `input` - Input tensor [batch_size, sequence_length, input_dim]
+    /// * `training` - Whether model is in training mode (affects dropout)
+    ///
+    /// # Returns
+    /// * `(output, attention_scores)` - Attended output and attention weights
+    pub fn forward(&self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
         // Input shape: [batch_size, sequence_length, input_dim]
         let (batch_size, seq_len, _input_dim) = input
             .dims3()
@@ -175,14 +182,30 @@ impl MultiHeadAttention {
         let values = self.reshape_for_attention(&values, batch_size, seq_len)?;
 
         // Compute attention scores with crypto-specific optimizations
-        let attention_scores = self.compute_attention_scores(&queries, &keys, seq_len)?;
+        let attention_scores = self.compute_attention_scores(&queries, &keys, seq_len, training)?;
 
         // Apply attention to values
         let attended_values = attention_scores.matmul(&values)?.contiguous()?;
 
         // Reshape back and apply output projection
         let attended_output = self.reshape_from_attention(&attended_values, batch_size, seq_len)?;
-        let output = self.output_projection.forward(&attended_output)?;
+        let mut output = self.output_projection.forward(&attended_output)?;
+
+        // Apply dropout to output if in training mode
+        if training && self.config.dropout_rate > 0.0 {
+            output = ops::dropout(&output, self.config.dropout_rate as f32)?;
+            log::debug!(
+                "🔧 Applied MultiHead attention output dropout (rate: {:.3}) to tensor shape {:?} [TRAINING MODE]",
+                self.config.dropout_rate,
+                output.shape()
+            );
+        } else if self.config.dropout_rate > 0.0 {
+            log::debug!(
+                "🔧 Skipped MultiHead attention output dropout (rate: {:.3}) for tensor shape {:?} [INFERENCE MODE]",
+                self.config.dropout_rate,
+                output.shape()
+            );
+        }
 
         // Return both output and attention weights for interpretability
         Ok((output, attention_scores))
@@ -223,6 +246,7 @@ impl MultiHeadAttention {
         queries: &Tensor,
         keys: &Tensor,
         seq_len: usize,
+        training: bool,
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
         let scale = (self.head_dim as f64).sqrt() as f32;
@@ -249,12 +273,27 @@ impl MultiHeadAttention {
         attention_scores = self.apply_causal_mask(&attention_scores, seq_len)?;
 
         // Apply softmax to get attention weights
-        let attention_weights = ops::softmax(&attention_scores, 3)?.contiguous()?;
+        let mut attention_weights = ops::softmax(&attention_scores, 3)?.contiguous()?;
 
-        // Apply dropout during training (if configured)
-        if self.config.dropout_rate > 0.0 {
-            // Note: In production, you'd apply dropout only during training
-            // For now, we'll skip dropout in inference
+        // Apply dropout to attention weights during training (CRITICAL FIX)
+        if training && self.config.dropout_rate > 0.0 {
+            attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
+            log::debug!(
+                "🔧 Applied MultiHead attention weights dropout (rate: {:.3}) to tensor shape {:?} [TRAINING MODE]",
+                self.config.dropout_rate,
+                attention_weights.shape()
+            );
+        } else if self.config.dropout_rate > 0.0 {
+            log::debug!(
+                "🔧 Skipped MultiHead attention weights dropout (rate: {:.3}) for tensor shape {:?} [INFERENCE MODE]",
+                self.config.dropout_rate,
+                attention_weights.shape()
+            );
+        } else {
+            log::debug!(
+                "🔧 No MultiHead attention weights dropout configured (rate: {:.3})",
+                self.config.dropout_rate
+            );
         }
 
         Ok(attention_weights)
@@ -438,17 +477,40 @@ impl AdditiveAttention {
     }
 
     /// Forward pass with additive attention mechanism
-    pub fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    ///
+    /// # Arguments
+    /// * `input` - Input tensor [batch_size, sequence_length, input_dim]
+    /// * `training` - Whether model is in training mode (affects dropout)
+    ///
+    /// # Returns
+    /// * `(output, attention_weights)` - Attended output and attention weights
+    pub fn forward(&self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
         let (batch_size, seq_len, _) = input.dims3()?;
 
         // Compute additive attention scores: score = v^T * tanh(W1*h + W2*s)
-        let scores = self.compute_additive_scores(input)?;
+        let scores = self.compute_additive_scores(input, training)?;
 
         // Apply crypto-specific optimizations
         let optimized_scores = self.apply_crypto_optimizations(&scores, seq_len)?;
 
         // Apply softmax to get attention weights
-        let attention_weights = ops::softmax_last_dim(&optimized_scores)?;
+        let mut attention_weights = ops::softmax_last_dim(&optimized_scores)?;
+
+        // Apply dropout to attention weights during training (CRITICAL FIX)
+        if training && self.config.dropout_rate > 0.0 {
+            attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
+            log::debug!(
+                "🔧 Applied Additive attention weights dropout (rate: {:.3}) to tensor shape {:?} [TRAINING MODE]",
+                self.config.dropout_rate,
+                attention_weights.shape()
+            );
+        } else if self.config.dropout_rate > 0.0 {
+            log::debug!(
+                "🔧 Skipped Additive attention weights dropout (rate: {:.3}) for tensor shape {:?} [INFERENCE MODE]",
+                self.config.dropout_rate,
+                attention_weights.shape()
+            );
+        }
 
         // Apply attention weights to input values
         let output = self.apply_attention_weights(input, &attention_weights)?;
@@ -464,12 +526,27 @@ impl AdditiveAttention {
     }
 
     /// Compute additive attention scores using the formula: score = v^T * tanh(W1*h + W2*s)
-    fn compute_additive_scores(&self, input: &Tensor) -> Result<Tensor> {
+    fn compute_additive_scores(&self, input: &Tensor, training: bool) -> Result<Tensor> {
         let (batch_size, seq_len, _) = input.dims3()?;
 
         // Project input through query and key transformations
-        let query_projection = self.w_query.forward(input)?; // [batch, seq, hidden]
-        let key_projection = self.w_key.forward(input)?; // [batch, seq, hidden]
+        let mut query_projection = self.w_query.forward(input)?; // [batch, seq, hidden]
+        let mut key_projection = self.w_key.forward(input)?; // [batch, seq, hidden]
+
+        // Apply dropout to projections during training (PROPER FIX)
+        if training && self.config.dropout_rate > 0.0 {
+            query_projection = ops::dropout(&query_projection, self.config.dropout_rate as f32)?;
+            key_projection = ops::dropout(&key_projection, self.config.dropout_rate as f32)?;
+            log::debug!(
+                "🔧 Applied Additive attention projections dropout (rate: {:.3}) [TRAINING MODE]",
+                self.config.dropout_rate
+            );
+        } else if self.config.dropout_rate > 0.0 {
+            log::debug!(
+                "🔧 Skipped Additive attention projections dropout (rate: {:.3}) [INFERENCE MODE]",
+                self.config.dropout_rate
+            );
+        }
 
         // For additive attention, we compute attention between each position and all others
         // Expand dimensions for pairwise computation
@@ -486,7 +563,22 @@ impl AdditiveAttention {
         let combined = (query_broadcast + key_broadcast)?.tanh()?;
 
         // Apply final scoring transformation with v vector
-        let scores = self.v_attention.forward(&combined)?; // [batch, seq, seq, 1]
+        let mut scores = self.v_attention.forward(&combined)?; // [batch, seq, seq, 1]
+
+        // Apply dropout to final scores during training (ADDITIONAL REGULARIZATION)
+        if training && self.config.dropout_rate > 0.0 {
+            scores = ops::dropout(&scores, self.config.dropout_rate as f32)?;
+            log::debug!(
+                "🔧 Applied Additive attention final scores dropout (rate: {:.3}) [TRAINING MODE]",
+                self.config.dropout_rate
+            );
+        } else if self.config.dropout_rate > 0.0 {
+            log::debug!(
+                "🔧 Skipped Additive attention final scores dropout (rate: {:.3}) [INFERENCE MODE]",
+                self.config.dropout_rate
+            );
+        }
+
         let scores = scores.squeeze(candle_core::D::Minus1)?; // [batch, seq, seq]
 
         Ok(scores)
@@ -574,8 +666,8 @@ impl AdditiveAttention {
 }
 
 impl AttentionModule for AdditiveAttention {
-    fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
-        self.forward(input)
+    fn forward(&self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
+        self.forward(input, training)
     }
 
     fn get_config(&self) -> &AttentionConfig {
@@ -585,13 +677,13 @@ impl AttentionModule for AdditiveAttention {
 
 /// Trait for different attention mechanisms
 pub trait AttentionModule {
-    fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)>;
+    fn forward(&self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)>;
     fn get_config(&self) -> &AttentionConfig;
 }
 
 impl AttentionModule for MultiHeadAttention {
-    fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
-        self.forward(input)
+    fn forward(&self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
+        self.forward(input, training)
     }
 
     fn get_config(&self) -> &AttentionConfig {

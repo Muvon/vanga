@@ -205,32 +205,36 @@ impl OptimizedAttention {
     }
 
     /// Forward pass with optimized attention computation
-    pub fn forward(&mut self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    pub fn forward(&mut self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
         let seq_len = input.dim(1)?;
 
         // Choose attention strategy based on sequence length
         match seq_len {
             len if len <= 64 => {
                 // Short sequences: use standard attention
-                self.base_attention.forward(input)
+                self.base_attention.forward(input, training)
             }
             len if len <= 256 => {
                 // Medium sequences: use optimized standard attention
-                self.forward_optimized_standard(input)
+                self.forward_optimized_standard(input, training)
             }
             len if len <= 1024 => {
                 // Long sequences: use sparse attention
-                self.forward_sparse_attention(input)
+                self.forward_sparse_attention(input, training)
             }
             _ => {
                 // Very long sequences: use hierarchical attention
-                self.forward_hierarchical_attention(input)
+                self.forward_hierarchical_attention(input, training)
             }
         }
     }
 
     /// Optimized standard attention for medium sequences
-    fn forward_optimized_standard(&mut self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    fn forward_optimized_standard(
+        &mut self,
+        input: &Tensor,
+        training: bool,
+    ) -> Result<(Tensor, Tensor)> {
         // Apply cryptocurrency-specific optimizations
         let optimized_input = self.apply_crypto_optimizations(input)?;
 
@@ -243,7 +247,7 @@ impl OptimizedAttention {
         }
 
         // Compute attention with optimizations
-        let (output, weights) = self.base_attention.forward(&optimized_input)?;
+        let (output, weights) = self.base_attention.forward(&optimized_input, training)?;
 
         // Cache result if enabled
         if self.config.memory_optimization.cache_attention_patterns {
@@ -255,30 +259,38 @@ impl OptimizedAttention {
     }
 
     /// Sparse attention for long sequences
-    fn forward_sparse_attention(&mut self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    fn forward_sparse_attention(
+        &mut self,
+        input: &Tensor,
+        training: bool,
+    ) -> Result<(Tensor, Tensor)> {
         if let Some(ref sparse_attention) = self.sparse_attention {
             // Apply sliding window if sequence is very long
             if let Some(window_size) = self.config.sequence_optimization.sliding_window_size {
                 let seq_len = input.dim(1)?;
                 if seq_len > window_size {
-                    return self.forward_sliding_window(input, window_size);
+                    return self.forward_sliding_window(input, window_size, training);
                 }
             }
 
-            sparse_attention.forward(input)
+            sparse_attention.forward(input, training)
         } else {
             // Fallback to standard attention
-            self.base_attention.forward(input)
+            self.base_attention.forward(input, training)
         }
     }
 
     /// Hierarchical attention for very long sequences
-    fn forward_hierarchical_attention(&mut self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    fn forward_hierarchical_attention(
+        &mut self,
+        input: &Tensor,
+        training: bool,
+    ) -> Result<(Tensor, Tensor)> {
         if let Some(ref hierarchical_attention) = self.hierarchical_attention {
-            hierarchical_attention.forward(input)
+            hierarchical_attention.forward(input, training)
         } else {
             // Fallback to sparse attention
-            self.forward_sparse_attention(input)
+            self.forward_sparse_attention(input, training)
         }
     }
 
@@ -287,6 +299,7 @@ impl OptimizedAttention {
         &mut self,
         input: &Tensor,
         window_size: usize,
+        training: bool,
     ) -> Result<(Tensor, Tensor)> {
         let seq_len = input.dim(1)?;
         let input_shape = input.shape();
@@ -318,7 +331,8 @@ impl OptimizedAttention {
             let window_input = input.narrow(1, start, window_len)?;
 
             // Apply attention to window
-            let (window_output, window_weights) = self.base_attention.forward(&window_input)?;
+            let (window_output, window_weights) =
+                self.base_attention.forward(&window_input, training)?;
 
             outputs.push(window_output);
             all_weights.push(window_weights);
@@ -548,7 +562,7 @@ impl SparseAttention {
     ) -> Result<Self> {
         Ok(Self { local_window })
     }
-    fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    fn forward(&self, input: &Tensor, _training: bool) -> Result<(Tensor, Tensor)> {
         // Simplified sparse attention: local window + global tokens
         let seq_len = input.dim(1)?;
 
@@ -637,16 +651,18 @@ impl HierarchicalAttention {
         })
     }
 
-    fn forward(&self, input: &Tensor) -> Result<(Tensor, Tensor)> {
+    fn forward(&self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
         let seq_len = input.dim(1)?;
 
         // Process multi-resolution data
         let (recent_data, medium_data, long_data) = self.process_multi_resolution_data(input)?;
 
         // Apply attention at each resolution level
-        let (recent_output, recent_weights) = self.recent_attention.forward(&recent_data)?;
-        let (medium_output, medium_weights) = self.medium_attention.forward(&medium_data)?;
-        let (long_output, long_weights) = self.long_attention.forward(&long_data)?;
+        let (recent_output, recent_weights) =
+            self.recent_attention.forward(&recent_data, training)?;
+        let (medium_output, medium_weights) =
+            self.medium_attention.forward(&medium_data, training)?;
+        let (long_output, long_weights) = self.long_attention.forward(&long_data, training)?;
 
         // Combine outputs with learnable weights and crypto-specific logic
         let (combined_output, combined_weights) = self.combine_multi_resolution_outputs(

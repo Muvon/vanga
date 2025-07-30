@@ -150,16 +150,30 @@ impl LSTMModel {
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
                 // Apply dropout between layers if enabled and in training mode
-                // CRITICAL FIX: Use dropout consistency configuration
-                let should_apply_dropout = self.dropout_consistency_config.should_apply_dropout(
-                    training,
-                    self.dropout_config.as_ref().is_some_and(|d| d.enabled),
-                );
+                // CRITICAL FIX: Use enhanced dropout consistency configuration
+                let effective_dropout_rate = if let Some(dropout_config) = &self.dropout_config {
+                    let base_rate = match &dropout_config.rate {
+                        crate::config::model::DropoutRate::Fixed(rate) => *rate,
+                        crate::config::model::DropoutRate::Auto { min_rate, max_rate } => {
+                            (min_rate + max_rate) / 2.0
+                        }
+                        crate::config::model::DropoutRate::Adaptive => 0.2,
+                    };
+                    self.dropout_consistency_config
+                        .get_effective_dropout_rate(base_rate, training)
+                } else {
+                    0.0
+                };
 
-                if should_apply_dropout && layer_idx < forward_lstm_layers.len() - 1 {
+                if effective_dropout_rate > 0.0 && layer_idx < forward_lstm_layers.len() - 1 {
                     self.dropout_consistency_config
                         .log_dropout_behavior(training, true);
                     current_input = self.apply_dropout(&current_input)?;
+                    log::debug!(
+                        "🔧 Applied LSTM layer dropout (effective rate: {:.3}, layer: {})",
+                        effective_dropout_rate,
+                        layer_idx
+                    );
                 } else if self.dropout_consistency_config.log_dropout_changes {
                     self.dropout_consistency_config
                         .log_dropout_behavior(training, false);
@@ -244,7 +258,14 @@ impl LSTMModel {
             // Ensure LSTM output is contiguous before passing to attention
             let contiguous_lstm_output = lstm_output.contiguous()?;
             let (attended_output, _attention_weights) =
-                attention.forward(&contiguous_lstm_output)?;
+                attention.forward(&contiguous_lstm_output, training)?;
+
+            let attention_dropout_rate = attention.get_config().dropout_rate;
+            log::debug!(
+                "🎯 Applied attention with dropout rate: {:.3}, training: {}",
+                attention_dropout_rate,
+                training
+            );
 
             // For sequence-to-one prediction, take the last timestep from attended output
             let seq_len = attended_output.dim(1).map_err(|e| {
@@ -503,6 +524,7 @@ impl LSTMModel {
     }
 
     /// Apply dropout with proper rate calculation based on configuration
+    /// Apply dropout with proper rate calculation based on configuration
     fn apply_dropout(&self, tensor: &Tensor) -> Result<Tensor> {
         let dropout_config = self
             .dropout_config
@@ -526,7 +548,7 @@ impl LSTMModel {
         let dropped_tensor = dropout(tensor, dropout_rate as f32)?;
 
         log::debug!(
-            "Applied dropout with rate {:.3} to tensor shape {:?}",
+            "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [DROPOUT ACTIVE]",
             dropout_rate,
             tensor.shape()
         );
@@ -702,8 +724,8 @@ impl LSTMModel {
         let features = if self.use_attention {
             if let Some(attention) = &self.attention_layers {
                 log::debug!("🎯 Applying attention to LSTM features");
-                let attention_result = attention.forward(&lstm_features.unsqueeze(1)?)?;
-                // Handle attention output (may be tuple)
+                let attention_result = attention.forward(&lstm_features.unsqueeze(1)?, false)?; // inference mode
+                                                                                                // Handle attention output (may be tuple)
                 let (attended_features, _) = attention_result;
                 attended_features.squeeze(1)?
             } else {

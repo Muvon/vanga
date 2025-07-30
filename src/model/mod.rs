@@ -14,6 +14,8 @@ pub mod tft;
 pub mod xgboost;
 
 #[cfg(test)]
+pub mod dropout_tests;
+#[cfg(test)]
 pub mod loss_validation_tests;
 #[cfg(test)]
 pub mod regime_calibration_tests;
