@@ -81,7 +81,7 @@ impl DataPipeline {
         train_data: &PreparedData,
         target_type: &TargetType,
         horizon: &str,
-        config: &crate::config::TrainingConfig,
+        _config: &crate::config::TrainingConfig,
     ) -> Result<Option<Vec<f32>>> {
         // Get the target data for the specific target type and horizon
         let targets = match target_type {
@@ -113,17 +113,9 @@ impl DataPipeline {
 
         // Get the correct number of classes from model configuration (same logic as LSTM model)
         let num_classes = match target_type {
-            TargetType::PriceLevel => {
-                if config.model.output_heads.price_levels.enabled {
-                    crate::config::model::NUM_CLASSES // Use unified 5-class system
-                } else {
-                    // Fallback: calculate from data but this should not happen
-                    let max_class = targets.iter().max().unwrap_or(&0);
-                    (*max_class + 1) as usize
-                }
-            }
-            TargetType::Direction => crate::config::model::NUM_CLASSES, // Dump/Down/Sideways/Up/Pump
-            TargetType::Volatility => crate::config::model::NUM_CLASSES, // VeryLow/Low/Medium/High/VeryHigh
+            TargetType::PriceLevel => crate::config::model::NUM_CLASSES, // Always 5-class system
+            TargetType::Direction => crate::config::model::NUM_CLASSES,  // Always 5-class system
+            TargetType::Volatility => crate::config::model::NUM_CLASSES, // Always 5-class system
         };
 
         // Count class frequencies

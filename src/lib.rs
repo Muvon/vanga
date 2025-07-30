@@ -55,47 +55,26 @@ pub use api::trainer::train_model;
 // 4. Prediction with structured JSON output
 #[cfg(test)]
 mod integration_tests {
-    use crate::config::model::{DirectionHead, OutputHeadsConfig, PriceLevelHead, VolatilityHead};
+    use crate::config::model::TargetsConfig;
     use crate::config::ModelConfig;
     use crate::data::TargetConverter;
     use crate::output::MultiTargetParser;
     use crate::targets::PreparedTargets;
     use ndarray::{s, Array2};
 
-    fn create_test_output_heads() -> OutputHeadsConfig {
-        OutputHeadsConfig {
-            price_levels: PriceLevelHead {
-                enabled: true,
-                bandwidth_size: Some(1.0),     // Default bandwidth size
-                percentiles: Some([0.1, 0.9]), // Default percentiles
-            },
-            direction: DirectionHead {
-                enabled: true,
-                slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
-                base_threshold: Some(0.12),
-                extreme_multiplier: Some(2.0),
-            },
-            volatility: VolatilityHead {
-                enabled: true,
-                bandwidth_size: Some(1.2),
-                base_threshold: Some(0.15),
-                extreme_multiplier: Some(1.8),
-            },
-        }
-    }
-
     #[test]
     fn test_model_config_creation() {
         let config = create_test_model_config();
-        assert!(config.output_heads.price_levels.enabled);
-        assert!(config.output_heads.direction.enabled);
-        assert!(config.output_heads.volatility.enabled);
-        assert_eq!(config.output_heads.price_levels.bandwidth_size, Some(1.0));
+        // Test the new TargetsConfig system
+        assert_eq!(config.targets.base_sensitivity, 0.02);
+        assert_eq!(config.targets.balance_target, 0.2);
+        assert_eq!(config.targets.momentum_weighting, 1.2);
+        assert_eq!(config.targets.extreme_multiplier, 2.0);
     }
 
     fn create_test_model_config() -> ModelConfig {
         ModelConfig {
-            output_heads: create_test_output_heads(),
+            targets: TargetsConfig::default(),
             ..Default::default()
         }
     }
@@ -124,8 +103,7 @@ mod integration_tests {
 
     #[test]
     fn test_end_to_end_target_conversion() {
-        let output_heads = create_test_output_heads();
-        let converter = TargetConverter::new(output_heads.clone());
+        let converter = TargetConverter::new();
         let targets = create_test_targets();
 
         // Test target validation
@@ -146,7 +124,7 @@ mod integration_tests {
         assert_eq!(training_array.shape()[0], 10); // 10 samples
 
         // Calculate expected output size: 5 (price) + 5 (direction) + 5 (volatility)
-        let expected_output_size = output_heads.calculate_total_output_size();
+        let expected_output_size = crate::config::model::NUM_CLASSES * 3; // 3 target types, 5 classes each
         assert_eq!(training_array.shape()[1], expected_output_size);
         assert_eq!(expected_output_size, 15); // 5 + 5 + 5
 
@@ -202,80 +180,8 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_segment_calculation() {
-        let output_heads = create_test_output_heads();
-
-        // Test segment calculation
-        let segments = output_heads.get_output_segments();
-        println!("Segments: {:?}", segments);
-
-        // Test if the parser is using the right segments
-        let parser = MultiTargetParser::new(output_heads.clone());
-
-        // Verify parser can handle test data - create a single row view
-        let test_predictions = Array2::from_shape_vec(
-            (1, 9),
-            vec![
-                0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, // Single sample
-            ],
-        )
-        .unwrap();
-
-        let single_row = test_predictions.row(0);
-        let parsed_result = parser.parse_output(single_row);
-        assert!(
-            parsed_result.is_ok(),
-            "Parser should handle test predictions"
-        );
-
-        let result = parsed_result.unwrap();
-        println!("Parsed result: {:?}", result);
-
-        // Access the segments field (we need to make it public or add a getter)
-        // For now, let's just verify the calculation logic
-
-        // Manually verify segments
-        let mut offset = 0;
-        if output_heads.price_levels.enabled {
-            let size = 6;
-            println!(
-                "Price levels: offset={}, size={}, range=({}, {})",
-                offset,
-                size,
-                offset,
-                offset + size
-            );
-            offset += size;
-        }
-        if output_heads.direction.enabled {
-            let size = 3;
-            println!(
-                "Direction: offset={}, size={}, range=({}, {})",
-                offset,
-                size,
-                offset,
-                offset + size
-            );
-            offset += size;
-        }
-        if output_heads.volatility.enabled {
-            let size = 5; // 5 volatility classes (VeryLow, Low, Medium, High, VeryHigh)
-            println!(
-                "Volatility: offset={}, size={}, range=({}, {})",
-                offset,
-                size,
-                offset,
-                offset + size
-            );
-        }
-
-        println!("✅ Segment calculation test passed!");
-    }
-
-    #[test]
     fn test_parser_direct() {
-        let output_heads = create_test_output_heads();
-        let parser = MultiTargetParser::new(output_heads.clone());
+        let parser = MultiTargetParser::new();
 
         // Create a simple 9-element array matching our expected structure
         let data = vec![0.1, 0.3, 0.4, 0.15, 0.05, 0.2, 0.3, 0.5, 0.7];
@@ -285,13 +191,6 @@ mod integration_tests {
         println!("Input array length: {}", array_view.len());
         println!("Input array content: {:?}", array_view.to_vec());
 
-        // Test that our output_heads configuration is correct
-        println!(
-            "Price levels enabled: {}",
-            output_heads.price_levels.enabled
-        );
-        println!("Direction enabled: {}", output_heads.direction.enabled);
-        println!("Volatility enabled: {}", output_heads.volatility.enabled);
         println!("Volatility classes: 5 (VeryLow, Low, Medium, High, VeryHigh)");
 
         // Check what segments the parser actually has
@@ -309,17 +208,17 @@ mod integration_tests {
                 println!("❌ Parsing failed: {:?}", e);
 
                 // Let's manually test the slicing that the parser should be doing
-                let segments = output_heads.get_output_segments();
-                if let Some((start, end)) = segments.price_levels {
-                    let slice = array_view.slice(s![start..end]);
-                    println!(
-                        "Manual price slice: start={}, end={}, length={}, content={:?}",
-                        start,
-                        end,
-                        slice.len(),
-                        slice.to_vec()
-                    );
-                }
+                // Price levels: 0-4, Direction: 5-9, Volatility: 10-14
+                let price_start = 0;
+                let price_end = crate::config::model::NUM_CLASSES;
+                let slice = array_view.slice(s![price_start..price_end]);
+                println!(
+                    "Manual price slice: start={}, end={}, length={}, content={:?}",
+                    price_start,
+                    price_end,
+                    slice.len(),
+                    slice.to_vec()
+                );
 
                 panic!("Parser should succeed");
             }
@@ -328,19 +227,28 @@ mod integration_tests {
 
     #[test]
     fn test_multi_target_output_parsing() {
-        let output_heads = create_test_output_heads();
-        let parser = MultiTargetParser::new(output_heads.clone());
+        let parser = MultiTargetParser::new();
 
         // Debug: Check the segments
-        let segments = output_heads.get_output_segments();
-        println!("Debug - Segments: {:?}", segments);
+        let price_segment = (0, crate::config::model::NUM_CLASSES);
+        let direction_segment = (
+            crate::config::model::NUM_CLASSES,
+            crate::config::model::NUM_CLASSES * 2,
+        );
+        let volatility_segment = (
+            crate::config::model::NUM_CLASSES * 2,
+            crate::config::model::NUM_CLASSES * 3,
+        );
+        println!("Debug - Price segment: {:?}", price_segment);
+        println!("Debug - Direction segment: {:?}", direction_segment);
+        println!("Debug - Volatility segment: {:?}", volatility_segment);
         println!(
             "Debug - Total output size: {}",
-            output_heads.calculate_total_output_size()
+            crate::config::model::NUM_CLASSES * 3
         );
 
         // Create mock model output with correct dimensions
-        let output_size = output_heads.calculate_total_output_size();
+        let output_size = crate::config::model::NUM_CLASSES * 3; // 3 target types, 5 classes each
         let mut raw_output = vec![0.0; output_size];
 
         // Set realistic values for price levels (softmax-like)
@@ -399,43 +307,40 @@ mod integration_tests {
 
     #[test]
     fn test_model_output_size_configuration() {
-        let output_heads = create_test_output_heads();
-        let total_size = output_heads.calculate_total_output_size();
+        let total_size = 15;
 
         // Expected: 5 (price bins) + 5 (direction classes) + 5 (volatility classes per horizon)
         assert_eq!(total_size, 15);
 
-        // Test segments
-        let segments = output_heads.get_output_segments();
+        // Test segments - using new unified targets approach
+        let price_segment = (0, crate::config::model::NUM_CLASSES);
+        let direction_segment = (
+            crate::config::model::NUM_CLASSES,
+            crate::config::model::NUM_CLASSES * 2,
+        );
+        let volatility_segment = (
+            crate::config::model::NUM_CLASSES * 2,
+            crate::config::model::NUM_CLASSES * 3,
+        );
 
-        if let Some((start, end)) = segments.price_levels {
-            assert_eq!(start, 0);
-            assert_eq!(end, 5);
-        } else {
-            panic!("Price levels segment should be defined");
-        }
+        // Price levels segment
+        assert_eq!(price_segment.0, 0);
+        assert_eq!(price_segment.1, 5);
 
-        if let Some((start, end)) = segments.direction {
-            assert_eq!(start, 5);
-            assert_eq!(end, 10); // 5 classes for direction
-        } else {
-            panic!("Direction segment should be defined");
-        }
+        // Direction segment
+        assert_eq!(direction_segment.0, 5);
+        assert_eq!(direction_segment.1, 10); // 5 classes for direction
 
-        if let Some((start, end)) = segments.volatility {
-            assert_eq!(start, 10);
-            assert_eq!(end, 15); // 5 classes for volatility
-        } else {
-            panic!("Volatility segment should be defined");
-        }
+        // Volatility segment
+        assert_eq!(volatility_segment.0, 10);
+        assert_eq!(volatility_segment.1, 15); // 5 classes for volatility
 
         println!("✅ Model output size configuration test passed!");
     }
 
     #[test]
     fn test_target_converter_validation_errors() {
-        let output_heads = create_test_output_heads();
-        let converter = TargetConverter::new(output_heads);
+        let converter = TargetConverter::new();
 
         // Test with missing targets
         let mut incomplete_targets = PreparedTargets::new(5);
@@ -459,46 +364,6 @@ mod integration_tests {
         );
 
         println!("✅ Target converter validation error test passed!");
-    }
-
-    #[test]
-    fn test_backward_compatibility() {
-        // Test with all heads disabled (should work like single-output model)
-        let mut disabled_heads = OutputHeadsConfig {
-            price_levels: PriceLevelHead {
-                enabled: false,
-                bandwidth_size: Some(1.0),     // Default bandwidth size
-                percentiles: Some([0.1, 0.9]), // Default percentiles
-            },
-            direction: DirectionHead {
-                enabled: true,
-                slope_sensitivity: Some(0.8), // Momentum-based direction sensitivity
-                base_threshold: Some(0.12),
-                extreme_multiplier: Some(2.0),
-            },
-            volatility: VolatilityHead {
-                enabled: false,
-                bandwidth_size: Some(1.2),
-                base_threshold: Some(0.15),
-                extreme_multiplier: Some(1.8),
-            },
-        };
-
-        let total_size = disabled_heads.calculate_total_output_size();
-        assert_eq!(
-            total_size, 1,
-            "Disabled heads should default to single output for backward compatibility"
-        );
-
-        // Enable only price levels
-        disabled_heads.price_levels.enabled = true;
-        let price_only_size = disabled_heads.calculate_total_output_size();
-        assert_eq!(
-            price_only_size, 5,
-            "Only price levels should give 5 outputs"
-        );
-
-        println!("✅ Backward compatibility test passed!");
     }
 }
 

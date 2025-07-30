@@ -189,8 +189,6 @@ impl Predictor {
 
         // Confidence calculation for predictions should use model uncertainty, not target generation
         // Target generation is inappropriate for prediction data as it requires full historical context
-        let targets_config = None; // Use model uncertainty-based confidence instead
-
         // Extract sequence data for order generation before cleanup - REQUIRED!
         let sequence_ohlc = prepared_data.sequence_ohlc.clone()
             .ok_or_else(|| VangaError::PredictionError(
@@ -227,36 +225,26 @@ impl Predictor {
         // Pass metadata to formatter for accurate PredictionResult creation
         formatter = formatter.with_metadata(input_feature_count, sequence_length);
 
-        // Configure formatter with model's output heads for proper 5-class parsing
-        let output_heads = if let Some(training_config) = model.get_training_config() {
-            // Use output heads from model's training configuration
+        // Configure formatter with model's targets config for proper 5-class parsing
+        let targets_config = if let Some(training_config) = model.get_training_config() {
+            // Use targets config from model's training configuration
             log::info!("✅ Using training configuration for prediction parameters");
-            training_config.model.output_heads.clone()
+            Some(training_config.model.targets.clone())
         } else {
-            // Fallback to updated default configuration (matches new training defaults)
+            // Fallback to default TargetsConfig - all targets are always enabled with NUM_CLASSES=5
             log::warn!("⚠️  No training configuration available, using fallback defaults. This may cause prediction inconsistency with training.");
-            crate::config::model::OutputHeadsConfig {
-                price_levels: crate::config::model::PriceLevelHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.0),
-                    percentiles: Some([0.1, 0.9]), // Default percentiles
-                },
-                direction: crate::config::model::DirectionHead {
-                    enabled: true,
-                    slope_sensitivity: Some(0.02), // Updated crypto-optimized sensitivity
-                    base_threshold: Some(0.12),    // 12% momentum threshold
-                    extreme_multiplier: Some(2.5), // Updated 2.5x for better extreme detection
-                },
-                volatility: crate::config::model::VolatilityHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.2),
-                    base_threshold: Some(0.15),    // 15% ATR threshold
-                    extreme_multiplier: Some(1.8), // 1.8x for extreme classes
-                },
-            }
+            None // Let reconstruction methods use their defaults
         };
 
-        formatter = formatter.with_output_heads(output_heads);
+        // Pass training config to formatter for enhanced reconstruction
+        if let Some(ref config) = targets_config {
+            formatter = formatter.with_training_config(config.clone());
+            log::debug!(
+                "🔧 Training config for reconstruction: base_sensitivity={:.3}, extreme_multiplier={:.1}",
+                config.base_sensitivity,
+                config.extreme_multiplier
+            );
+        }
 
         // Determine horizon using smart selection logic
         let horizon = if let Some(requested_horizon) = &self.config.horizon {
@@ -289,7 +277,7 @@ impl Predictor {
             &self.config.symbols[0],
             &horizon,
             current_price,
-            targets_config.as_ref(), // Pass targets config if available for confidence calculation
+            None, // No prepared targets available during prediction - use model uncertainty instead
         )?;
 
         // Apply post-processing if configured

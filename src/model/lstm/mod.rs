@@ -50,9 +50,8 @@ pub use config::{
 mod tests {
     use super::*;
     use crate::config::model::{
-        AttentionConfig, AttentionMechanism, DirectionHead, DropoutConfig, DropoutRate,
-        HiddenUnitsConfig, LSTMArchitecture, ModelConfig, OutputHeadsConfig, PriceLevelHead,
-        SequenceLengthConfig, VisualizationConfig, VolatilityHead,
+        AttentionConfig, AttentionMechanism, DropoutConfig, DropoutRate, HiddenUnitsConfig,
+        LSTMArchitecture, ModelConfig, SequenceLengthConfig, TargetsConfig, VisualizationConfig,
     };
     use crate::config::training::ClassWeightStrategy;
     use crate::config::training::OptimizerType;
@@ -510,25 +509,7 @@ mod tests {
                 visualization: crate::config::model::VisualizationConfig::default(),
             },
             xgboost: crate::config::model::XGBoostConfig::default(),
-            output_heads: OutputHeadsConfig {
-                price_levels: PriceLevelHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.0),     // Default bandwidth size
-                    percentiles: Some([0.1, 0.9]), // Default percentiles
-                },
-                direction: DirectionHead {
-                    enabled: true,
-                    slope_sensitivity: Some(0.8),
-                    base_threshold: Some(0.12),
-                    extreme_multiplier: Some(2.0),
-                },
-                volatility: VolatilityHead {
-                    enabled: false,
-                    bandwidth_size: Some(1.2),
-                    base_threshold: Some(0.15),
-                    extreme_multiplier: Some(1.8),
-                },
-            },
+            targets: TargetsConfig::default(),
             quantile_outputs: None,
             loss_function: CryptoLossFunction::MSE,
         };
@@ -590,32 +571,14 @@ mod tests {
                 use_relative_position: true,
                 visualization: crate::config::model::VisualizationConfig::default(),
             },
-            output_heads: OutputHeadsConfig {
-                price_levels: PriceLevelHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.0),     // Default bandwidth size
-                    percentiles: Some([0.1, 0.9]), // Default percentiles
-                },
-                direction: DirectionHead {
-                    enabled: true,
-                    slope_sensitivity: Some(0.8),
-                    base_threshold: Some(0.12),
-                    extreme_multiplier: Some(2.0),
-                },
-                volatility: VolatilityHead {
-                    enabled: false,
-                    bandwidth_size: Some(1.2),
-                    base_threshold: Some(0.15),
-                    extreme_multiplier: Some(1.8),
-                },
-            },
+            targets: TargetsConfig::default(),
             quantile_outputs: None,
             loss_function: CryptoLossFunction::MSE,
             xgboost: crate::config::model::XGBoostConfig::default(),
         };
 
         let input_size = 4;
-        let expected_output_size = model_config.output_heads.calculate_total_output_size();
+        let expected_output_size = 15;
 
         let mut model =
             LSTMModel::from_model_config(&model_config, input_size, expected_output_size).unwrap();
@@ -708,25 +671,7 @@ mod tests {
                 use_relative_position: true,
                 visualization: crate::config::model::VisualizationConfig::default(),
             },
-            output_heads: OutputHeadsConfig {
-                price_levels: PriceLevelHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.0),     // Default bandwidth size
-                    percentiles: Some([0.1, 0.9]), // Default percentiles
-                },
-                direction: DirectionHead {
-                    enabled: true,
-                    slope_sensitivity: Some(0.8),
-                    base_threshold: Some(0.12),
-                    extreme_multiplier: Some(2.0),
-                },
-                volatility: VolatilityHead {
-                    enabled: false,
-                    bandwidth_size: Some(1.2),
-                    base_threshold: Some(0.15),
-                    extreme_multiplier: Some(1.8),
-                },
-            },
+            targets: TargetsConfig::default(),
             quantile_outputs: None,
             loss_function: CryptoLossFunction::MSE,
             xgboost: crate::config::model::XGBoostConfig::default(),
@@ -782,25 +727,7 @@ mod tests {
                 use_relative_position: false,
                 visualization: VisualizationConfig::default(),
             },
-            output_heads: OutputHeadsConfig {
-                price_levels: PriceLevelHead {
-                    enabled: true,
-                    bandwidth_size: Some(1.0),     // Default bandwidth size
-                    percentiles: Some([0.1, 0.9]), // Default percentiles
-                },
-                direction: DirectionHead {
-                    enabled: false,
-                    base_threshold: Some(0.12),
-                    slope_sensitivity: Some(0.8),
-                    extreme_multiplier: Some(2.0),
-                },
-                volatility: VolatilityHead {
-                    enabled: false,
-                    bandwidth_size: Some(1.2),
-                    base_threshold: Some(0.15),
-                    extreme_multiplier: Some(1.8),
-                },
-            },
+            targets: TargetsConfig::default(),
             quantile_outputs: None,
             loss_function: CryptoLossFunction::MSE,
             xgboost: crate::config::model::XGBoostConfig::default(),
@@ -808,7 +735,7 @@ mod tests {
 
         // Create a simple test to verify the config is valid
         let input_size = 4;
-        let expected_output_size = model_config.output_heads.calculate_total_output_size();
+        let expected_output_size = 15;
 
         let mut model =
             LSTMModel::from_model_config(&model_config, input_size, expected_output_size).unwrap();

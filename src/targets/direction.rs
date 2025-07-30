@@ -89,7 +89,8 @@
 //! Each target serves a different purpose in the multi-target prediction system,
 //! providing complementary information for comprehensive market analysis.
 
-use crate::config::model::DirectionHead;
+use crate::config::model::TargetsConfig;
+use crate::data::structures::MarketDataRow;
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_close_prices;
 use crate::utils::parser::parse_horizon_to_steps;
@@ -118,33 +119,37 @@ pub enum Direction {
 pub fn generate_direction_targets(
     df: &DataFrame,
     horizons: &[String],
-    model_config: Option<&DirectionHead>,
+    targets_config: &TargetsConfig, // Use new unified config
     sequence_indices: &[usize],
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
-    // ADAPTIVE CALIBRATION: Auto-calibrate slope sensitivity if not provided or if using default
-    let should_calibrate = model_config
-        .and_then(|c| c.slope_sensitivity)
-        .map(|s| s >= 0.4) // Calibrate if using old default values
-        .unwrap_or(true); // Calibrate if no config provided
-
-    let calibrated_sensitivity = if should_calibrate {
+    // ADAPTIVE CALIBRATION: Always use adaptive calibration with TargetsConfig
+    let calibrated_sensitivity = {
         // Use first horizon for calibration
         let first_horizon_steps = parse_horizon_to_steps(&horizons[0])?;
-        calibrate_slope_sensitivity(&close_prices, sequence_length, first_horizon_steps, 0.15)?
-    } else {
-        model_config
-            .and_then(|c| c.slope_sensitivity)
-            .unwrap_or(0.02)
+        calibrate_direction_sensitivity(
+            &close_prices,
+            sequence_length,
+            first_horizon_steps,
+            targets_config.balance_target,
+        )?
+    };
+
+    // Create adaptive targets config with calibrated sensitivity
+    let adaptive_targets_config = TargetsConfig {
+        base_sensitivity: calibrated_sensitivity,
+        balance_target: targets_config.balance_target,
+        momentum_weighting: targets_config.momentum_weighting,
+        extreme_multiplier: targets_config.extreme_multiplier,
     };
 
     log::info!(
-        "🎯 Direction targets using slope_sensitivity: {:.6} (calibrated: {})",
+        "🎯 Direction targets using calibrated sensitivity: {:.6} (was base: {:.6})",
         calibrated_sensitivity,
-        should_calibrate
+        targets_config.base_sensitivity
     );
 
     for horizon in horizons {
@@ -165,18 +170,11 @@ pub fn generate_direction_targets(
 
                 // Only classify if we have enough horizon data for momentum calculation
                 if horizon_prices.len() >= 2 {
-                    // Create config with calibrated sensitivity
-                    let calibrated_config = model_config.map(|c| DirectionHead {
-                        enabled: c.enabled,
-                        slope_sensitivity: Some(calibrated_sensitivity),
-                        base_threshold: c.base_threshold,
-                        extreme_multiplier: c.extreme_multiplier,
-                    });
-
+                    // Use the new momentum-based directional classification
                     let target_class = classify_direction(
                         sequence_prices,
-                        horizon_prices, // Now using horizon sequence, not single price
-                        calibrated_config.as_ref(),
+                        horizon_prices,
+                        &adaptive_targets_config,
                     )?;
 
                     horizon_targets[seq_position] = target_class;
@@ -191,111 +189,53 @@ pub fn generate_direction_targets(
     Ok(targets)
 }
 
-/// Classify direction using trend acceleration approach
+/// Classify direction using momentum change analysis
 ///
 /// This is the main classification function that determines the directional class
-/// based on the acceleration/deceleration of price trends between sequence and horizon periods.
+/// based on MOMENTUM CHANGES between sequence and horizon periods.
 ///
 /// ## Algorithm
-/// 1. **Trend Analysis**: Calculate linear regression slopes for both periods
-///    - `sequence_slope`: Trend strength in the input sequence (recent history)
-///    - `horizon_slope`: Trend strength in the prediction horizon (future)
-/// 2. **Acceleration Calculation**: `trend_acceleration = horizon_slope - sequence_slope`
-/// 3. **Classification**: Compare acceleration against slope_sensitivity-based thresholds
+/// 1. **Sequence Momentum**: Calculate overall trend momentum in the sequence
+/// 2. **Horizon Momentum**: Calculate overall trend momentum in the horizon
+/// 3. **Momentum Change**: Measure the change in momentum (acceleration/deceleration)
+/// 4. **Adaptive Thresholds**: Set thresholds based on sequence trend consistency
+/// 5. **Classification**: Classify based on momentum change magnitude and direction
+///
+/// ## Key Insight
+/// Direction is about TREND CHANGES and MOMENTUM SHIFTS, not absolute movement:
+/// - DUMP: Strong momentum reversal (bullish to bearish or strong deceleration)
+/// - DOWN: Moderate momentum weakening
+/// - SIDEWAYS: Momentum continuation with minimal change
+/// - UP: Moderate momentum strengthening  
+/// - PUMP: Strong momentum acceleration (bearish to bullish or strong acceleration)
 ///
 /// ## Parameters
-/// - `sequence_prices`: Input sequence prices for establishing trend baseline
+/// - `sequence_prices`: Input sequence for establishing momentum baseline
 /// - `horizon_prices`: Prices from sequence end to target horizon
-/// - `model_config`: Optional DirectionHead configuration (uses defaults if None)
+/// - `targets_config`: Configuration for threshold sensitivity
 ///
 /// ## Returns
-/// Direction class as i32:
-/// - 0: DUMP (strong deceleration/reversal)
-/// - 1: DOWN (moderate deceleration)
-/// - 2: SIDEWAYS (trend continuation)
-/// - 3: UP (moderate acceleration)
-/// - 4: PUMP (strong acceleration)
-///
-/// ## Configuration
-/// Uses `slope_sensitivity` from model_config to determine threshold sensitivity:
-/// - Default: 0.4 (balanced sensitivity)
-/// - Lower values: More sensitive to momentum changes
-/// - Higher values: Less sensitive, only major shifts
-///
-/// ## Example
-/// ```rust
-/// let sequence = vec![100.0, 101.0, 102.0, 103.0, 104.0]; // +1.0/period trend
-/// let horizon = vec![104.0, 106.0, 108.0, 110.0, 112.0];  // +2.0/period trend
-/// // Acceleration = 2.0 - 1.0 = 1.0 (positive acceleration)
-/// // With default config: likely UP or PUMP class
-/// ```
+/// Direction class representing momentum change pattern
 pub fn classify_direction(
-    sequence_prices: &[f64], // Input sequence for trend baseline
+    sequence_prices: &[f64], // Input sequence for momentum baseline
     horizon_prices: &[f64],  // From sequence end to target horizon
-    model_config: Option<&DirectionHead>,
+    targets_config: &TargetsConfig,
 ) -> Result<i32> {
     if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
         return Ok(2); // Default to SIDEWAYS for insufficient data
     }
 
-    // Get config parameters
-    let slope_sensitivity = model_config
-        .and_then(|c| c.slope_sensitivity)
-        .unwrap_or(0.4);
-    let extreme_multiplier = model_config
-        .and_then(|c| c.extreme_multiplier)
-        .unwrap_or(2.0);
-
-    // Calculate trend acceleration thresholds
-    let thresholds =
-        calculate_trend_acceleration_thresholds(slope_sensitivity, extreme_multiplier)?;
-
-    // Classify using trend acceleration approach
-    classify_direction_trend_acceleration(sequence_prices, horizon_prices, &thresholds)
+    // Use the momentum change-based classification (the correct directional approach)
+    classify_direction_momentum_change(sequence_prices, horizon_prices, targets_config)
 }
 
-/// Trend acceleration thresholds for direction classification
+/// Calculate raw linear regression slope without normalization
 ///
-/// This struct defines the boundary values used to classify trend acceleration
-/// into the 5-class direction system. The thresholds are calculated based on
-/// `slope_sensitivity` and `extreme_multiplier` parameters.
+/// Uses least squares method to find the best-fit line slope in raw price units per time step.
+/// This is used internally for momentum calculations where we need raw slope values.
 ///
-/// ## Threshold Structure
-/// ```text
-/// DUMP:     acceleration <= dump_max (most negative)
-/// DOWN:     dump_max < acceleration <= down_max (moderate negative)
-/// SIDEWAYS: down_max < acceleration <= sideways_max (minimal change)
-/// UP:       sideways_max < acceleration <= up_max (moderate positive)
-/// PUMP:     acceleration > up_max (most positive)
-/// ```
-///
-/// ## Field Meanings
-/// - `dump_max`: Maximum acceleration for DUMP class (strong deceleration)
-/// - `down_max`: Maximum acceleration for DOWN class (moderate deceleration)
-/// - `sideways_max`: Maximum acceleration for SIDEWAYS class (trend continuation)
-/// - `up_max`: Maximum acceleration for UP class (moderate acceleration)
-/// - Values above `up_max` are classified as PUMP (strong acceleration)
-#[derive(Debug)]
-pub struct TrendAccelerationThresholds {
-    pub dump_max: f64,     // DUMP threshold (most negative acceleration)
-    pub down_max: f64,     // DOWN threshold (moderate negative acceleration)
-    pub sideways_max: f64, // SIDEWAYS threshold (minimal acceleration)
-    pub up_max: f64,       // UP threshold (moderate positive acceleration)
-                           // Above up_max = PUMP (strong positive acceleration)
-}
-
-/// Calculate linear regression slope for trend analysis with sequence volatility normalization
-///
-/// Uses least squares method to find the best-fit line slope, normalized by sequence price volatility
-/// to ensure consistent trend detection across different price levels and market conditions.
-///
-/// ## Normalization Strategy
-/// - Uses sequence price standard deviation for volatility-based normalization
-/// - Fallback to price mean for low-volatility periods (< 0.1% of mean)
-/// - Ensures slope values are comparable across different price ranges and symbols
-///
-/// Returns slope normalized by sequence volatility (dimensionless trend strength)
-pub fn calculate_linear_trend_slope(prices: &[f64]) -> Result<f64> {
+/// Returns raw slope in price units per time step
+pub fn calculate_raw_linear_slope(prices: &[f64]) -> Result<f64> {
     if prices.len() < 2 {
         return Ok(0.0); // No trend for insufficient data
     }
@@ -323,41 +263,21 @@ pub fn calculate_linear_trend_slope(prices: &[f64]) -> Result<f64> {
     }
 
     let slope = (n * sum_xy - sum_x * sum_y) / denominator;
-
-    // ADAPTIVE NORMALIZATION: Use sequence price volatility for normalization
-    let price_mean = sum_y / n;
-    let price_variance = prices.iter().map(|x| (x - price_mean).powi(2)).sum::<f64>() / n;
-    let price_std = price_variance.sqrt();
-
-    // Normalize by volatility, fallback to mean for low-volatility periods
-    let normalization_factor = if price_std > price_mean * 0.001 {
-        price_std // Use volatility for normal market conditions
-    } else {
-        price_mean.max(1e-8) // Fallback to mean for extremely low volatility
-    };
-
-    let normalized_slope = slope / normalization_factor;
-
-    log::trace!(
-        "🎯 Slope Calculation: raw_slope={:.6}, price_mean={:.2}, price_std={:.4}, norm_factor={:.4}, normalized_slope={:.6}",
-        slope, price_mean, price_std, normalization_factor, normalized_slope
-    );
-
-    Ok(normalized_slope)
+    Ok(slope)
 }
 
-/// Calculate adaptive slope sensitivity based on actual price data
+/// Calculate adaptive sensitivity based on momentum change patterns in the data
 ///
-/// This function analyzes the distribution of normalized slope differences in the data
-/// to automatically determine appropriate slope_sensitivity thresholds that will
-/// produce balanced class distributions.
+/// This function analyzes the distribution of momentum changes between sequence
+/// and horizon periods to automatically determine appropriate sensitivity thresholds
+/// that will produce balanced class distributions.
 ///
 /// # Algorithm
-/// 1. Calculate normalized slopes for all sequences and horizons
-/// 2. Compute slope acceleration distribution
+/// 1. Calculate momentum changes for all sequence-horizon pairs
+/// 2. Normalize by sequence trend consistency
 /// 3. Use percentiles to set balanced thresholds
-/// 4. Return calibrated slope_sensitivity value
-pub fn calibrate_slope_sensitivity(
+/// 4. Return calibrated sensitivity value
+pub fn calibrate_direction_sensitivity(
     close_prices: &[f64],
     sequence_length: usize,
     horizon_steps: usize,
@@ -367,49 +287,55 @@ pub fn calibrate_slope_sensitivity(
         return Ok(0.02); // Default fallback for insufficient data
     }
 
-    let mut accelerations = Vec::new();
+    let mut normalized_momentum_changes = Vec::new();
 
-    // Sample accelerations from the data
+    // Sample momentum changes from the data
     for i in 0..(close_prices.len() - sequence_length - horizon_steps) {
         let sequence_prices = &close_prices[i..i + sequence_length];
         let horizon_prices =
             &close_prices[i + sequence_length..i + sequence_length + horizon_steps];
 
         if sequence_prices.len() >= 2 && horizon_prices.len() >= 2 {
-            let seq_slope = calculate_linear_trend_slope(sequence_prices)?;
-            let hor_slope = calculate_linear_trend_slope(horizon_prices)?;
-            let acceleration = hor_slope - seq_slope;
+            // Calculate momentum change
+            let (_seq_momentum, _hor_momentum, momentum_change) =
+                calculate_directional_momentum_change(sequence_prices, horizon_prices)?;
 
-            if acceleration.is_finite() {
-                accelerations.push(acceleration.abs()); // Use absolute values for threshold calculation
+            // Calculate sequence trend consistency for normalization
+            let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
+
+            // Normalize momentum change by trend consistency
+            if trend_consistency > 1e-8 {
+                let normalized_change = momentum_change / trend_consistency;
+                if normalized_change.is_finite() {
+                    normalized_momentum_changes.push(normalized_change.abs());
+                }
             }
         }
     }
 
-    if accelerations.is_empty() {
+    if normalized_momentum_changes.is_empty() {
         return Ok(0.02); // Default fallback
     }
 
-    // Sort accelerations to find percentiles
-    accelerations.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = accelerations.len();
+    // Sort changes to find percentiles
+    normalized_momentum_changes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = normalized_momentum_changes.len();
 
     // Find the percentile that corresponds to target_balance for extreme classes
-    // We want target_balance% in each extreme class, so (1.0 - 2*target_balance) in middle classes
     let extreme_percentile = 1.0 - target_balance;
     let extreme_idx = ((n as f64) * extreme_percentile) as usize;
-    let extreme_threshold = accelerations[extreme_idx.min(n - 1)];
+    let extreme_threshold = normalized_momentum_changes[extreme_idx.min(n - 1)];
 
-    // The slope_sensitivity should be set so that extreme_threshold becomes the extreme boundary
-    // With extreme_multiplier = 2.0: extreme_boundary = slope_sensitivity * 2.0
-    // So: slope_sensitivity = extreme_threshold / 2.0
-    let calibrated_sensitivity = extreme_threshold / 2.0;
+    // The base_sensitivity should be set so that extreme_threshold becomes the extreme boundary
+    // With extreme_multiplier = 2.0: extreme_boundary = base_sensitivity * 20.0 * 2.0
+    // So: base_sensitivity = extreme_threshold / (20.0 * 2.0)
+    let calibrated_sensitivity = extreme_threshold / (20.0 * 2.0);
 
     // Ensure reasonable bounds
-    let final_sensitivity = calibrated_sensitivity.clamp(0.001, 0.5);
+    let final_sensitivity = calibrated_sensitivity.clamp(0.001, 0.1);
 
     log::info!(
-        "🎯 Calibrated slope_sensitivity: {:.6} (from {} samples, extreme_threshold: {:.6})",
+        "🎯 Calibrated momentum-based sensitivity: {:.6} (from {} samples, extreme_threshold: {:.6})",
         final_sensitivity,
         n,
         extreme_threshold
@@ -418,100 +344,143 @@ pub fn calibrate_slope_sensitivity(
     Ok(final_sensitivity)
 }
 
-/// Calculate trend acceleration thresholds for direction classification
+/// Calculate directional momentum change between sequence and horizon
 ///
-/// This function computes the threshold boundaries used to classify trend acceleration
-/// into the 5-class direction system (DUMP, DOWN, SIDEWAYS, UP, PUMP).
+/// Direction classification should detect TREND CHANGES and MOMENTUM SHIFTS,
+/// not just movement magnitude. This function analyzes how the directional
+/// momentum changes from the sequence period to the horizon period.
 ///
-/// ## Parameters
-/// - `slope_sensitivity`: Controls threshold sensitivity (default: 0.4)
-///   - Lower values = more sensitive (tighter thresholds)
-///   - Higher values = less sensitive (wider thresholds)
-/// - `extreme_multiplier`: Multiplier for extreme boundaries (default: 2.0)
-///   - Controls the ratio between moderate and extreme classifications
-///
-/// ## Threshold Logic
-/// ```text
-/// half_sensitivity = slope_sensitivity / 2.0
-/// extreme_sensitivity = slope_sensitivity * extreme_multiplier
-///
-/// Classification boundaries:
-/// DUMP:     acceleration <= -extreme_sensitivity
-/// DOWN:     -extreme_sensitivity < acceleration <= -half_sensitivity
-/// SIDEWAYS: -half_sensitivity < acceleration <= +half_sensitivity
-/// UP:       +half_sensitivity < acceleration <= +extreme_sensitivity
-/// PUMP:     acceleration > +extreme_sensitivity
-/// ```
-///
-/// ## Example
-/// With slope_sensitivity=4.0 and extreme_multiplier=2.0:
-/// - DUMP: acceleration <= -8.0 (strong deceleration)
-/// - DOWN: -8.0 < acceleration <= -2.0 (moderate deceleration)
-/// - SIDEWAYS: -2.0 < acceleration <= +2.0 (trend continuation)
-/// - UP: +2.0 < acceleration <= +8.0 (moderate acceleration)
-/// - PUMP: acceleration > +8.0 (strong acceleration)
-pub fn calculate_trend_acceleration_thresholds(
-    slope_sensitivity: f64,
-    extreme_multiplier: f64,
-) -> Result<TrendAccelerationThresholds> {
-    // Use slope_sensitivity directly - it should be configured appropriately for slope differences
-    // No magic scaling factor needed - let the user configure slope_sensitivity properly
-    let half_sensitivity = slope_sensitivity / 2.0;
-    let extreme_sensitivity = slope_sensitivity * extreme_multiplier;
-
-    let thresholds = TrendAccelerationThresholds {
-        dump_max: -extreme_sensitivity, // Most negative acceleration
-        down_max: -half_sensitivity,    // Moderate negative acceleration
-        sideways_max: half_sensitivity, // Minimal acceleration (around 0)
-        up_max: extreme_sensitivity,    // Moderate positive acceleration
-                                        // Above up_max = PUMP (strong positive acceleration)
-    };
-
-    log::debug!(
-        "🎯 Trend Acceleration Thresholds: slope_sensitivity={}, extreme_factor={}, thresholds=[{:.6}, {:.6}, {:.6}, {:.6}]",
-        slope_sensitivity, extreme_multiplier,
-        thresholds.dump_max, thresholds.down_max, thresholds.sideways_max, thresholds.up_max
-    );
-
-    Ok(thresholds)
-}
-
-/// Classify direction using trend acceleration approach
-fn classify_direction_trend_acceleration(
+/// Returns (sequence_momentum, horizon_momentum, momentum_change)
+fn calculate_directional_momentum_change(
     sequence_prices: &[f64],
     horizon_prices: &[f64],
-    thresholds: &TrendAccelerationThresholds,
+) -> Result<(f64, f64, f64)> {
+    if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
+        return Ok((0.0, 0.0, 0.0));
+    }
+
+    // Calculate sequence momentum (trend strength and direction)
+    let seq_start = sequence_prices[0];
+    let seq_end = sequence_prices[sequence_prices.len() - 1];
+    let sequence_momentum = (seq_end - seq_start) / seq_start;
+
+    // Calculate horizon momentum (trend strength and direction)
+    let hor_start = horizon_prices[0]; // This is same as seq_end
+    let hor_end = horizon_prices[horizon_prices.len() - 1];
+    let horizon_momentum = (hor_end - hor_start) / hor_start;
+
+    // Calculate momentum change (this is the key directional signal)
+    let momentum_change = horizon_momentum - sequence_momentum;
+
+    Ok((sequence_momentum, horizon_momentum, momentum_change))
+}
+
+/// Calculate sequence trend consistency for adaptive threshold setting
+///
+/// Measures how consistent the trend is within the sequence to set appropriate
+/// thresholds for detecting meaningful momentum changes. More volatile sequences
+/// need larger thresholds to filter out noise.
+fn calculate_sequence_trend_consistency(prices: &[f64]) -> Result<f64> {
+    if prices.len() < 3 {
+        return Ok(0.01); // Default consistency for short sequences
+    }
+
+    let mut momentum_changes = Vec::new();
+
+    // Calculate momentum between consecutive segments
+    let segment_size = (prices.len() / 3).max(2);
+    for i in 0..(prices.len() - segment_size * 2) {
+        let seg1_start = prices[i];
+        let seg1_end = prices[i + segment_size];
+        let seg2_start = seg1_end;
+        let seg2_end = prices[i + segment_size * 2];
+
+        if seg1_start != 0.0 && seg2_start != 0.0 {
+            let seg1_momentum = (seg1_end - seg1_start) / seg1_start;
+            let seg2_momentum = (seg2_end - seg2_start) / seg2_start;
+            let momentum_change = seg2_momentum - seg1_momentum;
+
+            if momentum_change.is_finite() {
+                momentum_changes.push(momentum_change);
+            }
+        }
+    }
+
+    if momentum_changes.is_empty() {
+        return Ok(0.01);
+    }
+
+    // Calculate standard deviation of momentum changes (trend consistency)
+    let mean = momentum_changes.iter().sum::<f64>() / momentum_changes.len() as f64;
+    let variance = momentum_changes
+        .iter()
+        .map(|x| (x - mean).powi(2))
+        .sum::<f64>()
+        / momentum_changes.len() as f64;
+    let std_dev = variance.sqrt();
+
+    Ok(std_dev.max(0.005)) // Minimum consistency threshold
+}
+
+/// Classify direction using momentum change analysis
+///
+/// This is the correct directional approach that focuses on TREND CHANGES:
+/// - DUMP: Strong momentum reversal from positive to negative
+/// - DOWN: Moderate momentum weakening or slight reversal  
+/// - SIDEWAYS: Momentum continuation with minimal change
+/// - UP: Moderate momentum strengthening or slight acceleration
+/// - PUMP: Strong momentum acceleration or reversal from negative to positive
+///
+/// Key insight: Direction is about momentum CHANGE, not absolute movement
+fn classify_direction_momentum_change(
+    sequence_prices: &[f64],
+    horizon_prices: &[f64],
+    targets_config: &TargetsConfig,
 ) -> Result<i32> {
-    // Step 1: Calculate linear regression slopes
-    let sequence_trend = calculate_linear_trend_slope(sequence_prices)?;
-    let horizon_trend = calculate_linear_trend_slope(horizon_prices)?;
+    // Step 1: Calculate momentum change between sequence and horizon
+    let (sequence_momentum, horizon_momentum, momentum_change) =
+        calculate_directional_momentum_change(sequence_prices, horizon_prices)?;
 
-    // Step 2: Calculate trend acceleration (change in slope) - NO NORMALIZATION
-    let trend_acceleration = horizon_trend - sequence_trend;
+    // Step 2: Calculate sequence trend consistency for adaptive thresholds
+    let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
 
-    // Step 3: Classify using absolute acceleration thresholds
-    let class = if trend_acceleration <= thresholds.dump_max {
-        0 // DUMP: Strong deceleration/reversal
-    } else if trend_acceleration <= thresholds.down_max {
-        1 // DOWN: Moderate deceleration
-    } else if trend_acceleration <= thresholds.sideways_max {
-        2 // SIDEWAYS: Trend continuation
-    } else if trend_acceleration <= thresholds.up_max {
-        3 // UP: Moderate acceleration
+    // Step 3: Set adaptive thresholds based on trend consistency
+    let base_multiplier = targets_config.base_sensitivity * 20.0; // Scale for momentum changes
+    let extreme_multiplier = targets_config.extreme_multiplier;
+
+    let base_threshold = trend_consistency * base_multiplier;
+    let extreme_threshold = trend_consistency * base_multiplier * extreme_multiplier;
+
+    // Ensure reasonable minimum thresholds
+    let min_base = 0.01; // 1% minimum momentum change
+    let min_extreme = 0.03; // 3% minimum for extreme changes
+
+    let final_base_threshold = base_threshold.max(min_base);
+    let final_extreme_threshold = extreme_threshold.max(min_extreme);
+
+    // Step 4: Classify based on momentum change magnitude and direction
+    let class = if momentum_change <= -final_extreme_threshold {
+        0 // DUMP: Strong momentum reversal (positive to negative or strong weakening)
+    } else if momentum_change <= -final_base_threshold {
+        1 // DOWN: Moderate momentum weakening
+    } else if momentum_change.abs() <= final_base_threshold {
+        2 // SIDEWAYS: Momentum continuation
+    } else if momentum_change <= final_extreme_threshold {
+        3 // UP: Moderate momentum strengthening
     } else {
-        4 // PUMP: Strong acceleration
+        4 // PUMP: Strong momentum acceleration (negative to positive or strong strengthening)
     };
 
     log::debug!(
-        "🎯 Trend Acceleration: seq_slope={:.6}, horizon_slope={:.6}, acceleration={:.6} → class={} (thresholds: [{:.6}, {:.6}, {:.6}, {:.6}])",
-        sequence_trend, horizon_trend, trend_acceleration, class,
-        thresholds.dump_max, thresholds.down_max, thresholds.sideways_max, thresholds.up_max
+        "🎯 Momentum Direction: seq_momentum={:.6}, hor_momentum={:.6}, momentum_change={:.6}, consistency={:.6}, base_thresh={:.6}, extreme_thresh={:.6} → class={} ({})",
+        sequence_momentum, horizon_momentum, momentum_change, trend_consistency, final_base_threshold, final_extreme_threshold, class,
+        ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"][class as usize]
     );
 
     Ok(class)
 }
 
-/// Log direction class distribution with trend acceleration analysis
+/// Log direction class distribution with momentum-based analysis
 fn log_direction_distribution(targets: &[i32], horizon: &str) {
     let class_names = ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"];
     let mut class_counts = [0usize; 5];
@@ -526,7 +495,7 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
 
     if valid_targets == 0 {
         log::warn!(
-            "📊 Trend Acceleration Direction Analysis [{}]: No valid targets found",
+            "📊 Momentum-Based Direction Analysis [{}]: No valid targets found",
             horizon
         );
         return;
@@ -551,10 +520,212 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Trend Acceleration Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        "📊 Momentum-Based Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
         horizon,
         valid_targets,
         imbalance_ratio,
         class_percentages.join(", ")
     );
+}
+
+// ============================================================================
+// PREDICTION RECONSTRUCTION METHODS
+// ============================================================================
+
+/// Reconstruction result for direction predictions
+#[derive(Debug, Clone)]
+pub struct DirectionReconstruction {
+    /// Class probabilities from model [DUMP, DOWN, SIDEWAYS, UP, PUMP]
+    pub probabilities: Vec<f64>,
+    /// Expected momentum change values for each class
+    pub momentum_changes: Vec<f64>,
+    /// Trend acceleration percentages for each class
+    pub trend_accelerations: Vec<f64>,
+    /// Most likely direction class index
+    pub most_likely_class: usize,
+    /// Confidence (probability of most likely class)
+    pub confidence: f64,
+    /// Expected momentum change (weighted average)
+    pub expected_momentum_change: f64,
+    /// Expected trend acceleration percentage (weighted average)
+    pub expected_trend_acceleration: f64,
+    /// Breakout probability (DUMP + PUMP)
+    pub breakout_probability: f64,
+    /// Upward bias probability (UP + PUMP)
+    pub upward_probability: f64,
+    /// Downward bias probability (DUMP + DOWN)
+    pub downward_probability: f64,
+    /// Sequence trend consistency used for thresholds
+    pub trend_consistency: f64,
+    /// Base threshold used for classification
+    pub base_threshold: f64,
+    /// Extreme threshold used for classification
+    pub extreme_threshold: f64,
+}
+
+/// Reconstruct direction predictions from model probabilities
+///
+/// This method reverses the training classification logic to convert
+/// raw model probabilities back to meaningful momentum changes and trend accelerations.
+///
+/// # Arguments
+/// * `probabilities` - 5-element array of class probabilities [DUMP, DOWN, SIDEWAYS, UP, PUMP]
+/// * `sequence_ohlcv` - OHLCV data for the input sequence (same as used in training)
+/// * `config` - Optional configuration (uses defaults if None)
+///
+/// # Returns
+/// * `DirectionReconstruction` - Complete reconstruction with momentum values and metrics
+pub fn reconstruct_direction(
+    probabilities: &[f64],
+    sequence_ohlcv: &[MarketDataRow],
+    config: Option<&TargetsConfig>,
+) -> Result<DirectionReconstruction> {
+    // Validate inputs
+    if probabilities.len() != 5 {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Direction reconstruction requires exactly 5 class probabilities".to_string(),
+        ));
+    }
+
+    if sequence_ohlcv.is_empty() {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Sequence OHLCV data is required for direction reconstruction".to_string(),
+        ));
+    }
+
+    // Extract sequence prices for momentum calculation
+    let sequence_prices: Vec<f64> = sequence_ohlcv
+        .iter()
+        .map(|row| (row.open + row.high + row.low + row.close) / 4.0) // OHLC4
+        .collect();
+
+    // Calculate trend consistency (same as training)
+    let trend_consistency = calculate_sequence_trend_consistency(&sequence_prices)?;
+
+    // Use same configuration as training
+    let targets_config = config.cloned().unwrap_or_default();
+    let base_multiplier = targets_config.base_sensitivity * 20.0; // Same scaling as training
+    let extreme_multiplier = targets_config.extreme_multiplier;
+
+    let base_threshold = trend_consistency * base_multiplier;
+    let extreme_threshold = trend_consistency * base_multiplier * extreme_multiplier;
+
+    // Apply same minimum thresholds as training
+    let min_base = 0.01; // 1% minimum momentum change
+    let min_extreme = 0.03; // 3% minimum for extreme changes
+    let final_base_threshold = base_threshold.max(min_base);
+    let final_extreme_threshold = extreme_threshold.max(min_extreme);
+
+    // Calculate representative momentum change for each class (reverse of classification)
+    let momentum_changes = vec![
+        -final_extreme_threshold * 1.5, // DUMP: Strong negative momentum change
+        -final_base_threshold * 1.5,    // DOWN: Moderate negative momentum change
+        0.0,                            // SIDEWAYS: No momentum change
+        final_base_threshold * 1.5,     // UP: Moderate positive momentum change
+        final_extreme_threshold * 1.5,  // PUMP: Strong positive momentum change
+    ];
+
+    // Convert momentum changes to trend acceleration percentages
+    let trend_accelerations: Vec<f64> = momentum_changes
+        .iter()
+        .map(|&change| change * 100.0) // Convert to percentage
+        .collect();
+
+    // Find most likely class and confidence
+    let (most_likely_class, confidence) = probabilities
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(idx, &prob)| (idx, prob))
+        .unwrap_or((2, 0.2)); // Default to SIDEWAYS
+
+    // Calculate expected values (weighted averages)
+    let expected_momentum_change: f64 = probabilities
+        .iter()
+        .zip(momentum_changes.iter())
+        .map(|(&prob, &change)| prob * change)
+        .sum();
+
+    let expected_trend_acceleration: f64 = probabilities
+        .iter()
+        .zip(trend_accelerations.iter())
+        .map(|(&prob, &accel)| prob * accel)
+        .sum();
+
+    // Calculate directional probabilities
+    let breakout_probability = probabilities[0] + probabilities[4]; // DUMP + PUMP
+    let upward_probability = probabilities[3] + probabilities[4]; // UP + PUMP
+    let downward_probability = probabilities[0] + probabilities[1]; // DUMP + DOWN
+
+    Ok(DirectionReconstruction {
+        probabilities: probabilities.to_vec(),
+        momentum_changes,
+        trend_accelerations,
+        most_likely_class,
+        confidence,
+        expected_momentum_change,
+        expected_trend_acceleration,
+        breakout_probability,
+        upward_probability,
+        downward_probability,
+        trend_consistency,
+        base_threshold: final_base_threshold,
+        extreme_threshold: final_extreme_threshold,
+    })
+}
+
+/// Convert class probabilities to expected momentum change values
+///
+/// This method calculates the expected momentum change for each class based on
+/// the same mathematical logic used in training target generation.
+///
+/// # Arguments
+/// * `probabilities` - 5-element array of class probabilities
+/// * `sequence_ohlcv` - OHLCV data for threshold calculation
+/// * `config` - Optional configuration
+///
+/// # Returns
+/// * `Vec<f64>` - Expected momentum change for each class [DUMP, DOWN, SIDEWAYS, UP, PUMP]
+pub fn probabilities_to_momentum_changes(
+    probabilities: &[f64],
+    sequence_ohlcv: &[MarketDataRow],
+    config: Option<&TargetsConfig>,
+) -> Result<Vec<f64>> {
+    if probabilities.len() != 5 {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Expected 5 class probabilities for direction reconstruction".to_string(),
+        ));
+    }
+
+    let reconstruction = reconstruct_direction(probabilities, sequence_ohlcv, config)?;
+    Ok(reconstruction.momentum_changes)
+}
+
+/// Calculate trend acceleration percentages from probabilities
+///
+/// # Arguments
+/// * `probabilities` - 5-element array of class probabilities
+/// * `sequence_ohlcv` - OHLCV data for threshold calculation
+/// * `config` - Optional configuration
+///
+/// # Returns
+/// * `Vec<f64>` - Trend acceleration percentage for each class
+pub fn probabilities_to_trend_accelerations(
+    probabilities: &[f64],
+    sequence_ohlcv: &[MarketDataRow],
+    config: Option<&TargetsConfig>,
+) -> Result<Vec<f64>> {
+    if probabilities.len() != 5 {
+        return Err(crate::utils::error::VangaError::DataError(
+            "Expected 5 class probabilities for direction reconstruction".to_string(),
+        ));
+    }
+
+    let reconstruction = reconstruct_direction(probabilities, sequence_ohlcv, config)?;
+    Ok(reconstruction.trend_accelerations)
+}
+
+/// Get direction class names in order
+pub fn get_direction_class_names() -> Vec<&'static str> {
+    vec!["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"]
 }

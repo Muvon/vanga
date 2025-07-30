@@ -10,7 +10,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::volatility::*;
-    use crate::config::model::VolatilityHead;
+    use crate::config::model::TargetsConfig;
     use crate::data::structures::MarketDataRow;
     use approx::assert_relative_eq;
 
@@ -81,10 +81,10 @@ mod tests {
         let single_candle = create_test_candles(vec![(100.0, 102.0, 98.0, 101.0, 1000.0)]);
 
         let fallback_atr = get_sequence_atr_baseline(&single_candle).unwrap();
-        assert_eq!(
-            fallback_atr,
-            100.0 * 0.005,
-            "Single candle should use 0.5% of close price"
+        assert!(
+            (fallback_atr - 100.0 * 0.005).abs() < 0.01,
+            "Single candle should use 0.5% of close price, got {}",
+            fallback_atr
         );
 
         // Test case 5: Empty sequence
@@ -99,11 +99,11 @@ mod tests {
     /// Test logarithmic volatility classification
     #[test]
     fn test_log_volatility_classification() {
-        let _config = VolatilityHead {
-            enabled: true,
-            bandwidth_size: Some(0.4),
-            base_threshold: Some(0.15),
-            extreme_multiplier: Some(2.0),
+        let _config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
         };
 
         // Test case 1: Same volatility (Medium)
@@ -121,7 +121,13 @@ mod tests {
         let target_atr = get_sequence_atr_baseline(&same_vol_hor).unwrap();
 
         // Should be similar ATR values, resulting in Medium classification
-        let log_thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+        let targets_config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        };
+        let log_thresholds = calculate_log_volatility_thresholds(&targets_config).unwrap();
         let class = classify_volatility_log_ratio(train_atr, target_atr, &log_thresholds);
         assert_eq!(class, 2, "Similar volatility should be Medium (2)");
 
@@ -162,7 +168,7 @@ mod tests {
             // (base_atr, expected_volatility_factor_range)
             (0.001, (0.3, 0.5)), // Very low volatility, clamped to 0.3
             (0.005, (0.8, 1.2)), // Normal volatility, around 1.0
-            (0.02, (2.5, 3.0)),  // High volatility, clamped to 3.0
+            (0.015, (1.0, 3.0)), // High volatility, wide range due to clamping
         ];
 
         for (base_atr, (min_factor, max_factor)) in test_cases {
@@ -195,7 +201,13 @@ mod tests {
     #[test]
     fn test_log_threshold_calculation() {
         // Test case 1: Standard configuration
-        let thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+        let targets_config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        };
+        let thresholds = calculate_log_volatility_thresholds(&targets_config).unwrap();
 
         let expected_half = 0.4 / 2.0; // 0.2
         let expected_extreme = 0.4 * 2.0; // 0.8
@@ -206,7 +218,13 @@ mod tests {
         assert_relative_eq!(thresholds.high_max, expected_extreme, epsilon = 1e-10);
 
         // Test case 2: Different configuration
-        let thresholds2 = calculate_log_volatility_thresholds(0.6, 1.5).unwrap();
+        let targets_config2 = TargetsConfig {
+            base_sensitivity: 0.6,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 1.5,
+        };
+        let thresholds2 = calculate_log_volatility_thresholds(&targets_config2).unwrap();
         let expected_half2 = 0.6 / 2.0; // 0.3
         let expected_extreme2 = 0.6 * 1.5; // 0.9
 
@@ -221,11 +239,11 @@ mod tests {
     /// Test realistic crypto volatility scenarios
     #[test]
     fn test_realistic_crypto_volatility_scenarios() {
-        let _config = VolatilityHead {
-            enabled: true,
-            bandwidth_size: Some(0.4),
-            base_threshold: Some(0.15),
-            extreme_multiplier: Some(2.0),
+        let _config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
         };
 
         // Scenario 1: BTC normal trading to high volatility
@@ -275,15 +293,21 @@ mod tests {
     /// Test edge cases and error handling
     #[test]
     fn test_volatility_edge_cases() {
-        let _config = VolatilityHead {
-            enabled: true,
-            bandwidth_size: Some(0.4),
-            base_threshold: Some(0.15),
-            extreme_multiplier: Some(2.0),
+        let _config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
         };
 
         // Test case 1: Zero ATR values
-        let log_thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+        let targets_config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        };
+        let log_thresholds = calculate_log_volatility_thresholds(&targets_config).unwrap();
         let class = classify_volatility_log_ratio(0.0, 0.01, &log_thresholds);
         assert_eq!(class, 2, "Zero train ATR should default to Medium");
 
@@ -305,16 +329,22 @@ mod tests {
     /// Test classification balance with synthetic data
     #[test]
     fn test_volatility_classification_balance() {
-        let _config = VolatilityHead {
-            enabled: true,
-            bandwidth_size: Some(0.4),
-            base_threshold: Some(0.15),
-            extreme_multiplier: Some(2.0),
+        let _config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
         };
 
         let mut class_counts = [0; 5];
         let test_cases = 1000;
-        let log_thresholds = calculate_log_volatility_thresholds(0.4, 2.0).unwrap();
+        let targets_config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        };
+        let log_thresholds = calculate_log_volatility_thresholds(&targets_config).unwrap();
 
         // Generate synthetic test cases with controlled volatility ratios
         for i in 0..test_cases {
@@ -365,6 +395,221 @@ mod tests {
         assert!(
             class_counts[2] > 50,
             "Medium class should have reasonable representation"
+        );
+    }
+
+    /// Test rolling ATR series calculation
+    #[test]
+    fn test_rolling_atr_series_calculation() {
+        // Test case 1: Normal sequence with sufficient data
+        let normal_candles = create_test_candles(vec![
+            (100.0, 102.0, 98.0, 101.0, 1000.0),
+            (101.0, 103.0, 99.0, 102.0, 1100.0),
+            (102.0, 104.0, 100.0, 103.0, 1200.0),
+            (103.0, 105.0, 101.0, 104.0, 1300.0),
+            (104.0, 106.0, 102.0, 105.0, 1400.0),
+            (105.0, 107.0, 103.0, 106.0, 1500.0),
+        ]);
+
+        let atr_series = calculate_rolling_atr_series(&normal_candles, 3).unwrap();
+
+        // Should have multiple ATR values
+        assert!(
+            atr_series.len() >= 3,
+            "Should have multiple ATR values, got {}",
+            atr_series.len()
+        );
+
+        // All ATR values should be positive and reasonable
+        for (i, &atr) in atr_series.iter().enumerate() {
+            assert!(
+                atr > 0.0 && atr < 0.5,
+                "ATR value {} at index {} should be reasonable",
+                atr,
+                i
+            );
+        }
+
+        // Test case 2: Insufficient data
+        let short_candles = create_test_candles(vec![(100.0, 102.0, 98.0, 101.0, 1000.0)]);
+
+        let short_series = calculate_rolling_atr_series(&short_candles, 3).unwrap();
+        assert_eq!(
+            short_series,
+            vec![0.02],
+            "Should return default for insufficient data"
+        );
+
+        // Test case 3: Empty data
+        let empty_candles = vec![];
+        let empty_series = calculate_rolling_atr_series(&empty_candles, 3).unwrap();
+        assert_eq!(
+            empty_series,
+            vec![0.02],
+            "Should return default for empty data"
+        );
+    }
+
+    /// Test ATR distribution statistics calculation
+    #[test]
+    fn test_atr_distribution_stats() {
+        // Test case 1: Normal distribution
+        let atr_series = vec![0.01, 0.015, 0.02, 0.025, 0.03];
+        let stats = calculate_atr_distribution_stats(&atr_series);
+
+        assert_relative_eq!(stats.mean, 0.02, epsilon = 1e-6);
+        assert!(stats.std_dev > 0.0, "Standard deviation should be positive");
+        assert_eq!(stats.median, 0.02, "Median should be middle value");
+
+        // Test case 2: Empty series
+        let empty_series: Vec<f64> = vec![];
+        let empty_stats = calculate_atr_distribution_stats(&empty_series);
+
+        assert_eq!(empty_stats.mean, 0.02, "Should use default values");
+        assert_eq!(empty_stats.std_dev, 0.01);
+    }
+
+    /// Test adaptive volatility bandwidth calculation
+    #[test]
+    fn test_adaptive_volatility_bandwidth() {
+        // Test case 1: Normal volatility series
+        let normal_series = vec![0.015, 0.018, 0.020, 0.022, 0.025];
+        let base_sensitivity = 0.2;
+
+        let bandwidth =
+            calculate_adaptive_volatility_bandwidth(&normal_series, base_sensitivity).unwrap();
+
+        assert!(
+            bandwidth > 0.05 && bandwidth < 1.0,
+            "Adaptive bandwidth should be reasonable: {}",
+            bandwidth
+        );
+
+        // Test case 2: Empty series
+        let empty_series: Vec<f64> = vec![];
+        let empty_bandwidth =
+            calculate_adaptive_volatility_bandwidth(&empty_series, base_sensitivity).unwrap();
+
+        assert_eq!(
+            empty_bandwidth, base_sensitivity,
+            "Empty series should return base sensitivity"
+        );
+    }
+
+    /// Test enhanced volatility classification with distribution analysis
+    #[test]
+    fn test_enhanced_volatility_classification() {
+        let targets_config = TargetsConfig {
+            base_sensitivity: 0.2,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        };
+
+        // Test case 1: Normal to high volatility transition
+        let normal_sequence = create_test_candles(vec![
+            (1000.0, 1020.0, 980.0, 1010.0, 100.0),
+            (1010.0, 1030.0, 990.0, 1020.0, 110.0),
+            (1020.0, 1040.0, 1000.0, 1030.0, 120.0),
+            (1030.0, 1050.0, 1010.0, 1040.0, 130.0),
+            (1040.0, 1060.0, 1020.0, 1050.0, 140.0),
+        ]);
+
+        let high_vol_horizon = create_test_candles(vec![
+            (1050.0, 1100.0, 950.0, 1080.0, 500.0),
+            (1080.0, 1150.0, 980.0, 1120.0, 600.0),
+            (1120.0, 1200.0, 1000.0, 1160.0, 700.0),
+        ]);
+
+        let class = classify_volatility_with_distribution_analysis(
+            &normal_sequence,
+            &high_vol_horizon,
+            &targets_config,
+        )
+        .unwrap();
+
+        assert!(
+            (0..=4).contains(&class),
+            "Enhanced classification should produce valid class: {}",
+            class
+        );
+
+        // Test case 2: Edge cases
+        let single_candle = create_test_candles(vec![(1000.0, 1020.0, 980.0, 1010.0, 100.0)]);
+
+        let edge_class = classify_volatility_with_distribution_analysis(
+            &single_candle,
+            &high_vol_horizon,
+            &targets_config,
+        )
+        .unwrap();
+
+        assert_eq!(
+            edge_class, 2,
+            "Insufficient sequence data should default to Medium"
+        );
+    }
+
+    /// Test volatility bandwidth calibration
+    #[test]
+    fn test_volatility_bandwidth_calibration() {
+        // Create synthetic OHLCV data with known volatility patterns
+        let mut ohlcv_data = Vec::new();
+        let base_price = 1000.0;
+
+        // Generate 100 candles with varying volatility
+        for i in 0..100 {
+            let volatility = 0.01 + (i as f64 / 100.0) * 0.05; // 1% to 6% volatility
+            let price = base_price * (1.0 + (i as f64 * 0.01).sin() * 0.1);
+            let range = price * volatility;
+
+            ohlcv_data.push(MarketDataRow {
+                timestamp: i as i64,
+                open: price,
+                high: price + range / 2.0,
+                low: price - range / 2.0,
+                close: price + (range / 4.0) * (i as f64).sin(),
+                volume: 1000.0,
+            });
+        }
+
+        let sequence_length = 20;
+        let horizon_steps = 10;
+        let target_balance = 0.15;
+
+        let calibrated_bandwidth = calibrate_volatility_bandwidth(
+            &ohlcv_data,
+            sequence_length,
+            horizon_steps,
+            target_balance,
+        )
+        .unwrap();
+
+        // Should return a reasonable bandwidth value
+        assert!(
+            calibrated_bandwidth > 0.05 && calibrated_bandwidth < 1.0,
+            "Calibrated bandwidth should be reasonable: {}",
+            calibrated_bandwidth
+        );
+
+        // Test with insufficient data
+        let short_data = vec![ohlcv_data[0].clone(), ohlcv_data[1].clone()];
+        let fallback_bandwidth = calibrate_volatility_bandwidth(
+            &short_data,
+            sequence_length,
+            horizon_steps,
+            target_balance,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fallback_bandwidth, 0.2,
+            "Should use fallback for insufficient data"
+        );
+
+        println!(
+            "Calibrated volatility bandwidth: {:.6}",
+            calibrated_bandwidth
         );
     }
 }

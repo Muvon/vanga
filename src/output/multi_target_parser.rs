@@ -3,24 +3,56 @@
 //! This module handles parsing raw LSTM outputs into structured prediction components
 //! based on the configured output heads (price levels, direction, volatility).
 
-use crate::config::model::{OutputHeadsConfig, OutputSegments, NUM_CLASSES};
+use crate::config::model::NUM_CLASSES;
 use crate::utils::error::{Result, VangaError};
 use ndarray::{s, ArrayView1};
 
+/// Output segments for multi-target parsing - always 3 targets with NUM_CLASSES each
+#[derive(Debug, Clone)]
+pub struct OutputSegments {
+    /// Price levels segment: (start_idx, end_idx)
+    pub price_levels: Option<(usize, usize)>,
+    /// Direction segment: (start_idx, end_idx)
+    pub direction: Option<(usize, usize)>,
+    /// Volatility segment: (start_idx, end_idx)
+    pub volatility: Option<(usize, usize)>,
+}
+
+impl Default for OutputSegments {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OutputSegments {
+    /// Create output segments for always-enabled 3 targets with NUM_CLASSES=5 each
+    pub fn new() -> Self {
+        // All targets are always enabled with NUM_CLASSES=5 each
+        // Total output size: 3 targets * 5 classes = 15
+        Self {
+            price_levels: Some((0, NUM_CLASSES)),                 // 0-4
+            direction: Some((NUM_CLASSES, NUM_CLASSES * 2)),      // 5-9
+            volatility: Some((NUM_CLASSES * 2, NUM_CLASSES * 3)), // 10-14
+        }
+    }
+}
+
 /// Multi-target output parser
 pub struct MultiTargetParser {
-    output_heads: OutputHeadsConfig,
     pub segments: OutputSegments, // Made public for debugging
+}
+
+impl Default for MultiTargetParser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MultiTargetParser {
     /// Create new parser with output configuration
-    pub fn new(output_heads: OutputHeadsConfig) -> Self {
-        let segments = output_heads.get_output_segments();
-        Self {
-            output_heads,
-            segments,
-        }
+    pub fn new() -> Self {
+        let segments = OutputSegments::new(); // Always use 3 targets with NUM_CLASSES=5 each
+        Self { segments }
     }
 
     /// Parse raw LSTM output into structured components
@@ -83,13 +115,6 @@ impl MultiTargetParser {
             )));
         }
 
-        // Validate that direction head is actually enabled
-        if !self.output_heads.direction.enabled {
-            return Err(VangaError::PredictionError(
-                "Direction head is disabled but direction data provided".to_string(),
-            ));
-        }
-
         // Apply softmax to convert logits to probabilities
         let max_logit = logits.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
         let exp_logits: Vec<f64> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
@@ -114,13 +139,6 @@ impl MultiTargetParser {
 
     /// Parse volatility values (5-class system)
     fn parse_volatility(&self, values: &ArrayView1<f64>) -> Result<VolatilityOutput> {
-        // Validate that volatility head is enabled and class count matches
-        if !self.output_heads.volatility.enabled {
-            return Err(VangaError::PredictionError(
-                "Volatility head is disabled but volatility data provided".to_string(),
-            ));
-        }
-
         let expected_total_classes = NUM_CLASSES;
 
         if values.len() != expected_total_classes {
@@ -159,13 +177,6 @@ impl MultiTargetParser {
 
     /// Parse price level logits with validation (5-class system)
     fn parse_price_levels(&self, logits: &ArrayView1<f64>) -> Result<Vec<f64>> {
-        // Validate that price levels head is enabled and class count matches
-        if !self.output_heads.price_levels.enabled {
-            return Err(VangaError::PredictionError(
-                "Price levels head is disabled but price level data provided".to_string(),
-            ));
-        }
-
         let expected_classes = NUM_CLASSES; // Unified 5-class system
         if logits.len() != expected_classes {
             return Err(VangaError::PredictionError(format!(

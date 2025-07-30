@@ -25,7 +25,6 @@
 //! ```text
 //! SingleLSTMModel {
 //!     lstm: LSTMModel,
-//!     output_heads: 3  // Multiple output heads from one LSTM
 //! }
 //!
 //! Target Processing (via TargetConverter):

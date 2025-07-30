@@ -309,20 +309,6 @@ mod candle_integration_tests {
         ModelConfig {
             hidden_units: crate::config::model::HiddenUnitsConfig::Fixed(vec![64]),
             sequence_length: crate::config::model::SequenceLengthConfig::Fixed(30),
-            output_heads: crate::config::model::OutputHeadsConfig {
-                price_levels: crate::config::model::PriceLevelHead {
-                    enabled: true,
-                    range_percent: 0.05,
-                },
-                direction: crate::config::model::DirectionHead {
-                    enabled: true,
-                    threshold: 0.001,
-                },
-                volatility: crate::config::model::VolatilityHead {
-                    enabled: true,
-                    horizons: vec![1, 4, 24],
-                },
-            },
         }
     }
 

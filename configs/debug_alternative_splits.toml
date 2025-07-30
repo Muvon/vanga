@@ -51,18 +51,6 @@ recurrent = false
 enabled = false
 
 # ============================================================================
-# OUTPUT HEADS - Same as debug config
-# ============================================================================
-[model.output_heads]
-
-[model.output_heads.price_levels]
-enabled = true
-bandwidth_size = 1.0  # Breakout sensitivity multiplier
-range_percent = 0.03
-
-target_strategy = { type = "current" }
-
-# ============================================================================
 # FEATURES - Same minimal set
 # ============================================================================
 [features.technical_indicators]

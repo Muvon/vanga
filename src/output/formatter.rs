@@ -3,16 +3,18 @@
 //! This module bridges the gap between raw LSTM Array2<f64> outputs and the structured
 //! JSON format specified in ARCHITECTURE.md, reusing existing target generation logic.
 
-use crate::config::model::{OutputHeadsConfig, NUM_CLASSES};
+use crate::config::model::NUM_CLASSES;
 use crate::config::prediction::{OutputConfig, OutputFormat};
 use crate::data::structures::MarketDataRow;
 use crate::output::multi_target_parser::{DirectionOutput, MultiTargetParser, VolatilityOutput};
 use crate::output::structures::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
 };
-use crate::targets::{
-    PreparedTargets, SequenceAnalyzer, SequenceReconstructionConfig, SequenceReconstructor,
-};
+use crate::targets::PreparedTargets;
+// Import reconstruction methods from target modules
+use crate::targets::direction::reconstruct_direction;
+use crate::targets::price_levels::reconstruct_price_levels;
+use crate::targets::volatility::reconstruct_volatility;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use std::collections::HashMap;
@@ -38,92 +40,13 @@ impl OutputFormatter {
     pub fn new(config: OutputConfig) -> Self {
         Self {
             config,
-            parser: None,
+            parser: Some(MultiTargetParser::new()), // Always initialize parser - all targets enabled with NUM_CLASSES=5
             sequence_ohlcv: None,
             bandwidth_size: None,
             percentiles: None,
             feature_count: None,
             sequence_length: None,
         }
-    }
-
-    /// Set output heads configuration for proper 5-class parsing with validation
-    pub fn with_output_heads(mut self, output_heads: OutputHeadsConfig) -> Self {
-        // Extract bandwidth_size and percentiles from price levels config
-        self.bandwidth_size = output_heads.price_levels.bandwidth_size;
-        self.percentiles = output_heads.price_levels.percentiles;
-
-        // Validate training-prediction parameter consistency
-        self.validate_training_prediction_consistency(&output_heads);
-
-        self.parser = Some(MultiTargetParser::new(output_heads));
-        self
-    }
-
-    /// Validate that prediction parameters match training configuration
-    fn validate_training_prediction_consistency(&self, output_heads: &OutputHeadsConfig) {
-        // Validate price level parameters
-        if let Some(percentiles) = output_heads.price_levels.percentiles {
-            log::info!(
-                "✅ Using training percentiles: [{:.1}%, {:.1}%] for price level predictions",
-                percentiles[0] * 100.0,
-                percentiles[1] * 100.0
-            );
-        } else {
-            log::warn!(
-                "⚠️  No percentiles found in training config, using fallback defaults [10%, 90%]. This may cause prediction inconsistency."
-            );
-        }
-
-        if let Some(bandwidth_size) = output_heads.price_levels.bandwidth_size {
-            log::info!(
-                "✅ Using training bandwidth_size: {:.2} for price level predictions",
-                bandwidth_size
-            );
-        } else {
-            log::warn!(
-                "⚠️  No bandwidth_size found in training config, using fallback default 1.0. This may cause prediction inconsistency."
-            );
-        }
-
-        // Validate direction parameters
-        if let Some(slope_sensitivity) = output_heads.direction.slope_sensitivity {
-            if !(0.01..=0.1).contains(&slope_sensitivity) {
-                log::warn!(
-                    "⚠️  Direction slope_sensitivity {:.3} is outside recommended crypto range [0.01, 0.1]. This may indicate training-prediction mismatch.",
-                    slope_sensitivity
-                );
-            } else {
-                log::info!(
-                    "✅ Using training slope_sensitivity: {:.3} for direction predictions",
-                    slope_sensitivity
-                );
-            }
-        }
-
-        if let Some(extreme_multiplier) = output_heads.direction.extreme_multiplier {
-            if !(2.0..=4.0).contains(&extreme_multiplier) {
-                log::warn!(
-                    "⚠️  Direction extreme_multiplier {:.1} is outside recommended range [2.0, 4.0]. This may indicate training-prediction mismatch.",
-                    extreme_multiplier
-                );
-            } else {
-                log::info!(
-                    "✅ Using training extreme_multiplier: {:.1} for direction predictions",
-                    extreme_multiplier
-                );
-            }
-        }
-
-        // Validate volatility parameters
-        if let Some(volatility_bandwidth) = output_heads.volatility.bandwidth_size {
-            log::info!(
-                "✅ Using training volatility bandwidth_size: {:.2}",
-                volatility_bandwidth
-            );
-        }
-
-        log::info!("🔍 Training-prediction parameter validation completed");
     }
 
     /// Set sequence data for sequence-aware price level calculations
@@ -137,6 +60,14 @@ impl OutputFormatter {
     pub fn with_metadata(mut self, feature_count: usize, sequence_length: usize) -> Self {
         self.feature_count = Some(feature_count);
         self.sequence_length = Some(sequence_length);
+        self
+    }
+
+    /// Set training configuration for enhanced reconstruction
+    pub fn with_training_config(mut self, config: crate::config::model::TargetsConfig) -> Self {
+        // Store training config parameters for reconstruction methods
+        self.bandwidth_size = Some(config.base_sensitivity);
+        self.percentiles = Some([0.1, 0.9]); // Default percentiles used in training
         self
     }
 
@@ -241,7 +172,8 @@ impl OutputFormatter {
         // Check if we have the multi-target parser configured
         let parser = self.parser.as_ref().ok_or_else(|| {
             VangaError::PredictionError(
-                "MultiTargetParser not configured. Use with_output_heads() to set up 5-class parsing.".to_string()
+                "MultiTargetParser not configured. This should not happen with unified targets."
+                    .to_string(),
             )
         })?;
 
@@ -525,13 +457,13 @@ impl OutputFormatter {
         Ok(results)
     }
 
-    /// Create price level prediction from 5-class probabilities using percentile-based ranges
+    /// Create price level prediction from 5-class probabilities using enhanced reconstruction
     pub fn create_price_level_prediction(
         &self,
         probabilities: &[f64],
         current_price: f64,
-        bandwidth_size: Option<f64>,
-        percentiles: Option<[f64; 2]>,
+        _bandwidth_size: Option<f64>, // Kept for API compatibility but unused (we use stored config)
+        _percentiles: Option<[f64; 2]>, // Kept for API compatibility but unused (we use stored config)
     ) -> Result<PriceLevelPrediction> {
         if probabilities.len() != NUM_CLASSES {
             return Err(VangaError::PredictionError(format!(
@@ -541,136 +473,66 @@ impl OutputFormatter {
             )));
         }
 
-        let mut bins = HashMap::new();
-
-        // Calculate VWAP-based ranges using OHLCV data (matches training approach)
-        let (bin_ranges, bin_names) = if let Some(ohlcv_data) = &self.sequence_ohlcv {
-            // Use percentile-based calculation (matches new training approach)
-            self.calculate_vwap_sequence_aware_ranges(
-                ohlcv_data,
-                current_price,
-                bandwidth_size.unwrap_or(1.0),
-                percentiles.unwrap_or([0.1, 0.9]), // Default percentiles
-            )
-        } else {
-            return Err(VangaError::PredictionError(
+        // Get sequence OHLCV data (required for reconstruction)
+        let sequence_ohlcv = self.sequence_ohlcv.as_ref().ok_or_else(|| {
+            VangaError::PredictionError(
                 "OHLCV sequence data not available. Use with_sequence_ohlcv() to provide it."
                     .to_string(),
-            ));
+            )
+        })?;
+
+        // Use enhanced reconstruction from price_levels module
+        let targets_config = if self.bandwidth_size.is_some() {
+            // Create TargetsConfig from stored parameters
+            Some(crate::config::model::TargetsConfig {
+                base_sensitivity: self.bandwidth_size.unwrap_or(1.0),
+                extreme_multiplier: 2.0, // Default value
+                ..Default::default()
+            })
+        } else {
+            None
         };
 
-        for (i, (bin_name, range_pct)) in bin_names.iter().zip(bin_ranges.iter()).enumerate() {
-            let price_min = current_price * (1.0 + range_pct[0] / 100.0);
-            let price_max = current_price * (1.0 + range_pct[1] / 100.0);
+        let reconstruction = reconstruct_price_levels(
+            probabilities,
+            sequence_ohlcv,
+            current_price,
+            targets_config.as_ref(),
+        )?;
 
+        // Create bins using reconstruction results
+        let mut bins = HashMap::new();
+        let bin_names = [
+            "strong_down",
+            "moderate_down",
+            "neutral",
+            "moderate_up",
+            "strong_up",
+        ];
+
+        for (i, bin_name) in bin_names.iter().enumerate() {
             bins.insert(
                 bin_name.to_string(),
                 PriceBin {
-                    range: *range_pct,
-                    price: [price_min, price_max],
-                    probability: probabilities[i],
+                    range: reconstruction.percentage_ranges[i],
+                    price: reconstruction.price_ranges[i],
+                    probability: reconstruction.probabilities[i],
                 },
             );
         }
 
-        // Find most likely range based on highest probability
-        let (most_likely_idx, max_prob) = probabilities
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap();
-
-        let most_likely_range = bin_ranges[most_likely_idx];
+        // Use reconstruction results for most likely range
+        let most_likely_range = reconstruction.percentage_ranges[reconstruction.most_likely_class];
 
         Ok(PriceLevelPrediction {
             bins,
             most_likely_range,
-            confidence: *max_prob,
+            confidence: reconstruction.confidence,
         })
     }
 
-    /// Calculate VWAP-based percentile ranges using centralized sequence reconstruction logic
-    fn calculate_vwap_sequence_aware_ranges(
-        &self,
-        sequence_ohlcv: &[MarketDataRow],
-        current_price: f64,
-        bandwidth_size: f64,
-        percentiles: [f64; 2],
-    ) -> (Vec<[f64; 2]>, Vec<&'static str>) {
-        // Use centralized sequence reconstruction logic
-        let config = SequenceReconstructionConfig {
-            percentiles,
-            bandwidth_size,
-        };
-        let analyzer = SequenceAnalyzer::new(config);
-
-        // Handle insufficient data case
-        if sequence_ohlcv.len() < 2 {
-            log::warn!("Insufficient OHLCV data for VWAP range calculation, using defaults");
-            return (
-                vec![
-                    [-5.0, -2.0], // Strong Down
-                    [-2.0, -1.0], // Moderate Down
-                    [-1.0, 1.0],  // Neutral
-                    [1.0, 2.0],   // Moderate Up
-                    [2.0, 5.0],   // Strong Up
-                ],
-                vec![
-                    "strong_down",
-                    "moderate_down",
-                    "neutral",
-                    "moderate_up",
-                    "strong_up",
-                ],
-            );
-        }
-
-        // Calculate ranges using centralized logic
-        match analyzer.sequences_to_ranges(sequence_ohlcv, current_price) {
-            Ok(ranges) => {
-                let names = vec![
-                    "strong_down",
-                    "moderate_down",
-                    "neutral",
-                    "moderate_up",
-                    "strong_up",
-                ];
-
-                // Log the centralized calculation results
-                log::debug!(
-                    "✅ Centralized Sequence Ranges: percentiles=[{:.1}%, {:.1}%], current={:.2}, bandwidth_size={:.3}",
-                    percentiles[0] * 100.0,
-                    percentiles[1] * 100.0,
-                    current_price,
-                    bandwidth_size
-                );
-
-                (ranges, names)
-            }
-            Err(e) => {
-                log::error!("Failed to calculate sequence ranges: {}", e);
-                // Fallback to default ranges
-                (
-                    vec![
-                        [-5.0, -2.0], // Strong Down
-                        [-2.0, -1.0], // Moderate Down
-                        [-1.0, 1.0],  // Neutral
-                        [1.0, 2.0],   // Moderate Up
-                        [2.0, 5.0],   // Strong Up
-                    ],
-                    vec![
-                        "strong_down",
-                        "moderate_down",
-                        "neutral",
-                        "moderate_up",
-                        "strong_up",
-                    ],
-                )
-            }
-        }
-    }
-
-    /// Create direction prediction from DirectionOutput with 5-class system and adaptive metrics
+    /// Create direction prediction from DirectionOutput with enhanced reconstruction
+    /// Create direction prediction from DirectionOutput with enhanced reconstruction
     pub fn create_direction_prediction(
         &self,
         input: &DirectionOutput,
@@ -678,7 +540,10 @@ impl OutputFormatter {
         sequence_length: Option<u32>,
         sequence_bandwidth_percent: Option<f64>,
     ) -> Result<DirectionPrediction> {
-        // Create prediction with 5-class probabilities
+        // Get sequence OHLCV data for reconstruction
+        let sequence_ohlcv = self.sequence_ohlcv.as_ref();
+
+        // Create base prediction with 5-class probabilities
         let mut prediction = DirectionPrediction::from_probabilities(
             input.dump_probability,
             input.down_probability,
@@ -686,6 +551,43 @@ impl OutputFormatter {
             input.up_probability,
             input.pump_probability,
         );
+
+        // Enhance with reconstruction if sequence data is available
+        if let Some(ohlcv_data) = sequence_ohlcv {
+            let probabilities = vec![
+                input.dump_probability,
+                input.down_probability,
+                input.sideways_probability,
+                input.up_probability,
+                input.pump_probability,
+            ];
+
+            // Use enhanced reconstruction from direction module
+            match reconstruct_direction(&probabilities, ohlcv_data, None) {
+                Ok(reconstruction) => {
+                    // Update existing fields with reconstruction results
+                    prediction.breakout_probability = reconstruction.breakout_probability;
+
+                    // Use reconstruction data to enhance existing calculations
+                    let enhanced_upside = reconstruction.expected_trend_acceleration.max(0.0);
+                    let enhanced_downside = (-reconstruction.expected_trend_acceleration).max(0.0);
+
+                    if enhanced_downside > 0.0 {
+                        prediction.risk_reward_ratio = enhanced_upside / enhanced_downside;
+                    }
+
+                    log::debug!(
+                        "🎯 Direction reconstruction: momentum_change={:.4}, trend_accel={:.2}%, breakout_prob={:.3}",
+                        reconstruction.expected_momentum_change,
+                        reconstruction.expected_trend_acceleration,
+                        reconstruction.breakout_probability
+                    );
+                }
+                Err(e) => {
+                    log::warn!("Direction reconstruction failed: {}, using fallback", e);
+                }
+            }
+        }
 
         // Calculate adaptive metrics if we have the required information
         if let (Some(horizon), Some(seq_len), Some(bandwidth)) = (
@@ -745,7 +647,7 @@ impl OutputFormatter {
         ))
     }
 
-    /// Create volatility prediction from VolatilityOutput with 5-class system and adaptive metrics
+    /// Create volatility prediction from VolatilityOutput with enhanced reconstruction
     pub fn create_volatility_prediction(
         &self,
         volatility_output: &VolatilityOutput,
@@ -753,7 +655,10 @@ impl OutputFormatter {
         sequence_bandwidth_percent: Option<f64>,
         current_volatility_percentile: Option<f64>,
     ) -> Result<VolatilityPrediction> {
-        // Create prediction with 5-class probabilities
+        // Get sequence OHLCV data for reconstruction
+        let sequence_ohlcv = self.sequence_ohlcv.as_ref();
+
+        // Create base prediction with 5-class probabilities
         let mut prediction = VolatilityPrediction::from_probabilities(
             volatility_output.very_low_probability,
             volatility_output.low_probability,
@@ -761,6 +666,44 @@ impl OutputFormatter {
             volatility_output.high_probability,
             volatility_output.very_high_probability,
         );
+
+        // Enhance with reconstruction if sequence data is available
+        if let Some(ohlcv_data) = sequence_ohlcv {
+            let probabilities = vec![
+                volatility_output.very_low_probability,
+                volatility_output.low_probability,
+                volatility_output.medium_probability,
+                volatility_output.high_probability,
+                volatility_output.very_high_probability,
+            ];
+
+            // Use enhanced reconstruction from volatility module
+            match reconstruct_volatility(&probabilities, ohlcv_data, None) {
+                Ok(reconstruction) => {
+                    // Update existing fields with reconstruction results
+                    // Use ATR ratio to enhance expected range calculation
+                    if let Some(bandwidth) = sequence_bandwidth_percent {
+                        prediction.expected_range_percent =
+                            bandwidth * reconstruction.expected_atr_ratio;
+                    }
+
+                    // Adjust position size multiplier based on volatility change
+                    let vol_change_factor =
+                        1.0 + (reconstruction.expected_volatility_change / 100.0).abs() * 0.1;
+                    prediction.position_size_multiplier = (1.0 / vol_change_factor).clamp(0.5, 2.0);
+
+                    log::debug!(
+                        "🎯 Volatility reconstruction: atr_ratio={:.3}, vol_change={:.2}%, extreme_prob={:.3}",
+                        reconstruction.expected_atr_ratio,
+                        reconstruction.expected_volatility_change,
+                        reconstruction.extreme_volatility_probability
+                    );
+                }
+                Err(e) => {
+                    log::warn!("Volatility reconstruction failed: {}, using fallback", e);
+                }
+            }
+        }
 
         // Calculate adaptive metrics if we have the required information
         if let (Some(horizon), Some(bandwidth), Some(percentile)) = (
