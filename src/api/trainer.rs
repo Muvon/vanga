@@ -140,6 +140,16 @@ impl ModelTrainer {
         let mut model = None;
 
         // Get base learning rate from config
+        log::info!("🔧 Walk-forward training configuration:");
+        log::info!("   📊 Test split: {:.1}% ({} samples reserved)", self.config.training.test_split * 100.0, (windows.len() as f64 * self.config.training.test_split) as usize);
+        log::info!("   📊 Validation split: {:.1}%", self.config.training.validation_split * 100.0);
+        log::info!("   🔄 Window decay: {:.3}", self.config.training.window_decay);
+
+        log::info!("🔧 Walk-forward training configuration:");
+        log::info!("   📊 Test split: {:.1}% ({} samples reserved)", self.config.training.test_split * 100.0, (windows.len() as f64 * self.config.training.test_split) as usize);
+        log::info!("   📊 Validation split: {:.1}%", self.config.training.validation_split * 100.0);
+        log::info!("   🔄 Window decay: {:.3}", self.config.training.window_decay);
+
         let base_lr = match &self.config.training.learning_rate {
             crate::config::training::LearningRateConfig::Fixed(lr) => *lr,
             crate::config::training::LearningRateConfig::Adaptive { initial_lr, .. } => *initial_lr,
@@ -214,6 +224,102 @@ impl ModelTrainer {
             );
         } else {
             log::warn!("⚠️  No training windows available - normalization stats not saved");
+        }
+
+        // CRITICAL FIX: Perform final test set evaluation on reserved test data
+        if let Some(final_window) = windows.last() {
+            if final_window.test_samples > 0 {
+                log::info!(
+                    "🧪 FINAL TEST EVALUATION: Evaluating model on reserved test set ({} samples)",
+                    final_window.test_samples
+                );
+                log::info!("   📊 Test data: Never seen during training/validation - provides unbiased performance assessment");
+
+                // Process test targets using the same method as training
+                match self.process_window_targets(final_window, "test_evaluation") {
+                    Ok((_, test_targets_array)) => {
+                        // Make predictions on test data using the trained multi-target model
+                        match final_model.predict(&final_window.test_data.sequences).await {
+                            Ok(test_predictions) => {
+                                log::info!("✅ Test predictions generated successfully");
+
+                                // Calculate comprehensive test metrics for each target
+                                let target_names = final_model.get_target_names();
+                                let num_targets = final_model.get_num_targets();
+
+                                log::info!(
+                                    "📊 FINAL TEST METRICS (Unbiased Performance Assessment):"
+                                );
+                                log::info!(
+                                    "   🎯 Evaluating {} targets on {} test samples",
+                                    num_targets,
+                                    final_window.test_samples
+                                );
+
+                                for (target_idx, target_name) in target_names.iter().enumerate() {
+                                    if target_idx < test_predictions.shape()[1]
+                                        && target_idx < test_targets_array.shape()[1]
+                                    {
+                                        // Extract predictions and targets for this specific target
+                                        let target_predictions =
+                                            test_predictions.column(target_idx);
+                                        let target_actual = test_targets_array.column(target_idx);
+
+                                        // Convert to integer predictions (argmax for classification)
+                                        let pred_classes: Vec<i32> = target_predictions
+                                            .iter()
+                                            .map(|&pred| pred.round() as i32)
+                                            .collect();
+                                        let actual_classes: Vec<i32> = target_actual
+                                            .iter()
+                                            .map(|&actual| actual.round() as i32)
+                                            .collect();
+
+                                        // Calculate classification metrics using existing infrastructure
+                                        match crate::utils::metrics::calculate_classification_metrics(&pred_classes, &actual_classes) {
+                                            Ok(metrics) => {
+                                                log::info!("   🎯 Target '{}' Test Results:", target_name);
+                                                log::info!("      • Accuracy: {:.3} ({:.1}%)", metrics.accuracy, metrics.accuracy * 100.0);
+                                                log::info!("      • Macro F1: {:.3}", metrics.macro_f1);
+                                                log::info!("      • Weighted F1: {:.3}", metrics.weighted_f1);
+                                                log::info!("      • Samples: {} test predictions", pred_classes.len());
+
+                                                // Log per-class metrics if available
+                                                if !metrics.precision.is_empty() {
+                                                    log::debug!("      • Per-class metrics available for {} classes", metrics.precision.len());
+                                                }
+                                            }
+                                            Err(e) => {
+                                                log::warn!("⚠️  Failed to calculate test metrics for target '{}': {}", target_name, e);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                log::info!("✅ FINAL TEST EVALUATION COMPLETED: Unbiased performance metrics calculated");
+                                log::info!("   📈 Test results provide true out-of-sample performance assessment");
+                                log::info!("   🎯 Use test metrics for final model selection and performance reporting");
+                                log::info!("   📊 Test data was reserved from training - these metrics are unbiased");
+                            }
+                            Err(e) => {
+                                log::warn!("⚠️  Failed to generate test predictions: {}", e);
+                                log::warn!("   🔧 Test evaluation skipped - check model training completion");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("⚠️  Failed to process test targets for evaluation: {}", e);
+                        log::warn!("   🔧 Test evaluation skipped - check target processing");
+                    }
+                }
+            } else {
+                log::info!(
+                    "📊 No test data reserved (test_split=0.0) - skipping final test evaluation"
+                );
+                log::info!("   💡 Set test_split > 0.0 in config to enable final test evaluation");
+            }
+        } else {
+            log::warn!("⚠️  No final window available for test evaluation");
         }
 
         // Save the trained multi-target model
