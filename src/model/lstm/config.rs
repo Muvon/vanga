@@ -3,8 +3,8 @@
 //! This module contains configuration structs, enums, and validation
 //! for LSTM model setup and training parameters.
 
-use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
-use crate::model::dropout_consistency::DropoutConsistencyConfig;
+use crate::config::model::{AttentionConfig, DropoutConfig};
+use crate::model::attention::MultiHeadAttention;
 use crate::model::dual_loss_system::DualLossSystem;
 use crate::model::loss::CryptoLossFunction;
 use crate::utils::error::{Result, VangaError};
@@ -118,9 +118,9 @@ pub struct LSTMModel {
     pub lstm_layers: Option<Vec<LSTM>>, // Forward layers for unidirectional or bidirectional
     pub backward_lstm_layers: Option<Vec<LSTM>>, // Backward layers for bidirectional LSTM
     pub output_layer: Option<Linear>,
-    pub attention_layers: Option<MultiHeadAttention>, // Public for testing
-    pub attention_config: Option<AttentionModuleConfig>, // Public for testing
-    pub use_attention: bool,                          // Public for testing
+    pub attention_module: Option<MultiHeadAttention>,
+    pub attention_config: Option<AttentionConfig>,
+    pub use_attention: bool, // Public for testing
     pub device: Device,
     pub varmap: VarMap,
     pub training_config: TrainingConfig,
@@ -138,9 +138,7 @@ pub struct LSTMModel {
     /// Architecture configuration for bidirectional detection
     pub architecture: Option<crate::config::model::LSTMArchitecture>,
     /// Dropout configuration for regularization
-    pub dropout_config: Option<crate::config::model::DropoutConfig>,
-    /// Dropout consistency configuration for training/validation behavior
-    pub dropout_consistency_config: DropoutConsistencyConfig,
+    pub dropout_config: Option<DropoutConfig>,
     /// Dual loss system for regime-aware training and regime-agnostic validation
     pub dual_loss_system: Option<DualLossSystem>,
     /// Stored validation data for consistent metrics calculation

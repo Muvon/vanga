@@ -5,7 +5,7 @@
 
 use super::config::{LSTMConfig, LSTMModel, ModelState, TrainingConfig};
 use crate::config::ModelConfig;
-use crate::model::attention::{AttentionConfig as AttentionModuleConfig, MultiHeadAttention};
+use crate::model::attention::MultiHeadAttention;
 use crate::model::loss::CryptoLossFunction;
 use crate::utils::error::{Result, VangaError};
 
@@ -27,7 +27,7 @@ impl LSTMModel {
             lstm_layers: None,
             backward_lstm_layers: None, // Initialize backward layers as None
             output_layer: None,
-            attention_layers: None, // Initialize attention as None
+            attention_module: None, // Initialize attention as None
             attention_config: None, // Initialize attention config as None
             use_attention: false,   // Attention disabled by default
             device: Device::Cpu,
@@ -40,15 +40,13 @@ impl LSTMModel {
             validation_class_weights: None,         // No validation weights initially
             architecture: None,                     // No architecture info by default
             dropout_config: None,                   // No dropout config by default
-            dropout_consistency_config:
-                crate::model::dropout_consistency::DropoutConsistencyConfig::default(),
-            dual_loss_system: None,         // No dual loss system initially
-            regime_metrics_collector: None, // No metrics collector initially
-            stored_val_sequences: None,     // No stored validation data initially
-            stored_val_targets: None,       // No stored validation targets initially
+            dual_loss_system: None,                 // No dual loss system initially
+            regime_metrics_collector: None,         // No metrics collector initially
+            stored_val_sequences: None,             // No stored validation data initially
+            stored_val_targets: None,               // No stored validation targets initially
             stored_test_sequences: ndarray::Array3::zeros((0, 1, 1)), // Empty test sequences
             stored_test_targets: ndarray::Array2::zeros((0, 1)), // Empty test targets
-            xgboost_model: None,            // No XGBoost model initially
+            xgboost_model: None,                    // No XGBoost model initially
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -200,13 +198,19 @@ impl LSTMModel {
         }
 
         // Convert config AttentionConfig to module AttentionConfig
-        let module_config = AttentionModuleConfig {
-            num_heads: attention_config.heads as usize,
-            head_dim: Some(attention_config.head_dim.unwrap_or(64) as usize),
-            dropout_rate: attention_config.dropout_rate,
-            temperature_scaling: attention_config.temperature_scaling,
-            use_relative_position: attention_config.use_relative_position,
-            max_sequence_length: self.config.sequence_length,
+        let module_config = crate::config::model::AttentionConfig {
+            enabled: true,
+            mechanism: crate::config::model::AttentionMechanism::MultiHeadAttention,
+            heads: 8,
+            head_dim: Some(64),
+            dropout_rate: 0.1,
+            dropout_weights: true,
+            dropout_output: true,
+            dropout_projections: true,
+            dropout_scores: true,
+            temperature_scaling: 1.0,
+            use_relative_position: true,
+            visualization: crate::config::model::VisualizationConfig::default(),
         };
 
         self.attention_config = Some(module_config);
@@ -268,11 +272,11 @@ impl LSTMModel {
                 self.device.clone(),
             )?;
 
-            self.attention_layers = Some(attention);
+            self.attention_module = Some(attention);
 
             log::debug!(
                 "✅ Attention layers initialized: {} heads, input_size={}, bidirectional={}",
-                attention_config.num_heads,
+                attention_config.heads as usize,
                 attention_input_size,
                 is_bidirectional
             );

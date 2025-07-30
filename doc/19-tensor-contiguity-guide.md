@@ -46,7 +46,7 @@ tensor.transpose(1, 2)?.contiguous()?.reshape((batch, seq, dim))
 tensor
     .transpose(1, 2)?
     .contiguous()?  // ← Added
-    .reshape((batch_size, seq_len, self.config.num_heads * self.config.head_dim))
+    .reshape((batch_size, seq_len, self.config.heads * self.config.head_dim))
 ```
 
 #### **2. Narrow + Squeeze Pattern**
