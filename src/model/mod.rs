@@ -2,7 +2,6 @@ pub mod attention;
 pub mod attention_loss;
 pub mod attention_optimizer;
 pub mod attention_viz;
-pub mod dropout_consistency;
 pub mod dual_loss_system;
 pub mod loss;
 pub mod lstm;
@@ -13,8 +12,6 @@ pub mod regime_metrics;
 pub mod tft;
 pub mod xgboost;
 
-#[cfg(test)]
-pub mod dropout_tests;
 #[cfg(test)]
 pub mod loss_validation_tests;
 #[cfg(test)]

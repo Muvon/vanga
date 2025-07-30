@@ -1,32 +1,10 @@
 // Multi-Head Self-Attention implementation for VANGA LSTM with auto-optimization
+use crate::config::model::AttentionConfig;
 use crate::utils::error::{Result, VangaError};
 use candle_core::{Device, Tensor};
 use candle_nn::{linear, ops, Linear, Module, VarBuilder};
-use serde::{Deserialize, Serialize};
 
-/// Multi-Head Self-Attention configuration with auto-optimization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttentionConfig {
-    pub num_heads: usize,
-    pub head_dim: Option<usize>,
-    pub dropout_rate: f64,
-    pub temperature_scaling: f64,
-    pub use_relative_position: bool,
-    pub max_sequence_length: usize,
-}
-
-impl Default for AttentionConfig {
-    fn default() -> Self {
-        Self {
-            num_heads: 8,                // Auto-optimized default for crypto sequences
-            head_dim: Some(64),          // Optimal for most crypto features (50-100)
-            dropout_rate: 0.1,           // Conservative dropout for attention
-            temperature_scaling: 1.0,    // Standard temperature
-            use_relative_position: true, // Better for time series
-            max_sequence_length: 200,    // Sufficient for crypto patterns
-        }
-    }
-}
+// AttentionConfig now comes from src/config/model.rs - no local default needed
 
 /// Multi-Head Self-Attention layer optimized for cryptocurrency time series
 pub struct MultiHeadAttention {
@@ -48,16 +26,12 @@ impl MultiHeadAttention {
         vs: VarBuilder,
         device: Device,
     ) -> Result<Self> {
-        let head_dim = config
-            .head_dim
-            .unwrap_or(Self::optimize_head_dimension(input_dim, config.num_heads));
-        let _total_dim = config.num_heads * head_dim;
-
         // Auto-optimize head dimension based on input size
         let head_dim = config
             .head_dim
-            .unwrap_or_else(|| Self::optimize_head_dimension(input_dim, config.num_heads));
-        let total_dim = config.num_heads * head_dim;
+            .map(|h| h as usize)
+            .unwrap_or_else(|| Self::optimize_head_dimension(input_dim, config.heads as usize));
+        let total_dim = config.heads as usize * head_dim;
 
         // Create projection layers
         let query_projection = linear(input_dim, total_dim, vs.pp("query_proj")).map_err(|e| {
@@ -79,8 +53,10 @@ impl MultiHeadAttention {
 
         // Create relative position embeddings for time series
         let relative_position_embeddings = if config.use_relative_position {
+            // Use a reasonable default max sequence length for crypto time series
+            let max_seq_len = 200; // Standard crypto sequence length
             Some(Self::create_relative_position_embeddings(
-                config.max_sequence_length,
+                max_seq_len,
                 head_dim,
                 &device,
             )?)
@@ -90,10 +66,10 @@ impl MultiHeadAttention {
 
         log::info!(
             "✅ MultiHeadAttention initialized: {} heads, {} head_dim, input_dim={}, total_dim={}",
-            config.num_heads,
+            config.heads,
             head_dim,
             input_dim,
-            config.num_heads * head_dim
+            config.heads as usize * head_dim
         );
 
         Ok(Self {
@@ -191,17 +167,11 @@ impl MultiHeadAttention {
         let attended_output = self.reshape_from_attention(&attended_values, batch_size, seq_len)?;
         let mut output = self.output_projection.forward(&attended_output)?;
 
-        // Apply dropout to output if in training mode
-        if training && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to output (controlled by config)
+        if self.config.dropout_output && self.config.dropout_rate > 0.0 {
             output = ops::dropout(&output, self.config.dropout_rate as f32)?;
             log::debug!(
-                "🔧 Applied MultiHead attention output dropout (rate: {:.3}) to tensor shape {:?} [TRAINING MODE]",
-                self.config.dropout_rate,
-                output.shape()
-            );
-        } else if self.config.dropout_rate > 0.0 {
-            log::debug!(
-                "🔧 Skipped MultiHead attention output dropout (rate: {:.3}) for tensor shape {:?} [INFERENCE MODE]",
+                "🔧 Applied MultiHead attention output dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
                 self.config.dropout_rate,
                 output.shape()
             );
@@ -220,7 +190,12 @@ impl MultiHeadAttention {
     ) -> Result<Tensor> {
         // Reshape from [batch, seq_len, num_heads * head_dim] to [batch, num_heads, seq_len, head_dim]
         tensor
-            .reshape((batch_size, seq_len, self.config.num_heads, self.head_dim))?
+            .reshape((
+                batch_size,
+                seq_len,
+                self.config.heads as usize,
+                self.head_dim,
+            ))?
             .transpose(1, 2)?
             .contiguous()
             .map_err(|e| VangaError::ModelError(format!("Attention reshape failed: {}", e)))
@@ -236,7 +211,11 @@ impl MultiHeadAttention {
         tensor
             .transpose(1, 2)?
             .contiguous()?
-            .reshape((batch_size, seq_len, self.config.num_heads * self.head_dim))
+            .reshape((
+                batch_size,
+                seq_len,
+                self.config.heads as usize * self.head_dim,
+            ))
             .map_err(|e| VangaError::ModelError(format!("Attention reshape back failed: {}", e)))
     }
 
@@ -246,7 +225,7 @@ impl MultiHeadAttention {
         queries: &Tensor,
         keys: &Tensor,
         seq_len: usize,
-        training: bool,
+        _training: bool,
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
         let scale = (self.head_dim as f64).sqrt() as f32;
@@ -275,17 +254,11 @@ impl MultiHeadAttention {
         // Apply softmax to get attention weights
         let mut attention_weights = ops::softmax(&attention_scores, 3)?.contiguous()?;
 
-        // Apply dropout to attention weights during training (CRITICAL FIX)
-        if training && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to attention weights (controlled by config)
+        if self.config.dropout_weights && self.config.dropout_rate > 0.0 {
             attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
             log::debug!(
-                "🔧 Applied MultiHead attention weights dropout (rate: {:.3}) to tensor shape {:?} [TRAINING MODE]",
-                self.config.dropout_rate,
-                attention_weights.shape()
-            );
-        } else if self.config.dropout_rate > 0.0 {
-            log::debug!(
-                "🔧 Skipped MultiHead attention weights dropout (rate: {:.3}) for tensor shape {:?} [INFERENCE MODE]",
+                "🔧 Applied MultiHead attention weights dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
                 self.config.dropout_rate,
                 attention_weights.shape()
             );
@@ -380,7 +353,7 @@ impl AttentionFactory {
             crate::config::model::AttentionMechanism::SelfAttention => {
                 // Simplified self-attention (single head)
                 let config = AttentionConfig {
-                    num_heads: 1,
+                    heads: 1,
                     ..AttentionConfig::default()
                 };
                 let attention = MultiHeadAttention::new(input_dim, config, vs, device)?;
@@ -389,8 +362,8 @@ impl AttentionFactory {
             crate::config::model::AttentionMechanism::AdditiveAttention => {
                 // Create proper additive attention mechanism
                 let config = AttentionConfig {
-                    num_heads: 1,                  // Additive attention typically uses single head
-                    head_dim: Some(input_dim / 2), // Hidden dimension for additive scoring
+                    heads: 1,                               // Additive attention typically uses single head
+                    head_dim: Some((input_dim / 2) as u32), // Hidden dimension for additive scoring
                     temperature_scaling: 1.0,
                     use_relative_position: true,
                     ..AttentionConfig::default()
@@ -440,7 +413,7 @@ impl AdditiveAttention {
         vs: VarBuilder,
         device: Device,
     ) -> Result<Self> {
-        let hidden_dim = config.head_dim.unwrap_or(input_dim / 2);
+        let hidden_dim = config.head_dim.unwrap_or((input_dim / 2) as u32) as usize;
 
         // Initialize learnable parameters
         let w_query = linear(input_dim, hidden_dim, vs.pp("w_query"))?;
@@ -450,7 +423,7 @@ impl AdditiveAttention {
         // Create crypto-specific position bias for recency weighting
         let position_bias = if config.use_relative_position {
             Some(Self::create_crypto_position_bias(
-                config.max_sequence_length,
+                200, // Standard crypto sequence length
                 &device,
             )?)
         } else {
@@ -496,17 +469,11 @@ impl AdditiveAttention {
         // Apply softmax to get attention weights
         let mut attention_weights = ops::softmax_last_dim(&optimized_scores)?;
 
-        // Apply dropout to attention weights during training (CRITICAL FIX)
-        if training && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to attention weights (controlled by config)
+        if self.config.dropout_weights && self.config.dropout_rate > 0.0 {
             attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
             log::debug!(
-                "🔧 Applied Additive attention weights dropout (rate: {:.3}) to tensor shape {:?} [TRAINING MODE]",
-                self.config.dropout_rate,
-                attention_weights.shape()
-            );
-        } else if self.config.dropout_rate > 0.0 {
-            log::debug!(
-                "🔧 Skipped Additive attention weights dropout (rate: {:.3}) for tensor shape {:?} [INFERENCE MODE]",
+                "🔧 Applied Additive attention weights dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
                 self.config.dropout_rate,
                 attention_weights.shape()
             );
@@ -526,24 +493,19 @@ impl AdditiveAttention {
     }
 
     /// Compute additive attention scores using the formula: score = v^T * tanh(W1*h + W2*s)
-    fn compute_additive_scores(&self, input: &Tensor, training: bool) -> Result<Tensor> {
+    fn compute_additive_scores(&self, input: &Tensor, _training: bool) -> Result<Tensor> {
         let (batch_size, seq_len, _) = input.dims3()?;
 
         // Project input through query and key transformations
         let mut query_projection = self.w_query.forward(input)?; // [batch, seq, hidden]
         let mut key_projection = self.w_key.forward(input)?; // [batch, seq, hidden]
 
-        // Apply dropout to projections during training (PROPER FIX)
-        if training && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to projections (controlled by config)
+        if self.config.dropout_projections && self.config.dropout_rate > 0.0 {
             query_projection = ops::dropout(&query_projection, self.config.dropout_rate as f32)?;
             key_projection = ops::dropout(&key_projection, self.config.dropout_rate as f32)?;
             log::debug!(
-                "🔧 Applied Additive attention projections dropout (rate: {:.3}) [TRAINING MODE]",
-                self.config.dropout_rate
-            );
-        } else if self.config.dropout_rate > 0.0 {
-            log::debug!(
-                "🔧 Skipped Additive attention projections dropout (rate: {:.3}) [INFERENCE MODE]",
+                "🔧 Applied Additive attention projections dropout (rate: {:.3}) [CONSISTENT]",
                 self.config.dropout_rate
             );
         }
@@ -565,16 +527,11 @@ impl AdditiveAttention {
         // Apply final scoring transformation with v vector
         let mut scores = self.v_attention.forward(&combined)?; // [batch, seq, seq, 1]
 
-        // Apply dropout to final scores during training (ADDITIONAL REGULARIZATION)
-        if training && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to final scores (controlled by config)
+        if self.config.dropout_scores && self.config.dropout_rate > 0.0 {
             scores = ops::dropout(&scores, self.config.dropout_rate as f32)?;
             log::debug!(
-                "🔧 Applied Additive attention final scores dropout (rate: {:.3}) [TRAINING MODE]",
-                self.config.dropout_rate
-            );
-        } else if self.config.dropout_rate > 0.0 {
-            log::debug!(
-                "🔧 Skipped Additive attention final scores dropout (rate: {:.3}) [INFERENCE MODE]",
+                "🔧 Applied Additive attention final scores dropout (rate: {:.3}) [CONSISTENT]",
                 self.config.dropout_rate
             );
         }
@@ -700,7 +657,7 @@ mod tests {
     #[test]
     fn test_attention_config_defaults() {
         let config = AttentionConfig::default();
-        assert_eq!(config.num_heads, 8);
+        assert_eq!(config.heads, 8);
         assert_eq!(config.head_dim, Some(64));
         assert!(config.use_relative_position);
     }

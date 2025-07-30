@@ -138,7 +138,11 @@ pub struct AttentionConfig {
     pub mechanism: AttentionMechanism,
     pub heads: u32,
     pub head_dim: Option<u32>,              // Auto-optimized if None
-    pub dropout_rate: f64,                  // Attention dropout
+    pub dropout_rate: f64,                  // Attention dropout rate
+    pub dropout_weights: bool,              // Apply dropout to attention weights
+    pub dropout_output: bool,               // Apply dropout to attention output
+    pub dropout_projections: bool,          // Apply dropout to Q, K, V projections
+    pub dropout_scores: bool,               // Apply dropout to final attention scores
     pub temperature_scaling: f64,           // Crypto volatility adaptation
     pub use_relative_position: bool,        // Temporal modeling for crypto
     pub visualization: VisualizationConfig, // Analysis options
@@ -189,6 +193,25 @@ pub struct VisualizationConfig {
     pub save_heatmaps: bool,
     pub export_analysis: bool,
     pub output_dir: String,
+}
+
+impl Default for AttentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mechanism: AttentionMechanism::MultiHeadAttention,
+            heads: 8,                    // Auto-optimized default for crypto sequences
+            head_dim: Some(64),          // Optimal for most crypto features (50-100)
+            dropout_rate: 0.1,           // Conservative dropout for attention
+            dropout_weights: true,       // Apply dropout to attention weights (standard)
+            dropout_output: true,        // Apply dropout to attention output (recommended)
+            dropout_projections: true,   // Apply dropout to Q, K, V projections (comprehensive)
+            dropout_scores: true, // Apply dropout to final attention scores (additional regularization)
+            temperature_scaling: 1.0, // Standard temperature
+            use_relative_position: true, // Better for time series
+            visualization: VisualizationConfig::default(),
+        }
+    }
 }
 
 impl Default for VisualizationConfig {
@@ -369,6 +392,10 @@ impl Default for ModelConfig {
                 heads: 8,
                 head_dim: None,              // Auto-optimized
                 dropout_rate: 0.1,           // Conservative for crypto
+                dropout_weights: true,       // Apply dropout to attention weights
+                dropout_output: true,        // Apply dropout to attention output
+                dropout_projections: true,   // Apply dropout to Q, K, V projections
+                dropout_scores: true,        // Apply dropout to final attention scores
                 temperature_scaling: 1.0,    // Standard temperature
                 use_relative_position: true, // Better for time series
                 visualization: VisualizationConfig::default(),

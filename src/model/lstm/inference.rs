@@ -149,34 +149,19 @@ impl LSTMModel {
                 current_input =
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
-                // Apply dropout between layers if enabled and in training mode
-                // CRITICAL FIX: Use enhanced dropout consistency configuration
-                let effective_dropout_rate = if let Some(dropout_config) = &self.dropout_config {
-                    let base_rate = match &dropout_config.rate {
-                        crate::config::model::DropoutRate::Fixed(rate) => *rate,
-                        crate::config::model::DropoutRate::Auto { min_rate, max_rate } => {
-                            (min_rate + max_rate) / 2.0
-                        }
-                        crate::config::model::DropoutRate::Adaptive => 0.2,
-                    };
-                    self.dropout_consistency_config
-                        .get_effective_dropout_rate(base_rate, training)
+                // Apply consistent dropout between layers if enabled
+                let should_apply_dropout = if let Some(dropout_config) = &self.dropout_config {
+                    dropout_config.enabled
                 } else {
-                    0.0
+                    false
                 };
 
-                if effective_dropout_rate > 0.0 && layer_idx < forward_lstm_layers.len() - 1 {
-                    self.dropout_consistency_config
-                        .log_dropout_behavior(training, true);
+                if should_apply_dropout && layer_idx < forward_lstm_layers.len() - 1 {
                     current_input = self.apply_dropout(&current_input)?;
                     log::debug!(
-                        "🔧 Applied LSTM layer dropout (effective rate: {:.3}, layer: {})",
-                        effective_dropout_rate,
+                        "🔧 Applied LSTM layer dropout (layer: {}) [CONSISTENT]",
                         layer_idx
                     );
-                } else if self.dropout_consistency_config.log_dropout_changes {
-                    self.dropout_consistency_config
-                        .log_dropout_behavior(training, false);
                 }
 
                 // Track dropout behavior in metrics collector if available
@@ -213,20 +198,16 @@ impl LSTMModel {
 
                 current_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
 
-                // Apply dropout between layers if enabled and in training mode
-                // CRITICAL FIX: Use dropout consistency configuration
-                let should_apply_dropout = self.dropout_consistency_config.should_apply_dropout(
-                    training,
-                    self.dropout_config.as_ref().is_some_and(|d| d.enabled),
-                );
+                // Apply consistent dropout between layers if enabled
+                let should_apply_dropout = self
+                    .dropout_config
+                    .as_ref()
+                    .map(|d| d.enabled)
+                    .unwrap_or(false);
 
                 if should_apply_dropout && i < forward_lstm_layers.len() - 1 {
-                    self.dropout_consistency_config
-                        .log_dropout_behavior(training, true);
                     current_output = self.apply_dropout(&current_output)?;
-                } else if self.dropout_consistency_config.log_dropout_changes {
-                    self.dropout_consistency_config
-                        .log_dropout_behavior(training, false);
+                    log::debug!("🔧 Applied LSTM layer dropout (layer: {}) [CONSISTENT]", i);
                 }
 
                 // Track dropout behavior in metrics collector if available
@@ -252,8 +233,8 @@ impl LSTMModel {
         };
 
         // Apply attention if enabled
-        let final_output = if self.use_attention && self.attention_layers.is_some() {
-            let attention = self.attention_layers.as_ref().unwrap();
+        let final_output = if self.use_attention && self.attention_module.is_some() {
+            let attention = self.attention_module.as_ref().unwrap();
 
             // Ensure LSTM output is contiguous before passing to attention
             let contiguous_lstm_output = lstm_output.contiguous()?;
@@ -523,13 +504,17 @@ impl LSTMModel {
             .map_err(|e| VangaError::ModelError(format!("Failed to create Array2: {}", e)))
     }
 
-    /// Apply dropout with proper rate calculation based on configuration
-    /// Apply dropout with proper rate calculation based on configuration
+    /// Apply consistent dropout with proper rate calculation based on configuration
     fn apply_dropout(&self, tensor: &Tensor) -> Result<Tensor> {
         let dropout_config = self
             .dropout_config
             .as_ref()
             .ok_or_else(|| VangaError::ModelError("Dropout configuration not set".to_string()))?;
+
+        // Only apply dropout if enabled
+        if !dropout_config.enabled {
+            return Ok(tensor.clone());
+        }
 
         // Calculate dropout rate based on configuration
         let dropout_rate = match &dropout_config.rate {
@@ -544,11 +529,11 @@ impl LSTMModel {
             }
         };
 
-        // Apply dropout using candle's dropout function
+        // Apply dropout using candle's dropout function - CONSISTENT behavior
         let dropped_tensor = dropout(tensor, dropout_rate as f32)?;
 
         log::debug!(
-            "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [DROPOUT ACTIVE]",
+            "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [CONSISTENT]",
             dropout_rate,
             tensor.shape()
         );
@@ -722,7 +707,7 @@ impl LSTMModel {
 
         // Apply attention if enabled (optional enhancement)
         let features = if self.use_attention {
-            if let Some(attention) = &self.attention_layers {
+            if let Some(attention) = &self.attention_module {
                 log::debug!("🎯 Applying attention to LSTM features");
                 let attention_result = attention.forward(&lstm_features.unsqueeze(1)?, false)?; // inference mode
                                                                                                 // Handle attention output (may be tuple)

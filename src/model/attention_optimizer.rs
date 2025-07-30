@@ -1,5 +1,6 @@
 // Optimized attention computation for cryptocurrency sequence lengths
-use crate::model::attention::{AttentionConfig, MultiHeadAttention};
+use crate::config::model::AttentionConfig;
+use crate::model::attention::MultiHeadAttention;
 use crate::utils::error::{Result, VangaError};
 use candle_core::{Device, Tensor};
 use candle_nn::{ops, VarBuilder};
@@ -610,21 +611,21 @@ impl HierarchicalAttention {
     fn new(input_dim: usize, vs: VarBuilder, device: Device) -> Result<Self> {
         // Create attention mechanisms for different resolution levels
         let recent_config = AttentionConfig {
-            num_heads: 8,
+            heads: 8,
             head_dim: Some(64),
             temperature_scaling: 1.0,
             ..AttentionConfig::default()
         };
 
         let medium_config = AttentionConfig {
-            num_heads: 6,
+            heads: 6,
             head_dim: Some(48),
             temperature_scaling: 1.2,
             ..AttentionConfig::default()
         };
 
         let long_config = AttentionConfig {
-            num_heads: 4,
+            heads: 4,
             head_dim: Some(32),
             temperature_scaling: 1.5,
             ..AttentionConfig::default()
@@ -875,12 +876,18 @@ impl OptimizedAttentionFactory {
     pub fn create_short_term_crypto() -> OptimizedAttentionConfig {
         OptimizedAttentionConfig {
             base_config: AttentionConfig {
-                num_heads: 8,
+                enabled: true,
+                mechanism: crate::config::model::AttentionMechanism::MultiHeadAttention,
+                heads: 8,
                 head_dim: Some(64),
                 dropout_rate: 0.05,
+                dropout_weights: true,
+                dropout_output: true,
+                dropout_projections: true,
+                dropout_scores: true,
                 temperature_scaling: 0.9, // Sharper attention for short-term
                 use_relative_position: true,
-                max_sequence_length: 128,
+                visualization: crate::config::model::VisualizationConfig::default(),
             },
             sequence_optimization: SequenceOptimization {
                 use_sparse_attention: false, // Short sequences don't need sparse
@@ -917,12 +924,18 @@ impl OptimizedAttentionFactory {
     pub fn create_long_term_crypto() -> OptimizedAttentionConfig {
         OptimizedAttentionConfig {
             base_config: AttentionConfig {
-                num_heads: 12,
+                enabled: true,
+                mechanism: crate::config::model::AttentionMechanism::MultiHeadAttention,
+                heads: 12,
                 head_dim: Some(128),
                 dropout_rate: 0.1,
+                dropout_weights: true,
+                dropout_output: true,
+                dropout_projections: true,
+                dropout_scores: true,
                 temperature_scaling: 1.2, // Smoother attention for long-term
                 use_relative_position: true,
-                max_sequence_length: 1024,
+                visualization: crate::config::model::VisualizationConfig::default(),
             },
             sequence_optimization: SequenceOptimization {
                 use_sparse_attention: true,
@@ -973,7 +986,8 @@ mod tests {
         let config = OptimizedAttentionFactory::create_short_term_crypto();
         assert!(!config.sequence_optimization.use_sparse_attention);
         assert!(config.crypto_optimizations.recent_price_focus);
-        assert_eq!(config.base_config.max_sequence_length, 128);
+        // Note: max_sequence_length is not part of AttentionConfig in config/model.rs
+        assert_eq!(config.base_config.heads, 8);
     }
 
     #[test]
@@ -981,6 +995,7 @@ mod tests {
         let config = OptimizedAttentionFactory::create_long_term_crypto();
         assert!(config.sequence_optimization.use_sparse_attention);
         assert!(!config.crypto_optimizations.recent_price_focus);
-        assert_eq!(config.base_config.max_sequence_length, 1024);
+        // Note: max_sequence_length is not part of AttentionConfig in config/model.rs
+        assert_eq!(config.base_config.heads, 8);
     }
 }
