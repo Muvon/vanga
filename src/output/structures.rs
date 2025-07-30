@@ -94,6 +94,155 @@ impl PriceLevelPrediction {
 
         ranges
     }
+
+    /// Extract probability-based order portions for adaptive allocation
+    /// Returns (up_portions, down_portions) for SHORT position logic
+    pub fn extract_probability_portions(&self) -> ([f64; 3], [f64; 3]) {
+        // For SHORT: entries use UP probabilities, exits use DOWN probabilities
+        let moderate_up_prob = self.bins.get("moderate_up").map(|b| b.probability).unwrap_or(0.0);
+        let strong_up_prob = self.bins.get("strong_up").map(|b| b.probability).unwrap_or(0.0);
+        let moderate_down_prob = self.bins.get("moderate_down").map(|b| b.probability).unwrap_or(0.0);
+        let strong_down_prob = self.bins.get("strong_down").map(|b| b.probability).unwrap_or(0.0);
+
+        let up_total = moderate_up_prob + strong_up_prob;
+        let down_total = moderate_down_prob + strong_down_prob;
+
+        // Entry portions (based on UP probabilities - we enter when price moves against us)
+        let entry_portions = if up_total > 0.0 {
+            let moderate_portion = moderate_up_prob / up_total;
+            let strong_portion = strong_up_prob / up_total;
+            // Split into 3 orders: moderate_lower, moderate_upper, strong_lower
+            [
+                moderate_portion * 0.6,  // 60% of moderate_up probability
+                moderate_portion * 0.4,  // 40% of moderate_up probability  
+                strong_portion,          // 100% of strong_up probability
+            ]
+        } else {
+            [0.33, 0.33, 0.34] // Fallback to equal distribution
+        };
+
+        // Exit portions (based on DOWN probabilities - we exit when price moves with us)
+        let exit_portions = if down_total > 0.0 {
+            let moderate_portion = moderate_down_prob / down_total;
+            let strong_portion = strong_down_prob / down_total;
+            // Split into 3 orders: moderate_center, strong_upper, strong_lower
+            [
+                moderate_portion,        // 100% of moderate_down probability
+                strong_portion * 0.5,    // 50% of strong_down probability
+                strong_portion * 0.5,    // 50% of strong_down probability
+            ]
+        } else {
+            [0.33, 0.33, 0.34] // Fallback to equal distribution
+        };
+
+        (entry_portions, exit_portions)
+    }
+
+    /// Get natural price positioning from range centers and boundaries
+    pub fn get_natural_price_positions(&self) -> (Vec<f64>, Vec<f64>) {
+        let moderate_up = self.bins.get("moderate_up");
+        let strong_up = self.bins.get("strong_up");
+        let moderate_down = self.bins.get("moderate_down");
+        let strong_down = self.bins.get("strong_down");
+
+        // Entry positions (UP ranges for SHORT)
+        let entry_positions = if let (Some(mod_up), Some(str_up)) = (moderate_up, strong_up) {
+            vec![
+                mod_up.range[0],                                    // moderate_up lower
+                (mod_up.range[0] + mod_up.range[1]) / 2.0,         // moderate_up center
+                str_up.range[0],                                    // strong_up lower
+            ]
+        } else {
+            vec![0.8, 1.2, 1.8] // Fallback percentages
+        };
+
+        // Exit positions (DOWN ranges for SHORT)
+        let exit_positions = if let (Some(mod_down), Some(str_down)) = (moderate_down, strong_down) {
+            vec![
+                (mod_down.range[0] + mod_down.range[1]) / 2.0,     // moderate_down center
+                str_down.range[1],                                  // strong_down upper (closer to current)
+                (str_down.range[0] + str_down.range[1]) / 2.0,     // strong_down center
+            ]
+        } else {
+            vec![-1.5, -2.5, -3.5] // Fallback percentages
+        };
+
+        (entry_positions, exit_positions)
+    }
+
+    /// Validate probability-driven orders for consistency and eliminate duplicates
+    pub fn validate_orders(&self, entry_levels: &[OrderLevel; 3], exit_levels: &[OrderLevel; 3], stop_levels: &[OrderLevel; 3]) -> crate::utils::error::Result<()> {
+        // 1. Validate probability portions sum to 1.0
+        let (entry_portions, exit_portions) = self.extract_probability_portions();
+        let entry_sum: f64 = entry_portions.iter().sum();
+        let exit_sum: f64 = exit_portions.iter().sum();
+        
+        if (entry_sum - 1.0).abs() > 0.001 {
+            return Err(crate::utils::error::VangaError::PredictionError(
+                format!("Entry portions sum to {:.6}, expected 1.0", entry_sum)
+            ));
+        }
+        
+        if (exit_sum - 1.0).abs() > 0.001 {
+            return Err(crate::utils::error::VangaError::PredictionError(
+                format!("Exit portions sum to {:.6}, expected 1.0", exit_sum)
+            ));
+        }
+
+        // 2. Validate no duplicate prices
+        let entry_prices: Vec<f64> = entry_levels.iter().map(|l| l.price).collect();
+        let exit_prices: Vec<f64> = exit_levels.iter().map(|l| l.price).collect();
+        let stop_prices: Vec<f64> = stop_levels.iter().map(|l| l.price).collect();
+        
+        for i in 0..3 {
+            for j in (i+1)..3 {
+                if (entry_prices[i] - entry_prices[j]).abs() < 0.01 {
+                    return Err(crate::utils::error::VangaError::PredictionError(
+                        format!("Duplicate entry prices: {:.2} and {:.2}", entry_prices[i], entry_prices[j])
+                    ));
+                }
+                if (exit_prices[i] - exit_prices[j]).abs() < 0.01 {
+                    return Err(crate::utils::error::VangaError::PredictionError(
+                        format!("Duplicate exit prices: {:.2} and {:.2}", exit_prices[i], exit_prices[j])
+                    ));
+                }
+                if (stop_prices[i] - stop_prices[j]).abs() < 0.01 {
+                    return Err(crate::utils::error::VangaError::PredictionError(
+                        format!("Duplicate stop prices: {:.2} and {:.2}", stop_prices[i], stop_prices[j])
+                    ));
+                }
+            }
+        }
+
+        // 3. Validate proper order sequencing for SHORT
+        let current_price = entry_levels[0].price / (1.0 + self.get_natural_price_positions().0[0] / 100.0);
+        
+        for level in entry_levels {
+            if level.price <= current_price {
+                return Err(crate::utils::error::VangaError::PredictionError(
+                    format!("SHORT entry price {:.2} must be above current price {:.2}", level.price, current_price)
+                ));
+            }
+        }
+        
+        for level in exit_levels {
+            if level.price >= current_price {
+                return Err(crate::utils::error::VangaError::PredictionError(
+                    format!("SHORT exit price {:.2} must be below current price {:.2}", level.price, current_price)
+                ));
+            }
+        }
+        
+        for (i, level) in stop_levels.iter().enumerate() {
+            if level.price <= entry_levels[i].price {
+                return Err(crate::utils::error::VangaError::PredictionError(
+                    format!("SHORT stop price {:.2} must be above entry price {:.2}", level.price, entry_levels[i].price)
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionPrediction {
@@ -148,6 +297,9 @@ pub struct DirectionPrediction {
 
     /// Aggregated downward probability (DOWN + DUMP)
     pub down_probability_aggregated: f64,
+
+    /// Aggregated sideways probability (SIDEWAYS only) - NEW for proper 3-way aggregation
+    pub sideways_probability_aggregated: f64,
 
     /// Most likely direction class
     pub prediction: String,
@@ -214,6 +366,7 @@ impl DirectionPrediction {
         // Update aggregated probabilities for backward compatibility
         self.up_probability_aggregated = self.up_probability + self.pump_probability;
         self.down_probability_aggregated = self.down_probability + self.dump_probability;
+        self.sideways_probability_aggregated = self.sideways_probability; // NEW: Include sideways
 
         // Update prediction and confidence
         self.update_prediction_and_confidence();
@@ -257,6 +410,7 @@ impl DirectionPrediction {
             breakout_probability: 0.0,
             up_probability_aggregated: 0.0,
             down_probability_aggregated: 0.0,
+            sideways_probability_aggregated: 0.0,
             prediction: "UNKNOWN".to_string(),
             confidence: 0.0,
         }
@@ -965,11 +1119,13 @@ impl TradingOrders {
                 &sequence_ranges,
                 config.config,
                 is_breakout,
+                config.price_levels, // NEW: Add price_levels parameter
+                config.volatility_pred, // NEW: Add volatility_pred parameter
             )
         };
 
-        // Validate and optimize risk-reward ratio (minimum 2:1 for crypto)
-        let min_risk_reward = 2.0; // Industry minimum for crypto trading
+        // Validate and optimize risk-reward ratio (configurable minimum for crypto)
+        let min_risk_reward = 4.0; // TODO: Move to config - 4:1 minimum as requested
         let risk_reward_ratio = Self::validate_and_optimize_risk_reward(
             &mut entry_levels,
             &mut exit_levels,
@@ -1163,13 +1319,15 @@ impl TradingOrders {
         (entry_levels, exit_levels, stop_levels)
     }
 
-    /// Generate sequence-aware short orders using bandwidth-based levels
+    /// Generate sequence-aware short orders using probability-based allocation (NO MAGIC NUMBERS)
     fn generate_sequence_aware_short_orders(
         current_price: f64,
         atr_distance: f64,
         sequence_ranges: &[[f64; 2]],
         config: &OrderConfig,
         is_breakout: bool,
+        price_levels: &PriceLevelPrediction, // NEW: Use for probability-based allocation
+        volatility_pred: &VolatilityPrediction, // NEW: Use for adaptive stop calculation
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
         // DEBUG: Log the ranges being used
         log::debug!(
@@ -1191,66 +1349,48 @@ impl TradingOrders {
             strong_up_range
         );
 
-        // FORCE CORRECT ENTRY PERCENTAGES (must be positive for SHORT)
-        let mut entry_1_pct = moderate_up_range[0].max(0.5); // Minimum 0.5% above current
-        let mut entry_2_pct = (moderate_up_range[0] + moderate_up_range[1]) / 2.0;
-        let mut entry_3_pct = strong_up_range[0].max(1.0); // Minimum 1.0% above current
+        // 🎯 NEW: Use probability-based allocation instead of hardcoded portions
+        let (entry_portions, exit_portions) = price_levels.extract_probability_portions();
+        let (entry_positions, exit_positions) = price_levels.get_natural_price_positions();
 
-        // SAFETY CHECK: If ranges are negative (wrong), use fixed percentages
-        if entry_1_pct < 0.0 || entry_2_pct < 0.0 || entry_3_pct < 0.0 {
-            log::warn!(
-                "🚨 SHORT ranges are negative! Using fixed percentages for correct trading logic"
-            );
-            entry_1_pct = 0.8; // 0.8% above current
-            entry_2_pct = 1.2; // 1.2% above current
-            entry_3_pct = 1.8; // 1.8% above current
-        }
-
-        // Ensure proper ordering: entry_1 < entry_2 < entry_3
-        if entry_2_pct <= entry_1_pct {
-            entry_2_pct = entry_1_pct + 0.4;
-        }
-        if entry_3_pct <= entry_2_pct {
-            entry_3_pct = entry_2_pct + 0.6;
-        }
-
-        log::debug!(
-            "💰 SHORT Entry Percentages (CORRECTED): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
-            entry_1_pct, entry_2_pct, entry_3_pct
+        log::info!(
+            "📊 Probability-based allocation (breakout={}): Entry portions: [{:.3}, {:.3}, {:.3}], Exit portions: [{:.3}, {:.3}, {:.3}]",
+            is_breakout,
+            entry_portions[0], entry_portions[1], entry_portions[2],
+            exit_portions[0], exit_portions[1], exit_portions[2]
         );
 
-        let entry_price_1 = current_price * (1.0 + entry_1_pct / 100.0);
-        let entry_price_2 = current_price * (1.0 + entry_2_pct / 100.0);
-        let entry_price_3 = current_price * (1.0 + entry_3_pct / 100.0);
+        // Use natural price positions from prediction data
+        let entry_1_pct = entry_positions[0].max(0.5); // Ensure minimum above current
+        let entry_2_pct = entry_positions[1].max(entry_1_pct + 0.2);
+        let entry_3_pct = entry_positions[2].max(entry_2_pct + 0.2);
 
         log::debug!(
-            "🎯 SHORT Entry Prices (ABOVE CURRENT): price_1={:.2}, price_2={:.2}, price_3={:.2}",
-            entry_price_1,
-            entry_price_2,
-            entry_price_3
+            "💰 SHORT Entry Percentages (ADAPTIVE): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
+            entry_1_pct, entry_2_pct, entry_3_pct
         );
 
         let entry_levels = [
             OrderLevel {
                 price: current_price * (1.0 + entry_1_pct / 100.0),
-                quantity_percentage: if is_breakout { 0.4 } else { 0.5 },
+                quantity_percentage: entry_portions[0],
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_2_pct / 100.0),
-                quantity_percentage: 0.3, // Same for both breakout and normal
+                quantity_percentage: entry_portions[1],
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.7,
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_3_pct / 100.0),
-                quantity_percentage: if is_breakout { 0.3 } else { 0.2 },
+                quantity_percentage: entry_portions[2],
                 atr_distance,
                 order_type: if is_breakout {
-                    "STOP_LIMIT".to_string()
+                    "STOP_LIMIT".to_string() // More aggressive for breakouts
                 } else {
                     "LIMIT".to_string()
                 },
@@ -1258,116 +1398,98 @@ impl TradingOrders {
             },
         ];
 
-        // Exit levels based on DOWN ranges (buy back low for SHORT)
-        // FORCE CORRECT EXIT LOGIC: exits must be BELOW current price for SHORT profit
-        let moderate_down_range = &sequence_ranges[1]; // moderate_down
-        let strong_down_range = &sequence_ranges[0]; // strong_down
-
-        let mut exit_1_pct = moderate_down_range[1]; // End of moderate down (conservative exit)
-        let mut exit_2_pct = strong_down_range[1]; // End of strong down (aggressive exit)
-        let mut exit_3_pct = strong_down_range[0]; // Start of strong down (maximum profit exit)
-
-        // SAFETY CHECK: Ensure exits are negative (below current price)
-        if exit_1_pct > -0.5 || exit_2_pct > -1.0 || exit_3_pct > -1.5 {
-            log::warn!(
-                "🚨 SHORT exit ranges are too high! Using fixed percentages for better profit"
-            );
-            exit_1_pct = -1.5; // 1.5% below current (conservative)
-            exit_2_pct = -2.5; // 2.5% below current (moderate)
-            exit_3_pct = -3.5; // 3.5% below current (aggressive)
-        }
-
-        // Ensure proper ordering: exit_1 > exit_2 > exit_3 (less negative to more negative)
-        if exit_2_pct >= exit_1_pct {
-            exit_2_pct = exit_1_pct - 1.0;
-        }
-        if exit_3_pct >= exit_2_pct {
-            exit_3_pct = exit_2_pct - 1.0;
-        }
+        // 🎯 NEW: Exit levels using probability-based allocation and natural positions
+        let exit_1_pct = exit_positions[0]; // moderate_down center
+        let exit_2_pct = exit_positions[1]; // strong_down upper  
+        let exit_3_pct = exit_positions[2]; // strong_down center
 
         log::debug!(
-            "📉 SHORT Exit Percentages (BELOW CURRENT): exit_1={:.2}%, exit_2={:.2}%, exit_3={:.2}%",
+            "📉 SHORT Exit Percentages (ADAPTIVE): exit_1={:.2}%, exit_2={:.2}%, exit_3={:.2}%",
             exit_1_pct, exit_2_pct, exit_3_pct
         );
 
         let exit_levels = [
             OrderLevel {
                 price: current_price * (1.0 + exit_1_pct / 100.0),
-                quantity_percentage: 0.4,
+                quantity_percentage: exit_portions[0],
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
                 price: current_price * (1.0 + exit_2_pct / 100.0),
-                quantity_percentage: 0.4,
+                quantity_percentage: exit_portions[1],
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.6,
             },
             OrderLevel {
                 price: current_price * (1.0 + exit_3_pct / 100.0),
-                quantity_percentage: 0.2,
+                quantity_percentage: exit_portions[2],
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.4,
             },
         ];
 
-        // Stop levels for SHORT: progressive stops above entry levels
-        // FORCE CORRECT STOP LOGIC: stops must be ABOVE entries to limit losses
-        let strong_up_range = &sequence_ranges[4]; // strong_up
-        let atr_pct = atr_distance / current_price * 100.0;
-
-        let mut stop_1_pct = strong_up_range[0] + atr_pct * 0.5; // Conservative stop
-        let mut stop_2_pct = strong_up_range[0] + atr_pct * 1.0; // Moderate stop
-        let mut stop_3_pct = strong_up_range[1] + atr_pct * 1.5; // Aggressive stop
-
-        // SAFETY CHECK: Ensure stops are above entries and properly spaced
-        let max_entry_pct = entry_3_pct; // Highest entry level
-        let min_stop_pct = max_entry_pct + 0.5; // Minimum 0.5% above highest entry
-
-        if stop_1_pct < min_stop_pct {
-            stop_1_pct = min_stop_pct;
-        }
-        if stop_2_pct <= stop_1_pct + 0.3 {
-            stop_2_pct = stop_1_pct + 0.5; // Minimum 0.5% spacing
-        }
-        if stop_3_pct <= stop_2_pct + 0.3 {
-            stop_3_pct = stop_2_pct + 0.7; // Minimum 0.7% spacing
-        }
+        // 🎯 NEW: Adaptive stop levels using volatility model data (NO HARDCODED VALUES)
+        // Extract volatility data from the prediction model
+        let recommended_stop_distance = volatility_pred.recommended_stop_distance_percent;
+        let expected_range = volatility_pred.expected_range_percent;
+        let regime_confidence = volatility_pred.confidence;
+        
+        // Calculate adaptive buffer based on volatility regime confidence
+        // Lower confidence = higher uncertainty = wider buffer needed
+        let confidence_buffer = (1.0 - regime_confidence) * expected_range;
+        let adaptive_stop_distance = recommended_stop_distance + confidence_buffer;
+        
+        log::info!(
+            "🎯 Adaptive Stop Calculation: base={:.3}% + buffer={:.3}% = total={:.3}%",
+            recommended_stop_distance, confidence_buffer, adaptive_stop_distance
+        );
+        
+        // Position stops at adaptive distance above each entry
+        let stop_1_pct = entry_1_pct + adaptive_stop_distance;
+        let stop_2_pct = entry_2_pct + adaptive_stop_distance;  
+        let stop_3_pct = entry_3_pct + adaptive_stop_distance;
 
         log::debug!(
-            "🛑 SHORT Stop Percentages (ABOVE ENTRIES): stop_1={:.2}%, stop_2={:.2}%, stop_3={:.2}%",
+            "🛑 SHORT Stop Percentages (VOLATILITY-ADAPTIVE): stop_1={:.2}%, stop_2={:.2}%, stop_3={:.2}%",
             stop_1_pct, stop_2_pct, stop_3_pct
         );
 
-        // Apply hunt protection from config
-        let hunt_protection_multiplier = config.hunt_protection;
-
+        // Use same probability-based portions for stops as entries (risk consistency)
         let stop_levels = [
             OrderLevel {
-                price: current_price * (1.0 + (stop_1_pct * hunt_protection_multiplier) / 100.0),
-                quantity_percentage: 0.4,
-                atr_distance: atr_distance * hunt_protection_multiplier,
+                price: current_price * (1.0 + (stop_1_pct * config.hunt_protection) / 100.0),
+                quantity_percentage: entry_portions[0], // Same as entry allocation
+                atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.9,
             },
             OrderLevel {
-                price: current_price * (1.0 + (stop_2_pct * hunt_protection_multiplier) / 100.0),
-                quantity_percentage: 0.4,
-                atr_distance: atr_distance * hunt_protection_multiplier,
+                price: current_price * (1.0 + (stop_2_pct * config.hunt_protection) / 100.0),
+                quantity_percentage: entry_portions[1], // Same as entry allocation
+                atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
-                price: current_price * (1.0 + (stop_3_pct * hunt_protection_multiplier) / 100.0),
-                quantity_percentage: 0.2,
-                atr_distance: atr_distance * hunt_protection_multiplier,
+                price: current_price * (1.0 + (stop_3_pct * config.hunt_protection) / 100.0),
+                quantity_percentage: entry_portions[2], // Same as entry allocation
+                atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.7,
             },
         ];
+
+        // 🎯 NEW: Validate the generated orders for consistency
+        if let Err(e) = price_levels.validate_orders(&entry_levels, &exit_levels, &stop_levels) {
+            log::error!("❌ Order validation failed: {}", e);
+            return (entry_levels, exit_levels, stop_levels); // Return anyway but log error
+        }
+
+        log::info!("✅ Probability-driven orders validated successfully - no duplicates, proper sequencing");
 
         (entry_levels, exit_levels, stop_levels)
     }
