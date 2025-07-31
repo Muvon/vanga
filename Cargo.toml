@@ -60,7 +60,9 @@ tokio-stream = "0.1"
 futures = "0.3"
 linemux = "0.3"
 csv-async = "1.2"
-xgb = "3.0.4"
+# Removed problematic xgb crate - replaced with smartcore
+# xgb = "3.0.4"  # Had learning issues - uniform predictions
+smartcore = { version = "0.3", features = ["serde"] }  # Pure Rust ML library with Random Forest, Decision Trees
 
 # macOS-specific Metal support
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -206,7 +206,7 @@ pub fn generate_direction_targets(
 /// - DUMP: Strong momentum reversal (bullish to bearish or strong deceleration)
 /// - DOWN: Moderate momentum weakening
 /// - SIDEWAYS: Momentum continuation with minimal change
-/// - UP: Moderate momentum strengthening  
+/// - UP: Moderate momentum strengthening
 /// - PUMP: Strong momentum acceleration (bearish to bullish or strong acceleration)
 ///
 /// ## Parameters
@@ -426,7 +426,7 @@ fn calculate_sequence_trend_consistency(prices: &[f64]) -> Result<f64> {
 ///
 /// This is the correct directional approach that focuses on TREND CHANGES:
 /// - DUMP: Strong momentum reversal from positive to negative
-/// - DOWN: Moderate momentum weakening or slight reversal  
+/// - DOWN: Moderate momentum weakening or slight reversal
 /// - SIDEWAYS: Momentum continuation with minimal change
 /// - UP: Moderate momentum strengthening or slight acceleration
 /// - PUMP: Strong momentum acceleration or reversal from negative to positive

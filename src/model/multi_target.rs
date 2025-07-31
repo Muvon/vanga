@@ -475,11 +475,17 @@ impl MultiTargetLSTMModel {
         // Process each model sequentially to avoid memory accumulation
         for (i, model) in self.models.iter().enumerate() {
             let target_name = &self.target_names[i];
-            log::debug!(
-                "Processing model {}/{}: {}",
+            let has_xgboost = model.xgboost_model.is_some();
+            log::info!(
+                "🎯 Processing model {}/{}: {} (XGBoost: {})",
                 i + 1,
                 self.num_targets,
-                target_name
+                target_name,
+                if has_xgboost {
+                    "✅ Enabled"
+                } else {
+                    "❌ Disabled"
+                }
             );
 
             match model.predict(sequences).await {
@@ -596,62 +602,29 @@ impl MultiTargetLSTMModel {
         // Load individual models
         let mut models = Vec::with_capacity(state.num_targets);
         for i in 0..state.num_targets {
-            let model_path = format!("{}_{}.bin", base_path.to_string_lossy(), i);
-            log::debug!("Loading model {} from: {}", i + 1, model_path);
+            // Use the correct base path without extension - LSTMModel methods will add extensions
+            let model_base_path = format!("{}_{}", base_path.to_string_lossy(), i);
+            log::debug!(
+                "Loading model {} from base path: {}",
+                i + 1,
+                model_base_path
+            );
 
+            // UNIFIED APPROACH: Use load_with_model_config to respect stored architecture
             let mut model = if let Some(training_config) = &state.training_config {
                 log::debug!(
-                    "🔧 Creating model {} from training_config.model (has architecture info)",
+                    "🔧 Loading model {} with stored training_config.model architecture",
                     i + 1
                 );
-
-                // CORRECT FIX: Use the training_config.model which has complete architecture info
-                let mut model = LSTMModel::from_model_config(
+                LSTMModel::load_with_model_config(
+                    &model_base_path,
                     &training_config.model,
                     state.input_size,
-                    crate::config::model::NUM_CLASSES, // All targets use 5-class system
-                )?;
-
-                // Step 1: Initialize network to create tensor placeholders in VarMap
-                log::info!(
-                    "🔧 Initializing network for model {} to create tensor placeholders",
-                    i + 1
-                );
-                model.initialize_network()?;
-
-                // Step 2: Load weights to overwrite the placeholders
-                let weights_path = format!("{}_{}.safetensors", base_path.to_string_lossy(), i);
-                log::info!(
-                    "🔄 Loading weights for model {} from: {}",
-                    i + 1,
-                    weights_path
-                );
-
-                // Check if weights file exists
-                if !std::path::Path::new(&weights_path).exists() {
-                    return Err(VangaError::SerializationError(format!(
-                        "Weights file not found for model {}: {}",
-                        i + 1,
-                        weights_path
-                    )));
-                }
-
-                // Load weights - this should overwrite the initialized tensors
-                model.varmap.load(&weights_path).map_err(|e| {
-                    VangaError::SerializationError(format!(
-                        "Failed to load weights for model {}: {}",
-                        i + 1,
-                        e
-                    ))
-                })?;
-
-                log::info!("✅ Weights loaded successfully for model {}", i + 1);
-                model.trained = true;
-                model
+                    crate::config::model::NUM_CLASSES,
+                )?
             } else {
                 log::warn!("⚠️ Loading legacy model {} without training config", i + 1);
-                let model_path = format!("{}_{}.bin", base_path.to_string_lossy(), i);
-                LSTMModel::load(&model_path)?
+                LSTMModel::load(&model_base_path)?
             };
 
             // CRITICAL FIX: Restore target context after loading

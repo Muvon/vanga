@@ -1150,4 +1150,30 @@ impl TrainingConfig {
 
         Ok(())
     }
+
+    /// Create a minimal configuration suitable for testing
+    pub fn default_for_testing() -> Result<Self> {
+        let config = Self {
+            symbol: "TESTUSDT".to_string(),
+            data_path: std::path::PathBuf::from("test_data.csv"),
+            training: TrainingParams {
+                epochs: EpochConfig::Fixed(5),
+                batch_size: BatchSizeConfig::Fixed(16),
+                learning_rate: LearningRateConfig::Fixed(0.01),
+                ..Default::default()
+            },
+            model: ModelConfig {
+                xgboost: crate::config::model::XGBoostConfig {
+                    enabled: true,
+                    n_estimators: 10, // Small for testing
+                    max_depth: 3,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        Ok(config)
+    }
 }

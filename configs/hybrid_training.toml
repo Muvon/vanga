@@ -41,24 +41,16 @@ dropout_rate = 0.1
 temperature_scaling = 1.0
 use_relative_position = true
 
-# XGBoost hybrid configuration (MAIN FEATURE)
+# SmartCore hybrid configuration (MAIN FEATURE - replaces XGBoost)
 [model.xgboost]
-enabled = true                    # Enable hybrid LSTM+XGBoost training
+enabled = true                    # Enable hybrid LSTM+SmartCore training
 feature_dim = 64                  # LSTM feature dimension (k in paper)
 n_estimators = 100                # Number of trees (M in equation 9)
 max_depth = 6                     # Maximum tree depth
-learning_rate = 0.1               # XGBoost learning rate (eta)
-subsample = 0.8                   # Row sampling ratio
-colsample_bytree = 0.8            # Column sampling ratio
-reg_alpha = 0.0                   # L1 regularization
-reg_lambda = 1.0                  # L2 regularization (λ in equation 11)
-early_stopping_rounds = 10        # Early stopping for efficiency
-eval_metric = "rmse"              # Default evaluation metric
-objective = "reg:squarederror"    # Default objective (auto-adjusted per target)
 save_feature_importance = true    # Enable feature analysis
-importance_type = "gain"          # Information gain importance (legacy)
-importance_method = "shap"        # Use SHAP-based real importance (not placeholder)
-importance_validation_size = 50   # Number of samples for SHAP calculation
+importance_method = "permutation" # Use permutation-based real importance
+objective = "RandomForest"        # SmartCore algorithm (RandomForest or DecisionTree)
+eval_metric = "multiclass_accuracy"  # Multi-class accuracy for classification
 
 # Output heads configuration
 [model.output_heads]
