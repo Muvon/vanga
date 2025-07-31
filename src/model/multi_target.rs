@@ -601,42 +601,56 @@ impl MultiTargetLSTMModel {
 
             let mut model = if let Some(training_config) = &state.training_config {
                 log::debug!(
-                    "🔧 Recreating model {} from stored ModelConfig with architecture: {:?}",
-                    i + 1,
-                    training_config.model.architecture
+                    "🔧 Creating model {} from training_config.model (has architecture info)",
+                    i + 1
                 );
 
-                // Create model from stored ModelConfig (preserves architecture)
+                // CORRECT FIX: Use the training_config.model which has complete architecture info
                 let mut model = LSTMModel::from_model_config(
                     &training_config.model,
                     state.input_size,
                     crate::config::model::NUM_CLASSES, // All targets use 5-class system
                 )?;
 
-                log::debug!(
-                    "🔍 Model {} created with output_size: {}",
-                    i + 1,
-                    model.get_output_size()
+                // Step 1: Initialize network to create tensor placeholders in VarMap
+                log::info!(
+                    "🔧 Initializing network for model {} to create tensor placeholders",
+                    i + 1
                 );
-
-                // Initialize network structure
                 model.initialize_network()?;
 
-                // Load weights using existing pattern from load() method
-                let weights_path = std::path::Path::new(&model_path).with_extension("safetensors");
-                model.varmap.load(&weights_path).map_err(|e| {
-                    VangaError::SerializationError(format!("Failed to load model weights: {}", e))
-                })?;
-                model.trained = true;
-
-                log::debug!(
-                    "✅ Model {} weights loaded from: {}",
+                // Step 2: Load weights to overwrite the placeholders
+                let weights_path = format!("{}_{}.safetensors", base_path.to_string_lossy(), i);
+                log::info!(
+                    "🔄 Loading weights for model {} from: {}",
                     i + 1,
-                    weights_path.display()
+                    weights_path
                 );
+
+                // Check if weights file exists
+                if !std::path::Path::new(&weights_path).exists() {
+                    return Err(VangaError::SerializationError(format!(
+                        "Weights file not found for model {}: {}",
+                        i + 1,
+                        weights_path
+                    )));
+                }
+
+                // Load weights - this should overwrite the initialized tensors
+                model.varmap.load(&weights_path).map_err(|e| {
+                    VangaError::SerializationError(format!(
+                        "Failed to load weights for model {}: {}",
+                        i + 1,
+                        e
+                    ))
+                })?;
+
+                log::info!("✅ Weights loaded successfully for model {}", i + 1);
+                model.trained = true;
                 model
             } else {
-                log::warn!("⚠️ Loading legacy model {} without training config - architecture may be incorrect", i + 1);
+                log::warn!("⚠️ Loading legacy model {} without training config", i + 1);
+                let model_path = format!("{}_{}.bin", base_path.to_string_lossy(), i);
                 LSTMModel::load(&model_path)?
             };
 

@@ -149,9 +149,9 @@ impl LSTMModel {
                 current_input =
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
-                // Apply consistent dropout between layers if enabled
+                // Apply consistent dropout between layers if enabled AND in training mode
                 let should_apply_dropout = if let Some(dropout_config) = &self.dropout_config {
-                    dropout_config.enabled
+                    dropout_config.enabled && training // Only apply dropout during training
                 } else {
                     false
                 };
@@ -198,11 +198,11 @@ impl LSTMModel {
 
                 current_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
 
-                // Apply consistent dropout between layers if enabled
+                // Apply consistent dropout between layers if enabled AND in training mode
                 let should_apply_dropout = self
                     .dropout_config
                     .as_ref()
-                    .map(|d| d.enabled)
+                    .map(|d| d.enabled && training) // Only apply dropout during training
                     .unwrap_or(false);
 
                 if should_apply_dropout && i < forward_lstm_layers.len() - 1 {

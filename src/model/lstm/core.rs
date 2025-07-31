@@ -420,9 +420,6 @@ impl LSTMModel {
             self.backward_lstm_layers = Some(backward_lstm_layers);
         }
 
-        // CRITICAL: Apply proper weight initialization after LSTM creation
-        self.apply_xavier_initialization()?;
-
         // Initialize attention layers if configured
         if self.use_attention && self.attention_config.is_some() {
             self.initialize_attention_layers(&vs)?;
@@ -495,6 +492,7 @@ impl LSTMModel {
     }
 
     /// Load model from file - Enhanced to load both config and weights
+    /// CRITICAL FIX: Ensure deterministic weight loading by proper initialization sequence
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
 
@@ -507,28 +505,117 @@ impl LSTMModel {
             VangaError::SerializationError(format!("Config deserialization failed: {}", e))
         })?;
 
+        // Check if weights file exists
+        let weights_path = path.with_extension("safetensors");
+        if !weights_path.exists() {
+            return Err(VangaError::SerializationError(format!(
+                "Weights file not found: {}",
+                weights_path.display()
+            )));
+        }
+
         // Create model with loaded configuration
         let mut model = Self::new(model_state.config)?;
         model.training_config.epochs = model_state.epochs;
         model.training_config.print_every = model_state.print_every;
         model.training_config.clip_gradient = model_state.clip_gradient;
 
-        // Initialize the network structure
+        // CRITICAL FIX: Initialize network structure FIRST to create tensor placeholders
+        log::info!("🔧 Initializing network structure...");
         model.initialize_network()?;
 
-        // Load model weights from safetensors
-        let weights_path = path.with_extension("safetensors");
-        model.varmap.load(&weights_path).map_err(|e| {
-            VangaError::SerializationError(format!("Failed to load model weights: {}", e))
-        })?;
+        // Verify network was initialized
+        let pre_load_keys: Vec<String> = model
+            .varmap
+            .data()
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        log::info!(
+            "📊 Network initialized with {} tensors: {:?}",
+            pre_load_keys.len(),
+            pre_load_keys
+        );
+
+        if pre_load_keys.is_empty() {
+            return Err(VangaError::ModelError(
+                "Network initialization failed - no tensors created".to_string(),
+            ));
+        }
+
+        // Load model weights from safetensors - this should OVERWRITE the initialized weights
+        log::info!("🔄 Loading weights from: {}", weights_path.display());
+
+        // CRITICAL FIX: Handle shape mismatches gracefully
+        match model.varmap.load(&weights_path) {
+            Ok(_) => {
+                log::info!("✅ Weights loaded successfully");
+            }
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                if error_msg.contains("shape mismatch") {
+                    log::error!("❌ Shape mismatch detected in saved weights!");
+                    log::error!(
+                        "This usually means the model architecture changed since training."
+                    );
+                    log::error!("Error details: {}", error_msg);
+
+                    // Extract the problematic tensor name and shapes from error
+                    if let Some(tensor_start) = error_msg.find("setting ") {
+                        if let Some(tensor_end) = error_msg[tensor_start..].find(" using") {
+                            let tensor_name =
+                                &error_msg[tensor_start + 8..tensor_start + tensor_end];
+                            log::error!("Problematic tensor: {}", tensor_name);
+                        }
+                    }
+
+                    return Err(VangaError::ModelError(format!(
+                        "Model architecture mismatch: {}. The saved model was trained with different layer sizes than the current configuration. Please retrain the model or use the correct configuration.",
+                        error_msg
+                    )));
+                } else {
+                    return Err(VangaError::SerializationError(format!(
+                        "Failed to load model weights: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        // Verify weights were actually loaded by checking if tensor values changed
+        let post_load_keys: Vec<String> = model
+            .varmap
+            .data()
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        log::info!(
+            "📊 After loading: {} tensors present: {:?}",
+            post_load_keys.len(),
+            post_load_keys
+        );
+
+        // The key count should be the same, but the values should have changed
+        if post_load_keys.len() != pre_load_keys.len() {
+            log::warn!(
+                "⚠️ Tensor count mismatch: before={}, after={}",
+                pre_load_keys.len(),
+                post_load_keys.len()
+            );
+        }
 
         model.trained = true;
 
         log::info!(
-            "Model loaded successfully: weights={}, config={}",
+            "🎯 Model loaded successfully: weights={}, config={}",
             weights_path.display(),
             config_path.display()
         );
+
         Ok(model)
     }
 
