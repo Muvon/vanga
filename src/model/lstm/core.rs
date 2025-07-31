@@ -6,7 +6,6 @@
 use super::config::{LSTMConfig, LSTMModel, ModelState, TrainingConfig};
 use crate::config::ModelConfig;
 use crate::model::attention::MultiHeadAttention;
-use crate::model::loss::CryptoLossFunction;
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::{DType, Device};
@@ -34,22 +33,19 @@ impl LSTMModel {
             varmap: VarMap::new(),
             training_config,
             trained: false,
-            loss_function: CryptoLossFunction::MSE, // Default to MSE
-            target_context: None,                   // No target context by default
-            training_class_weights: None,           // No global weights initially
-            validation_class_weights: None,         // No validation weights initially
-            architecture: None,                     // No architecture info by default
-            dropout_config: None,                   // No dropout config by default
-            dual_loss_system: None,                 // No dual loss system initially
-            regime_metrics_collector: None,         // No metrics collector initially
-            stored_val_sequences: None,             // No stored validation data initially
-            stored_val_targets: None,               // No stored validation targets initially
+            target_context: None,           // No target context by default
+            training_class_weights: None,   // No global weights initially
+            validation_class_weights: None, // No validation weights initially
+            architecture: None,             // No architecture info by default
+            dropout_config: None,           // No dropout config by default
+            stored_val_sequences: None,     // No stored validation data initially
+            stored_val_targets: None,       // No stored validation targets initially
             stored_test_sequences: ndarray::Array3::zeros((0, 1, 1)), // Empty test sequences
             stored_test_targets: ndarray::Array2::zeros((0, 1)), // Empty test targets
-            xgboost_model: None,                    // No XGBoost model initially
-            best_model_varmap: None,                // No best model state initially
-            best_validation_loss: None,             // No best validation loss initially
-            best_epoch: None,                       // No best epoch initially
+            xgboost_model: None,            // No XGBoost model initially
+            best_model_varmap: None,        // No best model state initially
+            best_validation_loss: None,     // No best validation loss initially
+            best_epoch: None,               // No best epoch initially
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -180,9 +176,7 @@ impl LSTMModel {
         // Configure dropout
         model.configure_dropout(&model_config.dropout);
 
-        // Configure loss function
-        model.loss_function = model_config.loss_function.clone();
-
+        // Loss function is now hardcoded to NLL - no configuration needed
         // Store architecture information for bidirectional detection
         model.architecture = Some(model_config.architecture.clone());
 
@@ -486,7 +480,7 @@ impl LSTMModel {
         std::fs::write(&config_path, encoded)
             .map_err(|e| VangaError::IoError(format!("Failed to write config file: {}", e)))?;
 
-        log::info!(
+        log::debug!(
             "Model saved successfully: weights={}, config={}",
             weights_path.display(),
             config_path.display()
@@ -650,7 +644,7 @@ impl LSTMModel {
     /// Save current model weights as the best checkpoint
     /// Called when validation loss improves during training
     pub fn save_best_checkpoint(&mut self, validation_loss: f64, epoch: usize) -> Result<()> {
-        log::info!(
+        log::debug!(
             "💾 Saving best model checkpoint at epoch {} with validation loss: {:.6}",
             epoch + 1,
             validation_loss

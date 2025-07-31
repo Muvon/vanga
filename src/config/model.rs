@@ -1,4 +1,3 @@
-use crate::model::loss::CryptoLossFunction;
 use serde::{Deserialize, Serialize};
 
 /// Unified number of classes for all target types in the 5-class system
@@ -102,9 +101,6 @@ pub struct ModelConfig {
 
     /// TFT Quantile regression configuration
     pub quantile_outputs: Option<TFTQuantileOutputConfig>,
-
-    /// Loss function configuration for multi-target training
-    pub loss_function: CryptoLossFunction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,7 +322,6 @@ impl Default for ModelConfig {
             xgboost: XGBoostConfig::default(), // XGBoost disabled by default
             targets: TargetsConfig::default(), // Use new unified config
             quantile_outputs: None,            // Disabled by default for backward compatibility
-            loss_function: CryptoLossFunction::MSE, // Use explicit MSE default
         }
     }
 }

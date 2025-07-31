@@ -56,7 +56,6 @@ mod tests {
     use crate::config::training::ClassWeightStrategy;
     use crate::config::training::OptimizerType;
     use crate::config::training::{EpochConfig, LearningRateConfig, TrainingParams};
-    use crate::model::CryptoLossFunction;
     use candle_core::Tensor;
     use ndarray::{Array2, Array3};
 
@@ -511,7 +510,6 @@ mod tests {
             xgboost: crate::config::model::XGBoostConfig::default(),
             targets: TargetsConfig::default(),
             quantile_outputs: None,
-            loss_function: CryptoLossFunction::MSE,
         };
 
         // Create model with bidirectional architecture
@@ -573,7 +571,6 @@ mod tests {
             },
             targets: TargetsConfig::default(),
             quantile_outputs: None,
-            loss_function: CryptoLossFunction::MSE,
             xgboost: crate::config::model::XGBoostConfig::default(),
         };
 
@@ -673,7 +670,6 @@ mod tests {
             },
             targets: TargetsConfig::default(),
             quantile_outputs: None,
-            loss_function: CryptoLossFunction::MSE,
             xgboost: crate::config::model::XGBoostConfig::default(),
         };
 
@@ -729,7 +725,6 @@ mod tests {
             },
             targets: TargetsConfig::default(),
             quantile_outputs: None,
-            loss_function: CryptoLossFunction::MSE,
             xgboost: crate::config::model::XGBoostConfig::default(),
         };
 
