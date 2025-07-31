@@ -314,6 +314,12 @@ impl ModelTrainer {
                                             .map(|&actual| actual.round() as i32)
                                             .collect();
 
+                                        // Debug: Log lengths to verify fix
+                                        log::debug!(
+                                            "   🔍 Target '{}': {} predictions vs {} targets (should match)",
+                                            target_name, pred_classes.len(), actual_classes.len()
+                                        );
+
                                         // Calculate classification metrics using existing infrastructure
                                         match crate::utils::metrics::calculate_classification_metrics(&pred_classes, &actual_classes) {
                                             Ok(metrics) => {
@@ -484,13 +490,6 @@ impl ModelTrainer {
             )));
         }
 
-        if window.val_data.targets.valid_indices.is_empty() {
-            return Err(VangaError::DataError(format!(
-                "No valid validation samples in window {} - check chronological split",
-                window.window_id + 1
-            )));
-        }
-
         // Extract target names from prepared data for multi-model architecture
         let target_names = &window.train_data.targets.target_names;
         log::info!(
@@ -513,27 +512,58 @@ impl ModelTrainer {
         // Extract raw integer targets for multi-model architecture (each column → separate LSTM)
         let train_targets =
             extract_targets_for_multi_model(&window.train_data.targets, target_names)?;
-        let val_targets = extract_targets_for_multi_model(&window.val_data.targets, target_names)?;
+
+        // Handle different operations: training/validation vs test evaluation
+        let second_targets = if operation == "test_evaluation" {
+            // For test evaluation, extract test targets instead of validation targets
+            if window.test_data.targets.valid_indices.is_empty() {
+                return Err(VangaError::DataError(format!(
+                    "No valid test samples in window {} - check test data split",
+                    window.window_id + 1
+                )));
+            }
+            extract_targets_for_multi_model(&window.test_data.targets, target_names)?
+        } else {
+            // For training/validation operations, extract validation targets
+            if window.val_data.targets.valid_indices.is_empty() {
+                return Err(VangaError::DataError(format!(
+                    "No valid validation samples in window {} - check chronological split",
+                    window.window_id + 1
+                )));
+            }
+            extract_targets_for_multi_model(&window.val_data.targets, target_names)?
+        };
 
         // Validate target alignment
-        if train_targets.shape()[1] != val_targets.shape()[1] {
+        if train_targets.shape()[1] != second_targets.shape()[1] {
             return Err(VangaError::DataError(format!(
-                "Target dimension mismatch: train {} vs validation {} targets",
+                "Target dimension mismatch: train {} vs {} {} targets",
                 train_targets.shape()[1],
-                val_targets.shape()[1]
+                if operation == "test_evaluation" {
+                    "test"
+                } else {
+                    "validation"
+                },
+                second_targets.shape()[1]
             )));
         }
 
+        let data_type = if operation == "test_evaluation" {
+            "test"
+        } else {
+            "validation"
+        };
         log::info!(
-            "Window {} {}: {} train samples x {} outputs, {} validation samples",
+            "Window {} {}: {} train samples x {} outputs, {} {} samples",
             window.window_id + 1,
             operation,
             train_targets.shape()[0],
             train_targets.shape()[1],
-            val_targets.shape()[0]
+            second_targets.shape()[0],
+            data_type
         );
 
-        Ok((train_targets, val_targets))
+        Ok((train_targets, second_targets))
     }
 
     /// Get existing multi-target model or create new one based on training configuration

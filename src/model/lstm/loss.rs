@@ -1376,7 +1376,7 @@ impl LSTMModel {
         };
 
         log::info!(
-            "📊 Categorical Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
+            "📊 Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
             target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
         );
 
