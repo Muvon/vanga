@@ -558,6 +558,7 @@ impl LSTMModel {
         // Initialize early stopping variables (only used with validation)
         let mut best_val_loss = f64::INFINITY;
         let mut early_stopping_counter = 0;
+        let mut checkpoint_restored = false; // Track if we already restored checkpoint
 
         // FIXED: Adaptive early stopping configuration based on target types
         let (early_stopping_patience, early_stopping_min_delta) = if use_validation {
@@ -988,6 +989,11 @@ impl LSTMModel {
                         improvement,
                         early_stopping_min_delta
                     );
+
+                    // Save the best model checkpoint
+                    if let Err(e) = self.save_best_checkpoint(val_loss as f64, epoch) {
+                        log::error!("Failed to save best model checkpoint: {}", e);
+                    }
                 } else {
                     early_stopping_counter += 1;
                     log::debug!(
@@ -1005,6 +1011,13 @@ impl LSTMModel {
                             best_val_loss,
                             early_stopping_min_delta
                         );
+
+                        // Restore best model weights before breaking
+                        if let Err(e) = self.restore_best_checkpoint() {
+                            log::error!("Failed to restore best model checkpoint: {}", e);
+                        }
+                        checkpoint_restored = true;
+
                         break;
                     }
                 }
@@ -1111,6 +1124,20 @@ impl LSTMModel {
         }
 
         self.trained = true;
+
+        // After training completes, restore best model weights if available
+        // This ensures we use the best weights even if training completed all epochs
+        if self.best_model_varmap.is_some() && !checkpoint_restored {
+            log::info!(
+                "🎯 Training completed. Restoring best model from epoch {} (val loss: {:.6})",
+                self.best_epoch.map(|e| e + 1).unwrap_or(0),
+                self.best_validation_loss.unwrap_or(0.0)
+            );
+            if let Err(e) = self.restore_best_checkpoint() {
+                log::error!("Failed to restore best model checkpoint: {}", e);
+            }
+        }
+
         log::info!("✅ Unified LSTM training completed successfully");
 
         // Calculate final training metrics - use classification accuracy for categorical targets

@@ -153,6 +153,13 @@ pub struct LSTMModel {
     pub regime_metrics_collector: Option<crate::model::regime_metrics::RegimeMetricsCollector>,
     /// None if XGBoost is disabled in configuration
     pub xgboost_model: Option<crate::model::xgboost::XGBoostRegressor>,
+    /// Best model weights saved during training (for early stopping)
+    /// Stores the VarMap state when validation loss improves
+    pub best_model_varmap: Option<VarMap>,
+    /// Best validation loss achieved during training
+    pub best_validation_loss: Option<f64>,
+    /// Epoch at which best validation loss was achieved
+    pub best_epoch: Option<usize>,
 }
 
 /// Serializable model state for persistence - SAME as original
