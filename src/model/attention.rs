@@ -167,8 +167,8 @@ impl MultiHeadAttention {
         let attended_output = self.reshape_from_attention(&attended_values, batch_size, seq_len)?;
         let mut output = self.output_projection.forward(&attended_output)?;
 
-        // Apply consistent dropout to output (controlled by config)
-        if self.config.dropout_output && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to output (controlled by config AND training mode)
+        if self.config.dropout_output && self.config.dropout_rate > 0.0 && training {
             output = ops::dropout(&output, self.config.dropout_rate as f32)?;
             log::debug!(
                 "🔧 Applied MultiHead attention output dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
@@ -225,7 +225,7 @@ impl MultiHeadAttention {
         queries: &Tensor,
         keys: &Tensor,
         seq_len: usize,
-        _training: bool,
+        training: bool,
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
         let scale = (self.head_dim as f64).sqrt() as f32;
@@ -254,8 +254,8 @@ impl MultiHeadAttention {
         // Apply softmax to get attention weights
         let mut attention_weights = ops::softmax(&attention_scores, 3)?.contiguous()?;
 
-        // Apply consistent dropout to attention weights (controlled by config)
-        if self.config.dropout_weights && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to attention weights (controlled by config AND training mode)
+        if self.config.dropout_weights && self.config.dropout_rate > 0.0 && training {
             attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
             log::debug!(
                 "🔧 Applied MultiHead attention weights dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
@@ -469,8 +469,8 @@ impl AdditiveAttention {
         // Apply softmax to get attention weights
         let mut attention_weights = ops::softmax_last_dim(&optimized_scores)?;
 
-        // Apply consistent dropout to attention weights (controlled by config)
-        if self.config.dropout_weights && self.config.dropout_rate > 0.0 {
+        // Apply consistent dropout to attention weights (controlled by config AND training mode)
+        if self.config.dropout_weights && self.config.dropout_rate > 0.0 && training {
             attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
             log::debug!(
                 "🔧 Applied Additive attention weights dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",

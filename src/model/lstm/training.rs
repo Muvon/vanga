@@ -312,6 +312,9 @@ impl LSTMModel {
         if self.lstm_layers.is_none() || self.output_layer.is_none() {
             log::info!("🆕 FRESH TRAINING: Initializing new LSTM network layers and weights");
             self.initialize_network()?;
+
+            // Apply Xavier initialization for fresh training
+            self.apply_xavier_initialization()?;
         } else {
             log::info!("🔄 CONTINUE TRAINING: Reusing existing LSTM network layers and weights (NO reinitialization)");
             log::info!(
