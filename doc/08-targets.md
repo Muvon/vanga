@@ -11,7 +11,8 @@ The VANGA LSTM cryptocurrency forecasting system implements a comprehensive mult
 VANGA now implements proper weighted multi-target loss calculation to address the critical issue of naive MSE summation:
 
 ```rust
-// Enhanced LSTM with CryptoLossFunction integration
+// Enhanced modular LSTM with CryptoLossFunction integration
+// Implemented in src/model/lstm/loss.rs
 impl LSTMModel {
     /// Calculate loss using configured loss function or default MSE
     fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {

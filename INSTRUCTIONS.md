@@ -58,98 +58,138 @@ remember(["task context", "similar issues"])
 src/
 ├── api/           # High-level training/prediction APIs
 │   ├── trainer.rs     # Training pipeline orchestration
-│   └── predictor.rs   # Prediction pipeline orchestration
+│   ├── predictor.rs   # Prediction pipeline orchestration
+│   └── backtester.rs  # Backtesting framework
 ├── model/         # LSTM implementations
-│   ├── lstm/          # Modular LSTM implementation (NEW STRUCTURE)
-│   │   ├── config.rs      # Configuration structs and validation
+│   ├── lstm/          # Modular LSTM implementation (CURRENT STRUCTURE)
+│   │   ├── config.rs      # LSTMConfig, OptimizerWrapper, TargetFormat
 │   │   ├── core.rs        # Model lifecycle and initialization
-│   │   ├── training.rs    # Training pipeline (MAIN TRAINING LOGIC)
+│   │   ├── training.rs    # THE unified training method (MAIN LOGIC)
 │   │   ├── inference.rs   # Prediction and forward pass
 │   │   ├── loss.rs        # Loss calculation and metrics
+│   │   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   │   └── mod.rs         # Public API and re-exports
-│   ├── lstm_simple.rs # Compatibility layer (re-exports from lstm/)
-│   └── multi_target.rs # Multi-target wrapper
+│   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
+│   ├── multi_target.rs # Multi-target wrapper
+│   ├── attention.rs   # Multi-head attention mechanisms
+│   └── loss.rs        # Composite loss functions
 ├── features/      # Feature engineering
-│   ├── technical.rs   # Technical indicators
-│   └── cross_asset.rs # Cross-asset features
+│   ├── technical.rs   # 50+ technical indicators
+│   ├── cross_asset.rs # Cross-asset features
+│   └── engineering.rs # Feature engineering pipeline
 ├── data/          # Data loading and preprocessing
 │   ├── loader.rs      # CSV loading and validation
 │   ├── preprocessor.rs # Feature normalization (CRITICAL)
 │   ├── sequence.rs    # Sequence generation
-│   └── schema.rs      # Data schema definitions
+│   ├── schema.rs      # Data schema definitions
+│   ├── structures.rs  # Data structures
+│   └── target_converter.rs # Target conversion utilities
 ├── targets/       # Target generation (CRITICAL)
 │   ├── mod.rs         # Target orchestration
-│   └── price_levels.rs # Price level classification
+│   └── price_levels.rs # VWAP-weighted range analysis (5-class system)
 ├── config/        # Configuration management
-│   ├── training.rs    # Training parameters
-│   └── features.rs    # Feature configurations
+│   ├── training.rs    # TrainingConfig, TrainingParams, 9 optimizers
+│   ├── features.rs    # Feature configurations
+│   ├── model.rs       # Model architecture configurations
+│   └── mod.rs         # Configuration coordination
+├── optimization/  # Optimization and feature selection
+│   └── feature_selection.rs # Feature selection algorithms
 └── utils/         # Utilities and error handling
-    └── error.rs       # Error types and handling
+    ├── error.rs       # VangaError types and handling
+    └── metrics.rs     # Evaluation metrics
 ```
 
 ## 🔄 CRITICAL: Training vs Prediction Data Flow
 
 ### Training Pipeline Architecture
 ```
-Raw CSV Data → Target Generation → Feature Engineering → Normalization → Sequences → Training
-     ↓              ↓                    ↓               ↓            ↓         ↓
-  OHLCV Data    Price Levels      Technical Indicators  Stats Saved  LSTM Input  Model
+Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Target Generation → Sequence Creation → Multi-Model Training
+    ↓           ↓                    ↓             ↓                ↓                  ↓                ↓
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   3×5 Targets      Sequences      N×LSTMModel
 ```
 
 ### Prediction Pipeline Architecture
 ```
-Raw CSV Data → Feature Engineering → Normalization (SAME STATS) → Sequences → Prediction
-     ↓              ↓                    ↓                        ↓         ↓
-  OHLCV Data    Technical Indicators  Stats Loaded            LSTM Input  Results
+Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Sequence Creation → Multi-Model Prediction
+    ↓           ↓                    ↓             ↓                ↓                  ↓
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences         N×Predictions
 ```
 
-### ⚠️ CRITICAL CONSISTENCY REQUIREMENTS
+### Key Data Flow Details
+- **No Global Normalization**: Uses per-sequence processing approach
+- **Feature Engineering**: Applied before any other processing
+- **NaN Removal**: Critical step to remove lag feature warmup period
+- **Target Independence**: Each target type calculated independently from sequences
+- **Multi-Model Coordination**: MultiTargetLSTMModel manages separate models per target×horizon
+
+### ⚠️ CRITICAL ARCHITECTURE REQUIREMENTS
+
+#### Multi-Model Architecture
+- **Single LSTMModel Limitation**: Each `LSTMModel` handles only ONE target (5 categorical outputs)
+- **MultiTargetLSTMModel Solution**: Wraps multiple `LSTMModel` instances (one per target×horizon)
+- **Example**: 3 targets × 2 horizons = 6 separate `LSTMModel` instances
+- **Training Coordination**: `TrainingContext` manages training across all models
+- **Prediction Aggregation**: Combines predictions from all individual models
 
 #### Target Generation (Training Only)
-- **Location**: `src/targets/price_levels.rs::calculate_price_level_targets()`
-- **Method**: Uses **percentage-based quantiles** (NOT raw prices)
-- **Why Critical**: Ensures symbol-agnostic classification difficulty
-- **Example**: All symbols use `[-2%, -1%, 0%, +1%, +2%]` boundaries
-- **Result**: Comparable validation losses across all trading pairs
+- **3 Target Types**: Price levels, direction, volatility - each independent
+- **5-Class System**: Each target outputs 5 categorical classes (`NUM_CLASSES = 5`)
+- **Sequence-Based**: All targets calculated from sequence data, not market regimes
+- **VWAP-Weighted**: Price levels use volume-weighted analysis for accuracy
+- **Total Output**: 3 targets × 5 classes = 15 outputs per prediction
 
-#### Feature Normalization (Both Training & Prediction)
-- **Training**: `src/data/preprocessor.rs` calculates and saves normalization stats
-- **Prediction**: `src/data/preprocessor.rs` loads and applies SAME stats
-- **Critical Rule**: Prediction must use training normalization parameters
-- **Storage**: Normalization stats saved with model for consistency
+#### Data Processing Consistency
+- **No Global Normalization**: Uses per-sequence processing approach
+- **Feature Engineering First**: Technical indicators applied before any processing
+- **NaN Removal Critical**: Must remove lag feature warmup period
+- **Outlier Handling**: Applied after feature engineering, before target generation
+- **Sequence Alignment**: Targets must align with sequence indices, not raw data indices
 
 ### Key Files to Know
 
-#### `src/model/lstm/` - MODULAR LSTM (NEW STRUCTURE)
-- **training.rs**: `pub async fn train()` - THE method to enhance (main training logic)
-- **loss.rs**: Loss calculation with `calculate_weighted_soft_crossentropy_loss()`
-- **config.rs**: LSTMConfig, TrainingConfig, OptimizerWrapper (all 9 optimizers)
-- **core.rs**: Model lifecycle, initialization, persistence methods
-- **inference.rs**: `predict()` method and forward pass implementation
-- **mod.rs**: Public API with full backward compatibility via re-exports
+#### `src/model/lstm/` - SINGLE LSTM MODEL (Core Implementation)
+- **training.rs**: `pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>, config: &TrainingConfig, val_sequences: Option<&Array3<f64>>, val_targets: Option<&Array2<f64>>, class_weights: Option<&Vec<f32>>) -> Result<()>` - THE unified training method
+- **config.rs**: `LSTMConfig`, `OptimizerWrapper` (9 optimizers), `TargetFormat` - Single model configuration
+- **core.rs**: Model lifecycle, initialization, persistence, Xavier initialization
+- **inference.rs**: `predict()` method - Single model prediction
+- **loss.rs**: Loss calculation with weighted cross-entropy for single target
+- **Limitation**: Can only handle ONE target at a time (hence the wrapper)
+
+#### `src/model/multi_target.rs` - MULTI-LSTM WRAPPER
+- **Purpose**: Wraps multiple `LSTMModel` instances to overcome single-target limitation
+- **Architecture**: Creates separate `LSTMModel` for each target×horizon combination
+- **Example**: 3 targets × 2 horizons = 6 separate `LSTMModel` instances
+- **Training**: `TrainingContext` coordinates training across all models
+- **Prediction**: Aggregates predictions from all individual models
 
 #### `src/model/lstm_simple.rs` - COMPATIBILITY LAYER
-- **Current role**: Just `pub use crate::model::lstm::*;` for backward compatibility
-- **All existing code**: Works unchanged due to re-exports
+- **Implementation**: `pub use crate::model::lstm::*;` - Pure re-export
+- **Purpose**: Maintains backward compatibility for existing code
 
-#### `src/model/multi_target.rs`
-- **Wrapper around lstm_simple**: Trains multiple models for different targets
-- **Chronological validation**: `train_with_chronological_validation()` for time-series data
-- **Symbol-specific**: Each trading pair gets its own model
+#### `src/targets/` - TARGET GENERATION (3 Targets × 5 Classes Each)
+- **Architecture**: 3 independent target types, each with 5 categorical outputs
+- **price_levels.rs**: VWAP-weighted range analysis (5-class: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up)
+- **direction.rs**: Directional movement classification (5-class categorical)
+- **volatility.rs**: Volatility regime classification (5-class categorical)
+- **mod.rs**: `TargetGenerator` orchestrates all 3 target types
+- **Output Structure**: `NUM_CLASSES = 5` for each target type
+- **Sequence-based**: All targets calculated from sequence data, independent of market/regime
+- **Total Output**: 3 targets × 5 classes = 15 total outputs per prediction
 
-#### `src/config/training.rs`
-- **Training parameters**: Epochs, learning rate, batch size, validation splits
-- **Optimizer configuration**: 9 available optimizers (AdamW, SGD, Adam, AdaDelta, AdaGrad, AdaMax, NAdam, RAdam, RMSprop)
-- **Validation methods**: `validate()` and `validate_for_symbols()` with optimizer parameter validation
-- **Auto-optimization**: Intelligent parameter tuning configurations
+#### `src/config/training.rs` - TRAINING CONFIGURATION
+- **TrainingConfig**: Complete pipeline configuration coordinator
+- **TrainingParams**: 9 optimizers (AdamW, SGD, Adam, AdaDelta, AdaGrad, AdaMax, NAdam, RAdam, RMSprop)
+- **DataConfig**: Outlier handling, feature processing configuration
+- **OptimizationConfig**: Hyperparameter optimization settings
+- **DeviceConfig**: CPU/GPU device selection
+- **EpochConfig**: Auto early stopping or fixed epochs
 
-#### `src/targets/price_levels.rs` - CRITICAL TARGET GENERATION
-- **Price level classification**: Percentage-based quantile targets (4-6 bins)
-- **Symbol-agnostic**: Uses percentage changes, NOT raw prices
-- **Method**: `calculate_price_level_targets()` - THE method for target generation
-- **Critical Fix**: Ensures comparable classification difficulty across all symbols
-- **Class distribution analysis**: `analyze_class_distribution()` for imbalance detection
-- **Integration**: Works with class weighting and label smoothing
+#### `src/data/preprocessor.rs` - DATA PROCESSING
+- **process_features_only()**: Feature engineering without global normalization
+- **remove_nan_rows()**: Critical NaN removal for lag features
+- **Outlier handling**: IQR and Z-score methods
+- **No global normalization**: Uses per-sequence approach
+- **Feature engineering integration**: Applies technical indicators first
 
 #### `src/data/preprocessor.rs` - CRITICAL NORMALIZATION
 - **Feature normalization**: Z-score normalization with saved statistics
@@ -158,12 +198,28 @@ Raw CSV Data → Feature Engineering → Normalization (SAME STATS) → Sequence
 - **Consistency rule**: Prediction MUST use training normalization stats
 - **Storage**: Normalization stats saved with model for inference consistency
 
-#### `configs/*.toml` - 20+ CONFIGURATIONS
-- **Configuration templates**: Different scenarios (training, prediction, features)
-- **Symbol-specific**: Each trading pair can have specialized configs
-- **Feature flags**: Enable/disable functionality via configuration
-- **Optimizer examples**: All 9 optimizers with crypto-specific recommendations
-- **Recent additions**: Cross-asset training, TFT enhanced, backtest configs
+#### `configs/*.toml` - 30+ CONFIGURATIONS
+- **training.toml**: Main configuration with all 9 optimizers documented
+- **optimizer_examples/**: 9 optimizer-specific configurations (adamw_crypto_optimized.toml, etc.)
+- **quick_start.toml**: Beginner-friendly minimal setup
+- **cross_asset_training.toml**: Multi-asset correlation analysis
+- **hybrid_training.toml**: XGBoost + TFT integration examples
+- **backtest.toml**: Backtesting framework configuration
+
+#### Configuration Structure Example:
+```toml
+[training]
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+epochs = { Auto = { max_epochs = 1000 } }
+batch_size = { Auto = { min_size = 16, max_size = 128 } }
+
+[model]
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+
+[data]
+outlier_handling = { enabled = true, method = "IQR", threshold = 3.0 }
+```
 
 ## 🔧 Common Task Patterns
 

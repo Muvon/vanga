@@ -6,7 +6,7 @@ Comprehensive evaluation framework for assessing LSTM model performance across d
 
 ### **Metrics System Overview**
 ```rust
-// Implemented in src/utils/metrics.rs
+// Implemented in src/utils/metrics.rs with modular LSTM integration
 pub fn calculate_classification_metrics(predictions: &[i32], targets: &[i32]) -> Result<EvaluationMetrics> {
     if predictions.len() != targets.len() {
         return Err(VangaError::InvalidParameter {
