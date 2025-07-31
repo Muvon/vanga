@@ -47,6 +47,9 @@ impl LSTMModel {
             stored_test_sequences: ndarray::Array3::zeros((0, 1, 1)), // Empty test sequences
             stored_test_targets: ndarray::Array2::zeros((0, 1)), // Empty test targets
             xgboost_model: None,                    // No XGBoost model initially
+            best_model_varmap: None,                // No best model state initially
+            best_validation_loss: None,             // No best validation loss initially
+            best_epoch: None,                       // No best epoch initially
         })
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
@@ -642,5 +645,125 @@ impl LSTMModel {
         // For now, single models default to 1h
         // TODO: Store actual trained horizons in model metadata
         vec!["1h".to_string()]
+    }
+
+    /// Save current model weights as the best checkpoint
+    /// Called when validation loss improves during training
+    pub fn save_best_checkpoint(&mut self, validation_loss: f64, epoch: usize) -> Result<()> {
+        log::info!(
+            "💾 Saving best model checkpoint at epoch {} with validation loss: {:.6}",
+            epoch + 1,
+            validation_loss
+        );
+
+        // Store validation metrics
+        self.best_validation_loss = Some(validation_loss);
+        self.best_epoch = Some(epoch);
+
+        // Create a unique checkpoint path
+        let checkpoint_dir = std::env::temp_dir().join("vanga_checkpoints");
+        std::fs::create_dir_all(&checkpoint_dir)
+            .map_err(|e| VangaError::IoError(format!("Failed to create checkpoint dir: {}", e)))?;
+
+        let checkpoint_path = checkpoint_dir.join(format!(
+            "best_model_{}_{}.safetensors",
+            std::process::id(),
+            epoch
+        ));
+
+        // Save the entire model state using the existing save method
+        self.save(&checkpoint_path)?;
+
+        // Store the checkpoint path for later restoration
+        // We'll use a marker VarMap to indicate a checkpoint exists
+        self.best_model_varmap = Some(VarMap::new());
+
+        // Save checkpoint path to a metadata file
+        let metadata_path =
+            checkpoint_dir.join(format!("best_model_{}_metadata.txt", std::process::id()));
+        let metadata = format!(
+            "{}\n{}\n{}",
+            checkpoint_path.to_string_lossy(),
+            epoch,
+            validation_loss
+        );
+        std::fs::write(&metadata_path, metadata).map_err(|e| {
+            VangaError::IoError(format!("Failed to save checkpoint metadata: {}", e))
+        })?;
+
+        log::debug!(
+            "✅ Best model checkpoint saved to: {}",
+            checkpoint_path.display()
+        );
+
+        Ok(())
+    }
+
+    /// Restore model weights from the best checkpoint
+    /// Called when early stopping triggers to use best weights instead of last
+    pub fn restore_best_checkpoint(&mut self) -> Result<()> {
+        if self.best_model_varmap.is_some() {
+            log::info!(
+                "🔄 Restoring best model checkpoint from epoch {} (val loss: {:.6})",
+                self.best_epoch.map(|e| e + 1).unwrap_or(0),
+                self.best_validation_loss.unwrap_or(0.0)
+            );
+
+            // Read checkpoint metadata
+            let checkpoint_dir = std::env::temp_dir().join("vanga_checkpoints");
+            let metadata_path =
+                checkpoint_dir.join(format!("best_model_{}_metadata.txt", std::process::id()));
+
+            if metadata_path.exists() {
+                let metadata = std::fs::read_to_string(&metadata_path).map_err(|e| {
+                    VangaError::IoError(format!("Failed to read checkpoint metadata: {}", e))
+                })?;
+                let lines: Vec<&str> = metadata.lines().collect();
+
+                if !lines.is_empty() {
+                    let checkpoint_path = std::path::Path::new(lines[0]);
+                    let weights_path = checkpoint_path.with_extension("safetensors");
+
+                    if weights_path.exists() {
+                        // Instead of loading into the existing VarMap (which can cause tensor mismatch),
+                        // we create a new VarMap and swap it
+                        let mut new_varmap = VarMap::new();
+                        new_varmap.load(&weights_path).map_err(|e| {
+                            VangaError::ModelError(format!(
+                                "Failed to load checkpoint weights: {}",
+                                e
+                            ))
+                        })?;
+
+                        // Replace the current varmap with the loaded one
+                        self.varmap = new_varmap;
+
+                        log::info!(
+                            "✅ Best model weights restored successfully from: {}",
+                            weights_path.display()
+                        );
+
+                        // Clean up checkpoint files
+                        let _ = std::fs::remove_file(&weights_path);
+                        let _ = std::fs::remove_file(checkpoint_path.with_extension("config"));
+                        let _ = std::fs::remove_file(&metadata_path);
+                    } else {
+                        log::warn!(
+                            "⚠️ Checkpoint weights file not found: {}",
+                            weights_path.display()
+                        );
+                    }
+                } else {
+                    log::warn!("⚠️ Invalid checkpoint metadata format");
+                }
+            } else {
+                log::warn!("⚠️ No checkpoint metadata file found");
+            }
+
+            Ok(())
+        } else {
+            log::warn!("⚠️ No best model checkpoint available to restore");
+            Ok(())
+        }
     }
 }
