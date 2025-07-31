@@ -308,6 +308,48 @@ use_relative_position = true                   # Include position encoding
 - **Many heads (12-16)**: Complex patterns, cross-asset relationships
 - **Temperature scaling**: Lower (0.5-0.8) for sharper attention, higher (1.2-2.0) for softer
 
+### **🤖 NEW: Hybrid Model Integration**
+
+#### **XGBoost Integration**
+```toml
+[model.xgboost]
+enabled = true                                 # Enable XGBoost hybrid model
+phase = "Second"                               # Use XGBoost in second phase (after LSTM)
+n_estimators = 100                             # Number of boosting rounds
+max_depth = 6                                  # Maximum tree depth
+learning_rate = 0.1                           # XGBoost learning rate
+subsample = 0.8                               # Subsample ratio
+colsample_bytree = 0.8                        # Feature subsample ratio
+
+# Target-specific XGBoost configuration
+[model.xgboost.targets]
+price_levels = { objective = "multi:softprob", eval_metric = "mlogloss" }
+direction = { objective = "binary:logistic", eval_metric = "logloss" }
+volatility = { objective = "reg:squarederror", eval_metric = "rmse" }
+```
+
+#### **TFT (Temporal Fusion Transformer) Integration**
+```toml
+[model.tft]
+enabled = true                                 # Enable TFT integration
+variable_selection = true                      # Enable variable selection network
+attention_heads = 4                           # Number of attention heads
+hidden_size = 128                             # Hidden layer size
+dropout = 0.1                                 # TFT dropout rate
+
+# Quantile outputs for uncertainty estimation
+[model.tft.quantile_outputs]
+enabled = true                                 # Enable quantile regression
+quantiles = [0.1, 0.5, 0.9]                  # Prediction quantiles
+loss_weights = [0.3, 0.4, 0.3]               # Loss weights per quantile
+
+# Variable selection configuration
+[model.tft.variable_selection]
+attention_mechanism = "MultiHeadAttention"     # Attention type
+selection_threshold = 0.1                     # Variable importance threshold
+max_variables = 50                            # Maximum selected variables
+```
+
 ### **Output Heads Configuration**
 
 ```toml
@@ -640,6 +682,40 @@ lag_periods = [1, 2, 3, 5, 10, 15, 30]  # More lags
 - Use `--config` parameter to specify configuration file
 - Monitor training logs for parameter validation messages
 - Test with small datasets before scaling up
+
+---
+
+## 🏗️ **NEW: Modular Architecture Configuration**
+
+### **Architecture Overview**
+
+VANGA now uses a **modular LSTM architecture** with focused modules:
+
+```
+src/model/lstm/
+├── config.rs      # Configuration structs and validation
+├── core.rs        # Model lifecycle and initialization
+├── training.rs    # Unified training method (THE main training logic)
+├── inference.rs   # Prediction pipeline
+├── loss.rs        # Loss calculation and metrics
+└── mod.rs         # Public API with backward compatibility
+```
+
+### **Configuration Impact**
+
+The modular architecture provides:
+
+- **Unified Training**: Single training method handles all scenarios via configuration
+- **9 Modern Optimizers**: Full optimizer support with proper configuration validation
+- **Backward Compatibility**: All existing configurations work unchanged
+- **Enhanced Validation**: Better error messages and parameter validation
+
+### **Migration Notes**
+
+- **No changes required**: Existing TOML files work as-is
+- **Enhanced features**: New optimizers and hybrid models available
+- **Better performance**: Improved training efficiency and memory usage
+- **Cleaner code**: Modular structure improves maintainability
 
 ---
 

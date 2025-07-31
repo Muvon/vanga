@@ -213,4 +213,17 @@ early_stopping_patience = 50
 
 **⚡ For benchmarking tools, see**: `scripts/README.md`
 
+---
+
+## 🏗️ **NEW: Modular Architecture Compatibility**
+
+All optimizer configurations work seamlessly with VANGA's new **modular LSTM architecture**:
+
+- **Unified Training**: Single training method handles all optimizers via configuration
+- **Enhanced Validation**: Better parameter validation and error messages
+- **Backward Compatibility**: All existing optimizer configurations work unchanged
+- **Improved Performance**: Modular structure provides better training efficiency
+
+**Implementation Location**: `src/model/lstm/training.rs` - THE unified training method
+
 **Start here, and only change if you have specific requirements or benchmark results suggest otherwise.**

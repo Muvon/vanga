@@ -10,7 +10,7 @@ VANGA includes a comprehensive technical indicators engine with 50+ professional
 
 ### **Core Implementation**
 ```rust
-// Implemented in src/features/technical.rs
+// Implemented in src/features/technical.rs - integrates with modular LSTM architecture
 pub async fn generate_technical_indicators(
     mut df: DataFrame,
     config: &TechnicalIndicatorsConfig

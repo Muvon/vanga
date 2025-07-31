@@ -42,7 +42,7 @@ During prediction, you'll see output like this:
 
 ### **Prediction Pipeline**
 ```rust
-// Implemented in src/api/predictor.rs
+// Implemented in src/api/predictor.rs with modular LSTM architecture
 impl Predictor {
     pub async fn predict(&self, model: &LSTMModel) -> Result<Array2<f64>> {
         // 1. Initialize data pipeline

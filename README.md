@@ -176,11 +176,14 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
 ## 🎯 Architecture Overview
 
 ### Core Design Principles
-- **Symbol-Agnostic**: Each trading pair gets its own specialized multi-target LSTM model
-- **Multi-Target Prediction**: Price levels, direction, and volatility with separate specialized models (0% data loss)
-- **Adaptive Feature Engineering**: Automatic feature selection and generation
-- **Multi-Model Architecture**: Separate LSTM models per target for optimal performance
-- **Zero-Parameter Tuning**: Auto-optimization using Adam optimizer with intelligent epoch management
+- **Modular LSTM Architecture**: New focused module structure (`config`, `core`, `training`, `inference`, `loss`)
+- **Unified Training System**: Single configurable training method with 9 modern optimizers
+- **Symbol-Agnostic Design**: Each trading pair gets its own specialized multi-target LSTM model
+- **Multi-Target Prediction**: Price levels, direction, and volatility with separate specialized models
+- **Configuration-Driven**: All behavior controlled via TOML configuration files
+- **Backward Compatibility**: All existing APIs preserved through compatibility layer
+- **Advanced Optimizers**: AdamW, RMSprop, NAdam, RAdam with intelligent learning rate scheduling
+- **Hybrid Models**: XGBoost integration and TFT (Temporal Fusion Transformer) support
 
 ### Required Data Format
 
@@ -387,26 +390,71 @@ For detailed parameter explanations and tuning guidance, see:
 ```
 vanga/
 ├── src/
-│   ├── api/           # Public API (train/predict)
-│   ├── config/        # Configuration management
-│   ├── data/          # Data loading & preprocessing
+│   ├── api/           # High-level training/prediction APIs
+│   │   ├── trainer.rs     # Training pipeline orchestration
+│   │   └── predictor.rs   # Prediction pipeline orchestration
+│   ├── model/         # LSTM implementations
+│   │   ├── lstm/          # Modular LSTM implementation (NEW STRUCTURE)
+│   │   │   ├── config.rs      # Configuration structs and validation
+│   │   │   ├── core.rs        # Model lifecycle and initialization
+│   │   │   ├── training.rs    # Training pipeline (MAIN TRAINING LOGIC)
+│   │   │   ├── inference.rs   # Prediction and forward pass
+│   │   │   ├── loss.rs        # Loss calculation and metrics
+│   │   │   └── mod.rs         # Public API and re-exports
+│   │   ├── lstm_simple.rs # Compatibility layer (re-exports from lstm/)
+│   │   ├── multi_target.rs # Multi-target wrapper
+│   │   ├── attention.rs   # Attention mechanisms
+│   │   ├── tft/           # Temporal Fusion Transformer integration
+│   │   └── xgboost.rs     # XGBoost hybrid models
 │   ├── features/      # Feature engineering
-│   ├── model/         # LSTM model implementation
-│   ├── targets/       # Prediction targets
-│   └── utils/         # Utilities & error handling
+│   │   ├── technical.rs   # Technical indicators
+│   │   └── cross_asset.rs # Cross-asset features
+│   ├── data/          # Data loading and preprocessing
+│   │   ├── loader.rs      # CSV loading and validation
+│   │   ├── preprocessor.rs # Feature normalization (CRITICAL)
+│   │   ├── sequence.rs    # Sequence generation
+│   │   └── schema.rs      # Data schema definitions
+│   ├── targets/       # Target generation (CRITICAL)
+│   │   ├── mod.rs         # Target orchestration
+│   │   └── price_levels.rs # Price level classification
+│   ├── config/        # Configuration management
+│   │   ├── training.rs    # Training parameters
+│   │   └── features.rs    # Feature configurations
+│   ├── optimization/  # Auto-optimization and hyperparameter tuning
+│   ├── realtime/      # Real-time data processing
+│   └── utils/         # Utilities and error handling
 ├── models/            # Trained model storage
 ├── data/              # Input data directory
-└── configs/           # Configuration files
+├── configs/           # Configuration files (20+ templates)
+│   └── optimizer_examples/ # 9 optimizer configurations
+├── scripts/           # Python automation scripts
+└── examples/          # Usage examples and guides
 ```
 
 ## 🔧 Dependencies
 
-- **rust-lstm**: Core LSTM implementation
+### Core ML & Neural Networks
+- **candle-core**: Modern Rust ML framework (GPU/Metal support)
+- **candle-nn**: Neural network layers and optimizers
+- **candle-optimisers**: 9 modern optimizers (AdamW, RMSprop, NAdam, etc.)
+- **ndarray**: Numerical computing and tensor operations
+- **linfa**: Machine learning toolkit
+
+### Data Processing & Analysis
 - **polars**: High-performance data processing
-- **ndarray**: Numerical computing
-- **ta**: Technical analysis indicators
+- **csv**: CSV file handling
+- **ta**: Technical analysis indicators (50+ indicators)
+- **statrs**: Statistical functions and distributions
+
+### Configuration & CLI
 - **clap**: Command-line interface
+- **toml**: Configuration file parsing
+- **serde**: Serialization framework
+
+### Async & Utilities
 - **tokio**: Async runtime
+- **anyhow**: Error handling
+- **chrono**: Date/time processing
 
 ## 📈 Key Features
 
