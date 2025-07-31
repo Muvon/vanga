@@ -492,6 +492,13 @@ impl LSTMModel {
         std::fs::write(&config_path, encoded)
             .map_err(|e| VangaError::IoError(format!("Failed to write config file: {}", e)))?;
 
+        // Save XGBoost model if present (hybrid model persistence)
+        if let Some(xgb_model) = &self.xgboost_model {
+            // Use the base path directly - SmartCore will add its own extensions
+            xgb_model.save_model(&path.to_string_lossy())?;
+            log::debug!("XGBoost model saved to: {}", path.display());
+        }
+
         log::debug!(
             "Model saved successfully: weights={}, config={}",
             weights_path.display(),
@@ -619,10 +626,119 @@ impl LSTMModel {
 
         model.trained = true;
 
+        // Load XGBoost model if present (hybrid model persistence)
+        let smartcore_meta_path = format!("{}.smartcore.meta", path.to_string_lossy());
+        if std::path::Path::new(&smartcore_meta_path).exists() {
+            log::info!("🔄 Loading XGBoost model from: {}", path.display());
+            match crate::model::xgboost::XGBoostRegressor::load_model(
+                &path.to_string_lossy(),
+                model.device.clone(),
+            ) {
+                Ok(xgb_model) => {
+                    model.xgboost_model = Some(xgb_model);
+                    log::info!("✅ XGBoost model loaded successfully");
+                }
+                Err(e) => {
+                    log::warn!(
+                        "⚠️ Failed to load XGBoost model: {}. Model will use pure LSTM prediction.",
+                        e
+                    );
+                    model.xgboost_model = None;
+                }
+            }
+        } else {
+            log::debug!(
+                "No XGBoost model found at: {} - using pure LSTM prediction",
+                smartcore_meta_path
+            );
+            model.xgboost_model = None;
+        }
+
         log::info!(
             "🎯 Model loaded successfully: weights={}, config={}",
             weights_path.display(),
             config_path.display()
+        );
+
+        Ok(model)
+    }
+
+    /// Load model from file with specific model configuration (for multi-target models)
+    /// This allows loading models with architecture different from the saved config
+    pub fn load_with_model_config<P: AsRef<std::path::Path>>(
+        path: P,
+        model_config: &crate::config::ModelConfig,
+        input_size: usize,
+        output_size: usize,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+
+        // Check if weights file exists
+        let weights_path = path.with_extension("safetensors");
+        if !weights_path.exists() {
+            return Err(VangaError::SerializationError(format!(
+                "Weights file not found: {}",
+                weights_path.display()
+            )));
+        }
+
+        // Create model with provided model configuration (not saved config)
+        let mut model = Self::from_model_config(model_config, input_size, output_size)?;
+
+        // Initialize network structure FIRST to create tensor placeholders
+        log::info!("🔧 Initializing network structure with provided config...");
+        model.initialize_network()?;
+
+        // Load model weights from safetensors
+        log::info!("🔄 Loading weights from: {}", weights_path.display());
+        match model.varmap.load(&weights_path) {
+            Ok(_) => {
+                log::info!("✅ Weights loaded successfully");
+            }
+            Err(e) => {
+                log::error!("❌ Shape mismatch detected in saved weights!");
+                log::error!("This usually means the model architecture changed since training.");
+                log::error!("Error details: {}", e);
+                return Err(VangaError::SerializationError(format!(
+                    "Failed to load weights: {}",
+                    e
+                )));
+            }
+        }
+
+        model.trained = true;
+
+        // Load XGBoost model if present (hybrid model persistence)
+        let smartcore_meta_path = format!("{}.smartcore.meta", path.to_string_lossy());
+        if std::path::Path::new(&smartcore_meta_path).exists() {
+            log::info!("🔄 Loading XGBoost model from: {}", path.display());
+            match crate::model::xgboost::XGBoostRegressor::load_model(
+                &path.to_string_lossy(),
+                model.device.clone(),
+            ) {
+                Ok(xgb_model) => {
+                    model.xgboost_model = Some(xgb_model);
+                    log::info!("✅ XGBoost model loaded successfully");
+                }
+                Err(e) => {
+                    log::warn!(
+                        "⚠️ Failed to load XGBoost model: {}. Model will use pure LSTM prediction.",
+                        e
+                    );
+                    model.xgboost_model = None;
+                }
+            }
+        } else {
+            log::debug!(
+                "No XGBoost model found at: {} - using pure LSTM prediction",
+                smartcore_meta_path
+            );
+            model.xgboost_model = None;
+        }
+
+        log::info!(
+            "🎯 Model loaded successfully with provided config: weights={}",
+            weights_path.display()
         );
 
         Ok(model)

@@ -575,7 +575,7 @@ pub fn classify_price_level(
 ///
 /// # Arguments
 /// * `sequence_ohlcv` - Input sequence OHLCV data
-/// * `horizon_ohlcv` - Horizon period OHLCV data  
+/// * `horizon_ohlcv` - Horizon period OHLCV data
 /// * `momentum_factor` - Optional momentum weighting (1.0 = standard, >1.0 = recent bias)
 ///
 /// # Returns

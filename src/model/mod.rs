@@ -6,8 +6,12 @@ pub mod attention_viz;
 pub mod lstm;
 pub mod lstm_simple;
 pub mod multi_target;
+pub mod smartcore_backend;
 pub mod tft;
 pub mod xgboost;
+
+#[cfg(test)]
+pub mod smartcore_test;
 
 pub use attention::{AttentionFactory, AttentionModule, MultiHeadAttention};
 pub use attention_loss::{AttentionLossConfig, AttentionLossFactory, AttentionWeightedLoss};
@@ -18,6 +22,7 @@ pub use attention_viz::{AttentionAnalysis, AttentionVisualizationConfig, Attenti
 pub use lstm::{LSTMConfig, LSTMModel}; // Use new modular LSTM
 pub use lstm_simple::*; // Backward compatibility
 pub use multi_target::MultiTargetLSTMModel;
+pub use smartcore_backend::{SmartCoreMetadata, SmartCoreRegressor};
 pub use tft::{
     QuantileMultiTargetModel, QuantileOutputConfig, QuantileRegressionHead,
     VariableSelectionAttention, VariableSelectionConfig, VariableSelectionNetwork,

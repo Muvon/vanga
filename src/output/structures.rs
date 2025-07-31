@@ -824,6 +824,16 @@ impl PredictionResult {
         // 2. DIRECTIONAL EDGE (minimum edge threshold)
         let directional_edge =
             direction_pred.up_probability_aggregated - direction_pred.down_probability_aggregated;
+        
+        // DEBUG: Log the directional edge calculation
+        log::warn!(
+            "🔍 DIRECTIONAL EDGE DEBUG: up_agg={:.4}, down_agg={:.4}, edge={:.4} ({:.1}%)",
+            direction_pred.up_probability_aggregated,
+            direction_pred.down_probability_aggregated,
+            directional_edge,
+            directional_edge * 100.0
+        );
+        
         let min_edge_threshold = 0.15; // 15% minimum edge
         let min_risk_reward = 1.2; // Minimum 1.2:1 risk/reward
 

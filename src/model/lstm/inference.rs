@@ -648,7 +648,7 @@ impl LSTMModel {
                 .squeeze(1)?; // Remove sequence dimension
 
             log::info!(
-                "✅ Extracted bidirectional LSTM features shape: {:?}",
+                "✅ Extracted LSTM latent vector z_test shape: {:?}",
                 lstm_features.shape()
             );
 
@@ -876,18 +876,10 @@ mod tests {
             feature_dim: 256, // Custom value different from default
             n_estimators: 100,
             max_depth: 6,
-            learning_rate: 0.1,
-            subsample: 0.8,
-            colsample_bytree: 0.8,
-            reg_alpha: 0.0,
-            reg_lambda: 1.0,
-            early_stopping_rounds: Some(10),
-            eval_metric: "rmse".to_string(),
-            objective: "reg:squarederror".to_string(),
+            objective: "RandomForest".to_string(),
+            eval_metric: "multiclass_accuracy".to_string(),
             save_feature_importance: true,
-            importance_type: "gain".to_string(),
-            importance_method: "shap".to_string(),
-            importance_validation_size: 50,
+            importance_method: "permutation".to_string(),
         };
 
         // Test that the method returns the config value, not calculated value

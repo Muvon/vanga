@@ -217,34 +217,26 @@ pub enum AttentionMechanism {
     None,
 }
 
-/// XGBoost hybrid model configuration following attention pattern
+/// SmartCore hybrid model configuration (maintains XGBoost name for compatibility)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XGBoostConfig {
-    /// Enable/disable XGBoost hybrid mode
+    /// Enable/disable SmartCore hybrid mode
     pub enabled: bool,
 
     /// LSTM feature extraction dimension (k in paper, typically 64)
     pub feature_dim: usize,
 
-    /// XGBoost hyperparameters
-    pub n_estimators: usize, // Number of trees (M in equation 9)
-    pub max_depth: usize,      // Maximum tree depth
-    pub learning_rate: f64,    // Learning rate (eta)
-    pub subsample: f64,        // Row sampling ratio
-    pub colsample_bytree: f64, // Column sampling ratio
-    pub reg_alpha: f64,        // L1 regularization
-    pub reg_lambda: f64,       // L2 regularization (λ in equation 11)
+    /// SmartCore hyperparameters
+    pub n_estimators: usize, // Number of trees in Random Forest
+    pub max_depth: usize, // Maximum tree depth
 
-    /// Training configuration
-    pub early_stopping_rounds: Option<usize>,
-    pub eval_metric: String, // "rmse", "mae", "logloss", etc.
-    pub objective: String,   // "reg:squarederror", "multi:softprob", etc.
+    /// SmartCore algorithm and evaluation
+    pub objective: String, // "RandomForest" or "DecisionTree"
+    pub eval_metric: String, // "multiclass_accuracy", etc.
 
     /// Feature importance analysis
     pub save_feature_importance: bool,
-    pub importance_type: String, // "weight", "gain", "cover" (legacy - not used with SHAP)
-    pub importance_method: String, // "shap", "placeholder" - method for calculating importance
-    pub importance_validation_size: usize, // Number of samples for SHAP calculation
+    pub importance_method: String, // "permutation" for SmartCore
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -439,26 +431,18 @@ impl ModelConfig {
     }
 }
 
-/// Default implementation for XGBoostConfig following crypto-optimized settings
+/// Default implementation for SmartCore config (maintains XGBoost name for compatibility)
 impl Default for XGBoostConfig {
     fn default() -> Self {
         Self {
-            enabled: false,                            // Disabled by default like attention
-            feature_dim: 64,                           // k=64 as per paper
-            n_estimators: 100,                         // Moderate number of trees
-            max_depth: 6,                              // Good balance for crypto complexity
-            learning_rate: 0.1,                        // Conservative learning rate
-            subsample: 0.8,                            // Row sampling to prevent overfitting
-            colsample_bytree: 0.8,                     // Column sampling
-            reg_alpha: 0.0,                            // L1 regularization (disabled by default)
-            reg_lambda: 1.0,                           // L2 regularization (λ in equation 11)
-            early_stopping_rounds: Some(10),           // Early stopping for efficiency
-            eval_metric: "rmse".to_string(),           // Default regression metric
-            objective: "reg:squarederror".to_string(), // Default regression objective
-            save_feature_importance: true,             // Enable feature analysis
-            importance_type: "gain".to_string(),       // Information gain importance (legacy)
-            importance_method: "shap".to_string(),     // Use SHAP-based importance by default
-            importance_validation_size: 50,            // 50 samples for SHAP calculation
+            enabled: false,                                 // Disabled by default like attention
+            feature_dim: 64,                                // k=64 as per paper
+            n_estimators: 100,                              // Number of trees in Random Forest
+            max_depth: 6,                                   // Good balance for crypto complexity
+            objective: "RandomForest".to_string(),          // SmartCore algorithm
+            eval_metric: "multiclass_accuracy".to_string(), // SmartCore evaluation metric
+            save_feature_importance: true,                  // Enable feature analysis
+            importance_method: "permutation".to_string(),   // Use permutation-based importance
         }
     }
 }
