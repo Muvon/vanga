@@ -5,8 +5,6 @@
 
 use crate::config::model::{AttentionConfig, DropoutConfig};
 use crate::model::attention::MultiHeadAttention;
-use crate::model::dual_loss_system::DualLossSystem;
-use crate::model::loss::CryptoLossFunction;
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::Device;
@@ -125,7 +123,6 @@ pub struct LSTMModel {
     pub varmap: VarMap,
     pub training_config: TrainingConfig,
     pub trained: bool,
-    pub loss_function: CryptoLossFunction, // Multi-target loss function
     /// Target context for this individual model (e.g., "price_level_1h", "direction_4h")
     /// This allows proper target type detection without assumptions
     pub target_context: Option<(String, crate::targets::TargetType)>, // (target_name, target_type)
@@ -139,8 +136,6 @@ pub struct LSTMModel {
     pub architecture: Option<crate::config::model::LSTMArchitecture>,
     /// Dropout configuration for regularization
     pub dropout_config: Option<DropoutConfig>,
-    /// Dual loss system for regime-aware training and regime-agnostic validation
-    pub dual_loss_system: Option<DualLossSystem>,
     /// Stored validation data for consistent metrics calculation
     /// Used to ensure epoch metrics and final metrics use the same data
     pub stored_val_sequences: Option<ndarray::Array3<f64>>,
@@ -149,8 +144,6 @@ pub struct LSTMModel {
     /// Check sequences.shape()[0] > 0 to determine if test data is available
     pub stored_test_sequences: ndarray::Array3<f64>,
     pub stored_test_targets: ndarray::Array2<f64>,
-    /// Regime metrics collector for comprehensive logging
-    pub regime_metrics_collector: Option<crate::model::regime_metrics::RegimeMetricsCollector>,
     /// None if XGBoost is disabled in configuration
     pub xgboost_model: Option<crate::model::xgboost::XGBoostRegressor>,
     /// Best model weights saved during training (for early stopping)
