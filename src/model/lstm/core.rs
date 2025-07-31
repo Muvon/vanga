@@ -438,14 +438,26 @@ impl LSTMModel {
 
         self.output_layer = Some(output_layer);
 
+        // Verify VarMap was populated during initialization
+        let vars_count_after_init = self.varmap.all_vars().len();
         log::info!(
-            "✅ LSTM network initialized: {} layers, {} parameters, bidirectional={}, output_input_size={}, final_hidden_size={}",
+            "✅ LSTM network initialized: {} layers, {} parameters in VarMap, bidirectional={}, output_input_size={}, final_hidden_size={}",
             num_layers,
-            self.config.total_parameters(),
+            vars_count_after_init,
             is_bidirectional,
             output_input_size,
             final_hidden_size
         );
+
+        if vars_count_after_init == 0 {
+            log::error!("⚠️ CRITICAL: VarMap is empty after network initialization!");
+            log::error!(
+                "   This indicates a problem with parameter creation during layer initialization."
+            );
+            return Err(VangaError::ModelError(
+                "Network initialization failed: no parameters created".to_string(),
+            ));
+        }
 
         Ok(())
     }
@@ -644,10 +656,34 @@ impl LSTMModel {
     /// Save current model weights as the best checkpoint
     /// Called when validation loss improves during training
     pub fn save_best_checkpoint(&mut self, validation_loss: f64, epoch: usize) -> Result<()> {
+        // Ensure network is initialized before saving
+        if self.lstm_layers.is_none() || self.output_layer.is_none() {
+            log::warn!("⚠️ Network not initialized, initializing before checkpoint save...");
+            self.initialize_network()?;
+        }
+
+        // Verify current model has parameters before saving
+        let current_vars_count = self.varmap.all_vars().len();
+        if current_vars_count == 0 {
+            log::error!("⚠️ Cannot save checkpoint: current model has no parameters even after initialization!");
+            log::error!(
+                "   This suggests the VarMap is not being populated during network initialization."
+            );
+            log::error!(
+                "   LSTM layers: {:?}, Output layer: {:?}",
+                self.lstm_layers.is_some(),
+                self.output_layer.is_some()
+            );
+            return Err(VangaError::ModelError(
+                "Cannot save checkpoint: model has no parameters".to_string(),
+            ));
+        }
+
         log::debug!(
-            "💾 Saving best model checkpoint at epoch {} with validation loss: {:.6}",
+            "💾 Saving best model checkpoint at epoch {} with validation loss: {:.6} ({} parameters)",
             epoch + 1,
-            validation_loss
+            validation_loss,
+            current_vars_count
         );
 
         // Store validation metrics
@@ -667,6 +703,26 @@ impl LSTMModel {
 
         // Save the entire model state using the existing save method
         self.save(&checkpoint_path)?;
+
+        // Verify the saved file exists and has content
+        if checkpoint_path.with_extension("safetensors").exists() {
+            let file_size = std::fs::metadata(checkpoint_path.with_extension("safetensors"))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            log::debug!("✅ Checkpoint file saved: {} bytes", file_size);
+
+            if file_size == 0 {
+                log::error!("⚠️ Saved checkpoint file is empty!");
+                return Err(VangaError::ModelError(
+                    "Saved checkpoint file is empty".to_string(),
+                ));
+            }
+        } else {
+            log::error!("⚠️ Checkpoint file was not created!");
+            return Err(VangaError::ModelError(
+                "Checkpoint file was not created".to_string(),
+            ));
+        }
 
         // Store the checkpoint path for later restoration
         // We'll use a marker VarMap to indicate a checkpoint exists
@@ -719,28 +775,53 @@ impl LSTMModel {
                     let weights_path = checkpoint_path.with_extension("safetensors");
 
                     if weights_path.exists() {
-                        // Instead of loading into the existing VarMap (which can cause tensor mismatch),
-                        // we create a new VarMap and swap it
-                        let mut new_varmap = VarMap::new();
-                        new_varmap.load(&weights_path).map_err(|e| {
+                        // Store current varmap info for verification
+                        let current_vars_count = self.varmap.all_vars().len();
+
+                        // CRITICAL FIX: Ensure network is initialized before loading weights
+                        // This creates the variables in the VarMap that load() can update
+                        if self.lstm_layers.is_none() || self.output_layer.is_none() {
+                            log::info!(
+                                "🔧 Initializing network before loading checkpoint weights..."
+                            );
+                            self.initialize_network()?;
+                        }
+
+                        // Verify we have variables to load into
+                        let vars_after_init = self.varmap.all_vars().len();
+                        if vars_after_init == 0 {
+                            log::error!("⚠️ No variables in VarMap after initialization!");
+                            return Err(VangaError::ModelError(
+                                "Cannot load checkpoint: no variables to load into".to_string(),
+                            ));
+                        }
+
+                        // Now load the checkpoint weights into the existing variables
+                        // This is the correct way to use VarMap.load() - it updates existing variables
+                        self.varmap.load(&weights_path).map_err(|e| {
                             VangaError::ModelError(format!(
                                 "Failed to load checkpoint weights: {}",
                                 e
                             ))
                         })?;
 
-                        // Replace the current varmap with the loaded one
-                        self.varmap = new_varmap;
-
+                        // Verify the loading worked
+                        let loaded_vars_count = self.varmap.all_vars().len();
                         log::info!(
-                            "✅ Best model weights restored successfully from: {}",
-                            weights_path.display()
+                            "✅ Best model weights restored successfully from: {} (vars: {} → {} after load)",
+                            weights_path.display(),
+                            current_vars_count,
+                            loaded_vars_count
                         );
+                        log::debug!("🔄 Checkpoint weights loaded into existing VarMap variables");
 
-                        // Clean up checkpoint files
+                        // Clean up checkpoint files AFTER successful restoration
+                        // Note: Keeping files temporarily for debugging if needed
                         let _ = std::fs::remove_file(&weights_path);
                         let _ = std::fs::remove_file(checkpoint_path.with_extension("config"));
                         let _ = std::fs::remove_file(&metadata_path);
+
+                        log::debug!("🧹 Checkpoint files cleaned up successfully");
                     } else {
                         log::warn!(
                             "⚠️ Checkpoint weights file not found: {}",
