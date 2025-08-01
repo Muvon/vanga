@@ -221,15 +221,18 @@ impl SmartCoreRegressor {
             // Try to get probabilities if available
             log::debug!("🔍 Attempting to get Random Forest probabilities...");
             // SmartCore might not have predict_proba - let's use predict for now and improve later
-            let predictions = rf_model
-                .predict(&x)
-                .map_err(|e| VangaError::model(format!("Random Forest prediction failed: {}", e)))?;
-            
+            let predictions = rf_model.predict(&x).map_err(|e| {
+                VangaError::model(format!("Random Forest prediction failed: {}", e))
+            })?;
+
             // CRITICAL DEBUG: Log what SmartCore actually predicted
-            log::debug!("🔍 XGBoost f(z) mapping: RandomForest predictions: {:?}", predictions);
+            log::debug!(
+                "🔍 XGBoost f(z) mapping: RandomForest predictions: {:?}",
+                predictions
+            );
             log::debug!("📊 Input latent vector z shape: {:?}", x.shape());
             log::debug!("🎯 Model instance: {:p}", self as *const _);
-            
+
             // Log first 10 LSTM features to verify they're different between models
             if x.shape().0 > 0 {
                 let feature_sample: Vec<f64> = (0..std::cmp::min(10, x.shape().1))
@@ -239,24 +242,31 @@ impl SmartCoreRegressor {
                     "📊 LSTM latent vector z_test: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, ...] (dim={})",
                     feature_sample[0], feature_sample[1], feature_sample[2], feature_sample[3], feature_sample[4], x.shape().1
                 );
-                
+
                 let feature_sum: f64 = (0..x.shape().1).map(|i| *x.get((0, i))).sum();
                 let feature_mean = feature_sum / x.shape().1 as f64;
-                log::debug!("🎯 Latent vector statistics: mean={:.6}, sum={:.6}", feature_mean, feature_sum);
+                log::debug!(
+                    "🎯 Latent vector statistics: mean={:.6}, sum={:.6}",
+                    feature_mean,
+                    feature_sum
+                );
             }
-            
+
             Ok(predictions)
         } else if let Some(ref dt_model) = self.decision_tree {
             log::debug!("🔍 Attempting to get Decision Tree probabilities...");
-            let predictions = dt_model
-                .predict(&x)
-                .map_err(|e| VangaError::model(format!("Decision Tree prediction failed: {}", e)))?;
-            
+            let predictions = dt_model.predict(&x).map_err(|e| {
+                VangaError::model(format!("Decision Tree prediction failed: {}", e))
+            })?;
+
             // CRITICAL DEBUG: Log what SmartCore actually predicted
-            log::debug!("🔍 XGBoost f(z) mapping: DecisionTree predictions: {:?}", predictions);
+            log::debug!(
+                "🔍 XGBoost f(z) mapping: DecisionTree predictions: {:?}",
+                predictions
+            );
             log::debug!("📊 Input latent vector z shape: {:?}", x.shape());
             log::debug!("🎯 Model instance: {:p}", self as *const _);
-            
+
             // Log first 10 LSTM features to verify they're different between models
             if x.shape().0 > 0 {
                 let feature_sample: Vec<f64> = (0..std::cmp::min(10, x.shape().1))
@@ -266,12 +276,16 @@ impl SmartCoreRegressor {
                     "📊 LSTM latent vector z_test: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, ...] (dim={})",
                     feature_sample[0], feature_sample[1], feature_sample[2], feature_sample[3], feature_sample[4], x.shape().1
                 );
-                
+
                 let feature_sum: f64 = (0..x.shape().1).map(|i| *x.get((0, i))).sum();
                 let feature_mean = feature_sum / x.shape().1 as f64;
-                log::debug!("🎯 Latent vector statistics: mean={:.6}, sum={:.6}", feature_mean, feature_sum);
+                log::debug!(
+                    "🎯 Latent vector statistics: mean={:.6}, sum={:.6}",
+                    feature_mean,
+                    feature_sum
+                );
             }
-            
+
             Ok(predictions)
         } else {
             log::error!("🚨 NO SMARTCORE MODEL LOADED! Using fallback...");
@@ -294,10 +308,14 @@ impl SmartCoreRegressor {
         let has_rf = self.model.is_some();
         let has_dt = self.decision_tree.is_some();
         let result = has_rf || has_dt;
-        
-        log::debug!("🔍 SmartCore model status: RandomForest={}, DecisionTree={}, is_trained={}", 
-                   has_rf, has_dt, result);
-        
+
+        log::debug!(
+            "🔍 SmartCore model status: RandomForest={}, DecisionTree={}, is_trained={}",
+            has_rf,
+            has_dt,
+            result
+        );
+
         result
     }
 
@@ -534,10 +552,14 @@ impl SmartCoreRegressor {
     }
 
     /// Convert SmartCore predictions to VANGA tensor format with realistic probabilities
-    fn predictions_to_tensor_with_noise(&self, predictions: Vec<i32>, batch_size: usize) -> Result<Tensor> {
+    fn predictions_to_tensor_with_noise(
+        &self,
+        predictions: Vec<i32>,
+        batch_size: usize,
+    ) -> Result<Tensor> {
         // VANGA always expects 5-class outputs (NUM_CLASSES = 5)
         let num_classes = 5;
-        
+
         log::debug!(
             "🔄 Converting {} predictions to [{}, {}] probability tensor",
             predictions.len(),
@@ -549,23 +571,23 @@ impl SmartCoreRegressor {
         let mut prob_data: Vec<f32> = Vec::new();
         for (idx, &pred_class) in predictions.iter().enumerate() {
             let mut class_probs = vec![0.01f32; num_classes]; // Low base probability for all classes
-            
+
             // Give the predicted class much higher probability
             if (pred_class as usize) < num_classes {
                 class_probs[pred_class as usize] = 0.85f32;
             }
-            
+
             // Add small random variations to other classes to make predictions more realistic
             // This preserves the SmartCore prediction while adding natural uncertainty
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
-            
+
             // Create deterministic but varied probabilities based on sample index, predicted class, AND model instance
             // Use the model's memory address as a unique identifier per model
             let mut hasher = DefaultHasher::new();
             (idx, pred_class, self as *const _ as usize).hash(&mut hasher);
             let seed = hasher.finish();
-            
+
             for (i, class_prob) in class_probs.iter_mut().enumerate().take(num_classes) {
                 if i != (pred_class as usize) {
                     // Create varied but deterministic probabilities for non-predicted classes
@@ -573,13 +595,13 @@ impl SmartCoreRegressor {
                     *class_prob = 0.01f32 + variation; // 0.01 to 0.109
                 }
             }
-            
+
             // Normalize to sum to 1.0
             let sum: f32 = class_probs.iter().sum();
             for prob in &mut class_probs {
                 *prob /= sum;
             }
-            
+
             // DEBUG: Log what SmartCore actually predicted
             log::debug!(
                 "🔍 Sample {}: SmartCore predicted class {} -> probabilities: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}]",
@@ -587,7 +609,7 @@ impl SmartCoreRegressor {
                 pred_class,
                 class_probs[0], class_probs[1], class_probs[2], class_probs[3], class_probs[4]
             );
-            
+
             prob_data.extend(class_probs);
         }
 
@@ -601,7 +623,11 @@ impl SmartCoreRegressor {
         // Log first prediction for debugging
         if batch_size > 0 && prob_data.len() >= num_classes {
             let first_pred: Vec<f32> = prob_data[0..num_classes].to_vec();
-            log::info!("🎯 Final prediction Ŷ_test ∈ R^{}: {:?}", num_classes, first_pred);
+            log::info!(
+                "🎯 Final prediction Ŷ_test ∈ R^{}: {:?}",
+                num_classes,
+                first_pred
+            );
         }
 
         Tensor::from_vec(prob_data, (batch_size, num_classes), &self.device)
@@ -615,7 +641,7 @@ impl SmartCoreRegressor {
 
         // VANGA ALWAYS uses 5-class system - don't infer from targets
         let num_classes = 5;
-        
+
         log::info!(
             "🎯 VANGA 5-class system: target shape {:?} -> forcing {} classes",
             dims,

@@ -669,6 +669,7 @@ impl StreamingPredictor {
             direction: Some(direction),
             volatility: Some(volatility),
             orders,
+            adaptive_signal: ml_prediction.adaptive_signal.clone(),
             confidence: ml_prediction.confidence,
             metadata: ml_prediction.metadata.clone(),
         })

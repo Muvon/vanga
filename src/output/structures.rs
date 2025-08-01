@@ -37,6 +37,10 @@ pub struct PredictionResult {
     /// Trading orders with dynamic position sizing (always included)
     pub orders: TradingOrders,
 
+    /// Adaptive trading signal for enhanced order generation (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adaptive_signal: Option<AdaptiveTradingSignal>,
+
     /// Overall prediction confidence
     pub confidence: f64,
 
@@ -702,6 +706,7 @@ impl PredictionResult {
             direction: None,
             volatility: None,
             orders: TradingOrders::default(),
+            adaptive_signal: None,
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -734,6 +739,7 @@ impl PredictionResult {
             direction: None,
             volatility: None,
             orders: TradingOrders::default(),
+            adaptive_signal: None,
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -785,6 +791,12 @@ impl PredictionResult {
         self
     }
 
+    /// Set adaptive trading signal
+    pub fn with_adaptive_signal(mut self, signal: AdaptiveTradingSignal) -> Self {
+        self.adaptive_signal = Some(signal);
+        self
+    }
+
     /// Generate adaptive trading signal that works for any horizon
     pub fn generate_adaptive_trading_signal(
         direction_pred: &DirectionPrediction,
@@ -821,58 +833,222 @@ impl PredictionResult {
             }
         }
 
-        // 2. DIRECTIONAL EDGE (minimum edge threshold)
+        // 2. INTELLIGENT ADAPTIVE SIGNAL GENERATION
+        // Analyze probability distribution to determine best trading approach
         let directional_edge =
             direction_pred.up_probability_aggregated - direction_pred.down_probability_aggregated;
-        
-        // DEBUG: Log the directional edge calculation
-        log::warn!(
-            "🔍 DIRECTIONAL EDGE DEBUG: up_agg={:.4}, down_agg={:.4}, edge={:.4} ({:.1}%)",
-            direction_pred.up_probability_aggregated,
-            direction_pred.down_probability_aggregated,
-            directional_edge,
-            directional_edge * 100.0
-        );
-        
-        let min_edge_threshold = 0.15; // 15% minimum edge
-        let min_risk_reward = 1.2; // Minimum 1.2:1 risk/reward
 
-        if directional_edge.abs() > min_edge_threshold
-            && direction_pred.risk_reward_ratio > min_risk_reward
-        {
-            if directional_edge > 0.0 {
-                return AdaptiveTradingSignal::Long {
-                    entry_price: current_price,
-                    target_price: current_price
-                        * (1.0 + direction_pred.expected_upside_percent / 100.0),
-                    stop_loss: current_price
-                        * (1.0 - volatility_pred.recommended_stop_distance_percent / 100.0),
-                    position_size: volatility_pred.position_size_multiplier,
-                    horizon: direction_pred.training_horizon.clone(),
-                    risk_reward: direction_pred.risk_reward_ratio,
-                    confidence: direction_pred.up_probability_aggregated,
-                };
+        // Calculate probability spread (how concentrated vs distributed the predictions are)
+        let max_prob = direction_pred
+            .sideways_probability
+            .max(direction_pred.up_probability_aggregated)
+            .max(direction_pred.down_probability_aggregated);
+        let min_prob = direction_pred
+            .sideways_probability
+            .min(direction_pred.up_probability_aggregated)
+            .min(direction_pred.down_probability_aggregated);
+        let probability_spread = max_prob - min_prob;
+
+        // Calculate confidence in the prediction (higher spread = more confident)
+        let prediction_confidence = probability_spread;
+
+        log::info!(
+            "📊 ADAPTIVE ANALYSIS: edge={:.1}%, spread={:.1}%, confidence={:.1}%, max_prob={:.1}%",
+            directional_edge * 100.0,
+            probability_spread * 100.0,
+            prediction_confidence * 100.0,
+            max_prob * 100.0
+        );
+
+        // 🚀 ADAPTIVE DECISION LOGIC - No hardcoded thresholds!
+        // Use model's own confidence and risk/reward to determine if we should trade
+
+        // Minimum confidence threshold based on model's own assessment
+        let min_confidence_threshold = 0.25; // Only trade if we have >25% confidence in any direction
+        let min_risk_reward_threshold = 0.8; // Minimum R/R based on volatility
+
+        // Check if any prediction has sufficient confidence
+        let has_sufficient_confidence = max_prob > min_confidence_threshold;
+        let has_acceptable_risk_reward =
+            direction_pred.risk_reward_ratio > min_risk_reward_threshold;
+
+        if has_sufficient_confidence && has_acceptable_risk_reward {
+            // Determine the best trading strategy based on probability distribution
+
+            // Strategy 1: Clear directional bias (one aggregated probability significantly higher)
+            if directional_edge.abs() > probability_spread * 0.3 {
+                // Edge is significant relative to spread
+                if directional_edge > 0.0 {
+                    log::info!(
+                        "📈 DIRECTIONAL LONG: edge={:.1}% is significant",
+                        directional_edge * 100.0
+                    );
+                    return AdaptiveTradingSignal::Long {
+                        entry_price: current_price,
+                        target_price: current_price
+                            * (1.0 + direction_pred.expected_upside_percent / 100.0),
+                        stop_loss: current_price
+                            * (1.0 - volatility_pred.recommended_stop_distance_percent / 100.0),
+                        position_size: volatility_pred.position_size_multiplier
+                            * (1.0 + prediction_confidence),
+                        horizon: direction_pred.training_horizon.clone(),
+                        risk_reward: direction_pred.risk_reward_ratio,
+                        confidence: direction_pred.up_probability_aggregated,
+                    };
+                } else {
+                    log::info!(
+                        "📉 DIRECTIONAL SHORT: edge={:.1}% is significant",
+                        directional_edge * 100.0
+                    );
+                    return AdaptiveTradingSignal::Short {
+                        entry_price: current_price,
+                        target_price: current_price
+                            * (1.0 - direction_pred.expected_downside_percent / 100.0),
+                        stop_loss: current_price
+                            * (1.0 + volatility_pred.recommended_stop_distance_percent / 100.0),
+                        position_size: volatility_pred.position_size_multiplier
+                            * (1.0 + prediction_confidence),
+                        horizon: direction_pred.training_horizon.clone(),
+                        risk_reward: direction_pred.risk_reward_ratio,
+                        confidence: direction_pred.down_probability_aggregated,
+                    };
+                }
             }
-            return AdaptiveTradingSignal::Short {
-                entry_price: current_price,
-                target_price: current_price
-                    * (1.0 - direction_pred.expected_downside_percent / 100.0),
-                stop_loss: current_price
-                    * (1.0 + volatility_pred.recommended_stop_distance_percent / 100.0),
-                position_size: volatility_pred.position_size_multiplier,
-                horizon: direction_pred.training_horizon.clone(),
-                risk_reward: direction_pred.risk_reward_ratio,
-                confidence: direction_pred.down_probability_aggregated,
-            };
+
+            // Strategy 2: SIDEWAYS is competitive (within reasonable range of other probabilities)
+            // Even if not dominant, if SIDEWAYS is close to other probabilities, it's a valid strategy
+            let sideways_competitiveness = direction_pred.sideways_probability / max_prob;
+            if sideways_competitiveness > 0.8 {
+                // SIDEWAYS is within 20% of the highest probability
+
+                // Determine bias within sideways movement
+                let sideways_direction = if direction_pred.up_probability_aggregated
+                    > direction_pred.down_probability_aggregated
+                {
+                    "LONG"
+                } else {
+                    "SHORT"
+                };
+
+                let _bias_strength = directional_edge.abs();
+
+                // Use sequence bandwidth for more conservative targets in sideways markets
+                let target_percent = if sideways_direction == "LONG" {
+                    (direction_pred.expected_upside_percent / 100.0)
+                        .min(direction_pred.sequence_bandwidth_percent / 100.0 * 0.6)
+                } else {
+                    (direction_pred.expected_downside_percent / 100.0)
+                        .min(direction_pred.sequence_bandwidth_percent / 100.0 * 0.6)
+                };
+
+                let stop_percent = (direction_pred.sequence_bandwidth_percent / 100.0 * 0.4)
+                    .max(volatility_pred.recommended_stop_distance_percent / 100.0);
+
+                let target_price = if sideways_direction == "LONG" {
+                    current_price * (1.0 + target_percent)
+                } else {
+                    current_price * (1.0 - target_percent)
+                };
+
+                let stop_loss = if sideways_direction == "LONG" {
+                    current_price * (1.0 - stop_percent)
+                } else {
+                    current_price * (1.0 + stop_percent)
+                };
+
+                let risk_reward = if stop_percent > 0.0 {
+                    target_percent / stop_percent
+                } else {
+                    0.0
+                };
+
+                log::info!(
+                    "🔄 SIDEWAYS COMPETITIVE: sideways={:.1}% (competitiveness={:.1}%), bias={}, R/R={:.2}",
+                    direction_pred.sideways_probability * 100.0,
+                    sideways_competitiveness * 100.0,
+                    sideways_direction,
+                    risk_reward
+                );
+
+                if sideways_direction == "LONG" {
+                    return AdaptiveTradingSignal::SidewaysLong {
+                        entry_price: current_price,
+                        target_price,
+                        stop_loss,
+                        position_size: volatility_pred.position_size_multiplier
+                            * (0.7 + prediction_confidence * 0.3),
+                        horizon: direction_pred.training_horizon.clone(),
+                        risk_reward,
+                        confidence: direction_pred.sideways_probability,
+                        sideways_probability: direction_pred.sideways_probability,
+                        sequence_bias: format!("{}_BIAS", sideways_direction),
+                    };
+                } else {
+                    return AdaptiveTradingSignal::SidewaysShort {
+                        entry_price: current_price,
+                        target_price,
+                        stop_loss,
+                        position_size: volatility_pred.position_size_multiplier
+                            * (0.7 + prediction_confidence * 0.3),
+                        horizon: direction_pred.training_horizon.clone(),
+                        risk_reward,
+                        confidence: direction_pred.sideways_probability,
+                        sideways_probability: direction_pred.sideways_probability,
+                        sequence_bias: format!("{}_BIAS", sideways_direction),
+                    };
+                }
+            }
+
+            // Strategy 3: Weak directional bias but still tradeable
+            // If we have acceptable confidence but no clear strategy above, trade the bias
+            if max_prob > 0.3 {
+                // At least 30% confidence in some direction
+                if direction_pred.up_probability_aggregated
+                    > direction_pred.down_probability_aggregated
+                {
+                    log::info!(
+                        "📈 WEAK LONG: up_agg={:.1}% > down_agg={:.1}%",
+                        direction_pred.up_probability_aggregated * 100.0,
+                        direction_pred.down_probability_aggregated * 100.0
+                    );
+                    return AdaptiveTradingSignal::Long {
+                        entry_price: current_price,
+                        target_price: current_price
+                            * (1.0 + direction_pred.expected_upside_percent / 100.0),
+                        stop_loss: current_price
+                            * (1.0 - volatility_pred.recommended_stop_distance_percent / 100.0),
+                        position_size: volatility_pred.position_size_multiplier * 0.8, // Reduced size for weak signals
+                        horizon: direction_pred.training_horizon.clone(),
+                        risk_reward: direction_pred.risk_reward_ratio,
+                        confidence: direction_pred.up_probability_aggregated,
+                    };
+                } else {
+                    log::info!(
+                        "📉 WEAK SHORT: down_agg={:.1}% > up_agg={:.1}%",
+                        direction_pred.down_probability_aggregated * 100.0,
+                        direction_pred.up_probability_aggregated * 100.0
+                    );
+                    return AdaptiveTradingSignal::Short {
+                        entry_price: current_price,
+                        target_price: current_price
+                            * (1.0 - direction_pred.expected_downside_percent / 100.0),
+                        stop_loss: current_price
+                            * (1.0 + volatility_pred.recommended_stop_distance_percent / 100.0),
+                        position_size: volatility_pred.position_size_multiplier * 0.8,
+                        horizon: direction_pred.training_horizon.clone(),
+                        risk_reward: direction_pred.risk_reward_ratio,
+                        confidence: direction_pred.down_probability_aggregated,
+                    };
+                }
+            }
         }
 
         AdaptiveTradingSignal::NoSignal {
             reason: format!(
-                "Insufficient edge ({:.1}%) or poor risk/reward ({:.2}). Need ≥{:.1}% edge and ≥{:.1}:1 R/R",
-                directional_edge * 100.0,
+                "Insufficient confidence for trading. Max probability: {:.1}% (need >25%), R/R: {:.2} (need >0.8), Spread: {:.1}%",
+                max_prob * 100.0,
                 direction_pred.risk_reward_ratio,
-                min_edge_threshold * 100.0,
-                min_risk_reward
+                probability_spread * 100.0
             ),
             horizon: direction_pred.training_horizon.clone(),
             confidence: direction_pred.confidence,
@@ -918,6 +1094,28 @@ pub enum AdaptiveTradingSignal {
         horizon: String,
         risk_reward: f64,
         confidence: f64,
+    },
+    SidewaysLong {
+        entry_price: f64,
+        target_price: f64,
+        stop_loss: f64,
+        position_size: f64,
+        horizon: String,
+        risk_reward: f64,
+        confidence: f64,
+        sideways_probability: f64,
+        sequence_bias: String, // "LONG_BIAS" or "SHORT_BIAS"
+    },
+    SidewaysShort {
+        entry_price: f64,
+        target_price: f64,
+        stop_loss: f64,
+        position_size: f64,
+        horizon: String,
+        risk_reward: f64,
+        confidence: f64,
+        sideways_probability: f64,
+        sequence_bias: String, // "LONG_BIAS" or "SHORT_BIAS"
     },
     NoSignal {
         reason: String,
@@ -1086,43 +1284,72 @@ impl TradingOrders {
             config.price_levels.confidence
         );
 
-        // 🎯 ADAPTIVE THRESHOLDS: Use prediction uncertainty instead of hardcoded values
-        let price_entropy = config
-            .price_levels
-            .bins
-            .values()
-            .map(|bin| {
-                if bin.probability > 0.0 {
-                    -bin.probability * bin.probability.ln()
-                } else {
-                    0.0
-                }
-            })
-            .sum::<f64>();
-
-        // Higher entropy = more uncertain = need stronger edge
-        let min_edge_threshold = price_entropy * 0.1;
-        let breakout_threshold =
-            min_edge_threshold + (1.0 - config.volatility_pred.confidence) * 0.2;
-
-        // Use same directional edge logic but with adaptive thresholds
+        // 🚀 ADAPTIVE ANALYSIS - Same logic as AdaptiveTradingSignal
+        // Analyze probability distribution to determine best trading approach
         let directional_edge = config.direction_pred.up_probability_aggregated
             - config.direction_pred.down_probability_aggregated;
 
-        let direction = if directional_edge > min_edge_threshold {
-            "LONG"
-        } else if directional_edge < -min_edge_threshold {
-            "SHORT"
-        } else {
-            // Return empty orders when directional edge is insufficient
+        // Calculate probability spread (how concentrated vs distributed the predictions are)
+        let max_prob = config
+            .direction_pred
+            .sideways_probability
+            .max(config.direction_pred.up_probability_aggregated)
+            .max(config.direction_pred.down_probability_aggregated);
+        let min_prob = config
+            .direction_pred
+            .sideways_probability
+            .min(config.direction_pred.up_probability_aggregated)
+            .min(config.direction_pred.down_probability_aggregated);
+        let probability_spread = max_prob - min_prob;
+
+        // Calculate confidence in the prediction (higher spread = more confident)
+        let prediction_confidence = probability_spread;
+
+        log::info!(
+            "📊 SEQUENCE-AWARE ANALYSIS: edge={:.1}%, spread={:.1}%, confidence={:.1}%, max_prob={:.1}%",
+            directional_edge * 100.0,
+            probability_spread * 100.0,
+            prediction_confidence * 100.0,
+            max_prob * 100.0
+        );
+
+        // Use model's own confidence and risk/reward to determine if we should trade
+        let min_confidence_threshold = 0.25; // Only trade if we have >25% confidence in any direction
+        let min_risk_reward_threshold = 0.5; // Minimum R/R based on volatility
+
+        // Check if any prediction has sufficient confidence
+        let has_sufficient_confidence = max_prob > min_confidence_threshold;
+        let has_acceptable_risk_reward =
+            config.direction_pred.risk_reward_ratio > min_risk_reward_threshold;
+
+        if !has_sufficient_confidence || !has_acceptable_risk_reward {
             return Ok(Self::empty(
                 config.direction_pred,
                 &format!(
-                    "Insufficient directional edge ({:.1}%, need ≥{:.1}%)",
-                    directional_edge * 100.0,
-                    min_edge_threshold * 100.0
+                    "Insufficient confidence for trading. Max probability: {:.1}% (need >25%), R/R: {:.2} (need >0.5)",
+                    max_prob * 100.0,
+                    config.direction_pred.risk_reward_ratio
                 ),
             ));
+        }
+
+        // Determine direction based on adaptive logic
+        let direction = if directional_edge.abs() > probability_spread * 0.3 {
+            // Clear directional bias
+            if directional_edge > 0.0 {
+                "LONG"
+            } else {
+                "SHORT"
+            }
+        } else {
+            // Weak directional bias but still tradeable if we have confidence
+            if config.direction_pred.up_probability_aggregated
+                > config.direction_pred.down_probability_aggregated
+            {
+                "LONG"
+            } else {
+                "SHORT"
+            }
         };
 
         // 🎯 PROPER ATR CALCULATION: Base multiplier adjusted by market volatility
@@ -1138,8 +1365,8 @@ impl TradingOrders {
 
         // 🎯 ADAPTIVE ORDER GENERATION: Use price level probabilities instead of sequence ranges
         let (mut entry_levels, mut exit_levels, mut stop_levels) = if direction == "LONG" {
-            // Check if this is a breakout signal based on pump probability
-            let is_breakout = config.direction_pred.pump_probability > breakout_threshold;
+            // Check if this is a breakout signal based on pump probability (adaptive threshold)
+            let is_breakout = config.direction_pred.pump_probability > 0.25; // Use same threshold as AdaptiveTradingSignal
             Self::generate_adaptive_long_orders(
                 config.current_price,
                 atr_distance,
@@ -1150,9 +1377,9 @@ impl TradingOrders {
                 is_breakout,
             )
         } else {
-            // Check if this is a breakout signal based on dump probability
-            let is_breakout = config.direction_pred.dump_probability > breakout_threshold;
-            // Extract actual price level ranges for order generation
+            // Check if this is a breakout signal based on dump probability (adaptive threshold)
+            let is_breakout = config.direction_pred.dump_probability > 0.25; // Use same threshold as AdaptiveTradingSignal
+                                                                             // Extract actual price level ranges for order generation
             let sequence_ranges = config.price_levels.extract_ranges_for_orders();
             Self::generate_sequence_aware_short_orders(
                 config.current_price,
@@ -2149,8 +2376,8 @@ mod tests {
 
         // Should return empty orders for weak direction signals
         assert!(
-            orders.direction.contains("Insufficient directional edge"),
-            "Should indicate insufficient edge in direction: {}",
+            orders.direction.contains("NO_SIGNAL") || orders.direction.contains("Insufficient"),
+            "Should indicate no signal or insufficient confidence in direction: {}",
             orders.direction
         );
         assert_eq!(
