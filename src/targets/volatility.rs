@@ -103,6 +103,7 @@
 
 use crate::config::model::TargetsConfig;
 use crate::data::structures::MarketDataRow;
+use crate::targets::sequence_reconstruction::SequenceReconstructionConfig;
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_ohlcv_data;
 use crate::utils::parser::parse_horizon_to_steps;
@@ -170,7 +171,7 @@ pub fn generate_volatility_targets(
     log::info!(
         "🎯 Volatility targets using calibrated bandwidth: {:.6} (was base: {:.6})",
         calibrated_bandwidth,
-        targets_config.base_sensitivity
+        targets_config.base_sensitivity()
     );
 
     for horizon in horizons {
@@ -191,9 +192,22 @@ pub fn generate_volatility_targets(
 
                 // Only classify if we have sufficient data for ATR calculation
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
+                    // Map calibrated bandwidth back to appropriate sensitivity level
+                    let sensitivity = if calibrated_bandwidth <= 0.008 {
+                        crate::config::model::AdaptiveSensitivity::VeryHigh
+                    } else if calibrated_bandwidth <= 0.013 {
+                        crate::config::model::AdaptiveSensitivity::High
+                    } else if calibrated_bandwidth <= 0.025 {
+                        crate::config::model::AdaptiveSensitivity::Balanced
+                    } else if calibrated_bandwidth <= 0.035 {
+                        crate::config::model::AdaptiveSensitivity::Low
+                    } else {
+                        crate::config::model::AdaptiveSensitivity::VeryLow
+                    };
+                    
                     // Create adaptive config with calibrated bandwidth
                     let adaptive_targets_config = TargetsConfig {
-                        base_sensitivity: calibrated_bandwidth,
+                        sensitivity,
                         balance_target: targets_config.balance_target,
                         momentum_weighting: targets_config.momentum_weighting,
                         extreme_multiplier: targets_config.extreme_multiplier,
@@ -355,10 +369,10 @@ pub struct AtrDistributionStats {
 /// Adaptive bandwidth value optimized for current volatility regime
 pub fn calculate_adaptive_volatility_bandwidth(
     atr_series: &[f64],
-    base_sensitivity: f64,
+    sensitivity: f64,
 ) -> Result<f64> {
     if atr_series.is_empty() {
-        return Ok(base_sensitivity);
+        return Ok(sensitivity);
     }
 
     let stats = calculate_atr_distribution_stats(atr_series);
@@ -374,7 +388,7 @@ pub fn calculate_adaptive_volatility_bandwidth(
     // Higher CV (more volatile ATR) = wider bandwidth (less sensitive)
     // Lower CV (stable ATR) = narrower bandwidth (more sensitive)
     let cv_multiplier = (cv / 0.5).clamp(0.4, 2.5); // Normalize around 0.5 CV baseline
-    let adaptive_bandwidth = base_sensitivity * cv_multiplier;
+    let adaptive_bandwidth = sensitivity * cv_multiplier;
 
     // Apply reasonable bounds
     let final_bandwidth = adaptive_bandwidth.clamp(0.05, 1.0);
@@ -521,7 +535,8 @@ pub fn classify_volatility_with_distribution_analysis(
     let horizon_atr = get_sequence_atr_baseline(horizon_candles)?;
 
     // Step 4: Calculate adaptive thresholds using calibrated sensitivity
-    let log_thresholds = calculate_log_volatility_thresholds(targets_config)?;
+    let log_thresholds =
+        calculate_adaptive_log_volatility_thresholds(targets_config, sequence_candles)?;
 
     // Step 5: Classify using enhanced logarithmic ratio approach
     let volatility_class =
@@ -529,7 +544,7 @@ pub fn classify_volatility_with_distribution_analysis(
 
     log::debug!(
         "🎯 Volatility Distribution Analysis: seq_atr={:.6}, hor_atr={:.6}, calibrated_sensitivity={:.4}, class={}",
-        baseline_atr, horizon_atr, targets_config.base_sensitivity, volatility_class
+        baseline_atr, horizon_atr, targets_config.base_sensitivity(), volatility_class
     );
 
     Ok(volatility_class)
@@ -660,8 +675,12 @@ pub fn calibrate_volatility_bandwidth(
 pub fn calculate_log_volatility_thresholds(
     targets_config: &TargetsConfig,
 ) -> Result<LogVolatilityThresholds> {
-    let half_bandwidth = targets_config.base_sensitivity / 2.0;
-    let extreme_bandwidth = targets_config.base_sensitivity * targets_config.extreme_multiplier;
+    // **VOLATILITY-SPECIFIC SCALING**: Volatility needs wider ranges than price levels
+    // Scale the base sensitivity for volatility classification
+    let volatility_sensitivity = targets_config.base_sensitivity() * 3.0; // 3x scaling for volatility
+    
+    let half_bandwidth = volatility_sensitivity / 2.0;
+    let extreme_bandwidth = volatility_sensitivity * targets_config.extreme_multiplier;
 
     let thresholds = LogVolatilityThresholds {
         very_low_max: -extreme_bandwidth, // Most negative in log space
@@ -677,8 +696,51 @@ pub fn calculate_log_volatility_thresholds(
     let high_ratio = extreme_bandwidth.exp();
 
     log::debug!(
-        "🎯 Log Volatility Thresholds: base_sensitivity={}, extreme_multiplier={}, log_thresholds=[{:.4}, {:.4}, {:.4}, {:.4}], ratio_ranges=[{:.3}, {:.3}, {:.3}, {:.3}]",
-        targets_config.base_sensitivity, targets_config.extreme_multiplier,
+        "🎯 Log Volatility Thresholds: base_sensitivity={}, volatility_scaled={:.4}, extreme_multiplier={}, log_thresholds=[{:.4}, {:.4}, {:.4}, {:.4}], ratio_ranges=[{:.3}, {:.3}, {:.3}, {:.3}]",
+        targets_config.base_sensitivity(), volatility_sensitivity, targets_config.extreme_multiplier,
+        thresholds.very_low_max, thresholds.low_max, thresholds.medium_max, thresholds.high_max,
+        very_low_ratio, low_ratio, medium_high_ratio, high_ratio
+    );
+
+    Ok(thresholds)
+}
+
+/// Calculate adaptive log volatility thresholds based on sequence characteristics
+pub fn calculate_adaptive_log_volatility_thresholds(
+    targets_config: &TargetsConfig,
+    sequence_ohlcv: &[MarketDataRow],
+) -> Result<LogVolatilityThresholds> {
+    // Calculate adaptive sensitivity multiplier
+    let reconstruction_config = SequenceReconstructionConfig {
+        percentiles: [0.1, 0.9], // Not used for volatility, but required
+        bandwidth_size: 1.0,
+        adaptive_percentiles: true,
+        sensitivity: crate::config::model::AdaptiveSensitivity::Balanced, // Default sensitivity
+    };
+    let adaptive_multiplier = reconstruction_config.adaptive_sensitivity_multiplier(sequence_ohlcv);
+
+    // Apply adaptive multiplier to base sensitivity with volatility scaling
+    let volatility_base_sensitivity = targets_config.base_sensitivity() * 5.0; // Same 5x scaling
+    let adaptive_base_sensitivity = volatility_base_sensitivity * adaptive_multiplier;
+    let half_bandwidth = adaptive_base_sensitivity / 2.0;
+    let extreme_bandwidth = adaptive_base_sensitivity * targets_config.extreme_multiplier;
+
+    let thresholds = LogVolatilityThresholds {
+        very_low_max: -extreme_bandwidth, // Most negative in log space
+        low_max: -half_bandwidth,         // Negative side of medium
+        medium_max: half_bandwidth,       // Positive side of medium
+        high_max: extreme_bandwidth,      // Most positive before very high
+    };
+
+    // Convert log thresholds back to ratio ranges for logging
+    let very_low_ratio = (-extreme_bandwidth).exp();
+    let low_ratio = (-half_bandwidth).exp();
+    let medium_high_ratio = half_bandwidth.exp();
+    let high_ratio = extreme_bandwidth.exp();
+
+    log::debug!(
+        "🎯 Adaptive Log Volatility Thresholds: base_sensitivity={}, volatility_scaled={:.4}, adaptive_multiplier={:.3}, adaptive_base={:.4}, log_thresholds=[{:.4}, {:.4}, {:.4}, {:.4}], ratio_ranges=[{:.3}, {:.3}, {:.3}, {:.3}]",
+        targets_config.base_sensitivity(), volatility_base_sensitivity, adaptive_multiplier, adaptive_base_sensitivity,
         thresholds.very_low_max, thresholds.low_max, thresholds.medium_max, thresholds.high_max,
         very_low_ratio, low_ratio, medium_high_ratio, high_ratio
     );
@@ -828,7 +890,8 @@ pub fn reconstruct_volatility(
 
     // Use same configuration as training
     let targets_config = config.cloned().unwrap_or_default();
-    let log_thresholds = calculate_log_volatility_thresholds(&targets_config)?;
+    let log_thresholds =
+        calculate_adaptive_log_volatility_thresholds(&targets_config, sequence_ohlcv)?;
 
     // Calculate training ATR baseline (same as training)
     let train_atr = get_sequence_atr_baseline(sequence_ohlcv)?;

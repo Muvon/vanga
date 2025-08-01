@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::config::model::TargetsConfig;
+    use crate::config::model::{TargetsConfig, AdaptiveSensitivity};
     use crate::data::structures::MarketDataRow;
     use crate::targets::direction::calculate_raw_linear_slope;
     use crate::targets::price_levels::classify_price_level;
@@ -190,7 +190,7 @@ mod tests {
 
             let train_atr = get_sequence_atr_baseline(&sequence).unwrap();
             let targets_config = TargetsConfig {
-                base_sensitivity: 0.4,
+                sensitivity: AdaptiveSensitivity::Low,
                 balance_target: 0.2,
                 momentum_weighting: 1.2,
                 extreme_multiplier: 2.0,
@@ -308,7 +308,7 @@ mod tests {
         // Test 3: Volatility log ratios preserve multiplicative relationships
         let base_atr = 0.02;
         let targets_config = TargetsConfig {
-            base_sensitivity: 0.4,
+            sensitivity: AdaptiveSensitivity::Low,
             balance_target: 0.2,
             momentum_weighting: 1.2,
             extreme_multiplier: 2.0,

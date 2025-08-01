@@ -16,24 +16,23 @@ mod tests {
     /// Test linear regression slope calculation with known data and volatility normalization
     #[test]
     fn test_linear_trend_slope_calculation() {
-        // Test case 1: Perfect upward trend with volatility normalization
+        // Test case 1: Perfect upward trend
         let upward_prices = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let slope = calculate_raw_linear_slope(&upward_prices).unwrap();
-        // With volatility normalization, slope should be normalized by price std dev
-        // Price mean = 3.0, std dev ≈ 1.58, raw slope = 1.0, normalized ≈ 1.0/1.58 ≈ 0.63
+        // Raw slope for perfect linear trend should be 1.0
         assert!(
-            slope > 0.5 && slope < 0.8,
-            "Normalized slope should be ~0.63, got {}",
+            (slope - 1.0).abs() < 0.01,
+            "Raw slope should be ~1.0, got {}",
             slope
         );
 
-        // Test case 2: Perfect downward trend with volatility normalization
+        // Test case 2: Perfect downward trend
         let downward_prices = vec![5.0, 4.0, 3.0, 2.0, 1.0];
         let slope = calculate_raw_linear_slope(&downward_prices).unwrap();
         // Should be negative of upward case
         assert!(
-            slope < -0.5 && slope > -0.8,
-            "Normalized slope should be ~-0.63, got {}",
+            (slope + 1.0).abs() < 0.01,
+            "Raw slope should be ~-1.0, got {}",
             slope
         );
 
@@ -42,13 +41,13 @@ mod tests {
         let slope = calculate_raw_linear_slope(&flat_prices).unwrap();
         assert_relative_eq!(slope, 0.0, epsilon = 1e-10);
 
-        // Test case 4: Realistic crypto price trend (BTC-like) with volatility normalization
+        // Test case 4: Realistic crypto price trend (BTC-like)
         let btc_prices = vec![50000.0, 50100.0, 50050.0, 50200.0, 50150.0];
         let slope = calculate_raw_linear_slope(&btc_prices).unwrap();
-        // Should be positive but normalized by price volatility
+        // Should be positive (upward trend overall)
         assert!(
-            slope > 0.0 && slope < 1.0,
-            "Normalized BTC slope should be small positive, got {}",
+            slope > 0.0,
+            "BTC slope should be positive for upward trend, got {}",
             slope
         );
 
@@ -62,15 +61,15 @@ mod tests {
     #[test]
     fn test_classification_with_known_slopes() {
         let targets_config = TargetsConfig {
-            base_sensitivity: 4.0, // Larger sensitivity for crypto slopes
+            sensitivity: crate::config::model::AdaptiveSensitivity::High, // High = 0.2, good for crypto slopes
             balance_target: 0.2,
             momentum_weighting: 1.2,
             extreme_multiplier: 2.0,
         };
 
         // Calculate expected thresholds - no slope_scale
-        let _half_sensitivity = 4.0 / 2.0; // 2.0 - for reference
-        let _extreme_sensitivity = 4.0 * 2.0; // 8.0 - for reference
+        let _half_sensitivity = 0.2 / 2.0; // 0.1 - for reference
+        let _extreme_sensitivity = 0.2 * 2.0; // 0.4 - for reference
 
         // Test case 1: Strong deceleration (DUMP)
         let seq_prices = vec![100.0, 101.0, 102.0, 103.0, 104.0]; // slope ≈ 1.0

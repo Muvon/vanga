@@ -5,17 +5,25 @@
 //! - Direction: Up/down/sideways movement classification
 //! - Volatility: Low/medium/high volatility regime classification
 
+pub mod balance_analysis_final;
 pub mod direction;
+#[cfg(test)]
+mod direction_balance_tests;
 #[cfg(test)]
 mod direction_tests;
 pub mod imbalance_mitigation;
 #[cfg(test)]
 mod math_consistency_tests;
 #[cfg(test)]
+mod price_level_balance_tests;
+#[cfg(test)]
 mod price_level_tests;
 pub mod price_levels;
 pub mod sequence_reconstruction;
+pub mod synthetic_data_generators;
 pub mod volatility;
+#[cfg(test)]
+mod volatility_balance_tests;
 #[cfg(test)]
 mod volatility_tests;
 
@@ -62,7 +70,7 @@ impl MultiTargetConfig {
         // Use the new TargetsConfig approach
         Self {
             price_level_config: PriceLevelConfig {
-                bandwidth_size: model_config.targets.base_sensitivity,
+                bandwidth_size: model_config.targets.base_sensitivity(),
             },
             horizons,
         }

@@ -241,7 +241,7 @@ impl Predictor {
             formatter = formatter.with_training_config(config.clone());
             log::debug!(
                 "🔧 Training config for reconstruction: base_sensitivity={:.3}, extreme_multiplier={:.1}",
-                config.base_sensitivity,
+                config.base_sensitivity(),
                 config.extreme_multiplier
             );
         }

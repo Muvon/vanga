@@ -66,7 +66,7 @@ mod integration_tests {
     fn test_model_config_creation() {
         let config = create_test_model_config();
         // Test the new TargetsConfig system
-        assert_eq!(config.targets.base_sensitivity, 0.02);
+        assert_eq!(config.targets.base_sensitivity(), 0.02);
         assert_eq!(config.targets.balance_target, 0.2);
         assert_eq!(config.targets.momentum_weighting, 1.2);
         assert_eq!(config.targets.extreme_multiplier, 2.0);

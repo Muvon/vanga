@@ -66,7 +66,7 @@ impl OutputFormatter {
     /// Set training configuration for enhanced reconstruction
     pub fn with_training_config(mut self, config: crate::config::model::TargetsConfig) -> Self {
         // Store training config parameters for reconstruction methods
-        self.bandwidth_size = Some(config.base_sensitivity);
+        self.bandwidth_size = Some(config.base_sensitivity());
         self.percentiles = Some([0.1, 0.9]); // Default percentiles used in training
         self
     }
@@ -718,8 +718,22 @@ impl OutputFormatter {
         // Use enhanced reconstruction from price_levels module
         let targets_config = if self.bandwidth_size.is_some() {
             // Create TargetsConfig from stored parameters
+            // Map bandwidth_size back to appropriate sensitivity level
+            let bandwidth = self.bandwidth_size.unwrap_or(0.02);
+            let sensitivity = if bandwidth <= 0.008 {
+                crate::config::model::AdaptiveSensitivity::VeryHigh
+            } else if bandwidth <= 0.013 {
+                crate::config::model::AdaptiveSensitivity::High
+            } else if bandwidth <= 0.025 {
+                crate::config::model::AdaptiveSensitivity::Balanced
+            } else if bandwidth <= 0.035 {
+                crate::config::model::AdaptiveSensitivity::Low
+            } else {
+                crate::config::model::AdaptiveSensitivity::VeryLow
+            };
+            
             Some(crate::config::model::TargetsConfig {
-                base_sensitivity: self.bandwidth_size.unwrap_or(1.0),
+                sensitivity,
                 extreme_multiplier: 2.0, // Default value
                 ..Default::default()
             })

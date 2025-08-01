@@ -623,13 +623,16 @@ pub fn classify_price_level(
         return Ok(2); // Default to neutral class
     }
 
-    // Use adaptive percentiles based on sequence data (no hardcoded values)
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
-    let bandwidth_size = config.base_sensitivity; // Use base_sensitivity as bandwidth
+    // Use centralized sequence reconstruction logic
+    // Map new TargetsConfig to old parameters for backward compatibility
+    let percentiles = [0.1, 0.9]; // Default percentiles for 5-class system
+    let bandwidth_size = config.base_sensitivity(); // Use base_sensitivity as bandwidth
 
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size,
+        adaptive_percentiles: true,
+        sensitivity: config.sensitivity, // Use the sensitivity from config
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
 
@@ -720,9 +723,30 @@ pub fn classify_price_level_with_momentum(
     // 2. Calculate horizon VWAP (standard calculation)
     let hor_vwap = get_horizon_vwap(horizon_ohlcv)?;
 
+<<<<<<< HEAD
     // 3. Use adaptive percentiles based on sequence data
     let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
+=======
+    // 3. Get configuration parameters with adaptive percentiles
+>>>>>>> 894b663 (draft)
     let base_bandwidth_size = 1.0;
+    let reconstruction_config = SequenceReconstructionConfig {
+        percentiles: [0.1, 0.9], // Base percentiles
+        bandwidth_size: base_bandwidth_size,
+        adaptive_percentiles: true, // Enable adaptive percentiles
+        sensitivity: crate::config::model::AdaptiveSensitivity::Balanced, // Default sensitivity
+    };
+
+    // Calculate adaptive percentiles based on sequence characteristics
+    let adaptive_percentiles = reconstruction_config.adaptive_percentiles(sequence_ohlcv);
+
+    log::debug!(
+        "🎯 Price Level Adaptive Percentiles: base=[{:.3}, {:.3}] → adaptive=[{:.3}, {:.3}]",
+        reconstruction_config.percentiles[0],
+        reconstruction_config.percentiles[1],
+        adaptive_percentiles[0],
+        adaptive_percentiles[1]
+    );
 
     // 4. Calculate adaptive bandwidth if enabled
     // // ALWAYS  adaptive no need to have complexity
@@ -730,11 +754,13 @@ pub fn classify_price_level_with_momentum(
         calculate_adaptive_bandwidth(sequence_ohlcv, base_bandwidth_size, momentum_factor)?;
 
     // 5. Use enhanced sequence reconstruction with adaptive parameters
-    let reconstruction_config = SequenceReconstructionConfig {
-        percentiles,
+    let final_reconstruction_config = SequenceReconstructionConfig {
+        percentiles: adaptive_percentiles,
         bandwidth_size: final_bandwidth_size,
+        adaptive_percentiles: false, // Already calculated adaptive percentiles above
+        sensitivity: crate::config::model::AdaptiveSensitivity::Balanced, // Default sensitivity
     };
-    let analyzer = SequenceAnalyzer::new(reconstruction_config);
+    let analyzer = SequenceAnalyzer::new(final_reconstruction_config);
 
     // 6. Calculate boundaries using centralized logic
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
@@ -883,7 +909,7 @@ pub fn generate_price_level_targets_with_targets_config(
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let config = PriceLevelConfig {
-        bandwidth_size: targets_config.base_sensitivity,
+        bandwidth_size: targets_config.base_sensitivity(),
     };
     generate_price_level_targets(df, horizons, &config, sequence_indices, sequence_length)
 }
@@ -969,9 +995,15 @@ pub fn reconstruct_price_levels(
         ));
     }
 
+<<<<<<< HEAD
     // Use same adaptive percentiles as training for consistency
     let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
     let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
+=======
+    // Use same configuration as training
+    let percentiles = [0.1, 0.9]; // Default percentiles for 5-class system
+    let bandwidth_size = config.map(|c| c.base_sensitivity()).unwrap_or(1.0);
+>>>>>>> 894b663 (draft)
 
     // Calculate adaptive bandwidth (same logic as training)
     let final_bandwidth_size = calculate_adaptive_bandwidth(
@@ -984,6 +1016,8 @@ pub fn reconstruct_price_levels(
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size: final_bandwidth_size,
+        adaptive_percentiles: true,
+        sensitivity: config.map(|c| c.sensitivity).unwrap_or(crate::config::model::AdaptiveSensitivity::Balanced),
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
@@ -1057,15 +1091,23 @@ pub fn probabilities_to_price_targets(
         ));
     }
 
+<<<<<<< HEAD
     // Use same adaptive percentiles as training for consistency
     let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
     let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
+=======
+    // Use same boundary calculation as training
+    let percentiles = [0.1, 0.9];
+    let bandwidth_size = config.map(|c| c.base_sensitivity()).unwrap_or(1.0);
+>>>>>>> 894b663 (draft)
     let final_bandwidth_size =
         calculate_adaptive_bandwidth(sequence_ohlcv, bandwidth_size, Some(1.2))?;
 
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size: final_bandwidth_size,
+        adaptive_percentiles: true,
+        sensitivity: crate::config::model::AdaptiveSensitivity::Balanced, // Default sensitivity
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;

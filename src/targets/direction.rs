@@ -91,6 +91,7 @@
 
 use crate::config::model::TargetsConfig;
 use crate::data::structures::MarketDataRow;
+use crate::targets::sequence_reconstruction::SequenceReconstructionConfig;
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_close_prices;
 use crate::utils::parser::parse_horizon_to_steps;
@@ -139,17 +140,31 @@ pub fn generate_direction_targets(
     };
 
     // Create adaptive targets config with calibrated sensitivity
+    // Map calibrated sensitivity back to appropriate enum level
+    let sensitivity = if calibrated_sensitivity <= 0.008 {
+        crate::config::model::AdaptiveSensitivity::VeryHigh
+    } else if calibrated_sensitivity <= 0.013 {
+        crate::config::model::AdaptiveSensitivity::High
+    } else if calibrated_sensitivity <= 0.025 {
+        crate::config::model::AdaptiveSensitivity::Balanced
+    } else if calibrated_sensitivity <= 0.035 {
+        crate::config::model::AdaptiveSensitivity::Low
+    } else {
+        crate::config::model::AdaptiveSensitivity::VeryLow
+    };
+    
     let adaptive_targets_config = TargetsConfig {
-        base_sensitivity: calibrated_sensitivity,
+        sensitivity,
         balance_target: targets_config.balance_target,
         momentum_weighting: targets_config.momentum_weighting,
         extreme_multiplier: targets_config.extreme_multiplier,
     };
 
     log::info!(
-        "🎯 Direction targets using calibrated sensitivity: {:.6} (was base: {:.6})",
+        "🎯 Direction targets using calibrated sensitivity: {:.6} (was base: {:.6}) -> {}",
         calibrated_sensitivity,
-        targets_config.base_sensitivity
+        targets_config.base_sensitivity(),
+        sensitivity
     );
 
     for horizon in horizons {
@@ -389,7 +404,13 @@ fn calculate_sequence_trend_consistency(prices: &[f64]) -> Result<f64> {
 
     // Calculate momentum between consecutive segments
     let segment_size = (prices.len() / 3).max(2);
-    for i in 0..(prices.len() - segment_size * 2) {
+    let required_length = segment_size * 2;
+    
+    if prices.len() < required_length {
+        return Ok(0.01); // Default consistency for sequences too short for segmentation
+    }
+    
+    for i in 0..(prices.len() - required_length) {
         let seg1_start = prices[i];
         let seg1_end = prices[i + segment_size];
         let seg2_start = seg1_end;
@@ -444,12 +465,35 @@ fn classify_direction_momentum_change(
     // Step 2: Calculate sequence trend consistency for adaptive thresholds
     let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
 
-    // Step 3: Set adaptive thresholds based on trend consistency
-    let base_multiplier = targets_config.base_sensitivity * 20.0; // Scale for momentum changes
+    // Step 3: Set adaptive thresholds based on trend consistency and sequence characteristics
+    let base_multiplier = targets_config.base_sensitivity() * 20.0; // Scale for momentum changes
     let extreme_multiplier = targets_config.extreme_multiplier;
 
-    let base_threshold = trend_consistency * base_multiplier;
-    let extreme_threshold = trend_consistency * base_multiplier * extreme_multiplier;
+    // Calculate adaptive sensitivity multiplier based on sequence characteristics
+    let reconstruction_config = SequenceReconstructionConfig {
+        percentiles: [0.1, 0.9], // Not used for direction, but required
+        bandwidth_size: 1.0,
+        adaptive_percentiles: true,
+        sensitivity: crate::config::model::AdaptiveSensitivity::Balanced, // Default sensitivity
+    };
+    let adaptive_multiplier = reconstruction_config.adaptive_sensitivity_multiplier(
+        &sequence_prices
+            .iter()
+            .enumerate()
+            .map(|(i, &price)| MarketDataRow {
+                timestamp: i as i64,
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+                volume: 1.0, // Dummy volume for price-only data
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let base_threshold = trend_consistency * base_multiplier * adaptive_multiplier;
+    let extreme_threshold =
+        trend_consistency * base_multiplier * extreme_multiplier * adaptive_multiplier;
 
     // Ensure reasonable minimum thresholds
     let min_base = 0.01; // 1% minimum momentum change
@@ -604,7 +648,7 @@ pub fn reconstruct_direction(
 
     // Use same configuration as training
     let targets_config = config.cloned().unwrap_or_default();
-    let base_multiplier = targets_config.base_sensitivity * 20.0; // Same scaling as training
+    let base_multiplier = targets_config.base_sensitivity() * 20.0; // Same scaling as training
     let extreme_multiplier = targets_config.extreme_multiplier;
 
     let base_threshold = trend_consistency * base_multiplier;

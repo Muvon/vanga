@@ -3,6 +3,81 @@ use serde::{Deserialize, Serialize};
 /// Unified number of classes for all target types in the 5-class system
 pub const NUM_CLASSES: usize = 5;
 
+/// Adaptive sensitivity levels for target classification
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum AdaptiveSensitivity {
+    /// Very aggressive classification - narrow neutral zones (10-20%)
+    /// More extreme classifications, better for volatile markets
+    VeryHigh,
+    
+    /// Aggressive classification - narrow neutral zones (15-25%)  
+    /// Good for trending markets with clear directional moves
+    High,
+    
+    /// Balanced classification - moderate neutral zones (20-35%)
+    /// Default setting, good for most market conditions
+    #[default]
+    Balanced,
+    
+    /// Conservative classification - wider neutral zones (30-45%)
+    /// Good for choppy/sideways markets, reduces noise
+    Low,
+    
+    /// Very conservative classification - wide neutral zones (40-60%)
+    /// Minimal extreme classifications, good for ranging markets
+    VeryLow,
+}
+
+impl AdaptiveSensitivity {
+    /// Get the base sensitivity value for calculations
+    pub fn base_value(&self) -> f64 {
+        match self {
+            AdaptiveSensitivity::VeryHigh => 0.5,   // Very aggressive - narrow neutral zones
+            AdaptiveSensitivity::High => 0.2,      // Aggressive - good for trending markets  
+            AdaptiveSensitivity::Balanced => 0.05, // Balanced - reasonable default
+            AdaptiveSensitivity::Low => 0.02,      // Conservative - wider neutral zones (original default)
+            AdaptiveSensitivity::VeryLow => 0.01,  // Very conservative - minimal sensitivity
+        }
+    }
+    
+    /// Get human-readable description
+    pub fn description(&self) -> &'static str {
+        match self {
+            AdaptiveSensitivity::VeryHigh => "Very aggressive - narrow neutral zones, more extreme classifications",
+            AdaptiveSensitivity::High => "Aggressive - good for trending markets with clear moves",
+            AdaptiveSensitivity::Balanced => "Balanced - default setting for most market conditions",
+            AdaptiveSensitivity::Low => "Conservative - wider neutral zones, good for choppy markets",
+            AdaptiveSensitivity::VeryLow => "Very conservative - minimal extreme classifications",
+        }
+    }
+    
+    /// Get expected neutral zone percentage range
+    pub fn neutral_zone_range(&self) -> (u8, u8) {
+        match self {
+            AdaptiveSensitivity::VeryHigh => (5, 15),   // Very narrow for high sensitivity
+            AdaptiveSensitivity::High => (10, 25),     // Narrow for aggressive trading
+            AdaptiveSensitivity::Balanced => (20, 35), // Moderate - original behavior
+            AdaptiveSensitivity::Low => (30, 50),      // Wide for conservative approach
+            AdaptiveSensitivity::VeryLow => (40, 70),  // Very wide for minimal extremes
+        }
+    }
+}
+
+
+
+impl std::fmt::Display for AdaptiveSensitivity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            AdaptiveSensitivity::VeryHigh => "VeryHigh",
+            AdaptiveSensitivity::High => "High", 
+            AdaptiveSensitivity::Balanced => "Balanced",
+            AdaptiveSensitivity::Low => "Low",
+            AdaptiveSensitivity::VeryLow => "VeryLow",
+        };
+        write!(f, "{}", name)
+    }
+}
+
 /// **UNIFIED TARGETS CONFIG**: Simple, clean, always adaptive
 ///
 /// This replaces all the complex individual target configurations with a single,
@@ -10,8 +85,8 @@ pub const NUM_CLASSES: usize = 5;
 /// class distribution across all market conditions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetsConfig {
-    /// Base sensitivity for all targets (auto-scaled by sequence volatility)
-    pub base_sensitivity: f64,
+    /// Adaptive sensitivity level for all targets
+    pub sensitivity: AdaptiveSensitivity,
 
     /// Target class balance (0.2 = 20% per class for 5-class system)
     pub balance_target: f64,
@@ -23,10 +98,17 @@ pub struct TargetsConfig {
     pub extreme_multiplier: f64,
 }
 
+impl TargetsConfig {
+    /// Get the base sensitivity value for backward compatibility
+    pub fn base_sensitivity(&self) -> f64 {
+        self.sensitivity.base_value()
+    }
+}
+
 impl Default for TargetsConfig {
     fn default() -> Self {
         Self {
-            base_sensitivity: 0.02,
+            sensitivity: AdaptiveSensitivity::Balanced,
             balance_target: 0.2,
             momentum_weighting: 1.2,
             extreme_multiplier: 2.0,
@@ -327,7 +409,7 @@ impl ModelConfig {
     /// Validate the model configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
         // Validate base_sensitivity
-        if self.targets.base_sensitivity <= 0.0 || self.targets.base_sensitivity > 1.0 {
+        if self.targets.base_sensitivity() <= 0.0 || self.targets.base_sensitivity() > 1.0 {
             return Err(crate::utils::error::VangaError::ConfigError(
                 "base_sensitivity must be between 0.0 and 1.0".to_string(),
             ));
