@@ -121,7 +121,7 @@ pub fn generate_price_level_targets(
 
                 // Use enhanced classification with momentum weighting and adaptive bandwidth
                 // TODO: Make these configurable parameters in future config refactoring
-                let momentum_factor = Some(1.2); // Slight bias toward recent data
+                let momentum_factor = Some(config.momentum_factor); // Slight bias toward recent data
 
                 let target_class = classify_price_level_with_momentum(
                     sequence_ohlcv,
