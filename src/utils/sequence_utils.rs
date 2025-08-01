@@ -102,9 +102,9 @@ pub fn calculate_sequence_indices(
 
 /// Validate sequence overlap parameter
 pub fn validate_sequence_overlap(overlap: f64) -> Result<()> {
-    if !(0.0..1.0).contains(&overlap) {
+    if !(0.0..=1.0).contains(&overlap) {
         return Err(VangaError::ConfigError(format!(
-            "sequence_overlap must be between 0.0 and 1.0 (exclusive), got: {}",
+            "sequence_overlap must be between 0.0 and 1.0 (inclusive), got: {}",
             overlap
         )));
     }
