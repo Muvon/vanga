@@ -246,39 +246,71 @@ impl Predictor {
             );
         }
 
-        // Determine horizon using smart selection logic
-        let horizon = if let Some(requested_horizon) = &self.config.horizon {
-            // Validate requested horizon against trained horizons
+        // Determine horizons to process based on configuration
+        let horizons_to_process = if self.config.all_horizons {
+            // Process ALL trained horizons
+            let trained_horizons = model.get_trained_horizons();
+            log::info!(
+                "Processing all {} trained horizons: {:?}",
+                trained_horizons.len(),
+                trained_horizons
+            );
+            trained_horizons.to_vec()
+        } else if let Some(requested_horizon) = &self.config.horizon {
+            // Process SPECIFIC horizon (with strict validation)
             let trained_horizons = model.get_trained_horizons();
             if !trained_horizons.contains(requested_horizon) {
-                log::warn!(
-                    "Requested horizon '{}' was not trained. Available horizons: {:?}. Using first available horizon.",
+                return Err(VangaError::ConfigError(format!(
+                    "Requested horizon '{}' was not trained. Available horizons: {:?}. Use one of the available horizons or --all-horizons to predict all.",
                     requested_horizon, trained_horizons
-                );
-                trained_horizons
-                    .first()
-                    .unwrap_or(&"1h".to_string())
-                    .clone()
-            } else {
-                requested_horizon.clone()
+                )));
             }
+            log::info!(
+                "Processing specific requested horizon: {}",
+                requested_horizon
+            );
+            vec![requested_horizon.clone()]
         } else {
-            // Use first trained horizon or default to 1h
+            // Process FIRST horizon (default behavior for backward compatibility)
             let trained_horizons = model.get_trained_horizons();
-            trained_horizons
+            let default_horizon = trained_horizons
                 .first()
                 .unwrap_or(&"1h".to_string())
-                .clone()
+                .clone();
+            log::info!(
+                "No horizon specified, using primary horizon: {}",
+                default_horizon
+            );
+            vec![default_horizon]
         };
 
-        // Generate targets for the prediction data to enable confidence calculation
-        let formatted_predictions = formatter.format_predictions(
-            &raw_predictions,
-            &self.config.symbols[0],
-            &horizon,
-            current_price,
-            None, // No prepared targets available during prediction - use model uncertainty instead
-        )?;
+        // Process each horizon and collect all predictions
+        let mut all_predictions = Vec::new();
+
+        for horizon in horizons_to_process {
+            log::info!("🎯 Processing predictions for horizon: {}", horizon);
+
+            // Generate predictions for this specific horizon
+            let formatted_predictions = formatter.format_predictions(
+                &raw_predictions,
+                &self.config.symbols[0],
+                &horizon,
+                current_price,
+                None, // No prepared targets available during prediction - use model uncertainty instead
+            )?;
+
+            log::info!(
+                "Generated {} predictions for horizon: {}",
+                formatted_predictions.len(),
+                horizon
+            );
+            all_predictions.extend(formatted_predictions);
+        }
+
+        log::info!(
+            "Total predictions generated across all horizons: {}",
+            all_predictions.len()
+        );
 
         // Apply post-processing if configured
         let post_processor = PostProcessor::new(self.config.post_processing.clone());
@@ -287,11 +319,16 @@ impl Predictor {
                 "Applying confidence threshold: {} (predictions with confidence below this will be filtered out)",
                 self.config.min_confidence
             );
-            let processed = post_processor.process(formatted_predictions)?;
+            let processed = post_processor.process(all_predictions)?;
 
             // Log confidence values before filtering (promote to INFO level for debugging)
             for (i, pred) in processed.iter().enumerate() {
-                log::info!("Prediction {}: confidence = {:.3}", i, pred.confidence);
+                log::info!(
+                    "Prediction {} ({}): confidence = {:.3}",
+                    i,
+                    pred.horizon,
+                    pred.confidence
+                );
             }
 
             let processed_count = processed.len();
@@ -316,7 +353,7 @@ impl Predictor {
             filtered
         } else {
             log::info!("No confidence threshold applied (min_confidence = 0.0)");
-            post_processor.process(formatted_predictions)?
+            post_processor.process(all_predictions)?
         };
 
         log::info!("Prediction completed successfully");
