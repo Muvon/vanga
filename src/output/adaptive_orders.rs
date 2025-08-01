@@ -19,93 +19,6 @@ use crate::output::structures::{
 use log::{debug, info, warn};
 use std::collections::HashMap;
 
-/// Calculate Shannon entropy from probability distribution for adaptive thresholds
-/// Higher entropy = more uncertain predictions = need stronger edge to trade
-fn calculate_entropy(bins: &HashMap<String, PriceBin>) -> f64 {
-    bins.values()
-        .map(|bin| {
-            if bin.probability > 0.0 {
-                -bin.probability * bin.probability.ln()
-            } else {
-                0.0
-            }
-        })
-        .sum()
-}
-
-/// Calculate entropy from direction probabilities for directional uncertainty
-fn calculate_direction_entropy(direction_pred: &DirectionPrediction) -> f64 {
-    let probabilities = [
-        direction_pred.dump_probability,
-        direction_pred.down_probability,
-        direction_pred.sideways_probability,
-        direction_pred.up_probability,
-        direction_pred.pump_probability,
-    ];
-
-    probabilities
-        .iter()
-        .map(|&prob| if prob > 0.0 { -prob * prob.ln() } else { 0.0 })
-        .sum()
-}
-
-/// Calculate entropy from volatility regime probabilities
-fn calculate_volatility_entropy(volatility_pred: &VolatilityPrediction) -> f64 {
-    let probabilities = [
-        volatility_pred.very_low_probability,
-        volatility_pred.low_probability,
-        volatility_pred.medium_probability,
-        volatility_pred.high_probability,
-        volatility_pred.very_high_probability,
-    ];
-
-    probabilities
-        .iter()
-        .map(|&prob| if prob > 0.0 { -prob * prob.ln() } else { 0.0 })
-        .sum()
-}
-
-/// Calculate adaptive market bias thresholds using comprehensive entropy analysis
-/// This replaces hardcoded 15% threshold with mathematical uncertainty measurement
-fn calculate_adaptive_thresholds(
-    price_levels: &PriceLevelPrediction,
-    direction_pred: &DirectionPrediction,
-    volatility_pred: &VolatilityPrediction,
-) -> (f64, f64, f64) {
-    // Calculate entropy across all prediction dimensions
-    let price_entropy = calculate_entropy(&price_levels.bins);
-    let direction_entropy = calculate_direction_entropy(direction_pred);
-    let volatility_entropy = calculate_volatility_entropy(volatility_pred);
-
-    // Combined uncertainty score (0.0 = certain, ~1.6 = maximum uncertainty)
-    let combined_entropy = (price_entropy + direction_entropy + volatility_entropy) / 3.0;
-
-    // Base threshold scales with uncertainty - more uncertain = need stronger edge
-    let base_threshold = 0.05 + (combined_entropy * 0.15); // 5-20% range based on entropy
-
-    // Directional edge threshold - minimum probability difference needed
-    let min_edge_threshold = base_threshold;
-
-    // Breakout threshold - higher bar for breakout signals
-    let breakout_threshold = base_threshold * 1.5;
-
-    // Confidence threshold - minimum combined confidence to trade
-    let confidence_threshold = 0.3 + (1.0 - combined_entropy) * 0.4; // 30-70% range
-
-    debug!(
-        "🧮 Adaptive Thresholds: price_entropy={:.3}, direction_entropy={:.3}, volatility_entropy={:.3}, combined={:.3}",
-        price_entropy, direction_entropy, volatility_entropy, combined_entropy
-    );
-    debug!(
-        "📊 Calculated Thresholds: min_edge={:.1}%, breakout={:.1}%, confidence={:.1}%",
-        min_edge_threshold * 100.0,
-        breakout_threshold * 100.0,
-        confidence_threshold * 100.0
-    );
-
-    (min_edge_threshold, breakout_threshold, confidence_threshold)
-}
-
 /// Calculate volatility regime-aware ATR multiplier using probability distribution
 /// This replaces hardcoded regime multipliers with mathematical probability weighting
 fn calculate_volatility_aware_atr_multiplier(
@@ -340,59 +253,90 @@ pub fn generate_adaptive_orders(
 ) -> crate::utils::error::Result<TradingOrders> {
     info!("🚀 Generating adaptive orders with mathematical optimization");
 
-    // 1. ADAPTIVE THRESHOLD CALCULATION (replaces hardcoded 15%)
-    let (min_edge_threshold, breakout_threshold, confidence_threshold) =
-        calculate_adaptive_thresholds(price_levels, direction_pred, volatility_pred);
-
-    // 2. DIRECTIONAL EDGE ANALYSIS
+    // 🚀 ADAPTIVE ANALYSIS - Same logic as AdaptiveTradingSignal
+    // Analyze probability distribution to determine best trading approach
     let directional_edge =
         direction_pred.up_probability_aggregated - direction_pred.down_probability_aggregated;
-    let combined_confidence =
-        (direction_pred.confidence + price_levels.confidence + volatility_pred.confidence) / 3.0;
+
+    // Calculate probability spread (how concentrated vs distributed the predictions are)
+    let max_prob = direction_pred
+        .sideways_probability
+        .max(direction_pred.up_probability_aggregated)
+        .max(direction_pred.down_probability_aggregated);
+    let min_prob = direction_pred
+        .sideways_probability
+        .min(direction_pred.up_probability_aggregated)
+        .min(direction_pred.down_probability_aggregated);
+    let probability_spread = max_prob - min_prob;
+
+    // Calculate confidence in the prediction (higher spread = more confident)
+    let prediction_confidence = probability_spread;
 
     info!(
-        "📊 Market Analysis: directional_edge={:.1}% (threshold={:.1}%) combined_confidence={:.1}% (threshold={:.1}%)",
-        directional_edge * 100.0, min_edge_threshold * 100.0, combined_confidence * 100.0, confidence_threshold * 100.0
+        "📊 ADAPTIVE ORDERS ANALYSIS: edge={:.1}%, spread={:.1}%, confidence={:.1}%, max_prob={:.1}%",
+        directional_edge * 100.0,
+        probability_spread * 100.0,
+        prediction_confidence * 100.0,
+        max_prob * 100.0
     );
 
-    // 3. SIGNAL VALIDATION - Check if we have sufficient edge and confidence
-    if directional_edge.abs() < min_edge_threshold {
+    // Use model's own confidence and risk/reward to determine if we should trade
+    let min_confidence_threshold = 0.25; // Only trade if we have >25% confidence in any direction
+    let min_risk_reward_threshold = 0.5; // Minimum R/R based on volatility
+
+    // Check if any prediction has sufficient confidence
+    let has_sufficient_confidence = max_prob > min_confidence_threshold;
+    let has_acceptable_risk_reward = direction_pred.risk_reward_ratio > min_risk_reward_threshold;
+
+    if !has_sufficient_confidence {
         warn!(
-            "❌ Insufficient directional edge: {:.1}% < {:.1}%",
-            directional_edge * 100.0,
-            min_edge_threshold * 100.0
+            "❌ Insufficient confidence: max_prob={:.1}% < 25%",
+            max_prob * 100.0
         );
-        return Ok(TradingOrders::empty_with_reason(&format!(
-            "Insufficient directional edge ({:.1}%, need ≥{:.1}%)",
-            directional_edge * 100.0,
-            min_edge_threshold * 100.0
-        )));
+        return Ok(TradingOrders::empty(
+            direction_pred,
+            &format!(
+                "Insufficient confidence for trading. Max probability: {:.1}% (need >25%)",
+                max_prob * 100.0
+            ),
+        ));
     }
 
-    if combined_confidence < confidence_threshold {
+    if !has_acceptable_risk_reward {
         warn!(
-            "❌ Insufficient combined confidence: {:.1}% < {:.1}%",
-            combined_confidence * 100.0,
-            confidence_threshold * 100.0
+            "❌ Poor risk/reward ratio: {:.2} < 0.5",
+            direction_pred.risk_reward_ratio
         );
-        return Ok(TradingOrders::empty_with_reason(&format!(
-            "Insufficient prediction confidence ({:.1}%, need ≥{:.1}%)",
-            combined_confidence * 100.0,
-            confidence_threshold * 100.0
-        )));
+        return Ok(TradingOrders::empty(
+            direction_pred,
+            &format!(
+                "Poor risk/reward ratio: {:.2} (need >0.5)",
+                direction_pred.risk_reward_ratio
+            ),
+        ));
     }
 
-    // 4. DIRECTION DETERMINATION WITH BREAKOUT DETECTION
-    let direction = if directional_edge > 0.0 {
-        if direction_pred.pump_probability > breakout_threshold {
-            "LONG_BREAKOUT"
+    // Determine direction based on adaptive logic (same as AdaptiveTradingSignal)
+    let direction = if directional_edge.abs() > probability_spread * 0.3 {
+        // Clear directional bias
+        if directional_edge > 0.0 {
+            if direction_pred.pump_probability > 0.25 {
+                "LONG_BREAKOUT"
+            } else {
+                "LONG"
+            }
+        } else if direction_pred.dump_probability > 0.25 {
+            "SHORT_BREAKOUT"
         } else {
-            "LONG"
+            "SHORT"
         }
-    } else if direction_pred.dump_probability > breakout_threshold {
-        "SHORT_BREAKOUT"
     } else {
-        "SHORT"
+        // Weak directional bias but still tradeable if we have confidence
+        if direction_pred.up_probability_aggregated > direction_pred.down_probability_aggregated {
+            "LONG"
+        } else {
+            "SHORT"
+        }
     };
 
     let is_breakout = direction.contains("BREAKOUT");
