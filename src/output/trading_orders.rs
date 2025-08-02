@@ -1,0 +1,836 @@
+//! Trading orders generation and management
+//!
+//! This module handles the generation of trading orders based on predictions,
+//! including dynamic position sizing, risk-reward optimization, and adaptive order placement.
+
+use serde::{Deserialize, Serialize};
+
+// Import prediction types from other modules
+use super::prediction_types::{DirectionPrediction, PriceLevelPrediction, VolatilityPrediction};
+
+/// Trading orders with dynamic position sizing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingOrders {
+    /// Trading direction based on prediction
+    pub direction: String, // "LONG" or "SHORT"
+
+    /// Three entry levels with dynamic quantities
+    pub entry_levels: [OrderLevel; 3],
+
+    /// Three exit levels with dynamic quantities
+    pub exit_levels: [OrderLevel; 3],
+
+    /// Three stop loss levels with dynamic quantities
+    pub stop_levels: [OrderLevel; 3],
+
+    /// Total position size (1.0 = 100%)
+    pub total_position_size: f64,
+
+    /// Expected risk-reward ratio (crypto-aggressive: 4.0-8.0+)
+    pub risk_reward_ratio: f64,
+
+    /// ATR multiplier used for spacing
+    pub atr_multiplier: f64,
+
+    /// Confidence-based position sizing enabled
+    pub dynamic_sizing: bool,
+}
+
+/// Individual order level with dynamic sizing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderLevel {
+    /// Order price
+    pub price: f64,
+
+    /// Dynamic quantity percentage (not fixed 33.33%)
+    pub quantity_percentage: f64,
+
+    /// Distance from current price in ATR units
+    pub atr_distance: f64,
+
+    /// Order type for execution
+    pub order_type: String, // "LIMIT", "STOP_LIMIT", "MARKET"
+
+    /// Confidence level for this price point
+    pub confidence: f64,
+}
+
+/// Configuration for order generation
+#[derive(Debug, Clone)]
+pub struct OrderConfig {
+    /// Base ATR multiplier (crypto default: 2.0)
+    pub base_atr_multiplier: f64,
+
+    /// Minimum risk-reward ratio (crypto: 4.0)
+    pub min_risk_reward: f64,
+
+    /// Maximum risk-reward ratio (crypto: 12.0)
+    pub max_risk_reward: f64,
+
+    /// Enable aggressive position sizing
+    pub aggressive_sizing: bool,
+
+    /// Hunt protection multiplier for stops
+    pub hunt_protection: f64,
+}
+
+impl Default for OrderConfig {
+    fn default() -> Self {
+        Self {
+            base_atr_multiplier: 2.0, // Crypto-aggressive spacing
+            min_risk_reward: 4.0,     // Minimum 4:1 for crypto
+            max_risk_reward: 12.0,    // Maximum 12:1 for high conviction
+            aggressive_sizing: true,  // Enable dynamic sizing
+            hunt_protection: 1.5,     // 50% extra distance for stops
+        }
+    }
+}
+
+impl Default for TradingOrders {
+    fn default() -> Self {
+        let empty_level = OrderLevel {
+            price: 0.0,
+            quantity_percentage: 0.0,
+            atr_distance: 0.0,
+            order_type: "NONE".to_string(),
+            confidence: 0.0,
+        };
+
+        Self {
+            direction: "NO_SIGNAL".to_string(),
+            entry_levels: [
+                empty_level.clone(),
+                empty_level.clone(),
+                empty_level.clone(),
+            ],
+            exit_levels: [
+                empty_level.clone(),
+                empty_level.clone(),
+                empty_level.clone(),
+            ],
+            stop_levels: [empty_level.clone(), empty_level.clone(), empty_level],
+            total_position_size: 0.0,
+            risk_reward_ratio: 0.0,
+            atr_multiplier: 0.0,
+            dynamic_sizing: false,
+        }
+    }
+}
+
+/// Configuration for sequence-aware order generation
+#[derive(Debug, Clone)]
+pub struct SequenceAwareOrderConfig<'a> {
+    pub current_price: f64,
+    pub direction_pred: &'a DirectionPrediction,
+    pub volatility_pred: &'a VolatilityPrediction,
+    pub price_levels: &'a PriceLevelPrediction,
+    pub atr_value: f64,
+    pub config: &'a OrderConfig,
+    pub sequence_prices: &'a [f64],
+    pub bandwidth_size: f64,
+}
+
+impl TradingOrders {
+    /// Generate trading orders from predictions with ADAPTIVE MATHEMATICAL OPTIMIZATION
+    /// This function now uses the new adaptive order generation system that maximizes
+    /// utilization of ALL prediction data instead of hardcoded thresholds
+    pub fn generate(
+        current_price: f64,
+        direction_pred: &DirectionPrediction,
+        volatility_pred: &VolatilityPrediction,
+        price_levels: &PriceLevelPrediction,
+        atr_value: f64,
+        config: &OrderConfig,
+    ) -> crate::utils::error::Result<Self> {
+        // 🚀 NEW: Use adaptive mathematical order generation system
+        use crate::output::adaptive_orders;
+
+        log::info!("🔄 Using NEW adaptive mathematical order generation system");
+
+        adaptive_orders::generate_adaptive_orders(
+            current_price,
+            direction_pred,
+            volatility_pred,
+            price_levels,
+            atr_value,
+            config,
+        )
+    }
+
+    /// Generate sequence-aware trading orders using the same bandwidth logic as price levels
+    /// This ensures consistency between price level predictions and order generation
+    pub fn generate_sequence_aware(
+        config: SequenceAwareOrderConfig,
+    ) -> crate::utils::error::Result<Self> {
+        // Validate that price_levels are consistent with our sequence-aware approach
+        log::debug!(
+            "Generating sequence-aware orders with price level confidence: {:.2}",
+            config.price_levels.confidence
+        );
+
+        // 🚀 ADAPTIVE ANALYSIS - Same logic as AdaptiveTradingSignal
+        // Analyze probability distribution to determine best trading approach
+        let directional_edge = config.direction_pred.up_probability_aggregated
+            - config.direction_pred.down_probability_aggregated;
+
+        // Calculate probability spread (how concentrated vs distributed the predictions are)
+        let max_prob = config
+            .direction_pred
+            .sideways_probability
+            .max(config.direction_pred.up_probability_aggregated)
+            .max(config.direction_pred.down_probability_aggregated);
+        let min_prob = config
+            .direction_pred
+            .sideways_probability
+            .min(config.direction_pred.up_probability_aggregated)
+            .min(config.direction_pred.down_probability_aggregated);
+        let probability_spread = max_prob - min_prob;
+
+        // Calculate confidence in the prediction (higher spread = more confident)
+        let prediction_confidence = probability_spread;
+
+        log::info!(
+            "📊 SEQUENCE-AWARE ANALYSIS: edge={:.1}%, spread={:.1}%, confidence={:.1}%, max_prob={:.1}%",
+            directional_edge * 100.0,
+            probability_spread * 100.0,
+            prediction_confidence * 100.0,
+            max_prob * 100.0
+        );
+
+        // Use model's own confidence and risk/reward to determine if we should trade
+        let min_confidence_threshold = 0.25; // Only trade if we have >25% confidence in any direction
+        let min_risk_reward_threshold = 0.5; // Minimum R/R based on volatility
+
+        // Check if any prediction has sufficient confidence
+        let has_sufficient_confidence = max_prob > min_confidence_threshold;
+        let has_acceptable_risk_reward =
+            config.direction_pred.risk_reward_ratio > min_risk_reward_threshold;
+
+        if !has_sufficient_confidence || !has_acceptable_risk_reward {
+            return Ok(Self::empty(
+                config.direction_pred,
+                &format!(
+                    "Insufficient confidence for trading. Max probability: {:.1}% (need >25%), R/R: {:.2} (need >0.5)",
+                    max_prob * 100.0,
+                    config.direction_pred.risk_reward_ratio
+                ),
+            ));
+        }
+
+        // Determine direction based on adaptive logic
+        let direction = if directional_edge.abs() > probability_spread * 0.3 {
+            // Clear directional bias
+            if directional_edge > 0.0 {
+                "LONG"
+            } else {
+                "SHORT"
+            }
+        } else {
+            // Weak directional bias but still tradeable if we have confidence
+            if config.direction_pred.up_probability_aggregated
+                > config.direction_pred.down_probability_aggregated
+            {
+                "LONG"
+            } else {
+                "SHORT"
+            }
+        };
+
+        // 🎯 PROPER ATR CALCULATION: Base multiplier adjusted by market volatility
+        let volatility_factor = config.volatility_pred.expected_range_percent / 5.0; // Scale to reasonable range (5% baseline)
+        let atr_multiplier = config.config.base_atr_multiplier * volatility_factor.clamp(0.5, 3.0); // Cap between 0.5x-3.0x
+
+        // ATR distance: use base calculation with market adjustment
+        let base_atr_pct = config
+            .volatility_pred
+            .recommended_stop_distance_percent
+            .max(1.0); // Minimum 1%
+        let atr_distance = config.current_price * (base_atr_pct / 100.0);
+
+        // 🎯 ADAPTIVE ORDER GENERATION: Use price level probabilities instead of sequence ranges
+        let (mut entry_levels, mut exit_levels, mut stop_levels) = if direction == "LONG" {
+            // Check if this is a breakout signal based on pump probability (adaptive threshold)
+            let is_breakout = config.direction_pred.pump_probability > 0.25; // Use same threshold as AdaptiveTradingSignal
+            Self::generate_adaptive_long_orders(
+                config.current_price,
+                atr_distance,
+                config.price_levels,
+                config.direction_pred,
+                config.volatility_pred,
+                config.config,
+                is_breakout,
+            )
+        } else {
+            // Check if this is a breakout signal based on dump probability (adaptive threshold)
+            let is_breakout = config.direction_pred.dump_probability > 0.25; // Use same threshold as AdaptiveTradingSignal
+                                                                             // Extract actual price level ranges for order generation
+            let sequence_ranges = config.price_levels.extract_ranges_for_orders();
+            Self::generate_sequence_aware_short_orders(
+                config.current_price,
+                atr_distance,
+                &sequence_ranges,
+                config.config,
+                is_breakout,
+                config.price_levels,    // NEW: Add price_levels parameter
+                config.volatility_pred, // NEW: Add volatility_pred parameter
+            )
+        };
+
+        // Validate and optimize risk-reward ratio (configurable minimum for crypto)
+        let min_risk_reward = 4.0; // TODO: Move to config - 4:1 minimum as requested
+        let risk_reward_ratio = Self::validate_and_optimize_risk_reward(
+            &mut entry_levels,
+            &mut exit_levels,
+            &mut stop_levels,
+            direction,
+            config.current_price,
+            min_risk_reward,
+        );
+
+        // Log final risk/reward assessment
+        if risk_reward_ratio < min_risk_reward {
+            log::error!(
+                "🚨 TRADING SIGNAL REJECTED: Risk/Reward {:.2} below minimum {:.2} - would be 'hole in pocket'",
+                risk_reward_ratio, min_risk_reward
+            );
+        } else {
+            log::info!(
+                "✅ TRADING SIGNAL APPROVED: Risk/Reward {:.2} meets minimum {:.2} requirement",
+                risk_reward_ratio,
+                min_risk_reward
+            );
+        }
+
+        Ok(TradingOrders {
+            direction: direction.to_string(),
+            entry_levels,
+            exit_levels,
+            stop_levels,
+            total_position_size: 1.0,
+            risk_reward_ratio,
+            atr_multiplier,
+            dynamic_sizing: config.config.aggressive_sizing,
+        })
+    }
+
+    /// Generate adaptive long orders using price level probabilities
+    fn generate_adaptive_long_orders(
+        current_price: f64,
+        atr_distance: f64,
+        price_levels: &PriceLevelPrediction,
+        direction_pred: &DirectionPrediction,
+        volatility_pred: &VolatilityPrediction,
+        config: &OrderConfig,
+        is_breakout: bool,
+    ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
+        // 🎯 SIMPLE ADAPTIVE LOGIC: Use sequence bandwidth for realistic ranges
+        let sequence_bandwidth_pct = direction_pred.sequence_bandwidth_percent;
+        let expected_upside = direction_pred.expected_upside_percent;
+
+        // ENTRY LOGIC: Use most likely downside range but keep it realistic
+        let neutral_bin = price_levels.bins.get("neutral");
+        let moderate_down_bin = price_levels.bins.get("moderate_down");
+
+        // Use neutral range lower bound as primary entry (most conservative)
+        let primary_entry_pct = neutral_bin
+            .map(|bin| bin.range[0]) // Lower bound of neutral
+            .unwrap_or(-sequence_bandwidth_pct * 0.3); // Fallback: 30% of bandwidth
+
+        // Secondary entries: scale down from primary
+        let entry_1_pct = primary_entry_pct; // Best entry
+        let entry_2_pct = primary_entry_pct - sequence_bandwidth_pct * 0.2; // 20% bandwidth deeper
+        let entry_3_pct = primary_entry_pct - sequence_bandwidth_pct * 0.4; // 40% bandwidth deeper
+
+        // POSITION SIZING: Simple probability weighting
+        let neutral_prob = neutral_bin.map(|bin| bin.probability).unwrap_or(0.4);
+        let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.3);
+
+        let entry_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + entry_1_pct / 100.0),
+                quantity_percentage: neutral_prob.min(0.5), // Cap at 50%
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: neutral_prob,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + entry_2_pct / 100.0),
+                quantity_percentage: moderate_down_prob.min(0.3), // Cap at 30%
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: moderate_down_prob,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + entry_3_pct / 100.0),
+                quantity_percentage: (1.0 - neutral_prob - moderate_down_prob).max(0.2), // Remainder, min 20%
+                atr_distance,
+                order_type: if is_breakout {
+                    "STOP_LIMIT".to_string()
+                } else {
+                    "LIMIT".to_string()
+                },
+                confidence: 0.2,
+            },
+        ];
+
+        // EXIT LOGIC: Use expected upside with progressive scaling
+        let exit_1_pct = expected_upside * 0.5; // 50% of expected upside
+        let exit_2_pct = expected_upside * 0.8; // 80% of expected upside
+        let exit_3_pct = expected_upside; // Full expected upside
+
+        let exit_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + exit_1_pct / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_2_pct / 100.0),
+                quantity_percentage: 0.4,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.6,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_3_pct / 100.0),
+                quantity_percentage: 0.2,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.4,
+            },
+        ];
+
+        // STOP LOGIC: ENFORCE RISK-REWARD RATIO MATHEMATICALLY
+        let avg_entry_price =
+            (entry_levels[0].price + entry_levels[1].price + entry_levels[2].price) / 3.0;
+        let avg_exit_price =
+            (exit_levels[0].price + exit_levels[1].price + exit_levels[2].price) / 3.0;
+
+        // Calculate required stop distance to maintain min_risk_reward
+        let expected_profit = avg_exit_price - avg_entry_price;
+        let max_allowed_loss = expected_profit / config.min_risk_reward; // Enforce 4:1 ratio
+
+        // Use volatility recommendation but cap by risk-reward requirement
+        let volatility_stop_distance =
+            volatility_pred.recommended_stop_distance_percent / 100.0 * avg_entry_price;
+        let required_stop_distance = max_allowed_loss.min(volatility_stop_distance);
+
+        // CRITICAL: Stops must be BELOW entry prices for LONG
+        let stop_price_1 = avg_entry_price - required_stop_distance;
+        let stop_price_2 = avg_entry_price - required_stop_distance * 1.1; // 10% wider
+        let stop_price_3 = avg_entry_price - required_stop_distance * 1.2; // 20% wider
+
+        let stop_levels = [
+            OrderLevel {
+                price: stop_price_1,
+                quantity_percentage: 0.4,
+                atr_distance: atr_distance * config.hunt_protection,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.9,
+            },
+            OrderLevel {
+                price: stop_price_2,
+                quantity_percentage: 0.4,
+                atr_distance: atr_distance * config.hunt_protection,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: stop_price_3,
+                quantity_percentage: 0.2,
+                atr_distance: atr_distance * config.hunt_protection,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.7,
+            },
+        ];
+
+        // VALIDATION: Ensure mathematical correctness
+        let actual_risk_reward = expected_profit / required_stop_distance;
+
+        log::info!(
+            "🎯 LONG Orders: Avg Entry={:.2} | Avg Exit={:.2} | Avg Stop={:.2} | R:R={:.2} (min={:.1})",
+            avg_entry_price, avg_exit_price, (stop_price_1 + stop_price_2 + stop_price_3) / 3.0,
+            actual_risk_reward, config.min_risk_reward
+        );
+
+        // Ensure stops are below entries
+        for (i, stop) in stop_levels.iter().enumerate() {
+            if stop.price >= entry_levels[i].price {
+                log::error!(
+                    "🚨 CRITICAL: Stop {} ({:.2}) >= Entry {} ({:.2})",
+                    i,
+                    stop.price,
+                    i,
+                    entry_levels[i].price
+                );
+            }
+        }
+
+        (entry_levels, exit_levels, stop_levels)
+    }
+
+    /// Generate sequence-aware short orders using probability-based allocation (NO MAGIC NUMBERS)
+    fn generate_sequence_aware_short_orders(
+        current_price: f64,
+        atr_distance: f64,
+        sequence_ranges: &[[f64; 2]],
+        config: &OrderConfig,
+        is_breakout: bool,
+        price_levels: &PriceLevelPrediction, // NEW: Use for probability-based allocation
+        volatility_pred: &VolatilityPrediction, // NEW: Use for adaptive stop calculation
+    ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
+        // DEBUG: Log the ranges being used
+        log::debug!(
+            "🔍 SHORT Order Generation Debug: current_price={:.2}, ranges={:?}",
+            current_price,
+            sequence_ranges
+        );
+
+        // CRITICAL FIX: Force correct SHORT order logic regardless of range issues
+        // SHORT must enter ABOVE current price and exit BELOW current price
+
+        // Use sequence ranges for entry levels, but ensure they're positive (ABOVE current)
+        let moderate_up_range = &sequence_ranges[3]; // moderate_up
+        let strong_up_range = &sequence_ranges[4]; // strong_up
+
+        log::debug!(
+            "📊 SHORT Entry Ranges: moderate_up={:?}, strong_up={:?}",
+            moderate_up_range,
+            strong_up_range
+        );
+
+        // 🎯 NEW: Use probability-based allocation instead of hardcoded portions
+        let (entry_portions, exit_portions) = price_levels.extract_probability_portions();
+        let (entry_positions, exit_positions) = price_levels.get_natural_price_positions();
+
+        log::info!(
+            "📊 Probability-based allocation (breakout={}): Entry portions: [{:.3}, {:.3}, {:.3}], Exit portions: [{:.3}, {:.3}, {:.3}]",
+            is_breakout,
+            entry_portions[0], entry_portions[1], entry_portions[2],
+            exit_portions[0], exit_portions[1], exit_portions[2]
+        );
+
+        // Use natural price positions from prediction data
+        let entry_1_pct = entry_positions[0].max(0.5); // Ensure minimum above current
+        let entry_2_pct = entry_positions[1].max(entry_1_pct + 0.2);
+        let entry_3_pct = entry_positions[2].max(entry_2_pct + 0.2);
+
+        log::debug!(
+            "💰 SHORT Entry Percentages (ADAPTIVE): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
+            entry_1_pct,
+            entry_2_pct,
+            entry_3_pct
+        );
+
+        let entry_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + entry_1_pct / 100.0),
+                quantity_percentage: entry_portions[0],
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + entry_2_pct / 100.0),
+                quantity_percentage: entry_portions[1],
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.7,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + entry_3_pct / 100.0),
+                quantity_percentage: entry_portions[2],
+                atr_distance,
+                order_type: if is_breakout {
+                    "STOP_LIMIT".to_string() // More aggressive for breakouts
+                } else {
+                    "LIMIT".to_string()
+                },
+                confidence: if is_breakout { 0.9 } else { 0.6 },
+            },
+        ];
+
+        // 🎯 NEW: Exit levels using probability-based allocation and natural positions
+        let exit_1_pct = exit_positions[0]; // moderate_down center
+        let exit_2_pct = exit_positions[1]; // strong_down upper
+        let exit_3_pct = exit_positions[2]; // strong_down center
+
+        log::debug!(
+            "📉 SHORT Exit Percentages (ADAPTIVE): exit_1={:.2}%, exit_2={:.2}%, exit_3={:.2}%",
+            exit_1_pct,
+            exit_2_pct,
+            exit_3_pct
+        );
+
+        let exit_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + exit_1_pct / 100.0),
+                quantity_percentage: exit_portions[0],
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_2_pct / 100.0),
+                quantity_percentage: exit_portions[1],
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.6,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + exit_3_pct / 100.0),
+                quantity_percentage: exit_portions[2],
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.4,
+            },
+        ];
+
+        // 🎯 NEW: Adaptive stop levels using volatility model data (NO HARDCODED VALUES)
+        // Extract volatility data from the prediction model
+        let recommended_stop_distance = volatility_pred.recommended_stop_distance_percent;
+        let expected_range = volatility_pred.expected_range_percent;
+        let regime_confidence = volatility_pred.confidence;
+
+        // Calculate adaptive buffer based on volatility regime confidence
+        // Lower confidence = higher uncertainty = wider buffer needed
+        let confidence_buffer = (1.0 - regime_confidence) * expected_range;
+        let adaptive_stop_distance = recommended_stop_distance + confidence_buffer;
+
+        log::info!(
+            "🎯 Adaptive Stop Calculation: base={:.3}% + buffer={:.3}% = total={:.3}%",
+            recommended_stop_distance,
+            confidence_buffer,
+            adaptive_stop_distance
+        );
+
+        // Position stops at adaptive distance above each entry
+        let stop_1_pct = entry_1_pct + adaptive_stop_distance;
+        let stop_2_pct = entry_2_pct + adaptive_stop_distance;
+        let stop_3_pct = entry_3_pct + adaptive_stop_distance;
+
+        log::debug!(
+            "🛑 SHORT Stop Percentages (VOLATILITY-ADAPTIVE): stop_1={:.2}%, stop_2={:.2}%, stop_3={:.2}%",
+            stop_1_pct, stop_2_pct, stop_3_pct
+        );
+
+        // Use same probability-based portions for stops as entries (risk consistency)
+        let stop_levels = [
+            OrderLevel {
+                price: current_price * (1.0 + (stop_1_pct * config.hunt_protection) / 100.0),
+                quantity_percentage: entry_portions[0], // Same as entry allocation
+                atr_distance: atr_distance * config.hunt_protection,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.9,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + (stop_2_pct * config.hunt_protection) / 100.0),
+                quantity_percentage: entry_portions[1], // Same as entry allocation
+                atr_distance: atr_distance * config.hunt_protection,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.8,
+            },
+            OrderLevel {
+                price: current_price * (1.0 + (stop_3_pct * config.hunt_protection) / 100.0),
+                quantity_percentage: entry_portions[2], // Same as entry allocation
+                atr_distance: atr_distance * config.hunt_protection,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: 0.7,
+            },
+        ];
+
+        // 🎯 NEW: Validate the generated orders for consistency
+        if let Err(e) = price_levels.validate_orders(&entry_levels, &exit_levels, &stop_levels) {
+            log::error!("❌ Order validation failed: {}", e);
+            return (entry_levels, exit_levels, stop_levels); // Return anyway but log error
+        }
+
+        log::info!("✅ Probability-driven orders validated successfully - no duplicates, proper sequencing");
+
+        (entry_levels, exit_levels, stop_levels)
+    }
+
+    /// Create empty orders when no trading signals are available
+    pub fn empty(direction_pred: &DirectionPrediction, reason: &str) -> Self {
+        let empty_level = OrderLevel {
+            price: 0.0,
+            quantity_percentage: 0.0,
+            atr_distance: 0.0,
+            order_type: "NONE".to_string(),
+            confidence: 0.0,
+        };
+
+        let direction = if direction_pred.up_probability > direction_pred.down_probability {
+            "LONG"
+        } else {
+            "SHORT"
+        };
+
+        TradingOrders {
+            direction: format!("{} ({})", direction, reason),
+            entry_levels: [
+                empty_level.clone(),
+                empty_level.clone(),
+                empty_level.clone(),
+            ],
+            exit_levels: [
+                empty_level.clone(),
+                empty_level.clone(),
+                empty_level.clone(),
+            ],
+            stop_levels: [empty_level.clone(), empty_level.clone(), empty_level],
+            total_position_size: 0.0,
+            risk_reward_ratio: 0.0,
+            atr_multiplier: 0.0,
+            dynamic_sizing: false,
+        }
+    }
+
+    /// Validate and optimize risk/reward ratio for trading viability
+    fn validate_and_optimize_risk_reward(
+        entry_levels: &mut [OrderLevel; 3],
+        exit_levels: &mut [OrderLevel; 3],
+        stop_levels: &mut [OrderLevel; 3],
+        direction: &str,
+        current_price: f64,
+        min_ratio: f64,
+    ) -> f64 {
+        let initial_ratio =
+            Self::calculate_risk_reward(entry_levels, exit_levels, stop_levels, direction);
+
+        log::debug!(
+            "🎯 Initial Risk/Reward Ratio: {:.2} (minimum required: {:.2})",
+            initial_ratio,
+            min_ratio
+        );
+
+        if initial_ratio >= min_ratio {
+            log::debug!("✅ Risk/Reward ratio is acceptable: {:.2}", initial_ratio);
+            return initial_ratio;
+        }
+
+        log::warn!(
+            "⚠️ Poor Risk/Reward ratio: {:.2} < {:.2} minimum. Attempting optimization...",
+            initial_ratio,
+            min_ratio
+        );
+
+        // OPTIMIZATION: Adjust levels to improve risk/reward
+        match direction {
+            "SHORT" => {
+                // For SHORT: Improve by moving exits lower (more profit) or stops closer (less risk)
+                for exit in exit_levels.iter_mut() {
+                    if exit.price > 0.0 {
+                        // Move exits 0.5% lower for more profit
+                        exit.price *= 0.995;
+                    }
+                }
+
+                // Move stops slightly closer to reduce risk
+                for stop in stop_levels.iter_mut() {
+                    if stop.price > current_price {
+                        // Move stops 0.3% closer to current price
+                        let distance_from_current = stop.price - current_price;
+                        stop.price = current_price + (distance_from_current * 0.97);
+                    }
+                }
+            }
+            "LONG" => {
+                // For LONG: Improve by moving exits higher (more profit) or stops closer (less risk)
+                for exit in exit_levels.iter_mut() {
+                    if exit.price > 0.0 {
+                        // Move exits 0.5% higher for more profit
+                        exit.price *= 1.005;
+                    }
+                }
+
+                // Move stops slightly closer to reduce risk
+                for stop in stop_levels.iter_mut() {
+                    if stop.price < current_price {
+                        // Move stops 0.3% closer to current price
+                        let distance_from_current = current_price - stop.price;
+                        stop.price = current_price - (distance_from_current * 0.97);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let optimized_ratio =
+            Self::calculate_risk_reward(entry_levels, exit_levels, stop_levels, direction);
+
+        if optimized_ratio >= min_ratio {
+            log::info!(
+                "✅ Risk/Reward optimized successfully: {:.2} -> {:.2}",
+                initial_ratio,
+                optimized_ratio
+            );
+        } else {
+            log::error!(
+                "❌ Failed to optimize Risk/Reward: {:.2} -> {:.2} (still below {:.2} minimum)",
+                initial_ratio,
+                optimized_ratio,
+                min_ratio
+            );
+        }
+
+        optimized_ratio
+    }
+
+    /// Calculate risk-reward ratio from order levels with direction awareness
+    fn calculate_risk_reward(
+        entry_levels: &[OrderLevel; 3],
+        exit_levels: &[OrderLevel; 3],
+        stop_levels: &[OrderLevel; 3],
+        direction: &str,
+    ) -> f64 {
+        // Weighted average prices by quantity
+        let avg_entry = Self::weighted_average_price(entry_levels);
+        let avg_exit = Self::weighted_average_price(exit_levels);
+        let avg_stop = Self::weighted_average_price(stop_levels);
+
+        // Calculate profit and loss based on direction
+        let (potential_profit, potential_loss) = match direction {
+            "LONG" => {
+                // LONG: profit when price goes up, loss when price goes down
+                let profit = avg_exit - avg_entry; // Exit higher than entry = profit
+                let loss = avg_entry - avg_stop; // Stop lower than entry = loss
+                (profit.max(0.0), loss.max(0.0))
+            }
+            "SHORT" => {
+                // SHORT: profit when price goes down, loss when price goes up
+                let profit = avg_entry - avg_exit; // Entry higher than exit = profit
+                let loss = avg_stop - avg_entry; // Stop higher than entry = loss
+                (profit.max(0.0), loss.max(0.0))
+            }
+            _ => {
+                // Fallback to absolute difference for unknown directions
+                let profit = (avg_exit - avg_entry).abs();
+                let loss = (avg_entry - avg_stop).abs();
+                (profit, loss)
+            }
+        };
+
+        if potential_loss > 0.0 {
+            potential_profit / potential_loss
+        } else {
+            10.0 // If no loss possible, return high ratio
+        }
+    }
+
+    /// Calculate weighted average price by quantity
+    fn weighted_average_price(levels: &[OrderLevel; 3]) -> f64 {
+        let total_weight: f64 = levels.iter().map(|l| l.quantity_percentage).sum();
+        if total_weight > 0.0 {
+            levels
+                .iter()
+                .map(|l| l.price * l.quantity_percentage)
+                .sum::<f64>()
+                / total_weight
+        } else {
+            levels.iter().map(|l| l.price).sum::<f64>() / 3.0
+        }
+    }
+}

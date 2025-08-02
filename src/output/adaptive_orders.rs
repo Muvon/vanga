@@ -12,7 +12,7 @@
 //! - Mathematical risk-reward optimization
 //! - Confidence-driven order placement
 
-use crate::output::structures::{
+use crate::output::{
     DirectionPrediction, OrderConfig, OrderLevel, PriceBin, PriceLevelPrediction, TradingOrders,
     VolatilityPrediction,
 };
@@ -371,8 +371,8 @@ pub fn generate_adaptive_orders(
     for (name, bin, weight) in &selected_ranges {
         let optimal_entry_pct = match direction {
             "LONG" | "LONG_BREAKOUT" => {
-                // For LONG: use better entry (less negative = higher price within range)
-                bin.range[1].min(bin.range[0] + (bin.range[1] - bin.range[0]) * 0.8)
+                // For LONG: use better entry (more negative = lower price for better entry)
+                bin.range[0].max(bin.range[1] - (bin.range[1] - bin.range[0]) * 0.8)
             }
             "SHORT" | "SHORT_BREAKOUT" => {
                 // For SHORT: use better entry (less positive = lower price within range)

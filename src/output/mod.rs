@@ -4,16 +4,22 @@
 //! converting raw LSTM outputs into user-friendly JSON and CSV formats.
 
 pub mod adaptive_orders;
+pub mod adaptive_signals;
 pub mod formatter;
+pub mod metadata;
 pub mod multi_target_parser;
 pub mod post_processor;
+pub mod prediction_types;
 pub mod structures;
+pub mod trading_orders;
 
-// Re-export main types
+// Re-export main types from new modular structure
+pub use adaptive_signals::{generate_adaptive_trading_signal, AdaptiveTradingSignal};
 pub use formatter::OutputFormatter;
+pub use metadata::{ConfidenceScore, DataQuality, PredictionMetadata};
 pub use multi_target_parser::{DirectionOutput, MultiTargetParser, ParsedOutput};
 pub use post_processor::PostProcessor;
-pub use structures::{
-    ConfidenceScore, DirectionPrediction, OrderConfig, OrderLevel, PredictionMetadata,
-    PredictionResult, PriceBin, PriceLevelPrediction, TradingOrders, VolatilityPrediction,
+pub use prediction_types::{
+    DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
 };
+pub use trading_orders::{OrderConfig, OrderLevel, SequenceAwareOrderConfig, TradingOrders};
