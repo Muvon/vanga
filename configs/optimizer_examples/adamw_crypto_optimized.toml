@@ -10,7 +10,8 @@
 optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 
 # Adaptive learning rate with crypto-optimized settings
-learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
+learning_rate = 0.001
+learning_schedule = { ReduceOnPlateau = { patience = 10, factor = 0.5 } }
 
 # Training parameters optimized for crypto data
 epochs = 100

@@ -44,7 +44,7 @@ async fn test_multi_target_training_validation() {
         training: crate::config::training::TrainingParams {
             epochs: crate::config::training::EpochConfig::Fixed(1),
             batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
-            learning_rate: crate::config::training::LearningRateConfig::Fixed(0.01),
+            learning_rate: 0.01,
             optimizer: crate::config::training::OptimizerType::AdamW {
                 weight_decay: 0.01,
                 beta1: 0.9,

@@ -4,7 +4,8 @@
 
 [training]
 epochs = { max_epochs = 150 }     # More epochs for crypto complexity
-learning_rate = { initial_lr = 0.0005, patience = 8, factor = 0.7 }
+learning_rate = 0.0005
+learning_schedule = { ReduceOnPlateau = { patience = 8, factor = 0.7 } }
 batch_size = 64                   # Larger batch for stable gradients
 validation_split = 0.15           # Smaller validation for more training data
 early_stopping = { patience = 20, min_delta = 0.0005 }

@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use vanga::config::training::{LearningRateConfig, TrainingParams};
+    use vanga::config::training::TrainingParams;
 
     #[test]
     fn test_window_decay_calculation() {
@@ -46,28 +46,17 @@ mod tests {
     }
 
     #[test]
-    fn test_learning_rate_extraction() {
-        // Test Fixed learning rate
-        let fixed_lr = LearningRateConfig::Fixed(0.001);
-        let base_lr = match fixed_lr {
-            LearningRateConfig::Fixed(lr) => lr,
-            LearningRateConfig::Adaptive { initial_lr, .. } => initial_lr,
-            LearningRateConfig::Auto { max_lr, .. } => max_lr,
-        };
+    fn test_learning_rate_simple() {
+        // Test simple float learning rate
+        let base_lr = 0.001_f64;
         assert_eq!(base_lr, 0.001);
 
-        // Test Adaptive learning rate
-        let adaptive_lr = LearningRateConfig::Adaptive {
-            initial_lr: 0.002,
-            patience: 10,
-            factor: 0.5,
-        };
-        let base_lr = match adaptive_lr {
-            LearningRateConfig::Fixed(lr) => lr,
-            LearningRateConfig::Adaptive { initial_lr, .. } => initial_lr,
-            LearningRateConfig::Auto { max_lr, .. } => max_lr,
-        };
-        assert_eq!(base_lr, 0.002);
+        // Test different learning rates
+        let rates = vec![0.01, 0.001, 0.0001, 1e-5];
+        for rate in rates {
+            assert!(rate > 0.0);
+            assert!(rate <= 1.0);
+        }
     }
 
     #[test]

@@ -58,7 +58,7 @@ mod tests {
     };
     use crate::config::training::ClassWeightStrategy;
     use crate::config::training::OptimizerType;
-    use crate::config::training::{EpochConfig, LearningRateConfig, TrainingParams};
+    use crate::config::training::{EpochConfig, TrainingParams};
     use candle_core::Tensor;
     use ndarray::{Array2, Array3};
 
@@ -107,7 +107,7 @@ mod tests {
             training: TrainingParams {
                 epochs: EpochConfig::Auto { max_epochs: 100 },
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
-                learning_rate: LearningRateConfig::Fixed(0.01),
+                learning_rate: 0.01,
                 optimizer: crate::config::training::OptimizerType::AdamW {
                     weight_decay: 0.01,
                     beta1: 0.9,
@@ -198,7 +198,7 @@ mod tests {
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(5), // Fixed epochs - should bypass early stopping
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
-                learning_rate: LearningRateConfig::Fixed(0.01),
+                learning_rate: 0.01,
                 optimizer: crate::config::training::OptimizerType::AdamW {
                     weight_decay: 0.01,
                     beta1: 0.9,
@@ -291,7 +291,7 @@ mod tests {
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(3), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
-                learning_rate: LearningRateConfig::Fixed(0.01),
+                learning_rate: 0.01,
                 optimizer: OptimizerType::SGD { momentum: None },
                 warmup_epochs: 0,
                 learning_schedule: None,
@@ -407,7 +407,7 @@ mod tests {
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(5), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16),
-                learning_rate: LearningRateConfig::Fixed(0.01),
+                learning_rate: 0.01,
                 optimizer: crate::config::training::OptimizerType::AdamW {
                     weight_decay: 0.01,
                     beta1: 0.9,

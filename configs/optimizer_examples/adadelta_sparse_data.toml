@@ -10,7 +10,7 @@
 optimizer = { AdaDelta = { rho = 0.95, eps = 1e-6, weight_decay = 0.01 } }
 
 # Fixed learning rate (AdaDelta adapts automatically)
-learning_rate = { Fixed = 1.0 }  # AdaDelta doesn't use external LR
+learning_rate = 1.0  # AdaDelta doesn't use external LR
 
 # Extended training for automatic adaptation
 epochs = 120

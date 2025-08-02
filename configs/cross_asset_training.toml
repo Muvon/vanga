@@ -9,7 +9,7 @@
 epochs = { Auto = { max_epochs = 1000 } }
 
 # LEARNING RATE CONFIGURATION
-learning_rate = { Fixed = 0.001 }
+learning_rate = 0.001
 
 # BATCH SIZE CONFIGURATION
 batch_size = { Auto = { min_size = 32, max_size = 512 } }

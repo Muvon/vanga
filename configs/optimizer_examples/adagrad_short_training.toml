@@ -11,7 +11,7 @@
 optimizer = { AdaGrad = { lr_decay = 0.0, weight_decay = 0.005, initial_acc = 0.0, eps = 1e-10 } }
 
 # Higher initial learning rate (will decay automatically)
-learning_rate = { Fixed = 0.01 }  # AdaGrad handles decay internally
+learning_rate = 0.01  # AdaGrad handles decay internally
 
 # SHORT training to avoid learning rate decay issues
 epochs = 30  # CRITICAL: Keep short to avoid LR decay problems

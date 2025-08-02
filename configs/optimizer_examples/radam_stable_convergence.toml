@@ -10,7 +10,8 @@
 optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
 
 # Conservative learning rate for stable convergence
-learning_rate = { Adaptive = { initial_lr = 0.0008, patience = 12, factor = 0.6 } }
+learning_rate = 0.0008
+learning_schedule = { ReduceOnPlateau = { patience = 12, factor = 0.6 } }
 
 # Extended training for stable convergence
 epochs = 150

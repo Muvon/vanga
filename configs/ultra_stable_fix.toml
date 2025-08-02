@@ -46,7 +46,7 @@ loss_function = "Composite"
 # CRITICAL: Much smaller learning rate
 epochs = { Fixed = 100 }
 optimizer = { AdamW = { weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }  # Increased weight decay
-learning_rate = { Fixed = 0.0001 }  # Reduced from 0.001 to 0.0001
+learning_rate = 0.0001  # Reduced from 0.001 to 0.0001
 
 # CRITICAL: Much smaller batch size
 batch_size = { Fixed = 8 }  # Reduced from 16 to 8

@@ -10,7 +10,8 @@
 optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.01, momentum = 0.0, centered = false } }
 
 # Aggressive adaptive learning rate for volatile markets
-learning_rate = { Adaptive = { initial_lr = 0.002, patience = 6, factor = 0.4 } }
+learning_rate = 0.002
+learning_schedule = { ReduceOnPlateau = { patience = 6, factor = 0.4 } }
 
 # Extended training for volatile data
 epochs = 120

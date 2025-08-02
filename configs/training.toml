@@ -64,21 +64,10 @@ optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1
 # optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.0, momentum = 0.0, centered = false } }
 
 # ============================================================================
-# LEARNING RATE CONFIGURATION - Advanced optimization strategies
+# LEARNING RATE CONFIGURATION - Simple and clear
 # ============================================================================
-# ADAPTIVE (RECOMMENDED): Automatically reduces LR when validation loss plateaus
-# - Starts with initial_lr and reduces by factor when patience is exceeded
-# - Best for most cryptocurrency forecasting tasks
-learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
-
-# AUTO: Optimizes learning rate within specified range based on model complexity
-# - Uses heuristics to select optimal LR between min_lr and max_lr
-# - Good for hyperparameter exploration
-# learning_rate = { Auto = { min_lr = 0.0001, max_lr = 0.01 } }
-
-# FIXED: Uses constant learning rate throughout training
-# - Simple and predictable, good for fine-tuning
-# learning_rate = { Fixed = 0.001 }
+# Base learning rate (simple float value)
+learning_rate = 0.001
 
 # ============================================================================
 # WARMUP CONFIGURATION - Gradual learning rate increase
@@ -91,12 +80,17 @@ warmup_epochs = 5
 # ============================================================================
 # LEARNING RATE SCHEDULING - Advanced decay patterns (OPTIONAL)
 # ============================================================================
-# Additional learning rate scheduling after warmup (experimental)
+# Reduce learning rate when validation loss plateaus (RECOMMENDED)
+# - Replaces the old "Adaptive" learning rate configuration
+# - Automatically reduces LR by factor when patience is exceeded
+learning_schedule = { ReduceOnPlateau = { patience = 10, factor = 0.5, min_lr = 1e-6 } }
+
+# Alternative scheduling options:
+# learning_schedule = "Constant"  # No scheduling (use base learning_rate throughout)
 # learning_schedule = { LinearDecay = { decay_rate = 0.95 } }
 # learning_schedule = { ExponentialDecay = { decay_rate = 0.98 } }
 # learning_schedule = { CosineAnnealing = { t_max = 100 } }
 # learning_schedule = { WarmRestarts = { t_0 = 50, t_mult = 2 } }
-# learning_schedule = "Constant"  # No additional scheduling
 
 
 # ============================================================================

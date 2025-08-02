@@ -19,6 +19,7 @@ struct TrainParams {
     attention: bool,
     tft: bool,
     batch: bool,
+    lr: Option<f64>,
 }
 
 /// Prediction command parameters
@@ -93,6 +94,13 @@ enum Commands {
         /// Force batch training mode (optional - auto-detected when --data is directory)
         #[arg(long)]
         batch: bool,
+
+        /// Override learning rate from config (e.g., 0.001, 1e-5)
+        #[arg(
+            long,
+            help = "Override learning rate from config file (e.g., 0.001, 1e-5, 0.0001)"
+        )]
+        lr: Option<f64>,
     },
 
     /// Make predictions using trained model
@@ -269,6 +277,7 @@ async fn main() -> Result<()> {
             attention,
             tft,
             batch,
+            lr,
         } => {
             let params = TrainParams {
                 symbol,
@@ -281,6 +290,7 @@ async fn main() -> Result<()> {
                 attention,
                 tft,
                 batch,
+                lr,
             };
             handle_train_command(params).await
         }
@@ -388,6 +398,16 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 
             // Apply device configuration
             symbol_config = symbol_config.with_device_config(&params.device)?;
+
+            // Apply learning rate override if provided
+            if let Some(lr) = params.lr {
+                log::info!(
+                    "🎯 Overriding learning rate from CLI: {} for {}",
+                    lr,
+                    symbol
+                );
+                symbol_config.training.learning_rate = lr;
+            }
 
             if params.attention {
                 log::info!("🎯 Attention mechanism enabled for {}", symbol);
@@ -510,6 +530,13 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 
         // Apply device configuration
         config = config.with_device_config(&params.device)?;
+
+        // Apply learning rate override if provided
+        if let Some(lr) = params.lr {
+            log::info!("🎯 Overriding learning rate from CLI: {}", lr);
+            config.training.learning_rate = lr;
+        }
+
         // Features are now part of the main config, no separate handling needed
         if params.attention {
             log::info!("🎯 Attention mechanism enabled for enhanced accuracy");

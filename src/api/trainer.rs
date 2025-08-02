@@ -186,11 +186,7 @@ impl ModelTrainer {
             self.config.training.window_decay
         );
 
-        let base_lr = match &self.config.training.learning_rate {
-            crate::config::training::LearningRateConfig::Fixed(lr) => *lr,
-            crate::config::training::LearningRateConfig::Adaptive { initial_lr, .. } => *initial_lr,
-            crate::config::training::LearningRateConfig::Auto { max_lr, .. } => *max_lr,
-        };
+        let base_lr = self.config.training.learning_rate;
 
         // Log window decay strategy
         if self.config.training.window_decay != 1.0 {
@@ -423,8 +419,7 @@ impl ModelTrainer {
 
         // Create config with window-specific learning rate
         let mut window_config = self.config.clone();
-        window_config.training.learning_rate =
-            crate::config::training::LearningRateConfig::Fixed(window_lr);
+        window_config.training.learning_rate = window_lr;
 
         log::info!(
             "🎯 Training from scratch with window learning rate: {:.6}",
@@ -468,8 +463,7 @@ impl ModelTrainer {
 
         // Create config with window-specific learning rate
         let mut window_config = self.config.clone();
-        window_config.training.learning_rate =
-            crate::config::training::LearningRateConfig::Fixed(window_lr);
+        window_config.training.learning_rate = window_lr;
 
         log::info!(
             "🎯 Continue training with window learning rate: {:.6}",

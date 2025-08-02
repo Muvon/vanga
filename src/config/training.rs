@@ -48,8 +48,8 @@ pub struct TrainingParams {
     /// Batch size ("auto" for optimization)
     pub batch_size: BatchSizeConfig,
 
-    /// Learning rate configuration
-    pub learning_rate: LearningRateConfig,
+    /// Base learning rate (e.g., 0.001, 1e-5)
+    pub learning_rate: f64,
 
     /// Optimizer type selection
     pub optimizer: OptimizerType,
@@ -176,20 +176,6 @@ pub enum EpochConfig {
 pub enum BatchSizeConfig {
     Auto { min_size: u32, max_size: u32 },
     Fixed(u32),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LearningRateConfig {
-    Auto {
-        min_lr: f64,
-        max_lr: f64,
-    },
-    Adaptive {
-        initial_lr: f64,
-        patience: u32,
-        factor: f64,
-    },
-    Fixed(f64),
 }
 
 /// Default window decay (no decay)
@@ -324,10 +310,21 @@ impl OptimizerType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LearningScheduleConfig {
+    /// No learning rate scheduling (constant rate)
     Constant,
+    /// Reduce learning rate when validation loss plateaus (formerly "Adaptive")
+    ReduceOnPlateau {
+        patience: u32,
+        factor: f64,
+        min_lr: Option<f64>,
+    },
+    /// Linear decay over training epochs
     LinearDecay { decay_rate: f64 },
+    /// Exponential decay over training epochs
     ExponentialDecay { decay_rate: f64 },
+    /// Cosine annealing schedule
     CosineAnnealing { t_max: u32 },
+    /// Warm restarts with cosine annealing
     WarmRestarts { t_0: u32, t_mult: u32 },
 }
 
@@ -722,10 +719,51 @@ impl TrainingParams {
 
     /// Validate learning schedule configuration parameters
     fn validate_learning_schedule(&self) -> Result<()> {
+        // Validate base learning rate
+        if self.learning_rate <= 0.0 {
+            return Err(VangaError::ConfigError(format!(
+                "learning_rate must be positive, got: {}",
+                self.learning_rate
+            )));
+        }
+
+        // Validate learning schedule if present
         if let Some(schedule) = &self.learning_schedule {
             match schedule {
                 LearningScheduleConfig::Constant => {
                     // No parameters to validate for constant schedule
+                }
+
+                LearningScheduleConfig::ReduceOnPlateau {
+                    patience,
+                    factor,
+                    min_lr,
+                } => {
+                    if *patience == 0 {
+                        return Err(VangaError::ConfigError(
+                            "ReduceOnPlateau patience must be greater than 0".to_string(),
+                        ));
+                    }
+                    if *factor <= 0.0 || *factor >= 1.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "ReduceOnPlateau factor must be between 0.0 and 1.0, got: {}",
+                            factor
+                        )));
+                    }
+                    if let Some(min_lr_val) = min_lr {
+                        if *min_lr_val <= 0.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "ReduceOnPlateau min_lr must be positive, got: {}",
+                                min_lr_val
+                            )));
+                        }
+                        if *min_lr_val >= self.learning_rate {
+                            return Err(VangaError::ConfigError(format!(
+                                "ReduceOnPlateau min_lr must be less than base learning_rate, got: {} >= {}",
+                                min_lr_val, self.learning_rate
+                            )));
+                        }
+                    }
                 }
 
                 LearningScheduleConfig::LinearDecay { decay_rate } => {
@@ -822,20 +860,20 @@ impl Default for TrainingParams {
 
                 max_size: 512,
             },
-            learning_rate: LearningRateConfig::Adaptive {
-                initial_lr: 0.001,
-                patience: 10,
-                factor: 0.5,
-            }, // Adaptive by default
+            learning_rate: 0.001, // Simple float value - 1e-3 default
             optimizer: OptimizerType::AdamW {
                 weight_decay: 0.01,
                 beta1: 0.9,
                 beta2: 0.999,
                 eps: 1e-8,
             }, // AdamW by default for better performance
-            warmup_epochs: 5,                 // 5 epochs warmup by default
-            learning_schedule: None,          // No schedule by default
-            validation_split: 0.2,            // 20% validation for early stopping
+            warmup_epochs: 5,     // 5 epochs warmup by default
+            learning_schedule: Some(LearningScheduleConfig::ReduceOnPlateau {
+                patience: 10,
+                factor: 0.5,
+                min_lr: Some(1e-6),
+            }), // Adaptive scheduling by default (formerly "Adaptive" learning_rate)
+            validation_split: 0.2, // 20% validation for early stopping
             validation_gap: "1h".to_string(), // 1 hour gap by default for feature independence
             test_split: 0.1,
             device: DeviceConfig::Auto,
@@ -1159,7 +1197,8 @@ impl TrainingConfig {
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(5),
                 batch_size: BatchSizeConfig::Fixed(16),
-                learning_rate: LearningRateConfig::Fixed(0.01),
+                learning_rate: 0.01,     // Simple float value for testing
+                learning_schedule: None, // No scheduling for testing
                 ..Default::default()
             },
             model: ModelConfig {

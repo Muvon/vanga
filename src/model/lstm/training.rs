@@ -32,27 +32,8 @@ impl LSTMModel {
         };
 
         // Extract learning rate from config - SAME logic as original
-        let learning_rate = match &vanga_config.training.learning_rate {
-            crate::config::training::LearningRateConfig::Fixed(lr) => {
-                log::info!("Using FIXED learning rate: {:.6}", lr);
-                *lr
-            }
-            crate::config::training::LearningRateConfig::Adaptive {
-                initial_lr,
-                patience: _,
-                factor: _,
-            } => {
-                log::info!(
-                    "Using ADAPTIVE learning rate starting at: {:.6}",
-                    initial_lr
-                );
-                *initial_lr
-            }
-            crate::config::training::LearningRateConfig::Auto { min_lr, max_lr } => {
-                log::info!("Using AUTO learning rate: {:.6} - {:.6}", min_lr, max_lr);
-                *max_lr // Start with max, will be reduced automatically
-            }
-        };
+        let learning_rate = vanga_config.training.learning_rate;
+        log::info!("Using learning rate: {:.6}", learning_rate);
 
         // Extract batch size from config - NEW: Properly utilize batch size configuration
         let batch_size = match &vanga_config.training.batch_size {
@@ -535,23 +516,21 @@ impl LSTMModel {
         let mut optimizer = self.setup_advanced_optimizer(config)?;
 
         // Extract learning rate configuration
-        let target_lr = match &config.training.learning_rate {
-            crate::config::training::LearningRateConfig::Fixed(rate) => *rate,
-            crate::config::training::LearningRateConfig::Adaptive { initial_lr, .. } => *initial_lr,
-            crate::config::training::LearningRateConfig::Auto { .. } => 0.001, // Default for auto
-        };
+        let target_lr = config.training.learning_rate;
 
         // Extract warmup configuration
         let warmup_epochs = config.training.warmup_epochs;
         let mut current_lr = target_lr;
 
-        // Initialize adaptive learning rate variables
+        // Initialize adaptive learning rate variables from learning_schedule
         let mut best_loss = f64::INFINITY;
         let mut patience_counter = 0;
-        let (adaptive_patience, adaptive_factor) = match &config.training.learning_rate {
-            crate::config::training::LearningRateConfig::Adaptive {
-                patience, factor, ..
-            } => (*patience, *factor),
+        let (adaptive_patience, adaptive_factor) = match &config.training.learning_schedule {
+            Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
+                patience,
+                factor,
+                ..
+            }) => (*patience, *factor),
             _ => (10, 0.5), // Default values for non-adaptive modes
         };
 
@@ -902,8 +881,9 @@ impl LSTMModel {
             // Adaptive learning rate adjustment after warmup
             // NOTE: This runs AFTER schedule updates, so adaptive LR can override schedule if needed
             if epoch >= warmup_epochs as usize {
-                if let crate::config::training::LearningRateConfig::Adaptive { .. } =
-                    &config.training.learning_rate
+                if let Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
+                    ..
+                }) = &config.training.learning_schedule
                 {
                     // Use validation loss if available, otherwise use training loss
                     let loss_for_adaptation = avg_val_loss
@@ -992,6 +972,9 @@ impl LSTMModel {
                             crate::config::training::LearningScheduleConfig::Constant => {
                                 " [Constant]"
                             }
+                            crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
+                                ..
+                            } => " [ReduceOnPlateau]",
                             crate::config::training::LearningScheduleConfig::LinearDecay {
                                 ..
                             } => " [LinearDecay]",
@@ -1063,8 +1046,8 @@ impl LSTMModel {
 
                 // Additional adaptive learning rate status
                 if matches!(
-                    &config.training.learning_rate,
-                    crate::config::training::LearningRateConfig::Adaptive { .. }
+                    &config.training.learning_schedule,
+                    Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau { .. })
                 ) && epoch >= warmup_epochs as usize
                 {
                     log::debug!(
@@ -1600,6 +1583,12 @@ impl LSTMModel {
         match schedule_config {
             LearningScheduleConfig::Constant => {
                 // Maintain constant learning rate
+                initial_lr
+            }
+
+            LearningScheduleConfig::ReduceOnPlateau { .. } => {
+                // ReduceOnPlateau is handled separately in the training loop
+                // This function is only for epoch-based schedules
                 initial_lr
             }
 

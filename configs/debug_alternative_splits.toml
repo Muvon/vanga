@@ -9,7 +9,7 @@
 
 # Same basic parameters as debug config
 epochs = { Fixed = 100 }
-learning_rate = { Fixed = 0.0005 }
+learning_rate = 0.0005
 batch_size = { Fixed = 32 }
 warmup_epochs = 2
 early_stopping = { patience = 20, min_delta = 0.0001 }

@@ -19,12 +19,13 @@ epochs = { Auto = { max_epochs = 1000 } }
 
 # LEARNING RATE CONFIGURATION
 # Controls how quickly the model learns from training data
-# - Fixed: Constant learning rate throughout training
-# - Adaptive: Automatically reduces when loss plateaus (RECOMMENDED)
+# - Simple float: Constant learning rate throughout training
+# - Use learning_schedule for advanced decay patterns
 # TUNING: Start with 0.001, reduce to 0.0001 for fine-tuning, increase to 0.01 for faster convergence
 # EFFECT: Higher values = faster learning but risk instability, lower values = stable but slower
-learning_rate = { Fixed = 0.001 }
-# Alternative: learning_rate = { Adaptive = { initial = 0.001, factor = 0.5, patience = 10 } }
+learning_rate = 0.001
+# Optional: Add scheduling for automatic reduction when loss plateaus
+# learning_schedule = { ReduceOnPlateau = { patience = 10, factor = 0.5, min_lr = 1e-6 } }
 
 # BATCH SIZE CONFIGURATION
 # Controls how many samples are processed together in each training step

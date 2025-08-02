@@ -33,7 +33,7 @@ bandwidth_size = 1.0  # Breakout sensitivity multiplier (5 price level classes: 
 device = "auto"
 epochs = { Auto = { max_epochs = 200 } }
 batch_size = { Fixed = 32 }
-learning_rate = { Fixed = 0.001 }
+learning_rate = 0.001
 optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 warmup_epochs = 5
 validation_split = 0.2

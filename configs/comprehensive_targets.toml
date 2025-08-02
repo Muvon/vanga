@@ -6,7 +6,8 @@
 [training]
 # Training configuration optimized for multi-target learning
 epochs = { Auto = { max_epochs = 1000 } }
-learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
+learning_rate = 0.001
+learning_schedule = { ReduceOnPlateau = { patience = 10, factor = 0.5 } }
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
 validation_split = 0.2
 validation_gap = "1h"

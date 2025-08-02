@@ -3,7 +3,7 @@
 
 [training]
 # Base learning rate configuration
-learning_rate = { Fixed = 0.001 }
+learning_rate = 0.001
 
 # Window decay factor (simple exponential decay)
 # 0.8 = 20% reduction per window

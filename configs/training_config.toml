@@ -14,13 +14,13 @@ epochs = { Auto = { max_epochs = 1000 } }
 # LEARNING RATE CONFIGURATION - Choose one approach:
 
 # Option 1: Fixed learning rate (simple, predictable)
-learning_rate = { Fixed = 0.001 }
+learning_rate = 0.001
 
 # Option 2: Adaptive learning rate (starts high, reduces when needed)
 # learning_rate = { Adaptive = { initial_lr = 0.01 } }
 
 # Option 3: Auto learning rate optimization (experimental)
-# learning_rate = { Auto = { min_lr = 0.0001, max_lr = 0.01 } }
+# learning_rate = 0.0001  # Auto optimization removed - use base rate
 
 # BATCH SIZE CONFIGURATION
 # Option 1: Auto batch size (optimizes based on data size and memory)
@@ -110,14 +110,14 @@ metric = "MAE"                             # MAE, RMSE, MAPE, SharpeRatio, MaxDr
 #
 # 3. FAST FIXED TRAINING (Testing/Development):
 #    epochs = { Fixed = 100 }
-#    learning_rate = { Fixed = 0.001 }
+#    learning_rate = 0.001
 #    validation_split = 0.0
 #    [model.attention]
 #    enabled = false
 #
 # 4. RESEARCH/REPRODUCIBLE WITH ATTENTION:
 #    epochs = { Fixed = 500 }
-#    learning_rate = { Fixed = 0.001 }
+#    learning_rate = 0.001
 #    validation_split = 0.2
 #    batch_size = { Fixed = 128 }
 #    [model.attention]

@@ -11,7 +11,7 @@
 epochs = { Fixed = 100 }
 
 # Conservative learning rate to prevent train loss from decreasing too fast
-learning_rate = { Fixed = 0.0005 }  # Reduced from typical 0.001
+learning_rate = 0.0005  # Reduced from typical 0.001
 
 # Smaller batch size for more stable gradients
 batch_size = { Fixed = 32 }

@@ -6,7 +6,7 @@
 [training]
 # Auto early stopping with intelligent defaults
 epochs = { Auto = { max_epochs = 1000 } }
-learning_rate = { Fixed = 0.001 }
+learning_rate = 0.001
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
 validation_split = 0.2
 validation_gap = "1h"           # 1 hour gap for feature independence

@@ -1,0 +1,35 @@
+# Quick test configuration to verify LSTM hidden state fix
+# This should show CHANGING validation metrics between epochs
+
+[model]
+architecture = { MultiLSTM = { layers = 1 } }  # Simple single layer for quick testing
+hidden_size = 32  # Small for fast training
+sequence_length = { Fixed = 20 }  # Short sequences for quick testing
+num_classes = 5
+
+[training]
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+epochs = { Fixed = 10 }  # Just 10 epochs to test quickly
+batch_size = { Fixed = 16 }  # Small batches
+learning_rate = 0.001
+
+[data]
+outlier_handling = { enabled = false }  # Disable for speed
+validation_split = 0.2
+chronological_split = true
+
+[features]
+technical_indicators = { enabled = true, indicators = ["sma_5", "rsi_14", "macd"] }  # Minimal features
+cross_asset = { enabled = false }  # Disable for speed
+
+[targets]
+price_levels = { enabled = true, horizons = [1] }  # Single horizon for speed
+direction = { enabled = false }  # Disable other targets for focus
+volatility = { enabled = false }
+
+[device]
+prefer_gpu = false  # Use CPU for consistent testing
+
+[logging]
+level = "info"
+validation_metrics_frequency = 2  # Show metrics every 2 epochs to see changes

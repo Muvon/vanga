@@ -273,7 +273,7 @@ impl Backtester {
                 device: crate::config::training::DeviceConfig::Auto,
                 epochs: crate::config::training::EpochConfig::Fixed(5), // Very short training for testing
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16), // Smaller batch size
-                learning_rate: crate::config::training::LearningRateConfig::Fixed(0.001),
+                learning_rate: 0.001,
                 optimizer: crate::config::training::OptimizerType::AdamW {
                     weight_decay: 0.01,
                     beta1: 0.9,
