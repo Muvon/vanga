@@ -22,6 +22,7 @@
 - **No dead code**: Don't use `#[allow(dead_code)]` - remove unused code or fix the issue
 - **DRY principle**: Don't repeat yourself - extract common logic into shared functions
 - **Tensor safety**: Always use `broadcast_as()` for shape matching, ensure `.contiguous()` for operations
+- **Test organization**: ALL tests must be in separate `*_test.rs` files - NEVER inline `#[cfg(test)]` modules
 
 ## 🚀 Quick Start Checklist
 
@@ -50,6 +51,105 @@ remember(["task context", "similar issues"])
 - **Test-driven**: Ensure changes work with existing tests
 - **Error handling**: Use `Result<T>` and proper error propagation
 - **Tensor safety**: Use `broadcast_as()` for shape matching, `.contiguous()` for operations
+
+## 🧪 Test Organization & Standards
+
+### MANDATORY Test Structure
+- **Separate test files ONLY**: All tests must be in dedicated `*_test.rs` files (singular)
+- **NO inline tests**: Never use `#[cfg(test)]` modules within source files
+- **Consistent naming**: Test files follow `{module_name}_test.rs` pattern (singular, not `_tests.rs`)
+- **Proper imports**: Use `use crate::module::*;` for accessing tested code
+- **Test discovery**: Cargo automatically discovers `*_test.rs` files
+
+### Test File Organization
+```
+src/
+├── data/
+│   ├── structures.rs          # Implementation
+│   ├── structures_test.rs     # Tests for structures.rs
+│   ├── target_converter.rs    # Implementation
+│   └── target_converter_test.rs # Tests for target_converter.rs
+├── model/
+│   ├── multi_target.rs        # Implementation
+│   ├── multi_target_test.rs   # Tests for multi_target.rs
+│   ├── attention_optimizer.rs # Implementation
+│   └── attention_optimizer_test.rs # Tests for attention_optimizer.rs
+└── utils/
+    ├── sequence_utils.rs      # Implementation
+    ├── sequence_utils_test.rs # Tests for sequence_utils.rs
+    ├── file_discovery.rs      # Implementation
+    ├── file_discovery_test.rs # Tests for file_discovery.rs
+    ├── device.rs              # Implementation
+    └── device_test.rs         # Tests for device.rs
+```
+
+### Test File Template
+```rust
+// src/module/feature_test.rs (singular _test.rs, not _tests.rs)
+use crate::module::feature::*;
+use crate::other::dependencies::*;
+
+#[test]
+fn test_basic_functionality() {
+    // Test implementation
+    assert_eq!(expected, actual);
+}
+
+#[tokio::test]  // For async tests
+async fn test_async_functionality() {
+    // Async test implementation
+    let result = async_function().await;
+    assert!(result.is_ok());
+}
+```
+
+### Benefits of Separate Test Files
+- ✅ **Cleaner source code**: Implementation files focus purely on logic
+- ✅ **Better organization**: Tests are easily discoverable and maintainable
+- ✅ **Rust best practices**: Follows community standards and conventions
+- ✅ **IDE support**: Better test runner integration and debugging
+- ✅ **Parallel compilation**: Tests can be compiled independently
+- ✅ **Reduced cognitive load**: Developers can focus on implementation or tests separately
+
+### Test Development Rules
+- **Test-first approach**: Write tests in separate files from the start
+- **Comprehensive coverage**: Test both success and error cases
+- **Descriptive names**: Use clear, descriptive test function names
+- **Isolated tests**: Each test should be independent and repeatable
+- **Mock dependencies**: Use proper mocking for external dependencies
+
+### FORBIDDEN Test Patterns
+```rust
+// ❌ NEVER DO THIS - Inline test modules
+impl SomeStruct {
+    fn some_method(&self) -> Result<()> {
+        // implementation
+    }
+}
+
+#[cfg(test)]
+mod tests {  // ❌ FORBIDDEN - inline test module
+    use super::*;
+
+    #[test]
+    fn test_some_method() {
+        // test code
+    }
+}
+```
+
+```rust
+// ✅ DO THIS INSTEAD - Separate test file
+// In src/module/some_struct_test.rs
+use crate::module::some_struct::*;
+
+#[test]
+fn test_some_method() {
+    let instance = SomeStruct::new();
+    let result = instance.some_method();
+    assert!(result.is_ok());
+}
+```
 
 ## 📁 Project Structure Deep Dive
 
@@ -348,6 +448,36 @@ let validation_data = extract_validation();
 if let Some(val_data) = validation_data {
     // Actually use the validation data
     model.validate_with(val_data)?;
+}
+```
+
+### Inline Test Modules
+```rust
+// ❌ NEVER DO THIS - Inline test modules in source files
+impl SomeStruct {
+    fn implementation(&self) -> Result<()> {
+        // implementation code
+    }
+}
+
+#[cfg(test)]  // ❌ FORBIDDEN - inline tests
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_implementation() {
+        // test code mixed with implementation
+    }
+}
+
+// ✅ DO THIS INSTEAD - Separate test file (src/module/some_struct_test.rs)
+use crate::module::some_struct::*;
+
+#[test]
+fn test_implementation() {
+    let instance = SomeStruct::new();
+    let result = instance.implementation();
+    assert!(result.is_ok());
 }
 ```
 

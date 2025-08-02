@@ -7,17 +7,17 @@
 
 pub mod direction;
 #[cfg(test)]
-mod direction_tests;
+mod direction_test;
 pub mod imbalance_mitigation;
 #[cfg(test)]
-mod math_consistency_tests;
+mod math_consistency_test;
 #[cfg(test)]
-mod price_level_tests;
+mod price_level_test;
 pub mod price_levels;
 pub mod sequence_reconstruction;
 pub mod volatility;
 #[cfg(test)]
-mod volatility_tests;
+mod volatility_test;
 
 use crate::config::model::TargetsConfig;
 use crate::utils::error::Result;
