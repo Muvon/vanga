@@ -917,6 +917,8 @@ pub struct PriceLevelReconstruction {
     pub percentage_ranges: Vec<[f64; 2]>,
     /// Absolute price ranges for each class [lower_price, upper_price]
     pub price_ranges: Vec<[f64; 2]>,
+    /// VWAP-relative percentage ranges for each class [lower_bound, upper_bound]
+    pub vwap_percentage_ranges: Vec<[f64; 2]>,
     /// Class probabilities from model
     pub probabilities: Vec<f64>,
     /// Most likely class index
@@ -1001,6 +1003,19 @@ pub fn reconstruct_price_levels(
         })
         .collect();
 
+    // Calculate sequence VWAP for vwap_range calculation
+    let sequence_vwap = get_sequence_vwap_baseline(sequence_ohlcv)?;
+
+    // Calculate VWAP-relative percentage ranges
+    let vwap_percentage_ranges: Vec<[f64; 2]> = price_ranges
+        .iter()
+        .map(|[lower_price, upper_price]| {
+            let lower_pct = ((lower_price / sequence_vwap) - 1.0) * 100.0;
+            let upper_pct = ((upper_price / sequence_vwap) - 1.0) * 100.0;
+            [lower_pct, upper_pct]
+        })
+        .collect();
+
     // Find most likely class and confidence
     let (most_likely_class, confidence) = probabilities
         .iter()
@@ -1024,6 +1039,7 @@ pub fn reconstruct_price_levels(
     Ok(PriceLevelReconstruction {
         percentage_ranges,
         price_ranges,
+        vwap_percentage_ranges,
         probabilities: probabilities.to_vec(),
         most_likely_class,
         confidence,

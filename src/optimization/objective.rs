@@ -506,6 +506,7 @@ impl ObjectiveFunction {
                     "support".to_string(),
                     crate::output::structures::PriceBin {
                         range: [lower_bound, current_price],
+                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [lower_bound, current_price],
                         probability: predictions[[i, 2]].clamp(0.0, 1.0),
                     },
@@ -515,6 +516,7 @@ impl ObjectiveFunction {
                     "resistance".to_string(),
                     crate::output::structures::PriceBin {
                         range: [current_price, upper_bound],
+                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [current_price, upper_bound],
                         probability: if predictions.ncols() > 3 {
                             predictions[[i, 3]].clamp(0.0, 1.0)
@@ -537,6 +539,7 @@ impl ObjectiveFunction {
                     "support".to_string(),
                     crate::output::structures::PriceBin {
                         range: [current_price * (1.0 - range_pct), current_price],
+                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [current_price * (1.0 - range_pct), current_price],
                         probability: 0.5,
                     },
@@ -545,6 +548,7 @@ impl ObjectiveFunction {
                     "resistance".to_string(),
                     crate::output::structures::PriceBin {
                         range: [current_price, current_price * (1.0 + range_pct)],
+                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [current_price, current_price * (1.0 + range_pct)],
                         probability: 0.5,
                     },

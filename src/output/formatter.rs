@@ -318,6 +318,24 @@ impl OutputFormatter {
                 sequence_length,
             );
 
+            // Calculate sequence VWAP using the same method as training
+            if let Some(ohlcv_data) = &self.sequence_ohlcv {
+                use crate::targets::price_levels::get_sequence_vwap_baseline;
+                match get_sequence_vwap_baseline(ohlcv_data) {
+                    Ok(sequence_vwap) => {
+                        result.current_vwap_price = sequence_vwap;
+                        log::debug!("Calculated sequence VWAP: {:.2}", sequence_vwap);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to calculate sequence VWAP: {}", e);
+                        result.current_vwap_price = current_price; // Fallback to current price
+                    }
+                }
+            } else {
+                log::warn!("No sequence OHLCV data available for VWAP calculation");
+                result.current_vwap_price = current_price; // Fallback to current price
+            }
+
             // Extract predictions for this batch
             let batch_predictions = raw_predictions.row(batch_idx);
 
@@ -749,6 +767,7 @@ impl OutputFormatter {
                 bin_name.to_string(),
                 PriceBin {
                     range: reconstruction.percentage_ranges[i],
+                    vwap_range: reconstruction.vwap_percentage_ranges[i],
                     price: reconstruction.price_ranges[i],
                     probability: reconstruction.probabilities[i],
                 },
@@ -1018,7 +1037,8 @@ impl OutputFormatter {
                     bins.insert(
                         "point_estimate".to_string(),
                         crate::output::structures::PriceBin {
-                            range: [0.0, 0.0], // Point estimate has no range
+                            range: [0.0, 0.0],      // Point estimate has no range
+                            vwap_range: [0.0, 0.0], // Point estimate has no VWAP range
                             price: [estimated_price, estimated_price],
                             probability: 1.0,
                         },
@@ -1084,7 +1104,8 @@ impl OutputFormatter {
                     bins.insert(
                         "point_estimate".to_string(),
                         crate::output::structures::PriceBin {
-                            range: [0.0, 0.0], // Point estimate has no range
+                            range: [0.0, 0.0],      // Point estimate has no range
+                            vwap_range: [0.0, 0.0], // Point estimate has no VWAP range
                             price: [estimated_price, estimated_price],
                             probability: 1.0,
                         },

@@ -22,6 +22,9 @@ pub struct PredictionResult {
     /// Current price at prediction time
     pub current_price: f64,
 
+    /// Current sequence VWAP price (same calculation as training)
+    pub current_vwap_price: f64,
+
     /// Price level predictions (if enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_levels: Option<PriceLevelPrediction>,
@@ -67,6 +70,9 @@ pub struct PriceLevelPrediction {
 pub struct PriceBin {
     /// Price range as percentage array [min, max] (e.g., [-5.0, -3.0])
     pub range: [f64; 2],
+
+    /// Price range relative to sequence VWAP as percentage array [min, max]
+    pub vwap_range: [f64; 2],
 
     /// Price range in actual currency values [min, max]
     pub price: [f64; 2],
@@ -702,6 +708,7 @@ impl PredictionResult {
             timestamp: Utc::now().to_rfc3339(),
             horizon,
             current_price,
+            current_vwap_price: 0.0, // Will be updated by formatter
             price_levels: None,
             direction: None,
             volatility: None,
@@ -735,6 +742,7 @@ impl PredictionResult {
             timestamp: Utc::now().to_rfc3339(),
             horizon,
             current_price,
+            current_vwap_price: 0.0, // Will be updated by formatter
             price_levels: None,
             direction: None,
             volatility: None,
@@ -2013,6 +2021,7 @@ mod tests {
             "pump".to_string(),
             PriceBin {
                 range: [3.0, 15.0],
+                vwap_range: [0.0, 0.0], // Test placeholder
                 price: [43000.0, 46000.0],
                 probability: 0.7, // Higher confidence pump
             },
@@ -2022,6 +2031,7 @@ mod tests {
             "sideways".to_string(),
             PriceBin {
                 range: [-3.0, 3.0],
+                vwap_range: [0.0, 0.0], // Test placeholder
                 price: [41000.0, 43000.0],
                 probability: 0.2, // Reduced sideways probability
             },
@@ -2031,6 +2041,7 @@ mod tests {
             "dump".to_string(),
             PriceBin {
                 range: [-15.0, -3.0],
+                vwap_range: [0.0, 0.0], // Test placeholder
                 price: [38000.0, 41000.0],
                 probability: 0.1,
             },
