@@ -112,8 +112,19 @@ impl LSTMModel {
                 .zip(backward_lstm_layers.iter())
                 .enumerate()
             {
-                // Process forward direction
-                let forward_states = forward_layer.seq(&current_input)?;
+                // CRITICAL FIX: Use seq_init() with zero_state() for validation to prevent hidden state contamination
+                // During training, we want to maintain states for temporal learning
+                // During validation, we want fresh states for each batch to get accurate metrics
+                let forward_states = if training {
+                    // Training mode: maintain hidden states between sequences (good for learning)
+                    forward_layer.seq(&current_input)?
+                } else {
+                    // Validation mode: reset hidden states for each batch (prevents contamination)
+                    let batch_size = current_input.dim(0)?;
+                    let zero_state = forward_layer.zero_state(batch_size)?;
+                    forward_layer.seq_init(&current_input, &zero_state)?
+                };
+
                 if forward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
                         "Forward layer {} produced no states",
@@ -127,8 +138,17 @@ impl LSTMModel {
                 }
                 let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
 
-                // Process backward direction
-                let backward_states = backward_layer.seq(&current_input)?;
+                // Process backward direction with same logic
+                let backward_states = if training {
+                    // Training mode: maintain hidden states
+                    backward_layer.seq(&current_input)?
+                } else {
+                    // Validation mode: reset hidden states
+                    let batch_size = current_input.dim(0)?;
+                    let zero_state = backward_layer.zero_state(batch_size)?;
+                    backward_layer.seq_init(&current_input, &zero_state)?
+                };
+
                 if backward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
                         "Backward layer {} produced no states",
@@ -182,7 +202,18 @@ impl LSTMModel {
             // Unidirectional processing (original logic)
             let mut current_output = input.clone();
             for (i, lstm_layer) in forward_lstm_layers.iter().enumerate() {
-                let layer_states = lstm_layer.seq(&current_output)?;
+                // CRITICAL FIX: Use seq_init() with zero_state() for validation to prevent hidden state contamination
+                // During training, we want to maintain states for temporal learning
+                // During validation, we want fresh states for each batch to get accurate metrics
+                let layer_states = if training {
+                    // Training mode: maintain hidden states between sequences (good for learning)
+                    lstm_layer.seq(&current_output)?
+                } else {
+                    // Validation mode: reset hidden states for each batch (prevents contamination)
+                    let batch_size = current_output.dim(0)?;
+                    let zero_state = lstm_layer.zero_state(batch_size)?;
+                    lstm_layer.seq_init(&current_output, &zero_state)?
+                };
 
                 if layer_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
