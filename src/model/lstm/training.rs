@@ -1108,10 +1108,14 @@ impl LSTMModel {
                         if let (Some(stored_val_seq), Some(stored_val_tgt)) =
                             (&self.stored_val_sequences, &self.stored_val_targets)
                         {
+                            // Clone the data to avoid borrowing conflicts
+                            let val_seq_clone = stored_val_seq.clone();
+                            let val_tgt_clone = stored_val_tgt.clone();
+
                             let _ = self
                                 .calculate_categorical_validation_metrics(
-                                    stored_val_seq,
-                                    stored_val_tgt,
+                                    &val_seq_clone,
+                                    &val_tgt_clone,
                                     64, // batch_size (not used in the method)
                                     10, // epoch = 10 to force calculation (10 % 10 == 0)
                                     config,
@@ -1127,10 +1131,15 @@ impl LSTMModel {
                                 "📊 Calculating Final Test Metrics on {} samples...",
                                 self.stored_test_sequences.shape()[0]
                             );
+
+                            // Clone the data to avoid borrowing conflicts
+                            let test_seq_clone = self.stored_test_sequences.clone();
+                            let test_tgt_clone = self.stored_test_targets.clone();
+
                             let _ = self
                                 .calculate_categorical_validation_metrics(
-                                    &self.stored_test_sequences,
-                                    &self.stored_test_targets,
+                                    &test_seq_clone,
+                                    &test_tgt_clone,
                                     64,
                                     10, // Force calculation
                                     config,

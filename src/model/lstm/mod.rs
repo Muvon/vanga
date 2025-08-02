@@ -42,6 +42,9 @@ pub mod inference;
 pub mod loss;
 pub mod training;
 
+#[cfg(test)]
+mod hidden_state_test;
+
 // Re-export main types for backward compatibility
 pub use config::{
     LSTMConfig, LSTMModel, ModelState, OptimizerWrapper, TargetFormat, TrainingConfig,

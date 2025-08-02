@@ -727,7 +727,7 @@ impl LSTMModel {
 
     /// Calculate categorical validation metrics for all categorical targets (PriceLevel, Direction, Volatility)
     pub async fn calculate_categorical_validation_metrics(
-        &self,
+        &mut self,
         val_sequences: &Array3<f64>,
         val_targets: &Array2<f64>,
         batch_size: usize,
@@ -755,21 +755,70 @@ impl LSTMModel {
 
         log::debug!("🎯 Detected target format: {:?}", target_format);
 
-        // Collect all predictions and targets
-        for batch_start in (0..total_val_samples).step_by(batch_size) {
-            let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
+        // SOLUTION: Process validation samples in random order to break hidden state patterns
+        // This ensures that validation metrics reflect actual model performance, not hidden state artifacts
+        let mut sample_indices: Vec<usize> = (0..total_val_samples).collect();
 
-            let batch_sequences = val_sequences
-                .slice(ndarray::s![batch_start..batch_end, .., ..])
-                .to_owned();
-            let batch_targets = val_targets
-                .slice(ndarray::s![batch_start..batch_end, ..])
-                .to_owned();
+        // Shuffle indices to break any hidden state patterns (but use deterministic seed for reproducibility)
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        epoch.hash(&mut hasher);
+        let seed = hasher.finish();
+
+        // Simple deterministic shuffle based on epoch
+        for i in 0..sample_indices.len() {
+            let j = ((seed as usize + i) * 1103515245 + 12345) % sample_indices.len();
+            sample_indices.swap(i, j);
+        }
+
+        log::debug!(
+            "🔄 Processing {} validation samples in shuffled order for epoch {}",
+            total_val_samples,
+            epoch
+        );
+
+        // Use smaller batch size for validation to ensure independence
+        let validation_batch_size = std::cmp::min(batch_size, 8); // Even smaller batches
+
+        // Process samples in shuffled order with small batches
+        for chunk_start in (0..total_val_samples).step_by(validation_batch_size) {
+            let chunk_end = std::cmp::min(chunk_start + validation_batch_size, total_val_samples);
+
+            // Get shuffled indices for this chunk
+            let chunk_indices = &sample_indices[chunk_start..chunk_end];
+
+            // Create batch from shuffled indices
+            let mut batch_sequences = Vec::new();
+            let mut batch_targets = Vec::new();
+
+            for &idx in chunk_indices {
+                batch_sequences.push(val_sequences.slice(ndarray::s![idx, .., ..]).to_owned());
+                batch_targets.push(val_targets.slice(ndarray::s![idx, ..]).to_owned());
+            }
+
+            // Convert to proper batch format
+            let batch_size_actual = batch_sequences.len();
+            let seq_len = batch_sequences[0].shape()[0];
+            let features = batch_sequences[0].shape()[1];
+
+            let mut batch_seq_array =
+                ndarray::Array3::<f64>::zeros((batch_size_actual, seq_len, features));
+            let mut batch_tgt_array =
+                ndarray::Array2::<f64>::zeros((batch_size_actual, batch_targets[0].len()));
+
+            for (i, (seq, tgt)) in batch_sequences.iter().zip(batch_targets.iter()).enumerate() {
+                batch_seq_array
+                    .slice_mut(ndarray::s![i, .., ..])
+                    .assign(seq);
+                batch_tgt_array.slice_mut(ndarray::s![i, ..]).assign(tgt);
+            }
 
             let (input_tensor, target_tensor) =
-                self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
+                self.convert_sequences_to_tensors(&batch_seq_array, &batch_tgt_array)?;
 
             // Forward pass (inference mode for loss calculation)
+            // Each small shuffled batch should produce independent predictions
             let predictions = self.forward(&input_tensor, false)?;
 
             // Convert predictions to class indices
