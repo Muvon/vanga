@@ -208,6 +208,7 @@ impl LSTMModel {
             temperature_scaling: 1.0,
             use_relative_position: true,
             visualization: crate::config::model::VisualizationConfig::default(),
+            moh: None,
         };
 
         self.attention_config = Some(module_config);

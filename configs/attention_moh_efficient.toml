@@ -1,0 +1,36 @@
+# High-Efficiency MoH Configuration (75% efficiency)
+# Optimized for maximum computational savings while maintaining performance
+
+[model]
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Auto = { min_length = 30, max_length = 100 } }
+hidden_units = { Auto = { min_units = 128, max_units = 256 } }
+
+[model.attention]
+enabled = true
+mechanism = "MixtureOfHeads"
+heads = 20                                      # More heads for better specialization
+head_dim = 48                                   # Smaller head dimension for efficiency
+dropout_rate = 0.15                             # Higher dropout for regularization
+dropout_weights = true
+dropout_output = true
+dropout_projections = true
+dropout_scores = false
+temperature_scaling = 1.2                       # Higher temperature for more exploration
+use_relative_position = true
+
+# High-efficiency MoH configuration
+[model.attention.moh]
+total_heads = 20                                # Total heads
+shared_heads = 3                                # Minimal shared heads (15%)
+top_k = 12                                      # Many routed heads (60%) = 75% total efficiency
+load_balance_weight = 0.02                      # Higher load balance weight
+routing_temperature = 0.8                       # Lower temperature for more focused routing
+log_routing_decisions = false
+
+[training]
+optimizer = { AdamW = { weight_decay = 0.005, beta1 = 0.9, beta2 = 0.999 } }
+epochs = { Auto = { max_epochs = 300 } }
+batch_size = { Auto = { min_size = 32, max_size = 128 } }  # Larger batches for efficiency
+learning_rate = { Auto = { min_lr = 5e-5, max_lr = 5e-4 } }  # Lower learning rates
+early_stopping = { enabled = true, patience = 15, min_delta = 1e-4 }

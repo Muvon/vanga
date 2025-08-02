@@ -381,6 +381,16 @@ impl AttentionFactory {
                 log::info!("TFT Variable Selection attention requested - using enhanced MultiHeadAttention");
                 Ok(Box::new(base_attention))
             }
+            crate::config::model::AttentionMechanism::MixtureOfHeads => {
+                // Mixture-of-Head Attention with dynamic routing
+                // Note: MoH requires direct instantiation due to mutable routing state
+                // This factory method is not suitable for MoH - use EnhancedAttentionFactory instead
+                log::warn!("MixtureOfHeads attention requires EnhancedAttentionFactory for proper instantiation");
+                Err(VangaError::ModelError(
+                    "MixtureOfHeads attention must be created through EnhancedAttentionFactory"
+                        .to_string(),
+                ))
+            }
             crate::config::model::AttentionMechanism::None => Err(VangaError::ModelError(
                 "Cannot create attention mechanism for 'None' type".to_string(),
             )),

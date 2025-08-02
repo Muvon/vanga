@@ -888,6 +888,7 @@ impl OptimizedAttentionFactory {
                 temperature_scaling: 0.9, // Sharper attention for short-term
                 use_relative_position: true,
                 visualization: crate::config::model::VisualizationConfig::default(),
+                moh: None,
             },
             sequence_optimization: SequenceOptimization {
                 use_sparse_attention: false, // Short sequences don't need sparse
@@ -936,6 +937,7 @@ impl OptimizedAttentionFactory {
                 temperature_scaling: 1.2, // Smoother attention for long-term
                 use_relative_position: true,
                 visualization: crate::config::model::VisualizationConfig::default(),
+                moh: None,
             },
             sequence_optimization: SequenceOptimization {
                 use_sparse_attention: true,

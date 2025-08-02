@@ -1,0 +1,36 @@
+# Conservative MoH Configuration (50% efficiency)
+# Balanced approach for stable training and good performance
+
+[model]
+architecture = { MultiLSTM = { layers = 3 } }   # Deeper network
+sequence_length = { Auto = { min_length = 40, max_length = 150 } }
+hidden_units = { Auto = { min_units = 256, max_units = 512 } }
+
+[model.attention]
+enabled = true
+mechanism = "MixtureOfHeads"
+heads = 12                                      # Moderate number of heads
+head_dim = 64                                   # Standard head dimension
+dropout_rate = 0.1                              # Conservative dropout
+dropout_weights = true
+dropout_output = true
+dropout_projections = true
+dropout_scores = false
+temperature_scaling = 1.0                       # Standard temperature
+use_relative_position = true
+
+# Conservative MoH configuration
+[model.attention.moh]
+total_heads = 12                                # Total heads
+shared_heads = 6                                # Half shared heads (50%)
+top_k = 0                                       # No routed heads = 50% efficiency
+load_balance_weight = 0.0                       # No load balance loss (all shared)
+routing_temperature = 1.0                       # Standard temperature
+log_routing_decisions = false
+
+[training]
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+epochs = { Auto = { max_epochs = 400 } }
+batch_size = { Auto = { min_size = 16, max_size = 64 } }
+learning_rate = { Auto = { min_lr = 1e-4, max_lr = 1e-3 } }
+early_stopping = { enabled = true, patience = 25, min_delta = 1e-4 }

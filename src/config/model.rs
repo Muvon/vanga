@@ -205,15 +205,19 @@ pub struct AttentionConfig {
     pub temperature_scaling: f64,           // Crypto volatility adaptation
     pub use_relative_position: bool,        // Temporal modeling for crypto
     pub visualization: VisualizationConfig, // Analysis options
+    /// Mixture-of-Head Attention configuration (only used when mechanism = MixtureOfHeads)
+    pub moh: Option<MoHConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AttentionMechanism {
     SelfAttention,
     MultiHeadAttention,
     AdditiveAttention,
     /// TFT Variable Selection Attention (builds on MultiHeadAttention)
     VariableSelection,
+    /// Mixture-of-Head Attention (MoH) - Dynamic head routing for efficiency
+    MixtureOfHeads,
     None,
 }
 
@@ -239,6 +243,83 @@ pub struct XGBoostConfig {
     pub importance_method: String, // "permutation" for SmartCore
 }
 
+/// Mixture-of-Head Attention configuration for dynamic head routing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoHConfig {
+    /// Total number of attention heads (h in paper)
+    pub total_heads: u32,
+    /// Number of always-active shared heads (hs in paper)
+    pub shared_heads: u32,
+    /// Number of routed heads to activate via top-K selection (K in paper)
+    pub top_k: u32,
+    /// Weight for load balance loss (β in paper, default: 0.01)
+    pub load_balance_weight: f64,
+    /// Temperature for routing softmax (higher = more exploration)
+    pub routing_temperature: f64,
+    /// Enable routing score logging for analysis
+    pub log_routing_decisions: bool,
+}
+
+impl Default for MoHConfig {
+    fn default() -> Self {
+        Self {
+            total_heads: 16,              // More heads for better specialization
+            shared_heads: 4,              // 25% shared heads for common patterns
+            top_k: 4,                     // 25% routed heads active (50% total active)
+            load_balance_weight: 0.01,    // Standard β from paper
+            routing_temperature: 1.0,     // Standard temperature
+            log_routing_decisions: false, // Disabled by default for performance
+        }
+    }
+}
+
+impl MoHConfig {
+    /// Validate MoH configuration parameters
+    pub fn validate(&self) -> Result<(), String> {
+        if self.shared_heads + self.top_k > self.total_heads {
+            return Err(format!(
+                "shared_heads ({}) + top_k ({}) cannot exceed total_heads ({})",
+                self.shared_heads, self.top_k, self.total_heads
+            ));
+        }
+
+        if self.shared_heads == 0 && self.top_k == 0 {
+            return Err("At least one head must be active (shared_heads + top_k > 0)".to_string());
+        }
+
+        if self.load_balance_weight < 0.0 || self.load_balance_weight > 1.0 {
+            return Err(format!(
+                "load_balance_weight ({}) must be between 0.0 and 1.0",
+                self.load_balance_weight
+            ));
+        }
+
+        if self.routing_temperature <= 0.0 {
+            return Err(format!(
+                "routing_temperature ({}) must be positive",
+                self.routing_temperature
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get the total number of active heads (shared + routed)
+    pub fn active_heads(&self) -> u32 {
+        self.shared_heads + self.top_k
+    }
+
+    /// Get the number of inactive heads
+    pub fn inactive_heads(&self) -> u32 {
+        self.total_heads - self.active_heads()
+    }
+
+    /// Calculate efficiency ratio (active/total heads)
+    pub fn efficiency_ratio(&self) -> f64 {
+        self.active_heads() as f64 / self.total_heads as f64
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualizationConfig {
     pub save_heatmaps: bool,
@@ -261,6 +342,7 @@ impl Default for AttentionConfig {
             temperature_scaling: 1.0, // Standard temperature
             use_relative_position: true, // Better for time series
             visualization: VisualizationConfig::default(),
+            moh: None, // MoH config only when mechanism = MixtureOfHeads
         }
     }
 }
@@ -310,6 +392,7 @@ impl Default for ModelConfig {
                 temperature_scaling: 1.0,    // Standard temperature
                 use_relative_position: true, // Better for time series
                 visualization: VisualizationConfig::default(),
+                moh: None, // No MoH for default config
             },
             xgboost: XGBoostConfig::default(), // XGBoost disabled by default
             targets: TargetsConfig::default(), // Use new unified config

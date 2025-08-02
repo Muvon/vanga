@@ -1,0 +1,74 @@
+# Mixture-of-Head Attention Configuration for VANGA LSTM
+# Based on "Mixture-of-Head Attention for Multi-Modal Learning" paper
+
+[model]
+# LSTM architecture with MoH attention
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+hidden_units = { Auto = { min_units = 128, max_units = 512 } }
+
+# Dropout configuration optimized for MoH
+dropout = { enabled = true, rate = { Auto = { min_rate = 0.1, max_rate = 0.3 } }, variational = true, recurrent = true }
+
+# Mixture-of-Head Attention Configuration
+[model.attention]
+enabled = true
+mechanism = "MixtureOfHeads"
+heads = 16                                      # Total heads (will be overridden by moh.total_heads)
+head_dim = 64                                   # Dimension per head (auto-optimized if not specified)
+dropout_rate = 0.1                              # Attention dropout rate
+dropout_weights = true                          # Apply dropout to attention weights
+dropout_output = true                           # Apply dropout to attention output
+dropout_projections = true                      # Apply dropout to Q, K, V projections
+dropout_scores = false                          # Disable for MoH (routing handles regularization)
+temperature_scaling = 1.0                       # Standard temperature
+use_relative_position = true                    # Better for time series
+
+# MoH-specific configuration
+[model.attention.moh]
+total_heads = 16                                # Total number of attention heads (h)
+shared_heads = 4                                # Always-active shared heads (hs) - 25%
+top_k = 4                                       # Routed heads to activate (K) - 25%
+load_balance_weight = 0.01                      # β parameter for load balance loss
+routing_temperature = 1.0                       # Temperature for routing softmax
+log_routing_decisions = false                   # Enable for debugging (performance impact)
+
+# Visualization for MoH analysis
+[model.attention.visualization]
+save_heatmaps = true                            # Save attention heatmaps
+export_analysis = true                          # Export routing analysis
+output_dir = "moh_analysis"                     # Output directory
+
+# Training configuration optimized for MoH
+[training]
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+epochs = { Auto = { max_epochs = 500 } }        # MoH may need more epochs for routing convergence
+batch_size = { Auto = { min_size = 16, max_size = 64 } }  # Smaller batches for routing stability
+learning_rate = { Auto = { min_lr = 1e-5, max_lr = 1e-3 } }
+
+# Early stopping with patience for routing convergence
+early_stopping = { enabled = true, patience = 20, min_delta = 1e-4 }
+
+# Data configuration
+[data]
+outlier_handling = { enabled = true, method = "IQR", threshold = 2.5 }
+feature_engineering = { enabled = true, technical_indicators = true }
+normalization = { method = "zscore", per_feature = true }
+
+# Target configuration for 5-class system
+[targets]
+base_sensitivity = 0.02                         # Base sensitivity for all targets
+balance_target = 0.2                            # Target class balance (20% per class)
+momentum_weighting = 1.2                        # Recent data weighting
+extreme_multiplier = 2.0                        # Extreme class boundary multiplier
+
+# Device configuration
+[device]
+preference = "Auto"                             # Auto-detect best device
+fallback_to_cpu = true                          # Fallback if GPU unavailable
+
+# Logging configuration for MoH analysis
+[logging]
+level = "info"
+attention_routing = false                       # Enable for detailed routing logs
+performance_metrics = true                      # Log performance metrics

@@ -54,7 +54,7 @@ mod tests {
     use super::*;
     use crate::config::model::{
         AttentionConfig, AttentionMechanism, DropoutConfig, DropoutRate, HiddenUnitsConfig,
-        LSTMArchitecture, ModelConfig, SequenceLengthConfig, TargetsConfig, VisualizationConfig,
+        LSTMArchitecture, ModelConfig, SequenceLengthConfig, TargetsConfig,
     };
     use crate::config::training::ClassWeightStrategy;
     use crate::config::training::OptimizerType;
@@ -509,6 +509,7 @@ mod tests {
                 temperature_scaling: 1.0,
                 use_relative_position: true,
                 visualization: crate::config::model::VisualizationConfig::default(),
+                moh: None,
             },
             xgboost: crate::config::model::XGBoostConfig::default(),
             targets: TargetsConfig::default(),
@@ -571,6 +572,7 @@ mod tests {
                 temperature_scaling: 1.0,
                 use_relative_position: true,
                 visualization: crate::config::model::VisualizationConfig::default(),
+                moh: None,
             },
             targets: TargetsConfig::default(),
             quantile_outputs: None,
@@ -670,6 +672,7 @@ mod tests {
                 temperature_scaling: 1.0,
                 use_relative_position: true,
                 visualization: crate::config::model::VisualizationConfig::default(),
+                moh: None,
             },
             targets: TargetsConfig::default(),
             quantile_outputs: None,
@@ -724,7 +727,8 @@ mod tests {
                 dropout_scores: false,
                 temperature_scaling: 1.0,
                 use_relative_position: false,
-                visualization: VisualizationConfig::default(),
+                visualization: crate::config::model::VisualizationConfig::default(),
+                moh: None,
             },
             targets: TargetsConfig::default(),
             quantile_outputs: None,

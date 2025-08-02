@@ -1,5 +1,9 @@
 pub mod attention;
 pub mod attention_loss;
+pub mod attention_moh;
+#[cfg(test)]
+pub mod attention_moh_test;
+pub mod attention_moh_wrapper;
 pub mod attention_optimizer;
 pub mod attention_viz;
 
@@ -15,6 +19,10 @@ pub mod smartcore_test;
 
 pub use attention::{AttentionFactory, AttentionModule, MultiHeadAttention};
 pub use attention_loss::{AttentionLossConfig, AttentionLossFactory, AttentionWeightedLoss};
+pub use attention_moh::MixtureOfHeadAttention;
+pub use attention_moh_wrapper::{
+    EnhancedAttentionFactory, MoHAttentionWrapper, MoHMetrics, MoHTrainingLoss,
+};
 pub use attention_optimizer::{
     OptimizedAttention, OptimizedAttentionConfig, OptimizedAttentionFactory,
 };
