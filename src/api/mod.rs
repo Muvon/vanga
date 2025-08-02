@@ -13,7 +13,7 @@ use crate::utils::error::Result;
 pub async fn train_model(
     config: TrainingConfig,
 ) -> Result<crate::model::multi_target::MultiTargetLSTMModel> {
-    let trainer = ModelTrainer::new(config);
+    let mut trainer = ModelTrainer::new(config);
     trainer.train().await
 }
 

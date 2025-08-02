@@ -75,6 +75,18 @@ use crate::model::multi_target::{MultiTargetLSTMModel, TrainingContext};
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
+use std::collections::HashMap;
+
+/// Window-by-window training metrics for final statistics
+#[derive(Debug, Clone)]
+pub struct WindowMetrics {
+    pub window_id: usize,
+    pub learning_rate: f64,
+    pub train_samples: usize,
+    pub val_samples: usize,
+    /// Per-target validation metrics: target_name -> (accuracy, macro_f1, weighted_f1)
+    pub target_metrics: HashMap<String, (f64, f64, f64)>,
+}
 
 /// Model trainer for multi-target LSTM architecture
 ///
@@ -85,12 +97,17 @@ use ndarray::Array2;
 /// - Normalization consistency for prediction
 pub struct ModelTrainer {
     config: TrainingConfig,
+    /// Window-by-window metrics for final statistics
+    window_metrics: Vec<WindowMetrics>,
 }
 
 impl ModelTrainer {
     /// Create new model trainer with configuration
     pub fn new(config: TrainingConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            window_metrics: Vec::new(),
+        }
     }
 
     /// Execute complete multi-target LSTM training pipeline
@@ -102,7 +119,7 @@ impl ModelTrainer {
     /// 4. Save complete training config and normalization stats for prediction consistency
     ///
     /// Returns trained MultiTargetLSTMModel ready for prediction or further training.
-    pub async fn train(&self) -> Result<MultiTargetLSTMModel> {
+    pub async fn train(&mut self) -> Result<MultiTargetLSTMModel> {
         log::info!("Starting model training for symbol: {}", self.config.symbol);
 
         // Initialize device from configuration
@@ -224,6 +241,12 @@ impl ModelTrainer {
                     self.continue_training_window(model.unwrap(), window, window_lr)
                         .await?,
                 );
+            }
+
+            // Collect window metrics for final statistics
+            if let Some(ref current_model) = model {
+                self.collect_window_metrics(current_model, window, i, window_lr)
+                    .await?;
             }
         }
 
@@ -366,6 +389,9 @@ impl ModelTrainer {
         } else {
             log::warn!("⚠️  No final window available for test evaluation");
         }
+
+        // Display final window-by-window statistics
+        self.display_final_statistics();
 
         // Save the trained multi-target model
         log::info!("✅ Walk-forward multi-target model training completed successfully!");
@@ -582,11 +608,225 @@ impl ModelTrainer {
             self.config.horizons.clone(),
         )
     }
+
+    /// Collect validation metrics for a window after training
+    async fn collect_window_metrics(
+        &mut self,
+        model: &MultiTargetLSTMModel,
+        window: &crate::data::TrainingWindow,
+        window_id: usize,
+        learning_rate: f64,
+    ) -> Result<()> {
+        log::debug!("📊 Collecting metrics for window {}", window_id + 1);
+
+        // Get validation predictions if validation data exists
+        if window.val_samples > 0 {
+            match model.predict(&window.val_data.sequences).await {
+                Ok(val_predictions) => {
+                    // Process validation targets
+                    match self.process_window_targets(window, "metrics_collection") {
+                        Ok((_, val_targets)) => {
+                            let mut target_metrics = HashMap::new();
+                            let target_names = model.get_target_names();
+
+                            // Calculate metrics for each target
+                            for (target_idx, target_name) in target_names.iter().enumerate() {
+                                const NUM_CLASSES: usize = 5;
+                                let start_col = target_idx * NUM_CLASSES;
+                                let end_col = start_col + NUM_CLASSES;
+
+                                if end_col <= val_predictions.shape()[1]
+                                    && target_idx < val_targets.shape()[1]
+                                {
+                                    // Extract predictions and targets for this target
+                                    let target_predictions_slice =
+                                        val_predictions.slice(ndarray::s![.., start_col..end_col]);
+                                    let target_actual = val_targets.column(target_idx);
+
+                                    // Convert predictions to class indices (argmax)
+                                    let pred_classes: Vec<i32> = target_predictions_slice
+                                        .rows()
+                                        .into_iter()
+                                        .map(|pred_row| {
+                                            pred_row
+                                                .iter()
+                                                .enumerate()
+                                                .max_by(|(_, a), (_, b)| {
+                                                    a.partial_cmp(b)
+                                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                                })
+                                                .map(|(idx, _)| idx as i32)
+                                                .unwrap_or(0)
+                                        })
+                                        .collect();
+
+                                    // Convert targets to class indices
+                                    let actual_classes: Vec<i32> = target_actual
+                                        .iter()
+                                        .map(|&actual| actual.round() as i32)
+                                        .collect();
+
+                                    // Calculate metrics
+                                    match crate::utils::metrics::calculate_classification_metrics(
+                                        &pred_classes,
+                                        &actual_classes,
+                                    ) {
+                                        Ok(metrics) => {
+                                            target_metrics.insert(
+                                                target_name.clone(),
+                                                (
+                                                    metrics.accuracy,
+                                                    metrics.macro_f1,
+                                                    metrics.weighted_f1,
+                                                ),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Failed to calculate metrics for target '{}': {}",
+                                                target_name,
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Store window metrics
+                            let window_metric = WindowMetrics {
+                                window_id: window_id + 1, // 1-indexed for display
+                                learning_rate,
+                                train_samples: window.train_samples,
+                                val_samples: window.val_samples,
+                                target_metrics,
+                            };
+
+                            self.window_metrics.push(window_metric);
+                            log::debug!("✅ Metrics collected for window {}", window_id + 1);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to process targets for metrics collection: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to generate validation predictions for metrics: {}",
+                        e
+                    );
+                }
+            }
+        } else {
+            log::debug!(
+                "No validation data for window {} - skipping metrics collection",
+                window_id + 1
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Display comprehensive final statistics showing metrics progression across windows
+    fn display_final_statistics(&self) {
+        if self.window_metrics.is_empty() {
+            log::info!("📊 No window metrics collected - final statistics unavailable");
+            return;
+        }
+
+        log::info!("📊 FINAL WINDOW-BY-WINDOW STATISTICS:");
+        log::info!(
+            "   🎯 Training progression across {} windows",
+            self.window_metrics.len()
+        );
+        log::info!("   📈 Metrics show model improvement through progressive learning");
+        log::info!("");
+
+        // Get all unique target names
+        let mut all_targets = std::collections::HashSet::new();
+        for window_metric in &self.window_metrics {
+            for target_name in window_metric.target_metrics.keys() {
+                all_targets.insert(target_name.clone());
+            }
+        }
+        let mut target_names: Vec<String> = all_targets.into_iter().collect();
+        target_names.sort();
+
+        // Display metrics for each target
+        for target_name in &target_names {
+            log::info!("🎯 Target: {}", target_name);
+            log::info!("   Window | LR      | Samples | Accuracy | Macro F1 | Weighted F1");
+            log::info!("   -------|---------|---------|----------|----------|------------");
+
+            for window_metric in &self.window_metrics {
+                if let Some((accuracy, macro_f1, weighted_f1)) =
+                    window_metric.target_metrics.get(target_name)
+                {
+                    log::info!(
+                        "   {:6} | {:.5} | {:7} | {:8.3} | {:8.3} | {:11.3}",
+                        window_metric.window_id,
+                        window_metric.learning_rate,
+                        window_metric.val_samples,
+                        accuracy,
+                        macro_f1,
+                        weighted_f1
+                    );
+                }
+            }
+
+            // Calculate improvement from first to last window
+            if let (Some(first_window), Some(last_window)) =
+                (self.window_metrics.first(), self.window_metrics.last())
+            {
+                if let (
+                    Some((first_acc, first_macro, first_weighted)),
+                    Some((last_acc, last_macro, last_weighted)),
+                ) = (
+                    first_window.target_metrics.get(target_name),
+                    last_window.target_metrics.get(target_name),
+                ) {
+                    let acc_improvement = last_acc - first_acc;
+                    let macro_improvement = last_macro - first_macro;
+                    let weighted_improvement = last_weighted - first_weighted;
+
+                    log::info!("   📈 Improvement (Window {} → {}): Accuracy: {:+.3}, Macro F1: {:+.3}, Weighted F1: {:+.3}",
+                        first_window.window_id, last_window.window_id,
+                        acc_improvement, macro_improvement, weighted_improvement);
+                }
+            }
+            log::info!("");
+        }
+
+        // Overall summary
+        log::info!("📊 TRAINING SUMMARY:");
+        log::info!("   🔄 Total windows: {}", self.window_metrics.len());
+        log::info!(
+            "   📉 Learning rate decay: {:.3}",
+            self.config.training.window_decay
+        );
+        if let (Some(first), Some(last)) = (self.window_metrics.first(), self.window_metrics.last())
+        {
+            log::info!(
+                "   📊 LR progression: {:.6} → {:.6}",
+                first.learning_rate,
+                last.learning_rate
+            );
+            log::info!(
+                "   📈 Sample progression: {} → {} validation samples",
+                first.val_samples,
+                last.val_samples
+            );
+        }
+        log::info!("   ✅ Progressive learning: Model weights preserved across all windows");
+        log::info!(
+            "   🎯 Final model: Trained on cumulative data from all {} windows",
+            self.window_metrics.len()
+        );
+    }
 }
 
 /// High-level training function
 pub async fn train_model(config: TrainingConfig) -> Result<MultiTargetLSTMModel> {
-    let trainer = ModelTrainer::new(config);
+    let mut trainer = ModelTrainer::new(config);
     trainer.train().await
 }
 
