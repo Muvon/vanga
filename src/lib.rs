@@ -372,3 +372,8 @@ mod attention_integration_tests {
 
     include!("tests/attention_integration.rs");
 }
+
+#[cfg(test)]
+mod metrics_tests {
+    include!("utils/metrics_test.rs");
+}

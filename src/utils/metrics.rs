@@ -49,22 +49,100 @@ pub fn calculate_classification_metrics(
         .sum();
     let accuracy = correct as f64 / predictions.len() as f64;
 
-    // For simplicity, create basic metrics
+    // Find all unique classes in both predictions and targets
+    let mut all_classes = std::collections::HashSet::new();
+    for &pred in predictions {
+        all_classes.insert(pred);
+    }
+    for &target in targets {
+        all_classes.insert(target);
+    }
+    let mut classes: Vec<i32> = all_classes.into_iter().collect();
+    classes.sort();
+
+    // Calculate per-class metrics
     let mut precision = HashMap::new();
     let mut recall = HashMap::new();
     let mut f1_score = HashMap::new();
+    let mut class_support = HashMap::new();
 
-    precision.insert(0, accuracy);
-    recall.insert(0, accuracy);
-    f1_score.insert(0, accuracy);
+    for &class in &classes {
+        // True Positives: predicted class AND actual class
+        let tp = predictions
+            .iter()
+            .zip(targets.iter())
+            .filter(|(&pred, &actual)| pred == class && actual == class)
+            .count() as f64;
+
+        // False Positives: predicted class but NOT actual class
+        let fp = predictions
+            .iter()
+            .zip(targets.iter())
+            .filter(|(&pred, &actual)| pred == class && actual != class)
+            .count() as f64;
+
+        // False Negatives: NOT predicted class but actual class
+        let fn_count = predictions
+            .iter()
+            .zip(targets.iter())
+            .filter(|(&pred, &actual)| pred != class && actual == class)
+            .count() as f64;
+
+        // Support: number of actual instances of this class
+        let support = targets.iter().filter(|&&actual| actual == class).count() as f64;
+        class_support.insert(class, support);
+
+        // Calculate precision: TP / (TP + FP)
+        let class_precision = if tp + fp > 0.0 { tp / (tp + fp) } else { 0.0 };
+        precision.insert(class, class_precision);
+
+        // Calculate recall: TP / (TP + FN)
+        let class_recall = if tp + fn_count > 0.0 {
+            tp / (tp + fn_count)
+        } else {
+            0.0
+        };
+        recall.insert(class, class_recall);
+
+        // Calculate F1: 2 * (precision * recall) / (precision + recall)
+        let class_f1 = if class_precision + class_recall > 0.0 {
+            2.0 * (class_precision * class_recall) / (class_precision + class_recall)
+        } else {
+            0.0
+        };
+        f1_score.insert(class, class_f1);
+    }
+
+    // Calculate macro F1: unweighted average of per-class F1 scores
+    let macro_f1 = if !f1_score.is_empty() {
+        f1_score.values().sum::<f64>() / f1_score.len() as f64
+    } else {
+        0.0
+    };
+
+    // Calculate weighted F1: support-weighted average of per-class F1 scores
+    let total_support: f64 = class_support.values().sum();
+    let weighted_f1 = if total_support > 0.0 {
+        classes
+            .iter()
+            .map(|&class| {
+                let class_f1 = f1_score.get(&class).unwrap_or(&0.0);
+                let support = class_support.get(&class).unwrap_or(&0.0);
+                class_f1 * support
+            })
+            .sum::<f64>()
+            / total_support
+    } else {
+        0.0
+    };
 
     Ok(EvaluationMetrics {
         accuracy,
         precision,
         recall,
         f1_score,
-        macro_f1: accuracy,
-        weighted_f1: accuracy,
+        macro_f1,
+        weighted_f1,
     })
 }
 
