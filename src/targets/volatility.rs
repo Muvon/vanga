@@ -263,8 +263,16 @@ pub fn calculate_rolling_atr_series(candles: &[MarketDataRow], window: usize) ->
         candles.len(),
         effective_window,
         atr_series.len(),
-        atr_series.iter().cloned().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(f64::INFINITY),
-        atr_series.iter().cloned().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(f64::NEG_INFINITY)
+        atr_series
+            .iter()
+            .cloned()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(f64::INFINITY),
+        atr_series
+            .iter()
+            .cloned()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(f64::NEG_INFINITY)
     );
 
     Ok(atr_series)

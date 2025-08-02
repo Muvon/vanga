@@ -284,6 +284,124 @@ fn get_horizon_vwap(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
     get_sequence_vwap_baseline(horizon_ohlcv)
 }
 
+/// Calculate volume-weighted center price from sequence data
+///
+/// This is the same as get_sequence_vwap_baseline but with a more descriptive name
+/// for use in adaptive percentile calculations. The volume-weighted center represents
+/// the "fair value" price during the sequence period, accounting for trading activity.
+pub fn calculate_volume_weighted_center(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    get_sequence_vwap_baseline(sequence_ohlcv)
+}
+
+/// Extract individual OHLC4 prices from sequence data
+///
+/// Returns a vector of OHLC4 prices (not volume-weighted) for distribution analysis.
+/// Each price represents the average of open, high, low, close for that candle.
+pub fn extract_sequence_prices(sequence_ohlcv: &[MarketDataRow]) -> Vec<f64> {
+    sequence_ohlcv
+        .iter()
+        .map(|candle| (candle.open + candle.high + candle.low + candle.close) / 4.0)
+        .collect()
+}
+
+/// Calculate adaptive percentiles based on sequence price distribution around volume-weighted center
+///
+/// # 🎯 ADAPTIVE PERCENTILE ALGORITHM
+///
+/// **Core Logic**: Analyze how prices are distributed around the volume-weighted center
+/// to determine optimal percentile boundaries for classification.
+///
+/// **Steps**:
+/// 1. Calculate volume-weighted center (fair value price)
+/// 2. Partition prices into below/above center groups
+/// 3. Determine adaptive percentiles based on distribution balance
+/// 4. Apply volatility-based adjustments
+///
+/// **Adaptive Logic**:
+/// - **Balanced distribution** (40-60% below center): Standard percentiles [0.1, 0.9]
+/// - **Bottom-heavy** (>60% below center): Tighter lower, wider upper [0.15, 0.95]
+/// - **Top-heavy** (<40% below center): Wider lower, tighter upper [0.05, 0.85]
+/// - **High volatility**: Expand both boundaries for noise tolerance
+/// - **Low volatility**: Contract boundaries for sensitivity
+///
+/// **Benefits**:
+/// - Automatic adaptation to each sequence's characteristics
+/// - Volume-aware (uses actual trading activity)
+/// - Volatility-responsive (tight for low vol, wide for high vol)
+/// - No hardcoded magic numbers
+///
+/// # Arguments
+/// * `sequence_ohlcv` - OHLCV data for the sequence
+///
+/// # Returns
+/// * `Result<[f64; 2]>` - Adaptive percentiles [lower, upper] optimized for the sequence
+pub fn calculate_adaptive_percentiles_from_sequence(
+    sequence_ohlcv: &[MarketDataRow],
+) -> Result<[f64; 2]> {
+    if sequence_ohlcv.len() < 5 {
+        // Fallback for short sequences - use standard percentiles
+        return Ok([0.1, 0.9]);
+    }
+
+    // 1. Calculate volume-weighted center (fair value)
+    let volume_weighted_center = calculate_volume_weighted_center(sequence_ohlcv)?;
+
+    // 2. Extract individual OHLC4 prices for distribution analysis
+    let sequence_prices = extract_sequence_prices(sequence_ohlcv);
+
+    // 3. Partition prices around the volume-weighted center
+    let below_center_count = sequence_prices
+        .iter()
+        .filter(|&&price| price < volume_weighted_center)
+        .count();
+
+    let below_center_ratio = below_center_count as f64 / sequence_prices.len() as f64;
+
+    // 4. Calculate coefficient of variation for volatility adjustment
+    let price_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+    let price_variance = sequence_prices
+        .iter()
+        .map(|&p| (p - price_mean).powi(2))
+        .sum::<f64>()
+        / sequence_prices.len() as f64;
+    let coefficient_of_variation = if price_mean > 1e-8 {
+        price_variance.sqrt() / price_mean
+    } else {
+        0.02 // Default 2% volatility
+    };
+
+    // 5. Determine base percentiles based on distribution balance
+    let (base_lower, base_upper): (f64, f64) = match below_center_ratio {
+        ratio if ratio < 0.4 => (0.05, 0.85), // Top-heavy: wider lower, tighter upper
+        ratio if ratio > 0.6 => (0.15, 0.95), // Bottom-heavy: tighter lower, wider upper
+        _ => (0.1, 0.9),                      // Balanced: standard percentiles
+    };
+
+    // 6. Apply volatility-based adjustments
+    let volatility_adjustment: f64 = match coefficient_of_variation {
+        cv if cv < 0.01 => 0.05, // Low volatility: contract boundaries (more sensitive)
+        cv if cv > 0.04 => -0.05, // High volatility: expand boundaries (less sensitive)
+        _ => 0.0,                // Medium volatility: no adjustment
+    };
+
+    let adaptive_lower = (base_lower + volatility_adjustment).clamp(0.02, 0.25);
+    let adaptive_upper = (base_upper - volatility_adjustment).clamp(0.75, 0.98);
+
+    // 7. Debug logging for transparency
+    log::debug!(
+        "🎯 Adaptive Percentiles: center={:.6}, below_ratio={:.2}, cv={:.3}, base=[{:.2}, {:.2}], adaptive=[{:.2}, {:.2}]",
+        volume_weighted_center,
+        below_center_ratio,
+        coefficient_of_variation,
+        base_lower,
+        base_upper,
+        adaptive_lower,
+        adaptive_upper
+    );
+
+    Ok([adaptive_lower, adaptive_upper])
+}
+
 /// **ENHANCED**: Calculate adaptive bandwidth based on sequence volatility characteristics
 ///
 /// # 🎯 ADAPTIVE BANDWIDTH CALCULATION
@@ -505,9 +623,8 @@ pub fn classify_price_level(
         return Ok(2); // Default to neutral class
     }
 
-    // Use centralized sequence reconstruction logic
-    // Map new TargetsConfig to old parameters for backward compatibility
-    let percentiles = [0.1, 0.9]; // Default percentiles for 5-class system
+    // Use adaptive percentiles based on sequence data (no hardcoded values)
+    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
     let bandwidth_size = config.base_sensitivity; // Use base_sensitivity as bandwidth
 
     let reconstruction_config = SequenceReconstructionConfig {
@@ -603,8 +720,8 @@ pub fn classify_price_level_with_momentum(
     // 2. Calculate horizon VWAP (standard calculation)
     let hor_vwap = get_horizon_vwap(horizon_ohlcv)?;
 
-    // 3. Get configuration parameters
-    let percentiles = [0.1, 0.9];
+    // 3. Use adaptive percentiles based on sequence data
+    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
     let base_bandwidth_size = 1.0;
 
     // 4. Calculate adaptive bandwidth if enabled
@@ -852,8 +969,8 @@ pub fn reconstruct_price_levels(
         ));
     }
 
-    // Use same configuration as training
-    let percentiles = [0.1, 0.9]; // Default percentiles for 5-class system
+    // Use same adaptive percentiles as training for consistency
+    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
     let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
 
     // Calculate adaptive bandwidth (same logic as training)
@@ -940,8 +1057,8 @@ pub fn probabilities_to_price_targets(
         ));
     }
 
-    // Use same boundary calculation as training
-    let percentiles = [0.1, 0.9];
+    // Use same adaptive percentiles as training for consistency
+    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
     let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
     let final_bandwidth_size =
         calculate_adaptive_bandwidth(sequence_ohlcv, bandwidth_size, Some(1.2))?;

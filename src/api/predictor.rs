@@ -290,13 +290,17 @@ impl Predictor {
         for horizon in horizons_to_process {
             log::info!("🎯 Processing predictions for horizon: {}", horizon);
 
+            // Get target names for horizon-specific extraction
+            let target_names = model.get_target_names();
+
             // Generate predictions for this specific horizon
-            let formatted_predictions = formatter.format_predictions(
+            let formatted_predictions = formatter.format_predictions_with_targets(
                 &raw_predictions,
                 &self.config.symbols[0],
                 &horizon,
                 current_price,
                 None, // No prepared targets available during prediction - use model uncertainty instead
+                Some(&target_names), // Pass target names for horizon-specific extraction
             )?;
 
             log::info!(

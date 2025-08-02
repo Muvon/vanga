@@ -104,6 +104,88 @@ impl OutputFormatter {
         parser.parse_output(raw_output)
     }
 
+    /// Extract horizon-specific predictions from multi-target model output
+    ///
+    /// Multi-target models output predictions for all targets and horizons:
+    /// [price_level_16h(5), price_level_32h(5), price_level_3d(5), direction_16h(5), direction_32h(5), direction_3d(5), volatility_16h(5), volatility_32h(5), volatility_3d(5)]
+    ///
+    /// This method extracts only the predictions for the specified horizon:
+    /// For "16h": [price_level_16h(5), direction_16h(5), volatility_16h(5)] = 15 outputs
+    /// For "32h": [price_level_32h(5), direction_32h(5), volatility_32h(5)] = 15 outputs
+    /// For "3d":  [price_level_3d(5), direction_3d(5), volatility_3d(5)] = 15 outputs
+    fn extract_horizon_predictions(
+        &self,
+        raw_predictions: ndarray::ArrayView1<f64>,
+        horizon: &str,
+        target_names: &[String],
+    ) -> Result<Vec<f64>> {
+        // Find indices of models that match the requested horizon
+        let mut horizon_indices = Vec::new();
+
+        for (i, target_name) in target_names.iter().enumerate() {
+            if target_name.ends_with(&format!("_{}", horizon)) {
+                // Each model outputs NUM_CLASSES predictions
+                let start_idx = i * NUM_CLASSES;
+                let end_idx = start_idx + NUM_CLASSES;
+
+                // Collect indices for this target's predictions
+                for idx in start_idx..end_idx {
+                    horizon_indices.push(idx);
+                }
+
+                log::debug!(
+                    "Target '{}' matches horizon '{}': indices [{}, {})",
+                    target_name,
+                    horizon,
+                    start_idx,
+                    end_idx - 1
+                );
+            }
+        }
+
+        if horizon_indices.is_empty() {
+            return Err(VangaError::PredictionError(format!(
+                "No models found for horizon '{}'. Available targets: {:?}",
+                horizon, target_names
+            )));
+        }
+
+        // Validate indices are within bounds
+        let max_idx = horizon_indices.iter().max().unwrap_or(&0);
+        if *max_idx >= raw_predictions.len() {
+            return Err(VangaError::PredictionError(format!(
+                "Prediction index {} out of bounds for array of length {}. Target names: {:?}",
+                max_idx,
+                raw_predictions.len(),
+                target_names
+            )));
+        }
+
+        // Extract the predictions for this horizon
+        let mut horizon_predictions = Vec::with_capacity(horizon_indices.len());
+        for &idx in &horizon_indices {
+            horizon_predictions.push(raw_predictions[idx]);
+        }
+
+        log::debug!(
+            "Extracted {} predictions for horizon '{}' from {} total predictions",
+            horizon_predictions.len(),
+            horizon,
+            raw_predictions.len()
+        );
+
+        // Verify we have exactly 15 predictions (3 targets × 5 classes)
+        let expected_count = 3 * NUM_CLASSES; // 3 targets (price_level, direction, volatility) × 5 classes
+        if horizon_predictions.len() != expected_count {
+            return Err(VangaError::PredictionError(format!(
+                "Expected {} predictions for horizon '{}' (3 targets × {} classes), but got {}. Indices: {:?}",
+                expected_count, horizon, NUM_CLASSES, horizon_predictions.len(), horizon_indices
+            )));
+        }
+
+        Ok(horizon_predictions)
+    }
+
     /// Format raw LSTM predictions into structured output
     ///
     /// This is the main entry point that converts Array2<f64> to PredictionResult
@@ -116,14 +198,37 @@ impl OutputFormatter {
         current_price: f64,
         targets_config: Option<&PreparedTargets>,
     ) -> Result<Vec<PredictionResult>> {
+        // For backward compatibility, call the new method with None for target_names
+        self.format_predictions_with_targets(
+            raw_predictions,
+            symbol,
+            horizon,
+            current_price,
+            targets_config,
+            None,
+        )
+    }
+
+    /// Format predictions with optional target names for horizon-specific extraction
+    pub fn format_predictions_with_targets(
+        &self,
+        raw_predictions: &Array2<f64>,
+        symbol: &str,
+        horizon: &str,
+        current_price: f64,
+        targets_config: Option<&PreparedTargets>,
+        target_names: Option<&[String]>,
+    ) -> Result<Vec<PredictionResult>> {
         match self.config.format {
-            OutputFormat::ProbabilityDistribution => self.format_probability_distribution(
-                raw_predictions,
-                symbol,
-                horizon,
-                current_price,
-                targets_config,
-            ),
+            OutputFormat::ProbabilityDistribution => self
+                .format_probability_distribution_with_targets(
+                    raw_predictions,
+                    symbol,
+                    horizon,
+                    current_price,
+                    targets_config,
+                    target_names,
+                ),
             OutputFormat::ConfidenceInterval => self.format_confidence_interval(
                 raw_predictions,
                 symbol,
@@ -140,12 +245,13 @@ impl OutputFormatter {
             ),
             OutputFormat::All => {
                 // Return all formats (for now, just probability distribution)
-                self.format_probability_distribution(
+                self.format_probability_distribution_with_targets(
                     raw_predictions,
                     symbol,
                     horizon,
                     current_price,
                     targets_config,
+                    target_names,
                 )
             }
         }
@@ -159,6 +265,27 @@ impl OutputFormatter {
         horizon: &str,
         current_price: f64,
         targets_config: Option<&PreparedTargets>,
+    ) -> Result<Vec<PredictionResult>> {
+        // For backward compatibility, call the new method with None for target_names
+        self.format_probability_distribution_with_targets(
+            raw_predictions,
+            symbol,
+            horizon,
+            current_price,
+            targets_config,
+            None,
+        )
+    }
+
+    /// Format as probability distribution with optional target names for horizon-specific extraction
+    fn format_probability_distribution_with_targets(
+        &self,
+        raw_predictions: &Array2<f64>,
+        symbol: &str,
+        horizon: &str,
+        current_price: f64,
+        targets_config: Option<&PreparedTargets>,
+        target_names: Option<&[String]>,
     ) -> Result<Vec<PredictionResult>> {
         let mut results = Vec::new();
 
@@ -194,8 +321,28 @@ impl OutputFormatter {
             // Extract predictions for this batch
             let batch_predictions = raw_predictions.row(batch_idx);
 
-            // Parse the raw predictions using the multi-target parser
-            let parsed_output = parser.parse_output(batch_predictions)?;
+            // Extract horizon-specific predictions if target names are provided (multi-target model)
+            let horizon_predictions =
+                if let Some(target_names) = target_names {
+                    // Multi-target model: extract only predictions for this horizon
+                    let extracted =
+                        self.extract_horizon_predictions(batch_predictions, horizon, target_names)?;
+                    log::debug!(
+                    "Extracted {} horizon-specific predictions for '{}' from {} total predictions",
+                    extracted.len(), horizon, batch_predictions.len()
+                );
+                    extracted
+                } else {
+                    // Single-target model or backward compatibility: use all predictions
+                    batch_predictions.to_vec()
+                };
+
+            // Convert to ArrayView1 for parser
+            let horizon_array = ndarray::Array1::from_vec(horizon_predictions);
+            let horizon_view = horizon_array.view();
+
+            // Parse the horizon-specific predictions using the multi-target parser
+            let parsed_output = parser.parse_output(horizon_view)?;
 
             // Convert parsed output to structured predictions
             if let Some(price_level_probs) = parsed_output.price_levels {

@@ -130,6 +130,29 @@ impl SequenceAnalyzer {
         Self::new(config)
     }
 
+    /// Create with adaptive percentiles calculated from sequence data
+    ///
+    /// This method ensures training-prediction consistency by using the same
+    /// adaptive percentile calculation logic for both target generation and
+    /// prediction reconstruction.
+    pub fn from_sequence_data(
+        sequence_ohlcv: &[MarketDataRow],
+        bandwidth_size: f64,
+    ) -> Result<Self> {
+        // Use the same adaptive percentile logic as training
+        let adaptive_percentiles =
+            crate::targets::price_levels::calculate_adaptive_percentiles_from_sequence(
+                sequence_ohlcv,
+            )?;
+
+        let config = SequenceReconstructionConfig {
+            percentiles: adaptive_percentiles,
+            bandwidth_size,
+        };
+
+        Ok(Self::new(config))
+    }
+
     /// Calculate VWAP prices from OHLCV sequence (centralized logic)
     pub fn calculate_vwap_prices(&self, sequence_ohlcv: &[MarketDataRow]) -> Result<Vec<f64>> {
         if sequence_ohlcv.is_empty() {
