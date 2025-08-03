@@ -341,39 +341,36 @@ impl AttentionFactory {
     pub fn create_attention(
         attention_type: &crate::config::model::AttentionMechanism,
         input_dim: usize,
+        config: AttentionConfig, // Accept actual config parameter
         vs: VarBuilder,
         device: Device,
     ) -> Result<Box<dyn AttentionModule>> {
         match attention_type {
             crate::config::model::AttentionMechanism::MultiHeadAttention => {
-                let config = AttentionConfig::default();
                 let attention = MultiHeadAttention::new(input_dim, config, vs, device)?;
                 Ok(Box::new(attention))
             }
             crate::config::model::AttentionMechanism::SelfAttention => {
-                // Simplified self-attention (single head)
-                let config = AttentionConfig {
-                    heads: 1,
-                    ..AttentionConfig::default()
-                };
-                let attention = MultiHeadAttention::new(input_dim, config, vs, device)?;
+                // Simplified self-attention (single head) - override heads but keep other config
+                let self_attention_config = AttentionConfig { heads: 1, ..config };
+                let attention =
+                    MultiHeadAttention::new(input_dim, self_attention_config, vs, device)?;
                 Ok(Box::new(attention))
             }
             crate::config::model::AttentionMechanism::AdditiveAttention => {
-                // Create proper additive attention mechanism
-                let config = AttentionConfig {
+                // Create proper additive attention mechanism - override specific fields but keep other config
+                let additive_config = AttentionConfig {
                     heads: 1,                               // Additive attention typically uses single head
                     head_dim: Some((input_dim / 2) as u32), // Hidden dimension for additive scoring
                     temperature_scaling: 1.0,
                     use_relative_position: true,
-                    ..AttentionConfig::default()
+                    ..config
                 };
-                let attention = AdditiveAttention::new(input_dim, config, vs, device)?;
+                let attention = AdditiveAttention::new(input_dim, additive_config, vs, device)?;
                 Ok(Box::new(attention))
             }
             crate::config::model::AttentionMechanism::VariableSelection => {
                 // TFT Variable Selection Attention - builds on MultiHeadAttention
-                let config = AttentionConfig::default();
                 let base_attention =
                     MultiHeadAttention::new(input_dim, config, vs.pp("base"), device.clone())?;
 
@@ -637,15 +634,15 @@ impl AttentionModule for AdditiveAttention {
         self.forward(input, training)
     }
 
-    fn get_config(&self) -> &AttentionConfig {
-        self.get_config()
+    fn get_config(&self) -> AttentionConfig {
+        self.get_config().clone()
     }
 }
 
 /// Trait for different attention mechanisms
 pub trait AttentionModule {
     fn forward(&self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)>;
-    fn get_config(&self) -> &AttentionConfig;
+    fn get_config(&self) -> AttentionConfig; // Return owned config instead of reference
 }
 
 impl AttentionModule for MultiHeadAttention {
@@ -653,8 +650,8 @@ impl AttentionModule for MultiHeadAttention {
         self.forward(input, training)
     }
 
-    fn get_config(&self) -> &AttentionConfig {
-        self.get_config()
+    fn get_config(&self) -> AttentionConfig {
+        self.config.clone()
     }
 }
 

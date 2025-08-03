@@ -1,7 +1,6 @@
 // Mixture-of-Head Attention (MoH) implementation for VANGA LSTM
 // Based on "Mixture-of-Head Attention for Multi-Modal Learning" paper
 use crate::config::model::{AttentionConfig, MoHConfig};
-use crate::model::attention::AttentionModule;
 use crate::utils::error::{Result, VangaError};
 use candle_core::{Device, Tensor};
 use candle_nn::{linear, ops, Linear, Module, VarBuilder};
@@ -650,19 +649,12 @@ impl MixtureOfHeadAttention {
         self.routing_history.clear();
         log::debug!("Cleared MoH routing history");
     }
-}
 
-impl AttentionModule for MixtureOfHeadAttention {
-    fn forward(&self, _input: &Tensor, _training: bool) -> Result<(Tensor, Tensor)> {
-        // Note: This requires &mut self, but trait expects &self
-        // We'll need to modify the trait or use interior mutability
-        // For now, return an error indicating this limitation
-        Err(VangaError::ModelError(
-            "MixtureOfHeadAttention requires mutable reference for routing history. Use direct forward() method.".to_string()
-        ))
-    }
-
-    fn get_config(&self) -> &AttentionConfig {
+    /// Get configuration (for wrapper access)
+    pub fn get_config(&self) -> &AttentionConfig {
         &self.config
     }
 }
+
+// Note: MixtureOfHeadAttention does NOT implement AttentionModule directly
+// It should only be used through MoHAttentionWrapper which handles the mutable reference requirement

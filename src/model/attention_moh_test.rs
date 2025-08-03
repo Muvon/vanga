@@ -1,6 +1,5 @@
 // Tests for Mixture-of-Head Attention (MoH) implementation
 use crate::config::model::{AttentionConfig, AttentionMechanism, MoHConfig};
-use crate::model::attention::AttentionModule;
 use crate::model::attention_moh::MixtureOfHeadAttention;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{VarBuilder, VarMap};
@@ -311,9 +310,8 @@ fn test_moh_top_k_selection() {
         indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut result = vec![0.0; scores.len()];
-        for i in 0..k.min(scores.len()) {
-            let (idx, score) = indexed_scores[i];
-            result[idx] = score;
+        for (idx, score) in indexed_scores.iter().take(k.min(scores.len())) {
+            result[*idx] = *score;
         }
 
         result

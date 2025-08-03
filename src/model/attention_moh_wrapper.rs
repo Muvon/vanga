@@ -62,14 +62,9 @@ impl AttentionModule for MoHAttentionWrapper {
         self.inner.borrow_mut().forward(input, training)
     }
 
-    fn get_config(&self) -> &AttentionConfig {
-        // This is problematic because we can't return a reference to borrowed content
-        // We'll need to modify the trait or use a different approach
-        // For now, we'll use unsafe to extend the lifetime (not ideal but functional)
-        unsafe {
-            let borrowed = self.inner.as_ptr();
-            (*borrowed).get_config()
-        }
+    fn get_config(&self) -> AttentionConfig {
+        // Return owned config to avoid lifetime issues
+        self.inner.borrow().get_config().clone()
     }
 }
 
@@ -105,7 +100,7 @@ impl EnhancedAttentionFactory {
             _ => {
                 // Delegate to original factory for other attention types
                 use crate::model::attention::AttentionFactory;
-                AttentionFactory::create_attention(attention_type, input_dim, vs, device)
+                AttentionFactory::create_attention(attention_type, input_dim, config, vs, device)
             }
         }
     }

@@ -5,7 +5,6 @@
 
 use super::config::{LSTMConfig, LSTMModel, ModelState, TrainingConfig};
 use crate::config::ModelConfig;
-use crate::model::attention::MultiHeadAttention;
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::{DType, Device};
@@ -194,36 +193,32 @@ impl LSTMModel {
             return Ok(());
         }
 
-        // Convert config AttentionConfig to module AttentionConfig
-        let module_config = crate::config::model::AttentionConfig {
-            enabled: true,
-            mechanism: crate::config::model::AttentionMechanism::MultiHeadAttention,
-            heads: 8,
-            head_dim: Some(64),
-            dropout_rate: 0.1,
-            dropout_weights: true,
-            dropout_output: true,
-            dropout_projections: true,
-            dropout_scores: true,
-            temperature_scaling: 1.0,
-            use_relative_position: true,
-            visualization: crate::config::model::VisualizationConfig::default(),
-            moh: None,
-        };
+        // Use the actual configured mechanism instead of hardcoding MultiHeadAttention
+        let mut final_config = attention_config.clone();
 
-        self.attention_config = Some(module_config);
+        // Auto-configure MoH if MixtureOfHeads is selected but no MoH config provided
+        if final_config.mechanism == crate::config::model::AttentionMechanism::MixtureOfHeads
+            && final_config.moh.is_none()
+        {
+            log::info!("🔧 Auto-configuring MoH settings for MixtureOfHeads mechanism");
+            final_config.moh = Some(crate::config::model::MoHConfig::default());
+        }
+
+        self.attention_config = Some(final_config);
         self.use_attention = true;
 
         // Log with context if provided, otherwise use generic message
         match context {
             Some(ctx) => log::info!(
-                "✅ Attention configured for {}: {} heads, head_dim={}",
+                "✅ Attention configured for {}: mechanism={:?}, heads={}, head_dim={}",
                 ctx,
+                attention_config.mechanism,
                 attention_config.heads,
                 attention_config.head_dim.unwrap_or(64)
             ),
             None => log::debug!(
-                "✅ Attention configured: {} heads, head_dim={}",
+                "✅ Attention configured: mechanism={:?}, heads={}, head_dim={}",
+                attention_config.mechanism,
                 attention_config.heads,
                 attention_config.head_dim.unwrap_or(64)
             ),
@@ -263,17 +258,21 @@ impl LSTMModel {
                 base_hidden_size
             };
 
-            let attention = MultiHeadAttention::new(
-                attention_input_size, // Use correct input dimension for bidirectional
+            // Use EnhancedAttentionFactory to create the appropriate attention mechanism
+            use crate::model::attention_moh_wrapper::EnhancedAttentionFactory;
+            let attention_module = EnhancedAttentionFactory::create_attention(
+                &attention_config.mechanism,
+                attention_input_size,
                 attention_config.clone(),
                 vs.pp("attention"),
                 self.device.clone(),
             )?;
 
-            self.attention_module = Some(attention);
+            self.attention_module = Some(attention_module);
 
             log::debug!(
-                "✅ Attention layers initialized: {} heads, input_size={}, bidirectional={}",
+                "✅ Attention layers initialized: mechanism={:?}, heads={}, input_size={}, bidirectional={}",
+                attention_config.mechanism,
                 attention_config.heads as usize,
                 attention_input_size,
                 is_bidirectional

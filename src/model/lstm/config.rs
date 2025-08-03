@@ -4,7 +4,7 @@
 //! for LSTM model setup and training parameters.
 
 use crate::config::model::{AttentionConfig, DropoutConfig};
-use crate::model::attention::MultiHeadAttention;
+use crate::model::attention::AttentionModule;
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::Device;
@@ -116,7 +116,7 @@ pub struct LSTMModel {
     pub lstm_layers: Option<Vec<LSTM>>, // Forward layers for unidirectional or bidirectional
     pub backward_lstm_layers: Option<Vec<LSTM>>, // Backward layers for bidirectional LSTM
     pub output_layer: Option<Linear>,
-    pub attention_module: Option<MultiHeadAttention>,
+    pub attention_module: Option<Box<dyn AttentionModule>>,
     pub attention_config: Option<AttentionConfig>,
     pub use_attention: bool, // Public for testing
     pub device: Device,
