@@ -759,15 +759,15 @@ impl ModelTrainer {
         // Display metrics for each target
         for target_name in &target_names {
             log::info!("🎯 Target: {}", target_name);
-            log::info!("   Window | LR      | Samples | Accuracy | Macro F1 | Weighted F1");
-            log::info!("   -------|---------|---------|----------|----------|------------");
+            log::info!("   Window | LR        | Samples | Accuracy | Macro F1 | Weighted F1");
+            log::info!("   -------|-----------|---------|----------|----------|------------");
 
             for window_metric in &self.window_metrics {
                 if let Some((accuracy, macro_f1, weighted_f1)) =
                     window_metric.target_metrics.get(target_name)
                 {
                     log::info!(
-                        "   {:6} | {:.5} | {:7} | {:8.3} | {:8.3} | {:11.3}",
+                        "   {:6} | {:9.2e} | {:7} | {:8.3} | {:8.3} | {:11.3}",
                         window_metric.window_id,
                         window_metric.learning_rate,
                         window_metric.val_samples,
