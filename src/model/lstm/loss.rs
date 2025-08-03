@@ -763,19 +763,39 @@ impl LSTMModel {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
+
+        // CRITICAL FIX: Include both epoch AND total_val_samples to ensure unique shuffle per validation run
+        // This prevents identical metrics when validation data/order doesn't change between epochs
         epoch.hash(&mut hasher);
+        total_val_samples.hash(&mut hasher);
+
+        // Add current model state hash to make shuffle truly unique per validation run
+        // Use a simple hash of the first few model parameters to differentiate between epochs
+        if let Some(first_var) = self.varmap.all_vars().first() {
+            if let Ok(param_sum) = first_var.as_tensor().sum_all() {
+                if let Ok(param_val) = param_sum.to_scalar::<f32>() {
+                    (param_val as u64).hash(&mut hasher);
+                }
+            }
+        }
+
         let seed = hasher.finish();
 
-        // Simple deterministic shuffle based on epoch
-        for i in 0..sample_indices.len() {
-            let j = ((seed as usize + i) * 1103515245 + 12345) % sample_indices.len();
+        // Simple deterministic shuffle based on unique seed using Fisher-Yates algorithm
+        // Use a proper PRNG to avoid shuffle collisions with different seeds
+        let mut rng_state = seed;
+        for i in (1..sample_indices.len()).rev() {
+            // Linear congruential generator (better parameters)
+            rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let j = (rng_state as usize) % (i + 1);
             sample_indices.swap(i, j);
         }
 
         log::debug!(
-            "🔄 Processing {} validation samples in shuffled order for epoch {}",
+            "🔄 Processing {} validation samples in shuffled order for epoch {} (seed: {})",
             total_val_samples,
-            epoch
+            epoch,
+            seed
         );
 
         // Use smaller batch size for validation to ensure independence
@@ -914,6 +934,21 @@ impl LSTMModel {
             self.calculate_precision_recall_f1(&all_predictions, &all_targets);
         let class_distribution =
             self.analyze_prediction_distribution(&all_predictions, &all_targets);
+
+        // DEBUG: Log first few predictions to verify they're changing between epochs
+        if log::log_enabled!(log::Level::Debug) && !all_predictions.is_empty() {
+            let sample_size = std::cmp::min(10, all_predictions.len());
+            log::debug!(
+                "🔍 Sample predictions (first {}): {:?}",
+                sample_size,
+                &all_predictions[..sample_size]
+            );
+            log::debug!(
+                "🔍 Sample targets (first {}): {:?}",
+                sample_size,
+                &all_targets[..sample_size]
+            );
+        }
 
         // Calculate additional distance-based metrics for categorical data
         // Convert predictions and targets to Array2<f64> for MSE/MAPE calculation
