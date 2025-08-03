@@ -4,6 +4,7 @@ use crate::utils::error::{Result, VangaError};
 use chrono::Utc;
 use ndarray::{s, Array2, Array3, Axis};
 use polars::prelude::*;
+use rayon::prelude::*;
 
 pub struct SequenceGenerator {
     // Sequence generation logic - overlap controlled via DataConfig
@@ -429,27 +430,38 @@ impl SequenceGenerator {
 
     /// Normalize a sequence window using only data within that window
     /// This is the CORRECT approach for time series ML - each sequence is self-contained
+    /// 🚀 OPTIMIZED: Parallel column processing for maximum performance
     fn normalize_sequence_window(&self, window_df: &DataFrame) -> Result<DataFrame> {
-        let mut normalized_columns = Vec::new();
+        let column_names: Vec<String> = window_df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
-        // Process each column independently
-        for column_name in window_df.get_column_names() {
-            if column_name == "timestamp" {
-                // Keep timestamp as-is
-                normalized_columns.push(window_df.column(column_name)?.clone());
-                continue;
-            }
-
-            if let Ok(series) = window_df.column(column_name) {
-                if series.dtype().is_numeric() {
-                    // Normalize using only THIS WINDOW's data
-                    let normalized_series = self.normalize_column_in_window(series)?;
-                    normalized_columns.push(normalized_series);
+        // 🚀 PARALLEL COLUMN PROCESSING: Process each column independently in parallel
+        let normalized_columns: Result<Vec<Series>> = column_names
+            .par_iter() // ← PARALLEL PROCESSING: Each column on different thread
+            .map(|column_name| {
+                if column_name == "timestamp" {
+                    // Keep timestamp as-is
+                    Ok(window_df.column(column_name)?.clone())
+                } else if let Ok(series) = window_df.column(column_name) {
+                    if series.dtype().is_numeric() {
+                        // Normalize using only THIS WINDOW's data
+                        self.normalize_column_in_window(series)
+                    } else {
+                        Ok(series.clone())
+                    }
                 } else {
-                    normalized_columns.push(series.clone());
+                    Err(VangaError::DataError(format!(
+                        "Column '{}' not found",
+                        column_name
+                    )))
                 }
-            }
-        }
+            })
+            .collect();
+
+        let normalized_columns = normalized_columns?;
 
         // Reconstruct DataFrame with normalized columns
         DataFrame::new(normalized_columns).map_err(|e| {
@@ -578,32 +590,52 @@ impl SequenceGenerator {
             data_config.sequence_overlap * 100.0
         );
 
-        let mut all_sequences = Vec::new();
-
-        // Generate sequences using calculated indices
-        for &start_idx in &sequence_indices {
-            // Extract the complete window (sequence + horizon)
-            let window_df = df.slice(start_idx as i64, total_window_size);
-
-            // FIXED: Only normalize the input sequence part, NOT targets
-            let sequence_df = window_df.slice(0, sequence_length);
-            let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
-            let feature_columns: Vec<String> = df
-                .get_column_names()
-                .iter()
-                .filter(|&col| *col != "timestamp")
-                .map(|s| s.to_string())
-                .collect();
-            let sequence_matrix =
-                self.extract_feature_matrix(&normalized_sequence, &feature_columns)?;
-
-            // Convert to sequence format [sequence_length, features]
-            all_sequences.push(sequence_matrix);
-        }
+        // 🚀 PARALLEL SEQUENCE PROCESSING: Process all sequences in parallel for maximum performance
+        let feature_columns: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .filter(|&col| *col != "timestamp")
+            .map(|s| s.to_string())
+            .collect();
 
         log::info!(
-            "✅ Generated {} sequences with per-sequence normalization using unified step calculation",
+            "🚀 Starting PARALLEL sequence processing: {} sequences across {} CPU cores",
+            sequence_indices.len(),
+            rayon::current_num_threads()
+        );
+
+        // Start timing for performance measurement
+        let start_time = std::time::Instant::now();
+
+        // Generate sequences using parallel processing - each sequence processed independently
+        let all_sequences: Result<Vec<Array2<f64>>> = sequence_indices
+            .par_iter() // ← PARALLEL PROCESSING: Each sequence on different thread
+            .map(|&start_idx| {
+                // Extract the complete window (sequence + horizon)
+                let window_df = df.slice(start_idx as i64, total_window_size);
+
+                // FIXED: Only normalize the input sequence part, NOT targets
+                let sequence_df = window_df.slice(0, sequence_length);
+                let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
+                let sequence_matrix =
+                    self.extract_feature_matrix(&normalized_sequence, &feature_columns)?;
+
+                Ok(sequence_matrix)
+            })
+            .collect();
+
+        let all_sequences = all_sequences?;
+        let processing_time = start_time.elapsed();
+
+        log::info!(
+            "✅ Generated {} sequences with PARALLEL per-sequence normalization using unified step calculation",
             all_sequences.len()
+        );
+        log::info!(
+            "🚀 Performance: Parallel processing completed in {:.2}ms using {} CPU cores ({:.2} sequences/ms)",
+            processing_time.as_millis(),
+            rayon::current_num_threads(),
+            all_sequences.len() as f64 / processing_time.as_millis() as f64
         );
 
         // Convert sequences to Array3
