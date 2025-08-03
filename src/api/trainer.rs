@@ -203,11 +203,11 @@ impl ModelTrainer {
         }
 
         for (i, window) in windows.iter().enumerate() {
-            // Calculate window-specific learning rate: base_lr * decay^window_id
+            // Calculate window-specific learning rate for display: base_lr * decay^window_id
             let window_lr = base_lr * self.config.training.window_decay.powi(i as i32);
 
             log::info!(
-                "🔄 Walk-forward window {}/{}: lr={:.6} ({:.1}% of base) → {} train samples, {} validation samples",
+                "🔄 Walk-forward window {}/{}: effective_lr={:.6} ({:.1}% of base) → {} train samples, {} validation samples",
                 i + 1,
                 windows.len(),
                 window_lr,
@@ -215,11 +215,14 @@ impl ModelTrainer {
                 window.train_samples,
                 window.val_samples
             );
+            log::info!(
+                "   📊 Window decay will be applied to ALL scheduler parameters (max_lr, base_lr, etc.)"
+            );
 
             if i == 0 {
                 // First window: train from scratch
                 log::info!("🆕 Window 1: Training fresh model from scratch with new weights");
-                model = Some(self.train_window_from_scratch(window, window_lr).await?);
+                model = Some(self.train_window_from_scratch(window, i).await?);
             } else {
                 // Subsequent windows: continue training on expanded data
                 log::info!(
@@ -234,13 +237,15 @@ impl ModelTrainer {
                     i
                 );
                 model = Some(
-                    self.continue_training_window(model.unwrap(), window, window_lr)
+                    self.continue_training_window(model.unwrap(), window, i)
                         .await?,
                 );
             }
 
             // Collect window metrics for final statistics
             if let Some(ref current_model) = model {
+                // Calculate the window learning rate for metrics collection
+                let window_lr = base_lr * self.config.training.window_decay.powi(i as i32);
                 self.collect_window_metrics(current_model, window, i, window_lr)
                     .await?;
             }
@@ -395,11 +400,11 @@ impl ModelTrainer {
         Ok(final_model)
     }
 
-    /// Train model from scratch on first window with window-specific learning rate
+    /// Train model from scratch on first window with window-aware configuration
     async fn train_window_from_scratch(
         &self,
         window: &crate::data::TrainingWindow,
-        window_lr: f64,
+        window_id: usize,
     ) -> Result<MultiTargetLSTMModel> {
         log::info!(
             "🎯 [train_window_from_scratch] Training config horizons: {:?} (count: {})",
@@ -417,13 +422,13 @@ impl ModelTrainer {
             .get_or_create_multi_target_model(input_size, target_names)
             .await?;
 
-        // Create config with window-specific learning rate
-        let mut window_config = self.config.clone();
-        window_config.training.learning_rate = window_lr;
+        // Create window-aware config that properly scales all scheduler parameters
+        let window_config =
+            crate::model::lstm::create_window_aware_config(&self.config, window_id)?;
 
         log::info!(
-            "🎯 Training from scratch with window learning rate: {:.6}",
-            window_lr
+            "🎯 Training from scratch with window-aware configuration for window {}",
+            window_id + 1
         );
 
         // Train the model with chronological validation
@@ -444,12 +449,12 @@ impl ModelTrainer {
         Ok(model)
     }
 
-    /// Continue training existing model on new window with window-specific learning rate
+    /// Continue training existing model on new window with window-aware configuration
     async fn continue_training_window(
         &self,
         mut model: MultiTargetLSTMModel,
         window: &crate::data::TrainingWindow,
-        window_lr: f64,
+        window_id: usize,
     ) -> Result<MultiTargetLSTMModel> {
         log::info!(
             "🎯 [continue_training_window] Training config horizons: {:?} (count: {})",
@@ -461,13 +466,13 @@ impl ModelTrainer {
         let (train_targets, _val_targets) =
             self.process_window_targets(window, "continue training")?;
 
-        // Create config with window-specific learning rate
-        let mut window_config = self.config.clone();
-        window_config.training.learning_rate = window_lr;
+        // Create window-aware config that properly scales all scheduler parameters
+        let window_config =
+            crate::model::lstm::create_window_aware_config(&self.config, window_id)?;
 
         log::info!(
-            "🎯 Continue training with window learning rate: {:.6}",
-            window_lr
+            "🎯 Continue training with window-aware configuration for window {}",
+            window_id + 1
         );
 
         // Continue training with new data

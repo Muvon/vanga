@@ -43,6 +43,7 @@ pub mod loss;
 pub mod schedule_benchmark;
 pub mod schedule_validation;
 pub mod training;
+pub mod window_aware_lr;
 
 #[cfg(test)]
 mod hidden_state_test;
@@ -51,6 +52,9 @@ mod hidden_state_test;
 pub use config::{
     LSTMConfig, LSTMModel, ModelState, OptimizerWrapper, TargetFormat, TrainingConfig,
 };
+
+// Re-export window-aware learning rate functionality
+pub use window_aware_lr::{create_window_aware_config, WindowAwareLearningRate};
 #[cfg(test)]
 mod tests {
     use super::*;
