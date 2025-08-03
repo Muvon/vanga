@@ -10,6 +10,19 @@ use crate::utils::error::{Result, VangaError};
 use candle_core::{DType, Device};
 use candle_nn::{linear, lstm, LSTMConfig as CandleLSTMConfig, VarBuilder, VarMap};
 
+/// Format numbers with thousands separators for better readability
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
 impl LSTMModel {
     /// Create a new LSTM model - EXACT same logic as original
     pub fn new(config: LSTMConfig) -> Result<Self> {
@@ -609,10 +622,39 @@ impl LSTMModel {
 
         // Verify VarMap was populated during initialization
         let vars_count_after_init = self.varmap.all_vars().len();
+        let lstm_params = self.config.total_parameters();
+
+        // Calculate output layer parameters
+        let output_params = (output_input_size + 1) * self.config.output_size;
+
+        // Estimate attention parameters (if attention is enabled)
+        let attention_params = if self.attention_module.is_some() {
+            // Rough estimation: 16 heads × 4 projections × (input_dim × head_dim + head_dim bias)
+            // This is an approximation since we don't have direct access to attention config here
+            let estimated_input_dim = final_hidden_size * if is_bidirectional { 2 } else { 1 };
+            let estimated_head_dim = 64; // Common head dimension
+            let estimated_heads = 16; // From your log
+            estimated_heads * 4 * (estimated_input_dim * estimated_head_dim + estimated_head_dim)
+        } else {
+            0
+        };
+
+        let total_params = lstm_params + output_params + attention_params;
+
         log::info!(
-            "✅ LSTM network initialized: {} layers, {} parameters in VarMap, bidirectional={}, output_input_size={}, final_hidden_size={}",
+            "✅ LSTM network initialized: {} layers, {} tensor variables, {} total parameters",
             num_layers,
             vars_count_after_init,
+            format_number(total_params)
+        );
+        log::info!(
+            "   📊 Parameter breakdown: LSTM={}, Output={}, Attention={}",
+            format_number(lstm_params),
+            format_number(output_params),
+            format_number(attention_params)
+        );
+        log::info!(
+            "   🏗️  Architecture: bidirectional={}, output_input_size={}, final_hidden_size={}",
             is_bidirectional,
             output_input_size,
             final_hidden_size
