@@ -980,13 +980,28 @@ impl LSTMModel {
                             } => " [LinearDecay]",
                             crate::config::training::LearningScheduleConfig::ExponentialDecay {
                                 ..
-                            } => " [ExpDecay]",
+                            } => " [ExponentialDecay]",
+                            crate::config::training::LearningScheduleConfig::StepDecay {
+                                ..
+                            } => " [StepDecay]",
+                            crate::config::training::LearningScheduleConfig::PolynomialDecay {
+                                ..
+                            } => " [PolynomialDecay]",
                             crate::config::training::LearningScheduleConfig::CosineAnnealing {
                                 ..
-                            } => " [CosineAnn]",
+                            } => " [CosineAnnealing]",
                             crate::config::training::LearningScheduleConfig::WarmRestarts {
                                 ..
-                            } => " [WarmRestart]",
+                            } => " [WarmRestarts]",
+                            crate::config::training::LearningScheduleConfig::OneCycle {
+                                ..
+                            } => " [OneCycle]",
+                            crate::config::training::LearningScheduleConfig::CyclicalLR {
+                                ..
+                            } => " [CyclicalLR]",
+                            crate::config::training::LearningScheduleConfig::NoamLR { .. } => {
+                                " [NoamLR]"
+                            }
                         }
                     } else {
                         ""
@@ -1566,12 +1581,18 @@ impl LSTMModel {
 
     /// Calculate learning rate based on schedule configuration
     ///
-    /// This function implements all 5 learning schedule types:
+    /// This function implements all 11 learning schedule types with proper mathematical formulations:
     /// - Constant: Maintains initial learning rate
-    /// - LinearDecay: Linear reduction over training epochs
-    /// - ExponentialDecay: Exponential decay with configurable rate
-    /// - CosineAnnealing: Cosine annealing schedule
-    /// - WarmRestarts: Cosine annealing with warm restarts (SGDR)
+    /// - ReduceOnPlateau: Handled separately in training loop
+    /// - LinearDecay: Linear reduction with configurable minimum
+    /// - ExponentialDecay: Exponential decay with gamma parameter
+    /// - StepDecay: Step-wise decay at milestones
+    /// - PolynomialDecay: Polynomial decay with configurable power
+    /// - CosineAnnealing: Cosine annealing with eta_min
+    /// - WarmRestarts: SGDR with efficient cycle calculation
+    /// - OneCycle: Super-convergence for LSTM training
+    /// - CyclicalLR: Triangular/exponential cyclical schedules
+    /// - NoamLR: Transformer-style scheduling
     fn calculate_scheduled_learning_rate(
         schedule_config: &crate::config::training::LearningScheduleConfig,
         epoch_after_warmup: usize,
@@ -1592,43 +1613,180 @@ impl LSTMModel {
                 initial_lr
             }
 
-            LearningScheduleConfig::LinearDecay { decay_rate } => {
+            LearningScheduleConfig::LinearDecay { decay_rate, min_lr } => {
                 // Linear decay: lr = initial_lr * (1 - decay_rate * progress)
                 let progress = epoch_after_warmup as f64 / total_epochs.max(1) as f64;
                 let decay_factor = 1.0 - (decay_rate * progress);
-                initial_lr * decay_factor.max(0.001) // Minimum LR threshold
+                let min_threshold = min_lr.unwrap_or(initial_lr * 0.001);
+                (initial_lr * decay_factor).max(min_threshold)
             }
 
-            LearningScheduleConfig::ExponentialDecay { decay_rate } => {
-                // Exponential decay: lr = initial_lr * decay_rate^epoch
-                let decay_factor = decay_rate.powf(epoch_after_warmup as f64);
-                initial_lr * decay_factor.max(0.0001) // Minimum LR threshold
+            LearningScheduleConfig::ExponentialDecay { gamma, min_lr } => {
+                // Exponential decay: lr = initial_lr * gamma^epoch
+                let decay_factor = gamma.powf(epoch_after_warmup as f64);
+                let min_threshold = min_lr.unwrap_or(initial_lr * 0.0001);
+                (initial_lr * decay_factor).max(min_threshold)
             }
 
-            LearningScheduleConfig::CosineAnnealing { t_max } => {
-                // Cosine annealing: lr = initial_lr * 0.5 * (1 + cos(π * epoch / t_max))
+            LearningScheduleConfig::StepDecay {
+                step_size,
+                gamma,
+                milestones,
+                min_lr,
+            } => {
+                // Step decay at specific milestones or regular intervals
+                let decay_steps = if let Some(milestones) = milestones {
+                    // Count how many milestones have been passed
+                    milestones
+                        .iter()
+                        .filter(|&&m| epoch_after_warmup >= m as usize)
+                        .count()
+                } else {
+                    // Regular step decay
+                    epoch_after_warmup / (*step_size).max(1) as usize
+                };
+
+                let decay_factor = gamma.powf(decay_steps as f64);
+                let min_threshold = min_lr.unwrap_or(initial_lr * 0.0001);
+                (initial_lr * decay_factor).max(min_threshold)
+            }
+
+            LearningScheduleConfig::PolynomialDecay { power, min_lr } => {
+                // Polynomial decay: lr = (initial_lr - min_lr) * (1 - progress)^power + min_lr
+                let progress = epoch_after_warmup as f64 / total_epochs.max(1) as f64;
+                let min_threshold = min_lr.unwrap_or(initial_lr * 0.001);
+                let decay_factor = (1.0 - progress.min(1.0)).powf(*power);
+                min_threshold + (initial_lr - min_threshold) * decay_factor
+            }
+
+            LearningScheduleConfig::CosineAnnealing { t_max, eta_min } => {
+                // Cosine annealing: lr = eta_min + (initial_lr - eta_min) * 0.5 * (1 + cos(π * epoch / t_max))
                 let t_max_f = (*t_max).max(1) as f64;
-                let progress = (epoch_after_warmup as f64) / t_max_f;
+                let progress = (epoch_after_warmup as f64 / t_max_f).min(1.0);
+                let eta_min_val = eta_min.unwrap_or(initial_lr * 0.001);
                 let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
-                initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
+                eta_min_val + (initial_lr - eta_min_val) * cosine_factor
             }
 
-            LearningScheduleConfig::WarmRestarts { t_0, t_mult } => {
-                // Cosine annealing with warm restarts (SGDR)
-                let mut t_cur = epoch_after_warmup;
-                let mut t_i = (*t_0).max(1) as usize;
+            LearningScheduleConfig::WarmRestarts {
+                t_0,
+                t_mult,
+                eta_min,
+            } => {
+                // SGDR: Cosine annealing with warm restarts - efficient cycle calculation
+                let t_0_val = (*t_0).max(1) as usize;
                 let t_mult_val = (*t_mult).max(1) as usize;
+                let eta_min_val = eta_min.unwrap_or(initial_lr * 0.001);
 
-                // Find current restart cycle
-                while t_cur >= t_i {
-                    t_cur -= t_i;
-                    t_i *= t_mult_val;
-                }
+                // Efficient cycle calculation using closed-form solution
+                let (t_cur, t_i) = if t_mult_val == 1 {
+                    // Simple case: constant cycle length
+                    (epoch_after_warmup % t_0_val, t_0_val)
+                } else {
+                    // Geometric progression: find current cycle
+                    let mut epoch_remaining = epoch_after_warmup;
+                    let mut current_cycle_length = t_0_val;
+
+                    while epoch_remaining >= current_cycle_length {
+                        epoch_remaining -= current_cycle_length;
+                        current_cycle_length *= t_mult_val;
+                    }
+
+                    (epoch_remaining, current_cycle_length)
+                };
 
                 // Calculate cosine annealing within current cycle
                 let progress = t_cur as f64 / t_i.max(1) as f64;
                 let cosine_factor = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
-                initial_lr * cosine_factor.max(0.001) // Minimum LR threshold
+                eta_min_val + (initial_lr - eta_min_val) * cosine_factor
+            }
+
+            LearningScheduleConfig::OneCycle {
+                max_lr,
+                pct_start,
+                anneal_strategy,
+                div_factor,
+                final_div_factor,
+            } => {
+                // One Cycle Learning Rate for super-convergence
+                let pct_start_val = pct_start.unwrap_or(0.3);
+                let div_factor_val = div_factor.unwrap_or(25.0);
+                let final_div_factor_val = final_div_factor.unwrap_or(1e4);
+                let anneal_strategy_val = anneal_strategy.as_deref().unwrap_or("cos");
+
+                let initial_lr_calc = max_lr / div_factor_val;
+                let final_lr = initial_lr_calc / final_div_factor_val;
+
+                let progress = epoch_after_warmup as f64 / total_epochs.max(1) as f64;
+
+                if progress <= pct_start_val {
+                    // Increasing phase
+                    let phase_progress = progress / pct_start_val;
+                    initial_lr_calc + (max_lr - initial_lr_calc) * phase_progress
+                } else {
+                    // Decreasing phase
+                    let phase_progress = (progress - pct_start_val) / (1.0 - pct_start_val);
+                    match anneal_strategy_val {
+                        "linear" => max_lr - (max_lr - final_lr) * phase_progress,
+                        _ => {
+                            // "cos"
+                            let cosine_factor =
+                                0.5 * (1.0 + (std::f64::consts::PI * phase_progress).cos());
+                            final_lr + (max_lr - final_lr) * cosine_factor
+                        }
+                    }
+                }
+            }
+
+            LearningScheduleConfig::CyclicalLR {
+                base_lr,
+                max_lr,
+                step_size_up,
+                step_size_down,
+                mode,
+                gamma,
+            } => {
+                // Cyclical Learning Rate with different policies
+                let step_size_down_val = step_size_down.unwrap_or(*step_size_up);
+                let cycle_length = step_size_up + step_size_down_val;
+                let mode_val = mode.as_deref().unwrap_or("triangular");
+                let gamma_val = gamma.unwrap_or(1.0);
+
+                let cycle = (epoch_after_warmup as f64 / cycle_length as f64).floor() as u32;
+                let x = (epoch_after_warmup % cycle_length as usize) as f64;
+
+                let amplitude = match mode_val {
+                    "triangular2" => (max_lr - base_lr) / (2.0_f64.powf(cycle as f64)),
+                    "exp_range" => (max_lr - base_lr) * gamma_val.powf(epoch_after_warmup as f64),
+                    _ => max_lr - base_lr, // "triangular"
+                };
+
+                if x <= *step_size_up as f64 {
+                    // Increasing phase
+                    base_lr + amplitude * (x / *step_size_up as f64)
+                } else {
+                    // Decreasing phase
+                    let down_progress = (x - *step_size_up as f64) / step_size_down_val as f64;
+                    base_lr + amplitude * (1.0 - down_progress)
+                }
+            }
+
+            LearningScheduleConfig::NoamLR {
+                model_size,
+                warmup_steps,
+                factor,
+            } => {
+                // Noam scheduler: lr = factor * model_size^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
+                let factor_val = factor.unwrap_or(1.0);
+                let step = (epoch_after_warmup + 1) as f64; // +1 to avoid zero
+                let warmup_steps_f = (*warmup_steps).max(1) as f64;
+                let model_size_f = (*model_size).max(1) as f64;
+
+                let scale = factor_val * model_size_f.powf(-0.5);
+                let lr_scale = (step.powf(-0.5)).min(step * warmup_steps_f.powf(-1.5));
+
+                // Apply to initial_lr as base
+                initial_lr * scale * lr_scale
             }
         }
     }

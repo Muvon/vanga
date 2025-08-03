@@ -317,15 +317,61 @@ pub enum LearningScheduleConfig {
         patience: u32,
         factor: f64,
         min_lr: Option<f64>,
+        /// Metric to monitor: "loss", "accuracy", "f1_score"
+        monitor: Option<String>,
+        /// Threshold for significant improvement
+        threshold: Option<f64>,
     },
     /// Linear decay over training epochs
-    LinearDecay { decay_rate: f64 },
+    LinearDecay {
+        decay_rate: f64,
+        min_lr: Option<f64>,
+    },
     /// Exponential decay over training epochs
-    ExponentialDecay { decay_rate: f64 },
-    /// Cosine annealing schedule
-    CosineAnnealing { t_max: u32 },
-    /// Warm restarts with cosine annealing
-    WarmRestarts { t_0: u32, t_mult: u32 },
+    ExponentialDecay {
+        gamma: f64, // Renamed from decay_rate for clarity
+        min_lr: Option<f64>,
+    },
+    /// Step decay at specific milestones
+    StepDecay {
+        step_size: u32,
+        gamma: f64,
+        milestones: Option<Vec<u32>>,
+        min_lr: Option<f64>,
+    },
+    /// Polynomial decay with configurable power
+    PolynomialDecay { power: f64, min_lr: Option<f64> },
+    /// Cosine annealing schedule with proper eta_min
+    CosineAnnealing { t_max: u32, eta_min: Option<f64> },
+    /// Warm restarts with cosine annealing (SGDR)
+    WarmRestarts {
+        t_0: u32,
+        t_mult: u32,
+        eta_min: Option<f64>,
+    },
+    /// One Cycle Learning Rate (super-convergence)
+    OneCycle {
+        max_lr: f64,
+        pct_start: Option<f64>, // Percentage of cycle spent increasing LR
+        anneal_strategy: Option<String>, // "cos" or "linear"
+        div_factor: Option<f64>, // initial_lr = max_lr / div_factor
+        final_div_factor: Option<f64>, // final_lr = initial_lr / final_div_factor
+    },
+    /// Cyclical Learning Rate with different policies
+    CyclicalLR {
+        base_lr: f64,
+        max_lr: f64,
+        step_size_up: u32,
+        step_size_down: Option<u32>,
+        mode: Option<String>, // "triangular", "triangular2", "exp_range"
+        gamma: Option<f64>,   // For exp_range mode
+    },
+    /// Noam scheduler (Transformer-style)
+    NoamLR {
+        model_size: u32,
+        warmup_steps: u32,
+        factor: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -738,6 +784,8 @@ impl TrainingParams {
                     patience,
                     factor,
                     min_lr,
+                    monitor: _,
+                    threshold: _,
                 } => {
                     if *patience == 0 {
                         return Err(VangaError::ConfigError(
@@ -766,33 +814,61 @@ impl TrainingParams {
                     }
                 }
 
-                LearningScheduleConfig::LinearDecay { decay_rate } => {
-                    if *decay_rate <= 0.0 || *decay_rate > 1.0 {
+                LearningScheduleConfig::LinearDecay { decay_rate, min_lr } => {
+                    if *decay_rate < 0.0 || *decay_rate > 1.0 {
                         return Err(VangaError::ConfigError(format!(
                             "LinearDecay decay_rate must be between 0.0 and 1.0, got: {}",
                             decay_rate
                         )));
                     }
-                }
-
-                LearningScheduleConfig::ExponentialDecay { decay_rate } => {
-                    if *decay_rate <= 0.0 || *decay_rate > 1.0 {
-                        return Err(VangaError::ConfigError(format!(
-                            "ExponentialDecay decay_rate must be between 0.0 and 1.0, got: {}",
-                            decay_rate
-                        )));
+                    if let Some(min_lr_val) = min_lr {
+                        if *min_lr_val <= 0.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "LinearDecay min_lr must be positive, got: {}",
+                                min_lr_val
+                            )));
+                        }
                     }
                 }
 
-                LearningScheduleConfig::CosineAnnealing { t_max } => {
+                LearningScheduleConfig::ExponentialDecay { gamma, min_lr } => {
+                    if *gamma <= 0.0 || *gamma > 1.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "ExponentialDecay gamma must be between 0.0 and 1.0, got: {}",
+                            gamma
+                        )));
+                    }
+                    if let Some(min_lr_val) = min_lr {
+                        if *min_lr_val <= 0.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "ExponentialDecay min_lr must be positive, got: {}",
+                                min_lr_val
+                            )));
+                        }
+                    }
+                }
+
+                LearningScheduleConfig::CosineAnnealing { t_max, eta_min } => {
                     if *t_max == 0 {
                         return Err(VangaError::ConfigError(
                             "CosineAnnealing t_max must be greater than 0".to_string(),
                         ));
                     }
+                    if let Some(eta_min_val) = eta_min {
+                        if *eta_min_val <= 0.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "CosineAnnealing eta_min must be positive, got: {}",
+                                eta_min_val
+                            )));
+                        }
+                    }
                 }
 
-                LearningScheduleConfig::WarmRestarts { t_0, t_mult } => {
+                LearningScheduleConfig::WarmRestarts {
+                    t_0,
+                    t_mult,
+                    eta_min,
+                } => {
                     if *t_0 == 0 {
                         return Err(VangaError::ConfigError(
                             "WarmRestarts t_0 must be greater than 0".to_string(),
@@ -801,6 +877,161 @@ impl TrainingParams {
                     if *t_mult == 0 {
                         return Err(VangaError::ConfigError(
                             "WarmRestarts t_mult must be greater than 0".to_string(),
+                        ));
+                    }
+                    if let Some(eta_min_val) = eta_min {
+                        if *eta_min_val <= 0.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "WarmRestarts eta_min must be positive, got: {}",
+                                eta_min_val
+                            )));
+                        }
+                    }
+                }
+
+                // Add validation for new schedule types
+                LearningScheduleConfig::StepDecay {
+                    step_size,
+                    gamma,
+                    milestones,
+                    min_lr,
+                } => {
+                    if *step_size == 0 {
+                        return Err(VangaError::ConfigError(
+                            "StepDecay step_size must be greater than 0".to_string(),
+                        ));
+                    }
+                    if *gamma <= 0.0 || *gamma > 1.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "StepDecay gamma must be between 0.0 and 1.0, got: {}",
+                            gamma
+                        )));
+                    }
+                    if let Some(milestones_vec) = milestones {
+                        if milestones_vec.is_empty() {
+                            return Err(VangaError::ConfigError(
+                                "StepDecay milestones cannot be empty".to_string(),
+                            ));
+                        }
+                        // Check ascending order
+                        for window in milestones_vec.windows(2) {
+                            if window[0] >= window[1] {
+                                return Err(VangaError::ConfigError(
+                                    "StepDecay milestones must be in ascending order".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(min_lr_val) = min_lr {
+                        if *min_lr_val <= 0.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "StepDecay min_lr must be positive, got: {}",
+                                min_lr_val
+                            )));
+                        }
+                    }
+                }
+
+                LearningScheduleConfig::PolynomialDecay { power, min_lr } => {
+                    if *power <= 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "PolynomialDecay power must be positive, got: {}",
+                            power
+                        )));
+                    }
+                    if let Some(min_lr_val) = min_lr {
+                        if *min_lr_val <= 0.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "PolynomialDecay min_lr must be positive, got: {}",
+                                min_lr_val
+                            )));
+                        }
+                    }
+                }
+
+                LearningScheduleConfig::OneCycle {
+                    max_lr,
+                    pct_start,
+                    div_factor,
+                    final_div_factor,
+                    ..
+                } => {
+                    if *max_lr <= 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "OneCycle max_lr must be positive, got: {}",
+                            max_lr
+                        )));
+                    }
+                    if let Some(pct) = pct_start {
+                        if *pct <= 0.0 || *pct >= 1.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "OneCycle pct_start must be between 0.0 and 1.0, got: {}",
+                                pct
+                            )));
+                        }
+                    }
+                    if let Some(div) = div_factor {
+                        if *div <= 1.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "OneCycle div_factor must be greater than 1.0, got: {}",
+                                div
+                            )));
+                        }
+                    }
+                    if let Some(final_div) = final_div_factor {
+                        if *final_div <= 1.0 {
+                            return Err(VangaError::ConfigError(format!(
+                                "OneCycle final_div_factor must be greater than 1.0, got: {}",
+                                final_div
+                            )));
+                        }
+                    }
+                }
+
+                LearningScheduleConfig::CyclicalLR {
+                    base_lr,
+                    max_lr,
+                    step_size_up,
+                    ..
+                } => {
+                    if *base_lr <= 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "CyclicalLR base_lr must be positive, got: {}",
+                            base_lr
+                        )));
+                    }
+                    if *max_lr <= 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "CyclicalLR max_lr must be positive, got: {}",
+                            max_lr
+                        )));
+                    }
+                    if *max_lr <= *base_lr {
+                        return Err(VangaError::ConfigError(format!(
+                            "CyclicalLR max_lr ({}) must be greater than base_lr ({})",
+                            max_lr, base_lr
+                        )));
+                    }
+                    if *step_size_up == 0 {
+                        return Err(VangaError::ConfigError(
+                            "CyclicalLR step_size_up must be greater than 0".to_string(),
+                        ));
+                    }
+                }
+
+                LearningScheduleConfig::NoamLR {
+                    model_size,
+                    warmup_steps,
+                    ..
+                } => {
+                    if *model_size == 0 {
+                        return Err(VangaError::ConfigError(
+                            "NoamLR model_size must be greater than 0".to_string(),
+                        ));
+                    }
+                    if *warmup_steps == 0 {
+                        return Err(VangaError::ConfigError(
+                            "NoamLR warmup_steps must be greater than 0".to_string(),
                         ));
                     }
                 }
@@ -872,6 +1103,8 @@ impl Default for TrainingParams {
                 patience: 10,
                 factor: 0.5,
                 min_lr: Some(1e-6),
+                monitor: Some("loss".to_string()),
+                threshold: Some(0.001),
             }), // Adaptive scheduling by default (formerly "Adaptive" learning_rate)
             validation_split: 0.2, // 20% validation for early stopping
             validation_gap: "1h".to_string(), // 1 hour gap by default for feature independence
