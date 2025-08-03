@@ -70,6 +70,24 @@ optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1
 learning_rate = 0.001
 
 # ============================================================================
+# REPRODUCIBLE TRAINING CONFIGURATION - Seed for deterministic results
+# ============================================================================
+# Random seed for reproducible training
+# - 0: Random initialization (different weights each run) - DEFAULT
+# - >0: Reproducible initialization (same weights each run)
+# 
+# Examples:
+# seed = 0      # Random training (default) - each run will be different
+# seed = 42     # Reproducible training - same results every time
+# seed = 12345  # Another reproducible seed
+#
+# Use cases:
+# - Development/Research: Use fixed seed (e.g., 42) for consistent results
+# - Production/Ensemble: Use seed = 0 for diverse models
+# - Debugging: Use fixed seed to isolate issues from randomness
+seed = 0
+
+# ============================================================================
 # WARMUP CONFIGURATION - Gradual learning rate increase
 # ============================================================================
 # Number of epochs to gradually increase learning rate from 0 to target

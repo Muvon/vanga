@@ -38,6 +38,9 @@ pub mod realtime; // NEW: Real-time streaming prediction
 pub mod targets;
 pub mod utils;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export commonly used types for convenience
 pub use config::{FeatureConfig, ModelConfig, PredictionConfig, TrainingConfig};
 pub use utils::{Result, VangaError};

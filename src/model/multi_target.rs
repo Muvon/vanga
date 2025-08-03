@@ -127,6 +127,23 @@ impl MultiTargetLSTMModel {
         target_names: Vec<String>,
         trained_horizons: Vec<String>,
     ) -> Result<Self> {
+        Self::new_with_seed(
+            model_config,
+            input_size,
+            target_names,
+            trained_horizons,
+            None,
+        )
+    }
+
+    /// Create new multi-target LSTM model with seed for reproducible training
+    pub fn new_with_seed(
+        model_config: &ModelConfig,
+        input_size: usize,
+        target_names: Vec<String>,
+        trained_horizons: Vec<String>,
+        seed: Option<u64>,
+    ) -> Result<Self> {
         let num_targets = target_names.len();
 
         log::info!(
@@ -134,15 +151,43 @@ impl MultiTargetLSTMModel {
             num_targets
         );
 
+        if let Some(seed_value) = seed {
+            log::info!("🎲 Multi-target model using seed: {}", seed_value);
+            if seed_value == 0 {
+                log::info!("🎲 Seed = 0: Each target model will use random initialization");
+            } else {
+                log::info!("🎲 Seed = {}: Each target model will use reproducible initialization with incremental seeds", seed_value);
+            }
+        } else {
+            log::info!("🎲 Multi-target model using random initialization for all targets");
+        }
+
         // Create individual LSTM model for each target
         let mut models = Vec::with_capacity(num_targets);
-        for target_name in target_names.iter() {
+        for (i, target_name) in target_names.iter().enumerate() {
             // Determine target type and calculate proper output size
             let target_type = Self::get_target_type_from_name(target_name);
             let output_size = Self::get_output_size_for_target(target_type, model_config);
 
-            // Create model with proper output size for target type
-            let mut model = LSTMModel::from_model_config(model_config, input_size, output_size)?;
+            // Calculate per-target seed for consistency across targets
+            let target_seed = seed.and_then(|s| if s == 0 { None } else { Some(s + i as u64) });
+
+            // Create model with proper output size for target type and seed
+            let mut model = if let Some(target_seed_value) = target_seed {
+                log::debug!(
+                    "🎲 Target '{}' using seed: {}",
+                    target_name,
+                    target_seed_value
+                );
+                LSTMModel::from_model_config_with_seed(
+                    model_config,
+                    input_size,
+                    output_size,
+                    Some(target_seed_value),
+                )?
+            } else {
+                LSTMModel::from_model_config(model_config, input_size, output_size)?
+            };
 
             // CRITICAL: Verify the model was created with correct output_size
             let actual_output_size = model.get_output_size();

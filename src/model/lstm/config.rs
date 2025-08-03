@@ -153,6 +153,9 @@ pub struct LSTMModel {
     pub best_validation_loss: Option<f64>,
     /// Epoch at which best validation loss was achieved
     pub best_epoch: Option<usize>,
+    /// Random seed for reproducible training
+    /// None = random initialization, Some(0) = random, Some(>0) = reproducible
+    pub seed: Option<u64>,
 }
 
 /// Serializable model state for persistence - SAME as original

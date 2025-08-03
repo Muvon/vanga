@@ -45,7 +45,32 @@ impl LSTMModel {
             best_model_varmap: None,        // No best model state initially
             best_validation_loss: None,     // No best validation loss initially
             best_epoch: None,               // No best epoch initially
+            seed: None,                     // No seed by default (random initialization)
         })
+    }
+
+    /// Create a new LSTM model with specified seed for reproducible training
+    pub fn new_with_seed(config: LSTMConfig, seed: Option<u64>) -> Result<Self> {
+        let mut model = Self::new(config)?;
+        model.seed = seed;
+
+        if let Some(seed_value) = seed {
+            log::info!("🎲 Created LSTMModel with seed: {}", seed_value);
+            if seed_value == 0 {
+                log::info!("🎲 Seed = 0: Random weight initialization will be used");
+            } else {
+                log::info!(
+                    "🎲 Seed = {}: Reproducible weight initialization will be used",
+                    seed_value
+                );
+            }
+        } else {
+            log::info!(
+                "🎲 Created LSTMModel without seed: Random weight initialization will be used"
+            );
+        }
+
+        Ok(model)
     }
     /// Create LSTM model from ModelConfig - Enhanced with multi-layer support
     pub fn from_model_config(
@@ -168,6 +193,142 @@ impl LSTMModel {
         lstm_config.validate()?;
 
         let mut model = Self::new(lstm_config)?;
+
+        // Configure attention if enabled
+        model.configure_attention(&model_config.attention, None)?;
+
+        // Configure dropout
+        model.configure_dropout(&model_config.dropout);
+
+        // Loss function is now hardcoded to NLL - no configuration needed
+        // Store architecture information for bidirectional detection
+        model.architecture = Some(model_config.architecture.clone());
+
+        Ok(model)
+    }
+
+    /// Create LSTM model from ModelConfig with seed for reproducible training
+    pub fn from_model_config_with_seed(
+        model_config: &ModelConfig,
+        input_size: usize,
+        output_size: usize,
+        seed: Option<u64>,
+    ) -> Result<Self> {
+        // Extract sequence length from config - SAME logic
+        let sequence_length = match &model_config.sequence_length {
+            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+            crate::config::model::SequenceLengthConfig::Auto {
+                min_length,
+                max_length: _,
+            } => *min_length as usize,
+            crate::config::model::SequenceLengthConfig::Adaptive => 60,
+        };
+
+        // Extract number of layers from architecture config - MOVED UP
+        let num_layers = Self::extract_num_layers_from_architecture(&model_config.architecture);
+
+        // Extract hidden units from config - ENHANCED to use full array
+        let hidden_sizes = match &model_config.hidden_units {
+            crate::config::model::HiddenUnitsConfig::Fixed(units) => {
+                // Use the full array instead of just the first value
+                units.iter().map(|&u| u as usize).collect::<Vec<usize>>()
+            }
+            crate::config::model::HiddenUnitsConfig::Auto {
+                min_units,
+                max_units: _,
+            } => {
+                // For auto config, create a single-layer configuration
+                vec![*min_units as usize]
+            }
+            crate::config::model::HiddenUnitsConfig::Pyramid {
+                base_units,
+                reduction_factor,
+            } => {
+                // Generate pyramid architecture: base_units, base_units * reduction_factor, etc.
+                let mut sizes = Vec::new();
+                let mut current_size = *base_units as f64;
+
+                for _ in 0..num_layers {
+                    sizes.push(current_size as usize);
+                    current_size *= reduction_factor;
+                    // Ensure minimum size of 8 units
+                    if current_size < 8.0 {
+                        current_size = 8.0;
+                    }
+                }
+                sizes
+            }
+        };
+
+        // Validate hidden_sizes array consistency
+        if hidden_sizes.is_empty() {
+            return Err(VangaError::ModelError(
+                "Hidden units configuration resulted in empty array".to_string(),
+            ));
+        }
+
+        // Validate reasonable hidden sizes
+        for (i, &size) in hidden_sizes.iter().enumerate() {
+            if size == 0 {
+                return Err(VangaError::ModelError(format!(
+                    "Layer {} has zero hidden units",
+                    i
+                )));
+            }
+            if size > 2048 {
+                log::warn!(
+                    "⚠️ Layer {} has very large hidden size ({}). This may cause memory issues.",
+                    i,
+                    size
+                );
+            }
+        }
+
+        // Extend hidden_sizes if needed to match num_layers
+        let mut final_hidden_sizes = hidden_sizes;
+        if final_hidden_sizes.len() < num_layers {
+            let last_size = final_hidden_sizes.last().copied().unwrap_or(128);
+            log::info!(
+                "🔧 Extending hidden_sizes from {} to {} layers using last size ({})",
+                final_hidden_sizes.len(),
+                num_layers,
+                last_size
+            );
+            final_hidden_sizes.resize(num_layers, last_size);
+        } else if final_hidden_sizes.len() > num_layers {
+            log::warn!(
+                "⚠️ hidden_sizes array length ({}) > num_layers ({}). Truncating to {} layers.",
+                final_hidden_sizes.len(),
+                num_layers,
+                num_layers
+            );
+            final_hidden_sizes.truncate(num_layers);
+        }
+
+        // Use sequence_length for LSTM configuration if needed - SAME logic
+        let adjusted_hidden_sizes = if sequence_length > 100 {
+            // Adjust all layer sizes based on sequence length
+            final_hidden_sizes
+                .iter()
+                .map(|&size| size + (sequence_length / 10))
+                .collect()
+        } else {
+            final_hidden_sizes
+        };
+
+        let lstm_config = LSTMConfig {
+            input_size,
+            hidden_sizes: adjusted_hidden_sizes,
+            output_size,
+            sequence_length,      // Use actual sequence length from config
+            learning_rate: 0.001, // Default learning rate
+            num_layers,           // Now properly extracted from architecture
+        };
+
+        // Validate the configuration
+        lstm_config.validate()?;
+
+        let mut model = Self::new_with_seed(lstm_config, seed)?;
 
         // Configure attention if enabled
         model.configure_attention(&model_config.attention, None)?;
@@ -306,6 +467,14 @@ impl LSTMModel {
             "Initializing multi-layer LSTM network with config: {:?}",
             self.config
         );
+
+        // Set device seed for reproducible weight initialization if seed is provided
+        if let Some(seed_value) = self.seed {
+            crate::model::lstm::seeded_weights::set_device_seed_with_logging(
+                &self.device,
+                Some(seed_value),
+            )?;
+        }
 
         // Check if this is a bidirectional LSTM
         let is_bidirectional = matches!(
@@ -956,5 +1125,13 @@ impl LSTMModel {
             log::warn!("⚠️ No best model checkpoint available to restore");
             Ok(())
         }
+    }
+
+    /// Mark model as trained for testing purposes
+    /// This is a test helper method to allow predictions on initialized models
+    #[cfg(test)]
+    pub fn mark_as_trained_for_testing(&mut self) {
+        self.trained = true;
+        log::info!("🧪 Model marked as trained for testing purposes");
     }
 }

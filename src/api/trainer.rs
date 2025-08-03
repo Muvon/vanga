@@ -122,9 +122,15 @@ impl ModelTrainer {
     pub async fn train(&mut self) -> Result<MultiTargetLSTMModel> {
         log::info!("Starting model training for symbol: {}", self.config.symbol);
 
-        // Initialize device from configuration
+        // Initialize device from configuration with seed support
         let device_string = self.config.training.device.to_device_string();
-        let device = crate::utils::device::DeviceManager::create_device(&device_string)?;
+        let seed = if self.config.training.seed == 0 {
+            None
+        } else {
+            Some(self.config.training.seed)
+        };
+        let device =
+            crate::utils::device::DeviceManager::create_device_with_seed(&device_string, seed)?;
         log::info!(
             "🔧 Using device: {} ({})",
             device_string,

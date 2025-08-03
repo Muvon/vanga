@@ -42,6 +42,7 @@ pub mod inference;
 pub mod loss;
 pub mod schedule_benchmark;
 pub mod schedule_validation;
+pub mod seeded_weights;
 pub mod training;
 pub mod window_aware_lr;
 
@@ -136,6 +137,7 @@ mod tests {
                 window_decay: 1.0,                                  // No decay for tests
                 min_train_ratio: 0.4,     // Add missing min_train_ratio field
                 min_increment_ratio: 0.3, // Add missing min_increment_ratio field
+                seed: 42,                 // Fixed seed for reproducible tests
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -229,6 +231,7 @@ mod tests {
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
                 class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+                seed: 42, // Fixed seed for reproducible tests
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -319,6 +322,7 @@ mod tests {
                 window_decay: 1.0,        // No decay for tests
                 min_train_ratio: 0.4,     // Add missing min_train_ratio field
                 min_increment_ratio: 0.3, // Add missing min_increment_ratio field
+                seed: 42,                 // Fixed seed for reproducible tests
             },
 
             data: crate::config::training::DataConfig::default(),
@@ -442,6 +446,7 @@ mod tests {
                 window_decay: 1.0,        // No decay for tests
                 min_train_ratio: 0.4,     // Add missing min_train_ratio field
                 min_increment_ratio: 0.3, // Add missing min_increment_ratio field
+                seed: 42,                 // Fixed seed for reproducible tests
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),

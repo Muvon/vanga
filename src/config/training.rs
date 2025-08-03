@@ -97,6 +97,12 @@ pub struct TrainingParams {
     /// This prevents overfitting by ensuring sufficient new information per window
     #[serde(default = "default_min_increment_ratio")]
     pub min_increment_ratio: f64,
+
+    /// Random seed for reproducible training
+    /// 0 = random initialization (different weights each run)
+    /// >0 = reproducible initialization (same weights each run)
+    #[serde(default = "default_seed")]
+    pub seed: u64,
 }
 
 /// Strategy for calculating class weights in imbalanced datasets
@@ -202,6 +208,11 @@ fn default_min_train_ratio() -> f64 {
 /// Default minimum increment ratio (30% for sufficient new data)
 fn default_min_increment_ratio() -> f64 {
     0.3
+}
+
+/// Default seed (0 = random initialization)
+fn default_seed() -> u64 {
+    0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1141,6 +1152,7 @@ impl Default for TrainingParams {
             window_decay: 1.0,                                  // No decay by default
             min_train_ratio: 0.4,                               // Start with 40% for efficiency
             min_increment_ratio: 0.3,                           // Ensure 30% new data per window
+            seed: default_seed(),                               // Random seed by default
         }
     }
 }

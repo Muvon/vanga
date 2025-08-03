@@ -1,8 +1,8 @@
 //! Comprehensive test cases for seed parameter functionality
 
-use vanga::config::{ModelConfig, TrainingConfig};
-use vanga::model::lstm::{LSTMConfig, LSTMModel};
-use vanga::model::multi_target::MultiTargetLSTMModel;
+use crate::config::{ModelConfig, TrainingConfig};
+use crate::model::lstm::{LSTMConfig, LSTMModel};
+use crate::model::multi_target::MultiTargetLSTMModel;
 
 #[tokio::test]
 async fn test_seed_parameter_flow() {
@@ -50,6 +50,9 @@ async fn test_seed_initialization_logging() {
         result.is_ok(),
         "Network initialization should succeed even if seeding doesn't work"
     );
+
+    // Mark as trained for any potential prediction tests
+    model.mark_as_trained_for_testing();
 }
 
 #[tokio::test]
@@ -60,7 +63,13 @@ async fn test_multi_target_seed_flow() {
     let model_config = ModelConfig::default();
 
     // Test that seed flows through multi-target model
-    let model = MultiTargetLSTMModel::new_with_seed(&model_config, Some(456));
+    let model = MultiTargetLSTMModel::new_with_seed(
+        &model_config,
+        10,                               // input_size
+        vec!["price_levels".to_string()], // target_names
+        vec!["1h".to_string()],           // trained_horizons
+        Some(456),                        // seed
+    );
     assert!(
         model.is_ok(),
         "Multi-target model creation with seed should succeed"
@@ -96,6 +105,12 @@ async fn test_seed_validation_logic() {
             "Initialization should succeed for {}",
             description
         );
+        model.mark_as_trained_for_testing(); // Allow predictions if needed
+        assert_eq!(
+            model.seed, seed,
+            "Seed should be stored correctly for {}",
+            description
+        );
         assert_eq!(
             model.seed, seed,
             "Seed should be stored correctly for {}",
@@ -116,9 +131,9 @@ async fn test_weight_tensor_access() {
         learning_rate: 0.001,
         num_layers: 1,
     };
-
     let mut model = LSTMModel::new_with_seed(config, Some(789)).unwrap();
     model.initialize_network().unwrap();
+    model.mark_as_trained_for_testing(); // Allow predictions if needed
 
     // Test that we can access weight tensors
     let all_vars = model.varmap.all_vars();
@@ -136,7 +151,14 @@ async fn test_weight_tensor_access() {
 async fn test_backward_compatibility() {
     env_logger::try_init().ok();
 
-    let config = LSTMConfig::default();
+    let config = LSTMConfig {
+        input_size: 10,
+        hidden_sizes: vec![32, 16],
+        output_size: 5,
+        sequence_length: 20,
+        learning_rate: 0.001,
+        num_layers: 2,
+    };
 
     // Test that old constructor still works
     let model_old = LSTMModel::new(config.clone());
@@ -179,6 +201,10 @@ async fn test_seed_consistency_attempt() {
     model1.initialize_network().unwrap();
     model2.initialize_network().unwrap();
 
+    // Mark as trained for any potential prediction tests
+    model1.mark_as_trained_for_testing();
+    model2.mark_as_trained_for_testing();
+
     // Calculate weight norms (even though they won't be identical due to Candle limitations)
     let norm1 = calculate_weight_norm(&model1);
     let norm2 = calculate_weight_norm(&model2);
@@ -188,11 +214,15 @@ async fn test_seed_consistency_attempt() {
     println!("Model 2 norm: {:.10}", norm2);
     println!("Difference: {:.10}", (norm1 - norm2).abs());
 
-    // This test documents the current limitation - weights are not identical
-    // In the future, when seeding works, this assertion should pass:
+    // This test documents the current limitation - weights may not be identical on CPU
+    // In the future, when GPU seeding works consistently, this assertion should pass:
     // assert!((norm1 - norm2).abs() < 1e-10, "Weight norms should be identical with same seed");
 
     // For now, just verify that both models were created successfully
+    log::info!(
+        "Weight norm difference: {} (CPU seeding may not be reproducible)",
+        (norm1 - norm2).abs()
+    );
     assert!(norm1 > 0.0, "Model 1 should have non-zero weights");
     assert!(norm2 > 0.0, "Model 2 should have non-zero weights");
 }
@@ -222,9 +252,9 @@ async fn test_training_config_integration() {
 
     // Test that TrainingConfig can hold seed parameter
     let mut training_config = TrainingConfig::default();
-    training_config.seed = Some(12345);
+    training_config.training.seed = 12345;
 
-    assert_eq!(training_config.seed, Some(12345));
+    assert_eq!(training_config.training.seed, 12345);
 
     // Test validation (should not fail for any seed value)
     let validation_result = training_config.validate();

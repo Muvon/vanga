@@ -18,11 +18,17 @@ impl DeviceManager {
     ///   - `"cpu"`: Forces CPU usage.
     ///   - `"gpu:0"`: Selects the first available GPU (NVIDIA CUDA or Apple Metal).
     ///   - `"metal:0"`: Selects the first Apple Metal device (macOS only).
+    /// * `seed` - Optional seed for reproducible training (0 = random, >0 = reproducible)
     /// # Returns
     ///
     /// A `Result` containing the selected `Device` or a `VangaError` if initialization fails.
     pub fn create_device(device_config: &str) -> Result<Device> {
-        match device_config.to_lowercase().as_str() {
+        Self::create_device_with_seed(device_config, None)
+    }
+
+    /// Creates a new compute device with optional seed for reproducible training
+    pub fn create_device_with_seed(device_config: &str, seed: Option<u64>) -> Result<Device> {
+        let device = match device_config.to_lowercase().as_str() {
             "auto" | "gpu:auto" => Self::auto_select_device(),
             "cpu" => Self::cpu_device(),
             "gpu:0" => Self::specific_gpu_device(0),
@@ -37,7 +43,25 @@ impl DeviceManager {
                 "Invalid device configuration: '{}'. Supported options: 'auto', 'cpu', 'gpu:0', 'metal:0'.",
                 device_config
             ))),
+        }?;
+
+        // Set seed for reproducible training if provided
+        if let Some(seed_value) = seed {
+            if seed_value == 0 {
+                log::info!("🎲 Seed = 0: Using random device initialization");
+                // Don't call set_seed for random initialization
+            } else {
+                log::info!(
+                    "🎲 Setting device seed to {} for reproducible training",
+                    seed_value
+                );
+                device.set_seed(seed_value).map_err(|e| {
+                    VangaError::ModelError(format!("Failed to set device seed: {}", e))
+                })?;
+            }
         }
+
+        Ok(device)
     }
 
     /// Automatically selects the best available device with a prioritized search.

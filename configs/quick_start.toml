@@ -14,6 +14,9 @@ test_split = 0.1
 early_stopping = { patience = 50, min_delta = 0.00005 }
 gradient_clip = 1.0
 
+# Reproducible training seed (0 = random, >0 = reproducible)
+seed = 42  # Fixed seed for consistent quick start results
+
 [model]
 # Simple but effective architecture
 architecture = { MultiLSTM = { layers = 2 } }

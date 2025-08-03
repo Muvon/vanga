@@ -295,6 +295,7 @@ impl Backtester {
                 window_decay: 1.0,        // No decay for backtesting
                 min_train_ratio: 0.4,     // Use efficiency-focused default
                 min_increment_ratio: 0.3, // Ensure sufficient new data per window
+                seed: 0,                  // Random seed for backtesting diversity
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
