@@ -86,6 +86,17 @@ pub struct TrainingParams {
     /// 0.8 = 20% reduction per window, 1.0 = no decay
     #[serde(default = "default_window_decay")]
     pub window_decay: f64,
+
+    /// Minimum training data ratio for initial window (0.3-0.6 range recommended)
+    /// 0.4 = start with 40% of available data, 0.5 = start with 50%
+    #[serde(default = "default_min_train_ratio")]
+    pub min_train_ratio: f64,
+
+    /// Minimum increment ratio for subsequent windows (0.2-0.5 range recommended)
+    /// 0.3 = each window must add at least 30% more data than previous window
+    /// This prevents overfitting by ensuring sufficient new information per window
+    #[serde(default = "default_min_increment_ratio")]
+    pub min_increment_ratio: f64,
 }
 
 /// Strategy for calculating class weights in imbalanced datasets
@@ -181,6 +192,16 @@ pub enum BatchSizeConfig {
 /// Default window decay (no decay)
 fn default_window_decay() -> f64 {
     1.0
+}
+
+/// Default minimum training ratio (40% for efficiency)
+fn default_min_train_ratio() -> f64 {
+    0.4
+}
+
+/// Default minimum increment ratio (30% for sufficient new data)
+fn default_min_increment_ratio() -> f64 {
+    0.3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1118,6 +1139,8 @@ impl Default for TrainingParams {
             print_every: 1,           // Print every epoch by default for better monitoring
             class_weight_strategy: ClassWeightStrategy::Global, // Use global weights by default for backward compatibility
             window_decay: 1.0,                                  // No decay by default
+            min_train_ratio: 0.4,                               // Start with 40% for efficiency
+            min_increment_ratio: 0.3,                           // Ensure 30% new data per window
         }
     }
 }

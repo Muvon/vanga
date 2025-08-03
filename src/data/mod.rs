@@ -301,6 +301,7 @@ impl DataPipeline {
         base_validation_size: usize,
         min_train_size: usize,
         gap_steps: usize,
+        min_increment_ratio: f64, // NEW: Minimum increment ratio for sufficient new data
     ) -> OptimalWindowConfig {
         let min_validation_size = std::cmp::max(base_validation_size / 2, 1000);
         let max_validation_size = base_validation_size * 2;
@@ -309,11 +310,46 @@ impl DataPipeline {
         let mut best_config = None;
         let mut best_score = 0.0;
 
-        // Try different window counts (2-8 windows for good balance)
-        for window_count in 2..=8 {
-            let avg_increment = data_for_expansion / window_count;
+        // 🚀 EFFICIENCY-FOCUSED WINDOW ALGORITHM
+        // Try different window counts with efficiency considerations
+        let max_reasonable_windows = std::cmp::min(6, available_for_training / 1000); // Cap based on data size
+        let window_range = 2..=max_reasonable_windows;
 
-            // Skip if increment is too small (less than 5% of available data)
+        log::info!(
+            "🧠 Efficiency-focused algorithm: testing {}-{} windows (capped at {} for efficiency)",
+            window_range.start(),
+            window_range.end(),
+            max_reasonable_windows
+        );
+
+        for window_count in window_range {
+            // 🚀 NEW: Progressive increment validation approach
+            // Instead of using fixed avg_increment, calculate increments that maintain min_increment_ratio
+
+            let mut progressive_increments = Vec::new();
+            let mut current_train_size = min_train_size;
+            let mut total_increment_needed = 0;
+
+            // Calculate progressive increments for each window
+            for _window_idx in 1..window_count {
+                let min_increment_for_this_window =
+                    (current_train_size as f64 * min_increment_ratio) as usize;
+                progressive_increments.push(min_increment_for_this_window);
+                total_increment_needed += min_increment_for_this_window;
+                current_train_size += min_increment_for_this_window;
+            }
+
+            // Check if we have enough data for progressive increments
+            if total_increment_needed > data_for_expansion {
+                log::debug!(
+                    "⚠️  Skipping {} windows: progressive increments need {} > available {} samples",
+                    window_count, total_increment_needed, data_for_expansion
+                );
+                continue;
+            }
+
+            // Also check the old validation for backward compatibility
+            let avg_increment = data_for_expansion / window_count;
             if avg_increment < available_for_training / 20 {
                 continue;
             }
@@ -370,9 +406,25 @@ impl DataPipeline {
 
                 total_used = train_end + gap_steps + validation_size;
 
-                // Move to next window (except for last)
+                // 🚀 NEW: Use progressive increments instead of fixed avg_increment
                 if i < window_count - 1 {
-                    train_end += avg_increment;
+                    if i < progressive_increments.len() {
+                        let progressive_increment = progressive_increments[i];
+                        train_end += progressive_increment;
+
+                        log::debug!(
+                            "📈 Window {}: train_end={}, increment=+{} ({:.1}% of previous window)",
+                            i + 2, // Next window number
+                            train_end,
+                            progressive_increment,
+                            (progressive_increment as f64
+                                / (train_end - progressive_increment) as f64)
+                                * 100.0
+                        );
+                    } else {
+                        // Fallback to avg_increment for safety (shouldn't happen with new logic)
+                        train_end += avg_increment;
+                    }
                 }
             }
 
@@ -383,24 +435,74 @@ impl DataPipeline {
 
             let utilization = (total_used as f64 / available_for_training as f64) * 100.0;
 
-            // Score function: prioritize high utilization and reasonable window count
-            // More windows = better validation, but diminishing returns after 5-6 windows
-            let window_quality_score = if window_count <= 4 {
-                window_count as f64
+            // 🚀 EFFICIENCY-FOCUSED SCORING FUNCTION
+            // Balance data utilization with training efficiency
+
+            // Base quality score with stronger diminishing returns
+            let window_quality_score = if window_count <= 3 {
+                window_count as f64 // Linear for 2-3 windows
+            } else if window_count <= 5 {
+                3.0 + (window_count as f64 - 3.0) * 0.7 // Moderate returns for 4-5 windows
             } else {
-                4.0 + (window_count as f64 - 4.0) * 0.5 // Diminishing returns
+                4.4 + (window_count as f64 - 5.0) * 0.3 // Strong diminishing returns for 6+ windows
             };
 
-            let score = utilization * window_quality_score / 100.0;
+            // Efficiency bonus: favor 4-5 windows (sweet spot)
+            let efficiency_bonus = match window_count {
+                4 | 5 => 0.3, // Sweet spot bonus
+                3 | 6 => 0.1, // Slight bonus for reasonable choices
+                _ => 0.0,     // No bonus for extreme choices
+            };
+
+            // Training time penalty for excessive windows
+            let time_penalty = if window_count > 5 {
+                (window_count as f64 - 5.0) * 0.2 // Penalty for > 5 windows
+            } else {
+                0.0
+            };
+
+            // Data utilization bonus (encourage high utilization)
+            let utilization_bonus = if utilization > 95.0 {
+                0.2
+            } else if utilization > 90.0 {
+                0.1
+            } else {
+                0.0
+            };
+
+            // Final efficiency-focused score
+            let score =
+                (utilization * window_quality_score / 100.0) + efficiency_bonus + utilization_bonus
+                    - time_penalty;
+
+            log::debug!(
+                "   {} windows: util={:.1}%, quality={:.2}, efficiency_bonus={:.2}, time_penalty={:.2}, final_score={:.3}",
+                window_count, utilization, window_quality_score, efficiency_bonus, time_penalty, score
+            );
 
             if score > best_score {
                 best_score = score;
+
+                // Calculate average increment for reporting (using progressive increments)
+                let avg_progressive_increment = if progressive_increments.is_empty() {
+                    avg_increment
+                } else {
+                    progressive_increments.iter().sum::<usize>() / progressive_increments.len()
+                };
+
                 best_config = Some(OptimalWindowConfig {
                     window_count,
                     windows,
                     data_utilization: utilization,
-                    avg_increment,
+                    avg_increment: avg_progressive_increment,
                 });
+
+                log::debug!(
+                    "   🏆 NEW BEST: {} windows, score={:.3}, progressive_increments={:?}",
+                    window_count,
+                    score,
+                    progressive_increments
+                );
             }
         }
 
@@ -467,7 +569,10 @@ impl DataPipeline {
         // STEP 2: Calculate validation size from remaining data
         let validation_size =
             (available_for_training as f64 * config.training.validation_split) as usize;
-        let min_train_size = available_for_training / 2; // Start with at least 50% for initial training
+
+        // 🚀 EFFICIENCY-FOCUSED: Configurable minimum training size (default 40% for faster training)
+        let min_train_size =
+            (available_for_training as f64 * config.training.min_train_ratio) as usize;
 
         if validation_size == 0 || min_train_size + validation_size > available_for_training {
             return Err(crate::utils::error::VangaError::DataError(
@@ -481,13 +586,19 @@ impl DataPipeline {
         let mut windows = Vec::new();
 
         log::info!(
-            "📊 Three-way split setup: total={}, test_reserved={} ({:.1}%), available_for_training={}, val_size={} ({:.1}%)",
+            "📊 Efficiency-focused three-way split: total={}, test_reserved={} ({:.1}%), available_for_training={}, val_size={} ({:.1}%)",
             total_samples,
             test_size,
             config.training.test_split * 100.0,
             available_for_training,
             validation_size,
             config.training.validation_split * 100.0
+        );
+
+        log::info!(
+            "🚀 Efficiency settings: min_train_ratio={:.1}% ({} samples), optimized for faster training",
+            config.training.min_train_ratio * 100.0,
+            min_train_size
         );
 
         // Parse validation gap
@@ -510,17 +621,18 @@ impl DataPipeline {
             gap_steps
         );
 
-        // 🧠 ADAPTIVE WALK-FORWARD ALGORITHM
-        // Calculate optimal window configuration for maximum data utilization
+        // 🚀 EFFICIENCY-FOCUSED WALK-FORWARD ALGORITHM
+        // Calculate optimal window configuration balancing data utilization with training efficiency
         let optimal_config = Self::calculate_optimal_window_configuration(
             available_for_training,
             validation_size,
             min_train_size,
             gap_steps,
+            config.training.min_increment_ratio, // NEW: Pass minimum increment ratio
         );
 
         log::info!(
-            "🧠 Adaptive window algorithm: {} windows planned, {:.1}% data utilization, avg_increment={}",
+            "🚀 Efficiency-focused algorithm result: {} windows planned, {:.1}% data utilization, avg_increment={} (optimized for training speed)",
             optimal_config.window_count,
             optimal_config.data_utilization,
             optimal_config.avg_increment
@@ -719,12 +831,20 @@ impl DataPipeline {
             } else {
                 window.train_samples - windows[i - 1].train_samples
             };
+            // Calculate percentage increase from previous window
+            let percentage_increase = if i == 0 {
+                0.0
+            } else {
+                (expansion_from_previous as f64 / windows[i - 1].train_samples as f64) * 100.0
+            };
+
             log::info!(
-                "   Window {}: train_samples={} (+{} from first, +{} from previous), val_samples={}, test_samples={}",
+                "   Window {}: train_samples={} (+{} from first, +{} from previous, {:.1}% increase), val_samples={}, test_samples={}",
                 i + 1,
                 window.train_samples,
                 expansion_from_first,
                 expansion_from_previous,
+                percentage_increase,
                 window.val_samples,
                 window.test_samples
             );

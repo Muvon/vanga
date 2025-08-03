@@ -134,6 +134,8 @@ mod tests {
                 print_every: 1, // Add missing print_every field
                 class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
                 window_decay: 1.0,                                  // No decay for tests
+                min_train_ratio: 0.4,     // Add missing min_train_ratio field
+                min_increment_ratio: 0.3, // Add missing min_increment_ratio field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
@@ -216,7 +218,9 @@ mod tests {
                 validation_split: 0.2,
                 validation_gap: "1h".to_string(), // Default gap for tests
                 device: crate::config::training::DeviceConfig::Auto,
-                window_decay: 1.0, // No decay for tests
+                window_decay: 1.0,        // No decay for tests
+                min_train_ratio: 0.4,     // Add missing min_train_ratio field
+                min_increment_ratio: 0.3, // Add missing min_increment_ratio field
                 test_split: 0.0,
                 early_stopping: crate::config::training::EarlyStoppingConfig {
                     patience: 10,
@@ -311,8 +315,10 @@ mod tests {
                 gradient_clip: Some(1.0),
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
-                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
-                window_decay: 1.0,                                  // No decay for tests
+                class_weight_strategy: crate::config::training::ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+                window_decay: 1.0,        // No decay for tests
+                min_train_ratio: 0.4,     // Add missing min_train_ratio field
+                min_increment_ratio: 0.3, // Add missing min_increment_ratio field
             },
 
             data: crate::config::training::DataConfig::default(),
@@ -432,8 +438,10 @@ mod tests {
                 },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
-                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
-                window_decay: 1.0,                                  // No decay for tests
+                class_weight_strategy: crate::config::training::ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+                window_decay: 1.0,        // No decay for tests
+                min_train_ratio: 0.4,     // Add missing min_train_ratio field
+                min_increment_ratio: 0.3, // Add missing min_increment_ratio field
             },
             data: crate::config::training::DataConfig::default(),
             optimization: crate::config::training::OptimizationConfig::default(),
