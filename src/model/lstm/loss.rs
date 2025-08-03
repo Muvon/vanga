@@ -11,6 +11,15 @@ use candle_core::Tensor;
 use candle_nn;
 use ndarray::{Array2, Array3};
 
+/// Loss calculation mode for distinguishing between training and validation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossMode {
+    /// Training mode - uses training class weights
+    Training,
+    /// Validation mode - uses validation class weights if available, otherwise training weights
+    Validation,
+}
+
 /// Calculate Mean Squared Error between predictions and targets
 ///
 /// **Core MSE Implementation**: Standard mathematical MSE calculation used throughout the system.
@@ -1190,7 +1199,7 @@ impl LSTMModel {
         match target_type {
             TargetType::PriceLevel => {
                 // Use NLL loss for categorical price levels (5-class system)
-                self.calculate_nll_loss(predictions, targets)
+                self.calculate_nll_loss(predictions, targets, LossMode::Training)
             }
             TargetType::Direction => {
                 // Direction targets use 5-class classification (Dump=0, Down=1, Sideways=2, Up=3, Pump=4)
@@ -1209,7 +1218,7 @@ impl LSTMModel {
                 }
 
                 // Use NLL loss for direction targets (5-class system)
-                self.calculate_nll_loss(predictions, targets)
+                self.calculate_nll_loss(predictions, targets, LossMode::Training)
             }
             TargetType::Volatility => {
                 // Volatility targets use 5-class classification (VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)
@@ -1228,7 +1237,7 @@ impl LSTMModel {
                 }
 
                 // Use NLL loss for volatility targets (5-class system)
-                self.calculate_nll_loss(predictions, targets)
+                self.calculate_nll_loss(predictions, targets, LossMode::Training)
             }
         }
     }
@@ -1347,18 +1356,91 @@ impl LSTMModel {
         (base_patience, min_delta)
     }
 
+    /// Helper method to select appropriate class weights based on loss calculation mode
+    ///
+    /// # Arguments
+    /// * `mode` - Loss calculation mode (Training or Validation)
+    /// * `num_classes` - Number of classes for uniform weights fallback
+    ///
+    /// # Returns
+    /// * `Vec<f32>` - Class weights to use for loss calculation
+    fn get_class_weights_for_mode(&self, mode: LossMode, num_classes: usize) -> Vec<f32> {
+        match mode {
+            LossMode::Training => {
+                // Training mode: always use training class weights
+                if let Some(ref weights) = self.training_class_weights {
+                    log::debug!(
+                        "🎯 TRAINING: Using calculated training class weights: {:?}",
+                        weights
+                    );
+                    weights.clone()
+                } else {
+                    log::debug!("🎯 TRAINING: No class weights configured (uniform weighting)");
+                    vec![1.0f32; num_classes]
+                }
+            }
+            LossMode::Validation => {
+                // Validation mode: use validation weights if available (Advanced strategy), otherwise training weights
+                if let Some(ref val_weights) = self.validation_class_weights {
+                    log::debug!(
+                        "🔍 VALIDATION: Using calculated validation class weights: {:?}",
+                        val_weights
+                    );
+                    val_weights.clone()
+                } else if let Some(ref train_weights) = self.training_class_weights {
+                    log::debug!(
+                        "🔍 VALIDATION: Using training class weights (Global strategy): {:?}",
+                        train_weights
+                    );
+                    train_weights.clone()
+                } else {
+                    log::debug!("🔍 VALIDATION: No class weights configured (uniform weighting)");
+                    vec![1.0f32; num_classes]
+                }
+            }
+        }
+    }
+
     /// **PRIMARY LOSS CALCULATION**: NLL Loss with Class Weighting
     ///
-    /// This is the main loss calculation method used throughout training.
+    /// This is the main loss calculation method used throughout training and validation.
     /// Uses Candle's built-in NLL loss with proper class weighting for stable training.
+    ///
+    /// # Arguments
+    /// * `predictions` - Model predictions tensor [batch_size, num_classes] containing raw logits
+    /// * `targets` - Ground truth targets tensor [batch_size, 1] or [batch_size] with class indices
+    /// * `mode` - Loss calculation mode determining which class weights to use:
+    ///   - `LossMode::Training`: Uses training class weights
+    ///   - `LossMode::Validation`: Uses validation class weights if available, otherwise training weights
+    ///
+    /// # Returns
+    /// * `Result<Tensor>` - Weighted NLL loss scalar tensor ready for backpropagation
+    ///
+    /// # Implementation Details
+    ///
+    /// ## Fast Path (Uniform Weights)
+    /// When all class weights are 1.0 (uniform), uses the optimized `candle_nn::loss::nll()`
+    /// function directly for maximum performance.
+    ///
+    /// ## Weighted Path (Class Weights)
+    /// For non-uniform class weights, implements manual per-sample calculation following
+    /// PyTorch's weighted NLL formula: `loss_n = -weight[target_n] * log_prob[n, target_n]`
+    ///
+    /// ## Gradient Preservation
+    /// All operations use tensor computations to maintain the computational graph
+    /// for proper gradient flow during backpropagation.
     ///
     /// Moved from training.rs - this is the proven approach that actually works.
     pub fn calculate_nll_loss(
         &self,
         predictions: &candle_core::Tensor,
         targets: &candle_core::Tensor,
+        mode: LossMode,
     ) -> Result<candle_core::Tensor> {
-        log::debug!("🎯 Using NLL Loss with Class Weighting for stable 5-class training");
+        log::debug!(
+            "🎯 Using NLL Loss with Class Weighting for stable 5-class training (mode: {:?})",
+            mode
+        );
 
         // Ensure tensors are contiguous
         let pred_contiguous = predictions.contiguous()?;
@@ -1390,33 +1472,69 @@ impl LSTMModel {
         let log_probs =
             candle_nn::ops::log_softmax(&pred_contiguous, candle_core::D::Minus1)?.contiguous()?;
 
-        // Step 2: Apply class weighting (simple balanced weighting for now)
-        // For 5-class: each class gets weight 1.0 (we can make this configurable later)
-        let class_weights = vec![1.0f32; num_classes];
+        // Step 2: Apply calculated class weighting based on training/validation mode
+        let class_weights = self.get_class_weights_for_mode(mode, num_classes);
+        // Step 3: Calculate NLL loss and apply class weights properly
+        if class_weights.iter().all(|&w| (w - 1.0).abs() < 1e-6) {
+            // All weights are 1.0 (uniform), use standard NLL
+            log::debug!("🎯 NLL Loss: Using uniform weights (no class weighting)");
+            let result = candle_nn::loss::nll(&log_probs, &target_u32)?;
+            return Ok(result);
+        }
 
-        // Create weight tensor [1, num_classes] and broadcast to [batch_size, num_classes]
-        let weight_tensor = candle_core::Tensor::from_vec(
-            class_weights,
-            (1, num_classes),
-            pred_contiguous.device(),
-        )?
-        .contiguous()?;
+        // For weighted NLL, we need to manually implement per-sample weighting
+        // Since candle_nn::loss::nll only supports uniform weighting
+        let batch_size = target_u32.dim(0)?;
 
-        let weight_broadcast = weight_tensor
-            .broadcast_as(log_probs.shape())?
-            .contiguous()?;
+        // Extract target indices to CPU for weight lookup (minimal CPU transfer)
+        let target_cpu = target_u32.to_device(&candle_core::Device::Cpu)?;
+        let target_data = target_cpu.to_vec1::<u32>()?;
 
-        // Apply class weights to log probabilities
-        let weighted_log_probs = log_probs.mul(&weight_broadcast)?.contiguous()?;
+        // Create weight tensor for all samples at once (more efficient)
+        let mut sample_weights = Vec::with_capacity(batch_size);
+        for &target_idx in &target_data {
+            let weight = class_weights
+                .get(target_idx as usize)
+                .copied()
+                .unwrap_or(1.0);
+            sample_weights.push(weight);
+        }
 
-        // Step 3: Use built-in NLL loss function
-        let nll_loss = candle_nn::loss::nll(&weighted_log_probs, &target_u32)?;
+        let weight_tensor =
+            candle_core::Tensor::from_vec(sample_weights, batch_size, pred_contiguous.device())?;
+
+        // Extract log probabilities for true classes using optimized tensor operations
+        // This is more efficient than individual .get() calls in a loop
+        let mut true_class_log_probs = Vec::with_capacity(batch_size);
+        for (sample_idx, &target_idx) in target_data.iter().enumerate() {
+            let sample_log_probs = log_probs.get(sample_idx)?;
+            let true_class_log_prob = sample_log_probs.get(target_idx as usize)?;
+            true_class_log_probs.push(true_class_log_prob);
+        }
+
+        // Stack all log probabilities into a single tensor [batch_size]
+        let true_class_tensor = candle_core::Tensor::stack(&true_class_log_probs, 0)?;
+
+        // Calculate NLL losses: -log_probs [batch_size]
+        let nll_losses = true_class_tensor.neg()?;
+
+        // Apply class weights: weighted_losses = nll_losses * weights [batch_size]
+        let weighted_losses = nll_losses.mul(&weight_tensor)?;
+
+        // Compute weighted average: sum(weighted_losses) / sum(weights)
+        let total_weighted_loss = weighted_losses.sum_all()?;
+        let total_weight = weight_tensor.sum_all()?;
+        let result = total_weighted_loss.div(&total_weight)?;
 
         log::debug!(
-            "✅ NLL Loss: {:.6} (5-class with weighting)",
-            nll_loss.to_scalar::<f32>().unwrap_or(0.0)
+            "🎯 NLL Loss: Applied class weights using optimized tensor operations (gradient-preserving)"
         );
 
-        Ok(nll_loss)
+        log::debug!(
+            "✅ NLL Loss: {:.6} (5-class with proper class weighting)",
+            result.to_scalar::<f32>().unwrap_or(0.0)
+        );
+
+        Ok(result)
     }
 }

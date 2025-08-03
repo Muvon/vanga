@@ -4,6 +4,7 @@
 //! batch configuration, and training-related utilities.
 
 use super::config::{LSTMModel, OptimizerWrapper};
+use super::loss::LossMode;
 use crate::config::training::ClassWeightStrategy;
 use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
@@ -739,7 +740,8 @@ impl LSTMModel {
                 let predictions = self.forward(&input_tensor, true)?;
 
                 // Calculate loss using the proven NLL approach (moved to loss.rs)
-                let loss = self.calculate_nll_loss(&predictions, &target_tensor)?;
+                let loss =
+                    self.calculate_nll_loss(&predictions, &target_tensor, LossMode::Training)?;
 
                 // Backward pass with gradient computation
                 let grads = loss.backward()?;
@@ -832,7 +834,11 @@ impl LSTMModel {
                     let predictions = self.forward(&input_tensor, false)?;
 
                     // Calculate validation loss using the same NLL approach as training
-                    let val_loss = self.calculate_nll_loss(&predictions, &target_tensor)?;
+                    let val_loss = self.calculate_nll_loss(
+                        &predictions,
+                        &target_tensor,
+                        LossMode::Validation,
+                    )?;
                     let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
                         VangaError::ModelError(format!(
                             "Validation loss scalar conversion failed: {}",

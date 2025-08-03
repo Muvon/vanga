@@ -49,10 +49,18 @@ pub mod window_aware_lr;
 #[cfg(test)]
 mod hidden_state_test;
 
+#[cfg(test)]
+mod loss_test;
+
 // Re-export main types for backward compatibility
 pub use config::{
     LSTMConfig, LSTMModel, ModelState, OptimizerWrapper, TargetFormat, TrainingConfig,
 };
+
+// Re-export core functionality including test helpers
+#[cfg(test)]
+#[allow(unused_imports)]
+pub use core::*;
 
 // Re-export window-aware learning rate functionality
 pub use window_aware_lr::{create_window_aware_config, WindowAwareLearningRate};
