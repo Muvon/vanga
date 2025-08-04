@@ -82,6 +82,7 @@ async fn test_multi_target_training_validation() {
                 val_sequences: None,
                 val_targets: None,
                 target_class_weights: None,
+                target_validation_indices: None,
             },
             &config,
         )

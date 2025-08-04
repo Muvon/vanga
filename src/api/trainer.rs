@@ -446,6 +446,7 @@ impl ModelTrainer {
                     val_sequences: Some(&window.val_data.sequences),
                     val_targets: Some(&val_targets),
                     target_class_weights: Some(&window.target_class_weights),
+                    target_validation_indices: Some(&window.target_validation_indices),
                 },
                 &window_config,
             )
@@ -514,10 +515,21 @@ impl ModelTrainer {
             )));
         }
 
+        // Log detailed information about the training data
+        log::debug!(
+            "🔍 Window {} train_data: sequences.shape={:?}, targets.valid_indices.len()={}, target_names={:?}",
+            window.window_id + 1,
+            window.train_data.sequences.shape(),
+            window.train_data.targets.valid_indices.len(),
+            window.train_data.targets.target_names
+        );
+
         if window.train_data.targets.valid_indices.is_empty() {
             return Err(VangaError::DataError(format!(
-                "No valid training samples in window {} - check data preprocessing",
-                window.window_id + 1
+                "No valid training samples in window {} - check data preprocessing. Sequences shape: {:?}, target_names: {:?}",
+                window.window_id + 1,
+                window.train_data.sequences.shape(),
+                window.train_data.targets.target_names
             )));
         }
 

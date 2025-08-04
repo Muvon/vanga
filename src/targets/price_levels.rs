@@ -834,7 +834,7 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
 
     // Log compact class distribution analysis
     log::info!(
-        "📊 Price Level Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        "📊 Price Level Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}] (BEFORE balanced selection)",
         horizon,
         valid_targets,
         imbalance_ratio,

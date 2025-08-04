@@ -755,7 +755,7 @@ fn log_volatility_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Log Ratio Volatility Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        "📊 Log Ratio Volatility Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}] (BEFORE balanced selection)",
         horizon,
         valid_targets,
         imbalance_ratio,

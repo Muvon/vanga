@@ -172,7 +172,7 @@ impl PreparedTargets {
 }
 
 /// Target type enumeration
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TargetType {
     PriceLevel,
     Direction,

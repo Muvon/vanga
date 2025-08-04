@@ -27,6 +27,7 @@ impl SequenceGenerator {
         horizons: &[String],
         model_config: &crate::config::ModelConfig,
         data_config: &crate::config::training::DataConfig,
+        feature_config: &crate::config::FeatureConfig,
     ) -> Result<PreparedData> {
         log::info!(
             "Generating training sequences for LSTM with {} horizons...",
@@ -52,7 +53,7 @@ impl SequenceGenerator {
             total_records,
             sequence_length,
             horizons,
-            data_config,
+            feature_config,
         )?;
 
         // Extract feature columns (exclude timestamp and target columns)
@@ -77,7 +78,7 @@ impl SequenceGenerator {
         let feature_data = self.extract_feature_matrix(&df, &feature_columns)?;
 
         // Generate sequences using per-sequence normalization (CORRECT approach)
-        let (sequences, targets) = self
+        let (sequences, targets, sequence_indices) = self
             .create_sliding_windows_with_normalization(
                 &feature_data,
                 sequence_length,
@@ -144,6 +145,7 @@ impl SequenceGenerator {
                 q75: vec![],
             },
             metadata,
+            sequence_indices,
         })
     }
 
@@ -368,62 +370,26 @@ impl SequenceGenerator {
         Ok(())
     }
 
-    /// Parse horizon string to steps (reuses existing volatility module function)
-    /// Validate feature window requirements for training data
+    /// Validate feature window requirements for training data using actual feature configuration
     fn validate_feature_window_requirements(
         &self,
         total_records: usize,
         sequence_length: usize,
         horizons: &[String],
-        _data_config: &crate::config::training::DataConfig,
+        feature_config: &crate::config::FeatureConfig,
     ) -> Result<()> {
-        // Calculate actual feature window from config if available
-        // TODO: Pass feature config to this method for accurate calculation
-        let estimated_max_window = 200; // Conservative estimate - should be replaced with actual config
+        // Use proper feature window calculation
+        let requirements = crate::utils::feature_window::calculate_min_data_requirements(
+            feature_config,
+            sequence_length,
+            horizons,
+        )?;
 
-        // Calculate minimum data requirements
-        let max_horizon_steps = horizons
-            .iter()
-            .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
-            .max()
-            .unwrap_or(1);
+        // Validate using the proper requirements
+        requirements.validate(total_records)?;
 
-        let min_required = estimated_max_window + sequence_length + max_horizon_steps;
-
-        if total_records < min_required {
-            return Err(VangaError::DataError(format!(
-                "Insufficient data for training: {} records available, {} required\n\
-                 Breakdown:\n\
-                 • Feature window: {} periods (for technical indicators like SMA, EMA)\n\
-                 • Sequence length: {} periods (for LSTM input)\n\
-                 • Horizon buffer: {} periods (for target calculation)\n\
-                 • Total required: {} periods\n\
-                 \n\
-                 Solution: Provide at least {} rows of historical data",
-                total_records,
-                min_required,
-                estimated_max_window,
-                sequence_length,
-                max_horizon_steps,
-                min_required,
-                min_required
-            )));
-        }
-
-        log::info!("📊 TRAINING DATA VALIDATION:");
-        log::info!("   • Dataset size: {} rows", total_records);
-        log::info!(
-            "   • Feature window: {} periods (estimated)",
-            estimated_max_window
-        );
-        log::info!("   • Sequence length: {} periods", sequence_length);
-        log::info!("   • Horizon buffer: {} periods", max_horizon_steps);
-        log::info!("   • Total required: {} periods", min_required);
-        log::info!(
-            "   • Effective training data: {} rows",
-            total_records.saturating_sub(estimated_max_window)
-        );
-        log::info!("   ✅ Sufficient data available");
+        // Log summary for debugging
+        requirements.log_summary(total_records, "TRAINING DATA VALIDATION");
 
         Ok(())
     }
@@ -525,6 +491,7 @@ impl SequenceGenerator {
 
     /// Create sliding windows with per-sequence normalization
     /// Each window: [sequence_length + gap + horizon_steps] normalized together
+    /// Returns: (sequences, targets, sequence_indices)
     async fn create_sliding_windows_with_normalization(
         &self,
         _feature_data: &Array2<f64>, // Unused - we work with DataFrame directly
@@ -533,7 +500,11 @@ impl SequenceGenerator {
         df: &DataFrame,
         data_config: &crate::config::training::DataConfig,
         model_config: &crate::config::ModelConfig,
-    ) -> Result<(Array3<f64>, crate::targets::PreparedTargets)> {
+    ) -> Result<(
+        Array3<f64>,
+        crate::targets::PreparedTargets,
+        Vec<(usize, usize)>,
+    )> {
         // Calculate maximum horizon steps
         let max_horizon_steps = horizons
             .iter()
@@ -650,7 +621,13 @@ impl SequenceGenerator {
             .generate_all_targets(df, Some(model_config), &sequence_indices, sequence_length)
             .await?;
 
-        Ok((sequences, targets))
+        // Create sequence position indices
+        let sequence_position_indices: Vec<(usize, usize)> = sequence_indices
+            .iter()
+            .map(|&start_idx| (start_idx, start_idx + sequence_length))
+            .collect();
+
+        Ok((sequences, targets, sequence_position_indices))
     }
 
     /// Convert list of sequence matrices to Array3
