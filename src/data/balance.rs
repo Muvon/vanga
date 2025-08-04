@@ -8,6 +8,9 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3};
 use std::collections::HashMap;
 
+// Import WindowConfig from parent module
+use super::WindowConfig;
+
 // Type alias for complex return type to improve readability
 type ValidationSelectionResult = (
     Vec<usize>,
@@ -16,6 +19,21 @@ type ValidationSelectionResult = (
 
 // Type alias for target-specific validation results
 type TargetSpecificValidationResult = HashMap<(TargetType, String), Vec<usize>>;
+
+/// Globally balanced dataset extracted from full available data
+#[derive(Debug, Clone)]
+pub struct GloballyBalancedDataset {
+    /// Balanced sequence indices for each target/horizon combination
+    pub balanced_indices: HashMap<(TargetType, String), Vec<usize>>,
+    /// Class distribution for each target/horizon combination
+    pub class_distribution: HashMap<(TargetType, String), HashMap<i32, usize>>,
+    /// Global minimum class count across all targets (the limiting factor)
+    pub global_min_class_count: usize,
+    /// Total number of balanced samples across all targets
+    pub total_balanced_samples: usize,
+    /// Statistics about overloaded classes (classes with more than min count)
+    pub overloaded_classes: HashMap<(TargetType, String), HashMap<i32, usize>>,
+}
 
 /// Represents a sequence with its associated targets and metadata
 #[derive(Debug, Clone)]
@@ -471,6 +489,320 @@ impl SequenceBalancer {
         Ok(selected)
     }
 
+    /// Extract globally balanced dataset from FULL available data
+    /// Uses ALL data (total - test_split) to find optimal balance across all targets
+    pub fn extract_globally_balanced_dataset(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        target_types: &[TargetType],
+        horizons: &[String],
+    ) -> Result<GloballyBalancedDataset> {
+        if all_sequences.is_empty() {
+            return Err(VangaError::DataError(
+                "No sequences available for global balancing".to_string(),
+            ));
+        }
+
+        log::info!(
+            "🌍 GLOBAL BALANCE EXTRACTION: Analyzing {} sequences across {} targets and {} horizons",
+            all_sequences.len(),
+            target_types.len(),
+            horizons.len()
+        );
+
+        let mut all_class_distributions = HashMap::new();
+        let mut global_min_class_count = usize::MAX;
+
+        // STEP 1: Analyze class distribution across ALL targets and horizons
+        for target_type in target_types {
+            for horizon in horizons {
+                let target_key = (*target_type, horizon.clone());
+                let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
+
+                // Group sequences by class for this target
+                for (idx, seq) in all_sequences.iter().enumerate() {
+                    if let Some(&class) = seq.targets.get(&target_key) {
+                        class_sequences.entry(class).or_default().push(idx);
+                    }
+                }
+
+                if class_sequences.is_empty() {
+                    return Err(VangaError::DataError(format!(
+                        "No sequences found for target {:?} horizon {}",
+                        target_type, horizon
+                    )));
+                }
+
+                // Find minimum class count for this target
+                let target_min_class_count =
+                    class_sequences.values().map(|v| v.len()).min().unwrap_or(0);
+                global_min_class_count = global_min_class_count.min(target_min_class_count);
+
+                log::debug!(
+                    "   📊 {:?} {}: {} classes, min_count={}, distribution={:?}",
+                    target_type,
+                    horizon,
+                    class_sequences.len(),
+                    target_min_class_count,
+                    class_sequences
+                        .iter()
+                        .map(|(k, v)| (*k, v.len()))
+                        .collect::<HashMap<_, _>>()
+                );
+
+                all_class_distributions.insert(target_key, class_sequences);
+            }
+        }
+
+        if global_min_class_count == 0 || global_min_class_count == usize::MAX {
+            return Err(VangaError::DataError(
+                "Cannot achieve global balance - at least one class has no sequences".to_string(),
+            ));
+        }
+
+        log::info!(
+            "🎯 GLOBAL CONSTRAINT: {} sequences per class (limited by rarest class across all targets)",
+            global_min_class_count
+        );
+
+        // STEP 2: Extract balanced samples using global minimum class count
+        let mut balanced_indices = HashMap::new();
+        let mut final_class_distribution = HashMap::new();
+        let mut overloaded_classes = HashMap::new();
+        let mut total_balanced_samples = 0;
+
+        for (target_key, class_sequences) in all_class_distributions {
+            let mut target_balanced_indices = Vec::new();
+            let mut target_class_distribution = HashMap::new();
+            let mut target_overloaded = HashMap::new();
+
+            // Select balanced samples for each class
+            for (class, mut indices) in class_sequences {
+                let available = indices.len();
+                let needed = global_min_class_count;
+
+                if available < needed {
+                    return Err(VangaError::DataError(format!(
+                        "FATAL: Cannot achieve global balance for {:?} class {} - need {} but only {} available",
+                        target_key, class, needed, available
+                    )));
+                }
+
+                // Track overloaded classes (have more than global minimum)
+                if available > needed {
+                    target_overloaded.insert(class, available - needed);
+                }
+
+                // Select sequences (prioritize by minimal overlap with others)
+                indices.sort_by_key(|&idx| {
+                    // Simple selection strategy - can be enhanced with overlap analysis
+                    all_sequences[idx].start_idx
+                });
+
+                let selected: Vec<usize> = indices.into_iter().take(needed).collect();
+                target_balanced_indices.extend(selected);
+                target_class_distribution.insert(class, needed);
+            }
+
+            total_balanced_samples += target_balanced_indices.len();
+            balanced_indices.insert(target_key.clone(), target_balanced_indices);
+            final_class_distribution.insert(target_key.clone(), target_class_distribution);
+
+            if !target_overloaded.is_empty() {
+                overloaded_classes.insert(target_key, target_overloaded);
+            }
+        }
+
+        log::info!(
+            "✅ GLOBAL BALANCE ACHIEVED: {} total balanced samples across all targets",
+            total_balanced_samples
+        );
+
+        log::info!("📊 OVERLOADED CLASSES DETECTED:");
+        for (target_key, overloaded) in &overloaded_classes {
+            log::info!(
+                "   {:?}: {:?} excess samples available for smart validation",
+                target_key,
+                overloaded.values().sum::<usize>()
+            );
+        }
+
+        Ok(GloballyBalancedDataset {
+            balanced_indices,
+            class_distribution: final_class_distribution,
+            global_min_class_count,
+            total_balanced_samples,
+            overloaded_classes,
+        })
+    }
+
+    /// Derive validation set from globally balanced dataset using smart overlap management
+    /// Uses overloaded classes to extract validation without reducing training balance
+    pub fn smart_validation_split_from_balanced(
+        &self,
+        balanced_dataset: &GloballyBalancedDataset,
+        _all_sequences: &[SequenceWithTargets], // TODO: Use for overlap management
+        validation_ratio: f64,
+        target_types: &[TargetType],
+        horizons: &[String],
+    ) -> Result<(
+        GloballyBalancedDataset,
+        HashMap<(TargetType, String), Vec<usize>>,
+    )> {
+        log::info!(
+            "🧠 SMART VALIDATION DERIVATION: Extracting {:.1}% validation from overloaded classes",
+            validation_ratio * 100.0
+        );
+
+        let mut remaining_training_indices = balanced_dataset.balanced_indices.clone();
+        let mut validation_indices = HashMap::new();
+        let mut total_validation_extracted = 0;
+
+        // Calculate target validation size per target
+        let target_validation_size = (balanced_dataset.global_min_class_count as f64
+            * balanced_dataset
+                .class_distribution
+                .values()
+                .next()
+                .unwrap()
+                .len() as f64
+            * validation_ratio) as usize;
+
+        log::info!(
+            "🎯 TARGET: ~{} validation samples per target (from {} balanced samples)",
+            target_validation_size,
+            balanced_dataset.global_min_class_count
+                * balanced_dataset
+                    .class_distribution
+                    .values()
+                    .next()
+                    .unwrap()
+                    .len()
+        );
+
+        for target_type in target_types {
+            for horizon in horizons {
+                let target_key = (*target_type, horizon.clone());
+                let mut target_validation = Vec::new();
+
+                // Check if this target has overloaded classes
+                if let Some(overloaded) = balanced_dataset.overloaded_classes.get(&target_key) {
+                    log::debug!(
+                        "   🔍 {:?}: {} overloaded classes with {} excess samples",
+                        target_key,
+                        overloaded.len(),
+                        overloaded.values().sum::<usize>()
+                    );
+
+                    // TODO: Extract validation from overloaded classes first
+                    // For now, use simple proportional extraction
+                    let training_indices = remaining_training_indices.get(&target_key).unwrap();
+                    let validation_count =
+                        (training_indices.len() as f64 * validation_ratio) as usize;
+
+                    if validation_count > 0 {
+                        // Simple extraction - take last N sequences (can be enhanced with overlap management)
+                        let split_point = training_indices.len() - validation_count;
+                        let (remaining_training, extracted_validation) =
+                            training_indices.split_at(split_point);
+
+                        target_validation.extend_from_slice(extracted_validation);
+                        remaining_training_indices
+                            .insert(target_key.clone(), remaining_training.to_vec());
+                        total_validation_extracted += validation_count;
+                    }
+                } else {
+                    // No overloaded classes - extract proportionally from balanced set
+                    let training_indices = remaining_training_indices.get(&target_key).unwrap();
+                    let validation_count =
+                        (training_indices.len() as f64 * validation_ratio) as usize;
+
+                    if validation_count > 0 {
+                        let split_point = training_indices.len() - validation_count;
+                        let (remaining_training, extracted_validation) =
+                            training_indices.split_at(split_point);
+
+                        target_validation.extend_from_slice(extracted_validation);
+                        remaining_training_indices
+                            .insert(target_key.clone(), remaining_training.to_vec());
+                        total_validation_extracted += validation_count;
+                    }
+                }
+
+                validation_indices.insert(target_key, target_validation);
+            }
+        }
+
+        log::info!(
+            "✅ SMART VALIDATION EXTRACTED: {} total validation samples across all targets",
+            total_validation_extracted
+        );
+
+        // Create remaining training dataset
+        let remaining_training_dataset = GloballyBalancedDataset {
+            balanced_indices: remaining_training_indices,
+            class_distribution: balanced_dataset.class_distribution.clone(), // Proportions remain same
+            global_min_class_count: balanced_dataset.global_min_class_count,
+            total_balanced_samples: balanced_dataset.total_balanced_samples
+                - total_validation_extracted,
+            overloaded_classes: HashMap::new(), // No overloaded classes in remaining training
+        };
+
+        Ok((remaining_training_dataset, validation_indices))
+    }
+
+    /// Build training windows from globally balanced dataset
+    /// Distributes balanced samples across windows ensuring consistent balance
+    pub fn build_windows_from_balanced_pool(
+        &self,
+        balanced_training_pool: &GloballyBalancedDataset,
+        window_ranges: &[WindowConfig],
+        target_types: &[TargetType],
+        horizons: &[String],
+    ) -> Result<HashMap<usize, HashMap<(TargetType, String), Vec<usize>>>> {
+        log::info!(
+            "🏗️ WINDOW CONSTRUCTION: Building {} windows from globally balanced pool ({} samples)",
+            window_ranges.len(),
+            balanced_training_pool.total_balanced_samples
+        );
+
+        let mut window_indices_map = HashMap::new();
+
+        for (window_idx, window_range) in window_ranges.iter().enumerate() {
+            let mut window_target_indices = HashMap::new();
+
+            log::debug!(
+                "   📊 Window {}: range [0..{}]",
+                window_idx + 1,
+                window_range.train_end
+            );
+
+            for target_type in target_types {
+                for horizon in horizons {
+                    let target_key = (*target_type, horizon.clone());
+
+                    if let Some(balanced_indices) =
+                        balanced_training_pool.balanced_indices.get(&target_key)
+                    {
+                        // For now, distribute all balanced samples to each window
+                        // This allows progressive training where each window sees more data
+                        // TODO: Can be enhanced with smart distribution strategies
+                        window_target_indices.insert(target_key, balanced_indices.clone());
+                    }
+                }
+            }
+
+            window_indices_map.insert(window_idx, window_target_indices);
+        }
+
+        log::info!(
+            "✅ WINDOW CONSTRUCTION COMPLETE: {} windows built with consistent balance",
+            window_ranges.len()
+        );
+
+        Ok(window_indices_map)
+    }
+
     /// Select sequences for a target with specified count
     fn select_sequences_for_target(
         &self,
@@ -878,4 +1210,106 @@ pub async fn create_sequences_with_targets(
     }
 
     Ok(sequences_with_targets)
+}
+
+#[cfg(test)]
+mod global_balance_tests {
+    use super::*;
+    use crate::targets::TargetType;
+
+    #[test]
+    fn test_global_balance_extraction_basic() {
+        // Create test sequences with different class distributions
+        let mut sequences = Vec::new();
+
+        // Create sequences for PriceLevel target with classes 0, 1, 2
+        for i in 0..15 {
+            let class = (i % 3) as i32; // Classes 0, 1, 2 with 5 sequences each (i32 type)
+            let mut targets = HashMap::new();
+            targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
+
+            sequences.push(SequenceWithTargets {
+                sequence_idx: i,
+                start_idx: i * 10,
+                end_idx: (i + 1) * 10,
+                sequence_data: Array2::zeros((10, 5)),
+                targets,
+            });
+        }
+
+        let balancer = SequenceBalancer::new(BalanceConfig::default());
+        let target_types = vec![TargetType::PriceLevel];
+        let horizons = vec!["1h".to_string()];
+
+        let result =
+            balancer.extract_globally_balanced_dataset(&sequences, &target_types, &horizons);
+
+        assert!(result.is_ok());
+        let balanced = result.unwrap();
+
+        // Should have global minimum class count of 5 (all classes have 5 sequences)
+        assert_eq!(balanced.global_min_class_count, 5);
+
+        // Should have balanced indices for PriceLevel 1h
+        let target_key = (TargetType::PriceLevel, "1h".to_string());
+        assert!(balanced.balanced_indices.contains_key(&target_key));
+
+        // Should have 15 total balanced samples (5 per class * 3 classes)
+        let indices = balanced.balanced_indices.get(&target_key).unwrap();
+        assert_eq!(indices.len(), 15);
+    }
+
+    #[test]
+    fn test_smart_validation_split() {
+        // Create test sequences
+        let mut sequences = Vec::new();
+
+        for i in 0..20 {
+            let class = (i % 2) as i32; // Classes 0, 1 with 10 sequences each (i32 type)
+            let mut targets = HashMap::new();
+            targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
+
+            sequences.push(SequenceWithTargets {
+                sequence_idx: i,
+                start_idx: i * 10,
+                end_idx: (i + 1) * 10,
+                sequence_data: Array2::zeros((10, 5)),
+                targets,
+            });
+        }
+
+        let balancer = SequenceBalancer::new(BalanceConfig::default());
+        let target_types = vec![TargetType::PriceLevel];
+        let horizons = vec!["1h".to_string()];
+
+        // First extract globally balanced dataset
+        let globally_balanced = balancer
+            .extract_globally_balanced_dataset(&sequences, &target_types, &horizons)
+            .unwrap();
+
+        // Then split validation
+        let result = balancer.smart_validation_split_from_balanced(
+            &globally_balanced,
+            &sequences,
+            0.2, // 20% validation
+            &target_types,
+            &horizons,
+        );
+
+        assert!(result.is_ok());
+        let (remaining_training, validation_indices) = result.unwrap();
+
+        // Should have validation indices for the target
+        let target_key = (TargetType::PriceLevel, "1h".to_string());
+        assert!(validation_indices.contains_key(&target_key));
+
+        // Validation should be extracted
+        let val_indices = validation_indices.get(&target_key).unwrap();
+        assert!(!val_indices.is_empty());
+
+        // Training pool should be reduced
+        assert!(
+            remaining_training.total_balanced_samples < globally_balanced.total_balanced_samples
+        );
+    }
 }

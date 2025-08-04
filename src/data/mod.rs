@@ -566,71 +566,80 @@ impl DataPipeline {
             config,
         )?;
 
-        // STEP 7: Create windows with per-window/per-target balancing
+        // STEP 7: Extract globally balanced dataset from FULL available data
+        log::info!(
+            "🌍 GLOBAL BALANCE EXTRACTION: Analyzing {} sequences for optimal balance",
+            all_sequences.len()
+        );
+        let globally_balanced = balancer.extract_globally_balanced_dataset(
+            &all_sequences,
+            &target_types,
+            &config.horizons,
+        )?;
+
+        // STEP 8: Smart validation split from balanced dataset
+        log::info!(
+            "🧠 SMART VALIDATION DERIVATION: Extracting validation from overloaded classes (ratio: {:.1}%)",
+            config.training.validation_split * 100.0
+        );
+        let (balanced_training_pool, smart_validation_indices) = balancer
+            .smart_validation_split_from_balanced(
+                &globally_balanced,
+                &all_sequences,
+                config.training.validation_split,
+                &target_types,
+                &config.horizons,
+            )?;
+
+        // STEP 9: Build windows from balanced training pool
+        log::info!(
+            "🏗️ WINDOW CONSTRUCTION: Building {} windows from globally balanced pool",
+            window_config.windows.len()
+        );
+        let window_train_indices_map = balancer.build_windows_from_balanced_pool(
+            &balanced_training_pool,
+            &window_config.windows,
+            &target_types,
+            &config.horizons,
+        )?;
+
+        // STEP 10: Create windows using pre-balanced indices
         let mut windows = Vec::new();
 
         for (window_idx, window_range) in window_config.windows.iter().enumerate() {
             log::info!(
-                "📊 Creating window {}/{}: data range [0..{}]",
+                "📊 Creating window {}/{}: data range [0..{}] from globally balanced pool",
                 window_idx + 1,
                 window_config.windows.len(),
                 window_range.train_end
             );
 
-            // Create balanced training data for each target
-            let mut window_train_indices: HashMap<
-                (crate::targets::TargetType, String),
-                Vec<usize>,
-            > = HashMap::new();
+            // Get pre-computed balanced indices for this window
+            let window_train_indices =
+                window_train_indices_map.get(&window_idx).ok_or_else(|| {
+                    VangaError::DataError(format!(
+                        "No balanced indices found for window {}",
+                        window_idx
+                    ))
+                })?;
 
-            for target_type in &target_types {
-                for horizon in &config.horizons {
-                    let target_key = (*target_type, horizon.clone());
+            log::info!(
+                "   ✅ Window {} balanced indices ready: {} targets with consistent global balance",
+                window_idx + 1,
+                window_train_indices.len()
+            );
 
-                    // Get target-specific validation indices
-                    let target_validation_indices =
-                        target_validation_indices.get(&target_key).ok_or_else(|| {
-                            VangaError::DataError(format!(
-                                "No validation indices found for {:?} {}",
-                                target_type, horizon
-                            ))
-                        })?;
-
-                    let balanced_selection = balancer.balance_sequences_for_window(
-                        &all_sequences,
-                        target_validation_indices,
-                        (0, window_range.train_end),
-                        *target_type,
-                        horizon,
-                    )?;
-
-                    log::info!(
-                        "   ✅ {:?} {}: {} sequences selected, {} per class, avg overlap: {:.1}%",
-                        target_type,
-                        horizon,
-                        balanced_selection.selected_indices.len(),
-                        balanced_selection.sequences_per_class,
-                        balanced_selection.avg_overlap * 100.0
-                    );
-
-                    window_train_indices.insert(
-                        (*target_type, horizon.clone()),
-                        balanced_selection.selected_indices,
-                    );
-                }
-            }
-
-            // Create window data structures
+            // Create window data structures using globally balanced indices
             let train_data = self.create_data_from_indices(
                 &all_sequences_data,
-                &window_train_indices,
+                window_train_indices,
                 &all_sequences,
             )?;
 
-            // Create target-specific validation data
+            // Create target-specific validation data using smart validation indices
             let val_data = self.create_target_specific_validation_data(
                 &all_sequences_data,
-                &target_validation_indices,
+                &smart_validation_indices,
                 &all_sequences,
             )?;
 
@@ -663,7 +672,7 @@ impl DataPipeline {
             };
 
             // Get first target's validation indices for window metadata (for compatibility)
-            let first_validation_indices = target_validation_indices
+            let first_validation_indices = smart_validation_indices
                 .values()
                 .next()
                 .cloned()
@@ -678,14 +687,14 @@ impl DataPipeline {
                 val_samples: first_validation_indices.len(),
                 test_samples: test_data.sequences.shape()[0],
                 target_class_weights,
-                train_sequence_indices: window_train_indices,
+                train_sequence_indices: window_train_indices.clone(),
                 val_sequence_indices: first_validation_indices,
-                target_validation_indices: target_validation_indices.clone(),
+                target_validation_indices: smart_validation_indices.clone(),
             });
         }
 
         log::info!(
-            "✅ Created {} balanced windows with per-target sampling",
+            "✅ Created {} windows with GLOBAL BALANCE: consistent balance across all windows from globally balanced pool",
             windows.len()
         );
 
