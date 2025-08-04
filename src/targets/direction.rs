@@ -520,7 +520,7 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Momentum-Based Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}]",
+        "📊 Momentum-Based Direction Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}] (BEFORE balanced selection)",
         horizon,
         valid_targets,
         imbalance_ratio,

@@ -1,5 +1,5 @@
 use super::SequenceGenerator;
-use crate::config::{training::DataConfig, ModelConfig};
+use crate::config::{training::DataConfig, ModelConfig, FeatureConfig};
 use polars::prelude::*;
 
 #[cfg(test)]
@@ -38,8 +38,9 @@ mod tests {
         };
         let gen = SequenceGenerator::default(); // Use default (no overlap)
         let data_config = DataConfig::default();
+        let feature_config = FeatureConfig::default();
         let res = gen
-            .generate_training_sequences(df, &horizons, &model_config, &data_config)
+            .generate_training_sequences(df, &horizons, &model_config, &data_config, &feature_config)
             .await;
         assert!(res.is_ok());
     }
@@ -54,8 +55,9 @@ mod tests {
         };
         let gen = SequenceGenerator::default(); // Use default (no overlap)
         let data_config = DataConfig::default();
+        let feature_config = FeatureConfig::default();
         let res = gen
-            .generate_training_sequences(df, &horizons, &model_config, &data_config)
+            .generate_training_sequences(df, &horizons, &model_config, &data_config, &feature_config)
             .await;
         assert!(res.is_err());
     }

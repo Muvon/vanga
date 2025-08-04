@@ -21,6 +21,9 @@ pub enum TrainingContext<'a> {
         /// Target-specific class weights for balanced training
         /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
         target_class_weights: Option<&'a HashMap<String, Vec<f32>>>,
+        /// Target-specific validation indices for balanced validation
+        /// Key: (target_type, horizon) -> validation sequence indices
+        target_validation_indices: Option<&'a HashMap<(TargetType, String), Vec<usize>>>,
     },
     /// Continues training from a previous state.
     Continue {
@@ -117,6 +120,32 @@ impl MultiTargetLSTMModel {
                 target_name
             );
             TargetType::PriceLevel
+        }
+    }
+
+    /// Extract horizon from target name (e.g., "price_level_1h" -> "1h")
+    fn extract_horizon_from_target_name(target_name: &str) -> Option<String> {
+        // Target names follow pattern: "{type}_{horizon}" (e.g., "price_level_1h", "direction_4h")
+        if let Some(last_underscore_pos) = target_name.rfind('_') {
+            let horizon = &target_name[last_underscore_pos + 1..];
+            // Validate horizon format (should be like "1h", "4h", "1d", etc.)
+            if horizon.len() >= 2
+                && (horizon.ends_with('h') || horizon.ends_with('d') || horizon.ends_with('m'))
+            {
+                Some(horizon.to_string())
+            } else {
+                log::warn!(
+                    "Invalid horizon format '{}' extracted from target name '{}', expected format like '1h', '4h', '1d'",
+                    horizon, target_name
+                );
+                None
+            }
+        } else {
+            log::warn!(
+                "Could not extract horizon from target name '{}', expected format like 'price_level_1h'",
+                target_name
+            );
+            None
         }
     }
 
@@ -255,6 +284,7 @@ impl MultiTargetLSTMModel {
                 val_sequences,
                 val_targets,
                 target_class_weights,
+                target_validation_indices,
             } => {
                 self.train_internal(
                     sequences,
@@ -262,6 +292,7 @@ impl MultiTargetLSTMModel {
                     val_sequences,
                     val_targets,
                     target_class_weights,
+                    target_validation_indices,
                     config,
                 )
                 .await
@@ -331,6 +362,7 @@ impl MultiTargetLSTMModel {
     }
 
     /// Internal training logic for all target models.
+    #[allow(clippy::too_many_arguments)]
     async fn train_internal(
         &mut self,
         sequences: &Array3<f64>,
@@ -338,6 +370,7 @@ impl MultiTargetLSTMModel {
         val_sequences: Option<&Array3<f64>>,
         val_targets: Option<&Array2<f64>>,
         target_class_weights: Option<&HashMap<String, Vec<f32>>>,
+        target_validation_indices: Option<&HashMap<(TargetType, String), Vec<usize>>>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!(
@@ -400,8 +433,6 @@ impl MultiTargetLSTMModel {
 
             // Extract single target column for this model
             let single_target = targets.column(i).to_owned().insert_axis(Axis(1));
-            let val_single_target =
-                val_targets.map(|vt| vt.column(i).to_owned().insert_axis(Axis(1)));
 
             log::debug!(
                 "Target {} shape: {:?}, values range: [{:.4}, {:.4}]",
@@ -473,13 +504,98 @@ impl MultiTargetLSTMModel {
                 None
             };
 
+            // Extract target-specific validation sequences using balanced indices
+            let (target_val_sequences, target_val_targets) = if let (Some(val_seq), Some(val_tgt)) =
+                (val_sequences, val_targets)
+            {
+                // Get target type from model
+                let target_type = if let Some((_, target_type)) = &model.target_context {
+                    *target_type
+                } else {
+                    // Fallback: infer from target name
+                    Self::get_target_type_from_name(target_name)
+                };
+
+                // Extract horizon from target name (e.g., "price_level_1h" -> "1h")
+                let horizon =
+                    Self::extract_horizon_from_target_name(target_name).unwrap_or_else(|| {
+                        // Fallback: use first horizon from config or default
+                        if !config.horizons.is_empty() {
+                            config.horizons.first().unwrap().clone()
+                        } else {
+                            "1h".to_string()
+                        }
+                    });
+
+                // Check if we have target-specific validation indices
+                if let Some(validation_indices_map) = target_validation_indices {
+                    let target_key = (target_type, horizon.clone());
+
+                    if let Some(target_val_indices) = validation_indices_map.get(&target_key) {
+                        log::info!(
+                            "🎯 Target {} ({:?} {}): using {} balanced validation sequences",
+                            target_name,
+                            target_type,
+                            horizon,
+                            target_val_indices.len()
+                        );
+
+                        // Extract sequences using target-specific indices
+                        let num_val_sequences = target_val_indices.len();
+                        let sequence_length = val_seq.shape()[1];
+                        let num_features = val_seq.shape()[2];
+
+                        let mut target_val_seq = ndarray::Array3::zeros((
+                            num_val_sequences,
+                            sequence_length,
+                            num_features,
+                        ));
+                        let mut target_val_tgt = ndarray::Array2::zeros((num_val_sequences, 1));
+
+                        for (new_idx, &orig_idx) in target_val_indices.iter().enumerate() {
+                            if orig_idx < val_seq.shape()[0] {
+                                target_val_seq
+                                    .slice_mut(ndarray::s![new_idx, .., ..])
+                                    .assign(&val_seq.slice(ndarray::s![orig_idx, .., ..]));
+
+                                target_val_tgt[[new_idx, 0]] = val_tgt[[orig_idx, i]];
+                            }
+                        }
+
+                        (Some(target_val_seq), Some(target_val_tgt))
+                    } else {
+                        log::warn!(
+                            "⚠️ No target-specific validation indices found for {:?} {}, using fallback",
+                            target_type,
+                            horizon
+                        );
+                        // Fallback to original logic
+                        let target_val_seq = val_seq.to_owned();
+                        let target_val_tgt = val_tgt.slice(ndarray::s![.., i..i + 1]).to_owned();
+                        (Some(target_val_seq), Some(target_val_tgt))
+                    }
+                } else {
+                    // No target-specific indices provided, use all validation data
+                    log::info!(
+                        "🎯 Target {}: using all {} validation sequences (no target-specific indices)",
+                        target_name,
+                        val_seq.shape()[0]
+                    );
+                    let target_val_seq = val_seq.to_owned();
+                    let target_val_tgt = val_tgt.slice(ndarray::s![.., i..i + 1]).to_owned();
+                    (Some(target_val_seq), Some(target_val_tgt))
+                }
+            } else {
+                (None, None)
+            };
+
             match model
                 .train(
                     sequences,
                     &single_target,
                     config,
-                    val_sequences,
-                    val_single_target.as_ref(),
+                    target_val_sequences.as_ref(),
+                    target_val_targets.as_ref(),
                     target_specific_weights,
                 )
                 .await

@@ -5,3 +5,6 @@
 pub mod test_reproducible_training;
 pub mod test_seed_comprehensive;
 pub mod test_seed_reproducibility;
+
+// Target-specific validation test
+pub mod target_specific_validation_test;

@@ -94,6 +94,8 @@ mod candle_integration_tests {
                     targets: &targets,
                     val_sequences: None,
                     val_targets: None,
+                    target_class_weights: None,
+                    target_validation_indices: None,
                 },
                 &training_config,
             )
@@ -162,6 +164,8 @@ mod candle_integration_tests {
                     targets: &targets,
                     val_sequences: None,
                     val_targets: None,
+                    target_class_weights: None,
+                    target_validation_indices: None,
                 },
                 &training_config,
             )
