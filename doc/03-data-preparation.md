@@ -72,27 +72,20 @@ pub fn validate(df: &DataFrame) -> Result<()> {
 ```
 
 ### **Data Quality Checks**
-- ✅ **Required Columns**: Ensures all OHLCV columns are present
-- ✅ **Data Types**: Validates numeric types for prices and volume
-- ✅ **OHLC Relationships**: Ensures high ≥ low, close within [low, high]
+- ✅ **Required Columns**: Ensures all OHLCV columns are present (timestamp, open, high, low, close, volume)
+- ✅ **Data Types**: Validates numeric types for prices and volume, datetime/string for timestamp
+- ✅ **OHLC Relationships**: Ensures high ≥ low, close within [low, high], open within [low, high]
 - ✅ **No Negative Values**: Validates prices and volume are non-negative
-- ✅ **Timestamp Uniqueness**: Ensures no duplicate timestamps
-- ✅ **Column Standardization**: Automatically standardizes column names
+- ✅ **Timestamp Validation**: Ensures timestamps are unique and properly formatted
+- ✅ **Column Standardization**: Automatically standardizes column names (case-insensitive)
+- ✅ **File Format Validation**: Ensures .csv extension and file existence
 
 ## Data Processing Pipeline
 
 ### **Loading Process**
 ```rust
 // Implemented in src/data/loader.rs
-impl DataLoader {
-    pub async fn load_csv<P: AsRef<Path>>(&self, path: P) -> Result<DataFrame> {
-        // 1. Load CSV with Polars
-        // 2. Validate required columns
-        // 3. Standardize column names
-        // 4. Perform data validation
-        // 5. Return clean DataFrame
-    }
-}
+impl DataLoader {\n    pub async fn load_csv<P: AsRef<Path>>(&self, path: P) -> Result<DataFrame> {\n        // 1. Validate file exists and is CSV format\n        // 2. Load CSV with Polars (chunked processing for large files)\n        // 3. Standardize column names (case-insensitive)\n        // 4. Validate required columns and data types\n        // 5. Perform data quality checks\n        // 6. Return clean DataFrame\n    }\n\n    // PARALLEL LOADING: Load multiple CSV files concurrently\n    pub async fn load_multiple_csv<P: AsRef<Path> + Sync>(\n        &self,\n        paths: &[P],\n    ) -> Result<Vec<DataFrame>> {\n        // Parallel processing with rayon for multiple files\n    }\n}
 ```
 
 ### **Feature Engineering**

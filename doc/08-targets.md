@@ -1,46 +1,64 @@
 # Multi-Target Prediction System
 
-The VANGA LSTM cryptocurrency forecasting system implements a comprehensive multi-target prediction framework designed specifically for cryptocurrency market analysis.
+The VANGA LSTM cryptocurrency forecasting system implements a comprehensive **3-target × 5-class prediction framework** designed specifically for cryptocurrency market analysis.
 
-**Status**: ✅ **Complete Implementation** - All target types functional
+**Status**: ✅ **Complete Implementation** - All target types functional with unified 5-class system
 
 ## Architecture Overview
 
-### **Multi-Target Loss Function Integration**
+### **3 Targets × 5 Classes Each = 15 Total Outputs**
 
-VANGA now implements proper weighted multi-target loss calculation to address the critical issue of naive MSE summation:
+VANGA implements a unified multi-target system where each target type outputs exactly **5 categorical classes**:
 
 ```rust
-// Enhanced modular LSTM with CryptoLossFunction integration
+// Target system architecture - src/targets/mod.rs
+pub enum TargetType {
+    PriceLevel,     // 5-class price level classification
+    Direction,      // 5-class directional movement
+    Volatility,     // 5-class volatility regime
+}
+
+// Each target outputs 5 classes using one-hot encoding
+pub const NUM_CLASSES: usize = 5;
+// Total model output: 3 targets × 5 classes = 15 outputs per prediction
+```
+
+### **Multi-Target Loss Function Integration**
+
+VANGA implements proper weighted multi-target loss calculation with class weighting for extreme imbalance:
+
+```rust
+// Enhanced modular LSTM with weighted loss calculation
 // Implemented in src/model/lstm/loss.rs
 impl LSTMModel {
-    /// Calculate loss using configured loss function or default MSE
-    fn calculate_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        if let Some(ref loss_fn) = self.loss_function {
-            // Convert tensors to Array2 for CryptoLossFunction
-            let pred_array = self.tensor_to_array2(predictions)?;
-            let target_array = self.tensor_to_array2(targets)?;
+    /// Calculate weighted soft cross-entropy loss for categorical targets
+    pub fn calculate_weighted_soft_crossentropy_loss(
+        &self,
+        predictions: &Tensor,
+        targets: &Tensor,
+        class_weights: Option<&Vec<f32>>,
+    ) -> Result<Tensor> {
+        // Apply class weights for extreme imbalance (248x weight for rare classes)
+        if let Some(weights) = class_weights {
+            let weights_tensor = Tensor::from_vec(weights.clone(), weights.len(), &self.device)?;
+            let weights_broadcast = weights_tensor.broadcast_as(targets.shape())?;
 
-            // Calculate weighted loss with market regime awareness
-            let market_regime = MarketRegime::MediumVolatility;
-            let loss_value = loss_fn.calculate_loss(&pred_array, &target_array, market_regime)?;
-
-            // Convert back to tensor for backpropagation
-            let loss_tensor = Tensor::new(&[loss_value as f32], &self.device)?;
-            Ok(loss_tensor)
+            // Weighted cross-entropy with proper broadcasting
+            let weighted_targets = targets.mul(&weights_broadcast)?.contiguous()?;
+            predictions.cross_entropy_with_logits(&weighted_targets)
         } else {
-            // Backward compatible MSE fallback
-            predictions.sub(targets)?.sqr()?.mean_all()
+            // Standard cross-entropy for balanced datasets
+            predictions.cross_entropy_with_logits(targets)
         }
     }
 }
 ```
 
-**Key Improvements:**
-- **Proper Weighting**: Direction prediction (50%) prioritized for trading signals
-- **Loss Scale Fix**: Values now 0.1-10 range instead of 1-11, making min_delta meaningful
-- **Market Regime Integration**: Uses MarketRegime enum for context-aware loss calculation
-- **Seamless Integration**: Bridges Candle Tensor and ndarray Array2 types
+**Key Features:**
+- **Class Weighting**: Handles extreme class imbalance (248x weight for rare classes)
+- **Tensor Broadcasting**: Proper shape matching with `broadcast_as()`
+- **Gradient Flow**: Maintains proper gradient flow for backpropagation
+- **Loss Consistency**: Same loss calculation for training and validation
 
 ### **Multi-Target Architecture**
 
@@ -97,83 +115,100 @@ impl PreparedTargets {
 }
 ```
 
-## Target Types
+## Target Types (3 Targets × 5 Classes Each)
 
-### **1. Price Level Targets**
+### **1. Price Level Targets (5-Class System)**
 
-**Purpose**: Quantile-based price level classification for regression-style prediction
+**Purpose**: VWAP-weighted price level classification using percentage-based quantiles for symbol-agnostic difficulty
 
 **Implementation**: `src/targets/price_levels.rs`
 ```rust
-pub fn generate_price_level_targets(
+pub fn generate_price_level_targets_with_targets_config(
     df: &DataFrame,
     horizons: &[String],
+    config: &TargetsConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let mut targets = HashMap::new();
-    let close_prices = extract_close_prices(df)?;
 
     for horizon in horizons {
-        let steps = parse_horizon_to_steps(horizon)?;
-        let price_targets = calculate_price_level_targets(&close_prices, steps, &PriceLevelConfig::default())?;
-        targets.insert(horizon.clone(), price_targets);
-    }
+        let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let mut horizon_targets = Vec::new();
 
-    Ok(targets)
-}
+        // Generate targets for each sequence
+        for &seq_start in sequence_indices {
+            let seq_end = seq_start + sequence_length;
+            let horizon_end = seq_end + horizon_steps;
 
-fn calculate_price_level_targets(
-    prices: &[f64],
-    horizon_steps: usize,
-    config: &PriceLevelConfig,
-) -> Result<Vec<i32>> {
-    let mut targets = vec![-1; prices.len()];
+            if horizon_end < df.height() {
+                // Extract sequence and horizon data
+                let sequence_ohlcv = extract_ohlcv_range(df, seq_start, seq_end)?;
+                let horizon_ohlcv = extract_ohlcv_range(df, seq_end, horizon_end)?;
 
-    // Calculate forward returns
-    let mut forward_returns = Vec::new();
-    for i in 0..prices.len().saturating_sub(horizon_steps) {
-        let current_price = prices[i];
-        let future_price = prices[i + horizon_steps];
-        let return_pct = (future_price - current_price) / current_price;
-        forward_returns.push(return_pct);
-    }
-
-    // Calculate dynamic quantiles
-    let quantiles = calculate_quantiles(&forward_returns, config.num_bins, config.volatility_adjustment)?;
-
-    // Classify returns into levels
-    for (i, &return_val) in forward_returns.iter().enumerate() {
-        targets[i] = classify_price_to_level(return_val, &quantiles);
-    }
-
-    Ok(targets)
-}
-```
-
-**Configuration**:
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PriceLevelConfig {
-    pub enabled: bool,
-    pub horizons: Vec<String>,
-    pub num_bins: usize,
-    pub volatility_adjustment: bool,
-}
-
-impl Default for PriceLevelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            horizons: vec!["1h".to_string(), "4h".to_string(), "1d".to_string(), "7d".to_string()],
-            num_bins: 7,
-            volatility_adjustment: true,
+                // Classify using VWAP-weighted analysis
+                let class = classify_price_level_with_momentum(
+                    &sequence_ohlcv,
+                    &horizon_ohlcv,
+                    config,
+                )?;
+                horizon_targets.push(class);
+            } else {
+                horizon_targets.push(-1); // Invalid target
+            }
         }
+
+        targets.insert(horizon.clone(), horizon_targets);
     }
+
+    Ok(targets)
+}
+
+/// Classify price level using VWAP-weighted momentum analysis
+pub fn classify_price_level_with_momentum(
+    sequence_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
+    config: &TargetsConfig,
+) -> Result<i32> {
+    // Calculate VWAP-weighted baseline and horizon prices
+    let baseline_price = calculate_vwap_with_momentum(sequence_ohlcv, config.momentum_weighting)?;
+    let horizon_price = get_horizon_vwap(horizon_ohlcv)?;
+
+    // Calculate percentage change
+    let percentage_change = (horizon_price - baseline_price) / baseline_price;
+
+    // Calculate adaptive percentiles from sequence data
+    let [adaptive_lower, adaptive_upper] = calculate_adaptive_percentiles_from_sequence(
+        sequence_ohlcv,
+        config.base_sensitivity,
+        config.extreme_multiplier,
+    )?;
+
+    // Classify into 5 classes using percentage boundaries
+    let class = if percentage_change <= adaptive_lower * config.extreme_multiplier {
+        0 // Strong Down
+    } else if percentage_change <= adaptive_lower {
+        1 // Moderate Down
+    } else if percentage_change <= adaptive_upper {
+        2 // Neutral
+    } else if percentage_change <= adaptive_upper * config.extreme_multiplier {
+        3 // Moderate Up
+    } else {
+        4 // Strong Up
+    };
+
+    Ok(class)
 }
 ```
 
-**Output**: Integer classifications (0 to bins-1) representing price quantile levels
+**5-Class Output**:
+- **Class 0**: Strong Down (< -extreme_threshold)
+- **Class 1**: Moderate Down (-extreme_threshold to -base_threshold)
+- **Class 2**: Neutral (-base_threshold to +base_threshold)
+- **Class 3**: Moderate Up (+base_threshold to +extreme_threshold)
+- **Class 4**: Strong Up (> +extreme_threshold)
 
-### **2. Direction Targets**
+### **2. Direction Targets (5-Class System)**
 
 **Purpose**: Directional price movement classification for trend prediction
 
@@ -182,22 +217,104 @@ impl Default for PriceLevelConfig {
 pub fn generate_direction_targets(
     df: &DataFrame,
     horizons: &[String],
+    config: &TargetsConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let mut targets = HashMap::new();
-    let close_prices = extract_close_prices(df)?;
 
     for horizon in horizons {
-        let steps = parse_horizon_to_steps(horizon)?;
-        let direction_targets = calculate_direction_targets(&close_prices, steps, &DirectionConfig::default())?;
-        targets.insert(horizon.clone(), direction_targets);
+        let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let mut horizon_targets = Vec::new();
+
+        for &seq_start in sequence_indices {
+            let seq_end = seq_start + sequence_length;
+            let horizon_end = seq_end + horizon_steps;
+
+            if horizon_end < df.height() {
+                // Extract sequence and horizon data
+                let sequence_ohlcv = extract_ohlcv_range(df, seq_start, seq_end)?;
+                let horizon_ohlcv = extract_ohlcv_range(df, seq_end, horizon_end)?;
+
+                // Classify directional movement
+                let class = classify_direction_movement(
+                    &sequence_ohlcv,
+                    &horizon_ohlcv,
+                    config,
+                )?;
+                horizon_targets.push(class);
+            } else {
+                horizon_targets.push(-1); // Invalid target
+            }
+        }
+
+        targets.insert(horizon.clone(), horizon_targets);
     }
 
     Ok(targets)
 }
+```
 
-fn calculate_direction_targets(
-    prices: &[f64],
-    horizon_steps: usize,
+**5-Class Output**:
+- **Class 0**: DUMP (extreme downward movement)
+- **Class 1**: DOWN (moderate downward movement)
+- **Class 2**: SIDEWAYS (minimal movement)
+- **Class 3**: UP (moderate upward movement)
+- **Class 4**: PUMP (extreme upward movement)
+
+### **3. Volatility Targets (5-Class System)**
+
+**Purpose**: Volatility regime classification for risk assessment
+
+**Implementation**: `src/targets/volatility.rs`
+```rust
+pub fn generate_volatility_targets(
+    df: &DataFrame,
+    horizons: &[String],
+    config: &TargetsConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
+) -> Result<HashMap<String, Vec<i32>>> {
+    let mut targets = HashMap::new();
+
+    for horizon in horizons {
+        let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let mut horizon_targets = Vec::new();
+
+        for &seq_start in sequence_indices {
+            let seq_end = seq_start + sequence_length;
+            let horizon_end = seq_end + horizon_steps;
+
+            if horizon_end < df.height() {
+                // Extract sequence and horizon data
+                let sequence_ohlcv = extract_ohlcv_range(df, seq_start, seq_end)?;
+                let horizon_ohlcv = extract_ohlcv_range(df, seq_end, horizon_end)?;
+
+                // Classify volatility regime
+                let class = classify_volatility_regime(
+                    &sequence_ohlcv,
+                    &horizon_ohlcv,
+                    config,
+                )?;
+                horizon_targets.push(class);
+            } else {
+                horizon_targets.push(-1); // Invalid target
+            }
+        }
+
+        targets.insert(horizon.clone(), horizon_targets);
+    }
+
+    Ok(targets)
+}
+```
+
+**5-Class Output**:
+- **Class 0**: VeryLow (minimal volatility)
+- **Class 1**: Low (below average volatility)
+- **Class 2**: Medium (average volatility)
+- **Class 3**: High (above average volatility)
+- **Class 4**: VeryHigh (extreme volatility)
     config: &DirectionConfig,
 ) -> Result<Vec<i32>> {
     let mut targets = vec![-1; prices.len()];
@@ -227,9 +344,11 @@ fn calculate_direction_targets(
 ```
 
 **Output Classes**:
-- `0`: **Down** - Significant price decrease
-- `1`: **Sideways** - Minimal price change
-- `2`: **Up** - Significant price increase
+- `0`: **Strong Down** - Extreme price decrease (DUMP)
+- `1`: **Moderate Down** - Moderate price decrease (DOWN)
+- `2`: **Sideways** - Minimal price change (NEUTRAL)
+- `3`: **Moderate Up** - Moderate price increase (UP)
+- `4`: **Strong Up** - Extreme price increase (PUMP)
 
 **Configuration**:
 ```rust
@@ -375,22 +494,24 @@ fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
 
 ## Configuration System
 
-### **Multi-Target Configuration**
+### **Unified TargetsConfig**
 ```rust
-// Implemented in src/config/features.rs
+// Implemented in src/config/model.rs
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultiTargetConfig {
-    pub price_levels: PriceLevelConfig,
-    pub direction: DirectionConfig,
-    pub volatility: VolatilityConfig,
+pub struct TargetsConfig {
+    pub base_sensitivity: f64,      // Base threshold for classification (default: 0.02 = 2%)
+    pub balance_target: f64,        // Target balance for class distribution (default: 0.2 = 20%)
+    pub momentum_weighting: f64,    // Momentum factor for VWAP calculation (default: 1.2)
+    pub extreme_multiplier: f64,    // Multiplier for extreme classes (default: 2.0)
 }
 
-impl Default for MultiTargetConfig {
+impl Default for TargetsConfig {
     fn default() -> Self {
         Self {
-            price_levels: PriceLevelConfig::default(),
-            direction: DirectionConfig::default(),
-            volatility: VolatilityConfig::default(),
+            base_sensitivity: 0.02,      // 2% base threshold
+            balance_target: 0.2,         // 20% target balance
+            momentum_weighting: 1.2,     // 20% momentum weighting
+            extreme_multiplier: 2.0,     // 2x multiplier for extreme classes
         }
     }
 }
@@ -398,25 +519,65 @@ impl Default for MultiTargetConfig {
 
 ### **TOML Configuration Example**
 ```toml
-[targets.price_levels]
-enabled = true
-horizons = ["1h", "4h", "1d", "7d"]
-num_bins = 7
-volatility_adjustment = true
+# Model configuration with targets
+[model.targets]
+base_sensitivity = 0.02        # 2% base threshold for classification
+balance_target = 0.2           # Target 20% balance for each class
+momentum_weighting = 1.2       # 20% momentum weighting for VWAP
+extreme_multiplier = 2.0       # 2x multiplier for extreme classes (Strong Down/Up)
 
-[targets.direction]
-enabled = true
-horizons = ["1h", "4h", "1d", "7d"]
-base_threshold = 0.02
-volatility_multiplier = 1.5
-volatility_window = 24
+# Training configuration
+[training]
+horizons = ["1h", "4h", "1d"]  # Prediction horizons
 
-[targets.volatility]
-enabled = true
-horizons = ["1h", "4h", "1d", "7d"]
-volatility_window = 24
-low_percentile = 0.33
-high_percentile = 0.67
+# All targets use the same configuration for consistency
+# Each target outputs 5 classes:
+# - Price Levels: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
+# - Direction: DUMP, DOWN, SIDEWAYS, UP, PUMP
+# - Volatility: VeryLow, Low, Medium, High, VeryHigh
+```
+
+### **Target Generation Pipeline**
+```rust
+// Implemented in src/targets/mod.rs
+pub struct TargetGenerator {
+    config: MultiTargetConfig,
+}
+
+impl TargetGenerator {
+    /// Generate all targets aligned with specific sequence indices
+    pub async fn generate_all_targets(
+        &self,
+        df: &DataFrame,
+        model_config: Option<&ModelConfig>,
+        sequence_indices: &[usize],
+        sequence_length: usize,
+    ) -> Result<PreparedTargets> {
+        let data_length = sequence_indices.len();
+        let mut prepared_targets = PreparedTargets::new(data_length);
+
+        // Generate all target types concurrently
+        let (price_targets, (direction_targets, volatility_targets)) = rayon::join(
+            || generate_price_level_targets_with_targets_config(
+                df, &self.config.horizons,
+                model_config.map(|cfg| &cfg.targets).unwrap_or(&TargetsConfig::default()),
+                sequence_indices, sequence_length
+            ),
+            || rayon::join(
+                || generate_direction_targets(df, &self.config.horizons, /* ... */),
+                || generate_volatility_targets(df, &self.config.horizons, /* ... */),
+            ),
+        );
+
+        // Assign results
+        prepared_targets.price_levels = price_targets?;
+        prepared_targets.directions = direction_targets?;
+        prepared_targets.volatility = volatility_targets?;
+        prepared_targets.valid_indices = (0..sequence_indices.len()).collect();
+
+        Ok(prepared_targets)
+    }
+}
 ```
 
 ## Integration with LSTM Training

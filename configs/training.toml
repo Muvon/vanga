@@ -75,7 +75,7 @@ learning_rate = 0.001
 # Random seed for reproducible training
 # - 0: Random initialization (different weights each run) - DEFAULT
 # - >0: Reproducible initialization (same weights each run)
-# 
+#
 # Examples:
 # seed = 0      # Random training (default) - each run will be different
 # seed = 42     # Reproducible training - same results every time

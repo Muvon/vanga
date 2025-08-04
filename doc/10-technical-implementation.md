@@ -1,6 +1,6 @@
 # VANGA LSTM Technical Implementation Guide
 
-## 🔧 **NEW: Modular Architecture Implementation**
+## 🔧 **Current: Modular Architecture Implementation**
 
 This document provides detailed technical specifications for VANGA's **modular LSTM architecture** with **unified training system** and **9 modern optimizers**.
 
@@ -25,14 +25,14 @@ src/model/lstm/
 pub use crate::model::lstm::*;
 ```
 
-### **Technology Stack (Updated)**
-- **Language**: Rust 1.87.0
+### **Technology Stack (Current)**
+- **Language**: Rust 1.87.0+
 - **ML Framework**: Candle (candle-core + candle-nn + candle-optimisers)
 - **Optimizers**: 9 modern optimizers (AdamW, RMSprop, NAdam, RAdam, etc.)
-- **Data Processing**: Polars 0.35
+- **Data Processing**: Polars 0.35+
 - **Serialization**: bincode + rmp-serde (MessagePack)
-- **CLI Framework**: clap 4.4
-- **Configuration**: TOML 0.8
+- **Configuration**: TOML with comprehensive validation
+- **Error Handling**: Custom VangaError types with detailed context
 
 ---
 
@@ -179,10 +179,17 @@ impl XGBoostRegressor {
 
 pub fn get_objective_for_target(target_type: &TargetType) -> String {
     match target_type {
-        TargetType::PriceLevels => "multi:softprob".to_string(),
-        TargetType::Direction => "binary:logistic".to_string(),
-        TargetType::Volatility => "reg:squarederror".to_string(),
-        TargetType::Returns => "reg:squarederror".to_string(),
+        TargetType::PriceLevel => "multi:softprob".to_string(),    // 5-class classification
+        TargetType::Direction => "multi:softprob".to_string(),     // 5-class classification
+        TargetType::Volatility => "multi:softprob".to_string(),    // 5-class classification
+    }
+}
+
+pub fn get_eval_metric_for_target(target_type: &TargetType) -> String {
+    match target_type {
+        TargetType::PriceLevel => "mlogloss".to_string(),    // Multi-class log loss
+        TargetType::Direction => "mlogloss".to_string(),     // Multi-class log loss
+        TargetType::Volatility => "mlogloss".to_string(),    // Multi-class log loss
     }
 }
 ```
@@ -274,9 +281,17 @@ pub fn calculate_weighted_soft_crossentropy_loss(
 
 ### **Data Pipeline Consistency**
 ```
-Raw CSV → Target Generation → Feature Engineering → Normalization →
-Sequences → Unified Training → Hybrid Models → Predictions
+Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Target Generation →
+Sequence Creation → Multi-Model Training → Hybrid Models → Predictions
+    ↓           ↓                    ↓             ↓                ↓
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   3×5 Targets
 ```
+
+**Key Principles:**
+- **No Global Normalization**: Uses per-sequence processing approach
+- **Feature Engineering First**: Applied before any other processing
+- **Target Independence**: Each target type calculated independently from sequences
+- **Multi-Model Coordination**: MultiTargetLSTMModel manages separate models per target×horizon
 
 ---
 

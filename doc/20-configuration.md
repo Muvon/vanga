@@ -1,8 +1,8 @@
 # VANGA Configuration Reference
 
-## 📋 **Single-Config System Overview**
+## 📋 **Current Configuration System Overview**
 
-VANGA uses a **unified configuration system** where all parameters (training, model, features, data processing) are defined in a single TOML file. This approach ensures consistency, simplifies management, and provides comprehensive parameter documentation.
+VANGA uses a **unified configuration system** where all parameters (training, model, features, data processing) are defined in TOML files and CLI arguments. This approach ensures consistency, simplifies management, and provides comprehensive parameter documentation.
 
 ### **Configuration Philosophy**
 - **All-in-One**: Single file contains all parameters
@@ -693,11 +693,40 @@ VANGA now uses a **modular LSTM architecture** with focused modules:
 
 ```
 src/model/lstm/
-├── config.rs      # Configuration structs and validation
+├── config.rs      # LSTMConfig, OptimizerWrapper, TargetFormat
 ├── core.rs        # Model lifecycle and initialization
-├── training.rs    # Unified training method (THE main training logic)
-├── inference.rs   # Prediction pipeline
+├── training.rs    # THE unified training method (main training logic)
+├── inference.rs   # Prediction pipeline and forward pass
 ├── loss.rs        # Loss calculation and metrics
+├── window_aware_lr.rs # Window-aware learning rate scheduling
+└── mod.rs         # Public API and re-exports
+
+src/config/
+├── training.rs    # TrainingConfig, TrainingParams, 9 optimizers
+├── features.rs    # FeatureConfig and feature engineering
+├── model.rs       # ModelConfig and architecture configurations
+├── prediction.rs  # PredictionConfig for inference
+└── mod.rs         # Configuration coordination
+```
+
+### **Configuration Module Structure**
+
+```rust
+// src/config/mod.rs
+pub use features::FeatureConfig;
+pub use model::ModelConfig;
+pub use prediction::PredictionConfig;
+pub use training::TrainingConfig;
+
+// Global configuration constants
+pub struct GlobalConfig {
+    pub const MODEL_DIR: &'static str = "./models";
+    pub const DATA_DIR: &'static str = "./data";
+    pub const CONFIG_DIR: &'static str = "./configs";
+    pub const REQUIRED_COLUMNS: &'static [&'static str] =
+        &["timestamp", "open", "high", "low", "close", "volume"];
+}
+```
 └── mod.rs         # Public API with backward compatibility
 ```
 

@@ -7,22 +7,26 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use vanga::{train_model, predict_multi_target, TrainingConfig, PredictionConfig};
+//! use vanga::{train_model, predict, TrainingConfig, PredictionConfig};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Train a multi-target model
-//! let config = TrainingConfig::default()
-//!     .symbol("BTCUSDT")
-//!     .data_path("./data/btc_ohlcv.csv")
-//!     .horizons(vec!["1h".to_string(), "4h".to_string(), "1d".to_string()]);
+//! let config = TrainingConfig {
+//!     symbol: "BTCUSDT".to_string(),
+//!     data_path: "./data/btc_ohlcv.csv".into(),
+//!     horizons: vec!["1h".to_string(), "4h".to_string(), "1d".to_string()],
+//!     ..TrainingConfig::default()
+//! };
 //!
 //! let model = train_model(config).await?;
 //!
-//! // Make multi-target predictions
-//! let pred_config = PredictionConfig::default()
-//!     .symbol("BTCUSDT")
-//!     .input_path("./data/recent_btc.csv");
-//! let predictions = predict_multi_target(pred_config, &model).await?;
+//! // Make predictions using the trained multi-target model
+//! let pred_config = PredictionConfig {
+//!     symbol: "BTCUSDT".to_string(),
+//!     input_path: "./data/recent_btc.csv".into(),
+//!     ..PredictionConfig::default()
+//! };
+//! let predictions = model.predict_multi_target(&pred_config).await?;
 //! # Ok(())
 //! # }
 //! ```
