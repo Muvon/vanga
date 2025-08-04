@@ -33,7 +33,7 @@ rustc --version
 cargo --version
 ```
 
-**Required Rust Version**: 1.87.0 or later
+**Required Rust Version**: 1.70.0 or later (tested with 1.87.0)
 
 ### **2. Clone the Repository**
 
@@ -109,13 +109,21 @@ vanga/
 ├── src/                    # Source code
 │   ├── main.rs            # CLI entry point
 │   ├── lib.rs             # Library root
-│   ├── api/               # High-level API
-│   ├── config/            # Configuration system
-│   ├── data/              # Data processing
-│   ├── features/          # Technical indicators
+│   ├── api/               # High-level API (trainer.rs, predictor.rs, backtester.rs)
+│   ├── config/            # Configuration system (training.rs, features.rs, model.rs, etc.)
+│   ├── data/              # Data processing (loader.rs, preprocessor.rs, sequence.rs, etc.)
+│   ├── features/          # Technical indicators (technical.rs, cross_asset.rs, engineering.rs)
 │   ├── model/             # LSTM implementation
-│   ├── targets/           # Multi-target system
-│   └── utils/             # Utilities and errors
+│   │   ├── lstm/          # Modular LSTM (config.rs, core.rs, training.rs, inference.rs, loss.rs)
+│   │   ├── multi_target.rs # Multi-target wrapper
+│   │   ├── attention.rs   # Attention mechanisms
+│   │   ├── tft/           # Temporal Fusion Transformer
+│   │   └── xgboost.rs     # XGBoost hybrid models
+│   ├── targets/           # Multi-target system (price_levels.rs, direction.rs, volatility.rs)
+│   ├── optimization/      # Auto-optimization (feature_selection.rs, hyperparameter.rs, etc.)
+│   ├── output/            # Output formatting
+│   ├── realtime/          # Real-time streaming
+│   └── utils/             # Utilities (error.rs, metrics.rs, device.rs, etc.)
 ├── doc/                   # Documentation
 ├── target/                # Build artifacts
 │   └── release/
@@ -123,6 +131,7 @@ vanga/
 ├── models/                # Trained models (created automatically)
 ├── data/                  # Input data directory
 └── configs/               # Configuration files
+    └── optimizer_examples/ # 9 optimizer-specific configurations
 ```
 
 ## Verification
@@ -224,7 +233,7 @@ cargo clean
 cargo build --release
 
 # Check Rust version
-rustc --version  # Should be 1.87.0 or later
+rustc --version  # Should be 1.70.0 or later
 ```
 
 #### **Missing Dependencies (Linux)**
@@ -271,7 +280,7 @@ For additional help:
 
 1. **Check the documentation**: See [Usage Examples](11-usage-examples.md)
 2. **Review error messages**: VANGA provides detailed error information
-3. **Check system compatibility**: Ensure Rust 1.87.0+ is installed
+3. **Check system compatibility**: Ensure Rust 1.70.0+ is installed
 
 ### **System Information**
 

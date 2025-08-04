@@ -17,6 +17,8 @@ src/model/lstm/
 ├── training.rs    # Training pipeline and optimization (MAIN LOGIC)
 ├── inference.rs   # Prediction pipeline and forward pass
 ├── loss.rs        # Loss calculation, metrics, and gradient utilities
+├── manual_lstm.rs # Manual LSTM implementation with seeded weights
+├── window_aware_lr.rs # Window-aware learning rate scheduling
 └── mod.rs         # Public API and re-exports for backward compatibility
 ```
 
@@ -230,10 +232,17 @@ use_relative_position = true
 ### **Critical Data Flow**
 
 ```
-Raw CSV Data → Target Generation → Feature Engineering → Normalization → Sequences → Training
-     ↓              ↓                    ↓               ↓            ↓         ↓
-  OHLCV Data    Price Levels      Technical Indicators  Stats Saved  LSTM Input  Model
+Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Target Generation → Sequence Creation → Multi-Model Training
+    ↓           ↓                    ↓             ↓                ↓                  ↓                ↓
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   3×5 Targets      Sequences      N×LSTMModel
 ```
+
+**Key Principles:**
+- **No Global Normalization**: Uses per-sequence processing approach
+- **Feature Engineering First**: Applied before any other processing
+- **NaN Removal Critical**: Must remove lag feature warmup period
+- **Target Independence**: Each target type calculated independently from sequences
+- **Multi-Model Coordination**: MultiTargetLSTMModel manages separate models per target×horizon
 
 ### **Target Generation (CRITICAL)**
 
@@ -283,16 +292,48 @@ impl MultiTargetLSTMModel {
 }
 ```
 
-### **Target Types**
+### **Target Types (3 Targets × 5 Classes Each)**
 
 ```rust
 pub enum TargetType {
-    PriceLevels,    // 4-6 bin classification
-    Direction,      // Up/Down binary classification
-    Volatility,     // Continuous volatility prediction
-    Returns,        // Raw return prediction
+    PriceLevel,     // 5-class price level classification (Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up)
+    Direction,      // 5-class directional movement (DUMP, DOWN, SIDEWAYS, UP, PUMP)
+    Volatility,     // 5-class volatility regime (VeryLow, Low, Medium, High, VeryHigh)
 }
 ```
+
+**Architecture**: Each target type outputs 5 categorical classes using one-hot encoding:
+- **Total Output Size**: 3 targets × 5 classes = 15 outputs per prediction
+- **Class Distribution**: Uses percentage-based quantiles for symbol-agnostic classification
+- **VWAP-Weighted**: Price levels use volume-weighted analysis for accuracy
+
+## 🤖 **Auto-Optimization System**
+
+### **Optimization Module Structure**
+```rust
+src/optimization/
+├── mod.rs                # Optimization orchestration
+├── feature_selection.rs  # Feature selection algorithms
+├── hyperparameter.rs     # Hyperparameter optimization
+├── objective.rs          # Optimization objectives
+└── optimizer_selector.rs # Intelligent optimizer selection
+```
+
+### **Intelligent Optimizer Selection**
+```rust
+// src/optimization/optimizer_selector.rs
+pub struct OptimizerSelector {
+    pub fn analyze_data_characteristics(&self, data: &DataFrame) -> DataCharacteristics
+    pub fn recommend_optimizer(&self, characteristics: &DataCharacteristics) -> OptimizerRecommendation
+    pub fn generate_config(&self, recommendation: &OptimizerRecommendation) -> TrainingConfig
+}
+```
+
+**Selection Criteria:**
+- **Data Size**: RAdam for large datasets, NAdam for small ones
+- **Volatility**: RMSprop for high volatility, AdamW for stable markets
+- **Market Regime**: Trending/ranging/volatile/extreme detection
+- **Performance Prediction**: Expected validation loss, training time, convergence
 
 ## 📈 **Technical Indicators System**
 

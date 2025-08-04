@@ -31,7 +31,7 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 - **Modular Architecture**: Clean, maintainable code structure with focused modules
 - **Multi-Layer Support**: 1-4+ layers with MultiLSTM, StackedLSTM, BidirectionalLSTM
 - **Attention Mechanisms**: Multi-head attention with configurable heads and dropout
-- **Multi-Target Prediction**: Price levels, direction, and volatility forecasting
+- **Multi-Target Prediction**: 3 targets × 5 classes each (price levels, direction, volatility)
 - **Model Persistence**: Save/load trained models with complete state preservation
 - **Intelligent Training**: Unified training method with early stopping and LR scheduling
 
@@ -78,7 +78,7 @@ src/
 │   └── attention.rs   # Multi-head attention mechanisms
 ├── api/               # High-level training/prediction APIs
 ├── features/          # Technical indicators and cross-asset features
-├── targets/           # Target generation (percentage-based quantiles)
+├── targets/           # Target generation (3 targets × 5 classes each)
 ├── data/              # Data loading, preprocessing, and normalization
 └── config/            # Configuration management and validation
 ```

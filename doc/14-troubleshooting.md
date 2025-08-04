@@ -1,8 +1,8 @@
-# VANGA Multi-Layer LSTM Troubleshooting Guide
+# VANGA Troubleshooting Guide
 
-## 🔧 **Multi-Layer LSTM Issues and Solutions**
+## 🔧 **Common Issues and Solutions**
 
-This document provides solutions to common issues encountered during VANGA multi-layer LSTM development and usage, including layer-specific problems and optimization challenges.
+This document provides solutions to common issues encountered during VANGA development and usage with the current CLI-based system.
 
 ---
 

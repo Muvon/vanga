@@ -7,8 +7,12 @@ pub mod loader;
 pub mod preprocessor;
 pub mod schema;
 pub mod sequence;
+#[cfg(test)]
+mod simple_validation_test;
 pub mod structures;
 pub mod target_converter;
+#[cfg(test)]
+mod validation_overlap_test;
 
 use serde::{Deserialize, Serialize};
 

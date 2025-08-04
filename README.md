@@ -73,8 +73,6 @@ VANGA features **unified training optimization** with modern optimizers and inte
 cargo install --git https://github.com/muvon/vanga
 ```
 
-```
-
 ### Single-Config Training (RECOMMENDED)
 ```bash
 # Quick start: Minimal but effective configuration
@@ -276,11 +274,17 @@ vanga models list
 # Evaluate model performance
 vanga models evaluate --symbol BTCUSDT --test-data ./data/btc_test.csv
 
-# Compare models
-vanga models compare --symbols BTCUSDT,ETHUSDT --metric sharpe_ratio
+# Evaluate with backtesting
+vanga models evaluate --symbol BTCUSDT --test-data ./data/btc_test.csv --backtest --train-split 0.8
 
-# Export model
+# Compare multiple models
+vanga models compare --symbols BTCUSDT,ETHUSDT --metric accuracy
+
+# Export model for deployment
 vanga models export --symbol BTCUSDT --format msgpack --output ./models/
+
+# Create model ensemble
+vanga models ensemble --symbols BTCUSDT,ETHUSDT,ADAUSDT --strategies weighted,voting --output crypto_ensemble
 ```
 
 ## 📊 Output Formats
@@ -392,43 +396,75 @@ vanga/
 ├── src/
 │   ├── api/           # High-level training/prediction APIs
 │   │   ├── trainer.rs     # Training pipeline orchestration
-│   │   └── predictor.rs   # Prediction pipeline orchestration
-│   ├── model/         # LSTM implementations
-│   │   ├── lstm/          # Modular LSTM implementation (NEW STRUCTURE)
-│   │   │   ├── config.rs      # Configuration structs and validation
+│   │   ├── predictor.rs   # Prediction pipeline orchestration
+│   │   └── backtester.rs  # Backtesting framework
+│   ├── model/         # LSTM implementations and neural networks
+│   │   ├── lstm/          # Modular LSTM implementation (CORE ARCHITECTURE)
+│   │   │   ├── config.rs      # LSTMConfig, OptimizerWrapper, TargetFormat
 │   │   │   ├── core.rs        # Model lifecycle and initialization
-│   │   │   ├── training.rs    # Training pipeline (MAIN TRAINING LOGIC)
+│   │   │   ├── training.rs    # Unified training method (MAIN LOGIC)
 │   │   │   ├── inference.rs   # Prediction and forward pass
 │   │   │   ├── loss.rs        # Loss calculation and metrics
+│   │   │   ├── window_aware_lr.rs # Window-aware learning rate scheduling
+│   │   │   ├── manual_lstm.rs # Manual LSTM with seeded weights
 │   │   │   └── mod.rs         # Public API and re-exports
-│   │   ├── lstm_simple.rs # Compatibility layer (re-exports from lstm/)
-│   │   ├── multi_target.rs # Multi-target wrapper
-│   │   ├── attention.rs   # Attention mechanisms
+│   │   ├── lstm_simple.rs # Compatibility layer
+│   │   ├── multi_target.rs # Multi-target wrapper (3 targets × 5 classes)
+│   │   ├── attention.rs   # Multi-head attention mechanisms
+│   │   ├── attention_moh.rs # Mixture-of-Head attention
+│   │   ├── attention_optimizer.rs # Optimized attention implementations
 │   │   ├── tft/           # Temporal Fusion Transformer integration
-│   │   └── xgboost.rs     # XGBoost hybrid models
+│   │   │   ├── mod.rs         # TFT module orchestration
+│   │   │   ├── variable_selection.rs # Variable selection networks
+│   │   │   └── quantile_regression.rs # Quantile regression heads
+│   │   ├── xgboost.rs     # XGBoost hybrid models (SmartCore backend)
+│   │   └── smartcore_backend.rs # SmartCore ML backend
 │   ├── features/      # Feature engineering
-│   │   ├── technical.rs   # Technical indicators
-│   │   └── cross_asset.rs # Cross-asset features
+│   │   ├── technical.rs   # 50+ technical indicators implementation
+│   │   ├── cross_asset.rs # Cross-asset correlation features
+│   │   └── engineering.rs # Feature engineering pipeline
 │   ├── data/          # Data loading and preprocessing
 │   │   ├── loader.rs      # CSV loading and validation
-│   │   ├── preprocessor.rs # Feature normalization (CRITICAL)
-│   │   ├── sequence.rs    # Sequence generation
-│   │   └── schema.rs      # Data schema definitions
-│   ├── targets/       # Target generation (CRITICAL)
-│   │   ├── mod.rs         # Target orchestration
-│   │   └── price_levels.rs # Price level classification
+│   │   ├── preprocessor.rs # Feature normalization and scaling
+│   │   ├── sequence.rs    # Sequence generation for LSTM
+│   │   ├── schema.rs      # Data schema definitions
+│   │   ├── structures.rs  # Core data structures
+│   │   └── target_converter.rs # Target conversion utilities
+│   ├── targets/       # Target generation (3 targets × 5 classes each)
+│   │   ├── mod.rs         # Target orchestration and conversion
+│   │   └── price_levels.rs # VWAP-weighted 5-class price level system
 │   ├── config/        # Configuration management
-│   │   ├── training.rs    # Training parameters
-│   │   └── features.rs    # Feature configurations
-│   ├── optimization/  # Auto-optimization and hyperparameter tuning
-│   ├── realtime/      # Real-time data processing
+│   │   ├── training.rs    # TrainingConfig with 9 optimizers
+│   │   ├── features.rs    # Feature configurations
+│   │   ├── model.rs       # Model architecture configurations
+│   │   ├── prediction.rs  # Prediction configurations
+│   │   └── trading.rs     # Trading configurations
+│   ├── optimization/  # Auto-optimization system
+│   │   ├── mod.rs         # Optimization orchestration
+│   │   ├── feature_selection.rs # Feature selection algorithms
+│   │   ├── hyperparameter.rs # Hyperparameter optimization
+│   │   ├── objective.rs   # Optimization objectives
+│   │   └── optimizer_selector.rs # Intelligent optimizer selection
+│   ├── output/        # Output formatting and parsing
+│   ├── realtime/      # Real-time streaming prediction
+│   ├── tests/         # Integration tests
 │   └── utils/         # Utilities and error handling
+│       ├── error.rs       # VangaError types and handling
+│       ├── metrics.rs     # Evaluation metrics
+│       ├── device.rs      # Device management (CPU/GPU/Metal)
+│       ├── model_path.rs  # Model path utilities
+│       ├── sequence_utils.rs # Sequence generation utilities
+│       ├── file_discovery.rs # File discovery and resolution
+│       ├── parser.rs      # Output parsing utilities
+│       ├── market_data.rs # Market data utilities
+│       └── backtest_reporter.rs # Backtesting reporting
 ├── models/            # Trained model storage
 ├── data/              # Input data directory
-├── configs/           # Configuration files (20+ templates)
-│   └── optimizer_examples/ # 9 optimizer configurations
+├── configs/           # Configuration files (TOML templates)
+│   └── optimizer_examples/ # 9 optimizer-specific configurations
 ├── scripts/           # Python automation scripts
-└── examples/          # Usage examples and guides
+├── examples/          # Usage examples and guides
+└── doc/               # Comprehensive documentation (30+ guides)
 ```
 
 ## 🔧 Dependencies

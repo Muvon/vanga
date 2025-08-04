@@ -23,7 +23,7 @@ This guide covers VANGA's **single-config LSTM training system** with intelligen
 - **35% better performance** compared to basic SGD on crypto datasets
 
 ### ✅ **Advanced Loss Function System (NEW)**
-- **Multi-Target Loss Weighting**: Proper weighted loss calculation for multi-target predictions
+- **Multi-Target Loss Weighting**: Proper weighted loss calculation for 3 targets × 5 classes each
 - **Crypto-Optimized Weights**: Direction (50%), Price Levels (20%), Volatility (20%), Risk (10%)
 - **CryptoComposite Loss**: Specialized loss function for cryptocurrency trading optimization
 - **Market Regime Awareness**: Adjusts loss calculation based on market conditions
@@ -419,13 +419,28 @@ impl LSTMModel {
 // Implemented in src/config/training.rs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingConfig {
-[INFO] ✅ BEST validation loss: 0.045231 (improved by 12.34%)
+    pub symbol: String,
     pub data_path: PathBuf,
     pub fresh_training: bool,
     pub continue_training: bool,
     pub horizons: Vec<String>,
-    pub features_config_path: Option<PathBuf>,
+    pub features: FeatureConfig,
     pub model: ModelConfig,
+    pub training: TrainingParams,
+    pub data: DataConfig,
+    pub optimization: OptimizationConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingParams {
+    pub epochs: EpochConfig,
+    pub batch_size: BatchSizeConfig,
+    pub learning_rate: f64,
+    pub optimizer: OptimizerType,
+    pub early_stopping: EarlyStoppingConfig,
+    pub validation_split: f64,
+    pub class_weight_strategy: ClassWeightStrategy,
+    pub seed: u64,
 }
 ```
 
@@ -434,13 +449,21 @@ pub struct TrainingConfig {
 // Implemented in src/config/model.rs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
-    pub sequence_length: usize,
-    pub hidden_size: usize,
-    pub num_layers: usize,
-    pub dropout: f64,
-    pub learning_rate: f64,
-    pub batch_size: usize,
-    pub epochs: usize,
+    pub architecture: LSTMArchitecture,
+    pub sequence_length: SequenceLengthConfig,
+    pub hidden_units: HiddenUnitsConfig,
+    pub dropout: DropoutConfig,
+    pub attention: AttentionConfig,
+    pub targets: TargetsConfig,
+    pub quantile_outputs: Option<QuantileOutputConfig>,
+    pub xgboost: XGBoostConfig,
+}
+
+pub enum LSTMArchitecture {
+    MultiLSTM { layers: usize },
+    StackedLSTM { layers: usize },
+    BidirectionalLSTM { layers: usize },
+    CNNLSTM { cnn_layers: usize, lstm_layers: usize },
 }
 ```
 

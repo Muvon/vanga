@@ -90,7 +90,7 @@ async fn test_progressive_increment_validation() {
                 if actual_ratio < min_increment_ratio - 0.001 {
                     // Small tolerance for floating point
                     all_meet_ratio = false;
-                    println!("      ❌ Increment {} fails ratio check: {:.3} < {:.3} (previous window: {})", 
+                    println!("      ❌ Increment {} fails ratio check: {:.3} < {:.3} (previous window: {})",
                         increment, actual_ratio, min_increment_ratio, check_size);
                     break;
                 }

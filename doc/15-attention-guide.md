@@ -19,17 +19,14 @@ VANGA LSTM now includes advanced attention mechanisms for enhanced cryptocurrenc
 
 ## Quick Start
 
-### Basic Usage
+### **CLI Integration**
 
 ```bash
-# Train with attention (recommended for crypto)
+# Enable attention via CLI
 vanga train --symbol BTCUSDT --data data.csv --attention
 
-# Train without attention (legacy mode)
-vanga train --symbol BTCUSDT --data data.csv
-
-# Predict with attention-enabled model
-vanga predict --symbol BTCUSDT --input recent.csv
+# Use configuration file for detailed attention settings
+vanga train --symbol BTCUSDT --data data.csv --config configs/attention_config.toml
 ```
 
 ### Configuration
