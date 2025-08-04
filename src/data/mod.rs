@@ -323,20 +323,32 @@ impl DataPipeline {
         );
 
         for window_count in window_range {
-            // 🚀 NEW: Progressive increment validation approach
-            // Instead of using fixed avg_increment, calculate increments that maintain min_increment_ratio
+            // 🚀 FIXED: Progressive increment calculation based on PREVIOUS window size
+            // Each increment should be min_increment_ratio of the IMMEDIATE PREVIOUS window
 
             let mut progressive_increments = Vec::new();
-            let mut current_train_size = min_train_size;
+            let mut previous_window_size = min_train_size; // Start with first window size
             let mut total_increment_needed = 0;
 
-            // Calculate progressive increments for each window
-            for _window_idx in 1..window_count {
+            // Calculate progressive increments for each subsequent window
+            for window_idx in 1..window_count {
+                // ✅ CORRECT: Calculate increment based on PREVIOUS window size
                 let min_increment_for_this_window =
-                    (current_train_size as f64 * min_increment_ratio) as usize;
+                    (previous_window_size as f64 * min_increment_ratio) as usize;
+
                 progressive_increments.push(min_increment_for_this_window);
                 total_increment_needed += min_increment_for_this_window;
-                current_train_size += min_increment_for_this_window;
+
+                // Update previous_window_size for next iteration
+                previous_window_size += min_increment_for_this_window;
+
+                log::debug!(
+                    "📈 Window {} increment: {} samples ({:.1}% of previous window size {})",
+                    window_idx + 1, // Window number (1-indexed)
+                    min_increment_for_this_window,
+                    min_increment_ratio * 100.0,
+                    previous_window_size - min_increment_for_this_window // Previous window size
+                );
             }
 
             // Check if we have enough data for progressive increments

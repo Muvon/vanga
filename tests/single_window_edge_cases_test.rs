@@ -35,11 +35,7 @@ async fn test_single_window_edge_cases() {
 
         let min_train_size = (available_for_training as f64 * min_train_ratio) as usize;
         let validation_size = (available_for_training as f64 * validation_split) as usize;
-        let data_for_expansion = if min_train_size >= available_for_training {
-            0
-        } else {
-            available_for_training - min_train_size
-        };
+        let data_for_expansion = available_for_training.saturating_sub(min_train_size);
 
         println!("   Min training size: {} samples", min_train_size);
         println!("   Validation size: {} samples", validation_size);
@@ -169,7 +165,7 @@ async fn test_single_window_data_utilization() {
 async fn test_min_train_ratio_boundary_conditions() {
     println!("🧪 Testing min_train_ratio Boundary Conditions");
 
-    let available_for_training = 10000;
+    let available_for_training: usize = 10000;
     let validation_split = 0.2;
     let validation_size = (available_for_training as f64 * validation_split) as usize;
 
@@ -194,11 +190,7 @@ async fn test_min_train_ratio_boundary_conditions() {
 
     for (min_train_ratio, expected_single_window, description) in boundary_cases {
         let min_train_size = (available_for_training as f64 * min_train_ratio) as usize;
-        let data_for_expansion = if min_train_size >= available_for_training {
-            0
-        } else {
-            available_for_training - min_train_size
-        };
+        let data_for_expansion = available_for_training.saturating_sub(min_train_size);
 
         let should_use_single_window =
             min_train_ratio >= 0.8 || data_for_expansion < (available_for_training / 10);
