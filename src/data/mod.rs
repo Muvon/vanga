@@ -574,13 +574,31 @@ impl DataPipeline {
         let min_train_size =
             (available_for_training as f64 * config.training.min_train_ratio) as usize;
 
-        if validation_size == 0 || min_train_size + validation_size > available_for_training {
+        // 🎯 SINGLE-WINDOW DETECTION: When min_train_ratio leaves no expansion room
+        let data_for_expansion = available_for_training.saturating_sub(min_train_size);
+
+        let use_single_window = config.training.min_train_ratio >= 0.8
+            || data_for_expansion < (available_for_training / 10);
+
+        if validation_size == 0 {
             return Err(crate::utils::error::VangaError::DataError(
                 format!(
-                    "Insufficient data for walk-forward analysis: total={}, test_reserved={}, available={}, min_train={}, val={}",
-                    total_samples, test_size, available_for_training, min_train_size, validation_size
+                    "Invalid validation_split: results in 0 validation samples from {} available samples",
+                    available_for_training
                 )
             ));
+        }
+
+        if use_single_window {
+            log::info!(
+                "🎯 SINGLE-WINDOW MODE: min_train_ratio={:.1}% leaves only {} samples for expansion (< 10% threshold)",
+                config.training.min_train_ratio * 100.0,
+                data_for_expansion
+            );
+            log::info!(
+                "   Using single training window with all {} available samples",
+                available_for_training
+            );
         }
 
         let mut windows = Vec::new();
@@ -622,21 +640,58 @@ impl DataPipeline {
         );
 
         // 🚀 EFFICIENCY-FOCUSED WALK-FORWARD ALGORITHM
-        // Calculate optimal window configuration balancing data utilization with training efficiency
-        let optimal_config = Self::calculate_optimal_window_configuration(
-            available_for_training,
-            validation_size,
-            min_train_size,
-            gap_steps,
-            config.training.min_increment_ratio, // NEW: Pass minimum increment ratio
-        );
+        let optimal_config = if use_single_window {
+            // 🎯 SINGLE-WINDOW MODE: Use all available data in one training window
+            log::info!("🎯 Creating single training window with all available data");
 
-        log::info!(
-            "🚀 Efficiency-focused algorithm result: {} windows planned, {:.1}% data utilization, avg_increment={} (optimized for training speed)",
-            optimal_config.window_count,
-            optimal_config.data_utilization,
-            optimal_config.avg_increment
-        );
+            let single_train_size = available_for_training - validation_size - gap_steps;
+
+            if single_train_size < 1000 {
+                return Err(crate::utils::error::VangaError::DataError(
+                    format!(
+                        "Insufficient training data after reserving validation: {} samples < 1000 minimum. \
+                        Available: {}, validation: {}, gap: {}, remaining for training: {}",
+                        single_train_size, available_for_training, validation_size, gap_steps, single_train_size
+                    )
+                ));
+            }
+
+            OptimalWindowConfig {
+                window_count: 1,
+                windows: vec![WindowConfig {
+                    train_end: single_train_size,
+                    validation_size,
+                    validation_start: Some(single_train_size + gap_steps),
+                    is_fresh_validation: true,
+                }],
+                data_utilization: 100.0,
+                avg_increment: 0, // No increments in single-window mode
+            }
+        } else {
+            // 🚀 MULTI-WINDOW MODE: Calculate optimal window configuration
+            Self::calculate_optimal_window_configuration(
+                available_for_training,
+                validation_size,
+                min_train_size,
+                gap_steps,
+                config.training.min_increment_ratio,
+            )
+        };
+
+        if use_single_window {
+            log::info!(
+                "🎯 Single-window result: 1 window, {:.1}% data utilization, training_size={} samples",
+                optimal_config.data_utilization,
+                optimal_config.windows[0].train_end
+            );
+        } else {
+            log::info!(
+                "🚀 Multi-window result: {} windows planned, {:.1}% data utilization, avg_increment={} samples",
+                optimal_config.window_count,
+                optimal_config.data_utilization,
+                optimal_config.avg_increment
+            );
+        }
 
         // Create windows using the optimal configuration
         for (window_idx, window_config) in optimal_config.windows.iter().enumerate() {

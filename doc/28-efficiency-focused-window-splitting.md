@@ -101,6 +101,34 @@ min_train_ratio = 0.4  # Start with 40% of data (default)
 - **Conservative**: `min_train_ratio = 0.5` (old behavior)
 - **Balanced**: `min_train_ratio = 0.4` (default, recommended)
 - **Aggressive**: `min_train_ratio = 0.3` (maximum efficiency)
+- **Single-Window**: `min_train_ratio = 0.8+` (automatic single-window mode)
+
+## Single-Window Mode
+
+### Automatic Detection
+When `min_train_ratio >= 0.8` or expansion data < 10% of available data, the algorithm automatically switches to **single-window mode**:
+
+- **No window splitting**: Uses one training window with all available data
+- **Maximum data utilization**: Training uses `available_data - validation_size - gap_steps`
+- **Optimal for high ratios**: Perfect for `min_train_ratio = 1.0` scenarios
+- **No errors**: Gracefully handles impossible windowing configurations
+
+### Single-Window Benefits
+- **100% data utilization**: Uses all available training data efficiently
+- **Fastest training**: No multiple window overhead
+- **Robust**: Never fails due to insufficient expansion data
+- **Clear logging**: Explicitly indicates single-window mode activation
+
+### Example: min_train_ratio = 1.0
+```
+Available for training: 17,885 samples
+Validation split: 20% (3,577 samples)
+Gap steps: 0
+
+Result: Single training window with 14,308 samples (80% of available data)
+Mode: Single-window (automatic detection)
+Utilization: 100% (14,308 + 3,577 = 17,885)
+```
 
 ## Benefits
 
