@@ -150,7 +150,6 @@ impl QuantileMultiTargetModel {
                     val_sequences: None,
                     val_targets: None,
                     target_class_weights: None,
-                    target_validation_indices: None,
                 },
                 config,
             )

@@ -366,7 +366,7 @@ impl SmartCoreRegressor {
                 VangaError::IoError(format!("Failed to write RandomForest model: {}", e))
             })?;
 
-            log::info!("💾 SmartCore RandomForest model saved to: {}", model_path);
+            log::debug!("💾 SmartCore RandomForest model saved to: {}", model_path);
         } else if let Some(ref dt_model) = self.decision_tree {
             let model_path = format!("{}.smartcore.model", path);
             let model_json = serde_json::to_string(dt_model).map_err(|e| {
@@ -377,11 +377,9 @@ impl SmartCoreRegressor {
                 VangaError::IoError(format!("Failed to write DecisionTree model: {}", e))
             })?;
 
-            log::info!("💾 SmartCore DecisionTree model saved to: {}", model_path);
+            log::debug!("💾 SmartCore DecisionTree model saved to: {}", model_path);
         }
 
-        log::info!("💾 SmartCore model metadata saved to: {}", metadata_path);
-        log::info!("✅ SmartCore model fully persisted with Serde serialization");
         Ok(())
     }
 
