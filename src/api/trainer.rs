@@ -72,10 +72,107 @@
 use crate::config::TrainingConfig;
 use crate::data::DataPipeline;
 use crate::model::multi_target::{MultiTargetLSTMModel, TrainingContext};
-use crate::targets::PreparedTargets;
+use crate::targets::{PreparedTargets, TargetType};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use std::collections::HashMap;
+
+/// Perfect balance validation for PreparedTargets
+/// Ensures all 5 classes have exactly the same number of samples for each target type and horizon
+fn validate_prepared_targets_balance(targets: &PreparedTargets, data_name: &str) -> Result<()> {
+    if targets.valid_indices.is_empty() {
+        return Err(VangaError::DataError(format!(
+            "🚨 BALANCE VALIDATION FAILED: {} data has no valid indices",
+            data_name
+        )));
+    }
+
+    let horizons = targets.get_horizons();
+    if horizons.is_empty() {
+        return Err(VangaError::DataError(format!(
+            "🚨 BALANCE VALIDATION FAILED: {} data has no horizons",
+            data_name
+        )));
+    }
+
+    let target_types = [
+        (TargetType::PriceLevel, "Price Level"),
+        (TargetType::Direction, "Direction"),
+        (TargetType::Volatility, "Volatility"),
+    ];
+
+    let mut all_balanced = true;
+    let mut error_details = Vec::new();
+
+    for horizon in &horizons {
+        for (target_type, target_name) in &target_types {
+            if let Some(target_values) = targets.get_targets(horizon, *target_type) {
+                // Count class occurrences for valid indices only
+                let mut class_counts = vec![0usize; 5];
+
+                for &idx in &targets.valid_indices {
+                    if idx < target_values.len() {
+                        let class_value = target_values[idx];
+                        if class_value >= 0 && class_value < 5 {
+                            class_counts[class_value as usize] += 1;
+                        } else {
+                            return Err(VangaError::DataError(format!(
+                                "🚨 BALANCE VALIDATION FAILED: Invalid class {} for {} {} in {} data (expected 0-4)",
+                                class_value, target_name, horizon, data_name
+                            )));
+                        }
+                    }
+                }
+
+                // Check for perfect balance: all classes must have exactly the same count
+                let min_count = *class_counts.iter().min().unwrap();
+                let max_count = *class_counts.iter().max().unwrap();
+
+                if min_count != max_count {
+                    all_balanced = false;
+                    let total_samples: usize = class_counts.iter().sum();
+                    error_details.push(format!(
+                        "  {} {} Target: {} total samples\n    Class 0: {} samples ({:.1}%)\n    Class 1: {} samples ({:.1}%)\n    Class 2: {} samples ({:.1}%)\n    Class 3: {} samples ({:.1}%)\n    Class 4: {} samples ({:.1}%)\n    ❌ IMBALANCE: min={}, max={}, ratio={:.2}x",
+                        target_name,
+                        horizon,
+                        total_samples,
+                        class_counts[0], (class_counts[0] as f64 / total_samples as f64) * 100.0,
+                        class_counts[1], (class_counts[1] as f64 / total_samples as f64) * 100.0,
+                        class_counts[2], (class_counts[2] as f64 / total_samples as f64) * 100.0,
+                        class_counts[3], (class_counts[3] as f64 / total_samples as f64) * 100.0,
+                        class_counts[4], (class_counts[4] as f64 / total_samples as f64) * 100.0,
+                        min_count,
+                        max_count,
+                        max_count as f64 / min_count as f64
+                    ));
+                } else {
+                    log::info!(
+                        "✅ {} {} Target PERFECTLY BALANCED: {} samples per class (total: {})",
+                        target_name,
+                        horizon,
+                        min_count,
+                        min_count * 5
+                    );
+                }
+            }
+        }
+    }
+
+    if !all_balanced {
+        let error_msg = format!(
+            "🚨 PERFECT BALANCE VALIDATION FAILED for {} data:\n\n{}\n\n💡 SOLUTION: Use balanced data preparation pipeline to ensure exactly equal class counts.\n   Each of the 5 classes must have identical sample counts for all target types and horizons.",
+            data_name,
+            error_details.join("\n\n")
+        );
+        return Err(VangaError::DataError(error_msg));
+    }
+
+    log::info!(
+        "🎯 {} DATA PERFECTLY BALANCED: All targets and horizons have equal class distribution",
+        data_name.to_uppercase()
+    );
+    Ok(())
+}
 
 /// Window-by-window training metrics for final statistics
 #[derive(Debug, Clone)]
@@ -629,6 +726,23 @@ impl ModelTrainer {
                 window.train_data.targets.target_names
             )));
         }
+
+        // 🎯 PERFECT BALANCE VALIDATION: Check training and validation data before extraction
+        log::info!(
+            "🔍 VALIDATING PERFECT BALANCE: Checking window {} data...",
+            window.window_id + 1
+        );
+
+        // Validate training data balance
+        validate_prepared_targets_balance(&window.train_data.targets, "TRAINING")?;
+
+        // Validate validation data balance
+        validate_prepared_targets_balance(&window.val_data.targets, "VALIDATION")?;
+
+        log::info!(
+            "✅ PERFECT BALANCE CONFIRMED: Window {} data is perfectly balanced",
+            window.window_id + 1
+        );
 
         // Extract target names from prepared data for multi-model architecture
         let target_names = &window.train_data.targets.target_names;
