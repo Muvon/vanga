@@ -554,9 +554,43 @@ impl AdditiveAttention {
 
         // Apply position bias for cryptocurrency recency preference
         if let Some(ref position_bias) = self.position_bias {
-            let bias = position_bias.narrow(0, 0, seq_len)?;
-            let bias_expanded = bias.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, seq]
-            optimized_scores = (optimized_scores + bias_expanded)?;
+            // Extract relevant portion of position bias for current sequence length
+            let bias_1d = position_bias.narrow(0, 0, seq_len)?; // [seq_len]
+
+            // Create 2D position bias matrix: bias[i,j] represents bias from position i to position j
+            // For crypto, we want recency bias: more recent positions (higher j) get higher attention
+            let mut bias_matrix_data = Vec::with_capacity(seq_len * seq_len);
+            let bias_values = bias_1d.to_vec1::<f32>()?;
+
+            for _i in 0..seq_len {
+                for &recency_bias in bias_values.iter().take(seq_len) {
+                    // Recency bias: attending to more recent positions gets higher bias
+                    bias_matrix_data.push(recency_bias);
+                }
+            }
+
+            let bias_2d = Tensor::from_vec(bias_matrix_data, (seq_len, seq_len), &self.device)?
+                .contiguous()?; // [seq_len, seq_len]
+
+            // Debug: Log tensor shapes to understand the issue
+            let batch_size = optimized_scores.dim(0)?;
+            log::debug!(
+                "🔍 Position bias shapes: bias_2d={:?}, optimized_scores={:?}, batch_size={}",
+                bias_2d.shape(),
+                optimized_scores.shape(),
+                batch_size
+            );
+
+            // Create proper batch-sized bias tensor by explicitly repeating the 2D bias
+            let bias_batch = bias_2d
+                .unsqueeze(0)? // [1, seq_len, seq_len]
+                .contiguous()?
+                .repeat(&[batch_size, 1, 1])? // [batch_size, seq_len, seq_len]
+                .contiguous()?;
+
+            log::debug!("🔍 Final bias_batch shape: {:?}", bias_batch.shape());
+
+            optimized_scores = optimized_scores.add(&bias_batch)?.contiguous()?;
         }
 
         // Apply temperature scaling for crypto volatility adaptation
@@ -575,17 +609,21 @@ impl AdditiveAttention {
         let seq_len = scores.dim(candle_core::D::Minus1)?;
 
         // Create lower triangular mask
-        let mut mask_data = vec![-1e9; seq_len * seq_len];
+        let mut mask_data = vec![-1e9f32; seq_len * seq_len];
         for i in 0..seq_len {
             for j in 0..=i {
-                mask_data[i * seq_len + j] = 0.0;
+                mask_data[i * seq_len + j] = 0.0f32;
             }
         }
 
-        let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &self.device)?;
-        let mask_expanded = mask.unsqueeze(0)?; // [1, seq, seq]
+        let mask =
+            Tensor::from_slice(&mask_data, (seq_len, seq_len), &self.device)?.contiguous()?;
+        let mask_expanded = mask.unsqueeze(0)?.contiguous()?; // [1, seq, seq]
 
-        let masked_scores = (scores + mask_expanded)?;
+        // Broadcast mask to match scores shape [batch, seq, seq]
+        let mask_batch = mask_expanded.broadcast_as(scores.shape())?.contiguous()?;
+
+        let masked_scores = scores.add(&mask_batch)?.contiguous()?;
 
         Ok(masked_scores)
     }
@@ -601,11 +639,11 @@ impl AdditiveAttention {
     /// Create cryptocurrency-specific position bias for recency weighting
     fn create_crypto_position_bias(max_length: usize, device: &Device) -> Result<Tensor> {
         // Create exponential decay bias favoring recent positions
-        let positions: Vec<f64> = (0..max_length)
+        let positions: Vec<f32> = (0..max_length)
             .map(|i| {
-                let position_ratio = i as f64 / max_length as f64;
+                let position_ratio = i as f32 / max_length as f32;
                 // Exponential decay: more recent positions get higher bias
-                let decay_factor = 0.1; // Adjust for stronger/weaker recency bias
+                let decay_factor = 0.1f32; // Adjust for stronger/weaker recency bias
                 (position_ratio * decay_factor).exp() - 1.0
             })
             .collect();
