@@ -266,9 +266,10 @@ impl LSTMModel {
             );
         }
 
+        // CRITICAL: self.trained flag detects continuation training (preserves weights, no reinitialization)
         // INCREMENTAL TRAINING DETECTION AND OPTIMIZATION - SAME logic as original continue_training
         let final_config = if self.trained {
-            // Configure training with typically lower learning rate for incremental training - SAME logic as original
+            // CRITICAL: Continuation training uses lower learning rate and patience for stability
             let mut incremental_config = config.clone();
 
             // Use smaller patience for incremental training (faster convergence expected) - SAME logic as original
@@ -499,7 +500,7 @@ impl LSTMModel {
         let batch_size = self.training_config.batch_size;
 
         log::info!(
-            "🚀 UNIFIED TRAINING: {} train samples{}, batch_size={}, optimizer={:?}",
+            "🎯 Using {} train samples{}, batch_size={}, optimizer={:?}",
             total_train_samples,
             if use_validation {
                 format!(", {} val samples", total_val_samples)

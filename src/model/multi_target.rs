@@ -23,15 +23,25 @@ pub enum TrainingContext<'a> {
         target_class_weights: Option<&'a HashMap<String, Vec<f32>>>,
     },
     /// Continues training from a previous state.
+    /// CRITICAL: new_sequences is CUMULATIVE (Window1: 2880, Window2: 3744, etc.) - NOT just new data
     Continue {
-        new_sequences: &'a Array3<f64>,
+        new_sequences: &'a Array3<f64>, // CUMULATIVE sequences (preserves + extends)
         new_targets: &'a Array2<f64>,
+        /// CRITICAL: Validation data prevents overfitting in continuation training
+        val_sequences: Option<&'a Array3<f64>>,
+        val_targets: Option<&'a Array2<f64>>,
         /// Target-specific class weights for balanced training
         /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
         target_class_weights: Option<&'a HashMap<String, Vec<f32>>>,
     },
 }
 /// Multi-target LSTM model that trains separate models for each target
+///
+/// ARCHITECTURE CLARIFICATION:
+/// - This is a WRAPPER containing multiple individual LSTMModel instances (one per target)
+/// - Each LSTMModel inside handles ONE target (e.g., price_level_1h, direction_4h, etc.)
+/// - In target-specific training, this wrapper may contain only ONE LSTMModel
+/// - This design avoids training PriceLevel models on Direction-specific sequences
 pub struct MultiTargetLSTMModel {
     /// Individual LSTM models, one per target
     models: Vec<LSTMModel>,
@@ -263,19 +273,31 @@ impl MultiTargetLSTMModel {
             TrainingContext::Continue {
                 new_sequences,
                 new_targets,
+                val_sequences,
+                val_targets,
                 target_class_weights: _, // Unused in continue training
             } => {
-                self.continue_training(new_sequences, new_targets, config)
-                    .await
+                self.continue_training(
+                    new_sequences,
+                    new_targets,
+                    val_sequences,
+                    val_targets,
+                    config,
+                )
+                .await
             }
         }
     }
 
     /// Continue training with new data for all target models (incremental learning)
+    /// CRITICAL: new_sequences is CUMULATIVE data (Window1: 2880, Window2: 3744, etc.)
+    /// CRITICAL: LSTMModel.trained flag prevents weight reinitialization - preserves learned patterns
     pub async fn continue_training(
         &mut self,
-        new_sequences: &Array3<f64>,
+        new_sequences: &Array3<f64>, // CUMULATIVE sequences (not just new data)
         new_targets: &Array2<f64>,
+        val_sequences: Option<&Array3<f64>>, // CRITICAL: Prevents overfitting
+        val_targets: Option<&Array2<f64>>,   // CRITICAL: Prevents overfitting
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!(
@@ -283,6 +305,20 @@ impl MultiTargetLSTMModel {
             self.models.len(),
             new_sequences.shape()[0]
         );
+
+        // Log validation data usage for continuation training
+        if let (Some(val_seq), Some(_val_tgt)) = (val_sequences, val_targets) {
+            log::info!(
+                "✅ CONTINUATION TRAINING with validation: {} train, {} val samples (prevents overfitting)",
+                new_sequences.shape()[0],
+                val_seq.shape()[0]
+            );
+        } else {
+            log::warn!(
+                "⚠️  CONTINUATION TRAINING without validation: {} train samples (risk of overfitting)",
+                new_sequences.shape()[0]
+            );
+        }
 
         // Validate input dimensions
         if new_targets.shape()[1] != self.num_targets {
@@ -309,9 +345,25 @@ impl MultiTargetLSTMModel {
                 .into_owned()
                 .insert_axis(ndarray::Axis(1));
 
-            // Continue training with new data
+            // Extract validation target if validation data is provided
+            let single_val_target = val_targets.map(|val_targets| {
+                val_targets
+                    .column(i)
+                    .into_owned()
+                    .insert_axis(ndarray::Axis(1))
+            });
+
+            // Continue training with new data and validation (prevents overfitting)
+            // CRITICAL: LSTMModel.train() with val_sequences prevents overfitting in continuation
             model
-                .train(new_sequences, &single_target, config, None, None, None)
+                .train(
+                    new_sequences,
+                    &single_target,
+                    config,
+                    val_sequences, // CRITICAL: Validation prevents overfitting
+                    single_val_target.as_ref(), // CRITICAL: Validation prevents overfitting
+                    None,
+                )
                 .await?;
 
             log::info!(
@@ -756,5 +808,49 @@ impl MultiTargetLSTMModel {
         // This would need to be implemented in LSTMModel to check if network exists
         // For now, assume trained if models exist
         !self.models.is_empty()
+    }
+
+    /// EXTRACT MODELS: Get individual LSTM models from MultiTargetLSTMModel wrapper
+    /// PURPOSE: Used in training loop to extract single-target models for combination
+    /// FLOW: Single-target wrapper → extract LSTM → add to collection → combine all
+    pub fn extract_models(self) -> Result<Vec<LSTMModel>> {
+        Ok(self.models)
+    }
+
+    /// COMBINE MODELS: Create MultiTargetLSTMModel from multiple pre-trained LSTM models  
+    /// PURPOSE: Fixes critical bug where only first target was kept
+    /// ARCHITECTURE: Vec<LSTMModel> → MultiTargetLSTMModel wrapper (all targets preserved)
+    /// USAGE: Called after training all targets separately to combine into final model
+    pub fn from_trained_models(
+        models: Vec<LSTMModel>,        // Pre-trained LSTM models (one per target)
+        target_names: Vec<String>,     // ["price_level_12h", "direction_12h", "volatility_12h"]
+        trained_horizons: Vec<String>, // ["12h", "12h", "12h"]
+        input_size: usize,             // Feature count (same for all models)
+    ) -> Result<Self> {
+        let num_targets = models.len();
+
+        if num_targets != target_names.len() {
+            return Err(VangaError::ModelError(format!(
+                "Model count ({}) doesn't match target names count ({})",
+                num_targets,
+                target_names.len()
+            )));
+        }
+
+        log::info!(
+            "🔗 Creating MultiTargetLSTMModel from {} pre-trained models: {:?}",
+            num_targets,
+            target_names
+        );
+
+        Ok(Self {
+            models,
+            target_names,
+            input_size,
+            num_targets,
+            trained_horizons,
+            feature_config: None,
+            training_config: None,
+        })
     }
 }

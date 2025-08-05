@@ -616,8 +616,8 @@ impl DataPipeline {
                         window_range.train_end
                     );
 
-                    // CRITICAL: Use proper balanced validation split that maintains class distribution
-                    // The simple split above breaks the perfect balance created by extract_target_specific_balanced_datasets
+                    // VALIDATION SPLIT: Mixed chronological - can be from anywhere in time series
+                    // Uses balanced extraction while maintaining class distribution
                     let (balanced_training_dataset, target_validation_indices) = balancer
                         .smart_validation_split_from_balanced(
                             target_dataset,
@@ -625,6 +625,7 @@ impl DataPipeline {
                             validation_ratio,
                             &[*target_type],
                             &[horizon.clone()],
+                            false, // Validation: mixed chronological
                         )?;
 
                     // Extract training indices for this specific target from the balanced dataset
@@ -648,7 +649,8 @@ impl DataPipeline {
                         val_indices.len()
                     );
 
-                    // For progressive windows, take appropriate portion
+                    // CRITICAL: Progressive windows create CUMULATIVE data (Window1: 2880, Window2: 3744, etc.)
+                    // This is CORRECT - continuation training uses expanded data while preserving weights
                     let samples_for_window = if window_config.windows.len() == 1 {
                         train_indices.len()
                     } else {
@@ -660,6 +662,7 @@ impl DataPipeline {
                         std::cmp::max(min_samples, progressive_samples)
                     };
 
+                    // CRITICAL: window_train contains CUMULATIVE indices [0..samples_for_window]
                     let window_train =
                         train_indices[..samples_for_window.min(train_indices.len())].to_vec();
 
@@ -683,8 +686,64 @@ impl DataPipeline {
                         &all_sequences,
                     )?;
 
-                    // Test data for final window - DISABLE for now since it's causing issues
-                    let test_data = {
+                    // TEST SPLIT: End chronological - from most recent data for realistic evaluation
+                    // Uses same balanced extraction but takes from end of time series
+                    let test_data = if config.training.test_split > 0.0 {
+                        // Extract balanced test split from the remaining training data after validation
+                        let (_final_training_dataset, target_test_indices) = balancer
+                            .smart_validation_split_from_balanced(
+                                &balanced_training_dataset,
+                                &all_sequences,
+                                config.training.test_split,
+                                &[*target_type],
+                                &[horizon.clone()],
+                                true, // Test: end chronological (most recent data)
+                            )?;
+
+                        // Extract test indices for this specific target
+                        let test_indices = target_test_indices
+                            .get(&target_key)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        if !test_indices.is_empty() {
+                            // Create test indices map
+                            let mut test_indices_map = HashMap::new();
+                            test_indices_map.insert(target_key.clone(), test_indices.clone());
+
+                            // Create test data using target-specific indices
+                            let test_data = self.create_data_from_indices(
+                                &all_sequences_data,
+                                &test_indices_map,
+                                &all_sequences,
+                            )?;
+
+                            log::info!(
+                                "🧪 {:?} {} balanced test split: {} test samples (balanced)",
+                                target_type,
+                                horizon,
+                                test_indices.len()
+                            );
+
+                            test_data
+                        } else {
+                            // No test data available - create empty
+                            let mut empty_targets = crate::targets::PreparedTargets::new(0);
+                            empty_targets.valid_indices = Vec::new();
+                            PreparedData {
+                                sequences: ndarray::Array3::zeros((
+                                    0,
+                                    train_data.sequences.shape()[1],
+                                    train_data.sequences.shape()[2],
+                                )),
+                                targets: empty_targets,
+                                feature_names: train_data.feature_names.clone(),
+                                metadata: train_data.metadata.clone(),
+                                sequence_indices: Vec::new(),
+                            }
+                        }
+                    } else {
+                        // No test split configured - create empty test data
                         let mut empty_targets = crate::targets::PreparedTargets::new(0);
                         empty_targets.valid_indices = Vec::new();
                         PreparedData {
@@ -717,7 +776,7 @@ impl DataPipeline {
                         val_data,
                         test_data: test_data.clone(),
                         window_id: window_idx,
-                        train_samples: window_range.train_end,
+                        train_samples: train_sequences, // ✅ FIX: Use actual training sequence count
                         val_samples,
                         test_samples: test_data.sequences.shape()[0],
                         target_class_weights,

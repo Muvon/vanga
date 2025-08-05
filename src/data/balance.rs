@@ -779,38 +779,60 @@ impl SequenceBalancer {
         Ok(target_balanced_datasets)
     }
 
-    /// Derive validation set from globally balanced dataset using smart overlap management
-    /// Uses overloaded classes to extract validation without reducing training balance
+    /// Derive validation/test set from globally balanced dataset with chronological awareness
+    ///
+    /// # Chronological Strategy:
+    /// - **Validation**: Mixed chronological (can be from anywhere in time series)
+    /// - **Test**: End chronological (from most recent data for realistic evaluation)
+    ///
+    /// # Parameters:
+    /// - `use_end_chronological`: true for test split (recent data), false for validation (mixed)
     pub fn smart_validation_split_from_balanced(
         &self,
         balanced_dataset: &GloballyBalancedDataset,
-        _all_sequences: &[SequenceWithTargets], // TODO: Use for overlap management
-        validation_ratio: f64,
+        all_sequences: &[SequenceWithTargets], // Used for chronological ordering
+        split_ratio: f64,
         target_types: &[TargetType],
         horizons: &[String],
+        use_end_chronological: bool,
     ) -> Result<ValidationSplitResult> {
+        let split_type = if use_end_chronological {
+            "TEST"
+        } else {
+            "VALIDATION"
+        };
+        let chronological_strategy = if use_end_chronological {
+            "end chronological (recent data)"
+        } else {
+            "mixed chronological"
+        };
+
         log::info!(
-            "🧠 SMART VALIDATION DERIVATION: Extracting {:.1}% validation from overloaded classes",
-            validation_ratio * 100.0
+            "🧠 SMART {} DERIVATION: Extracting {:.1}% {} using {}",
+            split_type,
+            split_ratio * 100.0,
+            split_type.to_lowercase(),
+            chronological_strategy
         );
 
         let mut remaining_training_indices = balanced_dataset.balanced_indices.clone();
-        let mut validation_indices = HashMap::new();
-        let mut total_validation_extracted = 0;
+        let mut split_indices = HashMap::new();
+        let mut total_split_extracted = 0;
 
-        // Calculate target validation size per target
-        let target_validation_size = (balanced_dataset.global_min_class_count as f64
+        // Calculate target split size per target
+        let target_split_size = (balanced_dataset.global_min_class_count as f64
             * balanced_dataset
                 .class_distribution
                 .values()
                 .next()
                 .unwrap()
                 .len() as f64
-            * validation_ratio) as usize;
+            * split_ratio) as usize;
 
         log::info!(
-            "🎯 TARGET: ~{} validation samples per target (from {} balanced samples)",
-            target_validation_size,
+            "🎯 TARGET: ~{} {} samples per target (from {} balanced samples)",
+            target_split_size,
+            split_type.to_lowercase(),
             balanced_dataset.global_min_class_count
                 * balanced_dataset
                     .class_distribution
@@ -823,7 +845,7 @@ impl SequenceBalancer {
         for target_type in target_types {
             for horizon in horizons {
                 let target_key = (*target_type, horizon.clone());
-                let mut target_validation = Vec::new();
+                let mut target_split = Vec::new();
 
                 // Check if this target has overloaded classes
                 if let Some(overloaded) = balanced_dataset.overloaded_classes.get(&target_key) {
@@ -837,45 +859,94 @@ impl SequenceBalancer {
                     // TODO: Extract validation from overloaded classes first
                     // For now, use simple proportional extraction
                     let training_indices = remaining_training_indices.get(&target_key).unwrap();
-                    let validation_count =
-                        (training_indices.len() as f64 * validation_ratio) as usize;
+                    let split_count = (training_indices.len() as f64 * split_ratio) as usize;
 
-                    if validation_count > 0 {
-                        // Simple extraction - take last N sequences (can be enhanced with overlap management)
-                        let split_point = training_indices.len() - validation_count;
-                        let (remaining_training, extracted_validation) =
-                            training_indices.split_at(split_point);
+                    if split_count > 0 {
+                        // CHRONOLOGICAL EXTRACTION based on strategy
+                        let extracted_split = if use_end_chronological {
+                            // TEST: Take from END (most recent data)
+                            // Sort indices by sequence start time and take the latest ones
+                            let mut sorted_indices: Vec<_> = training_indices
+                                .iter()
+                                .map(|&idx| (idx, all_sequences[idx].start_idx))
+                                .collect();
+                            sorted_indices.sort_by_key(|(_, start_idx)| *start_idx);
 
-                        target_validation.extend_from_slice(extracted_validation);
-                        remaining_training_indices
-                            .insert(target_key.clone(), remaining_training.to_vec());
-                        total_validation_extracted += validation_count;
+                            // Take the last N sequences (most recent)
+                            let split_point = sorted_indices.len() - split_count;
+                            sorted_indices[split_point..]
+                                .iter()
+                                .map(|(idx, _)| *idx)
+                                .collect::<Vec<_>>()
+                        } else {
+                            // VALIDATION: Mixed chronological (can be from anywhere)
+                            // Simple extraction - take last N sequences from balanced set
+                            let split_point = training_indices.len() - split_count;
+                            training_indices[split_point..].to_vec()
+                        };
+
+                        // Update remaining training indices (remove extracted ones)
+                        let remaining_training: Vec<_> = training_indices
+                            .iter()
+                            .filter(|&&idx| !extracted_split.contains(&idx))
+                            .copied()
+                            .collect();
+
+                        target_split.extend_from_slice(&extracted_split);
+                        remaining_training_indices.insert(target_key.clone(), remaining_training);
+                        total_split_extracted += split_count;
                     }
                 } else {
                     // No overloaded classes - extract proportionally from balanced set
                     let training_indices = remaining_training_indices.get(&target_key).unwrap();
-                    let validation_count =
-                        (training_indices.len() as f64 * validation_ratio) as usize;
+                    let split_count = (training_indices.len() as f64 * split_ratio) as usize;
 
-                    if validation_count > 0 {
-                        let split_point = training_indices.len() - validation_count;
-                        let (remaining_training, extracted_validation) =
-                            training_indices.split_at(split_point);
+                    if split_count > 0 {
+                        // CHRONOLOGICAL EXTRACTION based on strategy
+                        let extracted_split = if use_end_chronological {
+                            // TEST: Take from END (most recent data)
+                            let mut sorted_indices: Vec<_> = training_indices
+                                .iter()
+                                .map(|&idx| (idx, all_sequences[idx].start_idx))
+                                .collect();
+                            sorted_indices.sort_by_key(|(_, start_idx)| *start_idx);
 
-                        target_validation.extend_from_slice(extracted_validation);
-                        remaining_training_indices
-                            .insert(target_key.clone(), remaining_training.to_vec());
-                        total_validation_extracted += validation_count;
+                            // Take the last N sequences (most recent)
+                            let split_point = sorted_indices.len() - split_count;
+                            sorted_indices[split_point..]
+                                .iter()
+                                .map(|(idx, _)| *idx)
+                                .collect::<Vec<_>>()
+                        } else {
+                            // VALIDATION: Mixed chronological
+                            let split_point = training_indices.len() - split_count;
+                            training_indices[split_point..].to_vec()
+                        };
+
+                        // Update remaining training indices
+                        let remaining_training: Vec<_> = training_indices
+                            .iter()
+                            .filter(|&&idx| !extracted_split.contains(&idx))
+                            .copied()
+                            .collect();
+
+                        target_split.extend_from_slice(&extracted_split);
+                        remaining_training_indices.insert(target_key.clone(), remaining_training);
+                        total_split_extracted += split_count;
                     }
                 }
 
-                validation_indices.insert(target_key, target_validation);
+                if !target_split.is_empty() {
+                    split_indices.insert(target_key, target_split);
+                }
             }
         }
 
         log::info!(
-            "✅ SMART VALIDATION EXTRACTED: {} total validation samples across all targets",
-            total_validation_extracted
+            "✅ SMART {} EXTRACTED: {} total {} samples across all targets",
+            split_type,
+            total_split_extracted,
+            split_type.to_lowercase()
         );
 
         // Create remaining training dataset
@@ -883,12 +954,11 @@ impl SequenceBalancer {
             balanced_indices: remaining_training_indices,
             class_distribution: balanced_dataset.class_distribution.clone(), // Proportions remain same
             global_min_class_count: balanced_dataset.global_min_class_count,
-            total_balanced_samples: balanced_dataset.total_balanced_samples
-                - total_validation_extracted,
+            total_balanced_samples: balanced_dataset.total_balanced_samples - total_split_extracted,
             overloaded_classes: HashMap::new(), // No overloaded classes in remaining training
         };
 
-        Ok((remaining_training_dataset, validation_indices))
+        Ok((remaining_training_dataset, split_indices))
     }
 
     /// Select sequences for a target with specified count
