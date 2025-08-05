@@ -229,7 +229,7 @@ impl MultiHeadAttention {
     ) -> Result<Tensor> {
         // Compute scaled dot-product attention
         let scale = (self.head_dim as f64).sqrt() as f32;
-        let scale_tensor = Tensor::new(scale, &self.device)?;
+        let scale_tensor = Tensor::new(&[scale], &self.device)?;
         let scaled_queries = queries.broadcast_div(&scale_tensor)?.contiguous()?;
 
         // Compute attention scores: Q * K^T

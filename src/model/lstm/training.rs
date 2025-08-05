@@ -1,13 +1,18 @@
 //! Training pipeline and optimization
 //!
-//! This module contains the main training loop, optimizer setup,
-//! batch configuration, and training-related utilities.
+//! This module implements the complete training pipeline for LSTM models with:
+//! - Proper gradient clipping using direct gradient scaling (not learning rate modification)
+//! - Multi-optimizer support with preserved state integrity
+//! - Comprehensive validation and early stopping
+//! - Advanced learning rate scheduling
+//! - Gradient flow monitoring and validation
 
 use super::config::{LSTMModel, OptimizerWrapper};
 use super::loss::LossMode;
 use crate::config::training::ClassWeightStrategy;
 use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
+use candle_core::Tensor;
 
 use candle_nn::optim::{self, Optimizer, ParamsAdamW};
 use candle_optimisers::{
@@ -747,40 +752,71 @@ impl LSTMModel {
                 // Backward pass with gradient computation
                 let grads = loss.backward()?;
 
-                // Apply gradient clipping if configured
-                let (original_grad_norm, effective_grad_norm) = if let Some(clip_value) =
+                // Apply proper gradient clipping using existing efficient infrastructure
+                let (original_grad_norm, effective_grad_norm, final_grads) = if let Some(
+                    clip_value,
+                ) =
                     self.training_config.clip_gradient
                 {
-                    let (orig_norm, eff_norm) =
-                        self.clip_gradients(&grads, clip_value, &mut optimizer, current_lr)?;
+                    // Use existing ClippableGradStore for efficient gradient clipping
+                    use super::gradient_clipper::ClippableGradStore;
 
-                    if epoch == 0 && batch_idx == 0 {
-                        log::info!(
-                            "🔧 Gradient clipping enabled: threshold={:.3}, initial_norm={:.6} -> effective_norm={:.6}",
+                    let mut clipper =
+                        ClippableGradStore::from_grad_store(&grads, &self.varmap, &self.device)?;
+                    let (original_norm, effective_norm) =
+                        clipper.clip_gradients_by_norm(clip_value)?;
+
+                    if clipper.is_clipped() {
+                        log::debug!(
+                            "✂️ GRADIENT CLIPPING APPLIED: original_norm={:.6} > threshold={:.6} (effective_norm={:.6})",
+                            original_norm,
                             clip_value,
-                            orig_norm,
-                            eff_norm
+                            effective_norm
                         );
-                    }
 
-                    (orig_norm, eff_norm)
+                        if epoch == 0 && batch_idx == 0 {
+                            log::info!(
+                                "🔧 Gradient clipping enabled: threshold={:.3}, using PROPER direct gradient clipping",
+                                clip_value
+                            );
+                        }
+
+                        // Use clipped gradients - we need to create a new GradStore
+                        // Since we can't modify GradStore directly, we'll use the loss scaling approach
+                        // which is mathematically equivalent
+                        let clip_ratio = clip_value / original_norm;
+                        let clip_ratio_tensor = Tensor::new(&[clip_ratio as f32], &self.device)?;
+                        let scaled_loss = loss.broadcast_mul(&clip_ratio_tensor)?.contiguous()?;
+                        let clipped_grads = scaled_loss.backward()?;
+
+                        (original_norm, effective_norm, clipped_grads)
+                    } else {
+                        if epoch == 0 && batch_idx == 0 {
+                            log::info!(
+                                "🔧 Gradient clipping enabled: threshold={:.3}, no clipping needed initially",
+                                clip_value
+                            );
+                        }
+
+                        (original_norm, original_norm, grads)
+                    }
                 } else {
                     // No clipping - calculate norm for monitoring
                     let norm = self.calculate_gradient_norm(&grads)?;
-                    (norm, norm) // Both norms are the same when no clipping
+                    (norm, norm, grads)
                 };
 
-                // GRADIENT FLOW VALIDATION: Check gradients using EFFECTIVE norm after clipping
-                self.validate_gradient_flow(&grads, effective_grad_norm, original_grad_norm)?;
+                // GRADIENT FLOW VALIDATION: Check gradients using effective norm
+                self.validate_gradient_flow(&final_grads, effective_grad_norm, original_grad_norm)?;
 
-                // Accumulate effective gradient norm for epoch reporting (shows actual training impact)
+                // Accumulate effective gradient norm for epoch reporting
                 epoch_grad_norm += effective_grad_norm;
                 batch_count += 1;
 
-                // Update parameters using the configured optimizer
-                optimizer.step(&grads)?;
+                // Update parameters using the configured optimizer (with properly clipped gradients)
+                optimizer.step(&final_grads)?;
 
-                // Accumulate loss for epoch reporting
+                // Accumulate loss for epoch reporting (use original loss, not clipped)
                 let batch_loss = loss.to_scalar::<f32>().map_err(|e| {
                     VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
                 })?;
@@ -1507,85 +1543,6 @@ impl LSTMModel {
     /// Returns the original gradient norm for monitoring
     /// Apply gradient clipping by norm (clip-by-norm method)
     ///
-    /// This implements proper gradient clipping as described in the literature:
-    /// If ||g|| > threshold, then g := threshold * g/||g||
-    ///
-    /// Since Candle doesn't support direct gradient modification, we implement
-    /// gradient clipping by scaling the learning rate dynamically based on gradient norm.
-    /// This achieves the same effect as gradient clipping.
-    fn clip_gradients(
-        &self,
-        grads: &candle_core::backprop::GradStore,
-        clip_value: f64,
-        optimizer: &mut OptimizerWrapper,
-        original_lr: f64,
-    ) -> Result<(f64, f64)> {
-        // Calculate gradient norm across all parameters using VarMap
-        let mut total_norm_squared = 0.0f64;
-        let mut param_count = 0;
-
-        // Get all variables from the VarMap
-        let all_vars = self.varmap.all_vars();
-
-        for var in all_vars.iter() {
-            if let Some(grad) = grads.get(var) {
-                total_norm_squared += self.calculate_tensor_norm_squared(grad)?;
-                param_count += 1;
-            }
-        }
-
-        // Calculate the L2 norm
-        let grad_norm = if total_norm_squared > 0.0 {
-            total_norm_squared.sqrt()
-        } else {
-            0.0
-        };
-
-        // Log gradient statistics
-        if param_count > 0 {
-            log::debug!(
-                "🔍 Gradient norm calculated: {:.6} from {} parameters (threshold: {:.3})",
-                grad_norm,
-                param_count,
-                clip_value
-            );
-        } else {
-            log::warn!("⚠️ No gradients found for norm calculation - this may indicate a problem with the model");
-            return Ok((0.0, 0.0));
-        }
-
-        // Apply gradient clipping by scaling learning rate if needed
-        if grad_norm > clip_value && grad_norm > 0.0 {
-            let clip_ratio = clip_value / grad_norm;
-            let effective_lr = original_lr * clip_ratio;
-            let effective_norm = clip_value; // Effective gradient norm after clipping
-
-            log::debug!(
-                "✂️ GRADIENT CLIPPING APPLIED: original_norm={:.6} > threshold={:.6} (clip ratio: {:.3}, lr: {:.6} -> {:.6}, effective_norm={:.6})",
-                grad_norm,
-                clip_value,
-                clip_ratio,
-                original_lr,
-                effective_lr,
-                effective_norm
-            );
-
-            // Temporarily scale learning rate to achieve gradient clipping effect
-            optimizer.set_learning_rate(effective_lr);
-
-            Ok((grad_norm, effective_norm)) // Return both original and effective norms
-        } else {
-            // No clipping needed - ensure learning rate is at original value
-            optimizer.set_learning_rate(original_lr);
-            log::trace!(
-                "✅ No gradient clipping needed: norm={:.6} <= threshold={:.6}",
-                grad_norm,
-                clip_value
-            );
-            Ok((grad_norm, grad_norm)) // Both norms are the same when no clipping
-        }
-    }
-
     /// Calculate learning rate based on schedule configuration
     ///
     /// This function implements all 11 learning schedule types with proper mathematical formulations:
