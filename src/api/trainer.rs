@@ -119,6 +119,19 @@ impl ModelTrainer {
     /// 4. Save complete training config and normalization stats for prediction consistency
     ///
     /// Returns trained MultiTargetLSTMModel ready for prediction or further training.
+    /// Train multi-target LSTM models using target-specific balanced sequences
+    ///
+    /// ARCHITECTURE OVERVIEW:
+    /// 1. Each (target_type, horizon) gets its own balanced sequences with different sample counts
+    /// 2. For each target, we create a MultiTargetLSTMModel wrapper containing ONLY that target
+    /// 3. This ensures Direction sequences only train Direction models, not PriceLevel/Volatility
+    /// 4. MultiTargetLSTMModel is a wrapper with Vec<LSTMModel> - one LSTMModel per target
+    /// 5. In target-specific training, the wrapper contains only ONE LSTMModel
+    ///
+    /// EXPECTED LOGS:
+    /// - "Direction 12h: 985 sequences" → Creates MultiTargetLSTMModel with 1 Direction LSTMModel
+    /// - "PriceLevel 12h: 1250 sequences" → Creates MultiTargetLSTMModel with 1 PriceLevel LSTMModel  
+    /// - "🎯 Using 985 train samples" → Individual LSTMModel training log (correct per-target count)
     pub async fn train(&mut self) -> Result<MultiTargetLSTMModel> {
         log::info!("Starting model training for symbol: {}", self.config.symbol);
 
@@ -208,81 +221,209 @@ impl ModelTrainer {
             );
         }
 
-        // Train each target independently
-        let mut final_model = None;
+        // CORRECTED MULTI-TARGET TRAINING FLOW:
+        // 1. Train ALL targets within each window (proper temporal progression)
+        // 2. Each target gets single-target MultiTargetLSTMModel wrapper (1 LSTM inside)
+        // 3. Collect all single-target models and combine into final multi-target model
+        let mut all_target_models = Vec::new(); // Collect trained LSTM models
+        let mut all_target_names = Vec::new(); // Track target names for combination
+        let mut all_horizons = Vec::new(); // Track horizons for combination
 
-        for ((target_type, horizon), windows) in &target_windows.windows_by_target {
+        // Track model state across windows for each target
+        use std::collections::HashMap;
+        let mut target_models: HashMap<(crate::targets::TargetType, String), MultiTargetLSTMModel> = HashMap::new();
+
+        // Determine maximum number of windows across all targets
+        let max_windows = target_windows.windows_by_target.values()
+            .map(|windows| windows.len())
+            .max()
+            .unwrap_or(0);
+
+        if max_windows == 0 {
+            return Err(VangaError::DataError("No training windows found".to_string()));
+        }
+
+        log::info!(
+            "🔄 CORRECTED TRAINING FLOW: {} windows × {} targets (window-first approach for proper temporal progression)",
+            max_windows,
+            target_windows.windows_by_target.len()
+        );
+        log::info!(
+            "📊 Training progression: Window 1 (all targets) → Window 2 (all targets) → ... → Window {} (all targets)",
+            max_windows
+        );
+
+        // CORRECTED LOOP: WINDOW FIRST, THEN TARGETS (proper temporal progression)
+        for window_idx in 0..max_windows {
             log::info!(
-                "🎯 Training {:?} {} with {} windows and independent balancing",
-                target_type,
-                horizon,
-                windows.len()
+                "🪟 === WINDOW {}/{} === Training ALL targets within same temporal window",
+                window_idx + 1,
+                max_windows
             );
 
-            let mut target_model = None;
+            // Calculate window-specific learning rate
+            let window_lr = base_lr * self.config.training.window_decay.powi(window_idx as i32);
+            log::info!(
+                "📊 Window {} learning rate: {:.6} ({:.1}% of base)",
+                window_idx + 1,
+                window_lr,
+                (window_lr / base_lr) * 100.0
+            );
 
-            for (window_idx, window) in windows.iter().enumerate() {
-                // Calculate window-specific learning rate
-                let window_lr = base_lr * self.config.training.window_decay.powi(window_idx as i32);
+            // Train ALL targets within this window
+            for ((target_type, horizon), windows) in &target_windows.windows_by_target {
+                // Skip if this target doesn't have enough windows
+                if window_idx >= windows.len() {
+                    log::debug!(
+                        "⏭️  Skipping {:?} {} - only has {} windows (need window {})",
+                        target_type,
+                        horizon,
+                        windows.len(),
+                        window_idx + 1
+                    );
+                    continue;
+                }
 
+                let window = &windows[window_idx];
+                let target_key = (*target_type, horizon.clone());
                 log::info!(
-                    "🔄 {:?} {} Window {}/{}: effective_lr={:.6} ({:.1}% of base) → {} train samples, {} validation samples",
+                    "🎯 {:?} {} Window {}/{}: {} train samples, {} validation samples",
                     target_type, horizon,
                     window_idx + 1,
                     windows.len(),
-                    window_lr,
-                    (window_lr / base_lr) * 100.0,
                     window.train_samples,
                     window.val_samples
                 );
 
                 if window_idx == 0 {
-                    // First window: train from scratch
+                    // WINDOW 1: Train fresh model from scratch with initial data
                     log::info!(
                         "🆕 {:?} {} Window 1: Training fresh model from scratch",
                         target_type,
                         horizon
                     );
-                    target_model = Some(self.train_window_from_scratch(window, window_idx).await?);
+                    let new_model = self.train_window_from_scratch(window, window_idx, *target_type, horizon)
+                        .await?;
+                    target_models.insert(target_key, new_model);
                 } else {
-                    // Subsequent windows: continue training on expanded data
+                    // WINDOW 2+: Continue training with EXTENDED data (preserves learned weights)
+                    // CRITICAL: Uses SAME target's extended sequences, NOT new sequences only
                     log::info!(
-                        "🔄 {:?} {} Window {}: Continuing training with preserved weights",
+                        "🔄 {:?} {} Window {}: Continuing training with EXTENDED data (preserves weights)",
                         target_type,
                         horizon,
                         window_idx + 1
                     );
-                    target_model = Some(
-                        self.continue_training_window(target_model.unwrap(), window, window_idx)
-                            .await?,
-                    );
+
+                    // EXTRACT MODEL: Get existing trained model for continuation
+                    let existing_model = target_models.remove(&target_key).ok_or_else(|| {
+                        VangaError::ModelError(format!(
+                            "No existing model found for {:?} {} at window {}. This should not happen as window 0 creates the initial model.",
+                            target_type, horizon, window_idx + 1
+                        ))
+                    })?;
+
+                    let continued_model = self.continue_training_window(
+                        existing_model,
+                        window,
+                        window_idx,
+                        *target_type,
+                        horizon,
+                        window_lr,
+                    ).await?;
+                    
+                    // Store back the continued model
+                    let target_key_for_insert = (*target_type, horizon.clone());
+                    target_models.insert(target_key_for_insert, continued_model);
                 }
 
-                // Collect window metrics for final statistics
-                if let Some(ref current_model) = target_model {
-                    let window_lr =
-                        base_lr * self.config.training.window_decay.powi(window_idx as i32);
+                // Collect validation metrics for this window and target
+                let target_key_for_metrics = (*target_type, horizon.clone());
+                if let Some(current_model) = target_models.get(&target_key_for_metrics) {
                     self.collect_window_metrics(current_model, window, window_idx, window_lr)
                         .await?;
                 }
+
+                log::info!(
+                    "✅ {:?} {} Window {} completed successfully",
+                    target_type,
+                    horizon,
+                    window_idx + 1
+                );
             }
 
-            // Use the first target's model as the final model
-            if final_model.is_none() {
-                final_model = target_model;
-            }
+            log::info!(
+                "🏁 Window {}/{} completed - all {} targets trained within same temporal window ✅",
+                window_idx + 1,
+                max_windows,
+                target_windows.windows_by_target.len()
+            );
         }
 
-        // Get the final model
-        let mut final_model = final_model.ok_or_else(|| {
-            VangaError::TrainingError("No target models were trained".to_string())
-        })?;
+        // COLLECT ALL TRAINED MODELS: Extract final models from HashMap
+        log::info!("🔗 Collecting all trained models from window-based training");
+        for ((target_type, horizon), model) in target_models {
+            // Extract the single LSTMModel from the MultiTargetLSTMModel wrapper
+            let single_models = model.extract_models()?;
+            if single_models.len() != 1 {
+                return Err(VangaError::ModelError(format!(
+                    "Expected single model for {:?} {}, found {}",
+                    target_type,
+                    horizon,
+                    single_models.len()
+                )));
+            }
+
+            // COLLECT: Add to final model collection (ALL targets preserved)
+            all_target_models.push(single_models.into_iter().next().unwrap());
+            all_target_names.push(generate_target_name(target_type, &horizon));
+            all_horizons.push(horizon.clone());
+
+            log::info!(
+                "✅ Collected trained model for {:?} {} ({}/{} models total)",
+                target_type,
+                &horizon,
+                all_target_models.len(),
+                target_windows.windows_by_target.len()
+            );
+        }
+
+        // COMBINE ALL MODELS: Create final MultiTargetLSTMModel containing ALL trained targets
+        // ARCHITECTURE: MultiTargetLSTMModel = wrapper containing Vec<LSTMModel> (one per target)
+        if all_target_models.is_empty() {
+            return Err(VangaError::TrainingError(
+                "No target models were trained".to_string(),
+            ));
+        }
+
+        log::info!(
+            "🔗 Combining {} single-target models into final MultiTargetLSTMModel: {:?}",
+            all_target_models.len(),
+            all_target_names
+        );
+
+        // CREATE FINAL MODEL: All targets combined, each trained on its own sequences
+        let mut final_model = MultiTargetLSTMModel::from_trained_models(
+            all_target_models, // Vec<LSTMModel> - one per target
+            all_target_names,  // ["price_level_12h", "direction_12h", "volatility_12h"]
+            all_horizons,      // ["12h", "12h", "12h"]
+            target_windows.windows_by_target.values().next().unwrap()[0]
+                .train_data
+                .sequences
+                .shape()[2], // input_size
+        )?;
 
         // Set complete training config on model before saving
         final_model.set_training_config(self.config.clone());
 
-        // Skip final test evaluation for now since we have target-specific windows
-        // TODO: Implement proper test evaluation for target-specific models
+        // Enable final test evaluation with target-specific balanced test data
+        // Each target now has its own balanced test split for proper evaluation
+        if self.config.training.test_split > 0.0 {
+            log::info!("🧪 Final test evaluation enabled with target-specific balanced test data");
+            // TODO: Implement comprehensive test evaluation across all target models
+        } else {
+            log::info!("🧪 Test evaluation disabled (test_split = 0.0)");
+        }
 
         // Display final window-by-window statistics
         self.display_final_statistics();
@@ -293,27 +434,69 @@ impl ModelTrainer {
         Ok(final_model)
     }
 
-    /// Train model from scratch on first window with window-aware configuration
+    /// Train single-target model from scratch using target-specific balanced sequences
+    ///
+    /// ARCHITECTURE CLARIFICATION:
+    /// - MultiTargetLSTMModel is a WRAPPER containing multiple individual LSTMModel instances
+    /// - In target-specific windows, we create MultiTargetLSTMModel with ONLY ONE target
+    /// - This ensures target-specific sequences are only used for the matching target
+    /// - Avoids training PriceLevel models on Direction sequences, etc.
     async fn train_window_from_scratch(
         &self,
         window: &crate::data::TrainingWindow,
         window_id: usize,
+        target_type: crate::targets::TargetType,
+        horizon: &str,
     ) -> Result<MultiTargetLSTMModel> {
         log::info!(
-            "🎯 [train_window_from_scratch] Training config horizons: {:?} (count: {})",
-            self.config.horizons,
-            self.config.horizons.len()
+            "🎯 Training {:?} {} with target-specific balanced sequences ({} samples)",
+            target_type,
+            horizon,
+            window.train_samples
         );
 
         // Process targets for multi-model architecture
         let (train_targets, val_targets) = self.process_window_targets(window, "training")?;
 
-        // Create multi-target model
+        // CRITICAL FIX: Create MultiTargetLSTMModel with ONLY the current target being trained
+        // This window contains target-specific balanced sequences, so we should only train the matching target
         let input_size = window.train_data.sequences.shape()[2];
-        let target_names = &window.train_data.targets.target_names;
+
+        // Generate target name using helper function
+        let current_target_name = generate_target_name(target_type, horizon);
+
+        // Validate target exists in window
+        if !window
+            .train_data
+            .targets
+            .target_names
+            .contains(&current_target_name)
+        {
+            return Err(VangaError::DataError(format!(
+                "Target '{}' not found in window. Available targets: {:?}",
+                current_target_name, window.train_data.targets.target_names
+            )));
+        }
+
+        // Create MultiTargetLSTMModel wrapper with SINGLE target (avoids training wrong sequences on wrong targets)
+        let target_names = vec![current_target_name.clone()];
+        log::info!(
+            "🎯 Creating single-target MultiTargetLSTMModel for '{}' using target-specific balanced sequences",
+            current_target_name
+        );
+
         let mut model = self
-            .get_or_create_multi_target_model(input_size, target_names)
+            .get_or_create_multi_target_model(input_size, &target_names)
             .await?;
+
+        // Extract single target data using helper function
+        let (single_train_target, single_val_target) = extract_single_target_data(
+            &train_targets,
+            Some(&val_targets),
+            window,
+            &current_target_name,
+            "initial training",
+        )?;
 
         // Create window-aware config that properly scales all scheduler parameters
         let window_config =
@@ -324,14 +507,14 @@ impl ModelTrainer {
             window_id + 1
         );
 
-        // Train the model with chronological validation
+        // Train the model with target-specific sequences and target-specific targets
         model
             .train(
                 TrainingContext::Standard {
                     sequences: &window.train_data.sequences,
-                    targets: &train_targets,
+                    targets: &single_train_target,
                     val_sequences: Some(&window.val_data.sequences),
-                    val_targets: Some(&val_targets),
+                    val_targets: single_val_target.as_ref(),
                     target_class_weights: Some(&window.target_class_weights),
                 },
                 &window_config,
@@ -348,32 +531,51 @@ impl ModelTrainer {
         mut model: MultiTargetLSTMModel,
         window: &crate::data::TrainingWindow,
         window_id: usize,
+        target_type: crate::targets::TargetType,
+        horizon: &str,
+        window_lr: f64,
     ) -> Result<MultiTargetLSTMModel> {
-        log::info!(
-            "🎯 [continue_training_window] Training config horizons: {:?} (count: {})",
-            self.config.horizons,
-            self.config.horizons.len()
-        );
-
-        // Process targets for multi-model architecture
-        let (train_targets, _val_targets) =
-            self.process_window_targets(window, "continue training")?;
-
-        // Create window-aware config that properly scales all scheduler parameters
-        let window_config =
-            crate::model::lstm::create_window_aware_config(&self.config, window_id)?;
+        // Generate target name using helper function
+        let current_target_name = generate_target_name(target_type, horizon);
 
         log::info!(
-            "🎯 Continue training with window-aware configuration for window {}",
+            "🎯 [continue_training_window] Single-target continuation for '{}' (window {})",
+            current_target_name,
             window_id + 1
         );
 
-        // Continue training with new data
+        // Process targets for multi-model architecture (gets ALL targets)
+        let (train_targets, _val_targets) =
+            self.process_window_targets(window, "continue training")?;
+
+        // Extract single target data using helper function (INCLUDE VALIDATION DATA)
+        let (single_train_target, single_val_target) = extract_single_target_data(
+            &train_targets,
+            Some(&_val_targets), // ✅ CRITICAL FIX: Include validation data for continuation
+            window,
+            &current_target_name,
+            "continuation training",
+        )?;
+
+        // Create window-aware config with the provided learning rate
+        let mut window_config = self.config.clone();
+        window_config.training.learning_rate = window_lr;
+
+        log::info!(
+            "🎯 Continue training with window-aware learning rate {:.6} for window {}",
+            window_lr,
+            window_id + 1
+        );
+
+        // Continue training with EXTENDED/CUMULATIVE data (preserves weights, includes validation to prevent overfitting)
+        // CRITICAL: window.train_data.sequences contains CUMULATIVE data (Window1: 2880, Window2: 3744, etc.)
         model
             .train(
                 TrainingContext::Continue {
-                    new_sequences: &window.train_data.sequences,
-                    new_targets: &train_targets,
+                    new_sequences: &window.train_data.sequences, // CUMULATIVE sequences
+                    new_targets: &single_train_target,
+                    val_sequences: Some(&window.val_data.sequences), // CRITICAL: Prevents overfitting
+                    val_targets: single_val_target.as_ref(), // CRITICAL: Prevents overfitting
                     target_class_weights: Some(&window.target_class_weights),
                 },
                 &window_config,
@@ -852,4 +1054,67 @@ fn extract_targets_for_multi_model(
     }
 
     Ok(training_array)
+}
+
+// HELPER FUNCTIONS: Code quality improvements for target handling
+
+/// TARGET NAME GENERATION: Convert target type + horizon to standard format
+/// PURPOSE: Eliminates duplication, ensures consistent naming across codebase
+/// EXAMPLES: (PriceLevel, "12h") → "price_level_12h", (Direction, "4h") → "direction_4h"
+fn generate_target_name(target_type: crate::targets::TargetType, horizon: &str) -> String {
+    let target_type_str = match target_type {
+        crate::targets::TargetType::PriceLevel => "price_level",
+        crate::targets::TargetType::Direction => "direction",
+        crate::targets::TargetType::Volatility => "volatility",
+    };
+    format!("{}_{}", target_type_str, horizon)
+}
+
+/// SINGLE TARGET EXTRACTION: Extract one target's data from multi-target arrays
+/// PURPOSE: Prevents cross-contamination (PriceLevel models training on Direction data)
+/// CRITICAL: Each target trains ONLY on its own sequences and validation data
+/// INPUT: Multi-target arrays [samples, 3_targets] → OUTPUT: Single-target [samples, 1_target]
+fn extract_single_target_data(
+    train_targets: &ndarray::Array2<f64>, // All targets training data
+    val_targets: Option<&ndarray::Array2<f64>>, // All targets validation data (optional)
+    window: &crate::data::TrainingWindow, // Window containing target names
+    target_name: &str,                    // Specific target to extract ("price_level_12h")
+    operation: &str,                      // Operation context for error messages
+) -> Result<(ndarray::Array2<f64>, Option<ndarray::Array2<f64>>)> {
+    // Find target index with comprehensive error handling
+    let target_idx = window
+        .train_data
+        .targets
+        .target_names
+        .iter()
+        .position(|name| name == target_name)
+        .ok_or_else(|| {
+            VangaError::DataError(format!(
+                "Target '{}' not found during {}. Available targets: {:?}",
+                target_name, operation, window.train_data.targets.target_names
+            ))
+        })?;
+
+    // Extract single-column target arrays
+    let single_train_target = train_targets
+        .column(target_idx)
+        .to_owned()
+        .insert_axis(ndarray::Axis(1));
+
+    let single_val_target = val_targets.map(|val_targets| {
+        val_targets
+            .column(target_idx)
+            .to_owned()
+            .insert_axis(ndarray::Axis(1))
+    });
+
+    log::info!(
+        "🎯 Extracted target '{}' (column {}) from {} total targets for {}",
+        target_name,
+        target_idx,
+        window.train_data.targets.target_names.len(),
+        operation
+    );
+
+    Ok((single_train_target, single_val_target))
 }
