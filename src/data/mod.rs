@@ -591,7 +591,20 @@ impl DataPipeline {
         log::info!("🏗️ CREATING TARGET-SPECIFIC BALANCED WINDOWS:");
 
         // Process each target independently with balanced train/val splits
-        for ((target_type, horizon), target_dataset) in &target_balanced_datasets {
+        // CRITICAL: Sort keys for deterministic processing order (avoid random HashMap iteration)
+        let mut sorted_targets: Vec<_> = target_balanced_datasets.keys().collect();
+        sorted_targets.sort_by(|a, b| {
+            // Sort by target type first, then by horizon
+            match a.0.cmp(&b.0) {
+                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+                other => other,
+            }
+        });
+
+        for (target_type, horizon) in sorted_targets {
+            let target_dataset = target_balanced_datasets
+                .get(&(*target_type, horizon.clone()))
+                .unwrap();
             let target_key = (*target_type, horizon.clone());
 
             log::info!(
@@ -662,9 +675,42 @@ impl DataPipeline {
                         std::cmp::max(min_samples, progressive_samples)
                     };
 
-                    // CRITICAL: window_train contains CUMULATIVE indices [0..samples_for_window]
-                    let window_train =
-                        train_indices[..samples_for_window.min(train_indices.len())].to_vec();
+                    // CRITICAL FIX: Take BALANCED subset for progressive windows
+                    // Maintain perfect balance while taking progressive amounts
+                    let window_train = if samples_for_window >= train_indices.len() {
+                        // Use all data if requesting more than available
+                        train_indices.clone()
+                    } else {
+                        // Take balanced subset: samples_for_window / 5 classes = samples per class
+                        let samples_per_class = samples_for_window / 5;
+                        let mut balanced_subset = Vec::new();
+
+                        // Group indices by class and take equal amounts from each
+                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
+                            std::collections::HashMap::new();
+                        for &idx in &train_indices {
+                            if let Some(seq) = all_sequences.get(idx) {
+                                if let Some(&target_value) = seq.targets.get(&target_key) {
+                                    class_indices.entry(target_value).or_default().push(idx);
+                                }
+                            }
+                        }
+
+                        // Take samples_per_class from each class to maintain balance
+                        for class_value in 0..5 {
+                            if let Some(class_idx_list) = class_indices.get(&class_value) {
+                                let take_count = samples_per_class.min(class_idx_list.len());
+                                balanced_subset.extend(&class_idx_list[..take_count]);
+                            }
+                        }
+
+                        log::debug!(
+                            "🎯 Progressive Window {}: Taking {} samples ({} per class × 5) from {} total balanced",
+                            window_idx + 1, balanced_subset.len(), samples_per_class, train_indices.len()
+                        );
+
+                        balanced_subset
+                    };
 
                     // Create target-specific indices map
                     let mut train_indices_map = HashMap::new();
@@ -793,9 +839,31 @@ impl DataPipeline {
                         num_targets
                     );
                 }
+            } else {
+                log::error!(
+                    "❌ CRITICAL: No balanced indices found for {:?} {} in target_dataset.balanced_indices",
+                    target_type, horizon
+                );
+                log::debug!(
+                    "Available keys in balanced_indices: {:?}",
+                    target_dataset.balanced_indices.keys().collect::<Vec<_>>()
+                );
+                return Err(VangaError::DataError(format!(
+                    "No balanced indices found for target {:?} horizon {}. This indicates a balance extraction failure.",
+                    target_type, horizon
+                )));
             }
 
-            target_specific_windows.insert(target_key, target_windows);
+            // Only insert if we have windows (should always have windows after the check above)
+            if !target_windows.is_empty() {
+                target_specific_windows.insert(target_key, target_windows);
+            } else {
+                log::error!(
+                    "❌ CRITICAL: Empty target_windows for {:?} {} - this should not happen",
+                    target_type,
+                    horizon
+                );
+            }
         }
 
         log::info!("✅ Created target-specific balanced windows:");
@@ -920,42 +988,72 @@ impl DataPipeline {
 
         // Create targets using EMBEDDED targets from SequenceWithTargets (CRITICAL FIX!)
         let mut targets = crate::targets::PreparedTargets::new(num_sequences);
-        targets.target_names = all_data.targets.target_names.clone();
 
-        // Initialize target arrays
-        for horizon in all_data.targets.get_horizons() {
-            targets
-                .price_levels
-                .insert(horizon.clone(), vec![-1; num_sequences]);
-            targets
-                .directions
-                .insert(horizon.clone(), vec![-1; num_sequences]);
-            targets
-                .volatility
-                .insert(horizon.clone(), vec![-1; num_sequences]);
+        // CRITICAL FIX: Create target-specific PreparedTargets with ONLY current target data
+        // Determine which target types are present in indices_by_target
+        let target_types_present: std::collections::HashSet<crate::targets::TargetType> =
+            indices_by_target
+                .keys()
+                .map(|(target_type, _)| *target_type)
+                .collect();
+
+        log::debug!(
+            "🎯 Creating target-specific PreparedTargets for: {:?}",
+            target_types_present
+        );
+
+        // Only initialize and populate target arrays for the SPECIFIC target types present
+        for (target_type, horizon) in indices_by_target.keys() {
+            let target_name = match target_type {
+                crate::targets::TargetType::PriceLevel => format!("price_level_{}", horizon),
+                crate::targets::TargetType::Direction => format!("direction_{}", horizon),
+                crate::targets::TargetType::Volatility => format!("volatility_{}", horizon),
+            };
+            targets.target_names.push(target_name);
+
+            match target_type {
+                crate::targets::TargetType::PriceLevel => {
+                    targets
+                        .price_levels
+                        .insert(horizon.clone(), vec![-1; num_sequences]);
+                }
+                crate::targets::TargetType::Direction => {
+                    targets
+                        .directions
+                        .insert(horizon.clone(), vec![-1; num_sequences]);
+                }
+                crate::targets::TargetType::Volatility => {
+                    targets
+                        .volatility
+                        .insert(horizon.clone(), vec![-1; num_sequences]);
+                }
+            }
         }
 
-        // Extract targets from SequenceWithTargets (PROPER ALIGNMENT!)
+        // Extract targets from SequenceWithTargets (TARGET-SPECIFIC FILTERING!)
         for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
             if orig_idx < all_sequences.len() {
                 let seq_with_targets = &all_sequences[orig_idx];
 
-                // Copy embedded targets to new arrays
+                // Copy ONLY the target types that are present in indices_by_target
                 for ((target_type, horizon), &target_value) in &seq_with_targets.targets {
-                    match target_type {
-                        crate::targets::TargetType::PriceLevel => {
-                            if let Some(targets_vec) = targets.price_levels.get_mut(horizon) {
-                                targets_vec[new_idx] = target_value;
+                    // CRITICAL FIX: Only copy targets that are in indices_by_target
+                    if indices_by_target.contains_key(&(*target_type, horizon.clone())) {
+                        match target_type {
+                            crate::targets::TargetType::PriceLevel => {
+                                if let Some(targets_vec) = targets.price_levels.get_mut(horizon) {
+                                    targets_vec[new_idx] = target_value;
+                                }
                             }
-                        }
-                        crate::targets::TargetType::Direction => {
-                            if let Some(targets_vec) = targets.directions.get_mut(horizon) {
-                                targets_vec[new_idx] = target_value;
+                            crate::targets::TargetType::Direction => {
+                                if let Some(targets_vec) = targets.directions.get_mut(horizon) {
+                                    targets_vec[new_idx] = target_value;
+                                }
                             }
-                        }
-                        crate::targets::TargetType::Volatility => {
-                            if let Some(targets_vec) = targets.volatility.get_mut(horizon) {
-                                targets_vec[new_idx] = target_value;
+                            crate::targets::TargetType::Volatility => {
+                                if let Some(targets_vec) = targets.volatility.get_mut(horizon) {
+                                    targets_vec[new_idx] = target_value;
+                                }
                             }
                         }
                     }

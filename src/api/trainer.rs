@@ -108,12 +108,12 @@ fn validate_prepared_targets_balance(targets: &PreparedTargets, data_name: &str)
         for (target_type, target_name) in &target_types {
             if let Some(target_values) = targets.get_targets(horizon, *target_type) {
                 // Count class occurrences for valid indices only
-                let mut class_counts = vec![0usize; 5];
+                let mut class_counts = [0usize; 5];
 
                 for &idx in &targets.valid_indices {
                     if idx < target_values.len() {
                         let class_value = target_values[idx];
-                        if class_value >= 0 && class_value < 5 {
+                        if (0..5).contains(&class_value) {
                             class_counts[class_value as usize] += 1;
                         } else {
                             return Err(VangaError::DataError(format!(
@@ -373,7 +373,22 @@ impl ModelTrainer {
             );
 
             // Train ALL targets within this window
-            for ((target_type, horizon), windows) in &target_windows.windows_by_target {
+            // CRITICAL: Sort targets for deterministic processing order (avoid random HashMap iteration)
+            let mut sorted_targets: Vec<_> = target_windows.windows_by_target.keys().collect();
+            sorted_targets.sort_by(|a, b| {
+                // Sort by target type first, then by horizon
+                match a.0.cmp(&b.0) {
+                    std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+                    other => other,
+                }
+            });
+
+            for (target_type, horizon) in sorted_targets {
+                let windows = target_windows
+                    .windows_by_target
+                    .get(&(*target_type, horizon.clone()))
+                    .unwrap();
+
                 // Skip if this target doesn't have enough windows
                 if window_idx >= windows.len() {
                     log::debug!(

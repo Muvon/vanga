@@ -857,33 +857,48 @@ impl SequenceBalancer {
                     );
 
                     // TODO: Extract validation from overloaded classes first
-                    // For now, use simple proportional extraction
+                    // CRITICAL FIX: Extract balanced validation maintaining perfect class distribution
                     let training_indices = remaining_training_indices.get(&target_key).unwrap();
-                    let split_count = (training_indices.len() as f64 * split_ratio) as usize;
 
-                    if split_count > 0 {
-                        // CHRONOLOGICAL EXTRACTION based on strategy
-                        let extracted_split = if use_end_chronological {
-                            // TEST: Take from END (most recent data)
-                            // Sort indices by sequence start time and take the latest ones
-                            let mut sorted_indices: Vec<_> = training_indices
-                                .iter()
-                                .map(|&idx| (idx, all_sequences[idx].start_idx))
-                                .collect();
-                            sorted_indices.sort_by_key(|(_, start_idx)| *start_idx);
+                    // Calculate balanced split: take equal amounts from each class
+                    let total_balanced_samples = training_indices.len();
+                    let samples_per_class = total_balanced_samples / 5; // 5 classes
+                    let val_samples_per_class = (samples_per_class as f64 * split_ratio) as usize;
+                    let total_val_samples = val_samples_per_class * 5;
 
-                            // Take the last N sequences (most recent)
-                            let split_point = sorted_indices.len() - split_count;
-                            sorted_indices[split_point..]
-                                .iter()
-                                .map(|(idx, _)| *idx)
-                                .collect::<Vec<_>>()
-                        } else {
-                            // VALIDATION: Mixed chronological (can be from anywhere)
-                            // Simple extraction - take last N sequences from balanced set
-                            let split_point = training_indices.len() - split_count;
-                            training_indices[split_point..].to_vec()
-                        };
+                    log::debug!(
+                        "🎯 Balanced validation split: {} total → {} per class × 5 = {} validation samples",
+                        total_balanced_samples, val_samples_per_class, total_val_samples
+                    );
+
+                    if val_samples_per_class > 0 {
+                        // Group training indices by class
+                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
+                            std::collections::HashMap::new();
+                        for &idx in training_indices {
+                            if let Some(seq) = all_sequences.get(idx) {
+                                if let Some(&target_value) = seq.targets.get(&target_key) {
+                                    class_indices.entry(target_value).or_default().push(idx);
+                                }
+                            }
+                        }
+
+                        // Extract equal amounts from each class for validation
+                        let mut extracted_split = Vec::new();
+                        for class_value in 0..5 {
+                            if let Some(class_idx_list) = class_indices.get(&class_value) {
+                                let take_count = val_samples_per_class.min(class_idx_list.len());
+                                if use_end_chronological {
+                                    // Take from end (most recent) for test data
+                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
+                                    extracted_split.extend(&class_idx_list[start_idx..]);
+                                } else {
+                                    // Take from end for validation (but could be mixed)
+                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
+                                    extracted_split.extend(&class_idx_list[start_idx..]);
+                                }
+                            }
+                        }
 
                         // Update remaining training indices (remove extracted ones)
                         let remaining_training: Vec<_> = training_indices
@@ -894,36 +909,52 @@ impl SequenceBalancer {
 
                         target_split.extend_from_slice(&extracted_split);
                         remaining_training_indices.insert(target_key.clone(), remaining_training);
-                        total_split_extracted += split_count;
+                        total_split_extracted += extracted_split.len();
                     }
                 } else {
-                    // No overloaded classes - extract proportionally from balanced set
+                    // No overloaded classes - extract balanced validation maintaining perfect class distribution
                     let training_indices = remaining_training_indices.get(&target_key).unwrap();
-                    let split_count = (training_indices.len() as f64 * split_ratio) as usize;
 
-                    if split_count > 0 {
-                        // CHRONOLOGICAL EXTRACTION based on strategy
-                        let extracted_split = if use_end_chronological {
-                            // TEST: Take from END (most recent data)
-                            let mut sorted_indices: Vec<_> = training_indices
-                                .iter()
-                                .map(|&idx| (idx, all_sequences[idx].start_idx))
-                                .collect();
-                            sorted_indices.sort_by_key(|(_, start_idx)| *start_idx);
+                    // Calculate balanced split: take equal amounts from each class
+                    let total_balanced_samples = training_indices.len();
+                    let samples_per_class = total_balanced_samples / 5; // 5 classes
+                    let val_samples_per_class = (samples_per_class as f64 * split_ratio) as usize;
 
-                            // Take the last N sequences (most recent)
-                            let split_point = sorted_indices.len() - split_count;
-                            sorted_indices[split_point..]
-                                .iter()
-                                .map(|(idx, _)| *idx)
-                                .collect::<Vec<_>>()
-                        } else {
-                            // VALIDATION: Mixed chronological
-                            let split_point = training_indices.len() - split_count;
-                            training_indices[split_point..].to_vec()
-                        };
+                    log::debug!(
+                        "🎯 Balanced validation split (no overload): {} total → {} per class × 5 = {} validation samples",
+                        total_balanced_samples, val_samples_per_class, val_samples_per_class * 5
+                    );
 
-                        // Update remaining training indices
+                    if val_samples_per_class > 0 {
+                        // Group training indices by class
+                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
+                            std::collections::HashMap::new();
+                        for &idx in training_indices {
+                            if let Some(seq) = all_sequences.get(idx) {
+                                if let Some(&target_value) = seq.targets.get(&target_key) {
+                                    class_indices.entry(target_value).or_default().push(idx);
+                                }
+                            }
+                        }
+
+                        // Extract equal amounts from each class for validation
+                        let mut extracted_split = Vec::new();
+                        for class_value in 0..5 {
+                            if let Some(class_idx_list) = class_indices.get(&class_value) {
+                                let take_count = val_samples_per_class.min(class_idx_list.len());
+                                if use_end_chronological {
+                                    // Take from end (most recent) for test data
+                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
+                                    extracted_split.extend(&class_idx_list[start_idx..]);
+                                } else {
+                                    // Take from end for validation (but could be mixed)
+                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
+                                    extracted_split.extend(&class_idx_list[start_idx..]);
+                                }
+                            }
+                        }
+
+                        // Update remaining training indices (remove extracted ones)
                         let remaining_training: Vec<_> = training_indices
                             .iter()
                             .filter(|&&idx| !extracted_split.contains(&idx))
@@ -932,7 +963,7 @@ impl SequenceBalancer {
 
                         target_split.extend_from_slice(&extracted_split);
                         remaining_training_indices.insert(target_key.clone(), remaining_training);
-                        total_split_extracted += split_count;
+                        total_split_extracted += extracted_split.len();
                     }
                 }
 

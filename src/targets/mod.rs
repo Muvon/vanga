@@ -103,11 +103,18 @@ impl PreparedTargets {
         }
     }
 
-    /// Get all horizons available
+    /// Get all horizons available from ANY target type
     pub fn get_horizons(&self) -> Vec<String> {
-        let mut horizons: Vec<String> = self.price_levels.keys().cloned().collect();
-        horizons.sort();
-        horizons
+        let mut horizons: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Collect horizons from all target types
+        horizons.extend(self.price_levels.keys().cloned());
+        horizons.extend(self.directions.keys().cloned());
+        horizons.extend(self.volatility.keys().cloned());
+
+        let mut horizon_vec: Vec<String> = horizons.into_iter().collect();
+        horizon_vec.sort();
+        horizon_vec
     }
 
     /// Validate targets consistency across all types
@@ -172,7 +179,7 @@ impl PreparedTargets {
 }
 
 /// Target type enumeration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TargetType {
     PriceLevel,
     Direction,

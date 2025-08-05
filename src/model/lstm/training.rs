@@ -50,10 +50,10 @@ pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Resul
             validate_single_target_balance(targets, data_name)
         }
         _ => {
-            return Err(VangaError::DataError(format!(
+            Err(VangaError::DataError(format!(
                 "🚨 BALANCE VALIDATION FAILED: Expected 15 outputs (multi-target) or 1 output (single-target), got {}",
                 num_outputs
-            )));
+            )))
         }
     }
 }
@@ -94,15 +94,15 @@ pub fn validate_multi_target_balance(targets: &Array2<f64>, data_name: &str) -> 
         let end_col = start_col + 5;
 
         // Extract class labels from one-hot encoding
-        let mut class_counts = vec![0usize; 5];
+        let mut class_counts = [0usize; 5];
 
         for sample_idx in 0..num_samples {
             let mut found_class = false;
-            for class_idx in 0..5 {
+            for (class_idx, class_count) in class_counts.iter_mut().enumerate() {
                 let col_idx = start_col + class_idx;
                 if targets[[sample_idx, col_idx]] > 0.5 {
                     // One-hot encoded value
-                    class_counts[class_idx] += 1;
+                    *class_count += 1;
                     found_class = true;
                     break;
                 }
