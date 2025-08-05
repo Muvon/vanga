@@ -38,8 +38,10 @@
 
 pub mod config;
 pub mod core;
+pub mod gradient_clipper;
 pub mod inference;
 pub mod loss;
+pub mod optimizer_bridge;
 pub mod schedule_benchmark;
 pub mod schedule_validation;
 pub mod seeded_weights;

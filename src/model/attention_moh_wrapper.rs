@@ -128,7 +128,7 @@ impl MoHTrainingLoss {
         };
 
         let total_loss = if let Some(ref lb_loss) = load_balance_loss {
-            let weight_tensor = Tensor::new(load_balance_weight as f32, task_loss.device())?;
+            let weight_tensor = Tensor::new(&[load_balance_weight as f32], task_loss.device())?;
             let weighted_lb_loss = lb_loss.broadcast_mul(&weight_tensor)?.contiguous()?;
             (task_loss.clone() + weighted_lb_loss)?.contiguous()?
         } else {
@@ -244,7 +244,7 @@ mod tests {
     #[tokio::test]
     async fn test_moh_training_loss() {
         let device = Device::Cpu;
-        let task_loss = Tensor::new(1.5f32, &device).unwrap();
+        let task_loss = Tensor::new(&[1.5f32], &device).unwrap();
 
         // Test without MoH
         let loss_without_moh = MoHTrainingLoss::new(task_loss.clone(), None, 0.01).unwrap();

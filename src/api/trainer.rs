@@ -130,7 +130,7 @@ impl ModelTrainer {
     ///
     /// EXPECTED LOGS:
     /// - "Direction 12h: 985 sequences" → Creates MultiTargetLSTMModel with 1 Direction LSTMModel
-    /// - "PriceLevel 12h: 1250 sequences" → Creates MultiTargetLSTMModel with 1 PriceLevel LSTMModel  
+    /// - "PriceLevel 12h: 1250 sequences" → Creates MultiTargetLSTMModel with 1 PriceLevel LSTMModel
     /// - "🎯 Using 985 train samples" → Individual LSTMModel training log (correct per-target count)
     pub async fn train(&mut self) -> Result<MultiTargetLSTMModel> {
         log::info!("Starting model training for symbol: {}", self.config.symbol);
@@ -231,16 +231,21 @@ impl ModelTrainer {
 
         // Track model state across windows for each target
         use std::collections::HashMap;
-        let mut target_models: HashMap<(crate::targets::TargetType, String), MultiTargetLSTMModel> = HashMap::new();
+        let mut target_models: HashMap<(crate::targets::TargetType, String), MultiTargetLSTMModel> =
+            HashMap::new();
 
         // Determine maximum number of windows across all targets
-        let max_windows = target_windows.windows_by_target.values()
+        let max_windows = target_windows
+            .windows_by_target
+            .values()
             .map(|windows| windows.len())
             .max()
             .unwrap_or(0);
 
         if max_windows == 0 {
-            return Err(VangaError::DataError("No training windows found".to_string()));
+            return Err(VangaError::DataError(
+                "No training windows found".to_string(),
+            ));
         }
 
         log::info!(
@@ -288,7 +293,8 @@ impl ModelTrainer {
                 let target_key = (*target_type, horizon.clone());
                 log::info!(
                     "🎯 {:?} {} Window {}/{}: {} train samples, {} validation samples",
-                    target_type, horizon,
+                    target_type,
+                    horizon,
                     window_idx + 1,
                     windows.len(),
                     window.train_samples,
@@ -302,7 +308,8 @@ impl ModelTrainer {
                         target_type,
                         horizon
                     );
-                    let new_model = self.train_window_from_scratch(window, window_idx, *target_type, horizon)
+                    let new_model = self
+                        .train_window_from_scratch(window, window_idx, *target_type, horizon)
                         .await?;
                     target_models.insert(target_key, new_model);
                 } else {
@@ -323,15 +330,17 @@ impl ModelTrainer {
                         ))
                     })?;
 
-                    let continued_model = self.continue_training_window(
-                        existing_model,
-                        window,
-                        window_idx,
-                        *target_type,
-                        horizon,
-                        window_lr,
-                    ).await?;
-                    
+                    let continued_model = self
+                        .continue_training_window(
+                            existing_model,
+                            window,
+                            window_idx,
+                            *target_type,
+                            horizon,
+                            window_lr,
+                        )
+                        .await?;
+
                     // Store back the continued model
                     let target_key_for_insert = (*target_type, horizon.clone());
                     target_models.insert(target_key_for_insert, continued_model);
