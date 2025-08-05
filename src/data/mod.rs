@@ -695,7 +695,6 @@ impl DataPipeline {
                             )),
                             targets: empty_targets,
                             feature_names: train_data.feature_names.clone(),
-                            normalization_stats: train_data.normalization_stats.clone(),
                             metadata: train_data.metadata.clone(),
                             sequence_indices: Vec::new(),
                         }
@@ -759,16 +758,11 @@ impl DataPipeline {
         }
 
         // Extract shared metadata from first window
-        let (feature_names, _normalization_stats) = target_specific_windows
+        let feature_names = target_specific_windows
             .values()
             .next()
             .and_then(|windows| windows.first())
-            .map(|window| {
-                (
-                    window.train_data.feature_names.clone(),
-                    window.train_data.normalization_stats.clone(),
-                )
-            })
+            .map(|window| window.train_data.feature_names.clone())
             .unwrap_or_default();
 
         Ok(TargetSpecificWindows {
@@ -924,7 +918,6 @@ impl DataPipeline {
             sequences,
             targets,
             feature_names: all_data.feature_names.clone(),
-            normalization_stats: all_data.normalization_stats.clone(),
             metadata: all_data.metadata.clone(),
             sequence_indices,
         })
@@ -1040,7 +1033,6 @@ pub struct PreparedData {
     pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
     pub targets: PreparedTargets,
     pub feature_names: Vec<String>,
-    pub normalization_stats: NormalizationStats,
     pub metadata: DataMetadata,
     /// Start and end indices for each sequence in the original data
     pub sequence_indices: Vec<(usize, usize)>,

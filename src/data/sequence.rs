@@ -134,16 +134,6 @@ impl SequenceGenerator {
             sequences,
             targets,
             feature_names: feature_columns,
-            // No global normalization stats needed - each sequence normalized independently
-            normalization_stats: crate::data::NormalizationStats {
-                means: vec![],
-                stds: vec![],
-                mins: vec![],
-                maxs: vec![],
-                medians: vec![],
-                q25: vec![],
-                q75: vec![],
-            },
             metadata,
             sequence_indices,
         })

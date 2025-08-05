@@ -281,17 +281,6 @@ impl ModelTrainer {
         // Set complete training config on model before saving
         final_model.set_training_config(self.config.clone());
 
-        // Set normalization stats from training data (use first target's first window)
-        if let Some(first_windows) = target_windows.windows_by_target.values().next() {
-            if let Some(first_window) = first_windows.first() {
-                final_model
-                    .set_normalization_stats(first_window.train_data.normalization_stats.clone());
-                log::info!(
-                    "✅ Normalization stats saved with model for consistent prediction preprocessing"
-                );
-            }
-        }
-
         // Skip final test evaluation for now since we have target-specific windows
         // TODO: Implement proper test evaluation for target-specific models
 
