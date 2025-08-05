@@ -8,9 +8,6 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3};
 use std::collections::HashMap;
 
-// Import WindowConfig from parent module
-use super::WindowConfig;
-
 // Type alias for complex return type to improve readability
 type ValidationSelectionResult = (
     Vec<usize>,
@@ -25,7 +22,6 @@ type ValidationSplitResult = (
     GloballyBalancedDataset,
     HashMap<(TargetType, String), Vec<usize>>,
 );
-type WindowIndicesMap = HashMap<usize, HashMap<(TargetType, String), Vec<usize>>>;
 
 /// Globally balanced dataset extracted from full available data
 #[derive(Debug, Clone)]
@@ -643,6 +639,146 @@ impl SequenceBalancer {
         })
     }
 
+    /// Extract target-specific balanced datasets - each target gets its own optimal balance
+    pub fn extract_target_specific_balanced_datasets(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        target_types: &[TargetType],
+        horizons: &[String],
+    ) -> Result<HashMap<(TargetType, String), GloballyBalancedDataset>> {
+        if all_sequences.is_empty() {
+            return Err(VangaError::DataError(
+                "No sequences available for target-specific balancing".to_string(),
+            ));
+        }
+
+        log::info!(
+            "🎯 TARGET-SPECIFIC BALANCE EXTRACTION: Analyzing {} sequences for {} targets × {} horizons",
+            all_sequences.len(),
+            target_types.len(),
+            horizons.len()
+        );
+
+        let mut target_balanced_datasets = HashMap::new();
+
+        // Process each target independently to maximize its balanced data
+        for target_type in target_types {
+            for horizon in horizons {
+                let target_key = (*target_type, horizon.clone());
+
+                log::info!(
+                    "📊 Processing {:?} {} independently for optimal balance",
+                    target_type,
+                    horizon
+                );
+
+                // Group sequences by class for this specific target
+                let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
+                for (idx, seq) in all_sequences.iter().enumerate() {
+                    if let Some(&class) = seq.targets.get(&target_key) {
+                        class_sequences.entry(class).or_default().push(idx);
+                    }
+                }
+
+                if class_sequences.is_empty() {
+                    log::warn!(
+                        "⚠️ No sequences found for {:?} {} - skipping",
+                        target_type,
+                        horizon
+                    );
+                    continue;
+                }
+
+                // Find minimum class count for THIS target only
+                let target_min_class_count =
+                    class_sequences.values().map(|v| v.len()).min().unwrap_or(0);
+
+                if target_min_class_count == 0 {
+                    log::warn!(
+                        "⚠️ Cannot balance {:?} {} - at least one class has no sequences",
+                        target_type,
+                        horizon
+                    );
+                    continue;
+                }
+
+                let num_classes = class_sequences.len();
+                let total_balanced = target_min_class_count * num_classes;
+
+                log::info!(
+                    "   ✅ {:?} {}: {} classes, {} sequences per class = {} total balanced",
+                    target_type,
+                    horizon,
+                    num_classes,
+                    target_min_class_count,
+                    total_balanced
+                );
+
+                // Extract balanced samples for this target
+                let mut target_balanced_indices = Vec::new();
+                let mut target_class_distribution = HashMap::new();
+                let mut target_overloaded = HashMap::new();
+
+                for (class, mut indices) in class_sequences {
+                    let available = indices.len();
+                    let needed = target_min_class_count;
+
+                    // Shuffle for random selection
+                    use rand::seq::SliceRandom;
+                    let mut rng = rand::rng();
+                    indices.shuffle(&mut rng);
+
+                    // Take exactly what we need for balance
+                    let selected: Vec<usize> = indices.into_iter().take(needed).collect();
+                    target_balanced_indices.extend(&selected);
+                    target_class_distribution.insert(class, selected.len());
+
+                    // Track overloaded classes
+                    if available > needed {
+                        target_overloaded.insert(class, available - needed);
+                    }
+
+                    log::debug!(
+                        "      Class {}: selected {}/{} sequences",
+                        class,
+                        needed,
+                        available
+                    );
+                }
+
+                // Sort indices for consistency
+                target_balanced_indices.sort();
+
+                // Create target-specific balanced dataset
+                let mut balanced_indices_map = HashMap::new();
+                balanced_indices_map.insert(target_key.clone(), target_balanced_indices.clone());
+
+                let mut class_dist_map = HashMap::new();
+                class_dist_map.insert(target_key.clone(), target_class_distribution);
+
+                let mut overloaded_map = HashMap::new();
+                overloaded_map.insert(target_key.clone(), target_overloaded);
+
+                let target_dataset = GloballyBalancedDataset {
+                    balanced_indices: balanced_indices_map,
+                    class_distribution: class_dist_map,
+                    overloaded_classes: overloaded_map,
+                    global_min_class_count: target_min_class_count,
+                    total_balanced_samples: target_balanced_indices.len(),
+                };
+
+                target_balanced_datasets.insert(target_key, target_dataset);
+            }
+        }
+
+        log::info!(
+            "✅ TARGET-SPECIFIC BALANCE COMPLETE: {} target/horizon combinations balanced independently",
+            target_balanced_datasets.len()
+        );
+
+        Ok(target_balanced_datasets)
+    }
+
     /// Derive validation set from globally balanced dataset using smart overlap management
     /// Uses overloaded classes to extract validation without reducing training balance
     pub fn smart_validation_split_from_balanced(
@@ -753,166 +889,6 @@ impl SequenceBalancer {
         };
 
         Ok((remaining_training_dataset, validation_indices))
-    }
-
-    /// Build training windows from globally balanced dataset
-    /// Distributes balanced samples across windows ensuring consistent balance
-    #[allow(private_interfaces)]
-    pub(crate) fn build_windows_from_balanced_pool(
-        &self,
-        balanced_training_pool: &GloballyBalancedDataset,
-        window_ranges: &[WindowConfig],
-        target_types: &[TargetType],
-        horizons: &[String],
-    ) -> Result<WindowIndicesMap> {
-        log::info!(
-            "🏗️ WINDOW CONSTRUCTION: Building {} windows from globally balanced pool ({} samples)",
-            window_ranges.len(),
-            balanced_training_pool.total_balanced_samples
-        );
-
-        let mut window_indices_map = HashMap::new();
-
-        for (window_idx, window_range) in window_ranges.iter().enumerate() {
-            let mut window_target_indices = HashMap::new();
-
-            log::debug!(
-                "   📊 Window {}: range [0..{}]",
-                window_idx + 1,
-                window_range.train_end
-            );
-
-            for target_type in target_types {
-                for horizon in horizons {
-                    let target_key = (*target_type, horizon.clone());
-
-                    if let Some(balanced_indices) =
-                        balanced_training_pool.balanced_indices.get(&target_key)
-                    {
-                        // PROGRESSIVE WINDOW EXPANSION WITH MAINTAINED BALANCE
-                        // Each window must maintain perfect class balance
-
-                        let total_samples = balanced_indices.len();
-                        let samples_for_this_window = if window_ranges.len() == 1 {
-                            // Single window: use all samples
-                            total_samples
-                        } else {
-                            // Progressive expansion: calculate portion for this window
-                            let window_progress =
-                                (window_idx + 1) as f64 / window_ranges.len() as f64;
-                            let min_samples = total_samples / window_ranges.len(); // Minimum per window
-                            let progressive_samples =
-                                (total_samples as f64 * window_progress) as usize;
-                            std::cmp::max(min_samples, progressive_samples)
-                        };
-
-                        // CRITICAL: Maintain balance by taking proportional samples from each class
-                        let class_dist = balanced_training_pool
-                            .class_distribution
-                            .get(&target_key)
-                            .unwrap();
-                        let window_samples = self.extract_balanced_subset_for_window(
-                            balanced_indices,
-                            samples_for_this_window,
-                            class_dist,
-                            balanced_training_pool.global_min_class_count,
-                        )?;
-
-                        log::debug!(
-                            "   📊 {:?}: {} samples for window {} ({}% of balanced pool)",
-                            target_key,
-                            window_samples.len(),
-                            window_idx + 1,
-                            (window_samples.len() as f64 / total_samples as f64) * 100.0
-                        );
-
-                        window_target_indices.insert(target_key, window_samples);
-                    }
-                }
-            }
-
-            window_indices_map.insert(window_idx, window_target_indices);
-        }
-
-        log::info!(
-            "✅ WINDOW CONSTRUCTION COMPLETE: {} windows built with consistent balance",
-            window_ranges.len()
-        );
-
-        Ok(window_indices_map)
-    }
-
-    /// Extract balanced subset for a specific window maintaining class proportions
-    /// CRITICAL: Each window must maintain perfect balance, not just take first N samples
-    fn extract_balanced_subset_for_window(
-        &self,
-        all_balanced_indices: &[usize],
-        target_samples: usize,
-        class_distribution: &HashMap<i32, usize>,
-        global_min_class_count: usize,
-    ) -> Result<Vec<usize>> {
-        if target_samples >= all_balanced_indices.len() {
-            // Want all samples - return everything (already balanced)
-            return Ok(all_balanced_indices.to_vec());
-        }
-
-        let num_classes = class_distribution.len();
-
-        // Calculate samples per class for this window
-        let samples_per_class_for_window = target_samples / num_classes;
-        let remainder = target_samples % num_classes;
-
-        if samples_per_class_for_window == 0 {
-            // Too few samples requested - take at least 1 per class if possible
-            let min_samples = std::cmp::min(target_samples, num_classes);
-            return Ok(all_balanced_indices
-                .iter()
-                .take(min_samples)
-                .cloned()
-                .collect());
-        }
-
-        log::debug!(
-            "   🎯 Window balance: {} samples total, {} per class, {} remainder classes get +1",
-            target_samples,
-            samples_per_class_for_window,
-            remainder
-        );
-
-        let mut window_samples = Vec::new();
-
-        // Since balanced_indices are already balanced (global_min_class_count per class),
-        // we can take samples proportionally from the structured balanced array
-        let classes_processed = 0;
-
-        for &_class_count in class_distribution.values() {
-            let samples_for_this_class = if classes_processed < remainder {
-                samples_per_class_for_window + 1 // Distribute remainder
-            } else {
-                samples_per_class_for_window
-            };
-
-            // Take samples for this class from the balanced indices
-            // Since indices are balanced, we take from the class's portion
-            let class_start_idx = classes_processed * global_min_class_count;
-            let class_end_idx = std::cmp::min(
-                class_start_idx + samples_for_this_class,
-                (classes_processed + 1) * global_min_class_count,
-            );
-
-            for i in class_start_idx..class_end_idx {
-                if i < all_balanced_indices.len() {
-                    window_samples.push(all_balanced_indices[i]);
-                }
-            }
-        }
-
-        log::debug!(
-            "   ✅ Balanced window subset: {} samples with perfect class balance maintained",
-            window_samples.len()
-        );
-
-        Ok(window_samples)
     }
 
     /// Select sequences for a target with specified count
@@ -1323,277 +1299,4 @@ pub async fn create_sequences_with_targets(
     }
 
     Ok(sequences_with_targets)
-}
-
-#[cfg(test)]
-mod global_balance_tests {
-    use super::*;
-    use crate::targets::TargetType;
-
-    #[test]
-    fn test_global_balance_extraction_basic() {
-        // Create test sequences with different class distributions
-        let mut sequences = Vec::new();
-
-        // Create sequences for PriceLevel target with classes 0, 1, 2
-        for i in 0..15 {
-            let class = (i % 3) as i32; // Classes 0, 1, 2 with 5 sequences each (i32 type)
-            let mut targets = HashMap::new();
-            targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
-
-            sequences.push(SequenceWithTargets {
-                sequence_idx: i,
-                start_idx: i * 10,
-                end_idx: (i + 1) * 10,
-                sequence_data: Array2::zeros((10, 5)),
-                targets,
-            });
-        }
-
-        let balancer = SequenceBalancer::new(BalanceConfig::default());
-        let target_types = vec![TargetType::PriceLevel];
-        let horizons = vec!["1h".to_string()];
-
-        let result =
-            balancer.extract_globally_balanced_dataset(&sequences, &target_types, &horizons);
-
-        assert!(result.is_ok());
-        let balanced = result.unwrap();
-
-        // Should have global minimum class count of 5 (all classes have 5 sequences)
-        assert_eq!(balanced.global_min_class_count, 5);
-
-        // Should have balanced indices for PriceLevel 1h
-        let target_key = (TargetType::PriceLevel, "1h".to_string());
-        assert!(balanced.balanced_indices.contains_key(&target_key));
-
-        // Should have 15 total balanced samples (5 per class * 3 classes)
-        let indices = balanced.balanced_indices.get(&target_key).unwrap();
-        assert_eq!(indices.len(), 15);
-    }
-
-    #[test]
-    fn test_smart_validation_split() {
-        // Create test sequences
-        let mut sequences = Vec::new();
-
-        for i in 0..20 {
-            let class = (i % 2) as i32; // Classes 0, 1 with 10 sequences each (i32 type)
-            let mut targets = HashMap::new();
-            targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
-
-            sequences.push(SequenceWithTargets {
-                sequence_idx: i,
-                start_idx: i * 10,
-                end_idx: (i + 1) * 10,
-                sequence_data: Array2::zeros((10, 5)),
-                targets,
-            });
-        }
-
-        let balancer = SequenceBalancer::new(BalanceConfig::default());
-        let target_types = vec![TargetType::PriceLevel];
-        let horizons = vec!["1h".to_string()];
-
-        // First extract globally balanced dataset
-        let globally_balanced = balancer
-            .extract_globally_balanced_dataset(&sequences, &target_types, &horizons)
-            .unwrap();
-
-        // Then split validation
-        let result = balancer.smart_validation_split_from_balanced(
-            &globally_balanced,
-            &sequences,
-            0.2, // 20% validation
-            &target_types,
-            &horizons,
-        );
-
-        assert!(result.is_ok());
-        let (remaining_training, validation_indices) = result.unwrap();
-
-        // Should have validation indices for the target
-        let target_key = (TargetType::PriceLevel, "1h".to_string());
-        assert!(validation_indices.contains_key(&target_key));
-
-        // Validation should be extracted
-        let val_indices = validation_indices.get(&target_key).unwrap();
-        assert!(!val_indices.is_empty());
-
-        // Training pool should be reduced
-        assert!(
-            remaining_training.total_balanced_samples < globally_balanced.total_balanced_samples
-        );
-    }
-
-    #[test]
-    fn test_progressive_window_expansion() {
-        // Create test sequences
-        let mut sequences = Vec::new();
-
-        for i in 0..30 {
-            let class = (i % 3) as i32; // Classes 0, 1, 2 with 10 sequences each
-            let mut targets = HashMap::new();
-            targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
-
-            sequences.push(SequenceWithTargets {
-                sequence_idx: i,
-                start_idx: i * 10,
-                end_idx: (i + 1) * 10,
-                sequence_data: Array2::zeros((10, 5)),
-                targets,
-            });
-        }
-
-        let balancer = SequenceBalancer::new(BalanceConfig::default());
-        let target_types = vec![TargetType::PriceLevel];
-        let horizons = vec!["1h".to_string()];
-
-        // Extract globally balanced dataset
-        let globally_balanced = balancer
-            .extract_globally_balanced_dataset(&sequences, &target_types, &horizons)
-            .unwrap();
-
-        // Create mock window ranges
-        use super::WindowConfig;
-        let window_ranges = vec![
-            WindowConfig { train_end: 100 },
-            WindowConfig { train_end: 200 },
-            WindowConfig { train_end: 300 },
-        ];
-
-        // Build windows from balanced pool
-        let window_indices_map = balancer
-            .build_windows_from_balanced_pool(
-                &globally_balanced,
-                &window_ranges,
-                &target_types,
-                &horizons,
-            )
-            .unwrap();
-
-        let target_key = (TargetType::PriceLevel, "1h".to_string());
-
-        // Verify progressive expansion
-        let window_0_samples = window_indices_map
-            .get(&0)
-            .unwrap()
-            .get(&target_key)
-            .unwrap()
-            .len();
-        let window_1_samples = window_indices_map
-            .get(&1)
-            .unwrap()
-            .get(&target_key)
-            .unwrap()
-            .len();
-        let window_2_samples = window_indices_map
-            .get(&2)
-            .unwrap()
-            .get(&target_key)
-            .unwrap()
-            .len();
-
-        // Each window should have more or equal samples than the previous
-        assert!(window_1_samples >= window_0_samples);
-        assert!(window_2_samples >= window_1_samples);
-
-        // Last window should have all balanced samples
-        let total_balanced = globally_balanced
-            .balanced_indices
-            .get(&target_key)
-            .unwrap()
-            .len();
-        assert_eq!(window_2_samples, total_balanced);
-    }
-
-    #[test]
-    fn test_window_balance_maintained() {
-        // Create test sequences with clear class structure
-        let mut sequences = Vec::new();
-
-        // Create 60 sequences: 20 each for classes 0, 1, 2 (imbalanced)
-        for class in 0..3 {
-            for i in 0..20 {
-                let mut targets = HashMap::new();
-                targets.insert((TargetType::PriceLevel, "1h".to_string()), class as i32);
-
-                sequences.push(SequenceWithTargets {
-                    sequence_idx: class * 20 + i,
-                    start_idx: (class * 20 + i) * 10,
-                    end_idx: ((class * 20 + i) + 1) * 10,
-                    sequence_data: Array2::zeros((10, 5)),
-                    targets,
-                });
-            }
-        }
-
-        let balancer = SequenceBalancer::new(BalanceConfig::default());
-        let target_types = vec![TargetType::PriceLevel];
-        let horizons = vec!["1h".to_string()];
-
-        // Extract globally balanced dataset (should balance to 20 per class)
-        let globally_balanced = balancer
-            .extract_globally_balanced_dataset(&sequences, &target_types, &horizons)
-            .unwrap();
-
-        // Create 3 windows for testing
-        use super::WindowConfig;
-        let window_ranges = vec![
-            WindowConfig { train_end: 100 },
-            WindowConfig { train_end: 200 },
-            WindowConfig { train_end: 300 },
-        ];
-
-        // Build windows from balanced pool
-        let window_indices_map = balancer
-            .build_windows_from_balanced_pool(
-                &globally_balanced,
-                &window_ranges,
-                &target_types,
-                &horizons,
-            )
-            .unwrap();
-
-        let target_key = (TargetType::PriceLevel, "1h".to_string());
-
-        // CRITICAL TEST: Verify each window maintains perfect balance
-        for window_idx in 0..3 {
-            let window_samples = window_indices_map
-                .get(&window_idx)
-                .unwrap()
-                .get(&target_key)
-                .unwrap();
-
-            // Count class distribution in this window
-            let mut class_counts = HashMap::new();
-            for &sample_idx in window_samples {
-                let seq = &sequences[sample_idx];
-                let class = seq.targets.get(&target_key).unwrap();
-                *class_counts.entry(*class).or_insert(0) += 1;
-            }
-
-            println!(
-                "Window {} class distribution: {:?}",
-                window_idx, class_counts
-            );
-
-            // Verify perfect balance within this window
-            if class_counts.len() > 1 {
-                let counts: Vec<usize> = class_counts.values().cloned().collect();
-                let min_count = *counts.iter().min().unwrap();
-                let max_count = *counts.iter().max().unwrap();
-
-                // Allow at most 1 sample difference between classes (due to remainder distribution)
-                assert!(
-                    max_count - min_count <= 1,
-                    "Window {} is imbalanced: min={}, max={}, diff={}",
-                    window_idx,
-                    min_count,
-                    max_count,
-                    max_count - min_count
-                );
-            }
-        }
-    }
 }

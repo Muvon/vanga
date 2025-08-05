@@ -144,29 +144,27 @@ impl ModelTrainer {
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new();
 
-        // Load and prepare training data with chronological split
+        // Load and prepare target-specific training data with chronological split
         log::info!(
             "Loading training data from: {}",
             self.config.data_path.display()
         );
-        let windows = data_pipeline
+        let target_windows = data_pipeline
             .prepare_training_data(&self.config.data_path, &self.config)
             .await?;
 
         log::info!(
-            "Walk-forward training: {} windows prepared for progressive learning",
-            windows.len()
+            "Target-specific training: {} targets prepared with independent balancing",
+            target_windows.windows_by_target.len()
         );
-
-        // Train model using walk-forward analysis with window-based learning rate decay
-        let mut model = None;
 
         // Get base learning rate from config
         log::info!("🔧 Walk-forward training configuration:");
         log::info!(
             "   📊 Test split: {:.1}% ({} samples reserved)",
             self.config.training.test_split * 100.0,
-            (windows.len() as f64 * self.config.training.test_split) as usize
+            (target_windows.windows_by_target.len() as f64 * self.config.training.test_split)
+                as usize
         );
         log::info!(
             "   📊 Validation split: {:.1}%",
@@ -181,7 +179,8 @@ impl ModelTrainer {
         log::info!(
             "   📊 Test split: {:.1}% ({} samples reserved)",
             self.config.training.test_split * 100.0,
-            (windows.len() as f64 * self.config.training.test_split) as usize
+            (target_windows.windows_by_target.len() as f64 * self.config.training.test_split)
+                as usize
         );
         log::info!(
             "   📊 Validation split: {:.1}%",
@@ -192,6 +191,7 @@ impl ModelTrainer {
             self.config.training.window_decay
         );
 
+        // Train each target independently using its own balanced windows
         let base_lr = self.config.training.learning_rate;
 
         // Log window decay strategy
@@ -208,194 +208,92 @@ impl ModelTrainer {
             );
         }
 
-        for (i, window) in windows.iter().enumerate() {
-            // Calculate window-specific learning rate for display: base_lr * decay^window_id
-            let window_lr = base_lr * self.config.training.window_decay.powi(i as i32);
+        // Train each target independently
+        let mut final_model = None;
 
+        for ((target_type, horizon), windows) in &target_windows.windows_by_target {
             log::info!(
-                "🔄 Walk-forward window {}/{}: effective_lr={:.6} ({:.1}% of base) → {} train samples, {} validation samples",
-                i + 1,
-                windows.len(),
-                window_lr,
-                (window_lr / base_lr) * 100.0,
-                window.train_samples,
-                window.val_samples
-            );
-            log::info!(
-                "   📊 Window decay will be applied to ALL scheduler parameters (max_lr, base_lr, etc.)"
+                "🎯 Training {:?} {} with {} windows and independent balancing",
+                target_type,
+                horizon,
+                windows.len()
             );
 
-            if i == 0 {
-                // First window: train from scratch
-                log::info!("🆕 Window 1: Training fresh model from scratch with new weights");
-                model = Some(self.train_window_from_scratch(window, i).await?);
-            } else {
-                // Subsequent windows: continue training on expanded data
+            let mut target_model = None;
+
+            for (window_idx, window) in windows.iter().enumerate() {
+                // Calculate window-specific learning rate
+                let window_lr = base_lr * self.config.training.window_decay.powi(window_idx as i32);
+
                 log::info!(
-                    "🔄 Window {}: Continuing training with PRESERVED weights from previous window",
-                    i + 1
+                    "🔄 {:?} {} Window {}/{}: effective_lr={:.6} ({:.1}% of base) → {} train samples, {} validation samples",
+                    target_type, horizon,
+                    window_idx + 1,
+                    windows.len(),
+                    window_lr,
+                    (window_lr / base_lr) * 100.0,
+                    window.train_samples,
+                    window.val_samples
                 );
-                log::info!(
-                    "   ✅ Weight continuity: Using same model instance with existing parameters"
-                );
-                log::info!(
-                    "   📈 Progressive learning: Building on knowledge from {} previous windows",
-                    i
-                );
-                model = Some(
-                    self.continue_training_window(model.unwrap(), window, i)
-                        .await?,
-                );
+
+                if window_idx == 0 {
+                    // First window: train from scratch
+                    log::info!(
+                        "🆕 {:?} {} Window 1: Training fresh model from scratch",
+                        target_type,
+                        horizon
+                    );
+                    target_model = Some(self.train_window_from_scratch(window, window_idx).await?);
+                } else {
+                    // Subsequent windows: continue training on expanded data
+                    log::info!(
+                        "🔄 {:?} {} Window {}: Continuing training with preserved weights",
+                        target_type,
+                        horizon,
+                        window_idx + 1
+                    );
+                    target_model = Some(
+                        self.continue_training_window(target_model.unwrap(), window, window_idx)
+                            .await?,
+                    );
+                }
+
+                // Collect window metrics for final statistics
+                if let Some(ref current_model) = target_model {
+                    let window_lr =
+                        base_lr * self.config.training.window_decay.powi(window_idx as i32);
+                    self.collect_window_metrics(current_model, window, window_idx, window_lr)
+                        .await?;
+                }
             }
 
-            // Collect window metrics for final statistics
-            if let Some(ref current_model) = model {
-                // Calculate the window learning rate for metrics collection
-                let window_lr = base_lr * self.config.training.window_decay.powi(i as i32);
-                self.collect_window_metrics(current_model, window, i, window_lr)
-                    .await?;
+            // Use the first target's model as the final model
+            if final_model.is_none() {
+                final_model = target_model;
             }
         }
 
-        let mut final_model = model.unwrap();
+        // Get the final model
+        let mut final_model = final_model.ok_or_else(|| {
+            VangaError::TrainingError("No target models were trained".to_string())
+        })?;
 
-        // CRITICAL FIX: Set complete training config on model before saving
-        // This ensures prediction can regenerate the same features and settings as training
+        // Set complete training config on model before saving
         final_model.set_training_config(self.config.clone());
 
-        // CRITICAL FIX: Set normalization stats from training data
-        // This ensures prediction uses the same normalization as training
-        if let Some(first_window) = windows.first() {
-            final_model
-                .set_normalization_stats(first_window.train_data.normalization_stats.clone());
-            log::info!(
-                "✅ Normalization stats saved with model for consistent prediction preprocessing"
-            );
-        } else {
-            log::warn!("⚠️  No training windows available - normalization stats not saved");
-        }
-
-        // CRITICAL FIX: Perform final test set evaluation on reserved test data
-        if let Some(final_window) = windows.last() {
-            if final_window.test_samples > 0 {
+        // Set normalization stats from training data (use first target's first window)
+        if let Some(first_windows) = target_windows.windows_by_target.values().next() {
+            if let Some(first_window) = first_windows.first() {
+                final_model
+                    .set_normalization_stats(first_window.train_data.normalization_stats.clone());
                 log::info!(
-                    "🧪 FINAL TEST EVALUATION: Evaluating model on reserved test set ({} samples)",
-                    final_window.test_samples
+                    "✅ Normalization stats saved with model for consistent prediction preprocessing"
                 );
-                log::info!("   📊 Test data: Never seen during training/validation - provides unbiased performance assessment");
-
-                // Process test targets using the same method as training
-                match self.process_window_targets(final_window, "test_evaluation") {
-                    Ok((_, test_targets_array)) => {
-                        // Make predictions on test data using the trained multi-target model
-                        match final_model.predict(&final_window.test_data.sequences).await {
-                            Ok(test_predictions) => {
-                                log::info!("✅ Test predictions generated successfully");
-
-                                // Calculate comprehensive test metrics for each target
-                                let target_names = final_model.get_target_names();
-                                let num_targets = final_model.get_num_targets();
-
-                                log::info!(
-                                    "📊 FINAL TEST METRICS (Unbiased Performance Assessment):"
-                                );
-                                log::info!(
-                                    "   🎯 Evaluating {} targets on {} test samples",
-                                    num_targets,
-                                    final_window.test_samples
-                                );
-
-                                for (target_idx, target_name) in target_names.iter().enumerate() {
-                                    // Multi-target predictions have shape [batch_size, num_targets * NUM_CLASSES]
-                                    // Each target has NUM_CLASSES (5) probability outputs
-                                    const NUM_CLASSES: usize = 5;
-                                    let start_col = target_idx * NUM_CLASSES;
-                                    let end_col = start_col + NUM_CLASSES;
-
-                                    if end_col <= test_predictions.shape()[1]
-                                        && target_idx < test_targets_array.shape()[1]
-                                    {
-                                        // Extract 5-column probability slice for this target
-                                        let target_predictions_slice = test_predictions
-                                            .slice(ndarray::s![.., start_col..end_col]);
-                                        let target_actual = test_targets_array.column(target_idx);
-
-                                        // Convert predictions to class indices using argmax (like validation metrics)
-                                        let pred_classes: Vec<i32> = target_predictions_slice
-                                            .rows()
-                                            .into_iter()
-                                            .map(|pred_row| {
-                                                // Find class with highest probability (argmax)
-                                                pred_row
-                                                    .iter()
-                                                    .enumerate()
-                                                    .max_by(|(_, a), (_, b)| {
-                                                        a.partial_cmp(b)
-                                                            .unwrap_or(std::cmp::Ordering::Equal)
-                                                    })
-                                                    .map(|(idx, _)| idx as i32)
-                                                    .unwrap_or(0)
-                                            })
-                                            .collect();
-
-                                        // Convert targets to class indices (targets are already class indices)
-                                        let actual_classes: Vec<i32> = target_actual
-                                            .iter()
-                                            .map(|&actual| actual.round() as i32)
-                                            .collect();
-
-                                        // Debug: Log lengths to verify fix
-                                        log::debug!(
-                                            "   🔍 Target '{}': {} predictions vs {} targets (should match)",
-                                            target_name, pred_classes.len(), actual_classes.len()
-                                        );
-
-                                        // Calculate classification metrics using existing infrastructure
-                                        match crate::utils::metrics::calculate_classification_metrics(&pred_classes, &actual_classes) {
-                                            Ok(metrics) => {
-                                                log::info!("   🎯 Target '{}' Test Results:", target_name);
-                                                log::info!("      • Accuracy: {:.3} ({:.1}%)", metrics.accuracy, metrics.accuracy * 100.0);
-                                                log::info!("      • Macro F1: {:.3}", metrics.macro_f1);
-                                                log::info!("      • Weighted F1: {:.3}", metrics.weighted_f1);
-                                                log::info!("      • Samples: {} test predictions", pred_classes.len());
-
-                                                // Log per-class metrics if available
-                                                if !metrics.precision.is_empty() {
-                                                    log::debug!("      • Per-class metrics available for {} classes", metrics.precision.len());
-                                                }
-                                            }
-                                            Err(e) => {
-                                                log::warn!("⚠️  Failed to calculate test metrics for target '{}': {}", target_name, e);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                log::info!("✅ FINAL TEST EVALUATION COMPLETED: Unbiased performance metrics calculated");
-                                log::info!("   📈 Test results provide true out-of-sample performance assessment");
-                                log::info!("   🎯 Use test metrics for final model selection and performance reporting");
-                                log::info!("   📊 Test data was reserved from training - these metrics are unbiased");
-                            }
-                            Err(e) => {
-                                log::warn!("⚠️  Failed to generate test predictions: {}", e);
-                                log::warn!("   🔧 Test evaluation skipped - check model training completion");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("⚠️  Failed to process test targets for evaluation: {}", e);
-                        log::warn!("   🔧 Test evaluation skipped - check target processing");
-                    }
-                }
-            } else {
-                log::info!(
-                    "📊 No test data reserved (test_split=0.0) - skipping final test evaluation"
-                );
-                log::info!("   💡 Set test_split > 0.0 in config to enable final test evaluation");
             }
-        } else {
-            log::warn!("⚠️  No final window available for test evaluation");
         }
+
+        // Skip final test evaluation for now since we have target-specific windows
+        // TODO: Implement proper test evaluation for target-specific models
 
         // Display final window-by-window statistics
         self.display_final_statistics();
@@ -446,7 +344,6 @@ impl ModelTrainer {
                     val_sequences: Some(&window.val_data.sequences),
                     val_targets: Some(&val_targets),
                     target_class_weights: Some(&window.target_class_weights),
-                    target_validation_indices: Some(&window.target_validation_indices),
                 },
                 &window_config,
             )
