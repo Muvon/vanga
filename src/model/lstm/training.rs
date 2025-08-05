@@ -27,6 +27,179 @@ use candle_optimisers::{
 };
 use ndarray::{s, Array2, Array3};
 
+/// Perfect balance validation for training data
+/// Handles both multi-target (15 columns) and single-target (1 column) cases
+pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Result<()> {
+    let num_samples = targets.shape()[0];
+    let num_outputs = targets.shape()[1];
+
+    if num_samples == 0 {
+        return Err(VangaError::DataError(format!(
+            "🚨 BALANCE VALIDATION FAILED: {} data is empty",
+            data_name
+        )));
+    }
+
+    match num_outputs {
+        15 => {
+            // Multi-target case: 3 targets × 5 classes each
+            validate_multi_target_balance(targets, data_name)
+        }
+        1 => {
+            // Single target case: 1 target with class indices (not one-hot)
+            validate_single_target_balance(targets, data_name)
+        }
+        _ => {
+            return Err(VangaError::DataError(format!(
+                "🚨 BALANCE VALIDATION FAILED: Expected 15 outputs (multi-target) or 1 output (single-target), got {}",
+                num_outputs
+            )));
+        }
+    }
+}
+
+/// Validate balance for multi-target case (15 columns, one-hot encoded)
+pub fn validate_multi_target_balance(targets: &Array2<f64>, data_name: &str) -> Result<()> {
+    let num_samples = targets.shape()[0];
+    let num_outputs = targets.shape()[1];
+
+    log::info!(
+        "🔍 DEBUG: {} data shape: [{}, {}]",
+        data_name,
+        num_samples,
+        num_outputs
+    );
+
+    // Validate target structure: should be 15 outputs (3 targets × 5 classes)
+    if num_outputs != 15 {
+        return Err(VangaError::DataError(format!(
+            "🚨 BALANCE VALIDATION FAILED: Expected 15 target outputs (3×5), got {} for {} data",
+            num_outputs, data_name
+        )));
+    }
+
+    if num_samples == 0 {
+        return Err(VangaError::DataError(format!(
+            "🚨 BALANCE VALIDATION FAILED: {} data is empty",
+            data_name
+        )));
+    }
+
+    let target_types = ["Price Level", "Direction", "Volatility"];
+    let mut all_balanced = true;
+    let mut error_details = Vec::new();
+
+    for (target_idx, target_name) in target_types.iter().enumerate() {
+        let start_col = target_idx * 5;
+        let end_col = start_col + 5;
+
+        // Extract class labels from one-hot encoding
+        let mut class_counts = vec![0usize; 5];
+
+        for sample_idx in 0..num_samples {
+            let mut found_class = false;
+            for class_idx in 0..5 {
+                let col_idx = start_col + class_idx;
+                if targets[[sample_idx, col_idx]] > 0.5 {
+                    // One-hot encoded value
+                    class_counts[class_idx] += 1;
+                    found_class = true;
+                    break;
+                }
+            }
+
+            if !found_class {
+                return Err(VangaError::DataError(format!(
+                    "🚨 BALANCE VALIDATION FAILED: Sample {} in {} data has no active class for {} target (columns {}-{})",
+                    sample_idx, data_name, target_name, start_col, end_col - 1
+                )));
+            }
+        }
+
+        // Check for perfect balance: all classes must have exactly the same count
+        let min_count = *class_counts.iter().min().unwrap();
+        let max_count = *class_counts.iter().max().unwrap();
+
+        if min_count != max_count {
+            all_balanced = false;
+            let total_target_samples: usize = class_counts.iter().sum();
+            error_details.push(format!(
+                "  {} Target: {} total samples\n    Class 0: {} samples ({:.1}%)\n    Class 1: {} samples ({:.1}%)\n    Class 2: {} samples ({:.1}%)\n    Class 3: {} samples ({:.1}%)\n    Class 4: {} samples ({:.1}%)\n    ❌ IMBALANCE: min={}, max={}, ratio={:.2}x",
+                target_name,
+                total_target_samples,
+                class_counts[0], (class_counts[0] as f64 / total_target_samples as f64) * 100.0,
+                class_counts[1], (class_counts[1] as f64 / total_target_samples as f64) * 100.0,
+                class_counts[2], (class_counts[2] as f64 / total_target_samples as f64) * 100.0,
+                class_counts[3], (class_counts[3] as f64 / total_target_samples as f64) * 100.0,
+                class_counts[4], (class_counts[4] as f64 / total_target_samples as f64) * 100.0,
+                min_count,
+                max_count,
+                max_count as f64 / min_count as f64
+            ));
+        } else {
+            log::info!(
+                "✅ {} Target PERFECTLY BALANCED: {} samples per class (total: {})",
+                target_name,
+                min_count,
+                min_count * 5
+            );
+        }
+    }
+
+    if !all_balanced {
+        let error_msg = format!(
+            "🚨 PERFECT BALANCE VALIDATION FAILED for {} data:\n\n{}\n\n💡 SOLUTION: Use balanced data preparation pipeline to ensure exactly equal class counts.\n   Each of the 5 classes must have identical sample counts for all 3 target types.",
+            data_name,
+            error_details.join("\n\n")
+        );
+        return Err(VangaError::DataError(error_msg));
+    }
+
+    log::info!(
+        "🎯 {} DATA PERFECTLY BALANCED: All targets have equal class distribution",
+        data_name.to_uppercase()
+    );
+    Ok(())
+}
+
+/// Validate balance for single-target case (1 column from one-hot encoded data)
+fn validate_single_target_balance(targets: &Array2<f64>, data_name: &str) -> Result<()> {
+    let num_samples = targets.shape()[0];
+
+    // For single target extracted from multi-target one-hot encoding,
+    // we need to count how many samples have value 1.0 (active class)
+    // and how many have 0.0 (inactive class)
+
+    let mut active_count = 0;
+    let mut inactive_count = 0;
+
+    for sample_idx in 0..num_samples {
+        let value = targets[[sample_idx, 0]];
+        if value > 0.5 {
+            active_count += 1;
+        } else if value < 0.5 {
+            inactive_count += 1;
+        } else {
+            return Err(VangaError::DataError(format!(
+                "🚨 BALANCE VALIDATION FAILED: Sample {} in {} data has invalid value {} (expected 0.0 or 1.0)",
+                sample_idx, data_name, value
+            )));
+        }
+    }
+
+    log::info!(
+        "✅ Single Target Column Validated: {} active (1.0), {} inactive (0.0) in {} data",
+        active_count,
+        inactive_count,
+        data_name
+    );
+
+    // For single column from one-hot encoding, we can't validate perfect balance
+    // because each column represents only one class. The balance validation
+    // should happen at the multi-target level before splitting.
+    Ok(())
+}
+
 impl LSTMModel {
     pub fn configure_training(&mut self, vanga_config: &crate::config::TrainingConfig) {
         // Extract epochs from config - SAME logic as original
