@@ -39,14 +39,6 @@ warmup_epochs = 5
 validation_split = 0.2
 test_split = 0.1
 
-# 🎯 NEW FEATURE: Per-Window Class Weights
-# This fixes the validation loss growing issue in walk-forward validation
-# Options:
-#   - "Global": Calculate weights once from initial training data (default, original behavior)
-#   - "PerWindow": Calculate weights per walk-forward window (fixes temporal mismatch)
-#   - "None": Disable class weighting entirely
-class_weight_strategy = "PerWindow"
-
 [training.early_stopping]
 patience = 15
 min_delta = 0.001

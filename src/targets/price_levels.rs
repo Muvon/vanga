@@ -768,28 +768,8 @@ pub fn classify_price_level_with_momentum(
     Ok(class)
 }
 
-/// Analyze class distribution and log insights for debugging with imbalance mitigation
+/// Analyze class distribution and log insights for debugging
 fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Result<()> {
-    use crate::targets::imbalance_mitigation::{
-        ClassDistributionAnalysis, ImbalanceMitigationConfig, ImbalanceMitigator,
-    };
-
-    // Perform advanced analysis
-    let mitigation_config = ImbalanceMitigationConfig::default();
-    let analysis = ClassDistributionAnalysis::analyze(targets, bins as usize, &mitigation_config);
-
-    // Generate and log recommendations if imbalance is severe
-    if analysis.imbalance_ratio > mitigation_config.max_imbalance_ratio {
-        let current_config = PriceLevelConfig::default();
-        let recommendations = ImbalanceMitigator::generate_recommendations(
-            &analysis,
-            &current_config,
-            &mitigation_config,
-        );
-        recommendations.log_recommendations(horizon);
-    }
-
-    // Continue with existing logging for compatibility
     let mut class_counts = vec![0usize; bins as usize];
     let mut valid_targets = 0;
 

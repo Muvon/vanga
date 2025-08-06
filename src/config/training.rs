@@ -80,7 +80,6 @@ pub struct TrainingParams {
     pub print_every: u32,
 
     /// Class weight strategy for handling imbalanced datasets
-    pub class_weight_strategy: ClassWeightStrategy,
 
     /// Window-based learning rate decay for walk-forward training
     /// 0.8 = 20% reduction per window, 1.0 = no decay
@@ -107,19 +106,7 @@ pub struct TrainingParams {
 
 /// Strategy for calculating class weights in imbalanced datasets
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub enum ClassWeightStrategy {
-    /// Calculate class weights once from entire initial training dataset (original behavior)
-    #[default]
-    Global,
-    /// Calculate class weights per walk-forward window for temporal accuracy
-    PerWindow,
-    /// Disable class weighting entirely
-    None,
-    /// Advanced imbalance mitigation with adaptive strategies
-    Advanced,
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum DeviceConfig {
     #[default]
     Auto,
@@ -1148,11 +1135,10 @@ impl Default for TrainingParams {
             },
             gradient_clip: Some(1.0), // Prevent exploding gradients
             print_every: 1,           // Print every epoch by default for better monitoring
-            class_weight_strategy: ClassWeightStrategy::Global, // Use global weights by default for backward compatibility
-            window_decay: 1.0,                                  // No decay by default
-            min_train_ratio: 0.4,                               // Start with 40% for efficiency
-            min_increment_ratio: 0.3,                           // Ensure 30% new data per window
-            seed: default_seed(),                               // Random seed by default
+            window_decay: 1.0,        // No decay by default
+            min_train_ratio: 0.4,     // Start with 40% for efficiency
+            min_increment_ratio: 0.3, // Ensure 30% new data per window
+            seed: default_seed(),     // Random seed by default
         }
     }
 }

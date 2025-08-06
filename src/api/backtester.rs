@@ -291,7 +291,7 @@ impl Backtester {
                 },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
-                class_weight_strategy: crate::config::training::ClassWeightStrategy::Global, // Use global for backtesting
+
                 window_decay: 1.0,        // No decay for backtesting
                 min_train_ratio: 0.4,     // Use efficiency-focused default
                 min_increment_ratio: 0.3, // Ensure sufficient new data per window

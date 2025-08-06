@@ -128,10 +128,7 @@ pub struct LSTMModel {
     pub target_context: Option<(String, crate::targets::TargetType)>, // (target_name, target_type)
     /// Global class weights calculated once from entire training dataset
     /// Used for consistent loss calculation across all batches (training and validation)
-    pub training_class_weights: Option<Vec<f32>>,
-    /// Validation-specific class weights for Advanced weighting strategy
-    /// Used when validation data has different class distribution than training
-    pub validation_class_weights: Option<Vec<f32>>,
+
     /// Architecture configuration for bidirectional detection
     pub architecture: Option<crate::config::model::LSTMArchitecture>,
     /// Dropout configuration for regularization

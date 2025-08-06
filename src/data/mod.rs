@@ -12,16 +12,13 @@ pub mod target_converter;
 
 use serde::{Deserialize, Serialize};
 
+use crate::targets::PreparedTargets;
+use crate::utils::error::{Result, VangaError};
 pub use loader::DataLoader;
 pub use preprocessor::DataPreprocessor;
 pub use schema::{CryptoDataSchema, DataValidationError};
 pub use sequence::SequenceGenerator;
 pub use target_converter::TargetConverter;
-
-use crate::config::training::ClassWeightStrategy;
-use crate::targets::PreparedTargets;
-use crate::targets::TargetType;
-use crate::utils::error::{Result, VangaError};
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -77,156 +74,6 @@ impl DataPipeline {
         );
 
         Ok(target_windows)
-    }
-
-    /// Calculate class weights for a specific training window
-    /// Reuses the same logic as the LSTM model's class weight calculation
-    fn calculate_window_class_weights(
-        &self,
-        train_data: &PreparedData,
-        target_type: &TargetType,
-        horizon: &str,
-        _config: &crate::config::TrainingConfig,
-    ) -> Result<Option<Vec<f32>>> {
-        // Get the target data for the specific target type and horizon
-        let targets = match target_type {
-            TargetType::PriceLevel => train_data.targets.price_levels.get(horizon),
-            TargetType::Direction => train_data.targets.directions.get(horizon),
-            TargetType::Volatility => train_data.targets.volatility.get(horizon),
-        };
-
-        let targets = match targets {
-            Some(t) => t,
-            None => {
-                log::warn!(
-                    "⚠️ No target data available for {:?} horizon {}, skipping class weights",
-                    target_type,
-                    horizon
-                );
-                return Ok(None);
-            }
-        };
-
-        if targets.is_empty() {
-            log::warn!(
-                "⚠️ Empty target data for {:?} horizon {}, skipping class weights",
-                target_type,
-                horizon
-            );
-            return Ok(None);
-        }
-
-        // Get the correct number of classes from model configuration (same logic as LSTM model)
-        let num_classes = match target_type {
-            TargetType::PriceLevel => crate::config::model::NUM_CLASSES, // Always 5-class system
-            TargetType::Direction => crate::config::model::NUM_CLASSES,  // Always 5-class system
-            TargetType::Volatility => crate::config::model::NUM_CLASSES, // Always 5-class system
-        };
-
-        // Count class frequencies
-        let mut class_counts: HashMap<i32, usize> = HashMap::new();
-        let mut total_samples = 0;
-
-        for &target in targets.iter() {
-            let class_id = target;
-            *class_counts.entry(class_id).or_insert(0) += 1;
-            total_samples += 1;
-        }
-
-        // Debug: Log detailed class distribution for this window
-        log::debug!(
-            "🔍 Window class distribution for {:?} horizon {}: {} total samples",
-            target_type,
-            horizon,
-            total_samples
-        );
-        for (class_id, count) in &class_counts {
-            let percentage = (*count as f64 / total_samples as f64) * 100.0;
-            log::debug!(
-                "   Class {}: {} samples ({:.2}%)",
-                class_id,
-                count,
-                percentage
-            );
-        }
-
-        if num_classes < 2 {
-            log::warn!(
-                "⚠️ Only {} classes configured for {:?} horizon {}, skipping class weights",
-                num_classes,
-                target_type,
-                horizon
-            );
-            return Ok(None);
-        }
-
-        // Use advanced class weighting (same as price levels) for all target types
-        use crate::targets::imbalance_mitigation::{
-            AdvancedClassWeighter, ClassDistributionAnalysis, ImbalanceMitigationConfig,
-        };
-
-        let mitigation_config = ImbalanceMitigationConfig::default();
-        let analysis = ClassDistributionAnalysis::analyze(targets, num_classes, &mitigation_config);
-        let weights = AdvancedClassWeighter::calculate_weights(
-            &analysis,
-            &mitigation_config.weighting_strategy,
-        )?;
-
-        log::debug!(
-            "🎯 Window class weights for {:?} horizon {}: {:?} (from {} samples, {} classes configured)",
-            target_type,
-            horizon,
-            weights,
-            total_samples,
-            num_classes
-        );
-
-        Ok(Some(weights))
-    }
-
-    /// Calculate class weights for all target types and horizons
-    fn calculate_all_target_class_weights(
-        &self,
-        train_data: &PreparedData,
-        config: &crate::config::TrainingConfig,
-    ) -> Result<HashMap<String, Vec<f32>>> {
-        let mut target_weights = HashMap::new();
-
-        // Define all target types to calculate weights for
-        let target_types = [
-            TargetType::PriceLevel,
-            TargetType::Direction,
-            TargetType::Volatility,
-        ];
-
-        for target_type in &target_types {
-            for horizon in &config.horizons {
-                // Calculate weights for this specific target type and horizon
-                if let Ok(Some(weights)) =
-                    self.calculate_window_class_weights(train_data, target_type, horizon, config)
-                {
-                    let key = format!("{:?}_{}", target_type, horizon);
-                    target_weights.insert(key, weights);
-
-                    log::debug!(
-                        "📊 Calculated class weights for {:?} horizon {}: {} classes",
-                        target_type,
-                        horizon,
-                        target_weights
-                            .get(&format!("{:?}_{}", target_type, horizon))
-                            .unwrap()
-                            .len()
-                    );
-                }
-            }
-        }
-
-        log::info!(
-            "🎯 Calculated class weights for {} target-horizon combinations",
-            target_weights.len()
-        );
-
-        Ok(target_weights)
     }
 
     /// Calculate optimal walk-forward window configuration for maximum data utilization
@@ -807,14 +654,6 @@ impl DataPipeline {
                         }
                     };
 
-                    // Calculate class weights if needed
-                    let target_class_weights = match config.training.class_weight_strategy {
-                        ClassWeightStrategy::PerWindow => {
-                            self.calculate_all_target_class_weights(&train_data, config)?
-                        }
-                        _ => HashMap::new(),
-                    };
-
                     let val_samples = val_data.sequences.shape()[0];
                     let train_sequences = train_data.sequences.shape()[0];
                     let num_targets = train_data.targets.target_names.len();
@@ -827,7 +666,6 @@ impl DataPipeline {
                         train_samples: train_sequences, // ✅ FIX: Use actual training sequence count
                         val_samples,
                         test_samples: test_data.sequences.shape()[0],
-                        target_class_weights,
                     };
 
                     target_windows.push(window);
@@ -1254,9 +1092,6 @@ pub struct TrainingWindow {
     pub train_samples: usize,
     pub val_samples: usize,
     pub test_samples: usize,
-    /// Target-specific class weights for balanced training
-    /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
-    pub target_class_weights: HashMap<String, Vec<f32>>,
 }
 
 /// Container for target-specific balanced windows

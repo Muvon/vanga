@@ -73,7 +73,7 @@ mod tests {
         AttentionConfig, AttentionMechanism, DropoutConfig, DropoutRate, HiddenUnitsConfig,
         LSTMArchitecture, ModelConfig, SequenceLengthConfig, TargetsConfig,
     };
-    use crate::config::training::ClassWeightStrategy;
+
     use crate::config::training::OptimizerType;
     use crate::config::training::{EpochConfig, TrainingParams};
     use candle_core::Tensor;
@@ -143,8 +143,8 @@ mod tests {
                 validation_gap: "1h".to_string(), // Default gap for tests
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
-                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
-                window_decay: 1.0,                                  // No decay for tests
+
+                window_decay: 1.0,        // No decay for tests
                 min_train_ratio: 0.4,     // Add missing min_train_ratio field
                 min_increment_ratio: 0.3, // Add missing min_increment_ratio field
                 seed: 42,                 // Fixed seed for reproducible tests
@@ -155,7 +155,7 @@ mod tests {
 
         // Test that early stopping training completes without errors
         let result = model
-            .train(&sequences, &targets, &training_config, None, None, None)
+            .train(&sequences, &targets, &training_config, None, None)
             .await;
 
         if let Err(ref e) = result {
@@ -240,7 +240,7 @@ mod tests {
                 },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
-                class_weight_strategy: ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+
                 seed: 42, // Fixed seed for reproducible tests
             },
             data: crate::config::training::DataConfig::default(),
@@ -249,7 +249,7 @@ mod tests {
 
         // Test that fixed epochs training completes without errors
         let result = model
-            .train(&sequences, &targets, &training_config, None, None, None)
+            .train(&sequences, &targets, &training_config, None, None)
             .await;
 
         assert!(
@@ -328,7 +328,7 @@ mod tests {
                 gradient_clip: Some(1.0),
                 device: crate::config::training::DeviceConfig::Auto,
                 print_every: 1, // Add missing print_every field
-                class_weight_strategy: crate::config::training::ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+
                 window_decay: 1.0,        // No decay for tests
                 min_train_ratio: 0.4,     // Add missing min_train_ratio field
                 min_increment_ratio: 0.3, // Add missing min_increment_ratio field
@@ -340,7 +340,7 @@ mod tests {
         };
 
         model
-            .train(&sequences, &targets, &training_config, None, None, None)
+            .train(&sequences, &targets, &training_config, None, None)
             .await
             .expect("Training should complete successfully");
 
@@ -452,7 +452,7 @@ mod tests {
                 },
                 gradient_clip: Some(1.0),
                 print_every: 1, // Add missing print_every field
-                class_weight_strategy: crate::config::training::ClassWeightStrategy::Global, // Add missing class_weight_strategy field
+
                 window_decay: 1.0,        // No decay for tests
                 min_train_ratio: 0.4,     // Add missing min_train_ratio field
                 min_increment_ratio: 0.3, // Add missing min_increment_ratio field
@@ -464,7 +464,7 @@ mod tests {
 
         // Test multi-layer training
         let result = model
-            .train(&sequences, &targets, &training_config, None, None, None)
+            .train(&sequences, &targets, &training_config, None, None)
             .await;
 
         assert!(

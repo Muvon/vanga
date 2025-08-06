@@ -99,7 +99,7 @@ async fn test_hybrid_model_persistence_and_inference() -> Result<()> {
 
     // Train the model (this should train both LSTM and SmartCore)
     model
-        .train(&sequences, &targets, &training_config, None, None, None)
+        .train(&sequences, &targets, &training_config, None, None)
         .await?;
 
     println!("✅ Hybrid model training completed");
@@ -281,7 +281,7 @@ async fn test_pure_lstm_persistence() -> Result<()> {
     training_config.model.xgboost.enabled = false;
 
     model
-        .train(&sequences, &targets, &training_config, None, None, None)
+        .train(&sequences, &targets, &training_config, None, None)
         .await?;
 
     // Verify no XGBoost model
