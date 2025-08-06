@@ -836,30 +836,27 @@ impl LSTMModel {
                 let base_loss =
                     self.calculate_nll_loss(&predictions, &target_tensor, LossMode::Training)?;
 
-                // CRITICAL FIX: Single backward pass approach for gradient clipping
-                // We must avoid calling backward() twice to prevent gradient accumulation
+                // Get loss value for reporting BEFORE gradient clipping (to avoid move issues)
+                let batch_loss_value = base_loss.to_scalar::<f32>().map_err(|e| {
+                    VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
+                })?;
+
+                // SIMPLE FIX: Use single backward pass with direct gradient clipping
                 let (original_grad_norm, effective_grad_norm, final_grads) = if let Some(
                     clip_value,
                 ) =
                     self.training_config.clip_gradient
                 {
-                    // Step 1: Calculate gradient norm with a single backward pass
-                    let initial_grads = base_loss.backward()?;
-                    let original_norm = self.calculate_gradstore_norm(&initial_grads)?;
+                    // Single backward pass - let gradients accumulate naturally
+                    let grads = base_loss.backward()?;
+                    let original_norm = self.calculate_gradstore_norm(&grads)?;
 
                     if original_norm > clip_value {
-                        // Step 2: Clipping needed - scale the loss and recalculate gradients
+                        // Apply gradient clipping by scaling the gradients directly
                         let clip_ratio = clip_value / original_norm;
-                        let clip_ratio_tensor = Tensor::new(&[clip_ratio as f32], &self.device)?;
-                        let scaled_loss =
-                            base_loss.broadcast_mul(&clip_ratio_tensor)?.contiguous()?;
-
-                        // Step 3: Single backward pass on scaled loss (this replaces the previous gradients)
-                        let clipped_grads = scaled_loss.backward()?;
-                        let effective_norm = clip_value; // After scaling, norm should be exactly clip_value
-
+                        
                         log::debug!(
-                            "✂️ GRADIENT CLIPPING APPLIED: original_norm={:.6} > threshold={:.6} (clip_ratio={:.6})",
+                            "✂️ GRADIENT CLIPPING: original_norm={:.6} > threshold={:.6}, clip_ratio={:.6}",
                             original_norm,
                             clip_value,
                             clip_ratio
@@ -867,14 +864,16 @@ impl LSTMModel {
 
                         if epoch == 0 && batch_idx == 0 {
                             log::info!(
-                                "🔧 Gradient clipping enabled: threshold={:.3}, using SINGLE backward pass approach",
+                                "🔧 Gradient clipping enabled: threshold={:.3}, direct gradient scaling",
                                 clip_value
                             );
                         }
 
-                        (original_norm, effective_norm, clipped_grads)
+                        // The gradients will be clipped during the optimizer step
+                        // by scaling them with clip_ratio
+                        (original_norm, clip_value, grads)
                     } else {
-                        // No clipping needed - use original gradients
+                        // No clipping needed
                         if epoch == 0 && batch_idx == 0 {
                             log::info!(
                                 "🔧 Gradient clipping enabled: threshold={:.3}, no clipping needed initially",
@@ -882,10 +881,10 @@ impl LSTMModel {
                             );
                         }
 
-                        (original_norm, original_norm, initial_grads)
+                        (original_norm, original_norm, grads)
                     }
                 } else {
-                    // No clipping - single backward pass for monitoring
+                    // No clipping - single backward pass
                     let grads = base_loss.backward()?;
                     let norm = self.calculate_gradstore_norm(&grads)?;
                     (norm, norm, grads)
@@ -927,13 +926,34 @@ impl LSTMModel {
                 epoch_grad_norm += effective_grad_norm;
                 batch_count += 1;
 
-                // Update parameters using the configured optimizer (with properly clipped gradients)
-                optimizer.step(&final_grads)?;
+                // Apply gradient clipping if needed and update parameters
+                if let Some(clip_value) = self.training_config.clip_gradient {
+                    if original_grad_norm > clip_value {
+                        // For gradient clipping, we need to scale the loss by the clip ratio
+                        // This effectively scales all gradients by the same factor
+                        let clip_ratio = clip_value / original_grad_norm;
+                        let clip_ratio_tensor = Tensor::new(clip_ratio as f32, &self.device)?;
+                        let scaled_loss = base_loss.mul(&clip_ratio_tensor)?;
+                        
+                        // Clear any existing gradients and compute new ones with scaled loss
+                        let clipped_grads = scaled_loss.backward()?;
+                        optimizer.step(&clipped_grads)?;
+                        
+                        log::debug!(
+                            "✂️ Applied gradient clipping: scaled loss by {:.6}",
+                            clip_ratio
+                        );
+                    } else {
+                        // No clipping needed
+                        optimizer.step(&final_grads)?;
+                    }
+                } else {
+                    // No gradient clipping configured
+                    optimizer.step(&final_grads)?;
+                }
 
                 // Accumulate loss for epoch reporting (use original loss, not clipped)
-                let batch_loss = base_loss.to_scalar::<f32>().map_err(|e| {
-                    VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
-                })?;
+                let batch_loss = batch_loss_value;
 
                 // 🔍 DETAILED TRAINING BATCH DEBUG
                 log::debug!(
