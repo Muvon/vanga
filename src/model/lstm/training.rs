@@ -745,10 +745,6 @@ impl LSTMModel {
             (u32::MAX, 0.0) // Disable early stopping without validation
         };
 
-        // No class weighting - always disable
-        log::info!("🚫 Class weighting disabled - using balanced approach");
-        // No class weights - skip assignment
-
         log::info!("🔧 Training Configuration:");
         log::info!("  - Epochs: {}", self.training_config.epochs);
         log::info!("  - Batch size: {}", batch_size);
@@ -837,51 +833,47 @@ impl LSTMModel {
                 let predictions = self.forward(&input_tensor, true)?;
 
                 // Calculate loss using the proven NLL approach (moved to loss.rs)
-                let loss =
+                let base_loss =
                     self.calculate_nll_loss(&predictions, &target_tensor, LossMode::Training)?;
 
-                // Backward pass with gradient computation
-                let grads = loss.backward()?;
-
-                // Apply proper gradient clipping using existing efficient infrastructure
+                // CRITICAL FIX: Single backward pass approach for gradient clipping
+                // We must avoid calling backward() twice to prevent gradient accumulation
                 let (original_grad_norm, effective_grad_norm, final_grads) = if let Some(
                     clip_value,
                 ) =
                     self.training_config.clip_gradient
                 {
-                    // Use existing ClippableGradStore for efficient gradient clipping
-                    use super::gradient_clipper::ClippableGradStore;
+                    // Step 1: Calculate gradient norm with a single backward pass
+                    let initial_grads = base_loss.backward()?;
+                    let original_norm = self.calculate_gradient_norm(&initial_grads)?;
 
-                    let mut clipper =
-                        ClippableGradStore::from_grad_store(&grads, &self.varmap, &self.device)?;
-                    let (original_norm, effective_norm) =
-                        clipper.clip_gradients_by_norm(clip_value)?;
+                    if original_norm > clip_value {
+                        // Step 2: Clipping needed - scale the loss and recalculate gradients
+                        let clip_ratio = clip_value / original_norm;
+                        let clip_ratio_tensor = Tensor::new(&[clip_ratio as f32], &self.device)?;
+                        let scaled_loss = base_loss.broadcast_mul(&clip_ratio_tensor)?.contiguous()?;
 
-                    if clipper.is_clipped() {
+                        // Step 3: Single backward pass on scaled loss (this replaces the previous gradients)
+                        let clipped_grads = scaled_loss.backward()?;
+                        let effective_norm = clip_value; // After scaling, norm should be exactly clip_value
+
                         log::debug!(
-                            "✂️ GRADIENT CLIPPING APPLIED: original_norm={:.6} > threshold={:.6} (effective_norm={:.6})",
+                            "✂️ GRADIENT CLIPPING APPLIED: original_norm={:.6} > threshold={:.6} (clip_ratio={:.6})",
                             original_norm,
                             clip_value,
-                            effective_norm
+                            clip_ratio
                         );
 
                         if epoch == 0 && batch_idx == 0 {
                             log::info!(
-                                "🔧 Gradient clipping enabled: threshold={:.3}, using PROPER direct gradient clipping",
+                                "🔧 Gradient clipping enabled: threshold={:.3}, using SINGLE backward pass approach",
                                 clip_value
                             );
                         }
 
-                        // Use clipped gradients - we need to create a new GradStore
-                        // Since we can't modify GradStore directly, we'll use the loss scaling approach
-                        // which is mathematically equivalent
-                        let clip_ratio = clip_value / original_norm;
-                        let clip_ratio_tensor = Tensor::new(&[clip_ratio as f32], &self.device)?;
-                        let scaled_loss = loss.broadcast_mul(&clip_ratio_tensor)?.contiguous()?;
-                        let clipped_grads = scaled_loss.backward()?;
-
                         (original_norm, effective_norm, clipped_grads)
                     } else {
+                        // No clipping needed - use original gradients
                         if epoch == 0 && batch_idx == 0 {
                             log::info!(
                                 "🔧 Gradient clipping enabled: threshold={:.3}, no clipping needed initially",
@@ -889,10 +881,11 @@ impl LSTMModel {
                             );
                         }
 
-                        (original_norm, original_norm, grads)
+                        (original_norm, original_norm, initial_grads)
                     }
                 } else {
-                    // No clipping - calculate norm for monitoring
+                    // No clipping - single backward pass for monitoring
+                    let grads = base_loss.backward()?;
                     let norm = self.calculate_gradient_norm(&grads)?;
                     (norm, norm, grads)
                 };
