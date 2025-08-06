@@ -48,9 +48,41 @@ impl DataPreprocessor {
             ));
         }
 
-        // Apply feature engineering (technical indicators, etc.)
+        // Apply feature engineering pipeline
         if let Some(features_config) = features_config {
+            // STEP 1: Generate technical indicators if enabled (50+ indicators)
+            if features_config.technical_indicators.enabled {
+                log::info!("🔧 Generating technical indicators (50+ indicators)...");
+                let initial_columns = df.width();
+                df = crate::features::technical::generate_technical_indicators(
+                    df,
+                    &features_config.technical_indicators,
+                )
+                .await?;
+                let final_columns = df.width();
+                log::info!(
+                    "✅ Technical indicators generated: {} -> {} columns (+{})",
+                    initial_columns,
+                    final_columns,
+                    final_columns - initial_columns
+                );
+            } else {
+                log::info!("⚠️ Technical indicators disabled - skipping 50+ indicators");
+            }
+
+            // STEP 2: Apply additional feature engineering (interaction, polynomial, lag, rolling)
+            log::info!("🔧 Applying additional feature engineering...");
+            let initial_columns = df.width();
             df = apply_feature_engineering(df, &features_config.engineering).await?;
+            let final_columns = df.width();
+            log::info!(
+                "✅ Additional feature engineering completed: {} -> {} columns (+{})",
+                initial_columns,
+                final_columns,
+                final_columns - initial_columns
+            );
+        } else {
+            log::warn!("⚠️ No feature configuration provided - using raw OHLCV data only");
         }
 
         // CRITICAL: Remove initial NaN rows from lag features
