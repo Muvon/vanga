@@ -7,7 +7,6 @@ use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3, Axis};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Defines the context for a training session.
@@ -18,9 +17,6 @@ pub enum TrainingContext<'a> {
         targets: &'a Array2<f64>,
         val_sequences: Option<&'a Array3<f64>>,
         val_targets: Option<&'a Array2<f64>>,
-        /// Target-specific class weights for balanced training
-        /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
-        target_class_weights: Option<&'a HashMap<String, Vec<f32>>>,
     },
     /// Continues training from a previous state.
     /// CRITICAL: new_sequences is CUMULATIVE (Window1: 2880, Window2: 3744, etc.) - NOT just new data
@@ -30,9 +26,6 @@ pub enum TrainingContext<'a> {
         /// CRITICAL: Validation data prevents overfitting in continuation training
         val_sequences: Option<&'a Array3<f64>>,
         val_targets: Option<&'a Array2<f64>>,
-        /// Target-specific class weights for balanced training
-        /// Key format: "{target_type}_{horizon}" (e.g., "PriceLevel_1h", "Direction_4h")
-        target_class_weights: Option<&'a HashMap<String, Vec<f32>>>,
     },
 }
 /// Multi-target LSTM model that trains separate models for each target
@@ -258,24 +251,15 @@ impl MultiTargetLSTMModel {
                 targets,
                 val_sequences,
                 val_targets,
-                target_class_weights,
             } => {
-                self.train_internal(
-                    sequences,
-                    targets,
-                    val_sequences,
-                    val_targets,
-                    target_class_weights,
-                    config,
-                )
-                .await
+                self.train_internal(sequences, targets, val_sequences, val_targets, config)
+                    .await
             }
             TrainingContext::Continue {
                 new_sequences,
                 new_targets,
                 val_sequences,
                 val_targets,
-                target_class_weights: _, // Unused in continue training
             } => {
                 self.continue_training(
                     new_sequences,
@@ -362,7 +346,6 @@ impl MultiTargetLSTMModel {
                     config,
                     val_sequences, // CRITICAL: Validation prevents overfitting
                     single_val_target.as_ref(), // CRITICAL: Validation prevents overfitting
-                    None,
                 )
                 .await?;
 
@@ -384,7 +367,6 @@ impl MultiTargetLSTMModel {
         targets: &Array2<f64>,
         val_sequences: Option<&Array3<f64>>,
         val_targets: Option<&Array2<f64>>,
-        target_class_weights: Option<&HashMap<String, Vec<f32>>>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!(
@@ -484,40 +466,6 @@ impl MultiTargetLSTMModel {
                 }
             );
 
-            // Get target-specific class weights for this model
-            let target_specific_weights = if let Some(weights_map) = target_class_weights {
-                // Extract target type and horizon from target name (format: "target_type_horizon")
-                let target_type = Self::get_target_type_from_name(target_name);
-
-                // Find the horizon from target name (assumes format like "price_level_1h")
-                let horizon = if let Some(last_underscore) = target_name.rfind('_') {
-                    &target_name[last_underscore + 1..]
-                } else {
-                    // Fallback to first horizon if parsing fails
-                    config.horizons.first().map(|h| h.as_str()).unwrap_or("1h")
-                };
-
-                let weights_key = format!("{:?}_{}", target_type, horizon);
-                let weights = weights_map.get(&weights_key);
-
-                if let Some(w) = weights {
-                    log::debug!(
-                        "🎯 Using target-specific class weights for {}: {} classes",
-                        target_name,
-                        w.len()
-                    );
-                } else {
-                    log::debug!(
-                        "⚠️ No target-specific class weights found for key '{}', using None",
-                        weights_key
-                    );
-                }
-
-                weights
-            } else {
-                None
-            };
-
             // Extract target-specific validation sequences using balanced indices
             let (target_val_sequences, target_val_targets) =
                 if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
@@ -535,7 +483,6 @@ impl MultiTargetLSTMModel {
                     config,
                     target_val_sequences.as_ref(),
                     target_val_targets.as_ref(),
-                    target_specific_weights,
                 )
                 .await
             {
@@ -817,7 +764,7 @@ impl MultiTargetLSTMModel {
         Ok(self.models)
     }
 
-    /// COMBINE MODELS: Create MultiTargetLSTMModel from multiple pre-trained LSTM models  
+    /// COMBINE MODELS: Create MultiTargetLSTMModel from multiple pre-trained LSTM models
     /// PURPOSE: Fixes critical bug where only first target was kept
     /// ARCHITECTURE: Vec<LSTMModel> → MultiTargetLSTMModel wrapper (all targets preserved)
     /// USAGE: Called after training all targets separately to combine into final model

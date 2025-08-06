@@ -14,9 +14,9 @@ use ndarray::{Array2, Array3};
 /// Loss calculation mode for distinguishing between training and validation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LossMode {
-    /// Training mode - uses training class weights
+    /// Training mode - uses uniform weights
     Training,
-    /// Validation mode - uses validation class weights if available, otherwise training weights
+    /// Validation mode - uses uniform weights
     Validation,
 }
 
@@ -446,214 +446,6 @@ impl LSTMModel {
 }
 
 impl LSTMModel {
-    /// Calculate global class weights from entire training dataset
-    /// This ensures consistent loss calculation across all batches
-    pub fn calculate_training_class_weights(
-        &mut self,
-        train_targets: &Array2<f64>,
-        num_classes: usize,
-        provided_weights: Option<Vec<f32>>,
-    ) -> Result<()> {
-        // Calculate for all categorical targets: PriceLevel, Direction, and Volatility
-        if let Some((_, target_type)) = &self.target_context {
-            match target_type {
-                TargetType::PriceLevel => {
-                    log::debug!(
-                        "🎯 Calculating global class weights for PriceLevel target with {} classes",
-                        num_classes
-                    );
-                }
-                TargetType::Direction => {
-                    log::debug!(
-                        "🎯 Calculating global class weights for Direction target (5 classes: Dump=0, Down=1, Sideways=2, Up=3, Pump=4)"
-                    );
-                }
-                TargetType::Volatility => {
-                    log::debug!(
-                        "🎯 Calculating global class weights for Volatility target (5 classes: VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)"
-                    );
-                }
-            }
-        } else {
-            log::debug!("🎯 No target context set, skipping global class weights");
-            self.training_class_weights = None;
-            return Ok(());
-        }
-
-        // Check if pre-calculated weights are provided (for per-window class weights)
-        if let Some(weights) = provided_weights {
-            log::info!(
-                "🎯 Using provided per-window class weights for {:?}: {:?}",
-                self.target_context.as_ref().map(|(_, t)| t),
-                weights
-            );
-            self.training_class_weights = Some(weights);
-            return Ok(());
-        }
-
-        // Convert to tensor for consistent processing - ensure F32 dtype
-        let targets_f32: Vec<f32> = train_targets
-            .as_slice()
-            .unwrap()
-            .iter()
-            .map(|&x| x as f32)
-            .collect();
-        let targets_tensor = Tensor::from_slice(&targets_f32, train_targets.dim(), &self.device)?;
-
-        // Calculate global class weights from entire training dataset
-        let weights = self.calculate_class_weights_from_tensor(&targets_tensor, num_classes)?;
-
-        if let Some(weights) = weights {
-            log::info!(
-                "🌍 Global class weights calculated from {} training samples for {:?}: {:?}",
-                train_targets.shape()[0],
-                self.target_context.as_ref().map(|(_, t)| t),
-                weights
-            );
-            self.training_class_weights = Some(weights);
-        } else {
-            log::warn!("⚠️ Failed to calculate global class weights, using per-batch calculation");
-            self.training_class_weights = None;
-        }
-
-        Ok(())
-    }
-
-    /// Calculate validation-specific class weights for Advanced weighting strategy
-    /// This ensures validation uses its own class distribution weights
-    pub fn calculate_validation_class_weights(
-        &mut self,
-        val_targets: &Array2<f64>,
-        num_classes: usize,
-    ) -> Result<()> {
-        // Only calculate validation weights for Advanced strategy
-        if let Some((_, target_type)) = &self.target_context {
-            match target_type {
-                TargetType::PriceLevel => {
-                    log::debug!(
-                        "🎯 Calculating validation class weights for PriceLevel target with {} classes",
-                        num_classes
-                    );
-                }
-                TargetType::Direction => {
-                    log::debug!(
-                        "🎯 Calculating validation class weights for Direction target (5 classes: Dump=0, Down=1, Sideways=2, Up=3, Pump=4)"
-                    );
-                }
-                TargetType::Volatility => {
-                    log::debug!(
-                        "🎯 Calculating validation class weights for Volatility target (5 classes: VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)"
-                    );
-                }
-            }
-        } else {
-            log::debug!("🎯 No target context set, skipping validation class weights");
-            self.validation_class_weights = None;
-            return Ok(());
-        }
-
-        // Convert to tensor for consistent processing - ensure F32 dtype
-        let targets_f32: Vec<f32> = val_targets
-            .as_slice()
-            .unwrap()
-            .iter()
-            .map(|&x| x as f32)
-            .collect();
-        let targets_tensor = Tensor::from_slice(&targets_f32, val_targets.dim(), &self.device)?;
-
-        // Calculate validation class weights from validation dataset
-        let weights = self.calculate_class_weights_from_tensor(&targets_tensor, num_classes)?;
-
-        if let Some(weights) = weights {
-            log::info!(
-                "🔍 Validation class weights calculated from {} validation samples for {:?}: {:?}",
-                val_targets.shape()[0],
-                self.target_context.as_ref().map(|(_, t)| t),
-                weights
-            );
-            self.validation_class_weights = Some(weights);
-        } else {
-            log::warn!("⚠️ Failed to calculate validation class weights, using global weights");
-            self.validation_class_weights = None;
-        }
-
-        Ok(())
-    }
-
-    /// Calculate class weights for imbalanced datasets (helper method)
-    fn calculate_class_weights_from_tensor(
-        &self,
-        targets: &Tensor,
-        num_classes: usize,
-    ) -> Result<Option<Vec<f32>>> {
-        use crate::config::model::NUM_CLASSES;
-
-        // Ensure we're using the unified 5-class system
-        let actual_num_classes = if num_classes == NUM_CLASSES {
-            NUM_CLASSES
-        } else {
-            log::warn!(
-                "⚠️  Class count mismatch: expected {}, got {}. Using provided count for backward compatibility.",
-                NUM_CLASSES,
-                num_classes
-            );
-            num_classes
-        };
-
-        // Extract target values to calculate class distribution
-        let target_data = targets.to_vec2::<f32>()?;
-        let mut class_counts = vec![0usize; actual_num_classes];
-        let mut total_samples = 0;
-
-        // Count class occurrences
-        for row in &target_data {
-            if let Some(&target_val) = row.first() {
-                let class_idx = target_val as usize;
-                if class_idx < actual_num_classes {
-                    class_counts[class_idx] += 1;
-                    total_samples += 1;
-                }
-            }
-        }
-
-        if total_samples == 0 {
-            return Ok(None);
-        }
-
-        // Calculate inverse frequency weights
-        let mut weights = Vec::new();
-        let mut max_weight = 0.0f32;
-
-        for &count in &class_counts {
-            if count > 0 {
-                let weight = total_samples as f32 / (actual_num_classes as f32 * count as f32);
-                weights.push(weight);
-                max_weight = max_weight.max(weight);
-            } else {
-                // Handle empty classes with high weight
-                weights.push(max_weight * 2.0);
-            }
-        }
-
-        // Normalize weights to prevent extreme values
-        let weight_sum: f32 = weights.iter().sum();
-        if weight_sum > 0.0 {
-            for weight in &mut weights {
-                *weight = (*weight / weight_sum) * actual_num_classes as f32;
-                *weight = weight.clamp(0.1, 10.0); // Clamp to reasonable range
-            }
-        }
-
-        log::debug!(
-            "📊 Class weights calculated for {}-class system: {:?} (from counts: {:?})",
-            actual_num_classes,
-            weights,
-            class_counts
-        );
-
-        Ok(Some(weights))
-    }
-
     /// Detect target format from tensor shape and values
     pub fn detect_target_format(&self, targets: &Tensor) -> Result<TargetFormat> {
         let target_shape = targets.shape();
@@ -1356,47 +1148,25 @@ impl LSTMModel {
         (base_patience, min_delta)
     }
 
-    /// Helper method to select appropriate class weights based on loss calculation mode
+    /// Helper method to select uniform weights for loss calculation mode
     ///
     /// # Arguments
     /// * `mode` - Loss calculation mode (Training or Validation)
-    /// * `num_classes` - Number of classes for uniform weights fallback
+    /// * `num_classes` - Number of classes for uniform weights
     ///
     /// # Returns
-    /// * `Vec<f32>` - Class weights to use for loss calculation
+    /// * `Vec<f32>` - Uniform weights (all 1.0) for loss calculation
     fn get_class_weights_for_mode(&self, mode: LossMode, num_classes: usize) -> Vec<f32> {
         match mode {
             LossMode::Training => {
-                // Training mode: always use training class weights
-                if let Some(ref weights) = self.training_class_weights {
-                    log::debug!(
-                        "🎯 TRAINING: Using calculated training class weights: {:?}",
-                        weights
-                    );
-                    weights.clone()
-                } else {
-                    log::debug!("🎯 TRAINING: No class weights configured (uniform weighting)");
-                    vec![1.0f32; num_classes]
-                }
+                // Training mode: no weighting - use uniform weights
+                log::debug!("🎯 TRAINING: Using uniform weights (no weighting)");
+                vec![1.0f32; num_classes]
             }
             LossMode::Validation => {
-                // Validation mode: use validation weights if available (Advanced strategy), otherwise training weights
-                if let Some(ref val_weights) = self.validation_class_weights {
-                    log::debug!(
-                        "🔍 VALIDATION: Using calculated validation class weights: {:?}",
-                        val_weights
-                    );
-                    val_weights.clone()
-                } else if let Some(ref train_weights) = self.training_class_weights {
-                    log::debug!(
-                        "🔍 VALIDATION: Using training class weights (Global strategy): {:?}",
-                        train_weights
-                    );
-                    train_weights.clone()
-                } else {
-                    log::debug!("🔍 VALIDATION: No class weights configured (uniform weighting)");
-                    vec![1.0f32; num_classes]
-                }
+                // Validation mode: no weighting - use uniform weights
+                log::debug!("🔍 VALIDATION: Using uniform weights (no weighting)");
+                vec![1.0f32; num_classes]
             }
         }
     }
@@ -1404,14 +1174,14 @@ impl LSTMModel {
     /// **PRIMARY LOSS CALCULATION**: NLL Loss with Class Weighting
     ///
     /// This is the main loss calculation method used throughout training and validation.
-    /// Uses Candle's built-in NLL loss with proper class weighting for stable training.
+    /// Uses Candle's built-in NLL loss with uniform weighting for stable training.
     ///
     /// # Arguments
     /// * `predictions` - Model predictions tensor [batch_size, num_classes] containing raw logits
     /// * `targets` - Ground truth targets tensor [batch_size, 1] or [batch_size] with class indices
-    /// * `mode` - Loss calculation mode determining which class weights to use:
-    ///   - `LossMode::Training`: Uses training class weights
-    ///   - `LossMode::Validation`: Uses validation class weights if available, otherwise training weights
+    /// * `mode` - Loss calculation mode (both use uniform weights):
+    ///   - `LossMode::Training`: Uses uniform weights
+    ///   - `LossMode::Validation`: Uses uniform weights
     ///
     /// # Returns
     /// * `Result<Tensor>` - Weighted NLL loss scalar tensor ready for backpropagation
@@ -1419,11 +1189,11 @@ impl LSTMModel {
     /// # Implementation Details
     ///
     /// ## Fast Path (Uniform Weights)
-    /// When all class weights are 1.0 (uniform), uses the optimized `candle_nn::loss::nll()`
+    /// When all weights are 1.0 (uniform), uses the optimized `candle_nn::loss::nll()`
     /// function directly for maximum performance.
     ///
     /// ## Weighted Path (Class Weights)
-    /// For non-uniform class weights, implements manual per-sample calculation following
+    /// For non-uniform weights, implements manual per-sample calculation following
     /// PyTorch's weighted NLL formula: `loss_n = -weight[target_n] * log_prob[n, target_n]`
     ///
     /// ## Gradient Preservation
@@ -1472,9 +1242,9 @@ impl LSTMModel {
         let log_probs =
             candle_nn::ops::log_softmax(&pred_contiguous, candle_core::D::Minus1)?.contiguous()?;
 
-        // Step 2: Apply calculated class weighting based on training/validation mode
+        // Step 2: Apply uniform weighting (all weights = 1.0)
         let class_weights = self.get_class_weights_for_mode(mode, num_classes);
-        // Step 3: Calculate NLL loss and apply class weights properly
+        // Step 3: Calculate NLL loss with uniform weights
         if class_weights.iter().all(|&w| (w - 1.0).abs() < 1e-6) {
             // All weights are 1.0 (uniform), use standard NLL
             log::debug!("🎯 NLL Loss: Using uniform weights (no class weighting)");
@@ -1518,7 +1288,7 @@ impl LSTMModel {
         // Calculate NLL losses: -log_probs [batch_size]
         let nll_losses = true_class_tensor.neg()?;
 
-        // Apply class weights: weighted_losses = nll_losses * weights [batch_size]
+        // Apply uniform weights: weighted_losses = nll_losses * weights [batch_size]
         let weighted_losses = nll_losses.mul(&weight_tensor)?;
 
         // Compute weighted average: sum(weighted_losses) / sum(weights)
@@ -1527,11 +1297,11 @@ impl LSTMModel {
         let result = total_weighted_loss.div(&total_weight)?;
 
         log::debug!(
-            "🎯 NLL Loss: Applied class weights using optimized tensor operations (gradient-preserving)"
+            "🎯 NLL Loss: Applied uniform weights using optimized tensor operations (gradient-preserving)"
         );
 
         log::debug!(
-            "✅ NLL Loss: {:.6} (5-class with proper class weighting)",
+            "✅ NLL Loss: {:.6} (5-class with uniform weighting)",
             result.to_scalar::<f32>().unwrap_or(0.0)
         );
 

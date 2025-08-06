@@ -636,7 +636,6 @@ impl ModelTrainer {
                     targets: &single_train_target,
                     val_sequences: Some(&window.val_data.sequences),
                     val_targets: single_val_target.as_ref(),
-                    target_class_weights: Some(&window.target_class_weights),
                 },
                 &window_config,
             )
@@ -697,7 +696,6 @@ impl ModelTrainer {
                     new_targets: &single_train_target,
                     val_sequences: Some(&window.val_data.sequences), // CRITICAL: Prevents overfitting
                     val_targets: single_val_target.as_ref(), // CRITICAL: Prevents overfitting
-                    target_class_weights: Some(&window.target_class_weights),
                 },
                 &window_config,
             )

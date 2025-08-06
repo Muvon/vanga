@@ -45,20 +45,19 @@ impl LSTMModel {
             varmap: VarMap::new(),
             training_config,
             trained: false,
-            target_context: None,           // No target context by default
-            training_class_weights: None,   // No global weights initially
-            validation_class_weights: None, // No validation weights initially
-            architecture: None,             // No architecture info by default
-            dropout_config: None,           // No dropout config by default
-            stored_val_sequences: None,     // No stored validation data initially
-            stored_val_targets: None,       // No stored validation targets initially
+            target_context: None, // No target context by default
+
+            architecture: None,         // No architecture info by default
+            dropout_config: None,       // No dropout config by default
+            stored_val_sequences: None, // No stored validation data initially
+            stored_val_targets: None,   // No stored validation targets initially
             stored_test_sequences: ndarray::Array3::zeros((0, 1, 1)), // Empty test sequences
             stored_test_targets: ndarray::Array2::zeros((0, 1)), // Empty test targets
-            xgboost_model: None,            // No XGBoost model initially
-            best_model_varmap: None,        // No best model state initially
-            best_validation_loss: None,     // No best validation loss initially
-            best_epoch: None,               // No best epoch initially
-            seed: None,                     // No seed by default (random initialization)
+            xgboost_model: None,        // No XGBoost model initially
+            best_model_varmap: None,    // No best model state initially
+            best_validation_loss: None, // No best validation loss initially
+            best_epoch: None,           // No best epoch initially
+            seed: None,                 // No seed by default (random initialization)
         })
     }
 

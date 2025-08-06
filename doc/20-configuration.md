@@ -267,7 +267,7 @@ validation_gap = "1h"
 
 # Class weighting strategy - handles imbalanced datasets
 class_weight_strategy = "Global"
-# OPTIONS: "Global" (global class weights), "PerTarget" (per-target weights), "None" (no weighting)
+# OPTIONS: "Global" (global class weights), "PerWindow" (per-window weights), "None" (no weighting)
 # EFFECT: Balances training for imbalanced target classes
 
 # Window-based training parameters (for walk-forward training)

@@ -8,7 +8,7 @@
 pub mod direction;
 #[cfg(test)]
 mod direction_test;
-pub mod imbalance_mitigation;
+
 #[cfg(test)]
 mod math_consistency_test;
 #[cfg(test)]

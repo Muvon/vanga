@@ -1,18 +1,15 @@
-//! Tests for NLL loss calculation with class weighting
+//! Tests for NLL loss calculation
 //!
-//! This module tests the updated calculate_nll_loss function with both
-//! uniform and class-weighted scenarios, ensuring gradient preservation
+//! This module tests the updated calculate_nll_loss function with
+//! uniform weighting scenarios, ensuring gradient preservation
 //! and mathematical correctness.
 
 use super::config::{LSTMConfig, LSTMModel};
 use super::loss::LossMode;
 use candle_core::{Device, Tensor};
 
-/// Create a test LSTM model with configurable class weights
-fn create_test_model(
-    training_weights: Option<Vec<f32>>,
-    validation_weights: Option<Vec<f32>>,
-) -> LSTMModel {
+/// Create a test LSTM model
+fn create_test_model(_training_weights: Option<Vec<f32>>) -> LSTMModel {
     let config = LSTMConfig {
         input_size: 10,
         hidden_sizes: vec![20], // Single layer with 20 hidden units
@@ -22,13 +19,8 @@ fn create_test_model(
         num_layers: 1,
     };
 
-    let mut model = LSTMModel::new(config).expect("Failed to create test model");
-
-    // Set class weights for testing
-    model.training_class_weights = training_weights;
-    model.validation_class_weights = validation_weights;
-
-    model
+    // No weights needed anymore
+    LSTMModel::new(config).expect("Failed to create test model")
 }
 
 /// Create test tensors for loss calculation
@@ -52,7 +44,7 @@ fn create_test_tensors(batch_size: usize, num_classes: usize, device: &Device) -
 
 #[test]
 fn test_uniform_weights_training_mode() {
-    let model = create_test_model(None, None);
+    let model = create_test_model(None);
     let device = Device::Cpu;
     let (predictions, targets) = create_test_tensors(4, 5, &device);
 
@@ -74,7 +66,7 @@ fn test_uniform_weights_training_mode() {
 
 #[test]
 fn test_uniform_weights_validation_mode() {
-    let model = create_test_model(None, None);
+    let model = create_test_model(None);
     let device = Device::Cpu;
     let (predictions, targets) = create_test_tensors(4, 5, &device);
 
@@ -95,33 +87,10 @@ fn test_uniform_weights_validation_mode() {
 }
 
 #[test]
-fn test_class_weights_training_mode() {
-    let training_weights = vec![1.0, 2.0, 0.5, 3.0, 1.5]; // Different weights for each class
-    let model = create_test_model(Some(training_weights), None);
-    let device = Device::Cpu;
-    let (predictions, targets) = create_test_tensors(4, 5, &device);
-
-    let result = model.calculate_nll_loss(&predictions, &targets, LossMode::Training);
-
-    assert!(
-        result.is_ok(),
-        "Loss calculation should succeed with class weights"
-    );
-    let loss_tensor = result.unwrap();
-    let loss_value = loss_tensor
-        .to_scalar::<f32>()
-        .expect("Should convert to scalar");
-
-    // Loss should be positive and finite
-    assert!(loss_value > 0.0, "Loss should be positive");
-    assert!(loss_value.is_finite(), "Loss should be finite");
-}
-
-#[test]
-fn test_class_weights_validation_mode_with_validation_weights() {
+fn test_uniform_weights_validation_mode_with_validation_weights() {
     let training_weights = vec![1.0, 2.0, 0.5, 3.0, 1.5];
-    let validation_weights = vec![1.5, 1.0, 2.0, 0.5, 2.5]; // Different validation weights
-    let model = create_test_model(Some(training_weights), Some(validation_weights));
+
+    let model = create_test_model(Some(training_weights));
     let device = Device::Cpu;
     let (predictions, targets) = create_test_tensors(4, 5, &device);
 
@@ -142,9 +111,9 @@ fn test_class_weights_validation_mode_with_validation_weights() {
 }
 
 #[test]
-fn test_class_weights_validation_mode_fallback_to_training() {
+fn test_uniform_weights_validation_mode_fallback_to_training() {
     let training_weights = vec![1.0, 2.0, 0.5, 3.0, 1.5];
-    let model = create_test_model(Some(training_weights), None); // No validation weights
+    let model = create_test_model(Some(training_weights)); // No validation weights
     let device = Device::Cpu;
     let (predictions, targets) = create_test_tensors(4, 5, &device);
 
@@ -167,7 +136,7 @@ fn test_class_weights_validation_mode_fallback_to_training() {
 #[test]
 fn test_different_batch_sizes() {
     let training_weights = vec![1.0, 2.0, 0.5, 3.0, 1.5];
-    let model = create_test_model(Some(training_weights), None);
+    let model = create_test_model(Some(training_weights));
     let device = Device::Cpu;
 
     // Test different batch sizes
@@ -203,7 +172,7 @@ fn test_different_batch_sizes() {
 #[test]
 fn test_gradient_preservation() {
     let training_weights = vec![1.0, 2.0, 0.5, 3.0, 1.5];
-    let model = create_test_model(Some(training_weights), None);
+    let model = create_test_model(Some(training_weights));
     let device = Device::Cpu;
     let (predictions, targets) = create_test_tensors(4, 5, &device);
 
@@ -230,7 +199,7 @@ fn test_gradient_preservation() {
 fn test_loss_consistency_between_modes() {
     // When using the same weights for training and validation, losses should be similar
     let weights = vec![1.0, 1.0, 1.0, 1.0, 1.0]; // Uniform weights
-    let model = create_test_model(Some(weights.clone()), Some(weights));
+    let model = create_test_model(Some(weights.clone()));
     let device = Device::Cpu;
     let (predictions, targets) = create_test_tensors(8, 5, &device);
 
@@ -260,7 +229,7 @@ fn test_weighted_vs_uniform_loss_difference() {
     let (predictions, targets) = create_test_tensors(8, 5, &device);
 
     // Test with uniform weights
-    let uniform_model = create_test_model(None, None);
+    let uniform_model = create_test_model(None);
     let uniform_loss = uniform_model
         .calculate_nll_loss(&predictions, &targets, LossMode::Training)
         .expect("Uniform loss calculation should succeed")
@@ -268,7 +237,7 @@ fn test_weighted_vs_uniform_loss_difference() {
         .expect("Should convert to scalar");
 
     // Test with non-uniform weights
-    let weighted_model = create_test_model(Some(vec![0.5, 2.0, 1.0, 3.0, 0.8]), None);
+    let weighted_model = create_test_model(Some(vec![0.5, 2.0, 1.0, 3.0, 0.8]));
     let weighted_loss = weighted_model
         .calculate_nll_loss(&predictions, &targets, LossMode::Training)
         .expect("Weighted loss calculation should succeed")
@@ -285,7 +254,7 @@ fn test_weighted_vs_uniform_loss_difference() {
 
 #[test]
 fn test_invalid_target_indices() {
-    let model = create_test_model(Some(vec![1.0, 2.0, 0.5, 3.0, 1.5]), None);
+    let model = create_test_model(Some(vec![1.0, 2.0, 0.5, 3.0, 1.5]));
     let device = Device::Cpu;
 
     // Create predictions for 5 classes
@@ -320,7 +289,7 @@ fn test_invalid_target_indices() {
 
 #[test]
 fn test_empty_batch() {
-    let model = create_test_model(Some(vec![1.0, 2.0, 0.5, 3.0, 1.5]), None);
+    let model = create_test_model(Some(vec![1.0, 2.0, 0.5, 3.0, 1.5]));
     let device = Device::Cpu;
 
     // Create empty tensors
