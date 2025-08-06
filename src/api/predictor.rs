@@ -72,6 +72,16 @@ impl<'a> ModelWrapper<'a> {
     pub fn is_multi_target(&self) -> bool {
         matches!(self, ModelWrapper::MultiTarget(_))
     }
+
+    /// Get adaptive target parameters if available
+    pub fn get_adaptive_target_parameters(
+        &self,
+    ) -> Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters> {
+        match self {
+            ModelWrapper::Single(model) => model.adaptive_target_parameters.as_ref(),
+            ModelWrapper::MultiTarget(model) => model.get_adaptive_target_parameters(),
+        }
+    }
 }
 
 pub struct Predictor {
@@ -243,6 +253,24 @@ impl Predictor {
                 "🔧 Training config for reconstruction: base_sensitivity={:.3}, extreme_multiplier={:.1}",
                 config.base_sensitivity,
                 config.extreme_multiplier
+            );
+        }
+
+        // Pass adaptive target parameters to formatter for consistent reconstruction
+        if let Some(adaptive_params) = model.get_adaptive_target_parameters() {
+            formatter = formatter.with_adaptive_parameters(adaptive_params.clone());
+            log::info!(
+                "✅ Using adaptive target parameters for consistent prediction reconstruction"
+            );
+            log::debug!(
+                "🎯 Adaptive parameters: direction_sensitivity={:.3}, price_bandwidth={:.3}, volatility_bandwidth={:.3}",
+                adaptive_params.direction.base_sensitivity,
+                adaptive_params.price_levels.bandwidth_size,
+                adaptive_params.volatility.bandwidth_size
+            );
+        } else {
+            log::warn!(
+                "⚠️  No adaptive target parameters found - using default reconstruction parameters"
             );
         }
 

@@ -4,7 +4,17 @@
 //! - Price levels: Quantile-based price classification
 //! - Direction: Up/down/sideways movement classification
 //! - Volatility: Low/medium/high volatility regime classification
+//!
+//! ## Adaptive Parameter System
+//!
+//! The system now includes automatic parameter optimization that finds the optimal
+//! "sweet spot" parameters for balanced class distribution across all target types:
+//!
+//! - **AdaptiveTargetParameters**: Stores calibrated parameters for all targets
+//! - **UnifiedTargetCalibrator**: Orchestrates system-wide parameter optimization
+//! - **Model Integration**: Parameters are saved/loaded with the model for consistency
 
+pub mod adaptive_parameters;
 pub mod direction;
 #[cfg(test)]
 mod direction_test;
@@ -15,6 +25,7 @@ mod math_consistency_test;
 mod price_level_test;
 pub mod price_levels;
 pub mod sequence_reconstruction;
+pub mod unified_calibrator;
 pub mod volatility;
 #[cfg(test)]
 mod volatility_test;
@@ -24,16 +35,30 @@ use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
-// Re-export configurations
-pub use direction::{generate_direction_targets, Direction};
+// Re-export configurations and adaptive parameters
+pub use adaptive_parameters::{
+    calculate_class_distribution_balance, AdaptiveParameterCalibrator, AdaptiveTargetParameters,
+    CalibrationMetadata, ClassDistributionBalance, DirectionAdaptiveParams,
+    PriceLevelAdaptiveParams, VolatilityAdaptiveParams,
+};
+pub use direction::{
+    generate_direction_targets, generate_direction_targets_with_adaptive_params, Direction,
+};
 pub use price_levels::{
     generate_price_level_targets, generate_price_level_targets_from_model_config,
+    generate_price_level_targets_with_adaptive_params,
     generate_price_level_targets_with_targets_config, PriceLevelConfig,
 };
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
 };
-pub use volatility::generate_volatility_targets;
+pub use unified_calibrator::{
+    calibrate_adaptive_parameters, CrossTargetCorrelation, SystemBalanceMetrics,
+    UnifiedTargetCalibrator, UnifiedValidationResult,
+};
+pub use volatility::{
+    generate_volatility_targets, generate_volatility_targets_with_adaptive_params,
+};
 
 /// Comprehensive target configuration
 #[derive(Debug, Clone)]
@@ -264,6 +289,28 @@ impl TargetGenerator {
         sequence_indices: &[usize],
         sequence_length: usize,
     ) -> Result<PreparedTargets> {
+        self.generate_all_targets_with_adaptive_params(
+            df,
+            model_config,
+            sequence_indices,
+            sequence_length,
+            None, // No adaptive parameters - use calibration/base config
+        )
+        .await
+    }
+
+    /// Generate all targets with optional adaptive parameters
+    ///
+    /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
+    /// target generation between training and prediction. When None, uses calibration/base config.
+    pub async fn generate_all_targets_with_adaptive_params(
+        &self,
+        df: &DataFrame,
+        model_config: Option<&crate::config::model::ModelConfig>,
+        sequence_indices: &[usize],
+        sequence_length: usize,
+        adaptive_params: Option<&AdaptiveTargetParameters>,
+    ) -> Result<PreparedTargets> {
         // FIXED: Data length should be the number of sequences, not original data length
         let data_length = sequence_indices.len();
         let mut prepared_targets = PreparedTargets::new(data_length);
@@ -274,43 +321,49 @@ impl TargetGenerator {
         );
 
         // PARALLELIZED: Generate all target types concurrently
+        let default_config = TargetsConfig::default();
+        let targets_config = model_config
+            .map(|cfg| &cfg.targets)
+            .unwrap_or(&default_config);
+
+        let direction_adaptive_params = adaptive_params.map(|p| &p.direction);
+        let price_level_adaptive_params = adaptive_params.map(|p| &p.price_levels);
+        let volatility_adaptive_params = adaptive_params.map(|p| &p.volatility);
+
         let (price_targets, (direction_targets, volatility_targets)) = rayon::join(
             || {
                 log::debug!("Generating price level targets in parallel");
-                generate_price_level_targets_with_targets_config(
+                generate_price_level_targets_with_adaptive_params(
                     df,
                     &self.config.horizons,
-                    model_config
-                        .map(|cfg| &cfg.targets)
-                        .unwrap_or(&TargetsConfig::default()),
+                    targets_config,
                     sequence_indices,
                     sequence_length,
+                    price_level_adaptive_params,
                 )
             },
             || {
                 rayon::join(
                     || {
                         log::debug!("Generating direction targets in parallel");
-                        generate_direction_targets(
+                        generate_direction_targets_with_adaptive_params(
                             df,
                             &self.config.horizons,
-                            model_config
-                                .map(|cfg| &cfg.targets)
-                                .unwrap_or(&TargetsConfig::default()),
+                            targets_config,
                             sequence_indices,
                             sequence_length,
+                            direction_adaptive_params,
                         )
                     },
                     || {
                         log::debug!("Generating volatility targets in parallel");
-                        generate_volatility_targets(
+                        generate_volatility_targets_with_adaptive_params(
                             df,
                             &self.config.horizons,
-                            model_config
-                                .map(|cfg| &cfg.targets)
-                                .unwrap_or(&TargetsConfig::default()),
+                            targets_config,
                             sequence_indices,
                             sequence_length,
+                            volatility_adaptive_params,
                         )
                     },
                 )

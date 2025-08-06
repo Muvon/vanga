@@ -153,15 +153,27 @@ pub struct LSTMModel {
     /// Random seed for reproducible training
     /// None = random initialization, Some(0) = random, Some(>0) = reproducible
     pub seed: Option<u64>,
+
+    /// Adaptive target parameters for consistent prediction
+    /// These parameters are calibrated during training to achieve balanced
+    /// class distributions and must be reused during prediction for consistency
+    pub adaptive_target_parameters:
+        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
 }
 
-/// Serializable model state for persistence - SAME as original
+/// Serializable model state for persistence - Enhanced with adaptive parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelState {
     pub config: LSTMConfig,
     pub epochs: usize,
     pub print_every: usize,
     pub clip_gradient: Option<f64>,
+
+    /// Adaptive target parameters for consistent prediction
+    /// These parameters are calibrated during training to achieve balanced
+    /// class distributions and must be reused during prediction for consistency
+    pub adaptive_target_parameters:
+        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
 }
 
 // Optimizer wrapper for concrete type handling with Candle

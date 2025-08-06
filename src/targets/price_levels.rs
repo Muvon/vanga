@@ -279,7 +279,7 @@ pub fn calculate_vwap_with_momentum(
 }
 
 /// Get horizon VWAP-weighted price (same calculation as baseline)
-fn get_horizon_vwap(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
+pub fn get_horizon_vwap(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
     // Same calculation as baseline (VWAP-weighted price)
     get_sequence_vwap_baseline(horizon_ohlcv)
 }
@@ -862,8 +862,44 @@ pub fn generate_price_level_targets_with_targets_config(
     sequence_indices: &[usize],
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    let config = PriceLevelConfig {
-        bandwidth_size: targets_config.base_sensitivity,
+    generate_price_level_targets_with_adaptive_params(
+        df,
+        horizons,
+        targets_config,
+        sequence_indices,
+        sequence_length,
+        None, // No adaptive parameters - use base config
+    )
+}
+
+/// Generate price level targets with optional adaptive parameters
+///
+/// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
+/// target generation between training and prediction. When None, uses base config.
+pub fn generate_price_level_targets_with_adaptive_params(
+    df: &DataFrame,
+    horizons: &[String],
+    targets_config: &TargetsConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
+    adaptive_params: Option<&crate::targets::adaptive_parameters::PriceLevelAdaptiveParams>,
+) -> Result<HashMap<String, Vec<i32>>> {
+    let config = if let Some(params) = adaptive_params {
+        log::info!(
+            "🎯 Using pre-calibrated price level bandwidth: {:.4}",
+            params.bandwidth_size
+        );
+        PriceLevelConfig {
+            bandwidth_size: params.bandwidth_size,
+        }
+    } else {
+        log::info!(
+            "🎯 Using base price level bandwidth: {:.4}",
+            targets_config.base_sensitivity
+        );
+        PriceLevelConfig {
+            bandwidth_size: targets_config.base_sensitivity,
+        }
     };
     generate_price_level_targets(df, horizons, &config, sequence_indices, sequence_length)
 }
