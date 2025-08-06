@@ -845,13 +845,14 @@ impl LSTMModel {
                 {
                     // Step 1: Calculate gradient norm with a single backward pass
                     let initial_grads = base_loss.backward()?;
-                    let original_norm = self.calculate_gradient_norm(&initial_grads)?;
+                    let original_norm = self.calculate_gradstore_norm(&initial_grads)?;
 
                     if original_norm > clip_value {
                         // Step 2: Clipping needed - scale the loss and recalculate gradients
                         let clip_ratio = clip_value / original_norm;
                         let clip_ratio_tensor = Tensor::new(&[clip_ratio as f32], &self.device)?;
-                        let scaled_loss = base_loss.broadcast_mul(&clip_ratio_tensor)?.contiguous()?;
+                        let scaled_loss =
+                            base_loss.broadcast_mul(&clip_ratio_tensor)?.contiguous()?;
 
                         // Step 3: Single backward pass on scaled loss (this replaces the previous gradients)
                         let clipped_grads = scaled_loss.backward()?;
@@ -886,12 +887,41 @@ impl LSTMModel {
                 } else {
                     // No clipping - single backward pass for monitoring
                     let grads = base_loss.backward()?;
-                    let norm = self.calculate_gradient_norm(&grads)?;
+                    let norm = self.calculate_gradstore_norm(&grads)?;
                     (norm, norm, grads)
                 };
 
                 // GRADIENT FLOW VALIDATION: Check gradients using effective norm
                 self.validate_gradient_flow(&final_grads, effective_grad_norm, original_grad_norm)?;
+
+                // 🔍 ENHANCED GRADIENT MONITORING: Track gradient accumulation patterns
+                if epoch > 0 && batch_count > 1 {
+                    // Only check after we have multiple batches to compare
+                    let avg_grad_norm = epoch_grad_norm / batch_count as f64;
+                    let gradient_growth_rate = effective_grad_norm / avg_grad_norm.max(1e-12_f64);
+                    
+                    // Only warn if we have meaningful data and significant growth
+                    if avg_grad_norm > 1e-12_f64 && gradient_growth_rate > 3.0 {
+                        log::warn!(
+                            "⚠️ Potential gradient accumulation detected: current_norm={:.6e}, avg_norm={:.6e}, growth_rate={:.2}x",
+                            effective_grad_norm,
+                            avg_grad_norm,
+                            gradient_growth_rate
+                        );
+                    }
+                }
+
+                // 📊 GRADIENT CLIPPING STATISTICS: Track clipping frequency
+                if let Some(clip_value) = self.training_config.clip_gradient {
+                    if original_grad_norm > clip_value {
+                        log::debug!(
+                            "📊 Gradient clipping stats: original={:.6e}, clipped={:.6e}, reduction={:.1}%",
+                            original_grad_norm,
+                            effective_grad_norm,
+                            (1.0 - effective_grad_norm / original_grad_norm) * 100.0
+                        );
+                    }
+                }
 
                 // Accumulate effective gradient norm for epoch reporting
                 epoch_grad_norm += effective_grad_norm;
@@ -901,7 +931,7 @@ impl LSTMModel {
                 optimizer.step(&final_grads)?;
 
                 // Accumulate loss for epoch reporting (use original loss, not clipped)
-                let batch_loss = loss.to_scalar::<f32>().map_err(|e| {
+                let batch_loss = base_loss.to_scalar::<f32>().map_err(|e| {
                     VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
                 })?;
 
@@ -922,6 +952,32 @@ impl LSTMModel {
             } else {
                 0.0
             };
+
+            // 📊 GRADIENT STABILITY ANALYSIS: Check for gradient explosion or vanishing
+            if avg_grad_norm > 10.0 {
+                log::warn!(
+                    "⚠️ Large average gradient norm detected: {:.6e} - consider lower learning rate or stronger clipping",
+                    avg_grad_norm
+                );
+            } else if avg_grad_norm < 1e-6 && avg_grad_norm > 0.0 {
+                log::warn!(
+                    "⚠️ Very small average gradient norm detected: {:.6e} - model may not be learning effectively",
+                    avg_grad_norm
+                );
+            }
+
+            // 🔍 GRADIENT CLIPPING EFFECTIVENESS: Report clipping statistics
+            if let Some(clip_value) = self.training_config.clip_gradient {
+                let clipping_ratio = avg_grad_norm / clip_value;
+                if clipping_ratio > 0.8 {
+                    log::debug!(
+                        "📊 Gradient clipping active: avg_norm={:.6e}, threshold={:.6e}, ratio={:.2}",
+                        avg_grad_norm,
+                        clip_value,
+                        clipping_ratio
+                    );
+                }
+            }
 
             // 🔍 EPOCH TRAINING SUMMARY DEBUG
             log::debug!(
@@ -1995,5 +2051,54 @@ impl LSTMModel {
 
         candle_core::Tensor::from_vec(target_data, (batch_size, output_size), &self.device)
             .map_err(|e| VangaError::model(format!("Failed to create targets tensor: {}", e)))
+    }
+
+    /// Calculate gradient norm from GradStore (L2 norm across all parameters)
+    ///
+    /// This method calculates the total gradient norm using the standard L2 approach:
+    /// ||g|| = sqrt(sum(||g_i||²)) for all parameters i
+    ///
+    /// This matches PyTorch's clip_grad_norm_ implementation exactly.
+    fn calculate_gradstore_norm(&self, grads: &candle_core::backprop::GradStore) -> Result<f64> {
+        let mut total_norm_squared = 0.0f64;
+        let mut param_count = 0;
+
+        // Iterate through all variables in the VarMap to get their gradients
+        for var in self.varmap.all_vars().iter() {
+            if let Some(grad) = grads.get(var) {
+                // Calculate squared norm for this parameter's gradient
+                let grad_squared = grad.sqr().map_err(|e| {
+                    VangaError::ModelError(format!("Failed to square gradient tensor: {}", e))
+                })?;
+
+                let grad_norm_squared = grad_squared
+                    .sum_all()
+                    .map_err(|e| {
+                        VangaError::ModelError(format!("Failed to sum gradient squares: {}", e))
+                    })?
+                    .to_scalar::<f32>()
+                    .map_err(|e| {
+                        VangaError::ModelError(format!(
+                            "Failed to convert gradient norm to scalar: {}",
+                            e
+                        ))
+                    })? as f64;
+
+                total_norm_squared += grad_norm_squared;
+                param_count += 1;
+
+                log::trace!("Gradient norm² for parameter: {:.6e}", grad_norm_squared);
+            }
+        }
+
+        let total_norm = total_norm_squared.sqrt();
+
+        log::debug!(
+            "🔍 Total gradient norm: {:.6e} across {} parameters",
+            total_norm,
+            param_count
+        );
+
+        Ok(total_norm)
     }
 }
