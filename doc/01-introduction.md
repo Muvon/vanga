@@ -7,10 +7,14 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 ## 🚀 **NEW: Key Architectural Improvements**
 
 ### 🏗️ **Modular LSTM Architecture**
-- **Focused Modules**: 5 specialized modules (`config`, `core`, `training`, `inference`, `loss`)
+- **Complete Module Structure**: 12+ specialized modules for focused functionality
+- **Core Modules**: `config`, `core`, `training`, `inference`, `loss`
+- **Advanced Features**: `gradient_clipper`, `window_aware_lr`, `seeded_weights`
+- **Optimization**: `optimizer_bridge`, `schedule_benchmark`, `schedule_validation`
 - **Unified Training**: Single configurable training method handles all scenarios
-- **Backward Compatibility**: 100% API compatibility through re-exports
+- **Backward Compatibility**: 100% API compatibility through `lstm_simple.rs` re-exports
 - **Enhanced Maintainability**: Clear separation of concerns and responsibilities
+- **Testing Architecture**: All tests in separate `*_test.rs` files
 
 ### 🤖 **9 Modern Optimizers**
 - **AdamW**: Best overall performance (0.0234 avg validation loss, 98% success rate) - **RECOMMENDED**
@@ -20,20 +24,30 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 - **Adam, AdaMax, AdaDelta, SGD, AdaGrad**: Complete optimizer suite
 
 ### 🔗 **Hybrid Model Integration**
-- **XGBoost Integration**: Second-phase boosting for enhanced predictions
+- **SmartCore XGBoost**: Enhanced XGBoost integration with SmartCore backend
 - **TFT Support**: Temporal Fusion Transformer with quantile outputs
 - **Variable Selection**: Intelligent feature selection networks
 - **Multi-Phase Training**: LSTM → XGBoost pipeline optimization
 
+### 🆕 **Advanced Training Features**
+- **Perfect Balance Validation**: Automatic class balance detection and correction
+- **Per-Target Balanced Splits**: Individual balanced splits for each target type
+- **Window-Aware Learning Rate Scheduling**: Progressive window-based training with decay
+- **Gradient Clipping with Scaling**: Proper gradient explosion prevention
+- **Reproducible Training**: Deterministic training with configurable seeds
+- **Enhanced Attention**: Mixture-of-Head attention with comprehensive dropout options
+
 ## Key Features
 
 ### 🎯 **Advanced LSTM Implementation**
-- **Modular Architecture**: Clean, maintainable code structure with focused modules
+- **Complete Modular Architecture**: 12+ specialized modules with clear separation of concerns
 - **Multi-Layer Support**: 1-4+ layers with MultiLSTM, StackedLSTM, BidirectionalLSTM
-- **Attention Mechanisms**: Multi-head attention with configurable heads and dropout
+- **Enhanced Attention**: Multi-head attention + Mixture-of-Head attention with configurable dropout
 - **Multi-Target Prediction**: 3 targets × 5 classes each (price levels, direction, volatility)
 - **Model Persistence**: Save/load trained models with complete state preservation
-- **Intelligent Training**: Unified training method with early stopping and LR scheduling
+- **Unified Training System**: Single configurable training method with advanced features
+- **Perfect Balance Validation**: Automatic class balance detection and correction
+- **Reproducible Training**: Deterministic results with configurable seeds
 
 ### 🚀 **Professional Architecture**
 - **High Performance**: Rust implementation for maximum speed and safety
@@ -53,7 +67,10 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 - **Polars Integration**: High-performance DataFrame operations
 - **Memory Efficient**: Chunked processing for large datasets
 - **Data Validation**: Comprehensive OHLCV schema validation
-- **Normalization**: Z-score normalization with statistics tracking
+- **Advanced Normalization**: Z-score normalization with statistics tracking and consistency
+- **Perfect Balance Validation**: Automatic class distribution validation
+- **Chronological Integrity**: Proper time-series handling with validation gaps
+- **Per-Target Processing**: Individual processing pipelines for each target type
 
 ## Core Architecture
 
@@ -66,16 +83,29 @@ Unified Training → Hybrid Models → Multi-Target Prediction → CSV Output
 ### **Modular System Components**
 ```
 src/
-├── model/lstm/        # NEW: Modular LSTM Architecture
+├── model/lstm/        # NEW: Complete Modular LSTM Architecture
 │   ├── training.rs    # Unified training method (THE main training logic)
 │   ├── config.rs      # Configuration structs and 9 optimizer enums
 │   ├── core.rs        # Model lifecycle and initialization
-│   ├── inference.rs   # Prediction pipeline
-│   └── loss.rs        # Loss calculation and metrics
+│   ├── inference.rs   # Prediction pipeline and forward pass
+│   ├── loss.rs        # Loss calculation, metrics, and gradient utilities
+│   ├── gradient_clipper.rs # Gradient clipping with proper scaling
+│   ├── window_aware_lr.rs # Window-aware learning rate scheduling
+│   ├── seeded_weights.rs # Reproducible weight initialization
+│   ├── optimizer_bridge.rs # Optimizer integration bridge
+│   ├── schedule_benchmark.rs # Learning rate schedule benchmarking
+│   ├── schedule_validation.rs # Schedule validation utilities
+│   ├── manual_lstm.rs # Manual LSTM cell implementation
+│   └── *_test.rs      # Comprehensive test coverage in separate files
 ├── model/
-│   ├── xgboost.rs     # XGBoost hybrid integration
-│   ├── tft/           # Temporal Fusion Transformer
-│   └── attention.rs   # Multi-head attention mechanisms
+│   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
+│   ├── multi_target.rs # Multi-target wrapper (3 targets × 5 classes)
+│   ├── attention.rs   # Multi-head attention mechanisms
+│   ├── attention_moh.rs # Mixture-of-Head attention module
+│   ├── attention_moh_wrapper.rs # MoH integration wrapper
+│   ├── xgboost.rs     # XGBoost hybrid integration (SmartCore backend)
+│   ├── smartcore_backend.rs # SmartCore ML backend integration
+│   └── tft.rs         # Temporal Fusion Transformer
 ├── api/               # High-level training/prediction APIs
 ├── features/          # Technical indicators and cross-asset features
 ├── targets/           # Target generation (3 targets × 5 classes each)

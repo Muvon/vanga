@@ -63,13 +63,14 @@ vanga models SUBCOMMAND [OPTIONS]
 ### **Installation**
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/vanga.git
+git clone https://github.com/muvon/vanga.git
 cd vanga
 
-# Build the project
+# Build the project (use --release for production)
 cargo build --release
 
 # The binary will be available at target/release/vanga
+# For development, use: cargo build (faster compilation)
 ```
 
 ### **Data Format**

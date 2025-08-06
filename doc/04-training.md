@@ -198,52 +198,129 @@ enabled = true  # Full 50+ indicator suite
 ### **Fast Training (2-Layer)**
 ```toml
 # configs/fast_training.toml
-[model]
-architecture = "MultiLSTM"
-
-[model.architecture_config.MultiLSTM]
-layers = 2  # Faster training
-
-[model.lstm]
-hidden_size = 64   # Smaller for speed
-sequence_length = 30
-
 [training]
-[training.epochs]
-type = "Auto"
-max_epochs = 500
+epochs = { Auto = { max_epochs = 500 } }     # Auto early stopping
+learning_rate = 0.001                        # Base learning rate
+batch_size = { Fixed = 64 }                  # Fixed batch size for speed
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+validation_split = 0.2                       # 20% validation
+validation_gap = "1h"                        # 1 hour gap
+early_stopping = { patience = 30, min_delta = 0.0001 }
+gradient_clip = 1.0                          # Gradient clipping
+seed = 42                                    # Reproducible results
 
-[training.learning_rate]
-type = "Fixed"
-value = 0.001
+[model]
+architecture = { MultiLSTM = { layers = 2 } } # 2-layer LSTM
+sequence_length = { Fixed = 30 }             # Shorter sequences for speed
+hidden_units = { Fixed = [64, 64] }          # Smaller hidden units
+dropout = { enabled = true, rate = { Fixed = 0.2 } }
 ```
 
 ### **Advanced Stacked LSTM**
 ```toml
 # configs/stacked_lstm.toml
-[model]
-architecture = "StackedLSTM"
-
-[model.architecture_config.StackedLSTM]
-layers = 4  # Deep architecture for complex patterns
-
-[model.lstm]
-hidden_size = 256  # Larger for complex patterns
-sequence_length = 120
-
 [training]
-[training.epochs]
-type = "Auto"
-max_epochs = 1500
+epochs = { Auto = { max_epochs = 1500 } }    # More epochs for complex model
+learning_rate = 0.0005                       # Lower LR for stability
+batch_size = { Auto = { min_size = 16, max_size = 64 } } # Auto batch sizing
+optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
+validation_split = 0.2
+validation_gap = "2h"                        # Longer gap for complex patterns
+early_stopping = { patience = 100, min_delta = 0.0001 } # More patience
+gradient_clip = 1.0
+window_decay = 0.95                          # Learning rate decay
+min_train_ratio = 0.5                        # More training data
+seed = 42
 
-[training.learning_rate]
-type = "Adaptive"
-initial_lr = 0.0005  # Lower for stability
-
-[training.early_stopping]
-enabled = true
-patience = 100  # More patience for deep networks
+[model]
+architecture = { StackedLSTM = { layers = 4 } } # Deep 4-layer architecture
+sequence_length = { Fixed = 120 }            # Longer sequences
+hidden_units = { Fixed = [256, 256, 128, 128] } # Larger hidden units
+dropout = { enabled = true, rate = { Fixed = 0.3 } } # Higher dropout
+attention = { enabled = true, mechanism = "MultiHeadAttention", heads = 8 }
 ```
+
+## 🆕 **Advanced Training Features**
+
+### **Perfect Balance Validation**
+
+VANGA now includes perfect balance validation to ensure optimal training:
+
+```rust
+// Automatically validates class distribution
+pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Result<()>
+```
+
+**Benefits:**
+- Prevents model bias from imbalanced target classes
+- Ensures balanced class distribution in training and validation sets
+- Critical for multi-target systems with categorical outputs
+- Automatic detection and correction of class imbalances
+
+### **Per-Target Balanced Splits**
+
+Each target type gets its own balanced train/validation split:
+
+```toml
+[training]
+validation_split = 0.2                       # 20% validation for each target
+validation_gap = "1h"                        # Prevents data leakage
+class_weight_strategy = "Global"             # Global class weighting
+```
+
+**Features:**
+- Balanced splits for price levels, direction, and volatility targets
+- Maintains chronological order while ensuring class balance
+- Prevents overfitting to dominant classes
+- Configurable validation gap to prevent information leakage
+
+### **Window-Aware Learning Rate Scheduling**
+
+Advanced learning rate scheduling with window-based decay:
+
+```toml
+[training]
+window_decay = 0.95                          # 5% decay per window
+min_train_ratio = 0.4                        # Start with 40% of data
+min_increment_ratio = 0.3                    # 30% increment per window
+learning_schedule = { ReduceLROnPlateau = { factor = 0.5, patience = 10 } }
+```
+
+**Benefits:**
+- Learning rate adapts based on training window progression
+- Prevents overfitting in walk-forward training scenarios
+- Configurable decay per window for optimal convergence
+- Automatic plateau detection and learning rate reduction
+
+### **Gradient Clipping with Scaling**
+
+Proper gradient clipping with adaptive scaling:
+
+```toml
+[training]
+gradient_clip = 1.0                          # Gradient clipping threshold
+```
+
+**Features:**
+- Prevents gradient explosion in deep LSTM networks
+- Adaptive scaling based on gradient magnitude
+- Maintains training stability across different batch sizes
+- Configurable threshold for different model complexities
+
+### **Reproducible Training**
+
+Deterministic training with configurable seeds:
+
+```toml
+[training]
+seed = 42                                    # Fixed seed for reproducibility
+```
+
+**Benefits:**
+- Consistent model behavior across training runs
+- Reproducible results for research and debugging
+- Deterministic weight initialization
+- Enables proper A/B testing of configurations
 
 ## Multi-Layer Training Modes
 
@@ -433,14 +510,24 @@ pub struct TrainingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingParams {
-    pub epochs: EpochConfig,
-    pub batch_size: BatchSizeConfig,
-    pub learning_rate: f64,
-    pub optimizer: OptimizerType,
-    pub early_stopping: EarlyStoppingConfig,
-    pub validation_split: f64,
-    pub class_weight_strategy: ClassWeightStrategy,
-    pub seed: u64,
+    pub device: DeviceConfig,                    // CPU/GPU/Metal device selection
+    pub epochs: EpochConfig,                     // Auto early stopping or fixed epochs
+    pub batch_size: BatchSizeConfig,             // Auto or fixed batch sizing
+    pub learning_rate: f64,                      // Base learning rate
+    pub optimizer: OptimizerType,                // 9 modern optimizers
+    pub warmup_epochs: u32,                      // Learning rate warmup
+    pub learning_schedule: Option<LearningScheduleConfig>, // LR scheduling
+    pub validation_split: f64,                   // Validation data ratio
+    pub validation_gap: String,                  // Gap to prevent data leakage
+    pub test_split: f64,                         // Test data ratio
+    pub early_stopping: EarlyStoppingConfig,    // Early stopping configuration
+    pub gradient_clip: Option<f64>,              // Gradient clipping threshold
+    pub print_every: u32,                        // Progress printing frequency
+    pub class_weight_strategy: ClassWeightStrategy, // Class weighting strategy
+    pub window_decay: f64,                       // Learning rate decay per window
+    pub min_train_ratio: f64,                    // Minimum training data ratio
+    pub min_increment_ratio: f64,                // Minimum increment ratio
+    pub seed: u64,                               // Reproducible training seed
 }
 ```
 

@@ -135,9 +135,22 @@ device = "Auto"                               # Auto-detect best device (RECOMME
 epochs = { Auto = { max_epochs = 1000 } }     # Auto early stopping (RECOMMENDED)
 # epochs = { Fixed = 200 }                    # Fixed epoch count
 
-# Learning rate - controls learning speed
-learning_rate = { Fixed = 0.001 }             # Fixed learning rate
-# learning_rate = { Adaptive = { initial = 0.001, factor = 0.5, patience = 10 } }
+# Learning rate - base learning rate for optimization
+learning_rate = 0.001                         # Base learning rate (0.0001-0.01 range)
+
+# Modern optimizer configuration (9 optimizers available)
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+# Alternative optimizers:
+# optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.01, momentum = 0.0 } }
+# optimizer = { NAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
+# optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
+# optimizer = { SGD = { momentum = 0.9 } }
+
+# Learning rate warmup - gradual LR increase
+warmup_epochs = 5                             # Warmup epochs (0-20 range)
+
+# Learning rate scheduling - adaptive LR reduction
+learning_schedule = { ReduceLROnPlateau = { factor = 0.5, patience = 10, min_lr = 1e-6 } }
 
 # Batch size - controls memory usage and gradient stability
 batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto sizing (RECOMMENDED)
@@ -145,22 +158,29 @@ batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto sizing (RECOMM
 
 # Data splits - controls validation and testing
 validation_split = 0.2                        # 20% for validation (0.1-0.3 range)
+validation_gap = "1h"                         # Gap to prevent data leakage
 test_split = 0.1                              # 10% for testing (0.05-0.2 range)
 
-# Early stopping - prevents overfitting with min_delta threshold
-early_stopping = { patience = 50, min_delta = 0.001 }   # Stop after 50 epochs without improvement >= min_delta (adjusted for new loss scale)
-
-# Loss function configuration - NEW: Multi-target loss weighting
-[model.loss_function]
-# CryptoComposite loss with trading-optimized weights (RECOMMENDED)
-CryptoComposite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
-# Alternative loss functions:
-# MultiObjective = { horizon_weights = [0.4, 0.3, 0.3] }  # Balance across prediction horizons
-# RegimeAware = { volatility_penalty = 0.1 }              # Adjust based on market conditions
-# DirectionalFocused = { direction_penalty = 0.3 }        # Emphasize directional accuracy
+# Early stopping - prevents overfitting
+early_stopping = { patience = 50, min_delta = 0.0001 }   # Stop after 50 epochs without improvement
 
 # Gradient clipping - prevents exploding gradients
 gradient_clip = 1.0                           # Clipping threshold (0.5-2.0 range)
+
+# Progress monitoring
+print_every = 1                               # Print progress every N epochs
+
+# Class weighting strategy for imbalanced datasets
+class_weight_strategy = "Global"              # Global class weighting
+# class_weight_strategy = "PerTarget"         # Per-target class weighting
+
+# Window-based training parameters (for walk-forward training)
+window_decay = 1.0                            # Learning rate decay per window (0.8-1.0 range)
+min_train_ratio = 0.4                         # Minimum training data ratio (0.3-0.6 range)
+min_increment_ratio = 0.3                     # Minimum increment ratio (0.2-0.5 range)
+
+# Reproducible training
+seed = 42                                     # Fixed seed for reproducibility
 ```
 
 ### **Parameter Tuning Guidelines**
@@ -203,15 +223,25 @@ epochs = { Fixed = 200 }
 
 #### **Learning Rate Configuration**
 ```toml
-# Fixed learning rate (simple and stable)
-learning_rate = { Fixed = 0.001 }
+# Base learning rate (simple and direct)
+learning_rate = 0.001
 # TUNING: 0.0001 (conservative), 0.001 (standard), 0.01 (aggressive)
 # EFFECT: Higher = faster learning but risk instability
 
-# Adaptive learning rate (advanced)
-learning_rate = { Adaptive = { initial = 0.001, factor = 0.5, patience = 10 } }
+# Learning rate warmup (gradual increase)
+warmup_epochs = 5
+# TUNING: 0 (no warmup), 5-10 (standard), 15-20 (large models)
+# EFFECT: Prevents early training instability with large models
+
+# Learning rate scheduling (adaptive reduction)
+learning_schedule = { ReduceLROnPlateau = { factor = 0.5, patience = 10, min_lr = 1e-6 } }
 # TUNING: Reduce factor (0.2-0.3) for aggressive reduction, increase patience (15-20) for stability
 # EFFECT: Automatically reduces when loss plateaus
+
+# Window-aware learning rate decay (for walk-forward training)
+window_decay = 0.95
+# TUNING: 0.9 (aggressive decay), 0.95 (moderate), 1.0 (no decay)
+# EFFECT: Reduces learning rate progressively across training windows
 ```
 
 #### **Batch Size Configuration**
@@ -225,6 +255,68 @@ batch_size = { Auto = { min_size = 32, max_size = 512 } }
 batch_size = { Fixed = 64 }
 # TUNING: 32 (small data/memory), 64 (standard), 128+ (large data/memory)
 # EFFECT: Larger batches = more stable gradients but higher memory usage
+```
+
+#### **🆕 Advanced Training Parameters**
+
+```toml
+# Validation gap - prevents data leakage from features with lookback periods
+validation_gap = "1h"
+# TUNING: "0" (no gap), "1h" (standard), "2h" (conservative for features with long lookback)
+# EFFECT: Creates temporal gap between training and validation to prevent information leakage
+
+# Class weighting strategy - handles imbalanced datasets
+class_weight_strategy = "Global"
+# OPTIONS: "Global" (global class weights), "PerTarget" (per-target weights), "None" (no weighting)
+# EFFECT: Balances training for imbalanced target classes
+
+# Window-based training parameters (for walk-forward training)
+min_train_ratio = 0.4
+# TUNING: 0.3 (aggressive), 0.4 (standard), 0.6 (conservative)
+# EFFECT: Minimum percentage of data to use for initial training window
+
+min_increment_ratio = 0.3
+# TUNING: 0.2 (small increments), 0.3 (standard), 0.5 (large increments)
+# EFFECT: Minimum percentage increase per training window
+
+# Reproducible training
+seed = 42
+# TUNING: Any integer (42, 123, 2024, etc.)
+# EFFECT: Ensures deterministic training results for research and debugging
+
+# Progress monitoring
+print_every = 1
+# TUNING: 1 (every epoch), 5 (every 5 epochs), 10 (every 10 epochs)
+# EFFECT: Controls frequency of training progress output
+```
+
+#### **🤖 Optimizer Configuration**
+
+```toml
+# AdamW - Best overall performance (RECOMMENDED)
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+# TUNING: weight_decay (0.001-0.1), beta1 (0.8-0.95), beta2 (0.99-0.999)
+# BEST FOR: General cryptocurrency forecasting, handles volatility well
+
+# RMSprop - Volatile markets specialist
+optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.01, momentum = 0.0 } }
+# TUNING: alpha (0.9-0.99), momentum (0.0-0.9)
+# BEST FOR: High volatility markets, meme coins, rapid price movements
+
+# NAdam - Fastest convergence
+optimizer = { NAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
+# TUNING: Similar to Adam parameters
+# BEST FOR: Development, quick experiments, fast convergence needed
+
+# RAdam - Most stable
+optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
+# TUNING: Conservative parameter changes recommended
+# BEST FOR: Production environments, stable training required
+
+# SGD - Fine-tuning specialist
+optimizer = { SGD = { momentum = 0.9 } }
+# TUNING: momentum (0.0-0.95)
+# BEST FOR: Fine-tuning pre-trained models, transfer learning
 ```
 
 ---
@@ -295,17 +387,47 @@ recurrent = true                               # Recurrent dropout (prevents ove
 ```toml
 [model.attention]
 enabled = true                                 # Enable attention (RECOMMENDED for complex patterns)
-mechanism = "SelfAttention"                    # Attention type
+mechanism = "MultiHeadAttention"               # Attention type
+# mechanism = "SelfAttention"                  # Simple self-attention
+# mechanism = "MixtureOfHeads"                 # Advanced MoH attention
+
 heads = 8                                      # Number of attention heads (4-16 range)
-head_dim = 64                                  # Dimension per head
-dropout_rate = 0.1                            # Attention dropout
+head_dim = 64                                  # Dimension per head (32-128 range)
+
+# Enhanced dropout configurations
+dropout_rate = 0.1                            # Base attention dropout
+dropout_weights = true                         # Dropout on attention weights
+dropout_output = true                          # Dropout on attention output
+dropout_projections = true                     # Dropout on projections
+dropout_scores = true                          # Dropout on attention scores
+
 temperature_scaling = 1.0                     # Attention sharpness (0.5-2.0 range)
 use_relative_position = true                   # Include position encoding
+
+# Visualization settings (for debugging and analysis)
+[model.attention.visualization]
+enabled = false                                # Enable attention visualization
+save_path = "attention_maps/"                  # Directory for attention maps
+save_frequency = 10                            # Save every N epochs
+
+# Mixture-of-Head specific configuration (when mechanism = "MixtureOfHeads")
+[model.attention.moh]
+enabled = false                                # Enable MoH attention
+num_mixtures = 4                              # Number of attention mixtures (2-8 range)
+mixture_dropout = 0.1                         # Dropout for mixture weights
 ```
 
 #### **Attention Tuning**
 - **Few heads (4-6)**: Simple patterns, faster training
 - **Many heads (12-16)**: Complex patterns, cross-asset relationships
+- **Small head_dim (32-48)**: Memory efficient, faster training
+- **Large head_dim (64-128)**: More expressive, better for complex data
+
+#### **🆕 Mixture-of-Head Attention**
+- **Purpose**: Advanced attention mechanism with multiple attention mixtures
+- **Benefits**: Better pattern recognition, improved model capacity
+- **Use Cases**: Complex market patterns, multi-asset relationships
+- **Tuning**: Start with 4 mixtures, increase for more complex patterns
 - **Temperature scaling**: Lower (0.5-0.8) for sharper attention, higher (1.2-2.0) for softer
 
 ### **🤖 NEW: Hybrid Model Integration**

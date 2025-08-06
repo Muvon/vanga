@@ -62,35 +62,73 @@ impl LSTMModel {
 
 ### **Multi-Target Architecture**
 
-VANGA implements a revolutionary multi-target LSTM architecture that eliminates data loss:
+VANGA implements a sophisticated multi-target LSTM architecture with separate models per target:
 
 ```rust
-// Multi-target LSTM model with separate models per target
+// Multi-target LSTM model with individual models per target
+// Implemented in src/model/multi_target.rs
 pub struct MultiTargetLSTMModel {
-    /// Individual LSTM models, one per target (0% data loss)
-    models: Vec<LSTMModel>,
-    /// Names/descriptions of each target
-    target_names: Vec<String>,
+    /// Individual LSTM models, one per target×horizon combination
+    pub models: HashMap<String, LSTMModel>,
+    /// Target types being predicted
+    pub target_types: Vec<TargetType>,
+    /// Prediction horizons
+    pub horizons: Vec<String>,
     /// Input feature size (shared across all models)
-    input_size: usize,
-    /// Number of targets
-    num_targets: usize,
+    pub input_size: usize,
+    /// Training configuration
+    pub training_config: Option<TrainingConfig>,
 }
 
 impl MultiTargetLSTMModel {
-    /// Train all target models with the provided data
-    pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>) -> Result<()> {
-        // Train each model with its corresponding target
-        for (i, model) in self.models.iter_mut().enumerate() {
-            let target_name = &self.target_names[i];
+    /// Train all target models with balanced validation
+    pub async fn train_with_chronological_validation(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &HashMap<String, Array2<f64>>,
+        config: &TrainingConfig,
+    ) -> Result<()> {
+        // Create chronological train/validation split
+        let split_point = (sequences.shape()[0] as f64 * (1.0 - config.training.validation_split)) as usize;
 
-            // Extract single target column for this model
-            let single_target = targets.column(i).to_owned().insert_axis(Axis(1));
+        let train_sequences = sequences.slice(s![..split_point, .., ..]).to_owned();
+        let val_sequences = sequences.slice(s![split_point.., .., ..]).to_owned();
 
-            // Train individual model
-            model.train(sequences, &single_target).await?;
+        // Train each target model with its balanced data
+        for (target_key, target_data) in targets {
+            if let Some(model) = self.models.get_mut(target_key) {
+                let train_targets = target_data.slice(s![..split_point, ..]).to_owned();
+                let val_targets = target_data.slice(s![split_point.., ..]).to_owned();
+
+                // Validate perfect balance for this target
+                validate_perfect_balance(&train_targets, &format!("training_{}", target_key))?;
+                validate_perfect_balance(&val_targets, &format!("validation_{}", target_key))?;
+
+                // Train individual model with balanced data
+                model.train(
+                    &train_sequences,
+                    &train_targets,
+                    config,
+                    Some(&val_sequences),
+                    Some(&val_targets),
+                    None,
+                ).await?;
+            }
         }
+
         Ok(())
+    }
+
+    /// Predict using all trained models
+    pub async fn predict(&self, sequences: &Array3<f64>) -> Result<HashMap<String, Array2<f64>>> {
+        let mut predictions = HashMap::new();
+
+        for (target_key, model) in &self.models {
+            let target_predictions = model.predict(sequences).await?;
+            predictions.insert(target_key.clone(), target_predictions);
+        }
+
+        Ok(predictions)
     }
 }
 ```
@@ -626,6 +664,93 @@ model.train_multi_target(&prepared_data.sequences, &combined_targets).await?;
 - **Efficient Encoding**: Integer targets minimize memory usage
 
 ## Validation and Quality
+
+### **🆕 Perfect Balance Validation**
+
+VANGA now includes advanced balance validation to ensure optimal training:
+
+```rust
+// Implemented in src/model/lstm/training.rs
+pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Result<()> {
+    let num_samples = targets.shape()[0];
+    let num_classes = targets.shape()[1];
+
+    // Calculate class distribution
+    let mut class_counts = vec![0; num_classes];
+    for i in 0..num_samples {
+        for j in 0..num_classes {
+            if targets[[i, j]] > 0.5 {  // One-hot encoded targets
+                class_counts[j] += 1;
+                break;
+            }
+        }
+    }
+
+    // Validate balance (within 10% tolerance)
+    let expected_per_class = num_samples / num_classes;
+    let tolerance = (expected_per_class as f64 * 0.1) as usize;
+
+    for (class_idx, &count) in class_counts.iter().enumerate() {
+        let diff = if count > expected_per_class {
+            count - expected_per_class
+        } else {
+            expected_per_class - count
+        };
+
+        if diff > tolerance {
+            return Err(VangaError::ImbalancedTargets {
+                data_name: data_name.to_string(),
+                class_idx,
+                count,
+                expected: expected_per_class,
+            });
+        }
+    }
+
+    log::info!("✅ {} targets are perfectly balanced", data_name);
+    Ok(())
+}
+```
+
+**Key Features:**
+- **Automatic Balance Detection**: Validates class distribution in training and validation sets
+- **Tolerance-Based Validation**: Allows 10% tolerance for natural data variations
+- **Per-Target Validation**: Validates each target type independently
+- **Error Reporting**: Detailed error messages for imbalanced datasets
+
+### **Per-Target Balanced Splits**
+
+Each target type gets its own balanced train/validation split:
+
+```rust
+// Enhanced training with per-target balance validation
+pub async fn train_with_balanced_splits(
+    &mut self,
+    sequences: &Array3<f64>,
+    targets: &Array2<f64>,
+    config: &TrainingConfig,
+) -> Result<()> {
+    // Validate perfect balance for training data
+    validate_perfect_balance(targets, "training")?;
+
+    // Create balanced validation split
+    let (train_sequences, val_sequences, train_targets, val_targets) =
+        create_balanced_splits(sequences, targets, config.training.validation_split)?;
+
+    // Validate balance for validation data
+    validate_perfect_balance(&val_targets, "validation")?;
+
+    // Proceed with training
+    self.train(&train_sequences, &train_targets, config,
+               Some(&val_sequences), Some(&val_targets), None).await
+}
+```
+
+**Benefits:**
+- **Prevents Model Bias**: Ensures balanced class distribution across all targets
+- **Maintains Chronological Order**: Preserves time-series integrity while balancing classes
+- **Per-Target Optimization**: Each target (price levels, direction, volatility) gets optimal balance
+- **Automatic Correction**: Detects and corrects class imbalances during data preparation
 
 ### **Target Validation**
 ```rust
