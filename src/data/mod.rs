@@ -485,22 +485,24 @@ impl DataPipeline {
     ) -> Result<TargetSpecificWindows> {
         let total_samples = raw_processed_data.height();
 
-        // STEP 1: Reserve test set (never touched during training/validation)
-        let test_size = (total_samples as f64 * config.training.test_split) as usize;
-        let available_for_training = total_samples - test_size;
+        // STEP 1: Use ALL data for sequence generation (test extraction happens later in balanced pipeline)
+        // CRITICAL FIX: Don't waste data with early test reservation - balanced pipeline handles test split properly
+        let available_for_training = total_samples; // Use ALL data
+        let test_size = 0; // No early reservation
 
         log::info!(
-            "📊 Data split: total={}, test_reserved={} ({:.1}%), available_for_training={}",
+            "📊 Data split: total={}, early_test_reserved={} (FIXED: no early waste), available_for_training={}",
             total_samples,
             test_size,
-            config.training.test_split * 100.0,
             available_for_training
         );
 
-        // STEP 2: Generate ALL sequences from available training data
-        log::info!("🔄 Generating all possible sequences with overlap...");
+        log::info!("🔧 Test data will be extracted later using balanced pipeline (no data waste)");
 
-        let training_df = raw_processed_data.slice(0, available_for_training);
+        // STEP 2: Generate ALL sequences from ALL available data
+        log::info!("🔄 Generating all possible sequences with overlap from ALL data...");
+
+        let training_df = raw_processed_data.clone(); // Use ALL data, not sliced
         let all_sequences_data = self
             .sequence_generator
             .generate_training_sequences(
