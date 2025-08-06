@@ -845,8 +845,49 @@ impl LSTMModel {
                 model.device.clone(),
             ) {
                 Ok(xgb_model) => {
+                    // SENIOR-LEVEL FIX: Fail fast and loud - validate architecture compatibility
+                    let current_lstm_feature_dim = model.get_xgboost_feature_dim();
+                    let loaded_feature_dim = xgb_model.get_config().feature_dim;
+
+                    if current_lstm_feature_dim != loaded_feature_dim {
+                        // FATAL ERROR: Architecture mismatch - cannot proceed
+                        let error_msg = format!(
+                            "FATAL: XGBoost model architecture mismatch detected!\n\
+                             \n\
+                             Current LSTM configuration produces: {} features\n\
+                             Saved XGBoost model expects: {} features\n\
+                             \n\
+                             This indicates the model was trained with a different LSTM architecture than the current configuration.\n\
+                             \n\
+                             LSTM Config Analysis:\n\
+                             - Your hidden_units: {:?}\n\
+                             - Last layer size: {}\n\
+                             - Bidirectional: {} (multiplier: {})\n\
+                             - Calculated features: {} × {} = {}\n\
+                             \n\
+                             SOLUTION:\n\
+                             1. Delete incompatible model files: rm models/BTCUSDT_*.safetensors models/BTCUSDT_*.smartcore.*\n\
+                             2. Retrain the model with your current LSTM configuration\n\
+                             3. Or update your LSTM config to match the trained model\n\
+                             \n\
+                             Cannot proceed with incompatible architectures - this would cause runtime crashes.",
+                            current_lstm_feature_dim,
+                            loaded_feature_dim,
+                            model.config.hidden_sizes,
+                            model.config.hidden_sizes.last().copied().unwrap_or(0),
+                            if matches!(model.architecture, Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })) { "Yes" } else { "No" },
+                            if matches!(model.architecture, Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })) { 2 } else { 1 },
+                            model.config.hidden_sizes.last().copied().unwrap_or(0),
+                            if matches!(model.architecture, Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })) { 2 } else { 1 },
+                            current_lstm_feature_dim
+                        );
+
+                        log::error!("🚨 {}", error_msg);
+                        return Err(VangaError::ModelError(error_msg));
+                    }
+
                     model.xgboost_model = Some(xgb_model);
-                    log::info!("✅ XGBoost model loaded successfully");
+                    log::info!("✅ XGBoost model loaded successfully with matching feature dimensions ({} features)", current_lstm_feature_dim);
                 }
                 Err(e) => {
                     log::warn!(
@@ -927,8 +968,49 @@ impl LSTMModel {
                 model.device.clone(),
             ) {
                 Ok(xgb_model) => {
+                    // SENIOR-LEVEL FIX: Fail fast and loud - validate architecture compatibility
+                    let current_lstm_feature_dim = model.get_xgboost_feature_dim();
+                    let loaded_feature_dim = xgb_model.get_config().feature_dim;
+
+                    if current_lstm_feature_dim != loaded_feature_dim {
+                        // FATAL ERROR: Architecture mismatch - cannot proceed
+                        let error_msg = format!(
+                            "FATAL: XGBoost model architecture mismatch detected!\n\
+                             \n\
+                             Current LSTM configuration produces: {} features\n\
+                             Saved XGBoost model expects: {} features\n\
+                             \n\
+                             This indicates the model was trained with a different LSTM architecture than the current configuration.\n\
+                             \n\
+                             LSTM Config Analysis:\n\
+                             - Your hidden_units: {:?}\n\
+                             - Last layer size: {}\n\
+                             - Bidirectional: {} (multiplier: {})\n\
+                             - Calculated features: {} × {} = {}\n\
+                             \n\
+                             SOLUTION:\n\
+                             1. Delete incompatible model files: rm models/BTCUSDT_*.safetensors models/BTCUSDT_*.smartcore.*\n\
+                             2. Retrain the model with your current LSTM configuration\n\
+                             3. Or update your LSTM config to match the trained model\n\
+                             \n\
+                             Cannot proceed with incompatible architectures - this would cause runtime crashes.",
+                            current_lstm_feature_dim,
+                            loaded_feature_dim,
+                            model.config.hidden_sizes,
+                            model.config.hidden_sizes.last().copied().unwrap_or(0),
+                            if matches!(model.architecture, Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })) { "Yes" } else { "No" },
+                            if matches!(model.architecture, Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })) { 2 } else { 1 },
+                            model.config.hidden_sizes.last().copied().unwrap_or(0),
+                            if matches!(model.architecture, Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })) { 2 } else { 1 },
+                            current_lstm_feature_dim
+                        );
+
+                        log::error!("🚨 {}", error_msg);
+                        return Err(VangaError::ModelError(error_msg));
+                    }
+
                     model.xgboost_model = Some(xgb_model);
-                    log::info!("✅ XGBoost model loaded successfully");
+                    log::info!("✅ XGBoost model loaded successfully with matching feature dimensions ({} features)", current_lstm_feature_dim);
                 }
                 Err(e) => {
                     log::warn!(

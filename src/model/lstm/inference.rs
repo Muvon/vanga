@@ -364,7 +364,7 @@ impl LSTMModel {
             let lstm_features = self.extract_lstm_features(&input_tensor)?;
             log::debug!("📊 LSTM features for XGBoost: {:?}", lstm_features.shape());
 
-            // XGBoost prediction
+            // XGBoost prediction (architecture compatibility already validated at model loading)
             let xgb_predictions = xgb_model.predict(&lstm_features)?;
             log::debug!("📊 XGBoost predictions: {:?}", xgb_predictions.shape());
 

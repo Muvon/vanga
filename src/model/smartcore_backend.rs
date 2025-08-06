@@ -67,6 +67,19 @@ impl SmartCoreRegressor {
         }
     }
 
+    /// Update feature dimension to match actual LSTM output
+    /// This is critical for prediction consistency
+    pub fn update_feature_dimension(&mut self, actual_feature_dim: usize) {
+        if self.config.feature_dim != actual_feature_dim {
+            log::warn!(
+                "🔧 Updating SmartCore feature_dim from {} to {} to match LSTM output",
+                self.config.feature_dim,
+                actual_feature_dim
+            );
+            self.config.feature_dim = actual_feature_dim;
+        }
+    }
+
     /// Train SmartCore model on LSTM features
     ///
     /// # Arguments
