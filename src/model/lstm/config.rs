@@ -206,6 +206,4 @@ impl OptimizerWrapper {
             OptimizerWrapper::RMSprop(rmsprop) => rmsprop.step(grads),
         }
     }
-
-
 }

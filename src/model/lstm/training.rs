@@ -854,7 +854,7 @@ impl LSTMModel {
                     if original_norm > clip_value {
                         // Apply gradient clipping by scaling the gradients directly
                         let clip_ratio = clip_value / original_norm;
-                        
+
                         log::debug!(
                             "✂️ GRADIENT CLIPPING: original_norm={:.6} > threshold={:.6}, clip_ratio={:.6}",
                             original_norm,
@@ -898,7 +898,7 @@ impl LSTMModel {
                     // Only check after we have multiple batches to compare
                     let avg_grad_norm = epoch_grad_norm / batch_count as f64;
                     let gradient_growth_rate = effective_grad_norm / avg_grad_norm.max(1e-12_f64);
-                    
+
                     // Only warn if we have meaningful data and significant growth
                     if avg_grad_norm > 1e-12_f64 && gradient_growth_rate > 3.0 {
                         log::warn!(
@@ -934,11 +934,11 @@ impl LSTMModel {
                         let clip_ratio = clip_value / original_grad_norm;
                         let clip_ratio_tensor = Tensor::new(clip_ratio as f32, &self.device)?;
                         let scaled_loss = base_loss.mul(&clip_ratio_tensor)?;
-                        
+
                         // Clear any existing gradients and compute new ones with scaled loss
                         let clipped_grads = scaled_loss.backward()?;
                         optimizer.step(&clipped_grads)?;
-                        
+
                         log::debug!(
                             "✂️ Applied gradient clipping: scaled loss by {:.6}",
                             clip_ratio
