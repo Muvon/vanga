@@ -268,6 +268,55 @@ impl ModelTrainer {
             target_windows.windows_by_target.len()
         );
 
+        // CRITICAL: Calibrate adaptive target parameters for consistent prediction reconstruction
+        log::info!("🎯 Calibrating adaptive target parameters for balanced class distributions...");
+        let data_loader = crate::data::DataLoader::new();
+        let raw_data = data_loader.load_csv(&self.config.data_path).await?;
+        let ohlcv_data = crate::utils::market_data::extract_ohlcv_data(&raw_data)?;
+
+        // Get sequence indices from the first target window (all targets use same sequences)
+        let sequence_indices: Vec<usize> =
+            if let Some(first_target) = target_windows.windows_by_target.values().next() {
+                if let Some(first_window) = first_target.first() {
+                    (0..first_window.train_data.sequences.shape()[0]).collect()
+                } else {
+                    return Err(VangaError::DataError(
+                        "No training windows available for calibration".to_string(),
+                    ));
+                }
+            } else {
+                return Err(VangaError::DataError(
+                    "No target windows available for calibration".to_string(),
+                ));
+            };
+
+        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(
+            self.config.model.targets.clone(),
+        );
+
+        let adaptive_params = calibrator
+            .calibrate_all_targets(
+                &ohlcv_data,
+                96, // Default sequence length for calibration - actual training will use configured length
+                24, // Default horizon steps - will be overridden per target
+                &sequence_indices,
+            )
+            .await?;
+
+        log::info!("✅ Adaptive parameters calibrated:");
+        log::info!(
+            "   Direction sensitivity: {:.4}",
+            adaptive_params.direction.base_sensitivity
+        );
+        log::info!(
+            "   Price level bandwidth: {:.4}",
+            adaptive_params.price_levels.bandwidth_size
+        );
+        log::info!(
+            "   Volatility bandwidth: {:.4}",
+            adaptive_params.volatility.bandwidth_size
+        );
+
         // Get base learning rate from config
         log::info!("🔧 Walk-forward training configuration:");
         log::info!(
@@ -536,6 +585,10 @@ impl ModelTrainer {
 
         // Set complete training config on model before saving
         final_model.set_training_config(self.config.clone());
+
+        // CRITICAL: Set adaptive target parameters for consistent prediction reconstruction
+        final_model.set_adaptive_target_parameters(adaptive_params);
+        log::info!("✅ Adaptive target parameters stored with model for consistent prediction reconstruction");
 
         // Enable final test evaluation with target-specific balanced test data
         // Each target now has its own balanced test split for proper evaluation

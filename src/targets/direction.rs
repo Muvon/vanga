@@ -123,11 +123,40 @@ pub fn generate_direction_targets(
     sequence_indices: &[usize],
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
+    generate_direction_targets_with_adaptive_params(
+        df,
+        horizons,
+        targets_config,
+        sequence_indices,
+        sequence_length,
+        None, // No adaptive parameters - use calibration
+    )
+}
+
+/// Generate direction targets with optional adaptive parameters
+///
+/// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
+/// target generation between training and prediction. When None, performs calibration.
+pub fn generate_direction_targets_with_adaptive_params(
+    df: &DataFrame,
+    horizons: &[String],
+    targets_config: &TargetsConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
+    adaptive_params: Option<&crate::targets::adaptive_parameters::DirectionAdaptiveParams>,
+) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
-    // ADAPTIVE CALIBRATION: Always use adaptive calibration with TargetsConfig
-    let calibrated_sensitivity = {
+    // Use adaptive parameters if available, otherwise calibrate
+    let calibrated_sensitivity = if let Some(params) = adaptive_params {
+        log::info!(
+            "🎯 Using pre-calibrated direction sensitivity: {:.6}",
+            params.base_sensitivity
+        );
+        params.base_sensitivity
+    } else {
+        log::info!("🎯 Calibrating direction sensitivity (no adaptive parameters provided)");
         // Use first horizon for calibration
         let first_horizon_steps = parse_horizon_to_steps(&horizons[0])?;
         calibrate_direction_sensitivity(
@@ -138,12 +167,16 @@ pub fn generate_direction_targets(
         )?
     };
 
-    // Create adaptive targets config with calibrated sensitivity
+    // Create adaptive targets config with calibrated or pre-set sensitivity
     let adaptive_targets_config = TargetsConfig {
         base_sensitivity: calibrated_sensitivity,
         balance_target: targets_config.balance_target,
         momentum_weighting: targets_config.momentum_weighting,
-        extreme_multiplier: targets_config.extreme_multiplier,
+        extreme_multiplier: if let Some(params) = adaptive_params {
+            params.extreme_multiplier
+        } else {
+            targets_config.extreme_multiplier
+        },
     };
 
     log::info!(

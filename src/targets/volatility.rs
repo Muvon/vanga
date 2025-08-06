@@ -107,6 +107,7 @@ use crate::utils::error::Result;
 use crate::utils::market_data::extract_ohlcv_data;
 use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Generate volatility targets for multiple horizons using logarithmic ratio approach
@@ -155,22 +156,60 @@ pub fn generate_volatility_targets(
     sequence_indices: &[usize],
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
+    generate_volatility_targets_with_adaptive_params(
+        df,
+        horizons,
+        targets_config,
+        sequence_indices,
+        sequence_length,
+        None, // No adaptive parameters - use calibration
+    )
+}
+
+/// Generate volatility targets with optional adaptive parameters
+///
+/// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
+/// target generation between training and prediction. When None, performs calibration.
+pub fn generate_volatility_targets_with_adaptive_params(
+    df: &DataFrame,
+    horizons: &[String],
+    targets_config: &TargetsConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
+    adaptive_params: Option<&crate::targets::adaptive_parameters::VolatilityAdaptiveParams>,
+) -> Result<HashMap<String, Vec<i32>>> {
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
 
-    // ALWAYS ADAPTIVE: Auto-calibrate bandwidth using unified config
-    let first_horizon_steps = parse_horizon_to_steps(&horizons[0])?;
-    let calibrated_bandwidth = calibrate_volatility_bandwidth(
-        &ohlcv_data,
-        sequence_length,
-        first_horizon_steps,
-        targets_config.balance_target,
-    )?;
+    // Use adaptive parameters if available, otherwise calibrate
+    let calibrated_bandwidth = if let Some(params) = adaptive_params {
+        log::info!(
+            "🎯 Using pre-calibrated volatility bandwidth: {:.6}",
+            params.bandwidth_size
+        );
+        params.bandwidth_size
+    } else {
+        log::info!("🎯 Calibrating volatility bandwidth (no adaptive parameters provided)");
+        // Auto-calibrate bandwidth using unified config
+        let first_horizon_steps = parse_horizon_to_steps(&horizons[0])?;
+        calibrate_volatility_bandwidth(
+            &ohlcv_data,
+            sequence_length,
+            first_horizon_steps,
+            targets_config.balance_target,
+        )?
+    };
+
+    let extreme_multiplier = if let Some(params) = adaptive_params {
+        params.extreme_multiplier
+    } else {
+        targets_config.extreme_multiplier
+    };
 
     log::info!(
-        "🎯 Volatility targets using calibrated bandwidth: {:.6} (was base: {:.6})",
+        "🎯 Volatility targets using bandwidth: {:.6}, extreme_multiplier: {:.2}",
         calibrated_bandwidth,
-        targets_config.base_sensitivity
+        extreme_multiplier
     );
 
     for horizon in horizons {
@@ -191,12 +230,12 @@ pub fn generate_volatility_targets(
 
                 // Only classify if we have sufficient data for ATR calculation
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-                    // Create adaptive config with calibrated bandwidth
+                    // Create adaptive config with calibrated bandwidth and extreme multiplier
                     let adaptive_targets_config = TargetsConfig {
                         base_sensitivity: calibrated_bandwidth,
                         balance_target: targets_config.balance_target,
                         momentum_weighting: targets_config.momentum_weighting,
-                        extreme_multiplier: targets_config.extreme_multiplier,
+                        extreme_multiplier,
                     };
 
                     // Use enhanced classification with calibrated bandwidth
@@ -294,6 +333,7 @@ pub fn calculate_atr_distribution_stats(atr_series: &[f64]) -> AtrDistributionSt
             median: 0.02,
             percentile_25: 0.015,
             percentile_75: 0.025,
+            coefficient_of_variation: 0.5,
         };
     }
 
@@ -316,23 +356,40 @@ pub fn calculate_atr_distribution_stats(atr_series: &[f64]) -> AtrDistributionSt
     let percentile_25 = sorted_series[len / 4];
     let percentile_75 = sorted_series[3 * len / 4];
 
+    let coefficient_of_variation = if mean > 0.0 { std_dev / mean } else { 0.0 };
+
     AtrDistributionStats {
         mean,
         std_dev,
         median,
         percentile_25,
         percentile_75,
+        coefficient_of_variation,
     }
 }
 
 /// Statistical distribution metrics for ATR series
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtrDistributionStats {
     pub mean: f64,
     pub std_dev: f64,
     pub median: f64,
     pub percentile_25: f64,
     pub percentile_75: f64,
+    pub coefficient_of_variation: f64,
+}
+
+impl Default for AtrDistributionStats {
+    fn default() -> Self {
+        Self {
+            mean: 0.02,
+            std_dev: 0.01,
+            median: 0.02,
+            percentile_25: 0.015,
+            percentile_75: 0.025,
+            coefficient_of_variation: 0.5,
+        }
+    }
 }
 
 /// Calculate adaptive volatility bandwidth based on ATR distribution analysis

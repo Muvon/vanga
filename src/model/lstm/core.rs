@@ -58,6 +58,7 @@ impl LSTMModel {
             best_validation_loss: None, // No best validation loss initially
             best_epoch: None,           // No best epoch initially
             seed: None,                 // No seed by default (random initialization)
+            adaptive_target_parameters: None, // No adaptive parameters initially
         })
     }
 
@@ -692,6 +693,7 @@ impl LSTMModel {
             epochs: self.training_config.epochs,
             print_every: self.training_config.print_every,
             clip_gradient: self.training_config.clip_gradient,
+            adaptive_target_parameters: self.adaptive_target_parameters.clone(),
         };
 
         let config_path = path.with_extension("config");
@@ -745,6 +747,7 @@ impl LSTMModel {
         model.training_config.epochs = model_state.epochs;
         model.training_config.print_every = model_state.print_every;
         model.training_config.clip_gradient = model_state.clip_gradient;
+        model.adaptive_target_parameters = model_state.adaptive_target_parameters;
 
         // CRITICAL FIX: Initialize network structure FIRST to create tensor placeholders
         log::info!("🔧 Initializing network structure...");

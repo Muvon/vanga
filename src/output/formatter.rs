@@ -33,6 +33,8 @@ pub struct OutputFormatter {
     feature_count: Option<usize>,
     /// Sequence length used for prediction
     sequence_length: Option<usize>,
+    /// Adaptive target parameters for consistent reconstruction
+    adaptive_parameters: Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
 }
 
 impl OutputFormatter {
@@ -46,6 +48,7 @@ impl OutputFormatter {
             percentiles: None,
             feature_count: None,
             sequence_length: None,
+            adaptive_parameters: None,
         }
     }
 
@@ -68,6 +71,18 @@ impl OutputFormatter {
         // Store training config parameters for reconstruction methods
         self.bandwidth_size = Some(config.base_sensitivity);
         self.percentiles = Some([0.1, 0.9]); // Default percentiles used in training
+        self
+    }
+
+    /// Set adaptive target parameters for consistent reconstruction
+    pub fn with_adaptive_parameters(
+        mut self,
+        params: crate::targets::adaptive_parameters::AdaptiveTargetParameters,
+    ) -> Self {
+        // Override training config with calibrated adaptive parameters for better accuracy
+        self.bandwidth_size = Some(params.price_levels.bandwidth_size);
+        self.percentiles = Some(params.price_levels.adaptive_percentiles);
+        self.adaptive_parameters = Some(params);
         self
     }
 

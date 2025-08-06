@@ -750,6 +750,23 @@ impl MultiTargetLSTMModel {
         self.training_config = Some(config);
     }
 
+    /// Set adaptive target parameters for all models
+    pub fn set_adaptive_target_parameters(
+        &mut self,
+        params: crate::targets::adaptive_parameters::AdaptiveTargetParameters,
+    ) {
+        for model in &mut self.models {
+            model.adaptive_target_parameters = Some(params.clone());
+        }
+    }
+
+    /// Get adaptive target parameters from the first model (all models should have the same parameters)
+    pub fn get_adaptive_target_parameters(
+        &self,
+    ) -> Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters> {
+        self.models.first()?.adaptive_target_parameters.as_ref()
+    }
+
     /// Check if all models are trained (have networks)
     pub fn is_trained(&self) -> bool {
         // This would need to be implemented in LSTMModel to check if network exists
