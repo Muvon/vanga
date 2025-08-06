@@ -17,8 +17,17 @@ src/model/lstm/
 ├── training.rs    # Training pipeline and optimization (MAIN LOGIC)
 ├── inference.rs   # Prediction pipeline and forward pass
 ├── loss.rs        # Loss calculation, metrics, and gradient utilities
-├── manual_lstm.rs # Manual LSTM implementation with seeded weights
+├── gradient_clipper.rs # Gradient clipping with proper scaling
 ├── window_aware_lr.rs # Window-aware learning rate scheduling
+├── seeded_weights.rs # Reproducible weight initialization
+├── optimizer_bridge.rs # Optimizer integration bridge
+├── schedule_benchmark.rs # Learning rate schedule benchmarking
+├── schedule_validation.rs # Schedule validation utilities
+├── manual_lstm.rs # Manual LSTM cell implementation
+├── balance_validation_test.rs # Balance validation tests
+├── hidden_state_test.rs # Hidden state tests
+├── loss_test.rs   # Loss function tests
+├── schedule_test.rs # Schedule tests
 └── mod.rs         # Public API and re-exports for backward compatibility
 ```
 
@@ -131,10 +140,69 @@ All training behavior is controlled via TOML configuration:
 [training]
 epochs = { Auto = { max_epochs = 1000 } }    # Auto early stopping
 optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
-learning_rate = { Fixed = 0.001 }
+learning_rate = 0.001                        # Base learning rate
 batch_size = { Auto = { min_size = 32, max_size = 512 } }
 early_stopping = { patience = 50, min_delta = 0.0001 }
+validation_split = 0.2                       # 20% validation split
+validation_gap = "1h"                        # Gap to prevent data leakage
+gradient_clip = 1.0                          # Gradient clipping threshold
+class_weight_strategy = "Global"             # Class weighting strategy
+window_decay = 1.0                           # Learning rate decay per window
+min_train_ratio = 0.4                        # Minimum training data ratio
+min_increment_ratio = 0.3                    # Minimum increment ratio
+seed = 42                                    # Reproducible training seed
 ```
+
+### **🆕 Advanced Training Features**
+
+#### **Perfect Balance Validation**
+```rust
+pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Result<()>
+```
+- Ensures balanced class distribution in training and validation sets
+- Prevents model bias from imbalanced target classes
+- Critical for multi-target systems with categorical outputs
+
+#### **Per-Target Balanced Splits**
+```rust
+// Balanced train/validation splits for each target type
+let (train_sequences, val_sequences, train_targets, val_targets) =
+    create_balanced_splits(&sequences, &targets, validation_split)?;
+```
+- Each target (price levels, direction, volatility) gets balanced splits
+- Maintains chronological order while ensuring class balance
+- Prevents overfitting to dominant classes
+
+#### **Window-Aware Learning Rate Scheduling**
+```rust
+pub struct WindowAwareLearningRate {
+    pub base_lr: f64,
+    pub decay_factor: f64,
+    pub current_window: usize,
+}
+```
+- Learning rate adapts based on training window progression
+- Configurable decay per window (`window_decay` parameter)
+- Prevents overfitting in walk-forward training scenarios
+
+#### **Gradient Clipping with Scaling**
+```rust
+pub struct GradientClipper {
+    pub threshold: f64,
+    pub scaling_factor: f64,
+}
+```
+- Proper gradient clipping with adaptive scaling
+- Prevents gradient explosion in deep LSTM networks
+- Maintains training stability across different batch sizes
+
+#### **Reproducible Training**
+```rust
+pub fn new_with_seed(config: LSTMConfig, seed: Option<u64>) -> Result<Self>
+```
+- Deterministic weight initialization with configurable seeds
+- Reproducible training results for research and debugging
+- Consistent model behavior across training runs
 
 ## 🤖 **9 Modern Optimizers**
 
@@ -214,17 +282,45 @@ pub struct MultiHeadAttention {
 }
 ```
 
-### **Attention Configuration**
+### **🆕 Mixture-of-Head Attention**
+
+```rust
+// src/model/attention_moh.rs
+pub struct MixtureOfHeadAttention {
+    pub num_heads: usize,
+    pub head_dim: usize,
+    pub mixture_weights: Linear,
+    pub attention_heads: Vec<MultiHeadAttention>,
+}
+
+// src/model/attention_moh_wrapper.rs
+pub struct MoHWrapper {
+    pub moh_attention: MixtureOfHeadAttention,
+    pub integration_config: MoHConfig,
+}
+```
+
+### **Enhanced Attention Configuration**
 
 ```toml
 [model.attention]
 enabled = true
-mechanism = "MultiHeadAttention"
+mechanism = "MultiHeadAttention"  # or "SelfAttention" or "MixtureOfHeads"
 heads = 8
 head_dim = 64
 dropout_rate = 0.1
+dropout_weights = true           # NEW: Dropout on attention weights
+dropout_output = true            # NEW: Dropout on attention output
+dropout_projections = true       # NEW: Dropout on projections
+dropout_scores = true            # NEW: Dropout on attention scores
 temperature_scaling = 1.0
 use_relative_position = true
+
+# Mixture-of-Head specific configuration
+[model.attention.moh]
+enabled = false                  # Enable MoH attention
+num_mixtures = 4                # Number of attention mixtures
+mixture_dropout = 0.1           # Dropout for mixture weights
 ```
 
 ## 📊 **Data Pipeline Architecture**
@@ -631,6 +727,34 @@ Output Layer → Multi-Target Predictions
 - **Dimension Validation**: 3D tensor verification at each layer
 - **State Validation**: Empty states detection and error handling
 - **Performance Monitoring**: Layer-by-layer shape and timing logs
+
+#### **🆕 Testing Architecture**
+
+**Separate Test Files (MANDATORY)**
+```rust
+src/model/lstm/
+├── config.rs                    # Implementation
+├── config_test.rs              # Tests (separate file)
+├── training.rs                 # Implementation
+├── training_test.rs            # Tests (separate file)
+├── loss.rs                     # Implementation
+├── loss_test.rs                # Tests (separate file)
+└── ...
+```
+
+**Key Testing Principles:**
+- ✅ **All tests in separate `*_test.rs` files** (no inline `#[cfg(test)]` modules)
+- ✅ **Comprehensive coverage** for new features (balance validation, gradient clipping, etc.)
+- ✅ **Integration tests** for modular architecture
+- ✅ **Reproducible tests** with seed support
+- ✅ **Performance benchmarks** for optimization validation
+
+**Test Categories:**
+- **Balance Validation Tests**: Perfect balance validation for targets
+- **Gradient Clipping Tests**: Proper scaling and threshold validation
+- **Schedule Tests**: Learning rate scheduling and window-aware decay
+- **Hidden State Tests**: LSTM state management and validation
+- **Loss Function Tests**: Multi-target loss calculation accuracy
 
 #### **Mathematical Validation**
 - All formulas validated against financial literature

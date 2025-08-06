@@ -16,6 +16,17 @@ src/model/lstm/
 ├── training.rs    # Unified training method (THE main training logic)
 ├── inference.rs   # Prediction pipeline and forward pass
 ├── loss.rs        # Loss calculation, metrics, and gradient utilities
+├── gradient_clipper.rs # Gradient clipping with proper scaling
+├── window_aware_lr.rs # Window-aware learning rate scheduling
+├── seeded_weights.rs # Reproducible weight initialization
+├── optimizer_bridge.rs # Optimizer integration bridge
+├── schedule_benchmark.rs # Learning rate schedule benchmarking
+├── schedule_validation.rs # Schedule validation utilities
+├── manual_lstm.rs # Manual LSTM cell implementation
+├── balance_validation_test.rs # Balance validation tests
+├── hidden_state_test.rs # Hidden state tests
+├── loss_test.rs   # Loss function tests
+├── schedule_test.rs # Schedule tests
 └── mod.rs         # Public API with backward compatibility re-exports
 ```
 
@@ -141,14 +152,208 @@ pub fn setup_optimizer(&mut self, optimizer_type: &OptimizerType) -> Result<Opti
 
 ---
 
+## 🆕 **Advanced Training Features Implementation**
+
+### **Perfect Balance Validation** (`src/model/lstm/training.rs`)
+
+#### **Balance Validation Function**
+```rust
+pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Result<()> {
+    let num_samples = targets.shape()[0];
+    let num_classes = targets.shape()[1];
+
+    // Calculate class distribution
+    let mut class_counts = vec![0; num_classes];
+    for i in 0..num_samples {
+        for j in 0..num_classes {
+            if targets[[i, j]] > 0.5 {  // One-hot encoded targets
+                class_counts[j] += 1;
+                break;
+            }
+        }
+    }
+
+    // Validate balance (within 10% tolerance)
+    let expected_per_class = num_samples / num_classes;
+    let tolerance = (expected_per_class as f64 * 0.1) as usize;
+
+    for (class_idx, &count) in class_counts.iter().enumerate() {
+        let diff = if count > expected_per_class {
+            count - expected_per_class
+        } else {
+            expected_per_class - count
+        };
+
+        if diff > tolerance {
+            return Err(VangaError::ImbalancedTargets {
+                data_name: data_name.to_string(),
+                class_idx,
+                count,
+                expected: expected_per_class,
+            });
+        }
+    }
+
+    log::info!("✅ {} targets are perfectly balanced", data_name);
+    Ok(())
+}
+```
+
+### **Gradient Clipping with Scaling** (`src/model/lstm/gradient_clipper.rs`)
+
+#### **Gradient Clipper Implementation**
+```rust
+pub struct GradientClipper {
+    pub threshold: f64,
+    pub scaling_factor: f64,
+}
+
+impl GradientClipper {
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            threshold,
+            scaling_factor: 1.0,
+        }
+    }
+
+    pub fn clip_gradients(&mut self, grads: &GradStore) -> Result<()> {
+        // Calculate gradient norm
+        let mut total_norm = 0.0;
+        for (_, grad) in grads.iter() {
+            let grad_norm = grad.sqr()?.sum_all()?.to_scalar::<f64>()?;
+            total_norm += grad_norm;
+        }
+        total_norm = total_norm.sqrt();
+
+        // Apply clipping if necessary
+        if total_norm > self.threshold {
+            self.scaling_factor = self.threshold / total_norm;
+            log::debug!("🔧 Gradient clipping: norm={:.6}, scale={:.6}",
+                       total_norm, self.scaling_factor);
+
+            // Scale gradients
+            for (_, grad) in grads.iter() {
+                *grad = grad.mul(&Tensor::new(self.scaling_factor, grad.device())?)?;
+            }
+        } else {
+            self.scaling_factor = 1.0;
+        }
+
+        Ok(())
+    }
+}
+```
+
+### **Window-Aware Learning Rate Scheduling** (`src/model/lstm/window_aware_lr.rs`)
+
+#### **Window-Aware LR Implementation**
+```rust
+pub struct WindowAwareLearningRate {
+    pub base_lr: f64,
+    pub decay_factor: f64,
+    pub current_window: usize,
+    pub current_lr: f64,
+}
+
+impl WindowAwareLearningRate {
+    pub fn new(base_lr: f64, decay_factor: f64) -> Self {
+        Self {
+            base_lr,
+            decay_factor,
+            current_window: 0,
+            current_lr: base_lr,
+        }
+    }
+
+    pub fn step_window(&mut self) {
+        self.current_window += 1;
+        self.current_lr = self.base_lr * self.decay_factor.powi(self.current_window as i32);
+
+        log::info!("📉 Window {} LR: {:.6} (decay: {:.3})",
+                   self.current_window, self.current_lr, self.decay_factor);
+    }
+
+    pub fn get_current_lr(&self) -> f64 {
+        self.current_lr
+    }
+}
+
+pub fn create_window_aware_config(
+    base_config: &TrainingConfig,
+    window_decay: f64,
+) -> TrainingConfig {
+    let mut config = base_config.clone();
+    config.training.window_decay = window_decay;
+    config
+}
+```
+
+### **Reproducible Weight Initialization** (`src/model/lstm/seeded_weights.rs`)
+
+#### **Seeded Weight Initialization**
+```rust
+pub struct SeededWeights {
+    pub seed: u64,
+    pub rng: StdRng,
+}
+
+impl SeededWeights {
+    pub fn new(seed: u64) -> Self {
+        let rng = StdRng::seed_from_u64(seed);
+        Self { seed, rng }
+    }
+
+    pub fn xavier_uniform(&mut self, shape: &[usize]) -> Result<Tensor> {
+        let fan_in = shape[0];
+        let fan_out = shape[1];
+        let bound = (6.0 / (fan_in + fan_out) as f64).sqrt();
+
+        let size: usize = shape.iter().product();
+        let mut values = Vec::with_capacity(size);
+
+        for _ in 0..size {
+            let val = self.rng.gen_range(-bound..bound);
+            values.push(val as f32);
+        }
+
+        Tensor::from_vec(values, shape, &Device::Cpu)
+    }
+
+    pub fn initialize_lstm_weights(&mut self, vs: &VarBuilder, config: &LSTMConfig) -> Result<()> {
+        log::info!("🎲 Initializing LSTM weights with seed: {}", self.seed);
+
+        for layer in 0..config.num_layers {
+            let input_size = if layer == 0 { config.input_size } else { config.hidden_sizes[layer-1] };
+            let hidden_size = config.hidden_sizes[layer];
+
+            // Initialize weight matrices with Xavier uniform
+            let weight_ih = self.xavier_uniform(&[4 * hidden_size, input_size])?;
+            let weight_hh = self.xavier_uniform(&[4 * hidden_size, hidden_size])?;
+
+            // Store in VarBuilder
+            vs.get_with_hints(&format!("lstm.{}.weight_ih", layer), &weight_ih)?;
+            vs.get_with_hints(&format!("lstm.{}.weight_hh", layer), &weight_hh)?;
+        }
+
+        Ok(())
+    }
+}
+```
+
+---
+
 ## 🔗 **Hybrid Model Integration**
 
-### **XGBoost Integration** (`src/model/xgboost.rs`)
+### **XGBoost Integration** (`src/model/xgboost.rs` + `src/model/smartcore_backend.rs`)
 
-#### **XGBoost Regressor**
+#### **SmartCore XGBoost Backend**
 ```rust
+// Using SmartCore for XGBoost implementation
+use smartcore::ensemble::gradient_boosting_regressor::GradientBoostingRegressor;
+use smartcore::ensemble::gradient_boosting_classifier::GradientBoostingClassifier;
+
 pub struct XGBoostRegressor {
-    pub model: Option<xgboost::Booster>,
+    pub model: Option<GradientBoostingRegressor<f64>>,
     pub metadata: XGBoostMetadata,
 }
 
@@ -159,21 +364,23 @@ impl XGBoostRegressor {
         targets: &Array1<f64>,
         target_type: &TargetType,
     ) -> Result<()> {
-        let objective = get_objective_for_target(target_type);
-        let eval_metric = get_eval_metric_for_target(target_type);
+        // Configure SmartCore GBM parameters
+        let model = GradientBoostingRegressor::fit(
+            features,
+            targets,
+            Default::default()
+        )?;
 
-        // Configure XGBoost parameters
-        let mut params = HashMap::new();
-        params.insert("objective".to_string(), objective);
-        params.insert("eval_metric".to_string(), eval_metric);
-        params.insert("max_depth".to_string(), "6".to_string());
-        params.insert("learning_rate".to_string(), "0.1".to_string());
-
-        // Train XGBoost model
-        let dtrain = DMatrix::from_dense(features, targets)?;
-        self.model = Some(xgboost::train(&params, &dtrain, 100, &[])?);
-
+        self.model = Some(model);
         Ok(())
+    }
+
+    pub fn predict(&self, features: &Array2<f64>) -> Result<Array1<f64>> {
+        if let Some(model) = &self.model {
+            Ok(model.predict(features)?)
+        } else {
+            Err(VangaError::ModelNotTrained)
+        }
     }
 }
 
@@ -184,49 +391,56 @@ pub fn get_objective_for_target(target_type: &TargetType) -> String {
         TargetType::Volatility => "multi:softprob".to_string(),    // 5-class classification
     }
 }
-
-pub fn get_eval_metric_for_target(target_type: &TargetType) -> String {
-    match target_type {
-        TargetType::PriceLevel => "mlogloss".to_string(),    // Multi-class log loss
-        TargetType::Direction => "mlogloss".to_string(),     // Multi-class log loss
-        TargetType::Volatility => "mlogloss".to_string(),    // Multi-class log loss
-    }
-}
 ```
 
-### **TFT Integration** (`src/model/tft/`)
+### **TFT Integration** (`src/model/tft.rs`)
 
-#### **Quantile Multi-Target Model**
+#### **Temporal Fusion Transformer Model**
 ```rust
-pub struct QuantileMultiTargetModel {
-    pub models: HashMap<String, QuantileRegressionHead>,
+pub struct TemporalFusionTransformer {
     pub variable_selection: VariableSelectionNetwork,
+    pub lstm_encoder: LSTMEncoder,
+    pub attention_decoder: AttentionDecoder,
+    pub quantile_outputs: QuantileOutputs,
 }
 
 pub struct VariableSelectionNetwork {
-    pub attention: VariableSelectionAttention,
+    pub static_selection: Linear,
+    pub temporal_selection: Linear,
     pub selection_weights: Tensor,
-    pub selected_features: Vec<usize>,
 }
 
-impl QuantileMultiTargetModel {
+impl TemporalFusionTransformer {
     pub fn train(
         &mut self,
         features: &Array3<f64>,
-        targets: &HashMap<String, Array2<f64>>,
+        targets: &Array2<f64>,
         config: &TFTConfig,
     ) -> Result<()> {
-        // Variable selection
-        let selected_features = self.variable_selection.select_features(features, config)?;
+        // Variable selection phase
+        let selected_features = self.variable_selection.select_features(features)?;
 
-        // Train quantile regression heads
-        for (target_name, target_data) in targets {
-            if let Some(model) = self.models.get_mut(target_name) {
-                model.train(&selected_features, target_data, &config.quantiles)?;
-            }
-        }
+        // LSTM encoding phase
+        let encoded_features = self.lstm_encoder.encode(&selected_features)?;
+
+        // Attention decoding phase
+        let attention_output = self.attention_decoder.decode(&encoded_features)?;
+
+        // Quantile regression outputs
+        let predictions = self.quantile_outputs.predict(&attention_output)?;
+
+        // Calculate loss and backpropagate
+        let loss = self.calculate_quantile_loss(&predictions, targets, &config.quantiles)?;
+        loss.backward()?;
 
         Ok(())
+    }
+
+    pub fn predict(&self, features: &Array3<f64>) -> Result<Array2<f64>> {
+        let selected_features = self.variable_selection.select_features(features)?;
+        let encoded_features = self.lstm_encoder.encode(&selected_features)?;
+        let attention_output = self.attention_decoder.decode(&encoded_features)?;
+        self.quantile_outputs.predict(&attention_output)
     }
 }
 ```

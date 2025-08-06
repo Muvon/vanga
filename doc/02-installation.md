@@ -39,7 +39,7 @@ cargo --version
 
 ```bash
 # Clone the VANGA repository
-git clone <repository-url>
+git clone https://github.com/muvon/vanga.git
 cd vanga
 
 # Verify the project structure

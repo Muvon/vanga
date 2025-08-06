@@ -174,14 +174,29 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
 ## 🎯 Architecture Overview
 
 ### Core Design Principles
-- **Modular LSTM Architecture**: New focused module structure (`config`, `core`, `training`, `inference`, `loss`)
-- **Unified Training System**: Single configurable training method with 9 modern optimizers
+- **Modular LSTM Architecture**: Complete modular structure in `src/model/lstm/` with focused modules:
+  - `config.rs` - Configuration types and validation
+  - `core.rs` - Model lifecycle, initialization, persistence
+  - `training.rs` - Unified training method with advanced features
+  - `inference.rs` - Prediction pipeline and forward pass
+  - `loss.rs` - Loss calculation, validation metrics, gradient utilities
+  - `gradient_clipper.rs` - Gradient clipping with proper scaling
+  - `window_aware_lr.rs` - Window-aware learning rate scheduling
+- **Unified Training System**: Single configurable training method with 9 modern optimizers and advanced features:
+  - Perfect balance validation for targets
+  - Per-target balanced train/validation splits
+  - Window-aware learning rate scheduling with decay
+  - Gradient clipping with scaling
+  - Seed support for reproducible training
+  - Progressive window increment configuration
 - **Symbol-Agnostic Design**: Each trading pair gets its own specialized multi-target LSTM model
 - **Multi-Target Prediction**: Price levels, direction, and volatility with separate specialized models
-- **Configuration-Driven**: All behavior controlled via TOML configuration files
-- **Backward Compatibility**: All existing APIs preserved through compatibility layer
+- **Configuration-Driven**: All behavior controlled via TOML configuration files with enhanced parameters
+- **Backward Compatibility**: All existing APIs preserved through `lstm_simple.rs` compatibility layer
 - **Advanced Optimizers**: AdamW, RMSprop, NAdam, RAdam with intelligent learning rate scheduling
-- **Hybrid Models**: XGBoost integration and TFT (Temporal Fusion Transformer) support
+- **Hybrid Models**: SmartCore backend integration, XGBoost support, and TFT (Temporal Fusion Transformer)
+- **Enhanced Attention**: Mixture-of-Head attention module with comprehensive dropout configurations
+- **Testing Architecture**: All tests in separate `*_test.rs` files with comprehensive coverage
 
 ### Required Data Format
 
@@ -358,13 +373,25 @@ vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross
 ```toml
 [training]
 epochs = { Auto = { max_epochs = 1000 } }    # Intelligent early stopping
-learning_rate = { Fixed = 0.001 }            # Learning rate configuration
+learning_rate = 0.001                        # Base learning rate
 batch_size = { Auto = { min_size = 32, max_size = 512 } }  # Auto batch sizing
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+validation_split = 0.2                       # 20% validation split
+validation_gap = "1h"                        # Gap to prevent data leakage
+early_stopping = { patience = 50, min_delta = 0.0001 }  # Early stopping config
+gradient_clip = 1.0                          # Gradient clipping threshold
+class_weight_strategy = "Global"             # Class weighting strategy
+window_decay = 1.0                           # Learning rate decay per window
+min_train_ratio = 0.4                        # Minimum training data ratio
+min_increment_ratio = 0.3                    # Minimum increment ratio
+seed = 42                                    # Reproducible training seed
 
 [model]
 architecture = { MultiLSTM = { layers = 2 } }  # Model architecture
 sequence_length = { Auto = { min_length = 30, max_length = 120 } }  # Auto sequence length
 hidden_units = { Auto = { min_units = 64, max_units = 512 } }  # Auto hidden units
+dropout = { enabled = true, rate = { Fixed = 0.2 } }  # Dropout configuration
+attention = { enabled = true, mechanism = "MultiHeadAttention", heads = 8 }  # Attention config
 
 [features.technical_indicators]
 enabled = true                                # Enable technical indicators
@@ -405,20 +432,25 @@ vanga/
 │   │   │   ├── training.rs    # Unified training method (MAIN LOGIC)
 │   │   │   ├── inference.rs   # Prediction and forward pass
 │   │   │   ├── loss.rs        # Loss calculation and metrics
+│   │   │   ├── gradient_clipper.rs # Gradient clipping with scaling
 │   │   │   ├── window_aware_lr.rs # Window-aware learning rate scheduling
-│   │   │   ├── manual_lstm.rs # Manual LSTM with seeded weights
+│   │   │   ├── seeded_weights.rs # Reproducible weight initialization
+│   │   │   ├── optimizer_bridge.rs # Optimizer integration bridge
+│   │   │   ├── schedule_benchmark.rs # Learning rate schedule benchmarking
+│   │   │   ├── schedule_validation.rs # Schedule validation utilities
+│   │   │   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   │   │   └── mod.rs         # Public API and re-exports
-│   │   ├── lstm_simple.rs # Compatibility layer
+│   │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
 │   │   ├── multi_target.rs # Multi-target wrapper (3 targets × 5 classes)
 │   │   ├── attention.rs   # Multi-head attention mechanisms
-│   │   ├── attention_moh.rs # Mixture-of-Head attention
+│   │   ├── attention_moh.rs # Mixture-of-Head attention module
+│   │   ├── attention_moh_wrapper.rs # MoH integration wrapper
 │   │   ├── attention_optimizer.rs # Optimized attention implementations
-│   │   ├── tft/           # Temporal Fusion Transformer integration
-│   │   │   ├── mod.rs         # TFT module orchestration
-│   │   │   ├── variable_selection.rs # Variable selection networks
-│   │   │   └── quantile_regression.rs # Quantile regression heads
-│   │   ├── xgboost.rs     # XGBoost hybrid models (SmartCore backend)
-│   │   └── smartcore_backend.rs # SmartCore ML backend
+│   │   ├── attention_loss.rs # Attention-specific loss functions
+│   │   ├── attention_viz.rs # Attention visualization utilities
+│   │   ├── tft.rs         # Temporal Fusion Transformer integration
+│   │   ├── xgboost.rs     # XGBoost hybrid models
+│   │   └── smartcore_backend.rs # SmartCore ML backend integration
 │   ├── features/      # Feature engineering
 │   │   ├── technical.rs   # 50+ technical indicators implementation
 │   │   ├── cross_asset.rs # Cross-asset correlation features
