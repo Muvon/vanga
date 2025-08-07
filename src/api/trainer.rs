@@ -174,6 +174,124 @@ fn validate_prepared_targets_balance(targets: &PreparedTargets, data_name: &str)
     Ok(())
 }
 
+/// Validate that training and validation sequences are completely unique (no exact duplicates)
+/// This prevents data leakage where the model memorizes training patterns and gets false validation scores
+fn validate_sequence_uniqueness(
+    train_sequences: &ndarray::Array3<f64>,
+    val_sequences: &ndarray::Array3<f64>,
+    window_id: usize,
+) -> Result<()> {
+    if train_sequences.is_empty() || val_sequences.is_empty() {
+        log::warn!(
+            "⚠️ UNIQUENESS VALIDATION SKIPPED: Empty sequence data for window {}",
+            window_id + 1
+        );
+        return Ok(());
+    }
+
+    let train_samples = train_sequences.shape()[0];
+    let val_samples = val_sequences.shape()[0];
+    let sequence_length = train_sequences.shape()[1];
+    let num_features = train_sequences.shape()[2];
+
+    if train_sequences.shape()[1..] != val_sequences.shape()[1..] {
+        return Err(VangaError::DataError(format!(
+            "🚨 UNIQUENESS VALIDATION FAILED: Training sequences shape {:?} doesn't match validation shape {:?}",
+            train_sequences.shape(),
+            val_sequences.shape()
+        )));
+    }
+
+    log::debug!(
+        "🔍 Checking sequence uniqueness: {} training vs {} validation sequences ({}×{} each)",
+        train_samples,
+        val_samples,
+        sequence_length,
+        num_features
+    );
+
+    let mut duplicate_count = 0;
+    let mut duplicate_examples = Vec::new();
+    const MAX_EXAMPLES: usize = 5; // Limit examples to avoid log spam
+
+    // Check each validation sequence against all training sequences
+    for val_idx in 0..val_samples {
+        let val_sequence = val_sequences.slice(ndarray::s![val_idx, .., ..]);
+
+        for train_idx in 0..train_samples {
+            let train_sequence = train_sequences.slice(ndarray::s![train_idx, .., ..]);
+
+            // Check if sequences are exactly identical (within floating point precision)
+            let mut is_duplicate = true;
+            'sequence_check: for time_step in 0..sequence_length {
+                for feature_idx in 0..num_features {
+                    let diff = (val_sequence[[time_step, feature_idx]]
+                        - train_sequence[[time_step, feature_idx]])
+                    .abs();
+                    if diff > 1e-10 {
+                        // Very small tolerance for floating point comparison
+                        is_duplicate = false;
+                        break 'sequence_check;
+                    }
+                }
+            }
+
+            if is_duplicate {
+                duplicate_count += 1;
+
+                if duplicate_examples.len() < MAX_EXAMPLES {
+                    duplicate_examples.push((train_idx, val_idx));
+                }
+
+                // Break after finding first duplicate for this validation sequence
+                break;
+            }
+        }
+    }
+
+    if duplicate_count > 0 {
+        let error_msg = format!(
+            "🚨 SEQUENCE UNIQUENESS VALIDATION FAILED: Found {} exact duplicates between training and validation sets in window {}",
+            duplicate_count, window_id + 1
+        );
+
+        log::error!("{}", error_msg);
+        log::error!("📊 Duplicate Statistics:");
+        log::error!("   - Training sequences: {}", train_samples);
+        log::error!("   - Validation sequences: {}", val_samples);
+        log::error!("   - Exact duplicates found: {}", duplicate_count);
+        log::error!(
+            "   - Duplicate rate: {:.2}%",
+            (duplicate_count as f64 / val_samples as f64) * 100.0
+        );
+
+        if !duplicate_examples.is_empty() {
+            log::error!("🔍 Example duplicates (train_idx, val_idx):");
+            for (train_idx, val_idx) in &duplicate_examples {
+                log::error!("   - Training[{}] == Validation[{}]", train_idx, val_idx);
+            }
+            if duplicate_examples.len() < duplicate_count {
+                log::error!(
+                    "   - ... and {} more duplicates",
+                    duplicate_count - duplicate_examples.len()
+                );
+            }
+        }
+
+        log::error!("💡 This causes data leakage - the model memorizes training patterns and gets false validation scores!");
+        log::error!("💡 Check your data splitting logic to ensure proper temporal separation.");
+
+        return Err(VangaError::DataError(error_msg));
+    }
+
+    log::info!(
+        "✅ SEQUENCE UNIQUENESS VALIDATED: No exact duplicates found between {} training and {} validation sequences in window {}",
+        train_samples, val_samples, window_id + 1
+    );
+
+    Ok(())
+}
+
 /// Window-by-window training metrics for final statistics
 #[derive(Debug, Clone)]
 pub struct WindowMetrics {
@@ -804,6 +922,13 @@ impl ModelTrainer {
 
         // Validate validation data balance
         validate_prepared_targets_balance(&window.val_data.targets, "VALIDATION")?;
+
+        // Validate sequence uniqueness (no exact duplicates between train/val)
+        validate_sequence_uniqueness(
+            &window.train_data.sequences,
+            &window.val_data.sequences,
+            window.window_id,
+        )?;
 
         log::info!(
             "✅ PERFECT BALANCE CONFIRMED: Window {} data is perfectly balanced",
