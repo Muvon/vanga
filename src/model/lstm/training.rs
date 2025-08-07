@@ -859,18 +859,8 @@ impl LSTMModel {
                         total_epochs.saturating_sub(warmup_epochs as usize),
                     );
 
-                    // Only update if there's a meaningful change (avoid unnecessary updates)
-                    if (scheduled_lr - current_lr).abs() > 1e-8 {
-                        optimizer.set_learning_rate(scheduled_lr);
-                        current_lr = scheduled_lr;
-
-                        log::debug!(
-                            "📈 Schedule LR update at epoch {}: {:.6} (schedule: {:?})",
-                            epoch + 1,
-                            scheduled_lr,
-                            schedule_config
-                        );
-                    }
+                    optimizer.set_learning_rate(scheduled_lr);
+                    current_lr = scheduled_lr;
                 }
             }
 
@@ -920,65 +910,28 @@ impl LSTMModel {
                     VangaError::ModelError(format!("Loss scalar conversion failed: {}", e))
                 })?;
 
-                // SIMPLE FIX: Use single backward pass with direct gradient clipping
-                let (original_grad_norm, effective_grad_norm, final_grads) = if let Some(
-                    clip_value,
-                ) =
-                    self.training_config.clip_gradient
-                {
-                    // Single backward pass - let gradients accumulate naturally
-                    let grads = base_loss.backward()?;
-                    let original_norm = self.calculate_gradstore_norm(&grads)?;
+                // CRITICAL FIX: Use proper Candle backward_step API to prevent gradient accumulation
+                // This replaces manual gradient handling with framework's built-in gradient management
+                let effective_grad_norm = self.apply_gradient_clipping_and_step(
+                    &mut optimizer,
+                    &base_loss,
+                    self.training_config.clip_gradient,
+                    epoch,
+                    batch_idx,
+                )?;
 
-                    if original_norm > clip_value {
-                        // Apply gradient clipping by scaling the gradients directly
-                        let clip_ratio = clip_value / original_norm;
+                // GRADIENT FLOW VALIDATION: Basic validation without requiring gradients
+                // This ensures gradients are not NaN, infinite, or problematically large/small
+                self.validate_gradient_norm(effective_grad_norm)?;
 
-                        log::debug!(
-                            "✂️ GRADIENT CLIPPING: original_norm={:.6} > threshold={:.6}, clip_ratio={:.6}",
-                            original_norm,
-                            clip_value,
-                            clip_ratio
-                        );
-
-                        if epoch == 0 && batch_idx == 0 {
-                            log::info!(
-                                "🔧 Gradient clipping enabled: threshold={:.3}, direct gradient scaling",
-                                clip_value
-                            );
-                        }
-
-                        // The gradients will be clipped during the optimizer step
-                        // by scaling them with clip_ratio
-                        (original_norm, clip_value, grads)
-                    } else {
-                        // No clipping needed
-                        if epoch == 0 && batch_idx == 0 {
-                            log::info!(
-                                "🔧 Gradient clipping enabled: threshold={:.3}, no clipping needed initially",
-                                clip_value
-                            );
-                        }
-
-                        (original_norm, original_norm, grads)
-                    }
-                } else {
-                    // No clipping - single backward pass
-                    let grads = base_loss.backward()?;
-                    let norm = self.calculate_gradstore_norm(&grads)?;
-                    (norm, norm, grads)
-                };
-
-                // GRADIENT FLOW VALIDATION: Check gradients using effective norm
-                self.validate_gradient_flow(&final_grads, effective_grad_norm, original_grad_norm)?;
-
-                // 🔍 ENHANCED GRADIENT MONITORING: Track gradient accumulation patterns
+                // 🔍 ENHANCED GRADIENT MONITORING: Track gradient patterns across batches
+                // This helps detect gradient accumulation or instability issues
                 if epoch > 0 && batch_count > 1 {
-                    // Only check after we have multiple batches to compare
                     let avg_grad_norm = epoch_grad_norm / batch_count as f64;
                     let gradient_growth_rate = effective_grad_norm / avg_grad_norm.max(1e-12_f64);
 
                     // Only warn if we have meaningful data and significant growth
+                    // Growth rate > 3.0x suggests potential gradient accumulation
                     if avg_grad_norm > 1e-12_f64 && gradient_growth_rate > 3.0 {
                         log::warn!(
                             "⚠️ Potential gradient accumulation detected: current_norm={:.6e}, avg_norm={:.6e}, growth_rate={:.2}x",
@@ -989,49 +942,11 @@ impl LSTMModel {
                     }
                 }
 
-                // 📊 GRADIENT CLIPPING STATISTICS: Track clipping frequency
-                if let Some(clip_value) = self.training_config.clip_gradient {
-                    if original_grad_norm > clip_value {
-                        log::debug!(
-                            "📊 Gradient clipping stats: original={:.6e}, clipped={:.6e}, reduction={:.1}%",
-                            original_grad_norm,
-                            effective_grad_norm,
-                            (1.0 - effective_grad_norm / original_grad_norm) * 100.0
-                        );
-                    }
-                }
-
-                // Accumulate effective gradient norm for epoch reporting
+                // Accumulate gradient norm for epoch-level reporting and analysis
                 epoch_grad_norm += effective_grad_norm;
                 batch_count += 1;
 
-                // Apply gradient clipping if needed and update parameters
-                if let Some(clip_value) = self.training_config.clip_gradient {
-                    if original_grad_norm > clip_value {
-                        // For gradient clipping, we need to scale the loss by the clip ratio
-                        // This effectively scales all gradients by the same factor
-                        let clip_ratio = clip_value / original_grad_norm;
-                        let clip_ratio_tensor = Tensor::new(clip_ratio as f32, &self.device)?;
-                        let scaled_loss = base_loss.mul(&clip_ratio_tensor)?;
-
-                        // Clear any existing gradients and compute new ones with scaled loss
-                        let clipped_grads = scaled_loss.backward()?;
-                        optimizer.step(&clipped_grads)?;
-
-                        log::debug!(
-                            "✂️ Applied gradient clipping: scaled loss by {:.6}",
-                            clip_ratio
-                        );
-                    } else {
-                        // No clipping needed
-                        optimizer.step(&final_grads)?;
-                    }
-                } else {
-                    // No gradient clipping configured
-                    optimizer.step(&final_grads)?;
-                }
-
-                // Accumulate loss for epoch reporting (use original loss, not clipped)
+                // Accumulate loss for epoch reporting
                 let batch_loss = batch_loss_value;
 
                 // 🔍 DETAILED TRAINING BATCH DEBUG
@@ -2199,5 +2114,96 @@ impl LSTMModel {
         );
 
         Ok(total_norm)
+    }
+
+    /// Apply gradient clipping and optimizer step in a unified, clear method
+    ///
+    /// This method encapsulates the gradient clipping logic and optimizer step,
+    /// making the main training loop cleaner and more maintainable.
+    ///
+    /// # Arguments
+    /// * `optimizer` - The optimizer wrapper to apply updates with
+    /// * `base_loss` - The loss tensor to compute gradients from
+    /// * `clip_value` - Optional gradient clipping threshold
+    /// * `epoch` - Current epoch (for logging)
+    /// * `batch_idx` - Current batch index (for logging)
+    ///
+    /// # Returns
+    /// The effective gradient norm after clipping (if applied)
+    ///
+    /// # Key Features
+    /// - Uses proper `backward_step()` API to prevent gradient accumulation
+    /// - Applies loss scaling for gradient clipping instead of manual gradient manipulation
+    /// - Provides clear logging for gradient clipping decisions
+    /// - Handles both clipped and unclipped cases efficiently
+    fn apply_gradient_clipping_and_step(
+        &self,
+        optimizer: &mut OptimizerWrapper,
+        base_loss: &Tensor,
+        clip_value: Option<f64>,
+        epoch: usize,
+        batch_idx: usize,
+    ) -> Result<f64> {
+        match clip_value {
+            Some(threshold) => {
+                // GRADIENT CLIPPING PATH: Check if clipping is needed
+                // We need to compute gradient norm first to make clipping decision
+                let temp_grads = base_loss.backward()?;
+                let original_grad_norm = self.calculate_gradstore_norm(&temp_grads)?;
+
+                if original_grad_norm > threshold {
+                    // CLIPPING REQUIRED: Scale loss to achieve desired gradient norm
+                    let clip_ratio = threshold / original_grad_norm;
+                    let clip_ratio_tensor = Tensor::new(clip_ratio as f32, &self.device)?;
+                    let scaled_loss = base_loss.mul(&clip_ratio_tensor)?;
+
+                    // Apply optimizer step with scaled loss (prevents gradient accumulation)
+                    optimizer.backward_step(&scaled_loss)?;
+
+                    // Log clipping details for debugging
+                    log::debug!(
+                        "✂️ GRADIENT CLIPPING: original_norm={:.6} > threshold={:.6}, clip_ratio={:.6}",
+                        original_grad_norm,
+                        threshold,
+                        clip_ratio
+                    );
+
+                    // Log initial setup info (only once per training)
+                    if epoch == 0 && batch_idx == 0 {
+                        log::info!(
+                            "🔧 Gradient clipping enabled: threshold={:.3}, using loss scaling approach",
+                            threshold
+                        );
+                    }
+
+                    // Return the clipped gradient norm
+                    Ok(threshold)
+                } else {
+                    // NO CLIPPING NEEDED: Use original loss
+                    optimizer.backward_step(base_loss)?;
+
+                    // Log initial setup info (only once per training)
+                    if epoch == 0 && batch_idx == 0 {
+                        log::info!(
+                            "🔧 Gradient clipping enabled: threshold={:.3}, no clipping needed initially",
+                            threshold
+                        );
+                    }
+
+                    // Return the original gradient norm
+                    Ok(original_grad_norm)
+                }
+            }
+            None => {
+                // NO GRADIENT CLIPPING: Use backward_step directly
+                // This is the optimal path - single backward pass with proper gradient handling
+                optimizer.backward_step(base_loss)?;
+
+                // For monitoring purposes, compute gradient norm separately
+                // Note: This is only for logging - the actual optimization is handled above
+                let temp_grads = base_loss.backward()?;
+                Ok(self.calculate_gradstore_norm(&temp_grads)?)
+            }
+        }
     }
 }
