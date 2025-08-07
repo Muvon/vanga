@@ -206,6 +206,41 @@ impl LSTMModel {
         Ok(total_norm)
     }
 
+    /// Validate gradient norm for basic gradient flow issues (simplified version for backward_step usage)
+    pub fn validate_gradient_norm(&self, effective_grad_norm: f64) -> Result<()> {
+        // Check for NaN gradients
+        if effective_grad_norm.is_nan() {
+            return Err(VangaError::ModelError("🚨 NaN gradients detected! This indicates numerical instability in loss calculation or model architecture.".to_string()));
+        }
+
+        // Check for infinite gradients
+        if effective_grad_norm.is_infinite() {
+            return Err(VangaError::ModelError("🚨 Infinite gradients detected! This indicates exploding gradients - consider gradient clipping or lower learning rate.".to_string()));
+        }
+
+        // Check for zero gradients (no learning)
+        if effective_grad_norm < 1e-12 {
+            log::warn!(
+                "⚠️ Very small gradient norm ({:.2e}) - model may not be learning effectively",
+                effective_grad_norm
+            );
+        }
+
+        // Check for exploding gradients
+        if effective_grad_norm > 100.0 {
+            log::warn!(
+                "⚠️ Large gradient norm ({:.2e}) - consider gradient clipping or lower learning rate",
+                effective_grad_norm
+            );
+        }
+
+        log::debug!(
+            "✅ Gradient norm validation passed - norm: {:.6e}",
+            effective_grad_norm
+        );
+        Ok(())
+    }
+
     /// Validate gradient flow to catch gradient issues early
     pub fn validate_gradient_flow(
         &self,

@@ -190,6 +190,37 @@ pub enum OptimizerWrapper {
     RMSprop(candle_optimisers::rmsprop::RMSprop),
 }
 
+/// Macro to eliminate code duplication in OptimizerWrapper method dispatch
+///
+/// This macro generates the match statement for all 9 optimizer variants,
+/// calling the specified method with the provided arguments on each optimizer.
+///
+/// # Benefits
+/// - Eliminates 18+ lines of repetitive match arms
+/// - Single source of truth for optimizer dispatch
+/// - Type-safe method calls through macro expansion
+/// - Easy to maintain when adding new optimizers
+///
+/// # Usage
+/// ```rust
+/// optimizer_dispatch!(self, method_name, arg1, arg2)
+/// ```
+macro_rules! optimizer_dispatch {
+    ($self:expr, $method:ident, $($args:expr),*) => {
+        match $self {
+            OptimizerWrapper::Sgd(opt) => opt.$method($($args),*),
+            OptimizerWrapper::AdamW(opt) => opt.$method($($args),*),
+            OptimizerWrapper::Adam(opt) => opt.$method($($args),*),
+            OptimizerWrapper::AdaDelta(opt) => opt.$method($($args),*),
+            OptimizerWrapper::AdaGrad(opt) => opt.$method($($args),*),
+            OptimizerWrapper::AdaMax(opt) => opt.$method($($args),*),
+            OptimizerWrapper::NAdam(opt) => opt.$method($($args),*),
+            OptimizerWrapper::RAdam(opt) => opt.$method($($args),*),
+            OptimizerWrapper::RMSprop(opt) => opt.$method($($args),*),
+        }
+    };
+}
+
 impl OptimizerWrapper {
     pub fn set_learning_rate(&mut self, lr: f64) {
         match self {
@@ -205,17 +236,39 @@ impl OptimizerWrapper {
         }
     }
 
+    /// Apply optimizer step using manual gradients (legacy method for compatibility)
+    ///
+    /// This method manually applies gradients computed from loss.backward().
+    /// Used when you need explicit gradient access for clipping or analysis.
+    ///
+    /// # Arguments
+    /// * `grads` - Pre-computed gradients from loss.backward()
+    ///
+    /// # Note
+    /// Prefer `backward_step()` for normal training as it prevents gradient accumulation
     pub fn step(&mut self, grads: &candle_core::backprop::GradStore) -> candle_core::Result<()> {
-        match self {
-            OptimizerWrapper::Sgd(sgd) => sgd.step(grads),
-            OptimizerWrapper::AdamW(adamw) => adamw.step(grads),
-            OptimizerWrapper::Adam(adam) => adam.step(grads),
-            OptimizerWrapper::AdaDelta(adadelta) => adadelta.step(grads),
-            OptimizerWrapper::AdaGrad(adagrad) => adagrad.step(grads),
-            OptimizerWrapper::AdaMax(adamax) => adamax.step(grads),
-            OptimizerWrapper::NAdam(nadam) => nadam.step(grads),
-            OptimizerWrapper::RAdam(radam) => radam.step(grads),
-            OptimizerWrapper::RMSprop(rmsprop) => rmsprop.step(grads),
-        }
+        // Dispatch to the appropriate optimizer's step method
+        // All optimizers implement the same step(grads) signature
+        optimizer_dispatch!(self, step, grads)
+    }
+
+    /// Use the proper Candle backward_step method that handles both backward pass and parameter updates
+    ///
+    /// This is the RECOMMENDED method for training as it:
+    /// - Prevents gradient accumulation between batches
+    /// - Handles backward pass and parameter updates atomically
+    /// - Follows proper Candle framework patterns
+    ///
+    /// # Arguments
+    /// * `loss` - Loss tensor to compute gradients from and apply updates
+    ///
+    /// # Critical
+    /// This method prevents the gradient accumulation bug by using the framework's
+    /// built-in gradient management instead of manual gradient handling
+    pub fn backward_step(&mut self, loss: &candle_core::Tensor) -> candle_core::Result<()> {
+        use candle_nn::optim::Optimizer;
+        // Dispatch to the appropriate optimizer's backward_step method
+        // All optimizers implement the Optimizer trait with backward_step
+        optimizer_dispatch!(self, backward_step, loss)
     }
 }
