@@ -52,6 +52,9 @@ pub mod window_aware_lr;
 mod hidden_state_test;
 
 #[cfg(test)]
+mod inference_test;
+
+#[cfg(test)]
 mod loss_test;
 
 // Re-export main types for backward compatibility
