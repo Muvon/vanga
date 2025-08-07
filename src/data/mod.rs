@@ -3,6 +3,9 @@ pub mod balance;
 mod balance_critical_test;
 #[cfg(test)]
 mod balance_test;
+pub mod diversity; // NEW: Advanced diversity-based selection
+#[cfg(test)]
+mod diversity_test; // NEW: Comprehensive diversity tests
 pub mod loader;
 pub mod preprocessor;
 pub mod schema;
@@ -478,16 +481,16 @@ impl DataPipeline {
                         window_range.train_end
                     );
 
-                    // VALIDATION SPLIT: Mixed chronological - can be from anywhere in time series
-                    // Uses balanced extraction while maintaining class distribution
-                    let (balanced_training_dataset, target_validation_indices) = balancer
-                        .smart_validation_split_from_balanced(
+                    // DIVERSE SPLITS: Create diverse train/validation/test splits
+                    // Uses temporal stratification to ensure all splits are diverse
+                    let (balanced_training_dataset, target_validation_indices, target_test_indices) =
+                        balancer.create_diverse_splits(
                             target_dataset,
                             &all_sequences,
                             validation_ratio,
+                            config.training.test_split,
                             &[*target_type],
                             &[horizon.clone()],
-                            false, // Validation: mixed chronological
                         )?;
 
                     // Extract training indices for this specific target from the balanced dataset
@@ -581,20 +584,8 @@ impl DataPipeline {
                         &all_sequences,
                     )?;
 
-                    // TEST SPLIT: End chronological - from most recent data for realistic evaluation
-                    // Uses same balanced extraction but takes from end of time series
+                    // TEST DATA: Use diverse test split from create_diverse_splits
                     let test_data = if config.training.test_split > 0.0 {
-                        // Extract balanced test split from the remaining training data after validation
-                        let (_final_training_dataset, target_test_indices) = balancer
-                            .smart_validation_split_from_balanced(
-                                &balanced_training_dataset,
-                                &all_sequences,
-                                config.training.test_split,
-                                &[*target_type],
-                                &[horizon.clone()],
-                                true, // Test: end chronological (most recent data)
-                            )?;
-
                         // Extract test indices for this specific target
                         let test_indices = target_test_indices
                             .get(&target_key)
@@ -614,7 +605,7 @@ impl DataPipeline {
                             )?;
 
                             log::info!(
-                                "🧪 {:?} {} balanced test split: {} test samples (balanced)",
+                                "🧪 {:?} {} diverse test split: {} test samples (diverse & balanced)",
                                 target_type,
                                 horizon,
                                 test_indices.len()
