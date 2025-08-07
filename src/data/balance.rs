@@ -8,6 +8,9 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3};
 use std::collections::HashMap;
 
+// Import the new diversity selector
+use super::diversity::{DiversityConfig, DiversitySelector};
+
 // Type alias for complex return type to improve readability
 type ValidationSelectionResult = (
     Vec<usize>,
@@ -17,9 +20,10 @@ type ValidationSelectionResult = (
 // Type alias for target-specific validation results
 type TargetSpecificValidationResult = HashMap<(TargetType, String), Vec<usize>>;
 
-// Type alias for complex return types to satisfy clippy
-type ValidationSplitResult = (
+// Type alias for diverse splits creation result
+type DiverseSplitsResult = (
     GloballyBalancedDataset,
+    HashMap<(TargetType, String), Vec<usize>>,
     HashMap<(TargetType, String), Vec<usize>>,
 );
 
@@ -115,11 +119,180 @@ pub struct BalancedSelection {
 /// Main balancer for sequence selection
 pub struct SequenceBalancer {
     _config: BalanceConfig, // Stored for future use, currently algorithm uses minimum class count
+    diversity_selector: DiversitySelector, // NEW: Advanced diversity-based selection
 }
 
 impl SequenceBalancer {
     pub fn new(config: BalanceConfig) -> Self {
-        Self { _config: config }
+        Self {
+            _config: config,
+            diversity_selector: DiversitySelector::new(DiversityConfig::default()),
+        }
+    }
+
+    /// UNIFIED METHOD: Select balanced sequences for any target/horizon combination
+    /// This replaces both balance_sequences_for_window and the logic in extract_target_specific_balanced_datasets
+    pub fn select_balanced_sequences_unified(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        target_type: TargetType,
+        horizon: &str,
+        exclude_indices: &[usize],
+        window_range: Option<(usize, usize)>,
+    ) -> Result<BalancedSelection> {
+        // Filter sequences based on window range if specified
+        let available_sequences: Vec<usize> = all_sequences
+            .iter()
+            .enumerate()
+            .filter(|(idx, seq)| {
+                // Check window range
+                if let Some((start, end)) = window_range {
+                    if !seq.is_within_range(start, end) {
+                        return false;
+                    }
+                }
+                // Check exclusions
+                !exclude_indices.contains(idx)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if available_sequences.is_empty() {
+            return Err(VangaError::DataError(format!(
+                "No sequences available for {:?} {} after filtering",
+                target_type, horizon
+            )));
+        }
+
+        // Group sequences by class
+        let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
+        for &seq_idx in &available_sequences {
+            if let Some(&class) = all_sequences[seq_idx]
+                .targets
+                .get(&(target_type, horizon.to_string()))
+            {
+                class_sequences.entry(class).or_default().push(seq_idx);
+            }
+        }
+
+        // Validate all expected classes are present
+        let expected_classes = [0, 1, 2, 3, 4];
+        let found_classes: Vec<i32> = class_sequences.keys().cloned().collect();
+        let missing_classes: Vec<i32> = expected_classes
+            .iter()
+            .filter(|&&expected| !found_classes.contains(&expected))
+            .cloned()
+            .collect();
+
+        if !missing_classes.is_empty() {
+            return Err(VangaError::DataError(format!(
+                "FATAL: Missing classes detected for {:?} {}: Expected [0,1,2,3,4] but found {:?}. Missing: {:?}",
+                target_type, horizon, found_classes, missing_classes
+            )));
+        }
+
+        log::info!(
+            "✅ ALL 5 CLASSES PRESENT for {:?} {}: {:?}",
+            target_type,
+            horizon,
+            found_classes
+        );
+
+        // Calculate balance target (minimum class count)
+        let min_class_count = class_sequences.values().map(|v| v.len()).min().unwrap_or(0);
+        let sequences_per_class = min_class_count;
+        let total_sequences = sequences_per_class * class_sequences.len();
+
+        log::info!(
+            "🎯 BALANCE TARGET: {} sequences per class (limited by rarest class with {} sequences)",
+            sequences_per_class,
+            min_class_count
+        );
+
+        if sequences_per_class == 0 {
+            return Err(VangaError::DataError(format!(
+                "FATAL: Cannot achieve balance - at least one class has no sequences for {:?} {}",
+                target_type, horizon
+            )));
+        }
+
+        // Select sequences for each class using unified diversity selection
+        let mut selected_indices = Vec::new();
+        let mut class_distribution = HashMap::new();
+
+        for (class, indices) in class_sequences {
+            let available = indices.len();
+            let needed = sequences_per_class;
+
+            log::info!(
+                "🎯 Class {}: selecting {} sequences from {} available",
+                class,
+                needed,
+                available
+            );
+
+            let selected = if available > needed {
+                // OVERLOADED CLASS: Use diversity selection
+                log::info!(
+                    "🎯 Class {}: OVERLOADED - using DIVERSITY SELECTION from {} available",
+                    class,
+                    available
+                );
+
+                self.diversity_selector.select_diverse_sequences(
+                    all_sequences,
+                    &indices,
+                    needed,
+                    target_type,
+                    horizon,
+                    exclude_indices,
+                )?
+            } else {
+                // NOT OVERLOADED: Use all available sequences
+                log::debug!(
+                    "   Class {}: using all {} available sequences",
+                    class,
+                    available
+                );
+                indices
+            };
+
+            if selected.len() != needed {
+                return Err(VangaError::DataError(format!(
+                    "FATAL: Selection failed for class {} - selected {} but need {}",
+                    class,
+                    selected.len(),
+                    needed
+                )));
+            }
+
+            selected_indices.extend(selected);
+            class_distribution.insert(class, needed);
+        }
+
+        // Verify perfect balance
+        let total_selected = selected_indices.len();
+        if total_selected != total_sequences {
+            return Err(VangaError::DataError(format!(
+                "FATAL: Perfect balance failed - selected {} sequences but target was {}",
+                total_selected, total_sequences
+            )));
+        }
+
+        log::info!(
+            "🎯 PERFECT BALANCE ACHIEVED: {} sequences, {} per class for {:?} {}",
+            total_selected,
+            sequences_per_class,
+            target_type,
+            horizon
+        );
+
+        Ok(BalancedSelection {
+            selected_indices,
+            class_distribution,
+            avg_overlap: 0.0, // TODO: Calculate if needed
+            sequences_per_class,
+        })
     }
 
     /// Select target-specific balanced validation sets
@@ -301,6 +474,7 @@ impl SequenceBalancer {
     }
 
     /// Balance sequences for a specific window, target type, and horizon
+    /// DEPRECATED: Use select_balanced_sequences_unified instead
     pub fn balance_sequences_for_window(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -309,187 +483,14 @@ impl SequenceBalancer {
         target_type: TargetType,
         horizon: &str,
     ) -> Result<BalancedSelection> {
-        // Filter sequences that fall within this window's range
-        let available_sequences: Vec<usize> = all_sequences
-            .iter()
-            .enumerate()
-            .filter(|(idx, seq)| {
-                seq.is_within_range(window_range.0, window_range.1)
-                    && !validation_indices.contains(idx) // Exclude validation sequences
-            })
-            .map(|(idx, _)| idx)
-            .collect();
-
-        if available_sequences.is_empty() {
-            return Err(VangaError::DataError(format!(
-                "No sequences available in range [{}, {}) for {:?} {}",
-                window_range.0, window_range.1, target_type, horizon
-            )));
-        }
-
-        log::debug!(
-            "🔍 Window range [{}, {}): {} sequences available for {:?} {}",
-            window_range.0,
-            window_range.1,
-            available_sequences.len(),
-            target_type,
-            horizon
-        );
-
-        // Debug: Show some example sequences and their ranges
-        if available_sequences.len() < 10 {
-            for &idx in &available_sequences {
-                let seq = &all_sequences[idx];
-                log::debug!(
-                    "   Seq {}: data range [{}, {}]",
-                    idx,
-                    seq.start_idx,
-                    seq.end_idx
-                );
-            }
-        }
-
-        // Calculate class distribution for available sequences
-        let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
-        for &seq_idx in &available_sequences {
-            if let Some(&class) = all_sequences[seq_idx]
-                .targets
-                .get(&(target_type, horizon.to_string()))
-            {
-                class_sequences.entry(class).or_default().push(seq_idx);
-            }
-        }
-
-        // CRITICAL: Validate ALL expected classes are present (0, 1, 2, 3, 4)
-        let expected_classes = [0, 1, 2, 3, 4];
-        let found_classes: Vec<i32> = class_sequences.keys().cloned().collect();
-        let missing_classes: Vec<i32> = expected_classes
-            .iter()
-            .filter(|&&expected| !found_classes.contains(&expected))
-            .cloned()
-            .collect();
-
-        if !missing_classes.is_empty() {
-            return Err(VangaError::DataError(format!(
-                "FATAL: Missing classes detected for {:?} {}: Expected classes [0,1,2,3,4] but found {:?}. Missing: {:?}. This indicates target generation failure or data corruption.",
-                target_type, horizon, found_classes, missing_classes
-            )));
-        }
-
-        log::info!(
-            "✅ ALL 5 CLASSES PRESENT for {:?} {}: {:?}",
+        // Use unified method
+        self.select_balanced_sequences_unified(
+            all_sequences,
             target_type,
             horizon,
-            found_classes
-        );
-
-        // Store original counts for logging
-        let original_class_counts: HashMap<i32, usize> =
-            class_sequences.iter().map(|(k, v)| (*k, v.len())).collect();
-
-        // CRITICAL: Balance to minimum available class count (no sequence reuse!)
-        let min_class_count = class_sequences.values().map(|v| v.len()).min().unwrap_or(0);
-
-        // Use minimum class count as the balanced target (never reuse sequences)
-        let balanced_count = min_class_count;
-
-        log::info!(
-            "🎯 BALANCE TARGET: {} sequences per class (limited by rarest class with {} sequences)",
-            balanced_count,
-            min_class_count
-        );
-
-        if balanced_count == 0 {
-            return Err(VangaError::DataError(format!(
-                "FATAL: Cannot achieve balance - at least one class has no sequences for {:?} {}",
-                target_type, horizon
-            )));
-        }
-
-        log::debug!(
-            "📊 Class distribution before balancing: {:?}",
-            class_sequences
-                .iter()
-                .map(|(k, v)| (*k, v.len()))
-                .collect::<HashMap<_, _>>()
-        );
-
-        // Select balanced sequences (no sequence reuse!)
-        // Total sequences = balanced_count * num_classes (all classes get same amount)
-        let total_target_sequences = balanced_count * class_sequences.len();
-
-        let selected = self.select_balanced_with_overlap_management(
-            all_sequences,
-            class_sequences,
-            total_target_sequences,
             validation_indices,
-        )?;
-
-        // CRITICAL: Verify perfect balance was achieved (DYNAMIC class count)
-        let total_selected = selected.selected_indices.len();
-        let num_classes = selected.class_distribution.len();
-        let expected_percentage = 100.0 / num_classes as f64; // Dynamic percentage based on actual classes
-        let mut balance_warnings = Vec::new();
-        let mut perfect_balance = true;
-
-        log::info!(
-            "🔍 BALANCE VERIFICATION for {:?} {}: {} sequences selected, {} classes found, expecting {:.1}% per class",
-            target_type, horizon, total_selected, num_classes, expected_percentage
-        );
-
-        // Verify and log class-specific balance results
-        for (class, count) in &selected.class_distribution {
-            let original_count = original_class_counts.get(class).unwrap_or(&0);
-            let actual_percentage = if total_selected > 0 {
-                (*count as f64 / total_selected as f64) * 100.0
-            } else {
-                0.0
-            };
-
-            let balance_deviation = (actual_percentage - expected_percentage).abs();
-
-            // CRITICAL: Perfect balance required (±1% tolerance max)
-            if balance_deviation > 1.0 {
-                balance_warnings.push(format!(
-                    "Class {}: {:.1}% (should be {:.1}%, deviation: {:.1}%)",
-                    class, actual_percentage, expected_percentage, balance_deviation
-                ));
-                perfect_balance = false;
-            }
-
-            log::info!(
-                "   Class {}: {} sequences ({:.1}%) - had {} available - balance: {}",
-                class,
-                count,
-                actual_percentage,
-                original_count,
-                if balance_deviation <= 1.0 {
-                    "✅ PERFECT"
-                } else if balance_deviation <= 5.0 {
-                    "⚠️ ACCEPTABLE"
-                } else {
-                    "❌ FAILED"
-                }
-            );
-        }
-
-        // CRITICAL: Make balance failures FATAL
-        if !perfect_balance {
-            return Err(VangaError::DataError(format!(
-                "FATAL: Perfect balance requirement failed for {:?} {}: {}. System requires ±1% tolerance for stable training.",
-                target_type, horizon, balance_warnings.join(", ")
-            )));
-        }
-
-        log::info!(
-            "🎯 PERFECT BALANCE VERIFIED: All {} classes within ±1% of {:.1}% target for {:?} {}",
-            num_classes,
-            expected_percentage,
-            target_type,
-            horizon
-        );
-
-        Ok(selected)
+            Some(window_range),
+        )
     }
 
     /// Extract globally balanced dataset from FULL available data
@@ -672,38 +673,21 @@ impl SequenceBalancer {
                     horizon
                 );
 
-                // Group sequences by class for this specific target
-                let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
-                for (idx, seq) in all_sequences.iter().enumerate() {
-                    if let Some(&class) = seq.targets.get(&target_key) {
-                        class_sequences.entry(class).or_default().push(idx);
-                    }
-                }
+                // Use unified selection method
+                let selection_result = self.select_balanced_sequences_unified(
+                    all_sequences,
+                    *target_type,
+                    horizon,
+                    &[],  // No exclusions at this stage
+                    None, // No window range restriction
+                )?;
 
-                if class_sequences.is_empty() {
-                    log::warn!(
-                        "⚠️ No sequences found for {:?} {} - skipping",
-                        target_type,
-                        horizon
-                    );
-                    continue;
-                }
+                let target_balanced_indices = selection_result.selected_indices;
+                let target_class_distribution = selection_result.class_distribution;
+                let target_min_class_count = selection_result.sequences_per_class;
 
-                // Find minimum class count for THIS target only
-                let target_min_class_count =
-                    class_sequences.values().map(|v| v.len()).min().unwrap_or(0);
-
-                if target_min_class_count == 0 {
-                    log::warn!(
-                        "⚠️ Cannot balance {:?} {} - at least one class has no sequences",
-                        target_type,
-                        horizon
-                    );
-                    continue;
-                }
-
-                let num_classes = class_sequences.len();
-                let total_balanced = target_min_class_count * num_classes;
+                let num_classes = target_class_distribution.len();
+                let total_balanced = target_balanced_indices.len();
 
                 log::info!(
                     "   ✅ {:?} {}: {} classes, {} sequences per class = {} total balanced",
@@ -714,50 +698,19 @@ impl SequenceBalancer {
                     total_balanced
                 );
 
-                // Extract balanced samples for this target
-                let mut target_balanced_indices = Vec::new();
-                let mut target_class_distribution = HashMap::new();
-                let mut target_overloaded = HashMap::new();
-
-                for (class, mut indices) in class_sequences {
-                    let available = indices.len();
-                    let needed = target_min_class_count;
-
-                    // Shuffle for random selection
-                    use rand::seq::SliceRandom;
-                    let mut rng = rand::rng();
-                    indices.shuffle(&mut rng);
-
-                    // Take exactly what we need for balance
-                    let selected: Vec<usize> = indices.into_iter().take(needed).collect();
-                    target_balanced_indices.extend(&selected);
-                    target_class_distribution.insert(class, selected.len());
-
-                    // Track overloaded classes
-                    if available > needed {
-                        target_overloaded.insert(class, available - needed);
-                    }
-
-                    log::debug!(
-                        "      Class {}: selected {}/{} sequences",
-                        class,
-                        needed,
-                        available
-                    );
-                }
-
                 // Sort indices for consistency
-                target_balanced_indices.sort();
+                let mut sorted_indices = target_balanced_indices.clone();
+                sorted_indices.sort();
 
                 // Create target-specific balanced dataset
                 let mut balanced_indices_map = HashMap::new();
-                balanced_indices_map.insert(target_key.clone(), target_balanced_indices.clone());
+                balanced_indices_map.insert(target_key.clone(), sorted_indices);
 
                 let mut class_dist_map = HashMap::new();
                 class_dist_map.insert(target_key.clone(), target_class_distribution);
 
-                let mut overloaded_map = HashMap::new();
-                overloaded_map.insert(target_key.clone(), target_overloaded);
+                // No overloaded classes tracking in unified method (could be added if needed)
+                let overloaded_map = HashMap::new();
 
                 let target_dataset = GloballyBalancedDataset {
                     balanced_indices: balanced_indices_map,
@@ -779,217 +732,246 @@ impl SequenceBalancer {
         Ok(target_balanced_datasets)
     }
 
-    /// Derive validation/test set from globally balanced dataset with chronological awareness
+    /// SENIOR-LEVEL: Create diverse train/validation/test splits from balanced dataset
     ///
-    /// # Chronological Strategy:
-    /// - **Validation**: Mixed chronological (can be from anywhere in time series)
-    /// - **Test**: End chronological (from most recent data for realistic evaluation)
-    ///
-    /// # Parameters:
-    /// - `use_end_chronological`: true for test split (recent data), false for validation (mixed)
-    pub fn smart_validation_split_from_balanced(
+    /// This ensures ALL three splits maintain diversity, not just training data.
+    /// Uses stratified sampling across temporal and statistical dimensions.
+    pub fn create_diverse_splits(
         &self,
         balanced_dataset: &GloballyBalancedDataset,
-        all_sequences: &[SequenceWithTargets], // Used for chronological ordering
-        split_ratio: f64,
+        all_sequences: &[SequenceWithTargets],
+        validation_ratio: f64,
+        test_ratio: f64,
         target_types: &[TargetType],
         horizons: &[String],
-        use_end_chronological: bool,
-    ) -> Result<ValidationSplitResult> {
-        let split_type = if use_end_chronological {
-            "TEST"
-        } else {
-            "VALIDATION"
-        };
-        let chronological_strategy = if use_end_chronological {
-            "end chronological (recent data)"
-        } else {
-            "mixed chronological"
-        };
-
+    ) -> Result<DiverseSplitsResult> {
         log::info!(
-            "🧠 SMART {} DERIVATION: Extracting {:.1}% {} using {}",
-            split_type,
-            split_ratio * 100.0,
-            split_type.to_lowercase(),
-            chronological_strategy
+            "🎯 DIVERSE SPLITS: Creating diverse train ({:.1}%) / val ({:.1}%) / test ({:.1}%) splits",
+            (1.0 - validation_ratio - test_ratio) * 100.0,
+            validation_ratio * 100.0,
+            test_ratio * 100.0
         );
 
-        let mut remaining_training_indices = balanced_dataset.balanced_indices.clone();
-        let mut split_indices = HashMap::new();
-        let mut total_split_extracted = 0;
+        let mut remaining_training_indices = HashMap::new();
+        let mut validation_indices = HashMap::new();
+        let mut test_indices = HashMap::new();
 
-        // Calculate target split size per target
-        let target_split_size = (balanced_dataset.global_min_class_count as f64
-            * balanced_dataset
-                .class_distribution
-                .values()
-                .next()
-                .unwrap()
-                .len() as f64
-            * split_ratio) as usize;
-
-        log::info!(
-            "🎯 TARGET: ~{} {} samples per target (from {} balanced samples)",
-            target_split_size,
-            split_type.to_lowercase(),
-            balanced_dataset.global_min_class_count
-                * balanced_dataset
-                    .class_distribution
-                    .values()
-                    .next()
-                    .unwrap()
-                    .len()
-        );
-
+        // Process each target independently for optimal diversity
         for target_type in target_types {
             for horizon in horizons {
                 let target_key = (*target_type, horizon.clone());
-                let mut target_split = Vec::new();
 
-                // Check if this target has overloaded classes
-                if let Some(overloaded) = balanced_dataset.overloaded_classes.get(&target_key) {
-                    log::debug!(
-                        "   🔍 {:?}: {} overloaded classes with {} excess samples",
-                        target_key,
-                        overloaded.len(),
-                        overloaded.values().sum::<usize>()
+                if let Some(balanced_indices) = balanced_dataset.balanced_indices.get(&target_key) {
+                    log::info!(
+                        "🎯 Creating diverse splits for {:?} {} from {} balanced sequences",
+                        target_type,
+                        horizon,
+                        balanced_indices.len()
                     );
 
-                    // TODO: Extract validation from overloaded classes first
-                    // CRITICAL FIX: Extract balanced validation maintaining perfect class distribution
-                    let training_indices = remaining_training_indices.get(&target_key).unwrap();
+                    // Use our fast diversity selector to create splits
+                    let (train_indices, val_indices, test_indices_target) = self
+                        .create_diverse_target_splits(
+                            all_sequences,
+                            balanced_indices,
+                            validation_ratio,
+                            test_ratio,
+                            *target_type,
+                            horizon,
+                        )?;
 
-                    // Calculate balanced split: take equal amounts from each class
-                    let total_balanced_samples = training_indices.len();
-                    let samples_per_class = total_balanced_samples / 5; // 5 classes
-                    let val_samples_per_class = (samples_per_class as f64 * split_ratio) as usize;
-                    let total_val_samples = val_samples_per_class * 5;
+                    remaining_training_indices.insert(target_key.clone(), train_indices);
+                    validation_indices.insert(target_key.clone(), val_indices);
+                    test_indices.insert(target_key.clone(), test_indices_target);
 
-                    log::debug!(
-                        "🎯 Balanced validation split: {} total → {} per class × 5 = {} validation samples",
-                        total_balanced_samples, val_samples_per_class, total_val_samples
+                    log::info!(
+                        "   ✅ {:?} {}: {} train, {} val, {} test (all diverse)",
+                        target_type,
+                        horizon,
+                        remaining_training_indices.get(&target_key).unwrap().len(),
+                        validation_indices.get(&target_key).unwrap().len(),
+                        test_indices.get(&target_key).unwrap().len()
                     );
-
-                    if val_samples_per_class > 0 {
-                        // Group training indices by class
-                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
-                            std::collections::HashMap::new();
-                        for &idx in training_indices {
-                            if let Some(seq) = all_sequences.get(idx) {
-                                if let Some(&target_value) = seq.targets.get(&target_key) {
-                                    class_indices.entry(target_value).or_default().push(idx);
-                                }
-                            }
-                        }
-
-                        // Extract equal amounts from each class for validation
-                        let mut extracted_split = Vec::new();
-                        for class_value in 0..5 {
-                            if let Some(class_idx_list) = class_indices.get(&class_value) {
-                                let take_count = val_samples_per_class.min(class_idx_list.len());
-                                if use_end_chronological {
-                                    // Take from end (most recent) for test data
-                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
-                                    extracted_split.extend(&class_idx_list[start_idx..]);
-                                } else {
-                                    // Take from end for validation (but could be mixed)
-                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
-                                    extracted_split.extend(&class_idx_list[start_idx..]);
-                                }
-                            }
-                        }
-
-                        // Update remaining training indices (remove extracted ones)
-                        let remaining_training: Vec<_> = training_indices
-                            .iter()
-                            .filter(|&&idx| !extracted_split.contains(&idx))
-                            .copied()
-                            .collect();
-
-                        target_split.extend_from_slice(&extracted_split);
-                        remaining_training_indices.insert(target_key.clone(), remaining_training);
-                        total_split_extracted += extracted_split.len();
-                    }
-                } else {
-                    // No overloaded classes - extract balanced validation maintaining perfect class distribution
-                    let training_indices = remaining_training_indices.get(&target_key).unwrap();
-
-                    // Calculate balanced split: take equal amounts from each class
-                    let total_balanced_samples = training_indices.len();
-                    let samples_per_class = total_balanced_samples / 5; // 5 classes
-                    let val_samples_per_class = (samples_per_class as f64 * split_ratio) as usize;
-
-                    log::debug!(
-                        "🎯 Balanced validation split (no overload): {} total → {} per class × 5 = {} validation samples",
-                        total_balanced_samples, val_samples_per_class, val_samples_per_class * 5
-                    );
-
-                    if val_samples_per_class > 0 {
-                        // Group training indices by class
-                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
-                            std::collections::HashMap::new();
-                        for &idx in training_indices {
-                            if let Some(seq) = all_sequences.get(idx) {
-                                if let Some(&target_value) = seq.targets.get(&target_key) {
-                                    class_indices.entry(target_value).or_default().push(idx);
-                                }
-                            }
-                        }
-
-                        // Extract equal amounts from each class for validation
-                        let mut extracted_split = Vec::new();
-                        for class_value in 0..5 {
-                            if let Some(class_idx_list) = class_indices.get(&class_value) {
-                                let take_count = val_samples_per_class.min(class_idx_list.len());
-                                if use_end_chronological {
-                                    // Take from end (most recent) for test data
-                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
-                                    extracted_split.extend(&class_idx_list[start_idx..]);
-                                } else {
-                                    // Take from end for validation (but could be mixed)
-                                    let start_idx = class_idx_list.len().saturating_sub(take_count);
-                                    extracted_split.extend(&class_idx_list[start_idx..]);
-                                }
-                            }
-                        }
-
-                        // Update remaining training indices (remove extracted ones)
-                        let remaining_training: Vec<_> = training_indices
-                            .iter()
-                            .filter(|&&idx| !extracted_split.contains(&idx))
-                            .copied()
-                            .collect();
-
-                        target_split.extend_from_slice(&extracted_split);
-                        remaining_training_indices.insert(target_key.clone(), remaining_training);
-                        total_split_extracted += extracted_split.len();
-                    }
-                }
-
-                if !target_split.is_empty() {
-                    split_indices.insert(target_key, target_split);
                 }
             }
         }
 
-        log::info!(
-            "✅ SMART {} EXTRACTED: {} total {} samples across all targets",
-            split_type,
-            total_split_extracted,
-            split_type.to_lowercase()
-        );
-
         // Create remaining training dataset
         let remaining_training_dataset = GloballyBalancedDataset {
             balanced_indices: remaining_training_indices,
-            class_distribution: balanced_dataset.class_distribution.clone(), // Proportions remain same
+            class_distribution: balanced_dataset.class_distribution.clone(),
             global_min_class_count: balanced_dataset.global_min_class_count,
-            total_balanced_samples: balanced_dataset.total_balanced_samples - total_split_extracted,
-            overloaded_classes: HashMap::new(), // No overloaded classes in remaining training
+            total_balanced_samples: balanced_dataset.total_balanced_samples
+                - validation_indices.values().map(|v| v.len()).sum::<usize>()
+                - test_indices.values().map(|v| v.len()).sum::<usize>(),
+            overloaded_classes: HashMap::new(),
         };
 
-        Ok((remaining_training_dataset, split_indices))
+        log::info!("✅ DIVERSE SPLITS COMPLETE: All splits maintain diversity and class balance");
+
+        Ok((remaining_training_dataset, validation_indices, test_indices))
+    }
+
+    /// Create diverse train/val/test splits for a specific target
+    fn create_diverse_target_splits(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        balanced_indices: &[usize],
+        validation_ratio: f64,
+        test_ratio: f64,
+        target_type: TargetType,
+        horizon: &str,
+    ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
+        let target_key = (target_type, horizon.to_string());
+
+        // Group sequences by class for balanced splitting
+        let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
+        for &idx in balanced_indices {
+            if let Some(&class) = all_sequences[idx].targets.get(&target_key) {
+                class_sequences.entry(class).or_default().push(idx);
+            }
+        }
+
+        let mut train_indices = Vec::new();
+        let mut val_indices = Vec::new();
+        let mut test_indices = Vec::new();
+
+        // Split each class independently to maintain balance
+        for (class, class_indices) in class_sequences {
+            let class_size = class_indices.len();
+            let val_size = (class_size as f64 * validation_ratio) as usize;
+            let test_size = (class_size as f64 * test_ratio) as usize;
+            let train_size = class_size - val_size - test_size;
+
+            log::debug!(
+                "   Class {}: {} total → {} train, {} val, {} test",
+                class,
+                class_size,
+                train_size,
+                val_size,
+                test_size
+            );
+
+            // Use our fast diversity selection for each split
+            let (class_train, class_val, class_test) = self.create_diverse_class_splits(
+                all_sequences,
+                &class_indices,
+                train_size,
+                val_size,
+                test_size,
+            )?;
+
+            train_indices.extend(class_train);
+            val_indices.extend(class_val);
+            test_indices.extend(class_test);
+        }
+
+        Ok((train_indices, val_indices, test_indices))
+    }
+
+    /// Create diverse splits within a single class using temporal stratification
+    fn create_diverse_class_splits(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        class_indices: &[usize],
+        train_size: usize,
+        val_size: usize,
+        test_size: usize,
+    ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
+        use rand::seq::SliceRandom;
+
+        // Sort by temporal position for stratified sampling
+        let mut temporal_sorted: Vec<(usize, usize)> = class_indices
+            .iter()
+            .map(|&idx| (idx, all_sequences[idx].start_idx))
+            .collect();
+        temporal_sorted.sort_by_key(|(_, start_idx)| *start_idx);
+
+        // Create 3 temporal strata for train/val/test
+        let total_size = train_size + val_size + test_size;
+        if total_size > class_indices.len() {
+            return Err(VangaError::DataError(format!(
+                "Requested splits ({}) exceed available sequences ({})",
+                total_size,
+                class_indices.len()
+            )));
+        }
+
+        // Divide into temporal thirds for diverse sampling
+        let third_size = temporal_sorted.len() / 3;
+        let early_third = &temporal_sorted[0..third_size];
+        let middle_third = &temporal_sorted[third_size..2 * third_size];
+        let late_third = &temporal_sorted[2 * third_size..];
+
+        let mut rng = rand::rng();
+        let mut train_indices = Vec::new();
+        let mut val_indices = Vec::new();
+        let mut test_indices = Vec::new();
+
+        // Sample proportionally from each temporal stratum
+        for (stratum_name, stratum) in [
+            ("early", early_third),
+            ("middle", middle_third),
+            ("late", late_third),
+        ] {
+            let mut stratum_indices: Vec<usize> = stratum.iter().map(|(idx, _)| *idx).collect();
+            stratum_indices.shuffle(&mut rng);
+
+            // Calculate proportional allocation
+            let stratum_train = (train_size * stratum.len()) / class_indices.len();
+            let stratum_val = (val_size * stratum.len()) / class_indices.len();
+            let stratum_test = (test_size * stratum.len()) / class_indices.len();
+
+            // Allocate sequences from this stratum
+            let mut allocated = 0;
+
+            // Train split
+            let train_take = stratum_train.min(stratum_indices.len() - allocated);
+            train_indices.extend(stratum_indices[allocated..allocated + train_take].iter());
+            allocated += train_take;
+
+            // Validation split
+            let val_take = stratum_val.min(stratum_indices.len() - allocated);
+            val_indices.extend(stratum_indices[allocated..allocated + val_take].iter());
+            allocated += val_take;
+
+            // Test split
+            let test_take = stratum_test.min(stratum_indices.len() - allocated);
+            test_indices.extend(stratum_indices[allocated..allocated + test_take].iter());
+
+            log::debug!(
+                "     {} stratum: {} train, {} val, {} test",
+                stratum_name,
+                train_take,
+                val_take,
+                test_take
+            );
+        }
+
+        // Handle any remaining sequences due to rounding
+        let mut remaining: Vec<usize> = class_indices
+            .iter()
+            .filter(|&&idx| {
+                !train_indices.contains(&idx)
+                    && !val_indices.contains(&idx)
+                    && !test_indices.contains(&idx)
+            })
+            .copied()
+            .collect();
+        remaining.shuffle(&mut rng);
+
+        // Distribute remaining sequences to reach exact target sizes
+        while train_indices.len() < train_size && !remaining.is_empty() {
+            train_indices.push(remaining.pop().unwrap());
+        }
+        while val_indices.len() < val_size && !remaining.is_empty() {
+            val_indices.push(remaining.pop().unwrap());
+        }
+        while test_indices.len() < test_size && !remaining.is_empty() {
+            test_indices.push(remaining.pop().unwrap());
+        }
+
+        Ok((train_indices, val_indices, test_indices))
     }
 
     /// Select sequences for a target with specified count
@@ -1036,6 +1018,8 @@ impl SequenceBalancer {
             class_sequences,
             target_count, // Pass total count, not per-class count
             exclude_indices,
+            *target_type,
+            horizon,
         )
     }
 
@@ -1049,6 +1033,8 @@ impl SequenceBalancer {
         mut class_sequences: HashMap<i32, Vec<usize>>,
         _target_total_sequences: usize, // Ignored - we use minimum class count
         exclude_indices: &[usize],
+        target_type: TargetType, // NEW: For diversity selection
+        horizon: &str,           // NEW: For diversity selection
     ) -> Result<BalancedSelection> {
         let num_classes = class_sequences.len();
 
@@ -1103,7 +1089,7 @@ impl SequenceBalancer {
 
         // Select sequences for each class with strategic overlap
         for (class, scarcity) in class_scarcity {
-            let mut indices = class_sequences.remove(&class).unwrap();
+            let indices = class_sequences.remove(&class).unwrap();
             let needed = sequences_per_class;
             let available = indices.len();
 
@@ -1122,38 +1108,34 @@ impl SequenceBalancer {
                     class, needed, available
                 )));
             } else {
-                // Abundant class: select without overlap
-                indices.sort_by_key(|&idx| {
-                    let max_validation_overlap = exclude_indices
-                        .iter()
-                        .map(|&val_idx| all_sequences[idx].overlap_ratio(&all_sequences[val_idx]))
-                        .fold(0.0, f64::max);
-                    (max_validation_overlap * 1000.0) as i64
-                });
+                // IMPROVED: Use diversity-based selection for overloaded classes
+                log::info!(
+                    "🎯 Class {}: OVERLOADED - using DIVERSITY SELECTION from {} available (scarcity: {:.2}x)",
+                    class,
+                    available,
+                    scarcity
+                );
 
-                let mut class_selected = 0;
-                for &idx in &indices {
-                    if class_selected >= needed {
-                        break;
-                    }
+                // Use advanced diversity selector for better sample selection
+                let diverse_selection = self.diversity_selector.select_diverse_sequences(
+                    all_sequences,
+                    &indices,
+                    needed,
+                    target_type,
+                    horizon,
+                    exclude_indices,
+                )?;
 
-                    let max_validation_overlap = exclude_indices
-                        .iter()
-                        .map(|&val_idx| all_sequences[idx].overlap_ratio(&all_sequences[val_idx]))
-                        .fold(0.0, f64::max);
-
-                    if max_validation_overlap < 0.95 {
-                        selected_indices.push(idx);
-                        class_selected += 1;
-                    }
-                }
-
-                if class_selected < needed {
+                if diverse_selection.len() != needed {
                     return Err(VangaError::DataError(format!(
-                        "FATAL: Cannot achieve perfect balance for class {} - selected {} but need {} (validation overlap too high)",
-                        class, class_selected, needed
+                        "FATAL: Diversity selection failed for class {} - selected {} but need {}",
+                        class,
+                        diverse_selection.len(),
+                        needed
                     )));
                 }
+
+                selected_indices.extend(diverse_selection);
             }
 
             class_distribution.insert(class, needed); // Always record the target amount
