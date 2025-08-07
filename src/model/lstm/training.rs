@@ -760,6 +760,40 @@ impl LSTMModel {
             let mut epoch_grad_norm = 0.0; // Track gradient norm for epoch logging
             let mut batch_count = 0;
 
+            // CRITICAL FIX: Shuffle training data indices each epoch to prevent overfitting to batch order
+            let mut sample_indices: Vec<usize> = (0..total_train_samples).collect();
+            use rand::seq::SliceRandom;
+            use rand::SeedableRng;
+
+            // Create deterministic but epoch-varying shuffle (for reproducibility with different patterns each epoch)
+            let epoch_seed = config.training.seed.wrapping_add(epoch as u64 * 1000);
+            let mut rng = rand::rngs::StdRng::seed_from_u64(epoch_seed);
+            sample_indices.shuffle(&mut rng);
+
+            // Validation: Ensure all samples are present exactly once
+            debug_assert_eq!(sample_indices.len(), total_train_samples);
+            debug_assert!(
+                {
+                    let mut sorted_indices = sample_indices.clone();
+                    sorted_indices.sort();
+                    sorted_indices == (0..total_train_samples).collect::<Vec<_>>()
+                },
+                "Shuffled indices must contain all samples exactly once"
+            );
+
+            if epoch == 0 {
+                log::info!("🔀 Training data will be shuffled each epoch to prevent batch order overfitting");
+                log::debug!(
+                    "🔍 Epoch 0 first batch indices: {:?}",
+                    &sample_indices[0..std::cmp::min(10, sample_indices.len())]
+                );
+            } else if epoch == 1 {
+                log::debug!(
+                    "🔍 Epoch 1 first batch indices: {:?}",
+                    &sample_indices[0..std::cmp::min(10, sample_indices.len())]
+                );
+            }
+
             // Calculate warmup learning rate for current epoch
             if epoch < warmup_epochs as usize {
                 // Linear warmup from 0 to target_lr
@@ -811,19 +845,35 @@ impl LSTMModel {
                 }
             }
 
-            // Training phase - process data in batches
+            // Training phase - process data in shuffled batches
             for (batch_idx, batch_start) in (0..total_train_samples).step_by(batch_size).enumerate()
             {
                 let batch_end = std::cmp::min(batch_start + batch_size, total_train_samples);
                 let actual_batch_size = batch_end - batch_start;
 
-                // Extract batch from sequences and targets
-                let batch_sequences = train_sequences
-                    .slice(ndarray::s![batch_start..batch_end, .., ..])
-                    .to_owned();
-                let batch_targets = train_targets
-                    .slice(ndarray::s![batch_start..batch_end, ..])
-                    .to_owned();
+                // Extract shuffled batch indices
+                let batch_indices = &sample_indices[batch_start..batch_end];
+
+                // Create batch arrays using shuffled indices
+                let mut batch_sequences = ndarray::Array3::<f64>::zeros((
+                    actual_batch_size,
+                    train_sequences.shape()[1], // sequence_length
+                    train_sequences.shape()[2], // num_features
+                ));
+                let mut batch_targets = ndarray::Array2::<f64>::zeros((
+                    actual_batch_size,
+                    train_targets.shape()[1], // num_targets
+                ));
+
+                // Fill batch with shuffled samples
+                for (batch_pos, &sample_idx) in batch_indices.iter().enumerate() {
+                    batch_sequences
+                        .slice_mut(ndarray::s![batch_pos, .., ..])
+                        .assign(&train_sequences.slice(ndarray::s![sample_idx, .., ..]));
+                    batch_targets
+                        .slice_mut(ndarray::s![batch_pos, ..])
+                        .assign(&train_targets.slice(ndarray::s![sample_idx, ..]));
+                }
 
                 // Convert batch to tensors
                 let (input_tensor, target_tensor) =
