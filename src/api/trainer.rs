@@ -1301,7 +1301,7 @@ fn extract_single_target_data(
         "🎯 Extracted target '{}' (column {}) from {} total targets for {}",
         target_name,
         target_idx,
-        window.train_data.targets.target_names.len(),
+        train_targets.shape()[1],
         operation
     );
 

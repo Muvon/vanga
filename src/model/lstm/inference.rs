@@ -48,25 +48,53 @@ impl LSTMModel {
                 VangaError::ModelError(format!("Sequence tensor conversion failed: {}", e))
             })?;
 
-        // Convert targets - use only first target for rust-lstm compatibility - SAME logic as original
-        let target_data: Vec<f32> = (0..batch_size)
-            .map(|i| targets[[i, 0]] as f32) // Take first target only (single output)
-            .collect();
+        // Convert targets - handle both one-hot encoded and raw class indices
+        let num_target_cols = targets.shape()[1];
+        let target_data: Vec<f32> = if num_target_cols > 1 {
+            // Assume one-hot encoded targets - convert to class indices
+            log::debug!(
+                "Converting one-hot encoded targets ({} classes) to class indices",
+                num_target_cols
+            );
+            (0..batch_size)
+                .map(|i| {
+                    // Find which class is hot (has value 1.0 or highest value)
+                    let mut max_val = -1.0;
+                    let mut max_idx = 0;
+                    for class_idx in 0..num_target_cols {
+                        let val = targets[[i, class_idx]];
+                        if val > max_val {
+                            max_val = val;
+                            max_idx = class_idx;
+                        }
+                    }
+                    max_idx as f32
+                })
+                .collect()
+        } else {
+            // Already class indices - just convert to f32
+            log::debug!("Using raw class indices (already in correct format)");
+            (0..batch_size).map(|i| targets[[i, 0]] as f32).collect()
+        };
+
+        // Log sample of converted targets for verification
+        if batch_size > 0 {
+            let sample_size = std::cmp::min(5, batch_size);
+            let sample_targets: Vec<f32> = target_data.iter().take(sample_size).copied().collect();
+            log::debug!(
+                "Sample converted targets (first {} values): {:?}",
+                sample_size,
+                sample_targets
+            );
+        }
+
         let target_tensor =
             Tensor::from_vec(target_data, (batch_size, 1), &self.device).map_err(|e| {
                 VangaError::ModelError(format!("Target tensor conversion failed: {}", e))
             })?;
 
-        // Log warning about multi-target limitation - SAME as original
-        if targets.shape()[1] > 1 {
-            log::warn!(
-                "Candle LSTM limitation: Using only first target out of {} targets. Consider implementing separate models for each target or using a different ML library for true multi-target support.",
-                targets.shape()[1]
-            );
-        }
-
         log::debug!(
-            "Training data converted: {} samples with sequence length {} (using single target output instead of {})",
+            "Training data converted: {} samples with sequence length {} (converted {} target columns to class indices)",
             batch_size,
             seq_len,
             targets.shape()[1]
