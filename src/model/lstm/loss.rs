@@ -561,36 +561,29 @@ impl LSTMModel {
         let mut sample_indices: Vec<usize> = (0..total_val_samples).collect();
 
         // Shuffle indices to break any hidden state patterns (but use deterministic seed for reproducibility)
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-
-        // CRITICAL FIX: Include both epoch AND total_val_samples to ensure unique shuffle per validation run
-        // This prevents identical metrics when validation data/order doesn't change between epochs
-        epoch.hash(&mut hasher);
-        total_val_samples.hash(&mut hasher);
-
-        // Add current model state hash to make shuffle truly unique per validation run
-        // Use a simple hash of the first few model parameters to differentiate between epochs
-        if let Some(first_var) = self.varmap.all_vars().first() {
-            if let Ok(param_sum) = first_var.as_tensor().sum_all() {
-                if let Ok(param_val) = param_sum.to_scalar::<f32>() {
-                    (param_val as u64).hash(&mut hasher);
+        // CRITICAL FIX: Use the same robust shuffling algorithm as training
+        let seed_components = [
+            epoch as u64,
+            total_val_samples as u64,
+            // Add current model state hash to make shuffle truly unique per validation run
+            if let Some(first_var) = self.varmap.all_vars().first() {
+                if let Ok(param_sum) = first_var.as_tensor().sum_all() {
+                    if let Ok(param_val) = param_sum.to_scalar::<f32>() {
+                        param_val as u64
+                    } else {
+                        0
+                    }
+                } else {
+                    0
                 }
-            }
-        }
-
-        let seed = hasher.finish();
-
-        // Simple deterministic shuffle based on unique seed using Fisher-Yates algorithm
-        // Use a proper PRNG to avoid shuffle collisions with different seeds
-        let mut rng_state = seed;
-        for i in (1..sample_indices.len()).rev() {
-            // Linear congruential generator (better parameters)
-            rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let j = (rng_state as usize) % (i + 1);
-            sample_indices.swap(i, j);
-        }
+            } else {
+                0
+            },
+        ];
+        let seed = crate::model::lstm::training::shuffle_indices_deterministic(
+            &mut sample_indices,
+            &seed_components,
+        );
 
         log::debug!(
             "🔄 Processing {} validation samples in shuffled order for epoch {} (seed: {})",

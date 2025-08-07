@@ -26,6 +26,32 @@ use candle_optimisers::{
     Decay,
 };
 use ndarray::{s, Array2, Array3};
+use std::collections::hash_map::DefaultHasher;
+
+/// Deterministic shuffle using Fisher-Yates algorithm with linear congruential generator
+/// This is the same robust shuffling algorithm used in validation to ensure consistency
+pub fn shuffle_indices_deterministic(indices: &mut [usize], seed_components: &[u64]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+
+    // Hash all seed components to create unique seed
+    for &component in seed_components {
+        component.hash(&mut hasher);
+    }
+
+    let seed = hasher.finish();
+
+    // Fisher-Yates shuffle with linear congruential generator (same as validation)
+    let mut rng_state = seed;
+    for i in (1..indices.len()).rev() {
+        // Linear congruential generator with proven parameters
+        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let j = (rng_state as usize) % (i + 1);
+        indices.swap(i, j);
+    }
+
+    seed
+}
 
 /// Perfect balance validation for training data
 /// Handles both multi-target (15 columns) and single-target (1 column) cases
@@ -762,13 +788,14 @@ impl LSTMModel {
 
             // CRITICAL FIX: Shuffle training data indices each epoch to prevent overfitting to batch order
             let mut sample_indices: Vec<usize> = (0..total_train_samples).collect();
-            use rand::seq::SliceRandom;
-            use rand::SeedableRng;
 
-            // Create deterministic but epoch-varying shuffle (for reproducibility with different patterns each epoch)
-            let epoch_seed = config.training.seed.wrapping_add(epoch as u64 * 1000);
-            let mut rng = rand::rngs::StdRng::seed_from_u64(epoch_seed);
-            sample_indices.shuffle(&mut rng);
+            // Create deterministic but epoch-varying shuffle using the same robust algorithm as validation
+            let seed_components = [
+                config.training.seed,
+                epoch as u64,
+                total_train_samples as u64,
+            ];
+            let shuffle_seed = shuffle_indices_deterministic(&mut sample_indices, &seed_components);
 
             // Validation: Ensure all samples are present exactly once
             debug_assert_eq!(sample_indices.len(), total_train_samples);
@@ -784,12 +811,14 @@ impl LSTMModel {
             if epoch == 0 {
                 log::info!("🔀 Training data will be shuffled each epoch to prevent batch order overfitting");
                 log::debug!(
-                    "🔍 Epoch 0 first batch indices: {:?}",
+                    "🔍 Epoch 0 shuffle seed: {}, first batch indices: {:?}",
+                    shuffle_seed,
                     &sample_indices[0..std::cmp::min(10, sample_indices.len())]
                 );
             } else if epoch == 1 {
                 log::debug!(
-                    "🔍 Epoch 1 first batch indices: {:?}",
+                    "🔍 Epoch 1 shuffle seed: {}, first batch indices: {:?}",
+                    shuffle_seed,
                     &sample_indices[0..std::cmp::min(10, sample_indices.len())]
                 );
             }
