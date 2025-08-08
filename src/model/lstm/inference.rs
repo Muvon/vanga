@@ -8,8 +8,11 @@ use crate::targets::TargetType;
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::Tensor;
-use candle_nn::{ops::dropout, Module, RNN};
+use candle_nn::{Module, RNN};
 use ndarray::{Array2, Array3};
+
+// Import deterministic dropout
+use super::seeded_weights::SeededTensorUtils;
 
 impl LSTMModel {
     pub fn convert_sequences_to_tensors(
@@ -588,8 +591,12 @@ impl LSTMModel {
             }
         };
 
-        // Apply dropout using candle's dropout function - CONSISTENT behavior
-        let dropped_tensor = dropout(tensor, dropout_rate as f32)?;
+        // Apply dropout using deterministic seeded dropout - CONSISTENT behavior
+        let dropped_tensor = SeededTensorUtils::deterministic_dropout(
+            tensor,
+            dropout_rate as f32,
+            true, // Always training mode when this function is called
+        )?;
 
         log::debug!(
             "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [CONSISTENT]",

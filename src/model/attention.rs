@@ -1,5 +1,6 @@
 // Multi-Head Self-Attention implementation for VANGA LSTM with auto-optimization
 use crate::config::model::AttentionConfig;
+use crate::model::lstm::seeded_weights::SeededTensorUtils;
 use crate::utils::error::{Result, VangaError};
 use candle_core::{Device, Tensor};
 use candle_nn::{linear, ops, Linear, Module, VarBuilder};
@@ -169,9 +170,13 @@ impl MultiHeadAttention {
 
         // Apply consistent dropout to output (controlled by config AND training mode)
         if self.config.dropout_output && self.config.dropout_rate > 0.0 && training {
-            output = ops::dropout(&output, self.config.dropout_rate as f32)?;
+            output = SeededTensorUtils::deterministic_dropout(
+                &output,
+                self.config.dropout_rate as f32,
+                training,
+            )?;
             log::debug!(
-                "🔧 Applied MultiHead attention output dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
+                "🔧 Applied MultiHead attention output dropout (rate: {:.3}) to tensor shape {:?} [DETERMINISTIC]",
                 self.config.dropout_rate,
                 output.shape()
             );
@@ -256,9 +261,13 @@ impl MultiHeadAttention {
 
         // Apply consistent dropout to attention weights (controlled by config AND training mode)
         if self.config.dropout_weights && self.config.dropout_rate > 0.0 && training {
-            attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
+            attention_weights = SeededTensorUtils::deterministic_dropout(
+                &attention_weights,
+                self.config.dropout_rate as f32,
+                training,
+            )?;
             log::debug!(
-                "🔧 Applied MultiHead attention weights dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
+                "🔧 Applied MultiHead attention weights dropout (rate: {:.3}) to tensor shape {:?} [DETERMINISTIC]",
                 self.config.dropout_rate,
                 attention_weights.shape()
             );
@@ -478,9 +487,13 @@ impl AdditiveAttention {
 
         // Apply consistent dropout to attention weights (controlled by config AND training mode)
         if self.config.dropout_weights && self.config.dropout_rate > 0.0 && training {
-            attention_weights = ops::dropout(&attention_weights, self.config.dropout_rate as f32)?;
+            attention_weights = SeededTensorUtils::deterministic_dropout(
+                &attention_weights,
+                self.config.dropout_rate as f32,
+                training,
+            )?;
             log::debug!(
-                "🔧 Applied Additive attention weights dropout (rate: {:.3}) to tensor shape {:?} [CONSISTENT]",
+                "🔧 Applied Additive attention weights dropout (rate: {:.3}) to tensor shape {:?} [DETERMINISTIC]",
                 self.config.dropout_rate,
                 attention_weights.shape()
             );
@@ -509,10 +522,18 @@ impl AdditiveAttention {
 
         // Apply consistent dropout to projections (controlled by config)
         if self.config.dropout_projections && self.config.dropout_rate > 0.0 {
-            query_projection = ops::dropout(&query_projection, self.config.dropout_rate as f32)?;
-            key_projection = ops::dropout(&key_projection, self.config.dropout_rate as f32)?;
+            query_projection = SeededTensorUtils::deterministic_dropout(
+                &query_projection,
+                self.config.dropout_rate as f32,
+                _training,
+            )?;
+            key_projection = SeededTensorUtils::deterministic_dropout(
+                &key_projection,
+                self.config.dropout_rate as f32,
+                _training,
+            )?;
             log::debug!(
-                "🔧 Applied Additive attention projections dropout (rate: {:.3}) [CONSISTENT]",
+                "🔧 Applied Additive attention projections dropout (rate: {:.3}) [DETERMINISTIC]",
                 self.config.dropout_rate
             );
         }
@@ -536,9 +557,13 @@ impl AdditiveAttention {
 
         // Apply consistent dropout to final scores (controlled by config)
         if self.config.dropout_scores && self.config.dropout_rate > 0.0 {
-            scores = ops::dropout(&scores, self.config.dropout_rate as f32)?;
+            scores = SeededTensorUtils::deterministic_dropout(
+                &scores,
+                self.config.dropout_rate as f32,
+                _training,
+            )?;
             log::debug!(
-                "🔧 Applied Additive attention final scores dropout (rate: {:.3}) [CONSISTENT]",
+                "🔧 Applied Additive attention final scores dropout (rate: {:.3}) [DETERMINISTIC]",
                 self.config.dropout_rate
             );
         }
