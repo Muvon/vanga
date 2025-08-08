@@ -805,6 +805,13 @@ impl LSTMModel {
             f64::INFINITY
         };
 
+        // Calculate quality metric for crypto winning percentage
+        let quality = if !all_predictions.is_empty() && !all_targets.is_empty() {
+            self.calculate_quality_metric(&all_predictions, &all_targets)
+        } else {
+            0.0
+        };
+
         // Log comprehensive categorical metrics with target-type aware interpretation
         let target_type_name = if let Some((_, target_type)) = &self.target_context {
             match target_type {
@@ -824,8 +831,8 @@ impl LSTMModel {
         };
 
         log::info!(
-            "📊 Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, MSE: {:.3}, MAPE: {:.2}%",
-            target_type_name, metric_label, accuracy, precision, recall, f1, mse, categorical_mape
+            "📊 Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, Quality: {:.1}%, MSE: {:.3}, MAPE: {:.2}%",
+            target_type_name, metric_label, accuracy, precision, recall, f1, quality, mse, categorical_mape
         );
 
         log::debug!(
@@ -998,6 +1005,74 @@ impl LSTMModel {
         }
 
         (pred_counts, target_counts)
+    }
+
+    /// Distance-weighted quality scoring constants
+    ///
+    /// Quality = (Total Win Points / Total Possible Points) * 100%
+    const QUALITY_EXACT_MATCH_POINTS: f32 = 1.2; // Exact matches get bonus points
+    const QUALITY_CONSERVATIVE_POINTS: f32 = 1.0; // Conservative exceeded (1→0, 3→4)
+    const QUALITY_DISTANCE_1_POINTS: f32 = 0.8; // Distance 1 error (20% penalty)
+    const QUALITY_DISTANCE_2_POINTS: f32 = 0.5; // Distance 2 error (50% penalty)
+    const QUALITY_DISTANCE_3_POINTS: f32 = 0.2; // Distance 3 error (80% penalty)
+    const QUALITY_DISTANCE_4_POINTS: f32 = 0.0; // Distance 4 error (total failure)
+    const QUALITY_MAX_POINTS_PER_PREDICTION: f32 = 1.2; // Maximum possible points (exact match)
+
+    /// Calculate distance-weighted quality metric for crypto trading performance
+    ///
+    /// Quality Logic for 5-Class System (Distance-Weighted Scoring):
+    /// - Class 0: Strong Down, Class 1: Moderate Down, Class 2: Neutral, Class 3: Moderate Up, Class 4: Strong Up
+    ///
+    /// Scoring System:
+    /// - Exact matches (distance=0): 1.2 points (bonus for perfect predictions)
+    /// - Conservative exceeded (1→0, 3→4): 1.0 points (good trading predictions)
+    /// - Distance 1 errors: 0.8 points (20% penalty for small errors)
+    /// - Distance 2 errors: 0.5 points (50% penalty for medium errors)
+    /// - Distance 3 errors: 0.2 points (80% penalty for large errors)
+    /// - Distance 4 errors: 0.0 points (total failure for terrible errors)
+    pub fn calculate_quality_metric(&self, predictions: &[i32], targets: &[i32]) -> f32 {
+        if predictions.len() != targets.len() || predictions.is_empty() {
+            return 0.0;
+        }
+
+        let mut total_win_points = 0.0;
+        let mut total_possible_points = 0.0;
+
+        for (&pred, &target) in predictions.iter().zip(targets.iter()) {
+            // Skip invalid predictions/targets
+            if !(0..=4).contains(&pred) || !(0..=4).contains(&target) {
+                continue;
+            }
+
+            total_possible_points += Self::QUALITY_MAX_POINTS_PER_PREDICTION;
+
+            let distance = (pred - target).abs();
+
+            let win_points = if distance == 0 {
+                // Exact match - bonus points for perfect predictions
+                Self::QUALITY_EXACT_MATCH_POINTS
+            } else if (pred == 1 && target == 0) || (pred == 3 && target == 4) {
+                // Conservative predictions exceeded - full points for good trading
+                Self::QUALITY_CONSERVATIVE_POINTS
+            } else {
+                // Distance-based penalties for all other cases
+                match distance {
+                    1 => Self::QUALITY_DISTANCE_1_POINTS, // 20% penalty
+                    2 => Self::QUALITY_DISTANCE_2_POINTS, // 50% penalty
+                    3 => Self::QUALITY_DISTANCE_3_POINTS, // 80% penalty
+                    4 => Self::QUALITY_DISTANCE_4_POINTS, // Total failure
+                    _ => 0.0,                             // Should never happen with 5-class system
+                }
+            };
+
+            total_win_points += win_points;
+        }
+
+        if total_possible_points == 0.0 {
+            0.0
+        } else {
+            (total_win_points / total_possible_points) * 100.0
+        }
     }
 
     /// Calculate loss for single target type
