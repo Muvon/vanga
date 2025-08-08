@@ -45,6 +45,9 @@ pub mod utils;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod ta_tests;
+
 // Re-export commonly used types for convenience
 pub use config::{FeatureConfig, ModelConfig, PredictionConfig, TrainingConfig};
 pub use utils::{Result, VangaError};

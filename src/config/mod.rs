@@ -89,5 +89,6 @@ impl GlobalConfig {
         "regime_indicator",
         "volatility_clustering",
         "mean_reversion_strength",
+        "gap_volatility", // New gap volatility feature
     ];
 }
