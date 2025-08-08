@@ -1,8 +1,19 @@
 // Technical indicators implementation with comprehensive indicators
 use crate::config::features::TechnicalIndicatorsConfig;
+use crate::features::ta_helpers::*; // Import TA crate helpers
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use rayon::prelude::*;
+
+/// OHLCV data structure to reduce function parameter count
+#[derive(Clone)]
+struct OhlcvData<'a> {
+    open: &'a [f64],
+    high: &'a [f64],
+    low: &'a [f64],
+    close: &'a [f64],
+    volume: &'a [f64],
+}
 
 /// Generate comprehensive technical indicators for cryptocurrency data - PARALLELIZED
 pub async fn generate_technical_indicators(
@@ -17,6 +28,15 @@ pub async fn generate_technical_indicators(
     let low_prices = extract_numeric_column(&df, "low")?;
     let open_prices = extract_numeric_column(&df, "open")?;
     let volume = extract_numeric_column(&df, "volume")?;
+
+    // Create OHLCV data structure
+    let ohlcv = OhlcvData {
+        open: &open_prices,
+        high: &high_prices,
+        low: &low_prices,
+        close: &close_prices,
+        volume: &volume,
+    };
 
     // PARALLEL INDICATOR PROCESSING: Process all indicator groups concurrently
     let results = rayon::join(
@@ -110,7 +130,7 @@ pub async fn generate_technical_indicators(
     }
 
     if config.momentum.stochastic {
-        df = add_stochastic_indicators(df, &high_prices, &low_prices, &close_prices, 14, 3)?;
+        df = add_stochastic_indicators(df, &ohlcv, 14, 3)?;
     }
 
     if config.momentum.williams_r {
@@ -119,7 +139,7 @@ pub async fn generate_technical_indicators(
 
     if !config.momentum.cci_periods.is_empty() {
         for &period in &config.momentum.cci_periods {
-            df = add_cci_indicator(df, &high_prices, &low_prices, &close_prices, period)?;
+            df = add_cci_indicator(df, &open_prices, &high_prices, &low_prices, &close_prices, &volume, period)?;
         }
     }
 
@@ -154,15 +174,17 @@ pub async fn generate_technical_indicators(
     if !config.volatility.atr_periods.is_empty() {
         df = add_atr_indicators(
             df,
+            &open_prices,
             &high_prices,
             &low_prices,
             &close_prices,
+            &volume,
             &config.volatility.atr_periods,
         )?;
     }
 
     if config.volatility.keltner_channels {
-        df = add_keltner_channels(df, &high_prices, &low_prices, &close_prices, 20, 2.0)?;
+        df = add_keltner_channels(df, &ohlcv, 20, 2.0)?;
     }
 
     // Cryptocurrency-specific indicators (always enabled for crypto markets)
@@ -216,262 +238,13 @@ fn calculate_sma(data: &[f64], period: usize) -> Vec<f64> {
     result
 }
 
-/// Calculate exponential moving average
-fn calculate_ema(data: &[f64], period: usize) -> Vec<f64> {
-    let mut result = vec![f64::NAN; data.len()];
 
-    if data.is_empty() || period == 0 {
-        return result;
-    }
 
-    let alpha = 2.0 / (period as f64 + 1.0);
-    result[0] = data[0];
 
-    for i in 1..data.len() {
-        result[i] = alpha * data[i] + (1.0 - alpha) * result[i - 1];
-    }
 
-    result
-}
 
-/// Calculate RSI (Relative Strength Index)
-fn calculate_rsi(data: &[f64], period: usize) -> Vec<f64> {
-    let mut result = vec![f64::NAN; data.len()];
 
-    if data.len() <= period {
-        log::warn!(
-            "RSI calculation: insufficient data length {} for period {} (need at least {} points)",
-            data.len(),
-            period,
-            period + 1
-        );
-        return result;
-    }
 
-    // Check for any NaN or infinite values in input data
-    for (i, &value) in data.iter().enumerate() {
-        if !value.is_finite() {
-            log::error!(
-                "RSI calculation: non-finite input value {} at index {}",
-                value,
-                i
-            );
-            return result;
-        }
-    }
-
-    let mut gains = Vec::with_capacity(data.len() - 1);
-    let mut losses = Vec::with_capacity(data.len() - 1);
-
-    // Calculate price changes
-    for i in 1..data.len() {
-        let change = data[i] - data[i - 1];
-        if change > 0.0 {
-            gains.push(change);
-            losses.push(0.0);
-        } else {
-            gains.push(0.0);
-            losses.push(-change);
-        }
-    }
-
-    // Calculate RSI values starting from period index
-    // We need at least 'period' price changes to calculate RSI
-    for i in (period - 1)..gains.len() {
-        let start_idx = i + 1 - period;
-        let end_idx = i;
-
-        let avg_gain = gains[start_idx..=end_idx].iter().sum::<f64>() / period as f64;
-        let avg_loss = losses[start_idx..=end_idx].iter().sum::<f64>() / period as f64;
-
-        // Validate averages
-        if !avg_gain.is_finite() || !avg_loss.is_finite() {
-            log::error!(
-                "RSI calculation: non-finite averages - gain: {}, loss: {} at index {}",
-                avg_gain,
-                avg_loss,
-                i
-            );
-            continue;
-        }
-
-        let rsi_value = if avg_loss == 0.0 && avg_gain == 0.0 {
-            // No price movement - neutral RSI
-            50.0
-        } else if avg_loss == 0.0 {
-            // Only gains, no losses - maximum RSI
-            100.0
-        } else {
-            // Normal RSI calculation
-            let rs = avg_gain / avg_loss;
-            100.0 - (100.0 / (1.0 + rs))
-        };
-
-        // Validate final RSI value
-        if !rsi_value.is_finite() || !(0.0..=100.0).contains(&rsi_value) {
-            log::error!(
-                "RSI calculation: invalid RSI value {} (avg_gain: {}, avg_loss: {}) at index {}",
-                rsi_value,
-                avg_gain,
-                avg_loss,
-                i
-            );
-            continue;
-        }
-
-        // RSI corresponds to the data point at i+1 (since gains[i] is change from data[i] to data[i+1])
-        result[i + 1] = rsi_value;
-    }
-
-    result
-}
-
-/// Calculate MACD (Moving Average Convergence Divergence)
-fn calculate_macd(
-    data: &[f64],
-    fast: usize,
-    slow: usize,
-    signal: usize,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let ema_fast = calculate_ema(data, fast);
-    let ema_slow = calculate_ema(data, slow);
-
-    let mut macd_line = vec![f64::NAN; data.len()];
-    for i in 0..data.len() {
-        if !ema_fast[i].is_nan() && !ema_slow[i].is_nan() {
-            macd_line[i] = ema_fast[i] - ema_slow[i];
-        }
-    }
-
-    let signal_line = calculate_ema(&macd_line, signal);
-
-    let mut histogram = vec![f64::NAN; data.len()];
-    for i in 0..data.len() {
-        if !macd_line[i].is_nan() && !signal_line[i].is_nan() {
-            histogram[i] = macd_line[i] - signal_line[i];
-        }
-    }
-
-    (macd_line, signal_line, histogram)
-}
-
-/// Calculate Bollinger Bands
-fn calculate_bollinger_bands(
-    data: &[f64],
-    period: usize,
-    std_dev: f64,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let sma = calculate_sma(data, period);
-    let mut upper = vec![f64::NAN; data.len()];
-    let mut lower = vec![f64::NAN; data.len()];
-
-    for i in (period - 1)..data.len() {
-        let window = &data[(i + 1 - period)..=i];
-        let mean = sma[i];
-
-        if !mean.is_nan() {
-            let variance = window.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / period as f64;
-            let std = variance.sqrt();
-
-            upper[i] = mean + std_dev * std;
-            lower[i] = mean - std_dev * std;
-        }
-    }
-
-    (upper, sma, lower)
-}
-
-/// Calculate Stochastic Oscillator
-fn calculate_stochastic(
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    k_period: usize,
-    d_period: usize,
-) -> (Vec<f64>, Vec<f64>) {
-    let mut k_values = vec![f64::NAN; close.len()];
-
-    for i in (k_period - 1)..close.len() {
-        let window_high = high[(i + 1 - k_period)..=i]
-            .iter()
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let window_low = low[(i + 1 - k_period)..=i]
-            .iter()
-            .fold(f64::INFINITY, |a, &b| a.min(b));
-
-        if window_high != window_low {
-            k_values[i] = 100.0 * (close[i] - window_low) / (window_high - window_low);
-        }
-    }
-
-    let d_values = calculate_sma(&k_values, d_period);
-    (k_values, d_values)
-}
-
-/// Calculate Williams %R
-fn calculate_williams_r(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let mut result = vec![f64::NAN; close.len()];
-
-    for i in (period - 1)..close.len() {
-        let window_high = high[(i + 1 - period)..=i]
-            .iter()
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let window_low = low[(i + 1 - period)..=i]
-            .iter()
-            .fold(f64::INFINITY, |a, &b| a.min(b));
-
-        if window_high != window_low {
-            result[i] = -100.0 * (window_high - close[i]) / (window_high - window_low);
-        }
-    }
-
-    result
-}
-
-/// Calculate Commodity Channel Index (CCI)
-fn calculate_cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let mut typical_price = vec![0.0; close.len()];
-    for i in 0..close.len() {
-        typical_price[i] = (high[i] + low[i] + close[i]) / 3.0;
-    }
-
-    let sma_tp = calculate_sma(&typical_price, period);
-    let mut result = vec![f64::NAN; close.len()];
-
-    for i in (period - 1)..close.len() {
-        let window = &typical_price[(i + 1 - period)..=i];
-        let mean = sma_tp[i];
-
-        if !mean.is_nan() {
-            let mean_deviation =
-                window.iter().map(|&x| (x - mean).abs()).sum::<f64>() / period as f64;
-
-            if mean_deviation != 0.0 {
-                result[i] = (typical_price[i] - mean) / (0.015 * mean_deviation);
-            }
-        }
-    }
-
-    result
-}
-
-/// Calculate Average True Range (ATR)
-fn calculate_atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    if close.len() < 2 {
-        return vec![f64::NAN; close.len()];
-    }
-
-    let mut true_range = vec![f64::NAN; close.len()];
-
-    for i in 1..close.len() {
-        let tr1 = high[i] - low[i];
-        let tr2 = (high[i] - close[i - 1]).abs();
-        let tr3 = (low[i] - close[i - 1]).abs();
-        true_range[i] = tr1.max(tr2).max(tr3);
-    }
-
-    calculate_sma(&true_range, period)
-}
 
 /// Calculate On-Balance Volume (OBV)
 fn calculate_obv(close: &[f64], volume: &[f64]) -> Vec<f64> {
@@ -560,7 +333,11 @@ fn add_sma_indicators(
     let sma_results: Vec<_> = periods
         .par_iter()
         .map(|&period| {
-            let sma = calculate_sma(close_prices, period as usize);
+            let sma = calculate_sma_ta(close_prices, period as usize)
+                .unwrap_or_else(|e| {
+                    log::error!("SMA calculation failed for period {}: {}", period, e);
+                    vec![close_prices.iter().sum::<f64>() / close_prices.len() as f64; close_prices.len()] // Default to mean
+                });
             (format!("sma_{}", period), sma)
         })
         .collect();
@@ -588,7 +365,11 @@ fn add_ema_indicators(
     let ema_results: Vec<_> = periods
         .par_iter()
         .map(|&period| {
-            let ema = calculate_ema(close_prices, period as usize);
+            let ema = calculate_ema_ta(close_prices, period as usize)
+                .unwrap_or_else(|e| {
+                    log::error!("EMA calculation failed for period {}: {}", period, e);
+                    vec![close_prices.iter().sum::<f64>() / close_prices.len() as f64; close_prices.len()] // Default to mean
+                });
             (format!("ema_{}", period), ema)
         })
         .collect();
@@ -615,7 +396,12 @@ fn add_macd_indicators(
     signal: u32,
 ) -> Result<DataFrame> {
     let (macd_line, signal_line, histogram) =
-        calculate_macd(close_prices, fast as usize, slow as usize, signal as usize);
+        calculate_macd_ta(close_prices, fast as usize, slow as usize, signal as usize)
+            .unwrap_or_else(|e| {
+                log::error!("MACD calculation failed: {}", e);
+                let len = close_prices.len();
+                (vec![0.0; len], vec![0.0; len], vec![0.0; len]) // Default to zeros
+            });
 
     df = df
         .with_column(Series::new("macd", macd_line))
@@ -644,7 +430,12 @@ fn add_bollinger_bands(
     period: u32,
     std_dev: f64,
 ) -> Result<DataFrame> {
-    let (upper, middle, lower) = calculate_bollinger_bands(close_prices, period as usize, std_dev);
+    let (upper, middle, lower) = calculate_bollinger_bands_ta(close_prices, period as usize, std_dev)
+        .unwrap_or_else(|e| {
+            log::error!("Bollinger Bands calculation failed: {}", e);
+            let len = close_prices.len();
+            (vec![0.0; len], vec![0.0; len], vec![0.0; len]) // Default to zeros
+        });
 
     df = df
         .with_column(Series::new("bb_upper", upper))
@@ -698,7 +489,11 @@ fn add_rsi_indicators(
         .par_iter()
         .map(|&period| {
             log::debug!("Calculating RSI for period {}", period);
-            let rsi = calculate_rsi(close_prices, period as usize);
+            let rsi = calculate_rsi_ta(close_prices, period as usize)
+                .unwrap_or_else(|e| {
+                    log::error!("RSI calculation failed for period {}: {}", period, e);
+                    vec![50.0; close_prices.len()] // Default to neutral RSI
+                });
             let nan_count = rsi.iter().filter(|&&x| !x.is_finite()).count();
             log::debug!(
                 "RSI period {}: {} NaN values out of {} total",
@@ -724,16 +519,20 @@ fn add_rsi_indicators(
 }
 
 /// Add Stochastic indicators to DataFrame
+#[allow(clippy::too_many_arguments)]
 fn add_stochastic_indicators(
     mut df: DataFrame,
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
+    ohlcv: &OhlcvData,
     k_period: u32,
     d_period: u32,
 ) -> Result<DataFrame> {
     let (k_values, d_values) =
-        calculate_stochastic(high, low, close, k_period as usize, d_period as usize);
+        calculate_stochastic_ta(ohlcv.open, ohlcv.high, ohlcv.low, ohlcv.close, ohlcv.volume, k_period as usize, d_period as usize)
+            .unwrap_or_else(|e| {
+                log::error!("Stochastic calculation failed: {}", e);
+                let len = ohlcv.close.len();
+                (vec![f64::NAN; len], vec![f64::NAN; len]) // Use NaN for filtering
+            });
 
     df = df
         .with_column(Series::new("stoch_k", k_values))
@@ -756,7 +555,11 @@ fn add_williams_r(
     close: &[f64],
     period: u32,
 ) -> Result<DataFrame> {
-    let williams_r_values = calculate_williams_r(high, low, close, period as usize);
+    let williams_r_values = calculate_williams_r_ta(high, low, close, period as usize)
+        .unwrap_or_else(|e| {
+            log::error!("Williams %R calculation failed: {}", e);
+            vec![-50.0; close.len()] // Default to neutral value
+        });
     df = df
         .with_column(Series::new("williams_r", williams_r_values))
         .map_err(|e| VangaError::FeatureError(format!("Failed to add Williams %R: {}", e)))?
@@ -767,12 +570,18 @@ fn add_williams_r(
 /// Add CCI indicator to DataFrame
 fn add_cci_indicator(
     mut df: DataFrame,
+    open: &[f64],
     high: &[f64],
     low: &[f64],
     close: &[f64],
+    volume: &[f64],
     period: u32,
 ) -> Result<DataFrame> {
-    let cci_values = calculate_cci(high, low, close, period as usize);
+    let cci_values = calculate_cci_ta(open, high, low, close, volume, period as usize)
+        .unwrap_or_else(|e| {
+            log::error!("CCI calculation failed: {}", e);
+            vec![f64::NAN; close.len()] // Use NaN for filtering
+        });
     let column_name = format!("cci_{}", period);
     df = df
         .with_column(Series::new(&column_name, cci_values))
@@ -850,13 +659,19 @@ fn add_mfi_indicator(
 /// Add ATR indicators to DataFrame
 fn add_atr_indicators(
     mut df: DataFrame,
+    open: &[f64],
     high: &[f64],
     low: &[f64],
     close: &[f64],
+    volume: &[f64],
     periods: &[u32],
 ) -> Result<DataFrame> {
     for &period in periods {
-        let atr_values = calculate_atr(high, low, close, period as usize);
+        let atr_values = calculate_atr_ta(open, high, low, close, volume, period as usize)
+            .unwrap_or_else(|e| {
+                log::error!("ATR calculation failed for period {}: {}", period, e);
+                vec![f64::NAN; close.len()] // Use NaN for filtering
+            });
         let column_name = format!("atr_{}", period);
         df = df
             .with_column(Series::new(&column_name, atr_values))
@@ -867,21 +682,28 @@ fn add_atr_indicators(
 }
 
 /// Add Keltner Channels to DataFrame
+#[allow(clippy::too_many_arguments)]
 fn add_keltner_channels(
     mut df: DataFrame,
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
+    ohlcv: &OhlcvData,
     period: u32,
     multiplier: f64,
 ) -> Result<DataFrame> {
-    let ema_values = calculate_ema(close, period as usize);
-    let atr_values = calculate_atr(high, low, close, period as usize);
+    let ema_values = calculate_ema_ta(ohlcv.close, period as usize)
+        .unwrap_or_else(|e| {
+            log::error!("EMA calculation failed for Keltner Channels: {}", e);
+            vec![ohlcv.close.iter().sum::<f64>() / ohlcv.close.len() as f64; ohlcv.close.len()]
+        });
+    let atr_values = calculate_atr_ta(ohlcv.open, ohlcv.high, ohlcv.low, ohlcv.close, ohlcv.volume, period as usize)
+        .unwrap_or_else(|e| {
+            log::error!("ATR calculation failed for Keltner Channels: {}", e);
+            vec![f64::NAN; ohlcv.close.len()]
+        });
 
-    let mut keltner_upper = vec![f64::NAN; close.len()];
-    let mut keltner_lower = vec![f64::NAN; close.len()];
+    let mut keltner_upper = vec![f64::NAN; ohlcv.close.len()];
+    let mut keltner_lower = vec![f64::NAN; ohlcv.close.len()];
 
-    for i in 0..close.len() {
+    for i in 0..ohlcv.close.len() {
         if !ema_values[i].is_nan() && !atr_values[i].is_nan() {
             keltner_upper[i] = ema_values[i] + multiplier * atr_values[i];
             keltner_lower[i] = ema_values[i] - multiplier * atr_values[i];
@@ -933,9 +755,27 @@ fn add_crypto_specific_indicators(
     }
 
     // Price gaps (difference between current open and previous close)
+    // Improved to handle edge cases and provide more meaningful values
     let mut price_gaps = vec![0.0; close.len()];
     for i in 1..close.len() {
-        price_gaps[i] = (open[i] - close[i - 1]) / close[i - 1] * 100.0;
+        if close[i - 1] > 0.0 { // Avoid division by zero
+            let gap = (open[i] - close[i - 1]) / close[i - 1] * 100.0;
+            // Clamp extreme gaps to reasonable range (-50% to +50%)
+            price_gaps[i] = gap.clamp(-50.0, 50.0);
+        }
+    }
+    
+    // Add gap volatility as additional feature to make it more informative
+    let mut gap_volatility = vec![0.0; close.len()];
+    if close.len() > 20 {
+        for i in 20..close.len() {
+            let recent_gaps = &price_gaps[i-19..i+1];
+            let mean_gap = recent_gaps.iter().sum::<f64>() / 20.0;
+            let variance = recent_gaps.iter()
+                .map(|&x| (x - mean_gap).powi(2))
+                .sum::<f64>() / 20.0;
+            gap_volatility[i] = variance.sqrt();
+        }
     }
 
     // Intraday range (high - low) as percentage of close
@@ -1006,6 +846,11 @@ fn add_crypto_specific_indicators(
     df = df
         .with_column(Series::new("price_gaps", price_gaps))
         .map_err(|e| VangaError::FeatureError(format!("Failed to add price gaps: {}", e)))?
+        .clone();
+
+    df = df
+        .with_column(Series::new("gap_volatility", gap_volatility))
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add gap volatility: {}", e)))?
         .clone();
 
     df = df
@@ -1196,9 +1041,10 @@ fn calculate_hurst_exponent(prices: &[f64], window: usize) -> Vec<f64> {
 /// Calculate Fractal Dimension using box-counting method
 /// Higher values indicate more complex, chaotic price movements
 fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
-    let mut fractal_dims = vec![f64::NAN; prices.len()];
+    let mut fractal_dims = vec![f64::NAN; prices.len()]; // Start with NaN for filtering
 
     if prices.len() < window || window < 10 {
+        log::warn!("Fractal dimension: insufficient data (len={}, window={}, min_window=10)", prices.len(), window);
         return fractal_dims;
     }
 
@@ -1212,21 +1058,26 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
         let price_range = max_price - min_price;
 
-        if price_range <= 0.0 {
-            continue;
-        }
+        // Handle constant prices with small random variation to avoid zero range
+        let effective_range = if price_range <= 1e-10 {
+            // For constant prices, use a small fraction of the price level as range
+            let avg_price = price_window.iter().sum::<f64>() / price_window.len() as f64;
+            avg_price * 1e-6 // 0.0001% of price as minimum range
+        } else {
+            price_range
+        };
 
-        // Box-counting method with multiple scales
+        // Box-counting method with multiple scales (increased from 7 to 12 scales)
         let mut scales = Vec::new();
         let mut counts = Vec::new();
 
-        for scale_exp in 1..8 {
-            let scale = price_range / (2_f64.powi(scale_exp));
+        for scale_exp in 1..13 {
+            let scale = effective_range / (2_f64.powi(scale_exp));
             if scale <= 0.0 {
                 continue;
             }
 
-            let boxes = (price_range / scale).ceil() as usize;
+            let boxes = (effective_range / scale).ceil() as usize;
             if boxes == 0 {
                 continue;
             }
@@ -1244,7 +1095,7 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
         }
 
         // Linear regression to find fractal dimension
-        if scales.len() >= 3 {
+        if scales.len() >= 4 { // Require at least 4 points for better regression
             let n = scales.len() as f64;
             let sum_x = scales.iter().sum::<f64>();
             let sum_y = counts.iter().sum::<f64>();
@@ -1259,9 +1110,15 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
             if denominator.abs() > 1e-10 {
                 let slope = (n * sum_xy - sum_x * sum_y) / denominator;
                 // Fractal dimension is negative slope, clamped to [1.0, 2.0]
-                fractal_dims[i] = (-slope).clamp(1.0, 2.0);
+                let fractal_dim = (-slope).clamp(1.0, 2.0);
+                
+                // Validate the result
+                if fractal_dim.is_finite() {
+                    fractal_dims[i] = fractal_dim;
+                }
             }
         }
+        // If regression fails, keep NaN for filtering
     }
 
     fractal_dims
