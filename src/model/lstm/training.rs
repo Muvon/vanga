@@ -1061,7 +1061,11 @@ impl LSTMModel {
                 // Calculate categorical metrics for all categorical targets
                 if let Some((_, target_type)) = &self.target_context {
                     match target_type {
-                        TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
+                        TargetType::PriceLevel
+                        | TargetType::Direction
+                        | TargetType::Volatility
+                        | TargetType::Sentiment
+                        | TargetType::Volume => {
                             self.calculate_categorical_validation_metrics(
                                 val_seq, val_tgt, batch_size, epoch, config,
                             )
@@ -1294,7 +1298,11 @@ impl LSTMModel {
             // For classification targets, use accuracy instead of MSE
             if let Some((_, target_type)) = &self.target_context {
                 match target_type {
-                    TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility => {
+                    TargetType::PriceLevel
+                    | TargetType::Direction
+                    | TargetType::Volatility
+                    | TargetType::Sentiment
+                    | TargetType::Volume => {
                         // Use stored validation data for consistent metrics
                         log::info!(
                             "📊 Calculating Final Training Metrics using stored validation data..."

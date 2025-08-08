@@ -23,6 +23,7 @@ use crate::config::model::TargetsConfig;
 use crate::data::structures::MarketDataRow;
 use crate::targets::volatility::{calculate_atr_distribution_stats, AtrDistributionStats};
 use crate::utils::error::Result;
+use polars::frame::DataFrame;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -42,6 +43,12 @@ pub struct AdaptiveTargetParameters {
 
     /// Volatility target parameters (ATR distribution-based)
     pub volatility: VolatilityAdaptiveParams,
+
+    /// Sentiment target parameters (candle body analysis)
+    pub sentiment: SentimentAdaptiveParams,
+
+    /// Volume target parameters (logarithmic volume analysis)
+    pub volume: VolumeAdaptiveParams,
 
     /// Calibration metadata
     pub calibration_info: CalibrationMetadata,
@@ -135,6 +142,60 @@ impl Default for VolatilityAdaptiveParams {
             extreme_multiplier: 2.0,
             atr_distribution_stats: AtrDistributionStats::default(),
             cv_adjustment_factor: 1.0,
+            achieved_balance: ClassDistributionBalance::default(),
+        }
+    }
+}
+
+/// Sentiment adaptive parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentimentAdaptiveParams {
+    /// Body analysis sensitivity for sentiment calculation
+    pub body_sensitivity: f64,
+
+    /// Volume confirmation weight in sentiment score
+    pub volume_weight: f64,
+
+    /// Consistency factor for adaptive threshold scaling
+    pub consistency_factor: f64,
+
+    /// Distribution balance achieved with these parameters
+    pub achieved_balance: ClassDistributionBalance,
+}
+
+impl Default for SentimentAdaptiveParams {
+    fn default() -> Self {
+        Self {
+            body_sensitivity: 1.0,
+            volume_weight: 0.3,
+            consistency_factor: 1.0,
+            achieved_balance: ClassDistributionBalance::default(),
+        }
+    }
+}
+
+/// Volume adaptive parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeAdaptiveParams {
+    /// Volume bandwidth size for threshold calculation
+    pub bandwidth_size: f64,
+
+    /// Extreme threshold multiplier
+    pub extreme_multiplier: f64,
+
+    /// Volume smoothing periods for noise reduction
+    pub smoothing_periods: usize,
+
+    /// Distribution balance achieved with these parameters
+    pub achieved_balance: ClassDistributionBalance,
+}
+
+impl Default for VolumeAdaptiveParams {
+    fn default() -> Self {
+        Self {
+            bandwidth_size: 0.4,
+            extreme_multiplier: 2.0,
+            smoothing_periods: 3,
             achieved_balance: ClassDistributionBalance::default(),
         }
     }
@@ -538,6 +599,8 @@ impl AdaptiveParameterCalibrator {
             direction: direction_params,
             price_levels: price_level_params,
             volatility: volatility_params,
+            sentiment: SentimentAdaptiveParams::default(), // TODO: Add calibration
+            volume: VolumeAdaptiveParams::default(),       // TODO: Add calibration
             calibration_info,
         };
 
@@ -1379,6 +1442,231 @@ pub mod optimization {
         /// Add parameter bounds for optimization
         pub fn add_parameter_bounds(&mut self, name: String, bounds: (f64, f64)) {
             self.bounds.insert(name, bounds);
+        }
+    }
+}
+
+// Additional calibration methods for new targets
+impl AdaptiveParameterCalibrator {
+    /// Calibrate sentiment parameters for balanced distribution
+    pub async fn calibrate_sentiment_parameters(
+        &self,
+        df: &DataFrame,
+        horizons: &[String],
+        sequence_indices: &[usize],
+        sequence_length: usize,
+    ) -> Result<SentimentAdaptiveParams> {
+        log::info!("🎯 Calibrating sentiment parameters for balanced distribution");
+
+        let mut best_params = SentimentAdaptiveParams::default();
+        let mut best_balance_score = f64::INFINITY;
+
+        // Grid search for optimal sentiment parameters
+        let body_sensitivity_values = vec![0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+        let volume_weight_values = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let consistency_factor_values = vec![0.8, 1.0, 1.2, 1.5];
+
+        for &body_sensitivity in &body_sensitivity_values {
+            for &volume_weight in &volume_weight_values {
+                for &consistency_factor in &consistency_factor_values {
+                    let test_params = SentimentAdaptiveParams {
+                        body_sensitivity,
+                        volume_weight,
+                        consistency_factor,
+                        achieved_balance: ClassDistributionBalance::default(),
+                    };
+
+                    match self
+                        .evaluate_sentiment_parameters(
+                            df,
+                            horizons,
+                            sequence_indices,
+                            sequence_length,
+                            &test_params,
+                        )
+                        .await
+                    {
+                        Ok(balance_score) => {
+                            if balance_score < best_balance_score {
+                                best_balance_score = balance_score;
+                                best_params = test_params;
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to evaluate sentiment parameters: {}", e);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update achieved balance
+        best_params.achieved_balance.balance_score = best_balance_score;
+
+        log::info!(
+            "🎯 Sentiment calibration complete: body_sensitivity={:.3}, volume_weight={:.3}, consistency_factor={:.3}, balance_score={:.4}",
+            best_params.body_sensitivity, best_params.volume_weight, best_params.consistency_factor, best_balance_score
+        );
+
+        Ok(best_params)
+    }
+
+    /// Calibrate volume parameters for balanced distribution
+    pub async fn calibrate_volume_parameters(
+        &self,
+        df: &DataFrame,
+        horizons: &[String],
+        sequence_indices: &[usize],
+        sequence_length: usize,
+    ) -> Result<VolumeAdaptiveParams> {
+        log::info!("🎯 Calibrating volume parameters for balanced distribution");
+
+        let mut best_params = VolumeAdaptiveParams::default();
+        let mut best_balance_score = f64::INFINITY;
+
+        // Grid search for optimal volume parameters
+        let bandwidth_values = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.8];
+        let extreme_multiplier_values = vec![1.5, 2.0, 2.5, 3.0];
+        let smoothing_periods_values = vec![1, 2, 3, 5];
+
+        for &bandwidth_size in &bandwidth_values {
+            for &extreme_multiplier in &extreme_multiplier_values {
+                for &smoothing_periods in &smoothing_periods_values {
+                    let test_params = VolumeAdaptiveParams {
+                        bandwidth_size,
+                        extreme_multiplier,
+                        smoothing_periods,
+                        achieved_balance: ClassDistributionBalance::default(),
+                    };
+
+                    match self
+                        .evaluate_volume_parameters(
+                            df,
+                            horizons,
+                            sequence_indices,
+                            sequence_length,
+                            &test_params,
+                        )
+                        .await
+                    {
+                        Ok(balance_score) => {
+                            if balance_score < best_balance_score {
+                                best_balance_score = balance_score;
+                                best_params = test_params;
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to evaluate volume parameters: {}", e);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update achieved balance
+        best_params.achieved_balance.balance_score = best_balance_score;
+
+        log::info!(
+            "🎯 Volume calibration complete: bandwidth={:.3}, extreme_multiplier={:.2}, smoothing_periods={}, balance_score={:.4}",
+            best_params.bandwidth_size, best_params.extreme_multiplier, best_params.smoothing_periods, best_balance_score
+        );
+
+        Ok(best_params)
+    }
+
+    /// Evaluate sentiment parameters by simulating classification
+    async fn evaluate_sentiment_parameters(
+        &self,
+        df: &DataFrame,
+        horizons: &[String],
+        sequence_indices: &[usize],
+        sequence_length: usize,
+        params: &SentimentAdaptiveParams,
+    ) -> Result<f64> {
+        use crate::targets::sentiment::generate_sentiment_targets_with_adaptive_params;
+
+        // Generate targets with test parameters
+        let targets = generate_sentiment_targets_with_adaptive_params(
+            df,
+            horizons,
+            &self.base_config,
+            sequence_indices,
+            sequence_length,
+            Some(params),
+        )?;
+
+        // Calculate balance score across all horizons
+        let mut total_balance_score = 0.0;
+        let mut horizon_count = 0;
+
+        for (_, horizon_targets) in targets {
+            if !horizon_targets.is_empty() {
+                let mut class_counts = [0usize; 5];
+                for &target in &horizon_targets {
+                    if (0..5).contains(&target) {
+                        class_counts[target as usize] += 1;
+                    }
+                }
+
+                let balance = calculate_class_distribution_balance(&class_counts);
+                total_balance_score += balance.balance_score;
+                horizon_count += 1;
+            }
+        }
+
+        if horizon_count > 0 {
+            Ok(total_balance_score / horizon_count as f64)
+        } else {
+            Ok(f64::INFINITY) // No valid targets
+        }
+    }
+
+    /// Evaluate volume parameters by simulating classification
+    async fn evaluate_volume_parameters(
+        &self,
+        df: &DataFrame,
+        horizons: &[String],
+        sequence_indices: &[usize],
+        sequence_length: usize,
+        params: &VolumeAdaptiveParams,
+    ) -> Result<f64> {
+        use crate::targets::volume::generate_volume_targets_with_adaptive_params;
+
+        // Generate targets with test parameters
+        let targets = generate_volume_targets_with_adaptive_params(
+            df,
+            horizons,
+            &self.base_config,
+            sequence_indices,
+            sequence_length,
+            Some(params),
+        )?;
+
+        // Calculate balance score across all horizons
+        let mut total_balance_score = 0.0;
+        let mut horizon_count = 0;
+
+        for (_, horizon_targets) in targets {
+            if !horizon_targets.is_empty() {
+                let mut class_counts = [0usize; 5];
+                for &target in &horizon_targets {
+                    if (0..5).contains(&target) {
+                        class_counts[target as usize] += 1;
+                    }
+                }
+
+                let balance = calculate_class_distribution_balance(&class_counts);
+                total_balance_score += balance.balance_score;
+                horizon_count += 1;
+            }
+        }
+
+        if horizon_count > 0 {
+            Ok(total_balance_score / horizon_count as f64)
+        } else {
+            Ok(f64::INFINITY) // No valid targets
         }
     }
 }

@@ -14,7 +14,9 @@ use crate::targets::PreparedTargets;
 // Import reconstruction methods from target modules
 use crate::targets::direction::reconstruct_direction;
 use crate::targets::price_levels::reconstruct_price_levels;
+use crate::targets::sentiment::reconstruct_sentiment;
 use crate::targets::volatility::reconstruct_volatility;
+use crate::targets::volume::reconstruct_volume;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use std::collections::HashMap;
@@ -189,11 +191,11 @@ impl OutputFormatter {
             raw_predictions.len()
         );
 
-        // Verify we have exactly 15 predictions (3 targets × 5 classes)
-        let expected_count = 3 * NUM_CLASSES; // 3 targets (price_level, direction, volatility) × 5 classes
+        // Verify we have exactly 25 predictions (5 targets × 5 classes)
+        let expected_count = 5 * NUM_CLASSES; // 5 targets (price_level, direction, volatility, sentiment, volume) × 5 classes
         if horizon_predictions.len() != expected_count {
             return Err(VangaError::PredictionError(format!(
-                "Expected {} predictions for horizon '{}' (3 targets × {} classes), but got {}. Indices: {:?}",
+                "Expected {} predictions for horizon '{}' (5 targets × {} classes), but got {}. Indices: {:?}",
                 expected_count, horizon, NUM_CLASSES, horizon_predictions.len(), horizon_indices
             )));
         }
@@ -535,6 +537,17 @@ impl OutputFormatter {
                     Some(sequence_bandwidth_percent),
                     Some(volatility_percentile),
                 )?);
+            }
+
+            if let Some(sentiment_output) = parsed_output.sentiment {
+                result = result.with_sentiment(
+                    self.create_sentiment_prediction(&sentiment_output, Some(horizon))?,
+                );
+            }
+
+            if let Some(volume_output) = parsed_output.volume {
+                result = result
+                    .with_volume(self.create_volume_prediction(&volume_output, Some(horizon))?);
             }
 
             // Generate trading orders if we have all required predictions
@@ -989,6 +1002,172 @@ impl OutputFormatter {
             prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
             prediction.expected_range_percent = sequence_bandwidth_percent.unwrap_or(0.0);
             prediction.volatility_percentile = current_volatility_percentile.unwrap_or(50.0);
+        }
+
+        Ok(prediction)
+    }
+
+    /// Create sentiment prediction from parsed output with reconstruction
+    fn create_sentiment_prediction(
+        &self,
+        sentiment_output: &crate::output::multi_target_parser::SentimentOutput,
+        training_horizon: Option<&str>,
+    ) -> Result<crate::output::prediction_types::SentimentPrediction> {
+        let mut prediction =
+            crate::output::prediction_types::SentimentPrediction::from_probabilities(
+                sentiment_output.very_bearish_probability,
+                sentiment_output.bearish_probability,
+                sentiment_output.neutral_probability,
+                sentiment_output.bullish_probability,
+                sentiment_output.very_bullish_probability,
+            );
+
+        // Set training horizon
+        prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
+
+        // Enhanced reconstruction using adaptive parameters if available
+        if let (Some(adaptive_params), Some(sequence_ohlcv)) = 
+            (&self.adaptive_parameters, &self.sequence_ohlcv) {
+            
+            // Calculate sequence sentiment score from OHLCV data
+            let sequence_sentiment = {
+                use crate::targets::sentiment::calculate_sequence_sentiment_score;
+                // Convert data::structures::MarketDataRow to sentiment::MarketDataRow
+                let sentiment_candles: Vec<crate::targets::sentiment::MarketDataRow> = sequence_ohlcv
+                    .iter()
+                    .map(|candle| crate::targets::sentiment::MarketDataRow {
+                        open: candle.open,
+                        high: candle.high,
+                        low: candle.low,
+                        close: candle.close,
+                        volume: candle.volume,
+                    })
+                    .collect();
+                calculate_sequence_sentiment_score(&sentiment_candles)
+            };
+            
+            // Convert adaptive parameters to reconstruction thresholds
+            // Using the same logic as classify_sentiment: base_sensitivity with scaling
+            let base_sensitivity = adaptive_params.sentiment.body_sensitivity;
+            let thresholds = [
+                base_sensitivity * 2.0, // panic_extreme (strong panic threshold)
+                base_sensitivity,       // panic_moderate (moderate panic threshold)
+                base_sensitivity,       // greed_moderate (moderate greed threshold)
+                base_sensitivity * 2.0, // greed_extreme (strong greed threshold)
+            ];
+            
+            // Prepare probabilities array for reconstruction
+            let probabilities = vec![
+                sentiment_output.very_bearish_probability,
+                sentiment_output.bearish_probability,
+                sentiment_output.neutral_probability,
+                sentiment_output.bullish_probability,
+                sentiment_output.very_bullish_probability,
+            ];
+            
+            // Call reconstruction function with adaptive parameters
+            match reconstruct_sentiment(&probabilities, sequence_sentiment, &thresholds) {
+                Ok(reconstruction) => {
+                    // Use reconstruction results to enhance prediction
+                    // The reconstruction provides richer information than basic probabilities
+                    log::debug!(
+                        "🎯 Sentiment reconstruction: expected={:.4}, confidence={:.3}, interpretation={}",
+                        reconstruction.expected_sentiment,
+                        reconstruction.confidence,
+                        reconstruction.sentiment_interpretation
+                    );
+                    
+                    // Update confidence with reconstruction confidence
+                    prediction.confidence = reconstruction.confidence;
+                },
+                Err(e) => {
+                    log::warn!("Failed to reconstruct sentiment: {}", e);
+                    // Fall back to basic prediction without reconstruction
+                }
+            }
+        } else {
+            log::debug!("Sentiment reconstruction skipped: adaptive_parameters={}, sequence_ohlcv={}", 
+                       self.adaptive_parameters.is_some(), self.sequence_ohlcv.is_some());
+        }
+
+        Ok(prediction)
+    }
+
+    /// Create volume prediction from parsed output with reconstruction
+    fn create_volume_prediction(
+        &self,
+        volume_output: &crate::output::multi_target_parser::VolumeOutput,
+        training_horizon: Option<&str>,
+    ) -> Result<crate::output::prediction_types::VolumePrediction> {
+        let mut prediction = crate::output::prediction_types::VolumePrediction::from_probabilities(
+            volume_output.very_low_probability,
+            volume_output.low_probability,
+            volume_output.medium_probability,
+            volume_output.high_probability,
+            volume_output.very_high_probability,
+        );
+
+        // Set training horizon
+        prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
+
+        // Enhanced reconstruction using adaptive parameters if available
+        if let (Some(adaptive_params), Some(sequence_ohlcv)) = 
+            (&self.adaptive_parameters, &self.sequence_ohlcv) {
+            
+            // Calculate sequence volume (average volume from OHLCV data)
+            let sequence_volume = if !sequence_ohlcv.is_empty() {
+                sequence_ohlcv.iter().map(|candle| candle.volume).sum::<f64>() / sequence_ohlcv.len() as f64
+            } else {
+                1000.0 // Default fallback
+            };
+            
+            // Convert adaptive parameters to LogVolumeThresholds
+            // Using the same logic as calculate_log_volume_thresholds
+            let bandwidth_size = adaptive_params.volume.bandwidth_size;
+            let extreme_multiplier = adaptive_params.volume.extreme_multiplier;
+            
+            let half_bandwidth = bandwidth_size / 2.0;
+            let extreme_bandwidth = bandwidth_size * extreme_multiplier;
+            
+            let thresholds = crate::targets::volume::LogVolumeThresholds {
+                very_low_max: -extreme_bandwidth,  // Most negative in log space
+                low_max: -half_bandwidth,          // Negative side of medium
+                medium_max: half_bandwidth,        // Positive side of medium
+                high_max: extreme_bandwidth,       // Most positive before very high
+            };
+            
+            // Prepare probabilities array for reconstruction
+            let probabilities = vec![
+                volume_output.very_low_probability,
+                volume_output.low_probability,
+                volume_output.medium_probability,
+                volume_output.high_probability,
+                volume_output.very_high_probability,
+            ];
+            
+            // Call reconstruction function with adaptive parameters
+            match reconstruct_volume(&probabilities, sequence_volume, &thresholds) {
+                Ok(reconstruction) => {
+                    // Use reconstruction results to enhance prediction
+                    // The reconstruction provides richer information than basic probabilities
+                    log::debug!(
+                        "🎯 Volume reconstruction: expected_ratio={:.4}, confidence={:.3}, interpretation={}",
+                        reconstruction.expected_volume_ratio,
+                        reconstruction.confidence,
+                        reconstruction.volume_interpretation
+                    );
+                    
+                    // Update confidence with reconstruction confidence
+                    prediction.confidence = reconstruction.confidence;
+                },
+                Err(e) => {
+                    log::warn!("Failed to reconstruct volume: {}", e);
+                    // Fall back to basic prediction without reconstruction
+                }
+            }
+        } else {
+            log::debug!("Volume reconstruction skipped: adaptive_parameters={}, sequence_ohlcv={}", 
+                       self.adaptive_parameters.is_some(), self.sequence_ohlcv.is_some());
         }
 
         Ok(prediction)

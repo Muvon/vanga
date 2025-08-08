@@ -393,6 +393,8 @@ impl DataPipeline {
             crate::targets::TargetType::PriceLevel,
             crate::targets::TargetType::Direction,
             crate::targets::TargetType::Volatility,
+            crate::targets::TargetType::Sentiment,
+            crate::targets::TargetType::Volume,
         ];
 
         log::info!("🎯 TARGET-SPECIFIC BALANCE EXTRACTION: Each target balanced independently");
@@ -839,6 +841,8 @@ impl DataPipeline {
                 crate::targets::TargetType::PriceLevel => format!("price_level_{}", horizon),
                 crate::targets::TargetType::Direction => format!("direction_{}", horizon),
                 crate::targets::TargetType::Volatility => format!("volatility_{}", horizon),
+                crate::targets::TargetType::Sentiment => format!("sentiment_{}", horizon),
+                crate::targets::TargetType::Volume => format!("volume_{}", horizon),
             };
             targets.target_names.push(target_name);
 
@@ -856,6 +860,16 @@ impl DataPipeline {
                 crate::targets::TargetType::Volatility => {
                     targets
                         .volatility
+                        .insert(horizon.clone(), vec![-1; num_sequences]);
+                }
+                crate::targets::TargetType::Sentiment => {
+                    targets
+                        .sentiment
+                        .insert(horizon.clone(), vec![-1; num_sequences]);
+                }
+                crate::targets::TargetType::Volume => {
+                    targets
+                        .volume
                         .insert(horizon.clone(), vec![-1; num_sequences]);
                 }
             }
@@ -883,6 +897,16 @@ impl DataPipeline {
                             }
                             crate::targets::TargetType::Volatility => {
                                 if let Some(targets_vec) = targets.volatility.get_mut(horizon) {
+                                    targets_vec[new_idx] = target_value;
+                                }
+                            }
+                            crate::targets::TargetType::Sentiment => {
+                                if let Some(targets_vec) = targets.sentiment.get_mut(horizon) {
+                                    targets_vec[new_idx] = target_value;
+                                }
+                            }
+                            crate::targets::TargetType::Volume => {
+                                if let Some(targets_vec) = targets.volume.get_mut(horizon) {
                                     targets_vec[new_idx] = target_value;
                                 }
                             }

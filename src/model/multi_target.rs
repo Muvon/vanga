@@ -50,6 +50,8 @@ pub struct MultiTargetLSTMModel {
     training_config: Option<crate::config::TrainingConfig>,
     /// Feature configuration used during training (kept for backward compatibility)
     feature_config: Option<crate::config::FeatureConfig>,
+    /// Adaptive target parameters for consistent prediction reconstruction
+    adaptive_target_parameters: Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
 }
 
 /// Serializable state for multi-target model persistence
@@ -67,6 +69,9 @@ struct MultiTargetModelState {
     /// Feature configuration used during training (kept for backward compatibility)
     #[serde(default)]
     feature_config: Option<crate::config::FeatureConfig>,
+    /// Adaptive target parameters for consistent prediction reconstruction
+    #[serde(default)]
+    adaptive_target_parameters: Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
 }
 
 impl MultiTargetLSTMModel {
@@ -96,6 +101,20 @@ impl MultiTargetLSTMModel {
                 );
                 crate::config::model::NUM_CLASSES // Use unified 5-class system volatility
             }
+            TargetType::Sentiment => {
+                log::debug!(
+                    "Sentiment target: {} output classes (VeryBearish/Bearish/Neutral/Bullish/VeryBullish)",
+                    crate::config::model::NUM_CLASSES
+                );
+                crate::config::model::NUM_CLASSES // Use unified 5-class system
+            }
+            TargetType::Volume => {
+                log::debug!(
+                    "Volume target: {} output classes (VeryLow/Low/Medium/High/VeryHigh)",
+                    crate::config::model::NUM_CLASSES
+                );
+                crate::config::model::NUM_CLASSES // Use unified 5-class system
+            }
         }
     }
 
@@ -108,6 +127,10 @@ impl MultiTargetLSTMModel {
             TargetType::Direction
         } else if target_name.starts_with("volatility_") {
             TargetType::Volatility
+        } else if target_name.starts_with("sentiment_") {
+            TargetType::Sentiment
+        } else if target_name.starts_with("volume_") {
+            TargetType::Volume
         } else {
             // Fallback for unknown patterns - log warning and default to PriceLevel
             log::warn!(
@@ -200,6 +223,8 @@ impl MultiTargetLSTMModel {
                 }
                 TargetType::Direction => "classes=5".to_string(),
                 TargetType::Volatility => "classes=5".to_string(),
+                TargetType::Sentiment => "classes=5".to_string(),
+                TargetType::Volume => "classes=5".to_string(),
             };
 
             log::info!(
@@ -236,6 +261,7 @@ impl MultiTargetLSTMModel {
             trained_horizons,
             training_config: None, // Will be set during training
             feature_config: None,  // Will be set during training
+            adaptive_target_parameters: None,
         })
     }
 
@@ -609,6 +635,7 @@ impl MultiTargetLSTMModel {
             trained_horizons: Some(self.trained_horizons.clone()),
             training_config: self.training_config.clone(),
             feature_config: self.feature_config.clone(),
+            adaptive_target_parameters: self.adaptive_target_parameters.clone(),
         };
 
         let metadata_path = base_path.with_extension("meta");
@@ -707,6 +734,7 @@ impl MultiTargetLSTMModel {
             trained_horizons,
             training_config: state.training_config,
             feature_config: state.feature_config,
+            adaptive_target_parameters: state.adaptive_target_parameters,
         })
     }
 
@@ -755,15 +783,25 @@ impl MultiTargetLSTMModel {
         &mut self,
         params: crate::targets::adaptive_parameters::AdaptiveTargetParameters,
     ) {
+        // Store in the MultiTargetLSTMModel itself for persistence
+        self.adaptive_target_parameters = Some(params.clone());
+        
+        // Also set on individual models for backward compatibility
         for model in &mut self.models {
             model.adaptive_target_parameters = Some(params.clone());
         }
     }
 
-    /// Get adaptive target parameters from the first model (all models should have the same parameters)
+    /// Get adaptive target parameters from the MultiTargetLSTMModel or fallback to first model
     pub fn get_adaptive_target_parameters(
         &self,
     ) -> Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters> {
+        // Prioritize the MultiTargetLSTMModel's own field
+        if let Some(ref params) = self.adaptive_target_parameters {
+            return Some(params);
+        }
+        
+        // Fallback to first model for backward compatibility
         self.models.first()?.adaptive_target_parameters.as_ref()
     }
 
@@ -815,6 +853,7 @@ impl MultiTargetLSTMModel {
             trained_horizons,
             feature_config: None,
             training_config: None,
+            adaptive_target_parameters: None,
         })
     }
 }

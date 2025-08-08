@@ -460,6 +460,36 @@ impl LSTMModel {
                         predictions_tensor
                     }
                 }
+                TargetType::Sentiment => {
+                    // For Sentiment: Keep multi-class probabilities (don't convert to indices)
+                    let tensor_shape = predictions_tensor.shape();
+                    log::debug!("Sentiment prediction shape: {:?}", tensor_shape);
+                    if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
+                        log::info!(
+                            "Keeping Sentiment multi-class output {:?} as probabilities",
+                            tensor_shape
+                        );
+                        // Return the full probability distribution for multi-target parsing
+                        predictions_tensor
+                    } else {
+                        predictions_tensor
+                    }
+                }
+                TargetType::Volume => {
+                    // For Volume: Keep multi-class probabilities (don't convert to indices)
+                    let tensor_shape = predictions_tensor.shape();
+                    log::debug!("Volume prediction shape: {:?}", tensor_shape);
+                    if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
+                        log::info!(
+                            "Keeping Volume multi-class output {:?} as probabilities",
+                            tensor_shape
+                        );
+                        // Return the full probability distribution for multi-target parsing
+                        predictions_tensor
+                    } else {
+                        predictions_tensor
+                    }
+                }
             }
         } else {
             // No target context - keep multi-class outputs as probabilities for multi-target parsing

@@ -1367,6 +1367,26 @@ pub async fn create_sequences_with_targets(
                     );
                 }
             }
+
+            // Sentiment - MISSING TARGET POPULATION
+            if let Some(sentiment_targets) = targets.sentiment.get(&horizon) {
+                if seq_idx < sentiment_targets.len() {
+                    target_map.insert(
+                        (TargetType::Sentiment, horizon.clone()),
+                        sentiment_targets[seq_idx],
+                    );
+                }
+            }
+
+            // Volume - MISSING TARGET POPULATION
+            if let Some(volume_targets) = targets.volume.get(&horizon) {
+                if seq_idx < volume_targets.len() {
+                    target_map.insert(
+                        (TargetType::Volume, horizon.clone()),
+                        volume_targets[seq_idx],
+                    );
+                }
+            }
         }
 
         // Extract sequence data
