@@ -42,6 +42,14 @@ pub struct PredictionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volatility: Option<VolatilityPrediction>,
 
+    /// Sentiment predictions (if enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sentiment: Option<SentimentPrediction>,
+
+    /// Volume predictions (if enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume: Option<VolumePrediction>,
+
     /// Trading orders with dynamic position sizing (always included)
     pub orders: TradingOrders,
 
@@ -655,6 +663,200 @@ impl Default for VolatilityPrediction {
         Self::new()
     }
 }
+
+/// Sentiment prediction output (5-class system)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentimentPrediction {
+    /// Probability of very bearish sentiment
+    pub very_bearish_probability: f64,
+
+    /// Probability of bearish sentiment
+    pub bearish_probability: f64,
+
+    /// Probability of neutral sentiment
+    pub neutral_probability: f64,
+
+    /// Probability of bullish sentiment
+    pub bullish_probability: f64,
+
+    /// Probability of very bullish sentiment
+    pub very_bullish_probability: f64,
+
+    /// Training horizon this model was trained on (e.g., "4h", "1d")
+    pub training_horizon: String,
+
+    /// Sentiment regime prediction ("VERY_BEARISH", "BEARISH", "NEUTRAL", "BULLISH", "VERY_BULLISH")
+    pub regime: String,
+
+    /// Confidence in sentiment prediction
+    pub confidence: f64,
+}
+
+impl SentimentPrediction {
+    /// Create a new SentimentPrediction with default values
+    pub fn new() -> Self {
+        Self {
+            very_bearish_probability: 0.0,
+            bearish_probability: 0.0,
+            neutral_probability: 0.0,
+            bullish_probability: 0.0,
+            very_bullish_probability: 0.0,
+            training_horizon: "1h".to_string(),
+            regime: "NEUTRAL".to_string(),
+            confidence: 0.0,
+        }
+    }
+
+    /// Create from 5-class probabilities
+    pub fn from_probabilities(
+        very_bearish: f64,
+        bearish: f64,
+        neutral: f64,
+        bullish: f64,
+        very_bullish: f64,
+    ) -> Self {
+        let mut prediction = Self::new();
+        prediction.very_bearish_probability = very_bearish;
+        prediction.bearish_probability = bearish;
+        prediction.neutral_probability = neutral;
+        prediction.bullish_probability = bullish;
+        prediction.very_bullish_probability = very_bullish;
+        prediction.update_regime_and_confidence();
+        prediction
+    }
+
+    /// Update regime and confidence based on 5-class probabilities
+    fn update_regime_and_confidence(&mut self) {
+        let probabilities = [
+            ("VERY_BEARISH", self.very_bearish_probability),
+            ("BEARISH", self.bearish_probability),
+            ("NEUTRAL", self.neutral_probability),
+            ("BULLISH", self.bullish_probability),
+            ("VERY_BULLISH", self.very_bullish_probability),
+        ];
+
+        let (regime, confidence) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        self.regime = regime.to_string();
+        self.confidence = *confidence;
+    }
+
+    /// Get the most likely sentiment regime (5-class system)
+    pub fn get_prediction(&self) -> String {
+        self.regime.clone()
+    }
+
+    /// Get confidence in sentiment prediction
+    pub fn get_confidence(&self) -> f64 {
+        self.confidence
+    }
+}
+
+impl Default for SentimentPrediction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Volume prediction output (5-class system)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumePrediction {
+    /// Probability of very low volume
+    pub very_low_probability: f64,
+
+    /// Probability of low volume
+    pub low_probability: f64,
+
+    /// Probability of medium volume
+    pub medium_probability: f64,
+
+    /// Probability of high volume
+    pub high_probability: f64,
+
+    /// Probability of very high volume
+    pub very_high_probability: f64,
+
+    /// Training horizon this model was trained on (e.g., "4h", "1d")
+    pub training_horizon: String,
+
+    /// Volume regime prediction ("VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH")
+    pub regime: String,
+
+    /// Confidence in volume prediction
+    pub confidence: f64,
+}
+
+impl VolumePrediction {
+    /// Create a new VolumePrediction with default values
+    pub fn new() -> Self {
+        Self {
+            very_low_probability: 0.0,
+            low_probability: 0.0,
+            medium_probability: 0.0,
+            high_probability: 0.0,
+            very_high_probability: 0.0,
+            training_horizon: "1h".to_string(),
+            regime: "MEDIUM".to_string(),
+            confidence: 0.0,
+        }
+    }
+
+    /// Create from 5-class probabilities
+    pub fn from_probabilities(
+        very_low: f64,
+        low: f64,
+        medium: f64,
+        high: f64,
+        very_high: f64,
+    ) -> Self {
+        let mut prediction = Self::new();
+        prediction.very_low_probability = very_low;
+        prediction.low_probability = low;
+        prediction.medium_probability = medium;
+        prediction.high_probability = high;
+        prediction.very_high_probability = very_high;
+        prediction.update_regime_and_confidence();
+        prediction
+    }
+
+    /// Update regime and confidence based on 5-class probabilities
+    fn update_regime_and_confidence(&mut self) {
+        let probabilities = [
+            ("VERY_LOW", self.very_low_probability),
+            ("LOW", self.low_probability),
+            ("MEDIUM", self.medium_probability),
+            ("HIGH", self.high_probability),
+            ("VERY_HIGH", self.very_high_probability),
+        ];
+
+        let (regime, confidence) = probabilities
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+
+        self.regime = regime.to_string();
+        self.confidence = *confidence;
+    }
+
+    /// Get the most likely volume regime (5-class system)
+    pub fn get_prediction(&self) -> String {
+        self.regime.clone()
+    }
+
+    /// Get confidence in volume prediction
+    pub fn get_confidence(&self) -> f64 {
+        self.confidence
+    }
+}
+
+impl Default for VolumePrediction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl PredictionResult {
     /// Create a new prediction result with basic info
     pub fn new(symbol: String, horizon: String, current_price: f64) -> Self {
@@ -667,6 +869,8 @@ impl PredictionResult {
             price_levels: None,
             direction: None,
             volatility: None,
+            sentiment: None,
+            volume: None,
             orders: TradingOrders::default(),
             adaptive_signal: None,
             confidence: 0.0,
@@ -701,6 +905,8 @@ impl PredictionResult {
             price_levels: None,
             direction: None,
             volatility: None,
+            sentiment: None,
+            volume: None,
             orders: TradingOrders::default(),
             adaptive_signal: None,
             confidence: 0.0,
@@ -733,6 +939,18 @@ impl PredictionResult {
     /// Set volatility prediction
     pub fn with_volatility(mut self, volatility: VolatilityPrediction) -> Self {
         self.volatility = Some(volatility);
+        self
+    }
+
+    /// Set sentiment prediction
+    pub fn with_sentiment(mut self, sentiment: SentimentPrediction) -> Self {
+        self.sentiment = Some(sentiment);
+        self
+    }
+
+    /// Set volume prediction
+    pub fn with_volume(mut self, volume: VolumePrediction) -> Self {
+        self.volume = Some(volume);
         self
     }
 

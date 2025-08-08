@@ -818,6 +818,8 @@ impl LSTMModel {
                 TargetType::PriceLevel => "PriceLevel",
                 TargetType::Direction => "Direction",
                 TargetType::Volatility => "Volatility",
+                TargetType::Sentiment => "Sentiment",
+                TargetType::Volume => "Volume",
             }
         } else {
             "Unknown"
@@ -1132,6 +1134,42 @@ impl LSTMModel {
                 }
 
                 // Use NLL loss for volatility targets (5-class system)
+                self.calculate_nll_loss(predictions, targets, LossMode::Training)
+            }
+            TargetType::Sentiment => {
+                // Sentiment targets use 5-class classification (StrongPanic=0, ModeratePanic=1, Neutral=2, ModerateGreed=3, StrongGreed=4)
+                // Use CrossEntropy loss with proper error handling - NO FALLBACKS
+                log::debug!(
+                    "🎯 Sentiment target: Using CrossEntropy loss for 5-class classification"
+                );
+
+                // Validate model output matches Sentiment classes (5)
+                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
+                    return Err(VangaError::ModelError(format!(
+                        "Sentiment target requires model output_size={}, got {}. Please update model configuration.",
+                        crate::config::model::NUM_CLASSES,
+                        predictions.dims().last().unwrap_or(&0)
+                    )));
+                }
+
+                // Use NLL loss for sentiment targets (5-class system)
+                self.calculate_nll_loss(predictions, targets, LossMode::Training)
+            }
+            TargetType::Volume => {
+                // Volume targets use 5-class classification (VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)
+                // Use CrossEntropy loss with proper error handling - NO FALLBACKS
+                log::debug!("🎯 Volume target: Using CrossEntropy loss for 5-class classification");
+
+                // Validate model output matches Volume classes (5)
+                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
+                    return Err(VangaError::ModelError(format!(
+                        "Volume target requires model output_size={}, got {}. Please update model configuration.",
+                        crate::config::model::NUM_CLASSES,
+                        predictions.dims().last().unwrap_or(&0)
+                    )));
+                }
+
+                // Use NLL loss for volume targets (5-class system)
                 self.calculate_nll_loss(predictions, targets, LossMode::Training)
             }
         }

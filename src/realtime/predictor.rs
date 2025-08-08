@@ -669,6 +669,8 @@ impl StreamingPredictor {
             price_levels: ml_prediction.price_levels.clone(),
             direction: Some(direction),
             volatility: Some(volatility),
+            sentiment: ml_prediction.sentiment.clone(),
+            volume: ml_prediction.volume.clone(),
             orders,
             adaptive_signal: ml_prediction.adaptive_signal.clone(),
             confidence: ml_prediction.confidence,

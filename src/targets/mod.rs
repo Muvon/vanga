@@ -24,11 +24,17 @@ mod math_consistency_test;
 #[cfg(test)]
 mod price_level_test;
 pub mod price_levels;
+pub mod sentiment;
+#[cfg(test)]
+mod sentiment_test;
 pub mod sequence_reconstruction;
 pub mod unified_calibrator;
 pub mod volatility;
 #[cfg(test)]
 mod volatility_test;
+pub mod volume;
+#[cfg(test)]
+mod volume_test;
 
 use crate::config::model::TargetsConfig;
 use crate::utils::error::Result;
@@ -39,7 +45,8 @@ use std::collections::HashMap;
 pub use adaptive_parameters::{
     calculate_class_distribution_balance, AdaptiveParameterCalibrator, AdaptiveTargetParameters,
     CalibrationMetadata, ClassDistributionBalance, DirectionAdaptiveParams,
-    PriceLevelAdaptiveParams, VolatilityAdaptiveParams,
+    PriceLevelAdaptiveParams, SentimentAdaptiveParams, VolatilityAdaptiveParams,
+    VolumeAdaptiveParams,
 };
 pub use direction::{
     generate_direction_targets, generate_direction_targets_with_adaptive_params, Direction,
@@ -48,6 +55,10 @@ pub use price_levels::{
     generate_price_level_targets, generate_price_level_targets_from_model_config,
     generate_price_level_targets_with_adaptive_params,
     generate_price_level_targets_with_targets_config, PriceLevelConfig,
+};
+pub use sentiment::{
+    generate_sentiment_targets, generate_sentiment_targets_with_adaptive_params,
+    get_sentiment_class_names, SentimentConfig,
 };
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
@@ -58,6 +69,10 @@ pub use unified_calibrator::{
 };
 pub use volatility::{
     generate_volatility_targets, generate_volatility_targets_with_adaptive_params,
+};
+pub use volume::{
+    generate_volume_targets, generate_volume_targets_with_adaptive_params, get_volume_class_names,
+    VolumeConfig,
 };
 
 /// Comprehensive target configuration
@@ -100,6 +115,8 @@ pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,
     pub directions: HashMap<String, Vec<i32>>,
     pub volatility: HashMap<String, Vec<i32>>,
+    pub sentiment: HashMap<String, Vec<i32>>,
+    pub volume: HashMap<String, Vec<i32>>,
     pub target_names: Vec<String>, // ADDED: Avoid redundant TargetGenerator creation
     pub data_length: usize,
     pub valid_indices: Vec<usize>,
@@ -107,12 +124,13 @@ pub struct PreparedTargets {
 
 impl PreparedTargets {
     /// Create new empty PreparedTargets
-    /// Create new empty PreparedTargets
     pub fn new(data_length: usize) -> Self {
         Self {
             price_levels: HashMap::new(),
             directions: HashMap::new(),
             volatility: HashMap::new(),
+            sentiment: HashMap::new(),
+            volume: HashMap::new(),
             target_names: Vec::new(), // Initialize empty target names
             data_length,
             valid_indices: Vec::new(),
@@ -125,6 +143,8 @@ impl PreparedTargets {
             TargetType::PriceLevel => self.price_levels.get(horizon),
             TargetType::Direction => self.directions.get(horizon),
             TargetType::Volatility => self.volatility.get(horizon),
+            TargetType::Sentiment => self.sentiment.get(horizon),
+            TargetType::Volume => self.volume.get(horizon),
         }
     }
 
@@ -136,6 +156,8 @@ impl PreparedTargets {
         horizons.extend(self.price_levels.keys().cloned());
         horizons.extend(self.directions.keys().cloned());
         horizons.extend(self.volatility.keys().cloned());
+        horizons.extend(self.sentiment.keys().cloned());
+        horizons.extend(self.volume.keys().cloned());
 
         let mut horizon_vec: Vec<String> = horizons.into_iter().collect();
         horizon_vec.sort();
@@ -150,11 +172,17 @@ impl PreparedTargets {
             let price_len = self.price_levels.get(horizon).map(|v| v.len());
             let direction_len = self.directions.get(horizon).map(|v| v.len());
             let volatility_len = self.volatility.get(horizon).map(|v| v.len());
+            let sentiment_len = self.sentiment.get(horizon).map(|v| v.len());
+            let volume_len = self.volume.get(horizon).map(|v| v.len());
 
-            if price_len != direction_len || direction_len != volatility_len {
+            if price_len != direction_len
+                || direction_len != volatility_len
+                || volatility_len != sentiment_len
+                || sentiment_len != volume_len
+            {
                 return Err(crate::utils::error::VangaError::DataError(format!(
-                    "Target length mismatch for horizon {}: price={:?}, direction={:?}, volatility={:?}",
-                    horizon, price_len, direction_len, volatility_len
+                    "Target length mismatch for horizon {}: price={:?}, direction={:?}, volatility={:?}, sentiment={:?}, volume={:?}",
+                    horizon, price_len, direction_len, volatility_len, sentiment_len, volume_len
                 )));
             }
 
@@ -209,6 +237,8 @@ pub enum TargetType {
     PriceLevel,
     Direction,
     Volatility,
+    Sentiment,
+    Volume,
 }
 
 /// Target statistics container
@@ -217,6 +247,8 @@ pub struct TargetStatistics {
     pub price_level_stats: HashMap<String, ClassDistribution>,
     pub direction_stats: HashMap<String, ClassDistribution>,
     pub volatility_stats: HashMap<String, ClassDistribution>,
+    pub sentiment_stats: HashMap<String, ClassDistribution>,
+    pub volume_stats: HashMap<String, ClassDistribution>,
 }
 
 impl TargetStatistics {
@@ -225,6 +257,8 @@ impl TargetStatistics {
             price_level_stats: HashMap::new(),
             direction_stats: HashMap::new(),
             volatility_stats: HashMap::new(),
+            sentiment_stats: HashMap::new(),
+            volume_stats: HashMap::new(),
         }
     }
 }
@@ -272,13 +306,23 @@ impl TargetGenerator {
             names.push(format!("volatility_{}", horizon));
         }
 
+        // Sentiment targets
+        for horizon in &self.config.horizons {
+            names.push(format!("sentiment_{}", horizon));
+        }
+
+        // Volume targets
+        for horizon in &self.config.horizons {
+            names.push(format!("volume_{}", horizon));
+        }
+
         names
     }
 
     /// Get the total number of targets that will be generated
     pub fn get_num_targets(&self) -> usize {
-        // Each horizon generates: 1 price level + 1 direction + 1 volatility = 3 targets per horizon
-        self.config.horizons.len() * 3
+        // Each horizon generates: 1 price level + 1 direction + 1 volatility + 1 sentiment + 1 volume = 5 targets per horizon
+        self.config.horizons.len() * 5
     }
 
     /// Generate all targets aligned with specific sequence indices (FIXED: for proper synchronization)
@@ -329,8 +373,13 @@ impl TargetGenerator {
         let direction_adaptive_params = adaptive_params.map(|p| &p.direction);
         let price_level_adaptive_params = adaptive_params.map(|p| &p.price_levels);
         let volatility_adaptive_params = adaptive_params.map(|p| &p.volatility);
+        let sentiment_adaptive_params = adaptive_params.map(|p| &p.sentiment);
+        let volume_adaptive_params = adaptive_params.map(|p| &p.volume);
 
-        let (price_targets, (direction_targets, volatility_targets)) = rayon::join(
+        let (
+            price_targets,
+            (direction_targets, (volatility_targets, (sentiment_targets, volume_targets))),
+        ) = rayon::join(
             || {
                 log::debug!("Generating price level targets in parallel");
                 generate_price_level_targets_with_adaptive_params(
@@ -356,14 +405,44 @@ impl TargetGenerator {
                         )
                     },
                     || {
-                        log::debug!("Generating volatility targets in parallel");
-                        generate_volatility_targets_with_adaptive_params(
-                            df,
-                            &self.config.horizons,
-                            targets_config,
-                            sequence_indices,
-                            sequence_length,
-                            volatility_adaptive_params,
+                        rayon::join(
+                            || {
+                                log::debug!("Generating volatility targets in parallel");
+                                generate_volatility_targets_with_adaptive_params(
+                                    df,
+                                    &self.config.horizons,
+                                    targets_config,
+                                    sequence_indices,
+                                    sequence_length,
+                                    volatility_adaptive_params,
+                                )
+                            },
+                            || {
+                                rayon::join(
+                                    || {
+                                        log::debug!("Generating sentiment targets in parallel");
+                                        generate_sentiment_targets_with_adaptive_params(
+                                            df,
+                                            &self.config.horizons,
+                                            targets_config,
+                                            sequence_indices,
+                                            sequence_length,
+                                            sentiment_adaptive_params,
+                                        )
+                                    },
+                                    || {
+                                        log::debug!("Generating volume targets in parallel");
+                                        generate_volume_targets_with_adaptive_params(
+                                            df,
+                                            &self.config.horizons,
+                                            targets_config,
+                                            sequence_indices,
+                                            sequence_length,
+                                            volume_adaptive_params,
+                                        )
+                                    },
+                                )
+                            },
                         )
                     },
                 )
@@ -374,6 +453,8 @@ impl TargetGenerator {
         prepared_targets.price_levels = price_targets?;
         prepared_targets.directions = direction_targets?;
         prepared_targets.volatility = volatility_targets?;
+        prepared_targets.sentiment = sentiment_targets?;
+        prepared_targets.volume = volume_targets?;
 
         // FIXED: Set target names to avoid redundant TargetGenerator creation
         prepared_targets.target_names = self.get_target_names();

@@ -99,6 +99,8 @@ fn validate_prepared_targets_balance(targets: &PreparedTargets, data_name: &str)
         (TargetType::PriceLevel, "Price Level"),
         (TargetType::Direction, "Direction"),
         (TargetType::Volatility, "Volatility"),
+        (TargetType::Sentiment, "Sentiment"),
+        (TargetType::Volume, "Volume"),
     ];
 
     let mut all_balanced = true;
@@ -1314,6 +1316,8 @@ fn extract_targets_for_multi_model(
             "price_level" => targets.price_levels.get(horizon),
             "direction" => targets.directions.get(horizon),
             "volatility" => targets.volatility.get(horizon),
+            "sentiment" => targets.sentiment.get(horizon),
+            "volume" => targets.volume.get(horizon),
             _ => {
                 return Err(VangaError::DataError(format!(
                 "Unknown target type '{}' - supported types: price_level, direction, volatility",
@@ -1380,6 +1384,8 @@ fn generate_target_name(target_type: crate::targets::TargetType, horizon: &str) 
         crate::targets::TargetType::PriceLevel => "price_level",
         crate::targets::TargetType::Direction => "direction",
         crate::targets::TargetType::Volatility => "volatility",
+        crate::targets::TargetType::Sentiment => "sentiment",
+        crate::targets::TargetType::Volume => "volume",
     };
     format!("{}_{}", target_type_str, horizon)
 }
