@@ -139,7 +139,15 @@ pub async fn generate_technical_indicators(
 
     if !config.momentum.cci_periods.is_empty() {
         for &period in &config.momentum.cci_periods {
-            df = add_cci_indicator(df, &open_prices, &high_prices, &low_prices, &close_prices, &volume, period)?;
+            df = add_cci_indicator(
+                df,
+                &open_prices,
+                &high_prices,
+                &low_prices,
+                &close_prices,
+                &volume,
+                period,
+            )?;
         }
     }
 
@@ -238,14 +246,6 @@ fn calculate_sma(data: &[f64], period: usize) -> Vec<f64> {
     result
 }
 
-
-
-
-
-
-
-
-
 /// Calculate On-Balance Volume (OBV)
 fn calculate_obv(close: &[f64], volume: &[f64]) -> Vec<f64> {
     let mut result = vec![0.0; close.len()];
@@ -333,11 +333,13 @@ fn add_sma_indicators(
     let sma_results: Vec<_> = periods
         .par_iter()
         .map(|&period| {
-            let sma = calculate_sma_ta(close_prices, period as usize)
-                .unwrap_or_else(|e| {
-                    log::error!("SMA calculation failed for period {}: {}", period, e);
-                    vec![close_prices.iter().sum::<f64>() / close_prices.len() as f64; close_prices.len()] // Default to mean
-                });
+            let sma = calculate_sma_ta(close_prices, period as usize).unwrap_or_else(|e| {
+                log::error!("SMA calculation failed for period {}: {}", period, e);
+                vec![
+                    close_prices.iter().sum::<f64>() / close_prices.len() as f64;
+                    close_prices.len()
+                ] // Default to mean
+            });
             (format!("sma_{}", period), sma)
         })
         .collect();
@@ -365,11 +367,13 @@ fn add_ema_indicators(
     let ema_results: Vec<_> = periods
         .par_iter()
         .map(|&period| {
-            let ema = calculate_ema_ta(close_prices, period as usize)
-                .unwrap_or_else(|e| {
-                    log::error!("EMA calculation failed for period {}: {}", period, e);
-                    vec![close_prices.iter().sum::<f64>() / close_prices.len() as f64; close_prices.len()] // Default to mean
-                });
+            let ema = calculate_ema_ta(close_prices, period as usize).unwrap_or_else(|e| {
+                log::error!("EMA calculation failed for period {}: {}", period, e);
+                vec![
+                    close_prices.iter().sum::<f64>() / close_prices.len() as f64;
+                    close_prices.len()
+                ] // Default to mean
+            });
             (format!("ema_{}", period), ema)
         })
         .collect();
@@ -430,8 +434,8 @@ fn add_bollinger_bands(
     period: u32,
     std_dev: f64,
 ) -> Result<DataFrame> {
-    let (upper, middle, lower) = calculate_bollinger_bands_ta(close_prices, period as usize, std_dev)
-        .unwrap_or_else(|e| {
+    let (upper, middle, lower) =
+        calculate_bollinger_bands_ta(close_prices, period as usize, std_dev).unwrap_or_else(|e| {
             log::error!("Bollinger Bands calculation failed: {}", e);
             let len = close_prices.len();
             (vec![0.0; len], vec![0.0; len], vec![0.0; len]) // Default to zeros
@@ -489,11 +493,10 @@ fn add_rsi_indicators(
         .par_iter()
         .map(|&period| {
             log::debug!("Calculating RSI for period {}", period);
-            let rsi = calculate_rsi_ta(close_prices, period as usize)
-                .unwrap_or_else(|e| {
-                    log::error!("RSI calculation failed for period {}: {}", period, e);
-                    vec![50.0; close_prices.len()] // Default to neutral RSI
-                });
+            let rsi = calculate_rsi_ta(close_prices, period as usize).unwrap_or_else(|e| {
+                log::error!("RSI calculation failed for period {}: {}", period, e);
+                vec![50.0; close_prices.len()] // Default to neutral RSI
+            });
             let nan_count = rsi.iter().filter(|&&x| !x.is_finite()).count();
             log::debug!(
                 "RSI period {}: {} NaN values out of {} total",
@@ -526,13 +529,20 @@ fn add_stochastic_indicators(
     k_period: u32,
     d_period: u32,
 ) -> Result<DataFrame> {
-    let (k_values, d_values) =
-        calculate_stochastic_ta(ohlcv.open, ohlcv.high, ohlcv.low, ohlcv.close, ohlcv.volume, k_period as usize, d_period as usize)
-            .unwrap_or_else(|e| {
-                log::error!("Stochastic calculation failed: {}", e);
-                let len = ohlcv.close.len();
-                (vec![f64::NAN; len], vec![f64::NAN; len]) // Use NaN for filtering
-            });
+    let (k_values, d_values) = calculate_stochastic_ta(
+        ohlcv.open,
+        ohlcv.high,
+        ohlcv.low,
+        ohlcv.close,
+        ohlcv.volume,
+        k_period as usize,
+        d_period as usize,
+    )
+    .unwrap_or_else(|e| {
+        log::error!("Stochastic calculation failed: {}", e);
+        let len = ohlcv.close.len();
+        (vec![f64::NAN; len], vec![f64::NAN; len]) // Use NaN for filtering
+    });
 
     df = df
         .with_column(Series::new("stoch_k", k_values))
@@ -689,16 +699,22 @@ fn add_keltner_channels(
     period: u32,
     multiplier: f64,
 ) -> Result<DataFrame> {
-    let ema_values = calculate_ema_ta(ohlcv.close, period as usize)
-        .unwrap_or_else(|e| {
-            log::error!("EMA calculation failed for Keltner Channels: {}", e);
-            vec![ohlcv.close.iter().sum::<f64>() / ohlcv.close.len() as f64; ohlcv.close.len()]
-        });
-    let atr_values = calculate_atr_ta(ohlcv.open, ohlcv.high, ohlcv.low, ohlcv.close, ohlcv.volume, period as usize)
-        .unwrap_or_else(|e| {
-            log::error!("ATR calculation failed for Keltner Channels: {}", e);
-            vec![f64::NAN; ohlcv.close.len()]
-        });
+    let ema_values = calculate_ema_ta(ohlcv.close, period as usize).unwrap_or_else(|e| {
+        log::error!("EMA calculation failed for Keltner Channels: {}", e);
+        vec![ohlcv.close.iter().sum::<f64>() / ohlcv.close.len() as f64; ohlcv.close.len()]
+    });
+    let atr_values = calculate_atr_ta(
+        ohlcv.open,
+        ohlcv.high,
+        ohlcv.low,
+        ohlcv.close,
+        ohlcv.volume,
+        period as usize,
+    )
+    .unwrap_or_else(|e| {
+        log::error!("ATR calculation failed for Keltner Channels: {}", e);
+        vec![f64::NAN; ohlcv.close.len()]
+    });
 
     let mut keltner_upper = vec![f64::NAN; ohlcv.close.len()];
     let mut keltner_lower = vec![f64::NAN; ohlcv.close.len()];
@@ -758,22 +774,25 @@ fn add_crypto_specific_indicators(
     // Improved to handle edge cases and provide more meaningful values
     let mut price_gaps = vec![0.0; close.len()];
     for i in 1..close.len() {
-        if close[i - 1] > 0.0 { // Avoid division by zero
+        if close[i - 1] > 0.0 {
+            // Avoid division by zero
             let gap = (open[i] - close[i - 1]) / close[i - 1] * 100.0;
             // Clamp extreme gaps to reasonable range (-50% to +50%)
             price_gaps[i] = gap.clamp(-50.0, 50.0);
         }
     }
-    
+
     // Add gap volatility as additional feature to make it more informative
     let mut gap_volatility = vec![0.0; close.len()];
     if close.len() > 20 {
         for i in 20..close.len() {
-            let recent_gaps = &price_gaps[i-19..i+1];
+            let recent_gaps = &price_gaps[i - 19..i + 1];
             let mean_gap = recent_gaps.iter().sum::<f64>() / 20.0;
-            let variance = recent_gaps.iter()
+            let variance = recent_gaps
+                .iter()
                 .map(|&x| (x - mean_gap).powi(2))
-                .sum::<f64>() / 20.0;
+                .sum::<f64>()
+                / 20.0;
             gap_volatility[i] = variance.sqrt();
         }
     }
@@ -1044,7 +1063,11 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
     let mut fractal_dims = vec![f64::NAN; prices.len()]; // Start with NaN for filtering
 
     if prices.len() < window || window < 10 {
-        log::warn!("Fractal dimension: insufficient data (len={}, window={}, min_window=10)", prices.len(), window);
+        log::warn!(
+            "Fractal dimension: insufficient data (len={}, window={}, min_window=10)",
+            prices.len(),
+            window
+        );
         return fractal_dims;
     }
 
@@ -1095,7 +1118,8 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
         }
 
         // Linear regression to find fractal dimension
-        if scales.len() >= 4 { // Require at least 4 points for better regression
+        if scales.len() >= 4 {
+            // Require at least 4 points for better regression
             let n = scales.len() as f64;
             let sum_x = scales.iter().sum::<f64>();
             let sum_y = counts.iter().sum::<f64>();
@@ -1111,7 +1135,7 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
                 let slope = (n * sum_xy - sum_x * sum_y) / denominator;
                 // Fractal dimension is negative slope, clamped to [1.0, 2.0]
                 let fractal_dim = (-slope).clamp(1.0, 2.0);
-                
+
                 // Validate the result
                 if fractal_dim.is_finite() {
                     fractal_dims[i] = fractal_dim;
