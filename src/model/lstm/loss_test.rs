@@ -318,3 +318,162 @@ fn test_empty_batch() {
         }
     }
 }
+
+// ============================================================================
+// Quality Metric Tests
+// ============================================================================
+
+#[test]
+fn test_quality_metric_exact_matches() {
+    let model = create_test_model(None);
+
+    // Test exact matches - should get bonus points (1.2 each)
+    let predictions = vec![0, 1, 2, 3, 4];
+    let targets = vec![0, 1, 2, 3, 4];
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    // 5 exact matches * 1.2 points = 6.0 points
+    // 5 predictions * 1.2 max points = 6.0 max points
+    // Quality = (6.0 / 6.0) * 100% = 100%
+    assert_eq!(
+        quality, 100.0,
+        "Exact matches should have 100% quality with bonus points"
+    );
+}
+
+#[test]
+fn test_quality_metric_conservative_predictions_only() {
+    let model = create_test_model(None);
+
+    // Test ONLY the two valid conservative predictions (1.0 points each)
+    let predictions = vec![1, 3]; // Moderate Down, Moderate Up
+    let targets = vec![0, 4]; // Strong Down, Strong Up (conservative exceeded)
+
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    // 2 conservative * 1.0 points = 2.0 points
+    // 2 predictions * 1.2 max points = 2.4 max points
+    // Quality = (2.0 / 2.4) * 100% = 83.33%
+    assert!(
+        (quality - 83.33).abs() < 0.01,
+        "Conservative predictions should have ~83.33% quality"
+    );
+}
+
+#[test]
+fn test_quality_metric_distance_penalties() {
+    let model = create_test_model(None);
+
+    // Test different distance penalties
+    let predictions = vec![0, 0, 0, 0]; // All predict Strong Down
+    let targets = vec![1, 2, 3, 4]; // Distance 1, 2, 3, 4 respectively
+
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    // Distance 1: 0.8 points, Distance 2: 0.5 points, Distance 3: 0.2 points, Distance 4: 0.0 points
+    // Total points: 0.8 + 0.5 + 0.2 + 0.0 = 1.5 points
+    // Max points: 4 * 1.2 = 4.8 points
+    // Quality = (1.5 / 4.8) * 100% = 31.25%
+    assert_eq!(
+        quality, 31.25,
+        "Distance penalties should result in 31.25% quality"
+    );
+}
+
+#[test]
+fn test_quality_metric_mixed_scenarios() {
+    let model = create_test_model(None);
+
+    // Test comprehensive mixed scenario with different scoring
+    let predictions = vec![
+        0, // pred=0
+        1, // pred=1
+        2, // pred=2
+        3, // pred=3
+        1, // pred=1 (conservative)
+        3, // pred=3 (conservative)
+        0, // pred=0 (distance 2)
+        2, // pred=2 (distance 1)
+    ];
+    let targets = vec![
+        0, // target=0 - EXACT MATCH (1.2 points)
+        1, // target=1 - EXACT MATCH (1.2 points)
+        2, // target=2 - EXACT MATCH (1.2 points)
+        3, // target=3 - EXACT MATCH (1.2 points)
+        0, // target=0 - CONSERVATIVE (1.0 points)
+        4, // target=4 - CONSERVATIVE (1.0 points)
+        2, // target=2 - DISTANCE 2 (0.5 points)
+        1, // target=1 - DISTANCE 1 (0.8 points)
+    ];
+
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    // Total points: 4*1.2 + 2*1.0 + 1*0.5 + 1*0.8 = 4.8 + 2.0 + 0.5 + 0.8 = 8.1 points
+    // Max points: 8 * 1.2 = 9.6 points
+    // Quality = (8.1 / 9.6) * 100% = 84.375%
+    assert!(
+        (quality - 84.375).abs() < 0.01,
+        "Mixed scenario should have ~84.38% quality"
+    );
+}
+
+#[test]
+fn test_quality_metric_edge_cases() {
+    let model = create_test_model(None);
+
+    // Test empty arrays
+    let quality = model.calculate_quality_metric(&[], &[]);
+    assert_eq!(quality, 0.0, "Empty arrays should return 0% quality");
+
+    // Test mismatched lengths
+    let predictions = vec![1, 2, 3];
+    let targets = vec![1, 2];
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    assert_eq!(quality, 0.0, "Mismatched lengths should return 0% quality");
+
+    // Test invalid class values (should be skipped)
+    let predictions = vec![1, 5, 3, -1]; // 5 and -1 are invalid
+    let targets = vec![0, 2, 4, 1]; // Only indices 0 and 2 are valid
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    // Valid predictions: pred=1→target=0 (1.0 conservative), pred=3→target=4 (1.0 conservative)
+    // Total points: 1.0 + 1.0 = 2.0 points
+    // Max points: 2 * 1.2 = 2.4 points
+    // Quality = (2.0 / 2.4) * 100% = 83.33%
+    assert!(
+        (quality - 83.33).abs() < 0.01,
+        "Invalid classes should be skipped, valid conservative predictions should score ~83.33%"
+    );
+}
+
+#[test]
+fn test_quality_metric_distance_4_total_failure() {
+    let model = create_test_model(None);
+
+    // Test distance 4 scenarios (total failures)
+    let predictions = vec![0, 4]; // Strong Down, Strong Up
+    let targets = vec![4, 0]; // Strong Up, Strong Down (distance 4 each)
+
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    // Distance 4: 0.0 points each
+    // Total points: 0.0 + 0.0 = 0.0 points
+    // Max points: 2 * 1.2 = 2.4 points
+    // Quality = (0.0 / 2.4) * 100% = 0%
+    assert_eq!(
+        quality, 0.0,
+        "Distance 4 errors should result in 0% quality"
+    );
+}
+
+#[test]
+fn test_quality_metric_scoring_constants() {
+    let model = create_test_model(None);
+
+    // Test that scoring constants work as expected
+    let predictions = vec![0, 1, 0, 0, 0];
+    let targets = vec![0, 0, 1, 2, 3]; // Exact, Conservative, Dist1, Dist2, Dist3
+
+    let quality = model.calculate_quality_metric(&predictions, &targets);
+    // Points: 1.2 (exact) + 1.0 (conservative) + 0.8 (dist1) + 0.5 (dist2) + 0.2 (dist3) = 3.7
+    // Max points: 5 * 1.2 = 6.0
+    // Quality = (3.7 / 6.0) * 100% = 61.67%
+    assert!(
+        (quality - 61.67).abs() < 0.01,
+        "Scoring constants should result in ~61.67% quality"
+    );
+}
