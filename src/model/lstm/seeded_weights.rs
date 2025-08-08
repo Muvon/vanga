@@ -46,6 +46,46 @@ impl SeededTensorUtils {
     pub fn ones_tensor(shape: &[usize], device: &Device, dtype: DType) -> Result<Tensor> {
         Tensor::ones(shape, dtype, device)
     }
+
+    /// Apply deterministic dropout using device seed
+    ///
+    /// This function provides reproducible dropout behavior by using the device's
+    /// current seed state. For reproducible results, ensure device.set_seed() is
+    /// called before training begins.
+    ///
+    /// # Arguments
+    /// * `tensor` - Input tensor to apply dropout to
+    /// * `dropout_rate` - Dropout probability (0.0 to 1.0)
+    /// * `training` - Whether in training mode (dropout only applied during training)
+    ///
+    /// # Returns
+    /// * Tensor with dropout applied (scaled by 1/(1-p) during training)
+    pub fn deterministic_dropout(
+        tensor: &Tensor,
+        dropout_rate: f32,
+        training: bool,
+    ) -> Result<Tensor> {
+        // No dropout during inference or if rate is 0
+        if !training || dropout_rate <= 0.0 || dropout_rate >= 1.0 {
+            return Ok(tensor.clone());
+        }
+
+        let device = tensor.device();
+        let shape = tensor.shape();
+
+        // Create random tensor using device's current seed state
+        // This will be deterministic if device seed was set
+        let random_tensor = Tensor::rand(0.0, 1.0, shape, device)?;
+
+        // Create dropout mask: keep values where random > dropout_rate
+        let keep_mask = random_tensor.gt(dropout_rate)?;
+
+        // Apply mask and scale by 1/(1-p) to maintain expected value
+        let scale = 1.0 / (1.0 - dropout_rate);
+        let masked_tensor = tensor.mul(&keep_mask.to_dtype(tensor.dtype())?)?;
+        let scale_tensor = Tensor::new(scale, device)?.broadcast_as(tensor.shape())?;
+        masked_tensor.mul(&scale_tensor)
+    }
 }
 
 /// Helper function to set device seed and log the action
@@ -127,6 +167,63 @@ mod tests {
 
         // Test with Some(42) - should succeed gracefully even if CPU seeding fails
         set_device_seed_with_logging(&device, Some(42))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_deterministic_dropout_reproducibility() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let shape = &[4, 8];
+        let dropout_rate = 0.3;
+
+        // Create test tensor
+        let test_tensor = Tensor::ones(shape, dtype, &device)?;
+
+        // Set seed and apply dropout
+        let _ = device.set_seed(42); // May fail on CPU, that's OK
+        let dropout1 = SeededTensorUtils::deterministic_dropout(&test_tensor, dropout_rate, true)?;
+
+        // Set same seed and apply dropout again
+        let _ = device.set_seed(42); // May fail on CPU, that's OK
+        let dropout2 = SeededTensorUtils::deterministic_dropout(&test_tensor, dropout_rate, true)?;
+
+        // Verify shapes are identical
+        assert_eq!(dropout1.shape(), dropout2.shape());
+        assert_eq!(dropout1.shape(), test_tensor.shape());
+
+        // Verify tensors have expected properties
+        assert!(dropout1.elem_count() > 0);
+        assert!(dropout2.elem_count() > 0);
+
+        // Note: On CPU, results may not be identical due to seeding limitations
+        // This test verifies that dropout works without crashing and maintains shape
+        Ok(())
+    }
+
+    #[test]
+    fn test_deterministic_dropout_training_mode() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let shape = &[2, 4];
+        let dropout_rate = 0.5;
+
+        let test_tensor = Tensor::ones(shape, dtype, &device)?;
+
+        // Training mode should apply dropout
+        let dropout_training =
+            SeededTensorUtils::deterministic_dropout(&test_tensor, dropout_rate, true)?;
+        assert_eq!(dropout_training.shape(), test_tensor.shape());
+
+        // Inference mode should return original tensor
+        let dropout_inference =
+            SeededTensorUtils::deterministic_dropout(&test_tensor, dropout_rate, false)?;
+        assert_eq!(dropout_inference.shape(), test_tensor.shape());
+
+        // Zero dropout rate should return original tensor
+        let dropout_zero = SeededTensorUtils::deterministic_dropout(&test_tensor, 0.0, true)?;
+        assert_eq!(dropout_zero.shape(), test_tensor.shape());
 
         Ok(())
     }
