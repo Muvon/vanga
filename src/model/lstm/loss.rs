@@ -812,6 +812,13 @@ impl LSTMModel {
             0.0
         };
 
+        // Calculate error metric (percentage of predictions with distance > 2)
+        let error_percentage = if !all_predictions.is_empty() && !all_targets.is_empty() {
+            self.calculate_error_metric(&all_predictions, &all_targets)
+        } else {
+            0.0
+        };
+
         // Log comprehensive categorical metrics with target-type aware interpretation
         let target_type_name = if let Some((_, target_type)) = &self.target_context {
             match target_type {
@@ -833,8 +840,8 @@ impl LSTMModel {
         };
 
         log::info!(
-            "📊 Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, Quality: {:.1}%, MSE: {:.3}, MAPE: {:.2}%",
-            target_type_name, metric_label, accuracy, precision, recall, f1, quality, mse, categorical_mape
+            "📊 Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, Quality: {:.1}%, Error: {:.1}%, MSE: {:.3}, MAPE: {:.2}%",
+            target_type_name, metric_label, accuracy, precision, recall, f1, quality, error_percentage, mse, categorical_mape
         );
 
         log::debug!(
@@ -1074,6 +1081,43 @@ impl LSTMModel {
             0.0
         } else {
             (total_win_points / total_possible_points) * 100.0
+        }
+    }
+
+    /// Calculate error metric (percentage of predictions with distance >= 2 from target OR predicting adjacent movement when actual is neutral)
+    /// This measures "bad" predictions where we predict opposite/far movements OR predict movement when market is sideways
+    pub fn calculate_error_metric(&self, predictions: &[i32], targets: &[i32]) -> f32 {
+        if predictions.len() != targets.len() || predictions.is_empty() {
+            return 0.0;
+        }
+
+        let mut total_predictions = 0;
+        let mut error_predictions = 0;
+
+        for (&pred, &target) in predictions.iter().zip(targets.iter()) {
+            // Skip invalid predictions/targets (same validation as quality metric)
+            if !(0..=4).contains(&pred) || !(0..=4).contains(&target) {
+                continue;
+            }
+
+            total_predictions += 1;
+
+            let distance = (pred - target).abs();
+
+            // Count as errors:
+            // 1. Distance >= 2: opposite or far movements
+            // 2. Special case: target is neutral (2) but we predict adjacent movement (1 or 3)
+            let is_error = distance >= 2 || (target == 2 && (pred == 1 || pred == 3));
+
+            if is_error {
+                error_predictions += 1;
+            }
+        }
+
+        if total_predictions == 0 {
+            0.0
+        } else {
+            (error_predictions as f32 / total_predictions as f32) * 100.0
         }
     }
 
@@ -1447,5 +1491,82 @@ impl LSTMModel {
         );
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::lstm::LSTMConfig;
+
+    #[test]
+    fn test_error_metric_calculation() {
+        // Create a minimal LSTMModel for testing
+        let config = LSTMConfig {
+            input_size: 10,
+            hidden_sizes: vec![32],
+            output_size: 5,
+            sequence_length: 20,
+            learning_rate: 0.001,
+            num_layers: 1,
+        };
+        let model = LSTMModel::new(config).expect("Failed to create model");
+
+        // Test case 1: No errors (all exact matches)
+        let predictions = vec![0, 1, 2, 3, 4];
+        let targets = vec![0, 1, 2, 3, 4]; // Exact matches
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 0.0);
+
+        // Test case 2: Only distance 1 errors (should not count as errors, except when predicting movement on neutral)
+        let predictions = vec![0, 1, 2, 4, 3];
+        let targets = vec![1, 0, 3, 3, 4]; // Distances: 1, 1, 1, 1, 1 - none involve target=2 with pred=1 or 3
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 0.0);
+
+        // Test case 3: Distance >= 2 errors (should count as errors)
+        let predictions = vec![0, 1, 2, 3, 4];
+        let targets = vec![2, 3, 0, 1, 2]; // Distances: 2, 2, 2, 2, 2
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 100.0); // All 5 predictions have distance >= 2
+
+        // Test case 4: Distance 3 and 4 errors
+        let predictions = vec![0, 1, 2, 3, 4];
+        let targets = vec![3, 4, 2, 0, 1]; // Distances: 3, 3, 0, 3, 3
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 80.0); // 4 out of 5 predictions have distance >= 2
+
+        // Test case 5: Predict adjacent movement when actual is neutral (target = 2)
+        let predictions = vec![1, 3, 0, 4, 2]; // Down, Up, Strong Down, Strong Up, Sideways
+        let targets = vec![2, 2, 2, 2, 2]; // All actual are Sideways
+                                           // Errors: pred=1 (distance=1 but error), pred=3 (distance=1 but error), pred=0 (distance=2), pred=4 (distance=2), pred=2 (exact match)
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 80.0); // 4 out of 5 predictions are errors
+
+        // Test case 6: Mixed errors (distance >= 2 AND adjacent-movement-when-neutral)
+        let predictions = vec![0, 1, 3, 4]; // Strong Down, Down, Up, Strong Up
+        let targets = vec![4, 2, 2, 0]; // Strong Up, Sideways, Sideways, Strong Down
+                                        // Errors: distance=4, adjacent-movement-when-neutral, adjacent-movement-when-neutral, distance=4
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 100.0); // All 4 predictions are errors
+
+        // Test case 7: No errors with neutral predictions
+        let predictions = vec![2, 2, 2, 2]; // All predict Sideways
+        let targets = vec![1, 2, 3, 1]; // Various targets
+                                        // Distances: 1, 0, 1, 1 - none >= 2, and no movement-when-neutral errors
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 0.0); // No errors
+
+        // Test case 8: Empty arrays
+        let predictions = vec![];
+        let targets = vec![];
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 0.0);
+
+        // Test case 9: Invalid class values (should be skipped)
+        let predictions = vec![0, 1, 5, 3, -1]; // 5 and -1 are invalid
+        let targets = vec![0, 1, 2, 3, 4];
+        let error = model.calculate_error_metric(&predictions, &targets);
+        assert_eq!(error, 0.0); // Only valid pairs: (0,0), (1,1), (3,3) - all exact matches
     }
 }
