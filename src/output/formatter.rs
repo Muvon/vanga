@@ -1032,18 +1032,8 @@ impl OutputFormatter {
             // Calculate sequence sentiment score from OHLCV data
             let sequence_sentiment = {
                 use crate::targets::sentiment::calculate_sequence_sentiment_score;
-                // Convert data::structures::MarketDataRow to sentiment::MarketDataRow
-                let sentiment_candles: Vec<crate::targets::sentiment::MarketDataRow> =
-                    sequence_ohlcv
-                        .iter()
-                        .map(|candle| crate::targets::sentiment::MarketDataRow {
-                            open: candle.open,
-                            high: candle.high,
-                            low: candle.low,
-                            close: candle.close,
-                            volume: candle.volume,
-                        })
-                        .collect();
+                // Now using the same MarketDataRow structure everywhere
+                let sentiment_candles = sequence_ohlcv;
                 calculate_sequence_sentiment_score(&sentiment_candles)
             };
 

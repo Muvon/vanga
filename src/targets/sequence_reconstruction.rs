@@ -16,13 +16,17 @@ pub struct SequenceReconstructionConfig {
     pub percentiles: [f64; 2],
     /// Bandwidth size multiplier for breakout detection
     pub bandwidth_size: f64,
+    /// Neutral band factor for symmetric neutral zone (0.2-0.6)
+    /// Controls the size of the neutral zone as a fraction of the percentile range
+    pub neutral_band_factor: f64,
 }
 
 impl Default for SequenceReconstructionConfig {
     fn default() -> Self {
         Self {
-            percentiles: [0.1, 0.9], // Default 10th-90th percentiles
-            bandwidth_size: 1.0,     // Default bandwidth multiplier
+            percentiles: [0.1, 0.9],  // Default 10th-90th percentiles
+            bandwidth_size: 1.0,      // Default bandwidth multiplier
+            neutral_band_factor: 0.4, // 40% of percentile range becomes neutral zone
         }
     }
 }
@@ -126,6 +130,7 @@ impl SequenceAnalyzer {
         let config = SequenceReconstructionConfig {
             percentiles: [0.1, 0.9], // Default percentiles for 5-class system
             bandwidth_size: model_config.base_sensitivity, // Use base_sensitivity as bandwidth
+            neutral_band_factor: 0.4, // Default neutral band factor
         };
         Self::new(config)
     }
@@ -148,6 +153,7 @@ impl SequenceAnalyzer {
         let config = SequenceReconstructionConfig {
             percentiles: adaptive_percentiles,
             bandwidth_size,
+            neutral_band_factor: 0.4, // Default neutral band factor
         };
 
         Ok(Self::new(config))
@@ -199,12 +205,18 @@ impl SequenceAnalyzer {
         let base_bandwidth = sequence_max - sequence_min;
         let bandwidth = base_bandwidth * self.config.bandwidth_size;
 
-        // Define classification boundaries (matches training logic exactly)
+        // Calculate symmetric neutral band within percentile range
+        let range_center = (sequence_min + sequence_max) / 2.0;
+        let neutral_band_size = base_bandwidth * self.config.neutral_band_factor;
+        let neutral_lower = range_center - (neutral_band_size / 2.0);
+        let neutral_upper = range_center + (neutral_band_size / 2.0);
+
+        // Define classification boundaries with symmetric neutral zone
         let boundaries = [
-            sequence_min - bandwidth, // boundary_1: strong_down | moderate_down
-            sequence_min,             // boundary_2: moderate_down | neutral
-            sequence_max,             // boundary_3: neutral | moderate_up
-            sequence_max + bandwidth, // boundary_4: moderate_up | strong_up
+            sequence_min - bandwidth, // boundary_1: strong_down | moderate_down (UNCHANGED)
+            neutral_lower,            // boundary_2: moderate_down | neutral (NEW: symmetric)
+            neutral_upper,            // boundary_3: neutral | moderate_up (NEW: symmetric)
+            sequence_max + bandwidth, // boundary_4: moderate_up | strong_up (UNCHANGED)
         ];
 
         Ok(SequenceBoundaries {
@@ -347,6 +359,7 @@ mod tests {
         let analyzer = SequenceAnalyzer::new(SequenceReconstructionConfig {
             percentiles: [0.2, 0.8],
             bandwidth_size: 1.0,
+            neutral_band_factor: 0.4, // Default neutral band factor for test
         });
 
         let candles = create_test_candles(vec![

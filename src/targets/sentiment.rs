@@ -47,15 +47,8 @@ use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Market data row for sentiment analysis
-#[derive(Debug, Clone)]
-pub struct MarketDataRow {
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: f64,
-}
+// Use the main MarketDataRow from data::structures
+use crate::data::structures::MarketDataRow;
 
 /// Sentiment analysis metrics
 #[derive(Debug, Clone)]
@@ -449,6 +442,7 @@ fn extract_ohlcv_data(df: &DataFrame) -> Result<Vec<MarketDataRow>> {
             (open[i], high[i], low[i], close[i], volume[i])
         {
             ohlcv_data.push(MarketDataRow {
+                timestamp: i as i64, // Use index as timestamp for sentiment analysis
                 open: o,
                 high: h,
                 low: l,
