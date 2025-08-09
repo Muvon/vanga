@@ -103,6 +103,7 @@ impl MultiTargetConfig {
         Self {
             price_level_config: PriceLevelConfig {
                 bandwidth_size: model_config.targets.base_sensitivity,
+                neutral_band_factor: 0.4, // Default neutral band factor (40% of range)
             },
             horizons,
         }

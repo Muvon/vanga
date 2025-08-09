@@ -1,4 +1,5 @@
 use crate::config::model::TargetsConfig;
+use crate::data::structures::MarketDataRow;
 use crate::targets::sentiment::*;
 
 #[test]
@@ -13,6 +14,7 @@ fn test_sentiment_calibration_with_realistic_data() {
         let volume = 1000.0 + (i as f64 * 10.0); // Increasing volume
 
         test_data.push(MarketDataRow {
+            timestamp: i as i64,
             open: base_price,
             high: base_price + price_change.abs(),
             low: base_price - price_change.abs(),
@@ -78,6 +80,7 @@ fn test_sentiment_classification_balanced_distribution() {
     let test_data = vec![
         // Strong panic: Large red bodies, lower wicks
         MarketDataRow {
+            timestamp: 0,
             open: 100.0,
             high: 102.0,
             low: 90.0,
@@ -85,6 +88,7 @@ fn test_sentiment_classification_balanced_distribution() {
             volume: 1000.0,
         },
         MarketDataRow {
+            timestamp: 0,
             open: 92.0,
             high: 94.0,
             low: 85.0,
@@ -93,6 +97,7 @@ fn test_sentiment_classification_balanced_distribution() {
         },
         // Moderate panic: Medium red bodies
         MarketDataRow {
+            timestamp: 0,
             open: 100.0,
             high: 103.0,
             low: 95.0,
@@ -100,6 +105,7 @@ fn test_sentiment_classification_balanced_distribution() {
             volume: 800.0,
         },
         MarketDataRow {
+            timestamp: 0,
             open: 97.0,
             high: 99.0,
             low: 93.0,
@@ -108,6 +114,7 @@ fn test_sentiment_classification_balanced_distribution() {
         },
         // Neutral: Small bodies, balanced wicks
         MarketDataRow {
+            timestamp: 0,
             open: 100.0,
             high: 102.0,
             low: 98.0,
@@ -115,6 +122,7 @@ fn test_sentiment_classification_balanced_distribution() {
             volume: 500.0,
         },
         MarketDataRow {
+            timestamp: 0,
             open: 101.0,
             high: 103.0,
             low: 99.0,
@@ -123,6 +131,7 @@ fn test_sentiment_classification_balanced_distribution() {
         },
         // Moderate greed: Medium green bodies
         MarketDataRow {
+            timestamp: 0,
             open: 100.0,
             high: 108.0,
             low: 99.0,
@@ -130,6 +139,7 @@ fn test_sentiment_classification_balanced_distribution() {
             volume: 800.0,
         },
         MarketDataRow {
+            timestamp: 0,
             open: 105.0,
             high: 110.0,
             low: 103.0,
@@ -138,6 +148,7 @@ fn test_sentiment_classification_balanced_distribution() {
         },
         // Strong greed: Large green bodies, upper wicks
         MarketDataRow {
+            timestamp: 0,
             open: 100.0,
             high: 120.0,
             low: 98.0,
@@ -145,6 +156,7 @@ fn test_sentiment_classification_balanced_distribution() {
             volume: 1500.0,
         },
         MarketDataRow {
+            timestamp: 0,
             open: 115.0,
             high: 125.0,
             low: 112.0,
@@ -174,6 +186,7 @@ fn test_sentiment_classification_balanced_distribution() {
 #[test]
 fn test_sentiment_metrics_calculation() {
     let test_candle = MarketDataRow {
+        timestamp: 0,
         open: 100.0,
         high: 110.0,
         low: 95.0,
@@ -248,6 +261,7 @@ fn test_sentiment_edge_cases() {
     // Test with empty data
     let empty_data: Vec<MarketDataRow> = vec![];
     let test_data = vec![MarketDataRow {
+        timestamp: 0,
         open: 100.0,
         high: 102.0,
         low: 98.0,
@@ -263,6 +277,7 @@ fn test_sentiment_edge_cases() {
 
     // Test with invalid candle (high < low)
     let invalid_candle = MarketDataRow {
+        timestamp: 0,
         open: 100.0,
         high: 95.0, // Invalid: high < low
         low: 105.0,
@@ -277,17 +292,19 @@ fn test_sentiment_edge_cases() {
 #[test]
 fn test_sentiment_volume_confirmation() {
     let high_volume_candle = MarketDataRow {
+        timestamp: 0,
         open: 100.0,
         high: 110.0,
-        low: 98.0,
+        low: 95.0,
         close: 108.0,
         volume: 2000.0, // High volume
     };
 
     let low_volume_candle = MarketDataRow {
+        timestamp: 0,
         open: 100.0,
         high: 110.0,
-        low: 98.0,
+        low: 95.0,
         close: 108.0,
         volume: 200.0, // Low volume
     };

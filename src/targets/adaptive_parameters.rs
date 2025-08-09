@@ -97,6 +97,11 @@ pub struct PriceLevelAdaptiveParams {
     /// Volatility adjustment factor for bandwidth scaling
     pub volatility_adjustment: f64,
 
+    /// Neutral band factor for symmetric neutral zone (0.2-0.6)
+    /// Controls the size of the neutral zone as a fraction of the percentile range
+    /// 0.3 = 30% of percentile range becomes neutral zone (centered)
+    pub neutral_band_factor: f64,
+
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
 }
@@ -107,6 +112,7 @@ impl Default for PriceLevelAdaptiveParams {
             bandwidth_size: 1.0,
             adaptive_percentiles: [0.1, 0.9],
             volatility_adjustment: 1.0,
+            neutral_band_factor: 0.4, // 40% of percentile range becomes neutral zone
             achieved_balance: ClassDistributionBalance::default(),
         }
     }
@@ -277,6 +283,7 @@ pub struct AdaptiveParameterCalibrator {
 struct PriceLevelEvaluationParams {
     bandwidth_size: f64,
     percentiles: [f64; 2],
+    neutral_band_factor: f64,
 }
 
 impl AdaptiveParameterCalibrator {
@@ -323,6 +330,7 @@ impl AdaptiveParameterCalibrator {
                 let eval_params = PriceLevelEvaluationParams {
                     bandwidth_size: bandwidth,
                     percentiles,
+                    neutral_band_factor: 0.4, // Default for this calibration method
                 };
 
                 let balance = self
@@ -361,6 +369,7 @@ impl AdaptiveParameterCalibrator {
                         bandwidth_size: bandwidth,
                         adaptive_percentiles: percentiles,
                         volatility_adjustment: 1.0, // Default adjustment
+                        neutral_band_factor: 0.4,   // Default neutral band factor
                         achieved_balance: balance,
                     };
                 }
@@ -566,12 +575,36 @@ impl AdaptiveParameterCalibrator {
             )
             .await?;
 
-        // Step 4: Create calibration metadata
+        // Step 4: Calibrate sentiment parameters (candle body analysis)
+        log::info!("📊 Calibrating sentiment parameters (candle body analysis)...");
+        let sentiment_params = self
+            .calibrate_sentiment_parameters_from_ohlcv(
+                ohlcv_data,
+                sequence_length,
+                horizon_steps,
+                sequence_indices,
+            )
+            .await?;
+
+        // Step 5: Calibrate volume parameters (logarithmic volume analysis)
+        log::info!("📊 Calibrating volume parameters (logarithmic volume analysis)...");
+        let volume_params = self
+            .calibrate_volume_parameters_from_ohlcv(
+                ohlcv_data,
+                sequence_length,
+                horizon_steps,
+                sequence_indices,
+            )
+            .await?;
+
+        // Step 6: Create calibration metadata
         let calibration_time = start_time.elapsed().as_millis() as u64;
         let overall_balance_score = (direction_params.achieved_balance.balance_score
             + price_level_params.achieved_balance.balance_score
-            + volatility_params.achieved_balance.balance_score)
-            / 3.0;
+            + volatility_params.achieved_balance.balance_score
+            + sentiment_params.achieved_balance.balance_score
+            + volume_params.achieved_balance.balance_score)
+            / 5.0;
 
         let calibration_info = CalibrationMetadata {
             data_length: ohlcv_data.len(),
@@ -582,15 +615,15 @@ impl AdaptiveParameterCalibrator {
             optimization_time_ms: calibration_time,
             target_balance: self.target_balance,
             overall_balance_score,
-            calibration_success: overall_balance_score < self.tolerance * 3.0, // 3x tolerance for combined system
+            calibration_success: overall_balance_score < self.tolerance * 5.0, // 5x tolerance for combined system
         };
 
         let adaptive_params = AdaptiveTargetParameters {
             direction: direction_params,
             price_levels: price_level_params,
             volatility: volatility_params,
-            sentiment: SentimentAdaptiveParams::default(), // TODO: Add calibration
-            volume: VolumeAdaptiveParams::default(),       // TODO: Add calibration
+            sentiment: sentiment_params,
+            volume: volume_params,
             calibration_info,
         };
 
@@ -981,47 +1014,71 @@ impl AdaptiveParameterCalibrator {
             [0.2, 0.8],
             [0.25, 0.75],
         ];
+        let neutral_band_candidates = vec![0.2, 0.3, 0.4, 0.5, 0.6]; // 20%-60% neutral zone
 
         let mut best_params = PriceLevelAdaptiveParams::default();
         let mut best_balance_score = f64::INFINITY;
 
         for &bandwidth in &bandwidth_candidates {
             for &percentiles in &percentile_candidates {
-                // Test this parameter combination
-                let eval_params = PriceLevelEvaluationParams {
-                    bandwidth_size: bandwidth,
-                    percentiles,
-                };
-                let balance = self
-                    .evaluate_price_level_parameters(
-                        ohlcv_data,
-                        sequence_indices,
-                        sequence_length,
-                        horizon_steps,
-                        &eval_params,
-                    )
-                    .await?;
-
-                // Score this configuration (lower is better)
-                let score = balance.balance_score + (balance.imbalance_ratio - 1.0) * 0.1;
-
-                if score < best_balance_score {
-                    best_balance_score = score;
-                    best_params = PriceLevelAdaptiveParams {
+                for &neutral_factor in &neutral_band_candidates {
+                    // Test this parameter combination
+                    let eval_params = PriceLevelEvaluationParams {
                         bandwidth_size: bandwidth,
-                        adaptive_percentiles: percentiles,
-                        volatility_adjustment: mean_volatility / 0.02, // Normalize to 2% baseline
-                        achieved_balance: balance,
+                        percentiles,
+                        neutral_band_factor: neutral_factor,
                     };
+                    let balance = self
+                        .evaluate_price_level_parameters(
+                            ohlcv_data,
+                            sequence_indices,
+                            sequence_length,
+                            horizon_steps,
+                            &eval_params,
+                        )
+                        .await?;
+
+                    // Score this configuration (lower is better)
+                    // MIN-CLASS OPTIMIZATION: Prioritize parameters that maximize minimum class representation
+                    let min_class_ratio = balance
+                        .class_percentages
+                        .iter()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap())
+                        .unwrap()
+                        / 100.0;
+                    let min_class_threshold = 0.15; // 15% minimum per class
+
+                    // Heavy penalty if any class falls below threshold
+                    let min_class_penalty = if min_class_ratio < min_class_threshold {
+                        (min_class_threshold - min_class_ratio) * 50.0
+                    } else {
+                        0.0
+                    };
+
+                    let score = balance.balance_score
+                        + (balance.imbalance_ratio - 1.0) * 0.1
+                        + min_class_penalty;
+
+                    if score < best_balance_score {
+                        best_balance_score = score;
+                        best_params = PriceLevelAdaptiveParams {
+                            bandwidth_size: bandwidth,
+                            adaptive_percentiles: percentiles,
+                            volatility_adjustment: mean_volatility / 0.02, // Normalize to 2% baseline
+                            neutral_band_factor: neutral_factor,
+                            achieved_balance: balance,
+                        };
+                    }
                 }
             }
         }
 
         log::info!(
-            "🎯 Price level calibration: bandwidth={:.3}, percentiles=[{:.2}, {:.2}], balance_score={:.4}, imbalance={:.1}x",
+            "🎯 Price level calibration: bandwidth={:.3}, percentiles=[{:.2}, {:.2}], neutral_band={:.2}, balance_score={:.4}, imbalance={:.1}x",
             best_params.bandwidth_size,
             best_params.adaptive_percentiles[0],
             best_params.adaptive_percentiles[1],
+            best_params.neutral_band_factor,
             best_params.achieved_balance.balance_score,
             best_params.achieved_balance.imbalance_ratio
         );
@@ -1063,6 +1120,7 @@ impl AdaptiveParameterCalibrator {
                     let reconstruction_config = SequenceReconstructionConfig {
                         percentiles: params.percentiles,
                         bandwidth_size: params.bandwidth_size,
+                        neutral_band_factor: params.neutral_band_factor,
                     };
                     let analyzer = SequenceAnalyzer::new(reconstruction_config);
                     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
@@ -1310,6 +1368,24 @@ impl AdaptiveParameterCalibrator {
             params.volatility.extreme_multiplier,
             params.volatility.achieved_balance.balance_score,
             params.volatility.achieved_balance.imbalance_ratio
+        );
+
+        // Sentiment results
+        log::info!(
+            "📊 Sentiment: body_sensitivity={:.3}, volume_weight={:.3}, balance_score={:.4}, imbalance={:.1}x",
+            params.sentiment.body_sensitivity,
+            params.sentiment.volume_weight,
+            params.sentiment.achieved_balance.balance_score,
+            params.sentiment.achieved_balance.imbalance_ratio
+        );
+
+        // Volume results
+        log::info!(
+            "📊 Volume: bandwidth={:.3}, extreme_mult={:.2}, balance_score={:.4}, imbalance={:.1}x",
+            params.volume.bandwidth_size,
+            params.volume.extreme_multiplier,
+            params.volume.achieved_balance.balance_score,
+            params.volume.achieved_balance.imbalance_ratio
         );
 
         // Overall results
@@ -1653,5 +1729,298 @@ impl AdaptiveParameterCalibrator {
         } else {
             Ok(f64::INFINITY) // No valid targets
         }
+    }
+
+    /// Calibrate sentiment parameters from OHLCV data (for use in calibrate_all_targets)
+    async fn calibrate_sentiment_parameters_from_ohlcv(
+        &self,
+        ohlcv_data: &[MarketDataRow],
+        sequence_length: usize,
+        horizon_steps: usize,
+        sequence_indices: &[usize],
+    ) -> Result<SentimentAdaptiveParams> {
+        log::debug!("🎯 Starting sentiment parameter calibration from OHLCV...");
+
+        let mut best_params = SentimentAdaptiveParams::default();
+        let mut best_balance_score = f64::INFINITY;
+
+        // Grid search for optimal sentiment parameters
+        let body_sensitivity_values = vec![0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+        let volume_weight_values = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let consistency_factor_values = vec![0.8, 1.0, 1.2, 1.5];
+
+        for &body_sensitivity in &body_sensitivity_values {
+            for &volume_weight in &volume_weight_values {
+                for &consistency_factor in &consistency_factor_values {
+                    let balance = self
+                        .evaluate_sentiment_parameters_from_ohlcv(
+                            ohlcv_data,
+                            sequence_indices,
+                            sequence_length,
+                            horizon_steps,
+                            body_sensitivity,
+                            volume_weight,
+                            consistency_factor,
+                        )
+                        .await?;
+
+                    // MIN-CLASS OPTIMIZATION: Prioritize parameters that maximize minimum class representation
+                    let min_class_ratio = balance
+                        .class_percentages
+                        .iter()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap())
+                        .unwrap()
+                        / 100.0;
+                    let min_class_threshold = 0.15; // 15% minimum per class
+
+                    // Heavy penalty if any class falls below threshold
+                    let min_class_penalty = if min_class_ratio < min_class_threshold {
+                        (min_class_threshold - min_class_ratio) * 50.0
+                    } else {
+                        0.0
+                    };
+
+                    let score = balance.balance_score
+                        + (balance.imbalance_ratio - 1.0) * 0.1
+                        + min_class_penalty;
+
+                    if score < best_balance_score {
+                        best_balance_score = score;
+                        best_params = SentimentAdaptiveParams {
+                            body_sensitivity,
+                            volume_weight,
+                            consistency_factor,
+                            achieved_balance: balance,
+                        };
+                    }
+                }
+            }
+        }
+
+        let min_class_ratio = best_params
+            .achieved_balance
+            .class_percentages
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+            / 100.0;
+
+        log::info!(
+            "🎯 Sentiment calibration: body_sensitivity={:.3}, volume_weight={:.3}, consistency_factor={:.3}, balance_score={:.4}, imbalance={:.1}x, min_class={:.1}%",
+            best_params.body_sensitivity,
+            best_params.volume_weight,
+            best_params.consistency_factor,
+            best_params.achieved_balance.balance_score,
+            best_params.achieved_balance.imbalance_ratio,
+            min_class_ratio * 100.0
+        );
+
+        Ok(best_params)
+    }
+
+    /// Calibrate volume parameters from OHLCV data (for use in calibrate_all_targets)
+    async fn calibrate_volume_parameters_from_ohlcv(
+        &self,
+        ohlcv_data: &[MarketDataRow],
+        sequence_length: usize,
+        horizon_steps: usize,
+        sequence_indices: &[usize],
+    ) -> Result<VolumeAdaptiveParams> {
+        log::debug!("🎯 Starting volume parameter calibration from OHLCV...");
+
+        let mut best_params = VolumeAdaptiveParams::default();
+        let mut best_balance_score = f64::INFINITY;
+
+        // Grid search for optimal volume parameters
+        let bandwidth_values = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.8];
+        let extreme_multiplier_values = vec![1.5, 2.0, 2.5, 3.0];
+        let smoothing_periods_values = vec![1, 2, 3, 5];
+
+        for &bandwidth_size in &bandwidth_values {
+            for &extreme_multiplier in &extreme_multiplier_values {
+                for &smoothing_periods in &smoothing_periods_values {
+                    let balance = self
+                        .evaluate_volume_parameters_from_ohlcv(
+                            ohlcv_data,
+                            sequence_indices,
+                            sequence_length,
+                            horizon_steps,
+                            bandwidth_size,
+                            extreme_multiplier,
+                            smoothing_periods,
+                        )
+                        .await?;
+
+                    // MIN-CLASS OPTIMIZATION: Prioritize parameters that maximize minimum class representation
+                    let min_class_ratio = balance
+                        .class_percentages
+                        .iter()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap())
+                        .unwrap()
+                        / 100.0;
+                    let min_class_threshold = 0.15; // 15% minimum per class
+
+                    // Heavy penalty if any class falls below threshold
+                    let min_class_penalty = if min_class_ratio < min_class_threshold {
+                        (min_class_threshold - min_class_ratio) * 50.0
+                    } else {
+                        0.0
+                    };
+
+                    let score = balance.balance_score
+                        + (balance.imbalance_ratio - 1.0) * 0.1
+                        + min_class_penalty;
+
+                    if score < best_balance_score {
+                        best_balance_score = score;
+                        best_params = VolumeAdaptiveParams {
+                            bandwidth_size,
+                            extreme_multiplier,
+                            smoothing_periods,
+                            achieved_balance: balance,
+                        };
+                    }
+                }
+            }
+        }
+
+        let min_class_ratio = best_params
+            .achieved_balance
+            .class_percentages
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+            / 100.0;
+
+        log::info!(
+            "🎯 Volume calibration: bandwidth={:.3}, extreme_multiplier={:.2}, smoothing_periods={}, balance_score={:.4}, imbalance={:.1}x, min_class={:.1}%",
+            best_params.bandwidth_size,
+            best_params.extreme_multiplier,
+            best_params.smoothing_periods,
+            best_params.achieved_balance.balance_score,
+            best_params.achieved_balance.imbalance_ratio,
+            min_class_ratio * 100.0
+        );
+
+        Ok(best_params)
+    }
+
+    /// Evaluate sentiment parameters from OHLCV data by simulating classification
+    async fn evaluate_sentiment_parameters_from_ohlcv(
+        &self,
+        ohlcv_data: &[MarketDataRow],
+        sequence_indices: &[usize],
+        sequence_length: usize,
+        horizon_steps: usize,
+        body_sensitivity: f64,
+        volume_weight: f64,
+        consistency_factor: f64,
+    ) -> Result<ClassDistributionBalance> {
+        use crate::targets::sentiment::{classify_sentiment, SentimentConfig};
+
+        let mut class_counts = [0usize; 5];
+        let sample_limit = sequence_indices.len().min(500); // Limit for performance
+
+        let config = SentimentConfig {
+            body_sensitivity,
+            volume_weight,
+            consistency_factor,
+        };
+
+        for &seq_idx in sequence_indices.iter().take(sample_limit) {
+            let sequence_end_idx = seq_idx + sequence_length;
+            let target_end_idx = sequence_end_idx + horizon_steps;
+
+            if target_end_idx <= ohlcv_data.len() {
+                let sequence_data = &ohlcv_data[seq_idx..sequence_end_idx];
+                let horizon_data = &ohlcv_data[sequence_end_idx..target_end_idx];
+
+                if sequence_data.len() >= 2 && horizon_data.len() >= 2 {
+                    match classify_sentiment(
+                        sequence_data,
+                        horizon_data,
+                        &self.base_config,
+                        &config,
+                    ) {
+                        Ok(class) => {
+                            if (0..5).contains(&class) {
+                                class_counts[class as usize] += 1;
+                            }
+                        }
+                        Err(_) => continue, // Skip invalid classifications
+                    }
+                }
+            }
+        }
+
+        Ok(calculate_class_distribution_balance(&class_counts))
+    }
+
+    /// Evaluate volume parameters from OHLCV data by simulating classification
+    async fn evaluate_volume_parameters_from_ohlcv(
+        &self,
+        ohlcv_data: &[MarketDataRow],
+        sequence_indices: &[usize],
+        sequence_length: usize,
+        horizon_steps: usize,
+        bandwidth_size: f64,
+        extreme_multiplier: f64,
+        smoothing_periods: usize,
+    ) -> Result<ClassDistributionBalance> {
+        use crate::targets::volume::{classify_volume_regime, LogVolumeThresholds, VolumeConfig};
+
+        let mut class_counts = [0usize; 5];
+        let sample_limit = sequence_indices.len().min(500); // Limit for performance
+
+        let config = VolumeConfig {
+            bandwidth_size,
+            extreme_multiplier,
+            smoothing_periods,
+        };
+
+        // Create thresholds using same logic as volume.rs
+        let half_bandwidth = bandwidth_size / 2.0;
+        let extreme_bandwidth = bandwidth_size * extreme_multiplier;
+
+        let thresholds = LogVolumeThresholds {
+            very_low_max: -extreme_bandwidth,
+            low_max: -half_bandwidth,
+            medium_max: half_bandwidth,
+            high_max: extreme_bandwidth,
+        };
+
+        for &seq_idx in sequence_indices.iter().take(sample_limit) {
+            let sequence_end_idx = seq_idx + sequence_length;
+            let target_end_idx = sequence_end_idx + horizon_steps;
+
+            if target_end_idx <= ohlcv_data.len() {
+                let sequence_data = &ohlcv_data[seq_idx..sequence_end_idx];
+                let horizon_data = &ohlcv_data[sequence_end_idx..target_end_idx];
+
+                if sequence_data.len() >= 2 && horizon_data.len() >= 2 {
+                    // Extract volume data from OHLCV
+                    let sequence_volumes: Vec<f64> =
+                        sequence_data.iter().map(|row| row.volume).collect();
+                    let horizon_volumes: Vec<f64> =
+                        horizon_data.iter().map(|row| row.volume).collect();
+
+                    match classify_volume_regime(
+                        &sequence_volumes,
+                        &horizon_volumes,
+                        &thresholds,
+                        &config,
+                    ) {
+                        Ok(class) => {
+                            if (0..5).contains(&class) {
+                                class_counts[class as usize] += 1;
+                            }
+                        }
+                        Err(_) => continue, // Skip invalid classifications
+                    }
+                }
+            }
+        }
+
+        Ok(calculate_class_distribution_balance(&class_counts))
     }
 }

@@ -64,12 +64,19 @@ pub struct PriceLevelConfig {
     /// - 1.0: Standard behavior
     /// - 1.5: Less sensitive (larger breakout thresholds)
     pub bandwidth_size: f64,
+
+    /// Neutral band factor for symmetric neutral zone (default: 0.4)
+    /// - 0.2: Small neutral zone (20% of percentile range)
+    /// - 0.4: Balanced neutral zone (40% of percentile range)
+    /// - 0.6: Large neutral zone (60% of percentile range)
+    pub neutral_band_factor: f64,
 }
 
 impl Default for PriceLevelConfig {
     fn default() -> Self {
         Self {
             bandwidth_size: 1.0,
+            neutral_band_factor: 0.4, // 40% of percentile range becomes neutral zone
         }
     }
 }
@@ -87,6 +94,19 @@ impl PriceLevelConfig {
         if !self.bandwidth_size.is_finite() {
             return Err(crate::utils::error::VangaError::ConfigError(
                 "bandwidth_size must be a finite number".to_string(),
+            ));
+        }
+
+        if self.neutral_band_factor <= 0.0 || self.neutral_band_factor >= 1.0 {
+            return Err(crate::utils::error::VangaError::ConfigError(format!(
+                "neutral_band_factor must be between 0.0 and 1.0, got: {}",
+                self.neutral_band_factor
+            )));
+        }
+
+        if !self.neutral_band_factor.is_finite() {
+            return Err(crate::utils::error::VangaError::ConfigError(
+                "neutral_band_factor must be a finite number".to_string(),
             ));
         }
 
@@ -123,11 +143,8 @@ pub fn generate_price_level_targets(
                 // TODO: Make these configurable parameters in future config refactoring
                 let momentum_factor = Some(1.2); // Slight bias toward recent data
 
-                let target_class = classify_price_level_with_momentum(
-                    sequence_ohlcv,
-                    horizon_ohlcv,
-                    momentum_factor,
-                )?;
+                let target_class =
+                    classify_price_level(sequence_ohlcv, horizon_ohlcv, momentum_factor)?;
                 horizon_targets[seq_position] = target_class;
             }
         }
@@ -404,190 +421,6 @@ pub fn calculate_adaptive_bandwidth(
     Ok(adaptive_bandwidth)
 }
 
-/// Classify price level using exponentially-weighted sequence-aware range analysis
-///
-/// # 🎯 DETAILED CLASSIFICATION LOGIC
-///
-/// ## **Step-by-Step Process:**
-///
-/// ### **1. Exponentially-Weighted Close Price Calculation**
-/// ```
-/// For each candle in sequence:
-///   close_price = candle.close
-///   // Note: Individual close prices, exponential weighting applied during aggregation
-/// ```
-///
-/// ### **2. Range Boundary Detection**
-/// ```
-/// sequence_min = min(all_close_prices_in_sequence)
-/// sequence_max = max(all_close_prices_in_sequence)
-/// base_bandwidth = sequence_max - sequence_min
-/// ```
-///
-/// ### **3. Bandwidth Expansion**
-/// ```
-/// bandwidth = base_bandwidth × bandwidth_size
-/// lower_breakout = sequence_min - bandwidth
-/// upper_breakout = sequence_max + bandwidth
-/// ```
-///
-/// ### **4. Target Price Calculation**
-/// ```
-/// target_price = get_horizon_exponential_weighted_close(horizon_ohlcv)
-/// // Uses same exponentially-weighted close calculation as sequence
-/// ```
-///
-/// ### **5. Classification Rules**
-/// ```
-/// if target_price < lower_breakout:     return 0  // Strong Down
-/// if target_price < sequence_min:       return 1  // Moderate Down
-/// if target_price < sequence_max:       return 2  // Neutral
-/// if target_price < upper_breakout:     return 3  // Moderate Up
-/// else:                                 return 4  // Strong Up
-/// ```
-///
-/// ## **🔧 Configuration Impact:**
-///
-/// ### **bandwidth_size = 0.5 (More Sensitive)**
-/// - Smaller breakout thresholds
-/// - More Strong Down/Up classifications
-/// - Detects smaller range breaks
-///
-/// ### **bandwidth_size = 1.0 (Standard)**
-/// - Balanced classification distribution
-/// - Moderate breakout sensitivity
-///
-/// ### **bandwidth_size = 1.5 (Less Sensitive)**
-/// - Larger breakout thresholds required
-/// - More Neutral classifications
-/// - Only significant moves trigger breakouts
-///
-/// ## **📈 Practical Examples**
-///
-/// ### **Example 1: BTC Range Analysis**
-/// ```text
-/// Sequence close prices: [45000, 46000, 47000, 48000, 49000]
-/// sequence_min = 45000, sequence_max = 49000
-/// base_bandwidth = 49000 - 45000 = 4000
-///
-/// With bandwidth_size = 1.0:
-/// bandwidth = 4000 × 1.0 = 4000
-/// lower_breakout = 45000 - 4000 = 41000
-/// upper_breakout = 49000 + 4000 = 53000
-///
-/// Classification:
-/// target < 41000: Strong Down (0)
-/// 41000 ≤ target < 45000: Moderate Down (1)
-/// 45000 ≤ target < 49000: Neutral (2)
-/// 49000 ≤ target < 53000: Moderate Up (3)
-/// target ≥ 53000: Strong Up (4)
-/// ```
-///
-/// ### **Example 2: Sensitivity Comparison**
-/// ```text
-/// Same BTC range (45000-49000, base_bandwidth=4000):
-///
-/// Conservative (bandwidth_size=0.5):
-/// - Breakouts at ±2000 (43000/51000)
-/// - More sensitive to smaller moves
-///
-/// Standard (bandwidth_size=1.0):
-/// - Breakouts at ±4000 (41000/53000)
-/// - Balanced sensitivity
-///
-/// Aggressive (bandwidth_size=1.5):
-/// - Breakouts at ±6000 (39000/55000)
-/// - Only major moves trigger breakouts
-/// ```
-///
-/// ## **🎯 Target Integration Strategy**
-///
-/// **Price Levels + Direction + Volatility = Complete Market Analysis:**
-/// - **Price Levels**: "Where will price be?" (range/breakout analysis)
-/// - **Direction**: "How is momentum changing?" (acceleration/deceleration)
-/// - **Volatility**: "How risky will it be?" (regime assessment)
-///
-/// **Combined Signal Examples:**
-/// - Strong Up + PUMP + High Volatility = Major bullish breakout
-/// - Moderate Down + DOWN + Low Volatility = Controlled bearish move
-/// - Neutral + SIDEWAYS + Medium Volatility = Range-bound consolidation
-/// - Only significant moves trigger breakouts
-///
-/// ## **📊 Expected Class Distribution:**
-/// - **Neutral (2)**: ~40-50% (most prices stay in range)
-/// - **Moderate (1,3)**: ~20-25% each (near range boundaries)
-/// - **Strong (0,4)**: ~5-15% each (true breakouts)
-///
-/// ## **🎯 Trading Interpretation:**
-/// - **Class 0**: Strong support breakdown → Bearish signal
-/// - **Class 1**: Testing support → Caution
-/// - **Class 2**: Range-bound trading → Neutral
-/// - **Class 3**: Testing resistance → Watch for breakout
-/// - **Class 4**: Strong resistance breakout → Bullish signal
-///
-/// # Arguments
-/// * `sequence_ohlcv` - Input sequence OHLCV data for percentile calculation
-/// * `horizon_ohlcv` - Horizon period OHLCV data for target price
-/// * `config` - Configuration with percentiles array and bandwidth sensitivity
-///
-/// # Returns
-/// * `Result<i32>` - Classification bin [0-4] based on percentile boundaries
-pub fn classify_price_level(
-    sequence_ohlcv: &[MarketDataRow],
-    horizon_ohlcv: &[MarketDataRow],
-    config: &crate::config::model::TargetsConfig,
-) -> Result<i32> {
-    if sequence_ohlcv.is_empty() {
-        return Ok(2); // Default to neutral class
-    }
-
-    // Use adaptive percentiles based on sequence data (no hardcoded values)
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
-    let bandwidth_size = config.base_sensitivity; // Use base_sensitivity as bandwidth
-
-    let reconstruction_config = SequenceReconstructionConfig {
-        percentiles,
-        bandwidth_size,
-    };
-    let analyzer = SequenceAnalyzer::new(reconstruction_config);
-
-    // Calculate boundaries using centralized logic
-    let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
-
-    // Get target price from horizon exponentially-weighted close (instead of single future price)
-    let target_price = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
-
-    // Handle edge case: flat sequence (bandwidth = 0)
-    if boundaries.bandwidth == 0.0 {
-        return Ok(if target_price >= boundaries.sequence_min {
-            3
-        } else {
-            2
-        });
-    }
-
-    // Debug logging
-    log::debug!(
-        "🔍 Centralized Classification: percentiles=[{:.1}%, {:.1}%], seq_range=[{:.6}, {:.6}], target={:.6}, bandwidth={:.6}",
-        percentiles[0] * 100.0,
-        percentiles[1] * 100.0,
-        boundaries.sequence_min,
-        boundaries.sequence_max,
-        target_price,
-        boundaries.bandwidth
-    );
-
-    // Use centralized classification logic
-    let class = boundaries.classify_price(target_price);
-
-    log::debug!(
-        "🎯 Centralized Classification: target={:.6} → class={} (percentile_range: [{:.6}, {:.6}], bandwidth: {:.6})",
-        target_price, class, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
-    );
-
-    Ok(class)
-}
-
 /// **UPDATED**: Classify price level using exponentially-weighted close and adaptive thresholds
 ///
 /// # 🚀 ENHANCED CLASSIFICATION WITH ADAPTIVE FEATURES
@@ -615,7 +448,7 @@ pub fn classify_price_level(
 ///
 /// # Returns
 /// * `Result<i32>` - Enhanced classification [0-4] with adaptive features
-pub fn classify_price_level_with_momentum(
+pub fn classify_price_level(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
     momentum_factor: Option<f64>,
@@ -643,6 +476,7 @@ pub fn classify_price_level_with_momentum(
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size: final_bandwidth_size,
+        neutral_band_factor: 0.4, // Default neutral band factor (will be calibrated)
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
 
@@ -795,19 +629,22 @@ pub fn generate_price_level_targets_with_adaptive_params(
 ) -> Result<HashMap<String, Vec<i32>>> {
     let config = if let Some(params) = adaptive_params {
         log::info!(
-            "🎯 Using pre-calibrated price level bandwidth: {:.4}",
-            params.bandwidth_size
+            "🎯 Using pre-calibrated price level parameters: bandwidth={:.4}, neutral_band={:.2}",
+            params.bandwidth_size,
+            params.neutral_band_factor
         );
         PriceLevelConfig {
             bandwidth_size: params.bandwidth_size,
+            neutral_band_factor: params.neutral_band_factor,
         }
     } else {
         log::info!(
-            "🎯 Using base price level bandwidth: {:.4}",
+            "🎯 Using base price level bandwidth: {:.4}, default neutral_band: 0.4",
             targets_config.base_sensitivity
         );
         PriceLevelConfig {
             bandwidth_size: targets_config.base_sensitivity,
+            neutral_band_factor: 0.4, // Default neutral band factor
         }
     };
     generate_price_level_targets(df, horizons, &config, sequence_indices, sequence_length)
@@ -911,6 +748,7 @@ pub fn reconstruct_price_levels(
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size: final_bandwidth_size,
+        neutral_band_factor: 0.4, // Default neutral band factor (will be calibrated)
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
@@ -1006,6 +844,7 @@ pub fn probabilities_to_price_targets(
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size: final_bandwidth_size,
+        neutral_band_factor: 0.4, // Default neutral band factor (will be calibrated)
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;

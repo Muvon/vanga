@@ -93,11 +93,15 @@ async fn test_adaptive_parameter_calibration() -> Result<()> {
     assert!(adaptive_params.direction.base_sensitivity > 0.0);
     assert!(adaptive_params.price_levels.bandwidth_size > 0.0);
     assert!(adaptive_params.volatility.bandwidth_size > 0.0);
+    assert!(adaptive_params.sentiment.body_sensitivity > 0.0);
+    assert!(adaptive_params.volume.bandwidth_size > 0.0);
 
     // Verify balance scores are reasonable (should be better than random)
     assert!(adaptive_params.direction.achieved_balance.balance_score < 5.0); // Lower is better
     assert!(adaptive_params.price_levels.achieved_balance.balance_score < 5.0);
     assert!(adaptive_params.volatility.achieved_balance.balance_score < 5.0);
+    assert!(adaptive_params.sentiment.achieved_balance.balance_score < 5.0);
+    assert!(adaptive_params.volume.achieved_balance.balance_score < 5.0);
 
     // Verify class distributions are more balanced than default
     let direction_balance = &adaptive_params.direction.achieved_balance;
@@ -136,6 +140,14 @@ async fn test_adaptive_parameter_calibration() -> Result<()> {
     println!(
         "   Volatility bandwidth: {:.4}",
         adaptive_params.volatility.bandwidth_size
+    );
+    println!(
+        "   Sentiment body sensitivity: {:.3}",
+        adaptive_params.sentiment.body_sensitivity
+    );
+    println!(
+        "   Volume bandwidth: {:.3}",
+        adaptive_params.volume.bandwidth_size
     );
 
     Ok(())
