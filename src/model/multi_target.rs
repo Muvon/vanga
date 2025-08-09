@@ -51,7 +51,8 @@ pub struct MultiTargetLSTMModel {
     /// Feature configuration used during training (kept for backward compatibility)
     feature_config: Option<crate::config::FeatureConfig>,
     /// Adaptive target parameters for consistent prediction reconstruction
-    adaptive_target_parameters: Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    adaptive_target_parameters:
+        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
 }
 
 /// Serializable state for multi-target model persistence
@@ -71,7 +72,8 @@ struct MultiTargetModelState {
     feature_config: Option<crate::config::FeatureConfig>,
     /// Adaptive target parameters for consistent prediction reconstruction
     #[serde(default)]
-    adaptive_target_parameters: Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    adaptive_target_parameters:
+        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
 }
 
 impl MultiTargetLSTMModel {
@@ -785,7 +787,7 @@ impl MultiTargetLSTMModel {
     ) {
         // Store in the MultiTargetLSTMModel itself for persistence
         self.adaptive_target_parameters = Some(params.clone());
-        
+
         // Also set on individual models for backward compatibility
         for model in &mut self.models {
             model.adaptive_target_parameters = Some(params.clone());
@@ -800,7 +802,7 @@ impl MultiTargetLSTMModel {
         if let Some(ref params) = self.adaptive_target_parameters {
             return Some(params);
         }
-        
+
         // Fallback to first model for backward compatibility
         self.models.first()?.adaptive_target_parameters.as_ref()
     }

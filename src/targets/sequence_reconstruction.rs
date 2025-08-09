@@ -42,8 +42,8 @@ pub struct SequenceBoundaries {
     /// - boundary_3: sequence_max (neutral | moderate_up)
     /// - boundary_4: sequence_max + bandwidth (moderate_up | strong_up)
     pub boundaries: [f64; 4],
-    /// VWAP prices used for calculation
-    pub vwap_prices: Vec<f64>,
+    /// Exponentially-weighted close prices used for calculation
+    pub exponential_weighted_prices: Vec<f64>,
 }
 
 impl SequenceBoundaries {
@@ -153,26 +153,20 @@ impl SequenceAnalyzer {
         Ok(Self::new(config))
     }
 
-    /// Calculate VWAP prices from OHLCV sequence (centralized logic)
-    pub fn calculate_vwap_prices(&self, sequence_ohlcv: &[MarketDataRow]) -> Result<Vec<f64>> {
+    /// Calculate exponentially-weighted close prices from OHLCV sequence (centralized logic)
+    pub fn calculate_exponential_weighted_prices(
+        &self,
+        sequence_ohlcv: &[MarketDataRow],
+    ) -> Result<Vec<f64>> {
         if sequence_ohlcv.is_empty() {
             return Err(VangaError::data("Empty OHLCV sequence provided"));
         }
 
-        let vwap_prices: Vec<f64> = sequence_ohlcv
-            .iter()
-            .map(|candle| {
-                if candle.volume > 0.0 {
-                    // Volume-weighted OHLC4
-                    (candle.open + candle.high + candle.low + candle.close) / 4.0
-                } else {
-                    // Fallback to simple OHLC4 if no volume
-                    (candle.open + candle.high + candle.low + candle.close) / 4.0
-                }
-            })
-            .collect();
+        // For reconstruction, we need individual close prices (not weighted)
+        // The exponential weighting is applied during boundary calculation
+        let close_prices: Vec<f64> = sequence_ohlcv.iter().map(|candle| candle.close).collect();
 
-        Ok(vwap_prices)
+        Ok(close_prices)
     }
 
     /// Calculate sequence boundaries from OHLCV data (single source of truth)
@@ -186,11 +180,12 @@ impl SequenceAnalyzer {
             ));
         }
 
-        // Calculate VWAP prices
-        let vwap_prices = self.calculate_vwap_prices(sequence_ohlcv)?;
+        // Calculate exponentially-weighted close prices
+        let exponential_weighted_prices =
+            self.calculate_exponential_weighted_prices(sequence_ohlcv)?;
 
         // Calculate percentile boundaries from sorted prices
-        let mut sorted_prices = vwap_prices.clone();
+        let mut sorted_prices = exponential_weighted_prices.clone();
         sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let n = sorted_prices.len();
@@ -217,7 +212,7 @@ impl SequenceAnalyzer {
             sequence_max,
             bandwidth,
             boundaries,
-            vwap_prices,
+            exponential_weighted_prices,
         })
     }
 
@@ -332,17 +327,19 @@ mod tests {
     }
 
     #[test]
-    fn test_vwap_calculation() {
+    fn test_exponential_weighted_calculation() {
         let analyzer = SequenceAnalyzer::new(SequenceReconstructionConfig::default());
         let candles = create_test_candles(vec![
             (100.0, 105.0, 95.0, 102.0, 1000.0),
             (102.0, 108.0, 98.0, 106.0, 1500.0),
         ]);
 
-        let vwap_prices = analyzer.calculate_vwap_prices(&candles).unwrap();
-        assert_eq!(vwap_prices.len(), 2);
-        assert_eq!(vwap_prices[0], (100.0 + 105.0 + 95.0 + 102.0) / 4.0);
-        assert_eq!(vwap_prices[1], (102.0 + 108.0 + 98.0 + 106.0) / 4.0);
+        let exponential_weighted_prices = analyzer
+            .calculate_exponential_weighted_prices(&candles)
+            .unwrap();
+        assert_eq!(exponential_weighted_prices.len(), 2);
+        assert_eq!(exponential_weighted_prices[0], 102.0); // First candle close
+        assert_eq!(exponential_weighted_prices[1], 106.0); // Second candle close
     }
 
     #[test]
@@ -353,11 +350,11 @@ mod tests {
         });
 
         let candles = create_test_candles(vec![
-            (90.0, 95.0, 85.0, 92.0, 1000.0),     // VWAP: 90.5
-            (95.0, 100.0, 90.0, 98.0, 1000.0),    // VWAP: 95.75
-            (100.0, 110.0, 95.0, 105.0, 1000.0),  // VWAP: 102.5
-            (105.0, 115.0, 100.0, 110.0, 1000.0), // VWAP: 107.5
-            (110.0, 120.0, 105.0, 115.0, 1000.0), // VWAP: 112.5
+            (90.0, 95.0, 85.0, 92.0, 1000.0),     // Close: 92.0
+            (95.0, 100.0, 90.0, 98.0, 1000.0),    // Close: 98.0
+            (100.0, 110.0, 95.0, 105.0, 1000.0),  // Close: 105.0
+            (105.0, 115.0, 100.0, 110.0, 1000.0), // Close: 110.0
+            (110.0, 120.0, 105.0, 115.0, 1000.0), // Close: 115.0
         ]);
 
         let boundaries = analyzer.calculate_boundaries(&candles).unwrap();

@@ -2,16 +2,16 @@
 //!
 //! # 🎯 TARGET PURPOSE: "WHERE WILL PRICE BE?"
 //!
-//! This module implements **VWAP-weighted range analysis** for support/resistance breakout detection.
+//! This module implements **exponentially-weighted range analysis** for support/resistance breakout detection.
 //! It answers: "Will the future price break above/below the recent trading range?"
 //!
 //! ## 📊 MATHEMATICAL FOUNDATION
 //!
 //! ### **Core Logic: Range Boundary Analysis**
 //! ```
-//! 1. Calculate VWAP-weighted prices for input sequence (volume-aware)
-//! 2. Find sequence_min and sequence_max from VWAP prices
-//! 3. Calculate target VWAP price from horizon period
+//! 1. Calculate exponentially-weighted close prices for input sequence (recent-focused)
+//! 2. Find sequence_min and sequence_max from close prices
+//! 3. Calculate target exponentially-weighted close price from horizon period
 //! 4. Apply bandwidth expansion for breakout sensitivity
 //! 5. Classify target price relative to expanded range boundaries
 //! ```
@@ -25,10 +25,10 @@
 //!
 //! ## 🔧 KEY FEATURES
 //!
-//! ### **VWAP Integration (Volume-Weighted Average Price)**
-//! - Uses `(OHLC4 * volume)` weighting instead of simple OHLC4
-//! - Provides more accurate price representation in high-volume periods
-//! - Fallback to simple OHLC4 when volume data unavailable
+//! ### **Exponential Weighting Integration**
+//! - Uses exponentially-weighted close prices instead of volume-weighted prices
+//! - Provides more reliable price representation by emphasizing recent price action
+//! - No dependency on potentially manipulated volume data
 //!
 //! ### **Bandwidth Sensitivity Control**
 //! - `bandwidth_size`: Controls breakout sensitivity (default: 1.0)
@@ -132,7 +132,7 @@ pub fn generate_price_level_targets(
             }
         }
 
-        // Analyze and log class distribution (5 classes) - VWAP-based approach
+        // Analyze and log class distribution (5 classes) - exponentially-weighted approach
         let valid_targets: Vec<i32> = horizon_targets
             .iter()
             .filter(|&&x| x != -1)
@@ -148,149 +148,67 @@ pub fn generate_price_level_targets(
     Ok(targets)
 }
 
-/// Get VWAP-weighted price baseline from sequence OHLCV data
+/// Get exponentially-weighted close price from OHLCV data (replaces VWAP)
 ///
-/// # 📊 VWAP CALCULATION DETAILS
+/// # 🎯 EXPONENTIAL WEIGHTING LOGIC
 ///
-/// **Purpose**: Calculate volume-weighted average price for more accurate price representation
+/// **Recent-Focused Weighting**: Recent prices get exponentially more weight than older prices
 ///
-/// **Formula**: `VWAP = Σ(OHLC4_price × volume) / Σ(volume)`
-/// Where: `OHLC4_price = (open + high + low + close) / 4`
-///
-/// **Volume Weighting Logic**:
-/// - High volume periods get more weight in the average
-/// - Low volume periods get less influence
-/// - Zero volume periods are skipped entirely
-///
-/// **Fallback Strategy**:
-/// - If no volume data available: Use simple OHLC4 average
-/// - If sequence too short: Return 0.0 (handled by caller)
-///
-/// **Why VWAP vs Simple Average**:
-/// - VWAP reflects actual trading activity
-/// - More resistant to price manipulation on low volume
-/// - Better represents "fair value" during the sequence period
-pub fn get_sequence_vwap_baseline(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    if sequence_ohlcv.len() < 2 {
-        return Ok(0.0); // Fallback for insufficient data
-    }
-
-    let mut total_volume = 0.0;
-    let mut weighted_price_sum = 0.0;
-
-    for candle in sequence_ohlcv {
-        if candle.volume > 0.0 {
-            // Skip zero volume periods
-            let ohlc4_price = (candle.open + candle.high + candle.low + candle.close) / 4.0;
-            weighted_price_sum += ohlc4_price * candle.volume;
-            total_volume += candle.volume;
-        }
-    }
-
-    if total_volume > 0.0 {
-        Ok(weighted_price_sum / total_volume)
-    } else {
-        // Fallback to simple OHLC4 average if no volume data
-        let avg_price = sequence_ohlcv
-            .iter()
-            .map(|c| (c.open + c.high + c.low + c.close) / 4.0)
-            .sum::<f64>()
-            / sequence_ohlcv.len() as f64;
-        Ok(avg_price)
-    }
-}
-
-/// **ENHANCED**: Get momentum-weighted VWAP from sequence OHLCV data
-///
-/// # 🚀 MOMENTUM-WEIGHTED VWAP ENHANCEMENT
-///
-/// **Mathematical Enhancement**: Applies time-based momentum weighting to give recent data more influence
-///
-/// **Formula**: `MVWAP = Σ(OHLC4_price × volume × momentum_weight) / Σ(volume × momentum_weight)`
-/// Where: `momentum_weight = (time_position / sequence_length)^momentum_factor`
-///
-/// **Momentum Weighting Logic**:
-/// - `momentum_factor = 1.0`: Equal weighting (same as standard VWAP)
-/// - `momentum_factor > 1.0`: Recent data weighted more heavily
-/// - `momentum_factor < 1.0`: Earlier data weighted more heavily
+/// **Formula**: `EWP = Σ(close_price × weight) / Σ(weight)`
+/// Where: `weight = (position / length)^2.0` (exponential focus on recent data)
 ///
 /// **Benefits**:
-/// - Captures recent price momentum trends
-/// - More responsive to evolving market conditions
-/// - Better prediction accuracy for trending markets
-/// - Maintains volume awareness from original VWAP
+/// - No volume dependency (volume can be faked)
+/// - Recent prices matter more (reflects current market sentiment)
+/// - Simple and reliable calculation
+/// - More responsive to recent price action
 ///
-/// **Adaptive Behavior**:
-/// - Automatically adjusts to sequence volatility
-/// - Maintains mathematical consistency across market regimes
-/// - Preserves backward compatibility when momentum_factor = 1.0
-pub fn calculate_vwap_with_momentum(
-    sequence_ohlcv: &[MarketDataRow],
-    momentum_factor: f64,
-) -> Result<f64> {
-    if sequence_ohlcv.len() < 2 {
-        return Ok(0.0); // Fallback for insufficient data
+/// **Weighting Example** (5 candles):
+/// - Candle 1 (oldest): weight = (1/5)^2 = 0.04
+/// - Candle 2: weight = (2/5)^2 = 0.16
+/// - Candle 3: weight = (3/5)^2 = 0.36
+/// - Candle 4: weight = (4/5)^2 = 0.64
+/// - Candle 5 (newest): weight = (5/5)^2 = 1.00
+///
+/// **Fallback Logic**:
+/// - If insufficient data (< 2 candles): Returns 0.0
+/// - If single candle: Returns that candle's close price
+pub fn get_sequence_exponential_weighted_close(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    if sequence_ohlcv.is_empty() {
+        return Ok(0.0);
     }
 
-    // If momentum_factor is 1.0, use standard VWAP for efficiency
-    if (momentum_factor - 1.0).abs() < 1e-6 {
-        return get_sequence_vwap_baseline(sequence_ohlcv);
+    if sequence_ohlcv.len() == 1 {
+        return Ok(sequence_ohlcv[0].close);
     }
 
+    let mut weighted_sum = 0.0;
     let mut total_weight = 0.0;
-    let mut weighted_price_sum = 0.0;
-    let sequence_length = sequence_ohlcv.len() as f64;
+    let len = sequence_ohlcv.len() as f64;
 
     for (i, candle) in sequence_ohlcv.iter().enumerate() {
-        if candle.volume > 0.0 {
-            // Calculate OHLC4 price
-            let ohlc4_price = (candle.open + candle.high + candle.low + candle.close) / 4.0;
-
-            // Calculate momentum weight (recent data gets more weight when momentum_factor > 1.0)
-            let time_position = (i as f64 + 1.0) / sequence_length; // 0.0 to 1.0
-            let momentum_weight = time_position.powf(momentum_factor);
-
-            // Combined weight: volume × momentum
-            let combined_weight = candle.volume * momentum_weight;
-
-            weighted_price_sum += ohlc4_price * combined_weight;
-            total_weight += combined_weight;
-        }
+        // Exponential weighting: recent data gets much more weight
+        let weight = ((i as f64 + 1.0) / len).powf(2.0);
+        weighted_sum += candle.close * weight;
+        total_weight += weight;
     }
 
-    if total_weight > 0.0 {
-        Ok(weighted_price_sum / total_weight)
-    } else {
-        // Fallback to momentum-weighted simple average if no volume data
-        let mut weighted_price_sum = 0.0;
-        let mut total_weight = 0.0;
-
-        for (i, candle) in sequence_ohlcv.iter().enumerate() {
-            let ohlc4_price = (candle.open + candle.high + candle.low + candle.close) / 4.0;
-            let time_position = (i as f64 + 1.0) / sequence_length;
-            let momentum_weight = time_position.powf(momentum_factor);
-
-            weighted_price_sum += ohlc4_price * momentum_weight;
-            total_weight += momentum_weight;
-        }
-
-        Ok(weighted_price_sum / total_weight)
-    }
+    Ok(weighted_sum / total_weight)
 }
 
-/// Get horizon VWAP-weighted price (same calculation as baseline)
-pub fn get_horizon_vwap(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    // Same calculation as baseline (VWAP-weighted price)
-    get_sequence_vwap_baseline(horizon_ohlcv)
+/// Get horizon exponentially-weighted close price (same calculation as sequence)
+pub fn get_horizon_exponential_weighted_close(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    // Same calculation as sequence (exponentially-weighted close price)
+    get_sequence_exponential_weighted_close(horizon_ohlcv)
 }
 
-/// Calculate volume-weighted center price from sequence data
+/// Calculate exponentially-weighted center price from sequence data
 ///
-/// This is the same as get_sequence_vwap_baseline but with a more descriptive name
-/// for use in adaptive percentile calculations. The volume-weighted center represents
-/// the "fair value" price during the sequence period, accounting for trading activity.
-pub fn calculate_volume_weighted_center(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    get_sequence_vwap_baseline(sequence_ohlcv)
+/// This is the same as get_sequence_exponential_weighted_close but with a more descriptive name
+/// for use in adaptive percentile calculations. The exponentially-weighted center represents
+/// the recent-focused "fair value" price during the sequence period, emphasizing recent price action.
+pub fn calculate_exponential_weighted_center(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    get_sequence_exponential_weighted_close(sequence_ohlcv)
 }
 
 /// Extract individual OHLC4 prices from sequence data
@@ -343,8 +261,8 @@ pub fn calculate_adaptive_percentiles_from_sequence(
         return Ok([0.1, 0.9]);
     }
 
-    // 1. Calculate volume-weighted center (fair value)
-    let volume_weighted_center = calculate_volume_weighted_center(sequence_ohlcv)?;
+    // 1. Calculate exponentially-weighted center (recent-focused fair value)
+    let exponential_weighted_center = calculate_exponential_weighted_center(sequence_ohlcv)?;
 
     // 2. Extract individual OHLC4 prices for distribution analysis
     let sequence_prices = extract_sequence_prices(sequence_ohlcv);
@@ -352,7 +270,7 @@ pub fn calculate_adaptive_percentiles_from_sequence(
     // 3. Partition prices around the volume-weighted center
     let below_center_count = sequence_prices
         .iter()
-        .filter(|&&price| price < volume_weighted_center)
+        .filter(|&&price| price < exponential_weighted_center)
         .count();
 
     let below_center_ratio = below_center_count as f64 / sequence_prices.len() as f64;
@@ -390,7 +308,7 @@ pub fn calculate_adaptive_percentiles_from_sequence(
     // 7. Debug logging for transparency
     log::debug!(
         "🎯 Adaptive Percentiles: center={:.6}, below_ratio={:.2}, cv={:.3}, base=[{:.2}, {:.2}], adaptive=[{:.2}, {:.2}]",
-        volume_weighted_center,
+        exponential_weighted_center,
         below_center_ratio,
         coefficient_of_variation,
         base_lower,
@@ -486,23 +404,23 @@ pub fn calculate_adaptive_bandwidth(
     Ok(adaptive_bandwidth)
 }
 
-/// Classify price level using VWAP-weighted sequence-aware range analysis
+/// Classify price level using exponentially-weighted sequence-aware range analysis
 ///
 /// # 🎯 DETAILED CLASSIFICATION LOGIC
 ///
 /// ## **Step-by-Step Process:**
 ///
-/// ### **1. VWAP Price Calculation**
+/// ### **1. Exponentially-Weighted Close Price Calculation**
 /// ```
 /// For each candle in sequence:
-///   vwap_price = (open + high + low + close) / 4
-///   // Note: Individual candle VWAP, not period VWAP
+///   close_price = candle.close
+///   // Note: Individual close prices, exponential weighting applied during aggregation
 /// ```
 ///
 /// ### **2. Range Boundary Detection**
 /// ```
-/// sequence_min = min(all_vwap_prices_in_sequence)
-/// sequence_max = max(all_vwap_prices_in_sequence)
+/// sequence_min = min(all_close_prices_in_sequence)
+/// sequence_max = max(all_close_prices_in_sequence)
 /// base_bandwidth = sequence_max - sequence_min
 /// ```
 ///
@@ -515,8 +433,8 @@ pub fn calculate_adaptive_bandwidth(
 ///
 /// ### **4. Target Price Calculation**
 /// ```
-/// target_price = get_horizon_vwap(horizon_ohlcv)
-/// // Uses same VWAP calculation as sequence
+/// target_price = get_horizon_exponential_weighted_close(horizon_ohlcv)
+/// // Uses same exponentially-weighted close calculation as sequence
 /// ```
 ///
 /// ### **5. Classification Rules**
@@ -548,7 +466,7 @@ pub fn calculate_adaptive_bandwidth(
 ///
 /// ### **Example 1: BTC Range Analysis**
 /// ```text
-/// Sequence VWAP prices: [45000, 46000, 47000, 48000, 49000]
+/// Sequence close prices: [45000, 46000, 47000, 48000, 49000]
 /// sequence_min = 45000, sequence_max = 49000
 /// base_bandwidth = 49000 - 45000 = 4000
 ///
@@ -636,8 +554,8 @@ pub fn classify_price_level(
     // Calculate boundaries using centralized logic
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
 
-    // Get target price from horizon VWAP (instead of single future price)
-    let target_price = get_horizon_vwap(horizon_ohlcv)?;
+    // Get target price from horizon exponentially-weighted close (instead of single future price)
+    let target_price = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
     // Handle edge case: flat sequence (bandwidth = 0)
     if boundaries.bandwidth == 0.0 {
@@ -670,12 +588,12 @@ pub fn classify_price_level(
     Ok(class)
 }
 
-/// **ENHANCED**: Classify price level using momentum-weighted VWAP and adaptive thresholds
+/// **UPDATED**: Classify price level using exponentially-weighted close and adaptive thresholds
 ///
 /// # 🚀 ENHANCED CLASSIFICATION WITH ADAPTIVE FEATURES
 ///
 /// **Mathematical Enhancements**:
-/// 1. **Momentum-Weighted VWAP**: Recent data gets more influence in price calculation
+/// 1. **Exponentially-Weighted Close**: Recent data gets more influence in price calculation
 /// 2. **Adaptive Bandwidth**: Automatically adjusts to sequence volatility characteristics
 /// 3. **Volatility Normalization**: Consistent behavior across different market regimes
 /// 4. **Backward Compatibility**: Falls back to standard method when enhancements disabled
@@ -687,7 +605,7 @@ pub fn classify_price_level(
 /// - **Mathematical Consistency**: Stable performance across different assets and timeframes
 ///
 /// **Configuration Parameters**:
-/// - `momentum_factor`: 1.0 = standard VWAP, >1.0 = recent data weighted more
+/// - `momentum_factor`: No longer used - exponential weighting is built-in
 /// - `base_sensitivity`: Base bandwidth multiplier (auto-scaled by volatility)
 ///
 /// # Arguments
@@ -706,19 +624,11 @@ pub fn classify_price_level_with_momentum(
         return Ok(2); // Default to neutral class
     }
 
-    // 1. Calculate sequence VWAP with optional momentum weighting
-    let seq_vwap = if let Some(momentum) = momentum_factor {
-        if momentum != 1.0 {
-            calculate_vwap_with_momentum(sequence_ohlcv, momentum)?
-        } else {
-            get_sequence_vwap_baseline(sequence_ohlcv)?
-        }
-    } else {
-        get_sequence_vwap_baseline(sequence_ohlcv)?
-    };
+    // 1. Calculate sequence exponentially-weighted close (momentum factor no longer used)
+    let seq_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
 
-    // 2. Calculate horizon VWAP (standard calculation)
-    let hor_vwap = get_horizon_vwap(horizon_ohlcv)?;
+    // 2. Calculate horizon exponentially-weighted close
+    let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
     // 3. Use adaptive percentiles based on sequence data
     let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
@@ -741,7 +651,7 @@ pub fn classify_price_level_with_momentum(
 
     // 7. Handle edge case: flat sequence
     if boundaries.bandwidth == 0.0 {
-        return Ok(if hor_vwap >= boundaries.sequence_min {
+        return Ok(if hor_exponential_weighted >= boundaries.sequence_min {
             3
         } else {
             2
@@ -750,19 +660,18 @@ pub fn classify_price_level_with_momentum(
 
     // 8. Enhanced debug logging
     log::debug!(
-        "🚀 Price Level with Momentum: momentum_factor={:?}, seq_vwap={:.6}, hor_vwap={:.6}, final_bandwidth={:.3}",
-        momentum_factor,
-        seq_vwap,
-        hor_vwap,
+        "🚀 Price Level with Exponential Weighting: seq_exponential={:.6}, hor_exponential={:.6}, final_bandwidth={:.3}",
+        seq_exponential_weighted,
+        hor_exponential_weighted,
         final_bandwidth_size
     );
 
     // 9. Use centralized classification logic
-    let class = boundaries.classify_price(hor_vwap);
+    let class = boundaries.classify_price(hor_exponential_weighted);
 
     log::debug!(
         "🎯 Price Level Result: target={:.6} → class={} (adaptive_range: [{:.6}, {:.6}], adaptive_bandwidth: {:.6})",
-        hor_vwap, class, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
+        hor_exponential_weighted, class, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
     );
 
     Ok(class)
@@ -933,8 +842,8 @@ pub struct PriceLevelReconstruction {
     pub percentage_ranges: Vec<[f64; 2]>,
     /// Absolute price ranges for each class [lower_price, upper_price]
     pub price_ranges: Vec<[f64; 2]>,
-    /// VWAP-relative percentage ranges for each class [lower_bound, upper_bound]
-    pub vwap_percentage_ranges: Vec<[f64; 2]>,
+    /// Exponentially-weighted close relative percentage ranges for each class [lower_bound, upper_bound]
+    pub exponential_weighted_percentage_ranges: Vec<[f64; 2]>,
     /// Class probabilities from model
     pub probabilities: Vec<f64>,
     /// Most likely class index
@@ -995,7 +904,7 @@ pub fn reconstruct_price_levels(
     let final_bandwidth_size = calculate_adaptive_bandwidth(
         sequence_ohlcv,
         bandwidth_size,
-        Some(1.2), // Same momentum factor as training
+        None, // No momentum factor needed with exponential weighting
     )?;
 
     // Use centralized sequence reconstruction logic (same as training)
@@ -1019,15 +928,15 @@ pub fn reconstruct_price_levels(
         })
         .collect();
 
-    // Calculate sequence VWAP for vwap_range calculation
-    let sequence_vwap = get_sequence_vwap_baseline(sequence_ohlcv)?;
+    // Calculate sequence exponentially-weighted close for exponential_weighted_range calculation
+    let sequence_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
 
-    // Calculate VWAP-relative percentage ranges
-    let vwap_percentage_ranges: Vec<[f64; 2]> = price_ranges
+    // Calculate exponentially-weighted close relative percentage ranges
+    let exponential_weighted_percentage_ranges: Vec<[f64; 2]> = price_ranges
         .iter()
         .map(|[lower_price, upper_price]| {
-            let lower_pct = ((lower_price / sequence_vwap) - 1.0) * 100.0;
-            let upper_pct = ((upper_price / sequence_vwap) - 1.0) * 100.0;
+            let lower_pct = ((lower_price / sequence_exponential_weighted) - 1.0) * 100.0;
+            let upper_pct = ((upper_price / sequence_exponential_weighted) - 1.0) * 100.0;
             [lower_pct, upper_pct]
         })
         .collect();
@@ -1055,7 +964,7 @@ pub fn reconstruct_price_levels(
     Ok(PriceLevelReconstruction {
         percentage_ranges,
         price_ranges,
-        vwap_percentage_ranges,
+        exponential_weighted_percentage_ranges,
         probabilities: probabilities.to_vec(),
         most_likely_class,
         confidence,
@@ -1092,8 +1001,7 @@ pub fn probabilities_to_price_targets(
     // Use same adaptive percentiles as training for consistency
     let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
     let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
-    let final_bandwidth_size =
-        calculate_adaptive_bandwidth(sequence_ohlcv, bandwidth_size, Some(1.2))?;
+    let final_bandwidth_size = calculate_adaptive_bandwidth(sequence_ohlcv, bandwidth_size, None)?;
 
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,

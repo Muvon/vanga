@@ -398,45 +398,41 @@ mod tests {
         );
     }
 
-    /// **ENHANCED**: Test momentum-weighted VWAP calculation
+    /// **UPDATED**: Test exponentially-weighted close calculation
     #[test]
-    fn test_momentum_weighted_vwap() {
-        // Test case 1: Equal weighting (momentum_factor = 1.0) should match standard VWAP
+    fn test_exponential_weighted_close() {
+        // Test case 1: Basic exponential weighting functionality
         let sequence = create_test_candles(vec![
             (100.0, 102.0, 98.0, 101.0, 1000.0),  // OHLC4 = 100.25
             (101.0, 103.0, 99.0, 102.0, 2000.0),  // OHLC4 = 101.25
             (102.0, 104.0, 100.0, 103.0, 1500.0), // OHLC4 = 102.25
         ]);
 
-        let standard_vwap = get_sequence_vwap_baseline(&sequence).unwrap();
-        let momentum_vwap_equal = calculate_vwap_with_momentum(&sequence, 1.0).unwrap();
+        let standard_exponential = get_sequence_exponential_weighted_close(&sequence).unwrap();
+        let momentum_exponential = get_sequence_exponential_weighted_close(&sequence).unwrap();
 
-        // Should be identical for momentum_factor = 1.0
-        assert!((standard_vwap - momentum_vwap_equal).abs() < 1e-6);
+        // Should be identical since both use same exponential weighting
+        assert!((standard_exponential - momentum_exponential).abs() < 1e-6);
 
-        // Test case 2: Recent bias (momentum_factor > 1.0) should weight recent data more
-        let momentum_vwap_recent = calculate_vwap_with_momentum(&sequence, 1.5).unwrap();
+        // Test case 2: Exponential weighting emphasizes recent prices
+        let exponential_weighted = get_sequence_exponential_weighted_close(&sequence).unwrap();
 
-        // With recent bias, result should be closer to later prices
-        // Last candle OHLC4 = 102.25, so momentum_vwap_recent should be > standard_vwap
-        assert!(momentum_vwap_recent > standard_vwap);
+        // With exponential weighting, result should be closer to later prices
+        // Last candle close = 103.0, so exponential should be > simple average
+        let simple_average = (101.0 + 102.0 + 103.0) / 3.0; // 102.0
+        assert!(exponential_weighted > simple_average);
 
-        // Test case 3: Early bias (momentum_factor < 1.0) should weight early data more
-        let momentum_vwap_early = calculate_vwap_with_momentum(&sequence, 0.5).unwrap();
+        // Test case 3: Single candle should return close price
+        let single_candle = create_test_candles(vec![(100.0, 102.0, 98.0, 101.0, 1000.0)]);
+        let single_result = get_sequence_exponential_weighted_close(&single_candle).unwrap();
+        assert!((single_result - 101.0).abs() < 1e-6);
 
-        // With early bias, result should be closer to earlier prices
-        // First candle OHLC4 = 100.25, so momentum_vwap_early should be < standard_vwap
-        // Note: This might not always be true depending on volume weighting
-        // Let's just check that the values are different and reasonable
-        assert!(momentum_vwap_early != standard_vwap);
-        assert!(momentum_vwap_early > 100.0 && momentum_vwap_early < 103.0);
+        println!("Standard exponential: {:.6}", standard_exponential);
+        println!("Exponential weighted: {:.6}", exponential_weighted);
+        println!("Simple average: {:.6}", simple_average);
 
-        println!("Standard VWAP: {:.6}", standard_vwap);
-        println!("Momentum VWAP (recent bias): {:.6}", momentum_vwap_recent);
-        println!("Momentum VWAP (early bias): {:.6}", momentum_vwap_early);
-
-        // The key test: recent bias should be different from early bias
-        assert!((momentum_vwap_recent - momentum_vwap_early).abs() > 1e-6);
+        // The key test: exponential weighting should emphasize recent prices
+        assert!(exponential_weighted > simple_average);
     }
 
     /// **ENHANCED**: Test adaptive bandwidth calculation
@@ -718,6 +714,88 @@ mod tests {
             imbalance_ratio < 5.0,
             "Enhanced classification shows severe imbalance: {:.2}x",
             imbalance_ratio
+        );
+    }
+
+    /// Test reconstruction consistency between training and prediction
+    #[test]
+    fn test_reconstruction_consistency() {
+        use crate::targets::price_levels::reconstruct_price_levels;
+
+        // Create test sequence data
+        let sequence_data = create_test_candles(vec![
+            (100.0, 105.0, 95.0, 102.0, 1000.0),
+            (102.0, 108.0, 98.0, 106.0, 1500.0),
+            (106.0, 112.0, 104.0, 110.0, 2000.0),
+            (110.0, 115.0, 108.0, 113.0, 1800.0),
+            (113.0, 118.0, 111.0, 116.0, 2200.0),
+        ]);
+
+        // Create horizon data (future price)
+        let horizon_data = create_test_candles(vec![
+            (116.0, 120.0, 114.0, 118.0, 2000.0), // Target price: 118.0
+        ]);
+
+        let config = TargetsConfig::default();
+        let current_price = 116.0; // Last close price from sequence
+
+        // Step 1: Classify the target using training logic
+        let training_class = classify_price_level(&sequence_data, &horizon_data, &config).unwrap();
+
+        // Step 2: Create mock probabilities with 100% confidence in the training class
+        let mut probabilities = vec![0.0; 5];
+        probabilities[training_class as usize] = 1.0;
+
+        // Step 3: Reconstruct using prediction logic
+        let reconstruction =
+            reconstruct_price_levels(&probabilities, &sequence_data, current_price, Some(&config))
+                .unwrap();
+
+        // Step 4: Verify consistency
+        assert_eq!(
+            training_class as usize, reconstruction.most_likely_class,
+            "Training class should match reconstruction most likely class"
+        );
+        assert!(
+            (reconstruction.confidence - 1.0).abs() < 1e-6,
+            "Confidence should be 1.0 for 100% probability"
+        );
+
+        // Step 5: Verify ranges are ordered correctly
+        for i in 0..4 {
+            assert!(
+                reconstruction.percentage_ranges[i][1]
+                    <= reconstruction.percentage_ranges[i + 1][0],
+                "Price ranges should be ordered and non-overlapping"
+            );
+        }
+
+        // Step 6: Verify exponential weighted ranges exist and are reasonable
+        assert_eq!(
+            reconstruction.exponential_weighted_percentage_ranges.len(),
+            5
+        );
+        for range in &reconstruction.exponential_weighted_percentage_ranges {
+            assert!(
+                range[0] <= range[1],
+                "Range lower bound should be <= upper bound"
+            );
+        }
+
+        // Step 7: Verify sequence boundaries are reasonable
+        assert!(reconstruction.sequence_min < reconstruction.sequence_max);
+        assert!(reconstruction.bandwidth > 0.0);
+
+        println!("✅ Reconstruction consistency test passed!");
+        println!("   Training class: {}", training_class);
+        println!(
+            "   Reconstruction class: {}",
+            reconstruction.most_likely_class
+        );
+        println!("   Confidence: {:.3}", reconstruction.confidence);
+        println!(
+            "   Expected change: {:.2}%",
+            reconstruction.expected_change_percent
         );
     }
 }

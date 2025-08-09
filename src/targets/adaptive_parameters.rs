@@ -38,7 +38,7 @@ pub struct AdaptiveTargetParameters {
     /// Direction target parameters (momentum-based)
     pub direction: DirectionAdaptiveParams,
 
-    /// Price level target parameters (VWAP-weighted)
+    /// Price level target parameters (exponentially-weighted)
     pub price_levels: PriceLevelAdaptiveParams,
 
     /// Volatility target parameters (ATR distribution-based)
@@ -85,7 +85,7 @@ impl Default for DirectionAdaptiveParams {
     }
 }
 
-/// Adaptive parameters for price level targets (VWAP-weighted classification)
+/// Adaptive parameters for price level targets (exponentially-weighted classification)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevelAdaptiveParams {
     /// Calibrated bandwidth size for breakout sensitivity
@@ -93,9 +93,6 @@ pub struct PriceLevelAdaptiveParams {
 
     /// Adaptive percentiles for range boundaries [lower, upper]
     pub adaptive_percentiles: [f64; 2],
-
-    /// Momentum factor for VWAP weighting
-    pub momentum_factor: f64,
 
     /// Volatility adjustment factor for bandwidth scaling
     pub volatility_adjustment: f64,
@@ -109,7 +106,6 @@ impl Default for PriceLevelAdaptiveParams {
         Self {
             bandwidth_size: 1.0,
             adaptive_percentiles: [0.1, 0.9],
-            momentum_factor: 1.2,
             volatility_adjustment: 1.0,
             achieved_balance: ClassDistributionBalance::default(),
         }
@@ -281,7 +277,6 @@ pub struct AdaptiveParameterCalibrator {
 struct PriceLevelEvaluationParams {
     bandwidth_size: f64,
     percentiles: [f64; 2],
-    momentum_factor: f64,
 }
 
 impl AdaptiveParameterCalibrator {
@@ -319,60 +314,55 @@ impl AdaptiveParameterCalibrator {
             [0.2, 0.8],
             [0.25, 0.75],
         ];
-        let momentum_factor_candidates = vec![1.0, 1.1, 1.2, 1.3];
 
         let mut best_params = PriceLevelAdaptiveParams::default();
         let mut best_balance_score = f64::INFINITY;
 
         for &bandwidth in &bandwidth_candidates {
             for &percentiles in &percentile_candidates {
-                for &momentum_factor in &momentum_factor_candidates {
-                    let eval_params = PriceLevelEvaluationParams {
+                let eval_params = PriceLevelEvaluationParams {
+                    bandwidth_size: bandwidth,
+                    percentiles,
+                };
+
+                let balance = self
+                    .evaluate_price_level_parameters(
+                        ohlcv_data,
+                        sequence_indices,
+                        sequence_length,
+                        horizon_steps,
+                        &eval_params,
+                    )
+                    .await?;
+
+                // MIN-CLASS OPTIMIZATION: Prioritize parameters that maximize minimum class representation
+                let min_class_ratio = balance
+                    .class_percentages
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap()
+                    / 100.0;
+                let min_class_threshold = 0.15; // 15% minimum per class (vs 20% ideal)
+
+                // Heavy penalty if any class falls below threshold
+                let min_class_penalty = if min_class_ratio < min_class_threshold {
+                    (min_class_threshold - min_class_ratio) * 50.0 // 50x penalty for under-representation
+                } else {
+                    0.0
+                };
+
+                let score = balance.balance_score
+                    + (balance.imbalance_ratio - 1.0) * 0.1
+                    + min_class_penalty;
+
+                if score < best_balance_score {
+                    best_balance_score = score;
+                    best_params = PriceLevelAdaptiveParams {
                         bandwidth_size: bandwidth,
-                        percentiles,
-                        momentum_factor,
+                        adaptive_percentiles: percentiles,
+                        volatility_adjustment: 1.0, // Default adjustment
+                        achieved_balance: balance,
                     };
-
-                    let balance = self
-                        .evaluate_price_level_parameters(
-                            ohlcv_data,
-                            sequence_indices,
-                            sequence_length,
-                            horizon_steps,
-                            &eval_params,
-                        )
-                        .await?;
-
-                    // MIN-CLASS OPTIMIZATION: Prioritize parameters that maximize minimum class representation
-                    let min_class_ratio = balance
-                        .class_percentages
-                        .iter()
-                        .min_by(|a, b| a.partial_cmp(b).unwrap())
-                        .unwrap()
-                        / 100.0;
-                    let min_class_threshold = 0.15; // 15% minimum per class (vs 20% ideal)
-
-                    // Heavy penalty if any class falls below threshold
-                    let min_class_penalty = if min_class_ratio < min_class_threshold {
-                        (min_class_threshold - min_class_ratio) * 50.0 // 50x penalty for under-representation
-                    } else {
-                        0.0
-                    };
-
-                    let score = balance.balance_score
-                        + (balance.imbalance_ratio - 1.0) * 0.1
-                        + min_class_penalty;
-
-                    if score < best_balance_score {
-                        best_balance_score = score;
-                        best_params = PriceLevelAdaptiveParams {
-                            bandwidth_size: bandwidth,
-                            adaptive_percentiles: percentiles,
-                            momentum_factor,
-                            volatility_adjustment: 1.0, // Default adjustment
-                            achieved_balance: balance,
-                        };
-                    }
                 }
             }
         }
@@ -554,8 +544,8 @@ impl AdaptiveParameterCalibrator {
             )
             .await?;
 
-        // Step 2: Calibrate price level parameters (VWAP-weighted)
-        log::info!("📊 Calibrating price level parameters (VWAP-weighted)...");
+        // Step 2: Calibrate price level parameters (exponentially-weighted)
+        log::info!("📊 Calibrating price level parameters (exponentially-weighted)...");
         let price_level_params = self
             .calibrate_price_level_parameters(
                 ohlcv_data,
@@ -871,13 +861,13 @@ impl AdaptiveParameterCalibrator {
         Ok(calculate_class_distribution_balance(&class_counts))
     }
 
-    /// Calibrate price level parameters for optimal VWAP-weighted classification
+    /// Calibrate price level parameters for optimal exponentially-weighted classification
     ///
     /// This method finds the optimal parameters for price level targets by analyzing
-    /// VWAP-weighted price distributions and optimizing for balanced range-based classification.
+    /// exponentially-weighted price distributions and optimizing for balanced range-based classification.
     ///
     /// ## Algorithm
-    /// 1. **VWAP Analysis**: Calculate VWAP baselines and target prices across sequences
+    /// 1. **Exponential Weighting Analysis**: Calculate exponentially-weighted close prices and target prices across sequences
     /// 2. **Range Distribution**: Analyze price range characteristics and volatility patterns
     /// 3. **Percentile Optimization**: Find optimal adaptive percentiles for boundaries
     /// 4. **Bandwidth Calibration**: Optimize bandwidth size for breakout sensitivity
@@ -886,7 +876,7 @@ impl AdaptiveParameterCalibrator {
     /// ## Optimization Strategy
     /// - **Adaptive Percentiles**: Test percentile combinations for optimal boundaries
     /// - **Bandwidth Scaling**: Test bandwidth sizes from 0.5 to 2.0
-    /// - **Momentum Weighting**: Optimize momentum factor for VWAP calculation
+    /// - **Exponential Weighting**: Use built-in exponential weighting for recent price emphasis
     /// - **Volatility Adjustment**: Account for sequence volatility characteristics
     async fn calibrate_price_level_parameters(
         &self,
@@ -895,7 +885,9 @@ impl AdaptiveParameterCalibrator {
         horizon_steps: usize,
         sequence_indices: &[usize],
     ) -> Result<PriceLevelAdaptiveParams> {
-        use crate::targets::price_levels::{get_horizon_vwap, get_sequence_vwap_baseline};
+        use crate::targets::price_levels::{
+            get_horizon_exponential_weighted_close, get_sequence_exponential_weighted_close,
+        };
 
         log::debug!("🎯 Starting price level parameter calibration...");
 
@@ -904,10 +896,10 @@ impl AdaptiveParameterCalibrator {
             return Ok(PriceLevelAdaptiveParams::default());
         }
 
-        // Step 1: Sample VWAP data and price ranges for analysis
+        // Step 1: Sample exponentially-weighted close data and price ranges for analysis
         let mut sequence_ranges = Vec::new();
         let mut target_prices = Vec::new();
-        let mut sequence_vwaps = Vec::new();
+        let mut sequence_exponential_weighted = Vec::new();
         let mut volatility_measures = Vec::new();
 
         for &seq_idx in sequence_indices
@@ -923,11 +915,12 @@ impl AdaptiveParameterCalibrator {
                 let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
                 if sequence_ohlcv.len() >= 2 && horizon_ohlcv.len() >= 2 {
-                    // Calculate sequence VWAP and range
-                    let seq_vwap = get_sequence_vwap_baseline(sequence_ohlcv)?;
+                    // Calculate sequence exponentially-weighted close and range
+                    let seq_exponential_weighted =
+                        get_sequence_exponential_weighted_close(sequence_ohlcv)?;
                     let seq_prices: Vec<f64> = sequence_ohlcv
                         .iter()
-                        .map(|c| (c.open + c.high + c.low + c.close) / 4.0)
+                        .map(|c| c.close) // Use close prices for consistency with exponential weighting
                         .collect();
 
                     let seq_min = seq_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
@@ -935,7 +928,8 @@ impl AdaptiveParameterCalibrator {
                     let seq_range = seq_max - seq_min;
 
                     // Calculate target VWAP
-                    let target_vwap = get_horizon_vwap(horizon_ohlcv)?;
+                    let target_weighted_price =
+                        get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
                     // Calculate volatility measure (coefficient of variation)
                     let price_mean = seq_prices.iter().sum::<f64>() / seq_prices.len() as f64;
@@ -950,10 +944,13 @@ impl AdaptiveParameterCalibrator {
                         0.02
                     };
 
-                    if seq_vwap > 0.0 && target_vwap > 0.0 && seq_range > 0.0 {
-                        sequence_ranges.push(seq_range / seq_vwap); // Normalized range
-                        target_prices.push(target_vwap);
-                        sequence_vwaps.push(seq_vwap);
+                    if seq_exponential_weighted > 0.0
+                        && target_weighted_price > 0.0
+                        && seq_range > 0.0
+                    {
+                        sequence_ranges.push(seq_range / seq_exponential_weighted); // Normalized range
+                        target_prices.push(target_weighted_price);
+                        sequence_exponential_weighted.push(seq_exponential_weighted);
                         volatility_measures.push(volatility);
                     }
                 }
@@ -984,53 +981,47 @@ impl AdaptiveParameterCalibrator {
             [0.2, 0.8],
             [0.25, 0.75],
         ];
-        let momentum_factor_candidates = vec![1.0, 1.1, 1.2, 1.3, 1.5];
 
         let mut best_params = PriceLevelAdaptiveParams::default();
         let mut best_balance_score = f64::INFINITY;
 
         for &bandwidth in &bandwidth_candidates {
             for &percentiles in &percentile_candidates {
-                for &momentum_factor in &momentum_factor_candidates {
-                    // Test this parameter combination
-                    let eval_params = PriceLevelEvaluationParams {
+                // Test this parameter combination
+                let eval_params = PriceLevelEvaluationParams {
+                    bandwidth_size: bandwidth,
+                    percentiles,
+                };
+                let balance = self
+                    .evaluate_price_level_parameters(
+                        ohlcv_data,
+                        sequence_indices,
+                        sequence_length,
+                        horizon_steps,
+                        &eval_params,
+                    )
+                    .await?;
+
+                // Score this configuration (lower is better)
+                let score = balance.balance_score + (balance.imbalance_ratio - 1.0) * 0.1;
+
+                if score < best_balance_score {
+                    best_balance_score = score;
+                    best_params = PriceLevelAdaptiveParams {
                         bandwidth_size: bandwidth,
-                        percentiles,
-                        momentum_factor,
+                        adaptive_percentiles: percentiles,
+                        volatility_adjustment: mean_volatility / 0.02, // Normalize to 2% baseline
+                        achieved_balance: balance,
                     };
-                    let balance = self
-                        .evaluate_price_level_parameters(
-                            ohlcv_data,
-                            sequence_indices,
-                            sequence_length,
-                            horizon_steps,
-                            &eval_params,
-                        )
-                        .await?;
-
-                    // Score this configuration (lower is better)
-                    let score = balance.balance_score + (balance.imbalance_ratio - 1.0) * 0.1;
-
-                    if score < best_balance_score {
-                        best_balance_score = score;
-                        best_params = PriceLevelAdaptiveParams {
-                            bandwidth_size: bandwidth,
-                            adaptive_percentiles: percentiles,
-                            momentum_factor,
-                            volatility_adjustment: mean_volatility / 0.02, // Normalize to 2% baseline
-                            achieved_balance: balance,
-                        };
-                    }
                 }
             }
         }
 
         log::info!(
-            "🎯 Price level calibration: bandwidth={:.3}, percentiles=[{:.2}, {:.2}], momentum={:.2}, balance_score={:.4}, imbalance={:.1}x",
+            "🎯 Price level calibration: bandwidth={:.3}, percentiles=[{:.2}, {:.2}], balance_score={:.4}, imbalance={:.1}x",
             best_params.bandwidth_size,
             best_params.adaptive_percentiles[0],
             best_params.adaptive_percentiles[1],
-            best_params.momentum_factor,
             best_params.achieved_balance.balance_score,
             best_params.achieved_balance.imbalance_ratio
         );
@@ -1047,7 +1038,7 @@ impl AdaptiveParameterCalibrator {
         horizon_steps: usize,
         params: &PriceLevelEvaluationParams,
     ) -> Result<ClassDistributionBalance> {
-        use crate::targets::price_levels::{calculate_vwap_with_momentum, get_horizon_vwap};
+        use crate::targets::price_levels::get_horizon_exponential_weighted_close;
         use crate::targets::sequence_reconstruction::{
             SequenceAnalyzer, SequenceReconstructionConfig,
         };
@@ -1064,15 +1055,9 @@ impl AdaptiveParameterCalibrator {
                 let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
                 if sequence_ohlcv.len() >= 2 && horizon_ohlcv.len() >= 2 {
-                    // Calculate sequence VWAP with momentum weighting
-                    let _seq_vwap = if params.momentum_factor != 1.0 {
-                        calculate_vwap_with_momentum(sequence_ohlcv, params.momentum_factor)?
-                    } else {
-                        crate::targets::price_levels::get_sequence_vwap_baseline(sequence_ohlcv)?
-                    };
-
-                    // Calculate target VWAP
-                    let target_vwap = get_horizon_vwap(horizon_ohlcv)?;
+                    // Calculate target exponentially-weighted close
+                    let target_weighted_price =
+                        get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
                     // Use sequence reconstruction for consistent classification
                     let reconstruction_config = SequenceReconstructionConfig {
@@ -1084,7 +1069,7 @@ impl AdaptiveParameterCalibrator {
 
                     // Handle edge case: flat sequence
                     if boundaries.bandwidth == 0.0 {
-                        let class = if target_vwap >= boundaries.sequence_min {
+                        let class = if target_weighted_price >= boundaries.sequence_min {
                             3
                         } else {
                             2
@@ -1094,7 +1079,7 @@ impl AdaptiveParameterCalibrator {
                     }
 
                     // Classify using centralized logic
-                    let class = boundaries.classify_price(target_vwap);
+                    let class = boundaries.classify_price(target_weighted_price);
                     if (0..5).contains(&class) {
                         class_counts[class as usize] += 1;
                     }
