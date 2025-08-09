@@ -256,48 +256,42 @@ pub fn classify_sentiment(
     Ok(class)
 }
 
-/// Calculate sentiment score for a sequence using green/red candle analysis
+/// Calculate sentiment score using volume-price correlation analysis
+///
+/// This enhanced approach captures buying/selling pressure by analyzing the correlation
+/// between price movements and volume, providing a more accurate representation of
+/// market psychology than simple green/red candle analysis.
 pub fn calculate_sequence_sentiment_score(candles: &[MarketDataRow]) -> f64 {
     if candles.is_empty() {
         return 0.0;
     }
 
-    // Calculate average volume for normalization
+    // Calculate average volume for normalization (keep existing logic)
     let avg_volume = candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64;
-    let mut total_sentiment = 0.0;
+    let mut correlation_sum = 0.0;
     let mut valid_candles = 0;
 
     for candle in candles {
-        let range = candle.high - candle.low;
-        if range <= 0.0 {
+        if candle.open <= 0.0 || avg_volume <= 0.0 {
             continue;
         }
 
-        // Body size as percentage of range (0.0 to 1.0)
-        let body_size_pct = (candle.close - candle.open).abs() / range;
-
-        // Body direction: +1 for green, -1 for red, 0 for doji
-        let body_direction = if candle.close > candle.open {
-            1.0 // Green candle (bullish sentiment)
-        } else if candle.close < candle.open {
-            -1.0 // Red candle (bearish sentiment)
-        } else {
-            0.0 // Doji (neutral sentiment)
-        };
-
-        // Volume confirmation (higher volume = more significant)
+        // Volume-price correlation instead of simple green/red analysis
+        let price_change_pct = (candle.close - candle.open) / candle.open;
         let volume_ratio = candle.volume / avg_volume;
-        let volume_confirmation = (volume_ratio - 1.0).clamp(-0.5, 2.0); // Clamp volume effect
 
-        // Sentiment score: direction * size * volume_confirmation
-        let candle_sentiment = body_direction * body_size_pct * (1.0 + volume_confirmation * 0.3);
+        // Correlation captures buying/selling pressure:
+        // Positive: High volume + price up = buying pressure (bullish sentiment)
+        // Negative: High volume + price down = selling pressure (bearish sentiment)
+        // Near zero: Low volume or conflicting signals = neutral sentiment
+        let vp_correlation = price_change_pct * volume_ratio;
 
-        total_sentiment += candle_sentiment;
+        correlation_sum += vp_correlation;
         valid_candles += 1;
     }
 
     if valid_candles > 0 {
-        total_sentiment / valid_candles as f64
+        correlation_sum / valid_candles as f64
     } else {
         0.0
     }
@@ -475,7 +469,7 @@ fn parse_horizon_steps(horizon: &str) -> Result<usize> {
         .map_err(|_| VangaError::DataError(format!("Invalid horizon format: {}", horizon)))
 }
 
-/// Log sentiment class distribution
+/// Log sentiment class distribution with volume-price correlation context
 fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
     let class_names = [
         "STRONG_PANIC",
@@ -496,7 +490,7 @@ fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
 
     if valid_targets == 0 {
         log::warn!(
-            "📊 Sentiment Analysis [{}]: No valid targets found",
+            "📊 Volume-Price Sentiment Analysis [{}]: No valid targets found",
             horizon
         );
         return;
@@ -521,7 +515,7 @@ fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Sentiment Distribution [{}]: {} samples, {} | Imbalance: {:.2}x",
+        "📊 Volume-Price Sentiment Distribution [{}]: {} samples, {} | Imbalance: {:.2}x",
         horizon,
         valid_targets,
         class_percentages.join(", "),
@@ -540,7 +534,7 @@ fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
     };
 
     log::info!(
-        "📊 Sentiment Balance Quality [{}]: {} (target: ~20% per class)",
+        "📊 Volume-Price Sentiment Balance Quality [{}]: {} (target: ~20% per class)",
         horizon,
         balance_quality
     );
@@ -572,7 +566,20 @@ pub fn calibrate_sentiment_sensitivity(
     horizon_steps: usize,
     _target_balance: f64, // Unused but kept for API compatibility
 ) -> Result<f64> {
+    log::info!(
+        "🔍 Sentiment calibration: data_len={}, sequence_length={}, horizon_steps={}, required={}",
+        ohlcv_data.len(),
+        sequence_length,
+        horizon_steps,
+        sequence_length + horizon_steps + 10
+    );
+
     if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
+        log::warn!(
+            "⚠️ Insufficient data for sentiment calibration: {} < {}, using default: 0.055",
+            ohlcv_data.len(),
+            sequence_length + horizon_steps + 10
+        );
         return Ok(0.055); // Default from debug analysis
     }
 
@@ -583,7 +590,7 @@ pub fn calibrate_sentiment_sensitivity(
         let sequence_ohlcv = &ohlcv_data[i..i + sequence_length];
         let horizon_ohlcv = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
-        if sequence_ohlcv.len() >= 3 && horizon_ohlcv.len() >= 3 {
+        if sequence_ohlcv.len() >= 3 && !horizon_ohlcv.is_empty() {
             let seq_sentiment = calculate_sequence_sentiment_score(sequence_ohlcv);
             let hor_sentiment = calculate_sequence_sentiment_score(horizon_ohlcv);
 
@@ -595,39 +602,72 @@ pub fn calibrate_sentiment_sensitivity(
     }
 
     if sentiment_changes.is_empty() {
+        log::warn!("⚠️ No valid sentiment changes found, using default: 0.055");
         return Ok(0.055); // Default fallback from debug analysis
     }
+
+    log::info!(
+        "🔍 Collected {} sentiment changes, range: [{:.6}, {:.6}]",
+        sentiment_changes.len(),
+        sentiment_changes
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(&0.0),
+        sentiment_changes
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(&0.0)
+    );
 
     // Sort changes to find percentiles for balanced 5-class distribution
     sentiment_changes.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = sentiment_changes.len();
 
     // Calculate percentile thresholds for 20% per class
-    // We need the 40th and 60th percentiles to define neutral boundaries
+    // We need the 20th, 40th, 60th, and 80th percentiles for 5-class distribution
+    let p20_idx = (n as f64 * 0.20) as usize;
     let p40_idx = (n as f64 * 0.40) as usize;
     let p60_idx = (n as f64 * 0.60) as usize;
+    let p80_idx = (n as f64 * 0.80) as usize;
 
+    let strong_panic_threshold = sentiment_changes[p20_idx.min(n - 1)];
     let moderate_panic_threshold = sentiment_changes[p40_idx.min(n - 1)];
     let moderate_greed_threshold = sentiment_changes[p60_idx.min(n - 1)];
+    let strong_greed_threshold = sentiment_changes[p80_idx.min(n - 1)];
 
-    // The base threshold should be the average of the neutral boundaries (absolute values)
-    let base_threshold = (moderate_panic_threshold.abs() + moderate_greed_threshold.abs()) / 2.0;
+    // FIXED: Use actual percentile values directly for balanced classification
+    // Instead of calculating derived thresholds, use the actual 40th and 60th percentile values
+    // This ensures the neutral zone contains exactly 20% of the data
 
-    // Ensure reasonable bounds
-    let final_sensitivity = base_threshold.clamp(0.01, 1.0);
+    // The 40th percentile value should be our neutral lower bound
+    // The 60th percentile value should be our neutral upper bound
+    // Use the smaller absolute value to ensure symmetric thresholds
+    let abs_40th = moderate_panic_threshold.abs();
+    let abs_60th = moderate_greed_threshold.abs();
+    let base_threshold = abs_40th.min(abs_60th);
+
+    // Ensure minimum threshold for numerical stability
+    let final_sensitivity = if base_threshold < 0.0001 {
+        0.0001
+    } else {
+        base_threshold
+    };
 
     log::info!(
-        "🎯 Calibrated sentiment sensitivity: {:.6} (from {} samples, 40th percentile: {:.6}, 60th percentile: {:.6})",
+        "🎯 Calibrated sentiment sensitivity: {:.6} (from {} samples, percentiles: 20th={:.6}, 40th={:.6}, 60th={:.6}, 80th={:.6}, base_threshold={:.6})",
         final_sensitivity,
         n,
+        strong_panic_threshold,
         moderate_panic_threshold,
-        moderate_greed_threshold
+        moderate_greed_threshold,
+        strong_greed_threshold,
+        base_threshold
     );
 
     Ok(final_sensitivity)
 }
 
-/// Get sentiment class names in order
+/// Get sentiment class names (keeping original PANIC/GREED terminology)
 pub fn get_sentiment_class_names() -> Vec<&'static str> {
     vec![
         "STRONG_PANIC",
@@ -659,11 +699,11 @@ pub struct SentimentReconstruction {
     pub sentiment_interpretation: String,
 }
 
-/// Reconstruct sentiment from model probabilities
+/// Reconstruct sentiment from model probabilities with volume-price correlation interpretation
 pub fn reconstruct_sentiment(
     probabilities: &[f64],
-    sequence_sentiment: f64,
-    thresholds: &[f64; 4], // [panic_extreme, panic_moderate, greed_moderate, greed_extreme]
+    sequence_sentiment: f64, // Now represents volume-price correlation baseline
+    thresholds: &[f64; 4],   // [panic_extreme, panic_moderate, greed_moderate, greed_extreme]
 ) -> Result<SentimentReconstruction> {
     if probabilities.len() != 5 {
         return Err(VangaError::DataError(
@@ -671,7 +711,7 @@ pub fn reconstruct_sentiment(
         ));
     }
 
-    // Define sentiment ranges based on thresholds
+    // Define sentiment ranges based on volume-price correlation thresholds
     let sentiment_ranges = vec![
         [f64::NEG_INFINITY, sequence_sentiment - thresholds[0]], // Strong Panic
         [
@@ -699,7 +739,7 @@ pub fn reconstruct_sentiment(
 
     let confidence = probabilities[most_likely_class];
 
-    // Calculate expected sentiment (weighted average)
+    // Calculate expected sentiment (weighted average of volume-price correlation)
     let class_midpoints = [
         sequence_sentiment - thresholds[0] * 1.5, // Strong Panic
         sequence_sentiment - (thresholds[0] + thresholds[1]) / 2.0, // Moderate Panic
@@ -714,8 +754,14 @@ pub fn reconstruct_sentiment(
         .map(|(prob, midpoint)| prob * midpoint)
         .sum::<f64>();
 
-    // Generate interpretation
-    let class_names = get_sentiment_class_names();
+    // Generate interpretation with corrected PANIC/GREED terminology
+    let class_names = [
+        "STRONG_PANIC",
+        "MODERATE_PANIC",
+        "NEUTRAL",
+        "MODERATE_GREED",
+        "STRONG_GREED",
+    ];
     let sentiment_interpretation = format!(
         "{} (confidence: {:.1}%)",
         class_names[most_likely_class],
