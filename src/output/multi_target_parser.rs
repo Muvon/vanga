@@ -7,7 +7,7 @@ use crate::config::model::NUM_CLASSES;
 use crate::utils::error::{Result, VangaError};
 use ndarray::{s, ArrayView1};
 
-/// Output segments for multi-target parsing - always 5 targets with NUM_CLASSES each
+/// Output segments for multi-target parsing - always 5 targets (price_levels, direction, volatility, sentiment, volume) with NUM_CLASSES each
 #[derive(Debug, Clone)]
 pub struct OutputSegments {
     /// Price levels segment: (start_idx, end_idx)
