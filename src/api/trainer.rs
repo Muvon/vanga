@@ -374,41 +374,15 @@ impl ModelTrainer {
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new();
 
-        // Load and prepare target-specific training data with chronological split
-        log::info!(
-            "Loading training data from: {}",
-            self.config.data_path.display()
-        );
-        let target_windows = data_pipeline
-            .prepare_training_data(&self.config.data_path, &self.config)
-            .await?;
-
-        log::info!(
-            "Target-specific training: {} targets prepared with independent balancing",
-            target_windows.windows_by_target.len()
-        );
-
-        // CRITICAL: Calibrate adaptive target parameters for consistent prediction reconstruction
+        // CRITICAL: Calibrate adaptive target parameters BEFORE data pipeline to avoid duplicate calibration
         log::info!("🎯 Calibrating adaptive target parameters for balanced class distributions...");
         let data_loader = crate::data::DataLoader::new();
         let raw_data = data_loader.load_csv(&self.config.data_path).await?;
         let ohlcv_data = crate::utils::market_data::extract_ohlcv_data(&raw_data)?;
 
-        // Get sequence indices from the first target window (all targets use same sequences)
-        let sequence_indices: Vec<usize> =
-            if let Some(first_target) = target_windows.windows_by_target.values().next() {
-                if let Some(first_window) = first_target.first() {
-                    (0..first_window.train_data.sequences.shape()[0]).collect()
-                } else {
-                    return Err(VangaError::DataError(
-                        "No training windows available for calibration".to_string(),
-                    ));
-                }
-            } else {
-                return Err(VangaError::DataError(
-                    "No target windows available for calibration".to_string(),
-                ));
-            };
+        // Use a subset of data for calibration (first 1000 samples or all if less)
+        let calibration_sample_size = std::cmp::min(1000, ohlcv_data.len());
+        let calibration_indices: Vec<usize> = (0..calibration_sample_size).collect();
 
         let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(
             self.config.model.targets.clone(),
@@ -419,7 +393,7 @@ impl ModelTrainer {
                 &ohlcv_data,
                 96, // Default sequence length for calibration - actual training will use configured length
                 24, // Default horizon steps - will be overridden per target
-                &sequence_indices,
+                &calibration_indices,
             )
             .await?;
 
@@ -437,23 +411,25 @@ impl ModelTrainer {
             adaptive_params.volatility.bandwidth_size
         );
 
-        // Get base learning rate from config
-        log::info!("🔧 Walk-forward training configuration:");
+        // Load and prepare target-specific training data with PRE-CALIBRATED parameters
         log::info!(
-            "   📊 Test split: {:.1}% ({} samples reserved)",
-            self.config.training.test_split * 100.0,
-            (target_windows.windows_by_target.len() as f64 * self.config.training.test_split)
-                as usize
+            "Loading training data from: {}",
+            self.config.data_path.display()
         );
+        let target_windows = data_pipeline
+            .prepare_training_data_with_adaptive_params(
+                &self.config.data_path,
+                &self.config,
+                Some(&adaptive_params),
+            )
+            .await?;
+
         log::info!(
-            "   📊 Validation split: {:.1}%",
-            self.config.training.validation_split * 100.0
-        );
-        log::info!(
-            "   🔄 Window decay: {:.3}",
-            self.config.training.window_decay
+            "Target-specific training: {} targets prepared with independent balancing",
+            target_windows.windows_by_target.len()
         );
 
+        // Get base learning rate from config
         log::info!("🔧 Walk-forward training configuration:");
         log::info!(
             "   📊 Test split: {:.1}% ({} samples reserved)",
