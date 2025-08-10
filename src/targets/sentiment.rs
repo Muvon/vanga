@@ -176,7 +176,13 @@ pub fn generate_sentiment_targets_with_adaptive_params(
             let sequence_data = &ohlcv_data[seq_start..seq_end];
             let horizon_data = &ohlcv_data[seq_end..horizon_end];
 
-            match classify_sentiment(sequence_data, horizon_data, targets_config, &config) {
+            match classify_sentiment(
+                sequence_data,
+                horizon_data,
+                targets_config,
+                &config,
+                adaptive_params,
+            ) {
                 Ok(class) => horizon_targets.push(class),
                 Err(e) => {
                     log::warn!(
@@ -198,7 +204,7 @@ pub fn generate_sentiment_targets_with_adaptive_params(
     Ok(targets)
 }
 
-/// Classify sentiment using percentile-based adaptive thresholds (no magic numbers)
+/// Classify sentiment using percentile-based adaptive thresholds with optional adaptive parameters
 ///
 /// FIXED: This function now calculates percentile thresholds directly from the data
 /// to ensure exactly 20% of samples fall into each class, eliminating missing classes.
@@ -207,6 +213,7 @@ pub fn classify_sentiment(
     horizon_ohlcv: &[MarketDataRow],
     targets_config: &TargetsConfig,
     config: &SentimentConfig,
+    adaptive_params: Option<&SentimentAdaptiveParams>,
 ) -> Result<i32> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
         return Err(VangaError::DataError(
@@ -214,9 +221,24 @@ pub fn classify_sentiment(
         ));
     }
 
-    // Calculate sentiment metrics for both sequence and horizon
-    let sequence_sentiment = calculate_sequence_sentiment_score(sequence_ohlcv);
-    let horizon_sentiment = calculate_sequence_sentiment_score(horizon_ohlcv);
+    // Calculate sentiment metrics for both sequence and horizon using adaptive weighting
+    let sequence_sentiment = if let Some(params) = adaptive_params {
+        calculate_sequence_sentiment_score_with_weighting(
+            sequence_ohlcv,
+            params.horizon_decay_factor,
+        )
+    } else {
+        calculate_sequence_sentiment_score(sequence_ohlcv) // Fallback to uniform weighting
+    };
+
+    let horizon_sentiment = if let Some(params) = adaptive_params {
+        calculate_sequence_sentiment_score_with_weighting(
+            horizon_ohlcv,
+            params.horizon_decay_factor,
+        )
+    } else {
+        calculate_sequence_sentiment_score(horizon_ohlcv) // Fallback to uniform weighting
+    };
 
     // Calculate sentiment change (horizon vs sequence baseline)
     let sentiment_change = horizon_sentiment - sequence_sentiment;
@@ -259,48 +281,98 @@ pub fn classify_sentiment(
     Ok(class)
 }
 
-/// Calculate sentiment score for a sequence using green/red candle analysis
+/// Calculate sentiment score for a sequence using simplified green/red candle conviction analysis
+/// with optional horizon weighting for recent emphasis
+///
+/// ## Parameters
+/// - `candles`: OHLCV data for sentiment analysis
+/// - `horizon_decay_factor`: Optional decay factor for recent emphasis (1.0 = uniform, <1.0 = recent emphasis)
+///
+/// ## Weighting Strategy
+/// When horizon_decay_factor < 1.0, recent candles get higher weights:
+/// - weight[i] = decay_factor^(n-1-i) where i=0 is oldest, i=n-1 is newest
+/// - This emphasizes recent sentiment changes for better horizon prediction
+///
+/// This improved approach focuses on body conviction (direction + strength) as the primary
+/// sentiment indicator, with optional volume enhancement that doesn't dominate the calculation.
+///
+/// ## Core Algorithm
+/// 1. **Body Conviction**: (close - open) / (high - low) ∈ [-1, 1]
+/// 2. **Body Size**: abs(close - open) / (high - low) ∈ [0, 1]
+/// 3. **Sentiment Score**: body_conviction * body_size_pct ∈ [-1, 1]
+/// 4. **Volume Enhancement**: Optional 30% boost for high volume candles
+///
+/// ## Advantages
+/// - Simple, interpretable metrics in natural [-1, 1] range
+/// - Volume-independent core calculation (volume only enhances)
+/// - Captures both sentiment direction and conviction strength
+/// - Better suited for ML pattern recognition
 pub fn calculate_sequence_sentiment_score(candles: &[MarketDataRow]) -> f64 {
+    calculate_sequence_sentiment_score_with_weighting(candles, 1.0) // Default: uniform weighting
+}
+
+/// Calculate weighted sentiment score with optional horizon decay for recent emphasis
+pub fn calculate_sequence_sentiment_score_with_weighting(
+    candles: &[MarketDataRow],
+    horizon_decay_factor: f64,
+) -> f64 {
     if candles.is_empty() {
         return 0.0;
     }
 
-    // Calculate average volume for normalization
+    // Calculate average volume for optional enhancement (not dependency)
     let avg_volume = candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64;
-    let mut total_sentiment = 0.0;
-    let mut valid_candles = 0;
+    let mut weighted_sentiment = 0.0;
+    let mut total_weight = 0.0;
+    let n = candles.len();
 
-    for candle in candles {
+    for (i, candle) in candles.iter().enumerate() {
         let range = candle.high - candle.low;
         if range <= 0.0 {
-            continue;
+            continue; // Skip invalid candles
         }
 
-        // Body size as percentage of range (0.0 to 1.0)
+        // CORE SENTIMENT CALCULATION (volume-independent)
+
+        // Body conviction: combines direction and strength in single metric
+        // Range: [-1.0, 1.0] where -1 = full red body, +1 = full green body
+        let body_conviction = (candle.close - candle.open) / range;
+
+        // Body size as percentage of total range
+        // Range: [0.0, 1.0] where 1.0 = full body (no wicks)
         let body_size_pct = (candle.close - candle.open).abs() / range;
 
-        // Body direction: +1 for green, -1 for red, 0 for doji
-        let body_direction = if candle.close > candle.open {
-            1.0 // Green candle (bullish sentiment)
-        } else if candle.close < candle.open {
-            -1.0 // Red candle (bearish sentiment)
+        // Combined sentiment: direction * conviction strength
+        // Range: [-1.0, 1.0] with magnitude indicating conviction level
+        let core_sentiment = body_conviction * body_size_pct;
+
+        // OPTIONAL VOLUME ENHANCEMENT (not dependency)
+        // Volume only enhances existing sentiment, doesn't create it
+        let volume_multiplier = if avg_volume > 0.0 {
+            (candle.volume / avg_volume).min(2.0) // Cap at 2x to prevent dominance
         } else {
-            0.0 // Doji (neutral sentiment)
+            1.0
         };
 
-        // Volume confirmation (higher volume = more significant)
-        let volume_ratio = candle.volume / avg_volume;
-        let volume_confirmation = (volume_ratio - 1.0).clamp(-0.5, 2.0); // Clamp volume effect
+        // Apply volume enhancement: 70% core + 30% volume boost
+        // This ensures volume never dominates the sentiment calculation
+        let enhanced_sentiment = core_sentiment * (0.7 + 0.3 * volume_multiplier);
 
-        // Sentiment score: direction * size * volume_confirmation
-        let candle_sentiment = body_direction * body_size_pct * (1.0 + volume_confirmation * 0.3);
+        // ADAPTIVE HORIZON WEIGHTING
+        // Recent candles get higher weights when decay_factor < 1.0
+        // weight[i] = decay_factor^(n-1-i) where i=0 is oldest, i=n-1 is newest
+        let weight = if horizon_decay_factor < 1.0 {
+            horizon_decay_factor.powf((n - 1 - i) as f64)
+        } else {
+            1.0 // Uniform weighting when decay_factor >= 1.0
+        };
 
-        total_sentiment += candle_sentiment;
-        valid_candles += 1;
+        weighted_sentiment += enhanced_sentiment * weight;
+        total_weight += weight;
     }
 
-    if valid_candles > 0 {
-        total_sentiment / valid_candles as f64
+    if total_weight > 0.0 {
+        weighted_sentiment / total_weight
     } else {
         0.0
     }

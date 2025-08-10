@@ -166,6 +166,10 @@ pub struct SentimentAdaptiveParams {
     /// Consistency factor for adaptive threshold scaling
     pub consistency_factor: f64,
 
+    /// Horizon decay factor for recent-weighted sentiment calculation
+    /// Values < 1.0 emphasize recent candles, 1.0 = uniform weighting
+    pub horizon_decay_factor: f64,
+
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
 }
@@ -173,9 +177,10 @@ pub struct SentimentAdaptiveParams {
 impl Default for SentimentAdaptiveParams {
     fn default() -> Self {
         Self {
-            body_sensitivity: 1.0,
-            volume_weight: 0.3,
+            body_sensitivity: 0.05, // Lower default for new body conviction approach
+            volume_weight: 0.2,     // Reduced volume dependency
             consistency_factor: 1.0,
+            horizon_decay_factor: 1.0, // Uniform weighting as default fallback
             achieved_balance: ClassDistributionBalance::default(),
         }
     }
@@ -1599,40 +1604,44 @@ impl AdaptiveParameterCalibrator {
         let mut best_params = SentimentAdaptiveParams::default();
         let mut best_balance_score = f64::INFINITY;
 
-        // Grid search for optimal sentiment parameters
-        let body_sensitivity_values = vec![0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-        let volume_weight_values = vec![0.1, 0.2, 0.3, 0.4, 0.5];
-        let consistency_factor_values = vec![0.8, 1.0, 1.2, 1.5];
+        // Grid search for optimal sentiment parameters (optimized for new body conviction approach)
+        let body_sensitivity_values = vec![0.01, 0.02, 0.05, 0.1, 0.15, 0.2]; // Lower values for new approach
+        let volume_weight_values = vec![0.0, 0.1, 0.2, 0.3]; // Include volume-independent option
+        let consistency_factor_values = vec![0.5, 0.8, 1.0, 1.2]; // Broader range for new approach
+        let horizon_decay_values = vec![0.85, 0.90, 0.95, 1.0]; // Recent emphasis candidates
 
         for &body_sensitivity in &body_sensitivity_values {
             for &volume_weight in &volume_weight_values {
                 for &consistency_factor in &consistency_factor_values {
-                    let test_params = SentimentAdaptiveParams {
-                        body_sensitivity,
-                        volume_weight,
-                        consistency_factor,
-                        achieved_balance: ClassDistributionBalance::default(),
-                    };
+                    for &horizon_decay_factor in &horizon_decay_values {
+                        let test_params = SentimentAdaptiveParams {
+                            body_sensitivity,
+                            volume_weight,
+                            consistency_factor,
+                            horizon_decay_factor,
+                            achieved_balance: ClassDistributionBalance::default(),
+                        };
 
-                    match self
-                        .evaluate_sentiment_parameters(
-                            df,
-                            horizons,
-                            sequence_indices,
-                            sequence_length,
-                            &test_params,
-                        )
-                        .await
-                    {
-                        Ok(balance_score) => {
-                            if balance_score < best_balance_score {
-                                best_balance_score = balance_score;
-                                best_params = test_params;
+                        match self
+                            .evaluate_sentiment_parameters(
+                                df,
+                                horizons,
+                                sequence_indices,
+                                sequence_length,
+                                &test_params,
+                            )
+                            .await
+                        {
+                            Ok(balance_score) => {
+                                if balance_score < best_balance_score {
+                                    best_balance_score = balance_score;
+                                    best_params = test_params;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to evaluate sentiment parameters: {}", e);
-                            continue;
+                            Err(e) => {
+                                log::warn!("Failed to evaluate sentiment parameters: {}", e);
+                                continue;
+                            }
                         }
                     }
                 }
@@ -1643,8 +1652,8 @@ impl AdaptiveParameterCalibrator {
         best_params.achieved_balance.balance_score = best_balance_score;
 
         log::info!(
-            "🎯 Sentiment calibration complete: body_sensitivity={:.3}, volume_weight={:.3}, consistency_factor={:.3}, balance_score={:.4}",
-            best_params.body_sensitivity, best_params.volume_weight, best_params.consistency_factor, best_balance_score
+            "🎯 Sentiment calibration complete: body_sensitivity={:.3}, volume_weight={:.3}, consistency_factor={:.3}, horizon_decay_factor={:.3}, balance_score={:.4}",
+            best_params.body_sensitivity, best_params.volume_weight, best_params.consistency_factor, best_params.horizon_decay_factor, best_balance_score
         );
 
         Ok(best_params)
@@ -1844,6 +1853,7 @@ impl AdaptiveParameterCalibrator {
                 calibrated_sensitivity,
                 0.1, // Default volume_weight
                 0.8, // Default consistency_factor
+                1.0, // Default horizon_decay_factor (uniform weighting)
             )
             .await?;
 
@@ -1851,6 +1861,7 @@ impl AdaptiveParameterCalibrator {
             body_sensitivity: calibrated_sensitivity,
             volume_weight: 0.1,
             consistency_factor: 0.8,
+            horizon_decay_factor: 1.0, // Default uniform weighting
             achieved_balance: balance,
         };
 
@@ -1973,8 +1984,18 @@ impl AdaptiveParameterCalibrator {
         body_sensitivity: f64,
         volume_weight: f64,
         consistency_factor: f64,
+        horizon_decay_factor: f64, // Add the new parameter
     ) -> Result<ClassDistributionBalance> {
         use crate::targets::sentiment::{classify_sentiment, SentimentConfig};
+
+        // Create adaptive parameters for this evaluation
+        let test_params = SentimentAdaptiveParams {
+            body_sensitivity,
+            volume_weight,
+            consistency_factor,
+            horizon_decay_factor,
+            achieved_balance: ClassDistributionBalance::default(),
+        };
 
         let mut class_counts = [0usize; 5];
         let sample_limit = sequence_indices.len().min(500); // Limit for performance
@@ -1999,6 +2020,7 @@ impl AdaptiveParameterCalibrator {
                         horizon_data,
                         &self.base_config,
                         &config,
+                        Some(&test_params), // Pass the adaptive parameters
                     ) {
                         Ok(class) => {
                             if (0..5).contains(&class) {
