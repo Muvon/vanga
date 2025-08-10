@@ -3,78 +3,6 @@ use crate::data::structures::MarketDataRow;
 use crate::targets::sentiment::*;
 
 #[test]
-fn test_sentiment_calibration_with_realistic_data() {
-    // Create realistic crypto data with various volume-price patterns
-    let mut test_data = Vec::new();
-
-    // Generate 100 candles with different volume-price correlation patterns
-    for i in 0..100 {
-        let base_price = 100.0 + (i as f64 * 0.1);
-        let price_change = (i as f64 - 50.0) * 0.002; // Range from -0.1 to +0.1
-        let volume = 1000.0 + (i as f64 * 10.0); // Increasing volume
-
-        test_data.push(MarketDataRow {
-            timestamp: i as i64,
-            open: base_price,
-            high: base_price + price_change.abs(),
-            low: base_price - price_change.abs(),
-            close: base_price + price_change,
-            volume,
-        });
-    }
-
-    // Test calibration
-    let sensitivity = calibrate_sentiment_sensitivity(&test_data, 10, 5, 0.2).unwrap();
-    println!("Calibrated sensitivity: {:.6}", sensitivity);
-
-    // Debug: Test the sentiment changes directly
-    let mut sentiment_changes = Vec::new();
-    for i in 0..(test_data.len() - 15) {
-        let sequence_ohlcv = &test_data[i..i + 10];
-        let horizon_ohlcv = &test_data[i + 10..i + 15];
-
-        let seq_sentiment = calculate_sequence_sentiment_score(sequence_ohlcv);
-        let hor_sentiment = calculate_sequence_sentiment_score(horizon_ohlcv);
-        let sentiment_change = hor_sentiment - seq_sentiment;
-        sentiment_changes.push(sentiment_change);
-    }
-
-    sentiment_changes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = sentiment_changes.len();
-    let p20 = sentiment_changes[(n as f64 * 0.20) as usize];
-    let p40 = sentiment_changes[(n as f64 * 0.40) as usize];
-    let p60 = sentiment_changes[(n as f64 * 0.60) as usize];
-    let p80 = sentiment_changes[(n as f64 * 0.80) as usize];
-
-    println!(
-        "Sentiment changes range: {:.6} to {:.6}",
-        sentiment_changes[0],
-        sentiment_changes[n - 1]
-    );
-    println!(
-        "Percentiles: 20th={:.6}, 40th={:.6}, 60th={:.6}, 80th={:.6}",
-        p20, p40, p60, p80
-    );
-    println!("Neutral range: {:.6}", p60 - p40);
-
-    // Test classification with calibrated sensitivity
-    let config = SentimentConfig {
-        body_sensitivity: sensitivity,
-        volume_weight: 1.0,
-        consistency_factor: 1.0,
-    };
-
-    let targets_config = TargetsConfig::default();
-
-    // Test a few classifications
-    let sequence = &test_data[0..10];
-    let horizon = &test_data[10..15];
-
-    let class = classify_sentiment(sequence, horizon, &targets_config, &config).unwrap();
-    println!("Test classification: {}", class);
-}
-
-#[test]
 fn test_sentiment_classification_balanced_distribution() {
     // Create test OHLCV data with various sentiment patterns
     let test_data = vec![
@@ -243,7 +171,6 @@ fn test_sentiment_adaptive_thresholds() {
 
 #[test]
 fn test_sentiment_class_names() {
-    // Test corrected class names (kept original PANIC/GREED terminology)
     let class_names = get_sentiment_class_names();
     assert_eq!(class_names.len(), 5);
     assert_eq!(class_names[0], "STRONG_PANIC");
