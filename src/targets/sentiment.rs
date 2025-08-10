@@ -68,6 +68,9 @@ pub struct SentimentMetrics {
 /// Sentiment configuration for classification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SentimentConfig {
+    /// Controls the influence of the candle body ratio on sentiment calculation.
+    /// Higher values increase sensitivity to price movement direction.
+    /// Valid range: positive real number (typically 0.1 to 2.0). Default is 1.0.
     pub body_sensitivity: f64,
     pub volume_weight: f64,
     pub consistency_factor: f64,
