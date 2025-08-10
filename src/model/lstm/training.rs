@@ -2193,8 +2193,9 @@ impl LSTMModel {
 
                     Ok(threshold)
                 } else {
-                    // NO CLIPPING NEEDED: Use already computed gradients
-                    optimizer.step(&grads)?;
+                    // NO CLIPPING NEEDED: Use backward_step to prevent gradient accumulation
+                    // CRITICAL FIX: Must use backward_step, not step, to clear gradients
+                    optimizer.backward_step(base_loss)?;
 
                     // First batch logging
                     if epoch == 0 && batch_idx == 0 {
@@ -2208,26 +2209,30 @@ impl LSTMModel {
                 }
             }
             None => {
-                // NO GRADIENT CLIPPING: Optimal single backward_step path
-                optimizer.backward_step(base_loss)?;
+                // NO GRADIENT CLIPPING: Calculate norm before optimizer step for monitoring
+                let grad_norm = if batch_idx % 100 == 0 {
+                    // Calculate gradient norm for monitoring (before optimizer step)
+                    let grads = base_loss.backward()?;
+                    let norm = self.calculate_gradstore_norm(&grads)?;
 
-                // OPTIMIZATION: Reduce monitoring overhead
-                // Only calculate norm occasionally for logging (not every batch)
-                if batch_idx % 100 == 0 {
-                    // Monitoring pass (optional, for debugging)
-                    let monitor_grads = base_loss.backward()?;
-                    let norm = self.calculate_gradstore_norm(&monitor_grads)?;
+                    // CRITICAL: Must clear gradients - use backward_step with original loss
+                    // We already computed gradients for monitoring, but we still need to
+                    // use backward_step to ensure proper gradient clearing
+                    optimizer.backward_step(base_loss)?;
 
                     if batch_idx == 0 {
                         log::debug!("📊 Gradient monitoring enabled (every 100 batches)");
                     }
                     log::debug!("📊 Gradient norm: {:.6}", norm);
 
-                    Ok(norm)
+                    norm
                 } else {
-                    // Skip monitoring for most batches (performance optimization)
-                    Ok(1.0) // Return dummy value when not monitoring
-                }
+                    // Direct backward_step for most batches (optimal path)
+                    optimizer.backward_step(base_loss)?;
+                    1.0 // Return dummy value when not monitoring
+                };
+
+                Ok(grad_norm)
             }
         }
     }
