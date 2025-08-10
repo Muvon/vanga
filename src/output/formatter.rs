@@ -1034,7 +1034,7 @@ impl OutputFormatter {
                 use crate::targets::sentiment::calculate_sequence_sentiment_score;
                 // Now using the same MarketDataRow structure everywhere
                 let sentiment_candles = sequence_ohlcv;
-                calculate_sequence_sentiment_score(&sentiment_candles)
+                calculate_sequence_sentiment_score(sentiment_candles)
             };
 
             // Convert adaptive parameters to reconstruction thresholds

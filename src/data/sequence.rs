@@ -503,6 +503,7 @@ impl SequenceGenerator {
     /// Create sliding windows with per-sequence normalization
     /// Each window: [sequence_length + gap + horizon_steps] normalized together
     /// Returns: (sequences, targets, sequence_indices)
+    #[allow(clippy::too_many_arguments)]
     async fn create_sliding_windows_with_normalization(
         &self,
         _feature_data: &Array2<f64>, // Unused - we work with DataFrame directly

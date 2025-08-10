@@ -1742,63 +1742,43 @@ impl AdaptiveParameterCalibrator {
     ) -> Result<SentimentAdaptiveParams> {
         log::debug!("🎯 Starting sentiment parameter calibration from OHLCV...");
 
-        let mut best_params = SentimentAdaptiveParams::default();
-        let mut best_balance_score = f64::INFINITY;
+        // Use the CORRECT calibration from sentiment.rs that calculates actual percentiles
+        use crate::targets::sentiment::calibrate_sentiment_sensitivity;
 
-        // Grid search for optimal sentiment parameters
-        let body_sensitivity_values = vec![0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-        let volume_weight_values = vec![0.1, 0.2, 0.3, 0.4, 0.5];
-        let consistency_factor_values = vec![0.8, 1.0, 1.2, 1.5];
+        // Calculate the proper sensitivity from actual data percentiles
+        let calibrated_sensitivity = calibrate_sentiment_sensitivity(
+            ohlcv_data,
+            sequence_length,
+            horizon_steps,
+            0.2, // target_balance (unused in the function)
+        )?;
 
-        for &body_sensitivity in &body_sensitivity_values {
-            for &volume_weight in &volume_weight_values {
-                for &consistency_factor in &consistency_factor_values {
-                    let balance = self
-                        .evaluate_sentiment_parameters_from_ohlcv(
-                            ohlcv_data,
-                            sequence_indices,
-                            sequence_length,
-                            horizon_steps,
-                            body_sensitivity,
-                            volume_weight,
-                            consistency_factor,
-                        )
-                        .await?;
+        log::info!(
+            "🎯 Calibrated sentiment sensitivity from percentiles: {:.6}",
+            calibrated_sensitivity
+        );
 
-                    // MIN-CLASS OPTIMIZATION: Prioritize parameters that maximize minimum class representation
-                    let min_class_ratio = balance
-                        .class_percentages
-                        .iter()
-                        .min_by(|a, b| a.partial_cmp(b).unwrap())
-                        .unwrap()
-                        / 100.0;
-                    let min_class_threshold = 0.15; // 15% minimum per class
+        // Now test this calibrated value to get the actual class distribution
+        let balance = self
+            .evaluate_sentiment_parameters_from_ohlcv(
+                ohlcv_data,
+                sequence_indices,
+                sequence_length,
+                horizon_steps,
+                calibrated_sensitivity,
+                0.1, // Default volume_weight
+                0.8, // Default consistency_factor
+            )
+            .await?;
 
-                    // Heavy penalty if any class falls below threshold
-                    let min_class_penalty = if min_class_ratio < min_class_threshold {
-                        (min_class_threshold - min_class_ratio) * 50.0
-                    } else {
-                        0.0
-                    };
+        let params = SentimentAdaptiveParams {
+            body_sensitivity: calibrated_sensitivity,
+            volume_weight: 0.1,
+            consistency_factor: 0.8,
+            achieved_balance: balance,
+        };
 
-                    let score = balance.balance_score
-                        + (balance.imbalance_ratio - 1.0) * 0.1
-                        + min_class_penalty;
-
-                    if score < best_balance_score {
-                        best_balance_score = score;
-                        best_params = SentimentAdaptiveParams {
-                            body_sensitivity,
-                            volume_weight,
-                            consistency_factor,
-                            achieved_balance: balance,
-                        };
-                    }
-                }
-            }
-        }
-
-        let min_class_ratio = best_params
+        let min_class_ratio = params
             .achieved_balance
             .class_percentages
             .iter()
@@ -1808,15 +1788,15 @@ impl AdaptiveParameterCalibrator {
 
         log::info!(
             "🎯 Sentiment calibration: body_sensitivity={:.3}, volume_weight={:.3}, consistency_factor={:.3}, balance_score={:.4}, imbalance={:.1}x, min_class={:.1}%",
-            best_params.body_sensitivity,
-            best_params.volume_weight,
-            best_params.consistency_factor,
-            best_params.achieved_balance.balance_score,
-            best_params.achieved_balance.imbalance_ratio,
+            params.body_sensitivity,
+            params.volume_weight,
+            params.consistency_factor,
+            params.achieved_balance.balance_score,
+            params.achieved_balance.imbalance_ratio,
             min_class_ratio * 100.0
         );
 
-        Ok(best_params)
+        Ok(params)
     }
 
     /// Calibrate volume parameters from OHLCV data (for use in calibrate_all_targets)
@@ -1907,6 +1887,7 @@ impl AdaptiveParameterCalibrator {
     }
 
     /// Evaluate sentiment parameters from OHLCV data by simulating classification
+    #[allow(clippy::too_many_arguments)]
     async fn evaluate_sentiment_parameters_from_ohlcv(
         &self,
         ohlcv_data: &[MarketDataRow],
@@ -1958,6 +1939,7 @@ impl AdaptiveParameterCalibrator {
     }
 
     /// Evaluate volume parameters from OHLCV data by simulating classification
+    #[allow(clippy::too_many_arguments)]
     async fn evaluate_volume_parameters_from_ohlcv(
         &self,
         ohlcv_data: &[MarketDataRow],
