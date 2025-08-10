@@ -169,7 +169,7 @@ pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Resul
 let (train_sequences, val_sequences, train_targets, val_targets) =
     create_balanced_splits(&sequences, &targets, validation_split)?;
 ```
-- Each target (price levels, direction, volatility) gets balanced splits
+- Each target (price levels, direction, volatility, sentiment, volume) gets balanced splits
 - Maintains chronological order while ensuring class balance
 - Prevents overfitting to dominant classes
 
@@ -330,7 +330,7 @@ mixture_dropout = 0.1           # Dropout for mixture weights
 ```
 Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Target Generation → Sequence Creation → Multi-Model Training
     ↓           ↓                    ↓             ↓                ↓                  ↓                ↓
-OHLCV Data  Technical Indicators  Clean Data   Processed Data   3×5 Targets      Sequences      N×LSTMModel
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   5×5 Targets      Sequences      N×LSTMModel
 ```
 
 **Key Principles:**
@@ -343,12 +343,34 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   3×5 Targets    
 ### **Target Generation (CRITICAL)**
 
 ```rust
-// src/targets/price_levels.rs
+// src/targets/price_levels.rs - VWAP-weighted price classification
 pub fn calculate_price_level_targets(
     data: &Array2<f64>,
     horizon_hours: usize,
     num_bins: usize,
 ) -> Result<Array2<f64>>
+
+// src/targets/sentiment.rs - Candle body psychology analysis
+pub fn calculate_sentiment_targets(
+    data: &DataFrame,
+    horizon: &str,
+    adaptive_params: Option<&SentimentAdaptiveParams>,
+) -> Result<Vec<i32>>
+
+// src/targets/volume.rs - Logarithmic volume regime classification
+pub fn calculate_volume_targets(
+    data: &DataFrame,
+    horizon: &str,
+    adaptive_params: Option<&VolumeAdaptiveParams>,
+) -> Result<Vec<i32>>
+
+// src/targets/adaptive_parameters.rs - Automatic threshold calibration
+pub struct AdaptiveParameters {
+    pub price_level: PriceLevelAdaptiveParams,
+    pub sentiment: SentimentAdaptiveParams,
+    pub volume: VolumeAdaptiveParams,
+    pub volatility: VolatilityAdaptiveParams,
+}
 ```
 
 **Key Principle**: Uses **percentage-based quantiles** (NOT raw prices) for symbol-agnostic classification:
@@ -388,20 +410,27 @@ impl MultiTargetLSTMModel {
 }
 ```
 
-### **Target Types (3 Targets × 5 Classes Each)**
+### **Target Types (5 Targets per Horizon)**
 
 ```rust
 pub enum TargetType {
     PriceLevel,     // 5-class price level classification (Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up)
     Direction,      // 5-class directional movement (DUMP, DOWN, SIDEWAYS, UP, PUMP)
     Volatility,     // 5-class volatility regime (VeryLow, Low, Medium, High, VeryHigh)
+    Sentiment,      // 5-class market sentiment (Strong Panic, Moderate Panic, Neutral, Moderate Greed, Strong Greed)
+    Volume,         // 5-class volume regime (Very Low, Low, Medium, High, Very High)
 }
 ```
 
 **Architecture**: Each target type outputs 5 categorical classes using one-hot encoding:
-- **Total Output Size**: 3 targets × 5 classes = 15 outputs per prediction
+- **5 Targets per Horizon**: price_levels, direction, volatility, sentiment, volume
+- **5 Classes per Target**: Each target has 5 categorical outputs (classes 0-4)
+- **Total per Horizon**: 5 targets × 5 classes = 25 outputs per horizon
+- **Multi-Horizon Support**: Multiple prediction horizons (1h, 4h, 1d, etc.)
 - **Class Distribution**: Uses percentage-based quantiles for symbol-agnostic classification
 - **VWAP-Weighted**: Price levels use volume-weighted analysis for accuracy
+- **Sentiment Analysis**: Candle body psychology with volume confirmation
+- **Volume Regime**: Logarithmic volume ratio classification for symmetry
 
 ## 🤖 **Auto-Optimization System**
 
@@ -431,36 +460,69 @@ pub struct OptimizerSelector {
 - **Market Regime**: Trending/ranging/volatile/extreme detection
 - **Performance Prediction**: Expected validation loss, training time, convergence
 
-## 📈 **Technical Indicators System**
+## 📈 **Technical Indicators System (TA Crate Integration)**
 
-### **Comprehensive Indicator Suite (50+ Indicators)**
+### **Professional TA Library Integration (50+ Indicators)**
 
 #### **Implementation Location**
 ```rust
-// src/features/technical.rs - Main technical indicators
+// src/features/technical.rs - Main technical indicators with TA crate
+// src/features/ta_tests.rs - TA crate integration and validation
+// src/features/validation.rs - Feature validation system
 // src/features/cross_asset.rs - Cross-asset features
 ```
 
-#### **Trend Indicators**
-- **Simple Moving Average (SMA)**: Optimized sliding window calculation
-- **Exponential Moving Average (EMA)**: Alpha-based smoothing algorithm
-- **MACD**: Complete implementation with signal line and histogram
-- **Bollinger Bands**: Statistical volatility bands with configurable parameters
+#### **TA Crate Integration Architecture**
+```rust
+// Professional technical analysis library integration
+use ta::{
+    indicators::{SimpleMovingAverage, ExponentialMovingAverage, RelativeStrengthIndex},
+    Next, Reset,
+};
 
-#### **Momentum Indicators**
-- **RSI (Relative Strength Index)**: Proper gain/loss averaging
-- **Stochastic Oscillator**: %K and %D lines with window optimization
+pub struct TechnicalIndicatorEngine {
+    pub sma_indicators: HashMap<usize, SimpleMovingAverage>,
+    pub ema_indicators: HashMap<usize, ExponentialMovingAverage>,
+    pub rsi_indicator: RelativeStrengthIndex,
+    // ... 50+ more indicators
+}
+```
+
+#### **Comprehensive Indicator Categories**
+
+**Trend Indicators (TA Crate)**
+- **Simple Moving Average (SMA)**: Professional sliding window calculation
+- **Exponential Moving Average (EMA)**: Alpha-based smoothing with TA library
+- **Double EMA (DEMA)**: Enhanced trend following
+- **Triple EMA (TEMA)**: Advanced trend smoothing
+- **MACD**: Complete implementation with signal line and histogram
+- **Bollinger Bands**: Statistical volatility bands with TA library
+- **Parabolic SAR**: Stop and reverse trend indicator
+- **Supertrend**: Advanced trend following system
+
+**Momentum Indicators (TA Crate)**
+- **RSI (Relative Strength Index)**: Professional gain/loss averaging
+- **Stochastic Oscillator**: %K and %D lines with TA optimization
 - **Williams %R**: Efficient high/low window calculations
 - **CCI (Commodity Channel Index)**: Mean deviation-based momentum
+- **Rate of Change (ROC)**: Momentum measurement
+- **Momentum (MOM)**: Price momentum calculation
+- **Ultimate Oscillator**: Multi-timeframe momentum
+- **Detrended Price Oscillator**: Cycle identification
 
-#### **Volume Indicators**
+**Volume Indicators (TA Crate)**
 - **On-Balance Volume (OBV)**: Cumulative volume flow analysis
 - **Money Flow Index (MFI)**: Volume-weighted momentum oscillator
-- **Volume SMA**: Volume trend analysis
+- **Volume SMA**: Volume trend analysis with TA library
+- **Accumulation/Distribution Line**: Volume-price relationship
+- **Volume Rate of Change**: Volume momentum
+- **VWAP**: Volume-weighted average price
 
-#### **Volatility Indicators**
+**Volatility Indicators (TA Crate)**
 - **Average True Range (ATR)**: True volatility measurement
 - **Bollinger Bands**: Volatility-based trading bands
+- **Keltner Channels**: ATR-based volatility channels
+- **Standard Deviation**: Statistical volatility measure
 
 ### 🔄 **Data Processing Pipeline**
 
@@ -881,7 +943,7 @@ The VANGA system architecture represents a **production-ready** cryptocurrency f
 - **Hybrid Models**: XGBoost integration and TFT support
 - **Multi-Head Attention**: Advanced attention mechanisms
 - **50+ Technical Indicators**: Comprehensive market analysis
-- **Multi-Target Prediction**: Price levels, direction, volatility
+- **Multi-Target Prediction**: 5 targets per horizon (price levels, direction, volatility, sentiment, volume)
 
 ### **📊 Production Quality**
 - **Symbol-Agnostic Design**: Percentage-based targets for consistent performance

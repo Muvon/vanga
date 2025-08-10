@@ -46,7 +46,7 @@ vanga models SUBCOMMAND [OPTIONS]
 ```
 
 ### **Key Features**
-- **Multi-target system**: 3 targets (PriceLevel, Direction, Volatility) × 5 classes each
+- **Multi-target system**: 5 targets (PriceLevel, Direction, Volatility, Sentiment, Volume) × 5 classes each
 - **9 modern optimizers**: AdamW, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
 - **Flexible configuration**: TOML files with comprehensive validation
 - **Cross-asset support**: Train and predict multiple symbols simultaneously

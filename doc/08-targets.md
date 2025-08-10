@@ -1,12 +1,12 @@
 # Multi-Target Prediction System
 
-The VANGA LSTM cryptocurrency forecasting system implements a comprehensive **3-target × 5-class prediction framework** designed specifically for cryptocurrency market analysis.
+The VANGA LSTM cryptocurrency forecasting system implements a comprehensive **5-target × 5-class prediction framework** designed specifically for cryptocurrency market analysis.
 
 **Status**: ✅ **Complete Implementation** - All target types functional with unified 5-class system
 
 ## Architecture Overview
 
-### **3 Targets × 5 Classes Each = 15 Total Outputs**
+### **5 Targets per Horizon = 25 Total Outputs**
 
 VANGA implements a unified multi-target system where each target type outputs exactly **5 categorical classes**:
 
@@ -16,11 +16,13 @@ pub enum TargetType {
     PriceLevel,     // 5-class price level classification
     Direction,      // 5-class directional movement
     Volatility,     // 5-class volatility regime
+    Sentiment,      // 5-class market sentiment (NEW)
+    Volume,         // 5-class volume regime (NEW)
 }
 
 // Each target outputs 5 classes using one-hot encoding
 pub const NUM_CLASSES: usize = 5;
-// Total model output: 3 targets × 5 classes = 15 outputs per prediction
+// Total model output per horizon: 5 targets × 5 classes = 25 outputs per horizon
 ```
 
 ### **Multi-Target Loss Function Integration**
@@ -135,17 +137,28 @@ impl MultiTargetLSTMModel {
 
 ### **Target Data Structure**
 ```rust
-// Multi-target container
+// Multi-target container - src/targets/mod.rs
 pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,    // Horizon -> targets
-    pub direction: HashMap<String, Vec<i32>>,       // Horizon -> targets
+    pub directions: HashMap<String, Vec<i32>>,      // Horizon -> targets (note: plural)
     pub volatility: HashMap<String, Vec<i32>>,      // Horizon -> targets
+    pub sentiment: HashMap<String, Vec<i32>>,       // Horizon -> targets (NEW)
+    pub volume: HashMap<String, Vec<i32>>,          // Horizon -> targets (NEW)
+    pub target_names: Vec<String>,                  // Target names for reference
+    pub data_length: usize,                         // Original data length
+    pub valid_indices: Vec<usize>,                  // Valid sequence indices
 }
 
 impl PreparedTargets {
     pub fn get_targets(&self, horizon: &str, target_type: TargetType) -> Option<&Vec<i32>> {
         match target_type {
-            TargetType::PriceLevels => self.price_levels.get(horizon),
+            TargetType::PriceLevel => self.price_levels.get(horizon),
+            TargetType::Direction => self.directions.get(horizon),
+            TargetType::Volatility => self.volatility.get(horizon),
+            TargetType::Sentiment => self.sentiment.get(horizon),
+            TargetType::Volume => self.volume.get(horizon),
+        }
+    }
             TargetType::Direction => self.direction.get(horizon),
             TargetType::Volatility => self.volatility.get(horizon),
         }
@@ -353,6 +366,314 @@ pub fn generate_volatility_targets(
 - **Class 2**: Medium (average volatility)
 - **Class 3**: High (above average volatility)
 - **Class 4**: VeryHigh (extreme volatility)
+
+### **4. Sentiment Targets (5-Class System) - NEW**
+
+**Purpose**: Market sentiment classification based on candle body psychology analysis
+
+**Implementation**: `src/targets/sentiment.rs`
+```rust
+pub fn calculate_sentiment_targets(
+    data: &DataFrame,
+    horizon: &str,
+    adaptive_params: Option<&SentimentAdaptiveParams>,
+) -> Result<Vec<i32>> {
+    let horizon_steps = parse_horizon_to_steps(horizon)?;
+    let mut targets = Vec::new();
+
+    // Extract OHLCV data
+    let open = data.column("open")?.f64()?;
+    let high = data.column("high")?.f64()?;
+    let low = data.column("low")?.f64()?;
+    let close = data.column("close")?.f64()?;
+    let volume = data.column("volume")?.f64()?;
+
+    for i in 0..data.height().saturating_sub(horizon_steps) {
+        // Calculate sentiment score using candle body analysis
+        let sentiment_score = calculate_sentiment_score(
+            open.get(i).unwrap_or(0.0),
+            high.get(i).unwrap_or(0.0),
+            low.get(i).unwrap_or(0.0),
+            close.get(i).unwrap_or(0.0),
+            volume.get(i).unwrap_or(0.0),
+            adaptive_params,
+        )?;
+
+        // Classify into 5 sentiment classes
+        let class = classify_sentiment_score(sentiment_score, adaptive_params)?;
+        targets.push(class);
+    }
+
+    Ok(targets)
+}
+
+/// Calculate sentiment score using candle body psychology
+fn calculate_sentiment_score(
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+    adaptive_params: Option<&SentimentAdaptiveParams>,
+) -> Result<f64> {
+    // Body ratio: directional strength
+    let body_ratio = if high != low {
+        (close - open) / (high - low)
+    } else {
+        0.0
+    };
+
+    // Body size: magnitude of movement
+    let typical_price = (high + low + close) / 3.0;
+    let body_size = if typical_price > 0.0 {
+        (close - open).abs() / typical_price
+    } else {
+        0.0
+    };
+
+    // Wick imbalance: market psychology
+    let upper_wick = high - close.max(open);
+    let lower_wick = close.min(open) - low;
+    let wick_imbalance = if high != low {
+        (upper_wick - lower_wick) / (high - low)
+    } else {
+        0.0
+    };
+
+    // Volume confirmation
+    let volume_ratio = if let Some(params) = adaptive_params {
+        volume / params.volume_baseline.max(1.0)
+    } else {
+        1.0
+    };
+
+    // Combine into sentiment score
+    let sentiment_score = body_ratio * body_size * (1.0 + wick_imbalance) * volume_ratio.ln_1p();
+
+    Ok(sentiment_score)
+}
+```
+
+**5-Class Output**:
+- **Class 0**: Strong Panic (large red bodies, lower wicks, high volume)
+- **Class 1**: Moderate Panic (medium red bodies, mixed wicks)
+- **Class 2**: Neutral (small bodies, balanced wicks)
+- **Class 3**: Moderate Greed (medium green bodies, upper wicks)
+- **Class 4**: Strong Greed (large green bodies, upper wicks, high volume)
+
+### **5. Volume Targets (5-Class System) - NEW**
+
+**Purpose**: Volume regime classification using logarithmic volume ratio analysis
+
+**Implementation**: `src/targets/volume.rs`
+```rust
+pub fn calculate_volume_targets(
+    data: &DataFrame,
+    horizon: &str,
+    adaptive_params: Option<&VolumeAdaptiveParams>,
+) -> Result<Vec<i32>> {
+    let horizon_steps = parse_horizon_to_steps(horizon)?;
+    let mut targets = Vec::new();
+
+    // Extract volume data
+    let volume = data.column("volume")?.f64()?;
+
+    for i in 0..data.height().saturating_sub(horizon_steps) {
+        // Calculate sequence average volume (baseline)
+        let sequence_start = i.saturating_sub(30); // 30-period baseline
+        let sequence_volume = calculate_average_volume(&volume, sequence_start, i)?;
+
+        // Calculate horizon average volume (target)
+        let horizon_volume = calculate_average_volume(&volume, i, i + horizon_steps)?;
+
+        // Calculate volume ratio and apply logarithmic transformation
+        let volume_ratio = if sequence_volume > 0.0 {
+            horizon_volume / sequence_volume
+        } else {
+            1.0
+        };
+
+        let log_volume_ratio = volume_ratio.ln();
+
+        // Classify using adaptive thresholds
+        let class = classify_volume_ratio(log_volume_ratio, adaptive_params)?;
+        targets.push(class);
+    }
+
+    Ok(targets)
+}
+
+/// Classify logarithmic volume ratio into 5 classes
+fn classify_volume_ratio(
+    log_ratio: f64,
+    adaptive_params: Option<&VolumeAdaptiveParams>,
+) -> Result<i32> {
+    let thresholds = if let Some(params) = adaptive_params {
+        &params.thresholds
+    } else {
+        // Default symmetric thresholds in log space
+        &VolumeThresholds {
+            very_low: -0.693,    // ln(0.5) = -50% volume
+            low: -0.223,         // ln(0.8) = -20% volume
+            high: 0.223,         // ln(1.25) = +25% volume
+            very_high: 0.693,    // ln(2.0) = +100% volume
+        }
+    };
+
+    let class = if log_ratio <= thresholds.very_low {
+        0 // Very Low
+    } else if log_ratio <= thresholds.low {
+        1 // Low
+    } else if log_ratio <= thresholds.high {
+        2 // Medium
+    } else if log_ratio <= thresholds.very_high {
+        3 // High
+    } else {
+        4 // Very High
+    };
+
+    Ok(class)
+}
+```
+
+**5-Class Output**:
+- **Class 0**: Very Low (major volume decrease >50% drop)
+- **Class 1**: Low (moderate volume decrease 20-50% drop)
+- **Class 2**: Medium (similar volume ±20% change)
+- **Class 3**: High (moderate volume increase 20-100% increase)
+- **Class 4**: Very High (major volume surge >100% increase)
+
+## 🔧 **Adaptive Parameters System - NEW**
+
+### **Automatic Threshold Calibration**
+
+VANGA implements an advanced adaptive parameters system that automatically calibrates thresholds for balanced 20% per class distribution:
+
+**Implementation**: `src/targets/adaptive_parameters.rs`
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveParameters {
+    pub price_level: PriceLevelAdaptiveParams,
+    pub sentiment: SentimentAdaptiveParams,
+    pub volume: VolumeAdaptiveParams,
+    pub volatility: VolatilityAdaptiveParams,
+    pub direction: DirectionAdaptiveParams,
+}
+
+impl AdaptiveParameters {
+    /// Calibrate all adaptive parameters from training data
+    pub fn calibrate_from_data(
+        data: &DataFrame,
+        horizons: &[String],
+        config: &TargetsConfig,
+    ) -> Result<Self> {
+        let price_level = PriceLevelAdaptiveParams::calibrate(data, horizons, config)?;
+        let sentiment = SentimentAdaptiveParams::calibrate(data, horizons, config)?;
+        let volume = VolumeAdaptiveParams::calibrate(data, horizons, config)?;
+        let volatility = VolatilityAdaptiveParams::calibrate(data, horizons, config)?;
+        let direction = DirectionAdaptiveParams::calibrate(data, horizons, config)?;
+
+        Ok(Self {
+            price_level,
+            sentiment,
+            volume,
+            volatility,
+            direction,
+        })
+    }
+}
+```
+
+### **Sentiment Adaptive Parameters**
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentimentAdaptiveParams {
+    pub thresholds: SentimentThresholds,
+    pub volume_baseline: f64,
+    pub body_ratio_scaling: f64,
+    pub wick_imbalance_weight: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentimentThresholds {
+    pub strong_panic: f64,      // 20th percentile
+    pub moderate_panic: f64,    // 40th percentile
+    pub moderate_greed: f64,    // 60th percentile
+    pub strong_greed: f64,      // 80th percentile
+}
+```
+
+### **Volume Adaptive Parameters**
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeAdaptiveParams {
+    pub thresholds: VolumeThresholds,
+    pub baseline_window: usize,
+    pub log_transformation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeThresholds {
+    pub very_low: f64,     // ln(0.5) = -50% volume decrease
+    pub low: f64,          // ln(0.8) = -20% volume decrease
+    pub high: f64,         // ln(1.25) = +25% volume increase
+    pub very_high: f64,    // ln(2.0) = +100% volume increase
+}
+```
+
+### **Unified Calibrator**
+
+**Implementation**: `src/targets/unified_calibrator.rs`
+```rust
+pub struct UnifiedCalibrator {
+    pub config: TargetsConfig,
+}
+
+impl UnifiedCalibrator {
+    /// Calibrate all targets with consistent methodology
+    pub async fn calibrate_all_targets(
+        &self,
+        data: &DataFrame,
+        horizons: &[String],
+    ) -> Result<AdaptiveParameters> {
+        // Ensure consistent calibration across all target types
+        let adaptive_params = AdaptiveParameters::calibrate_from_data(
+            data,
+            horizons,
+            &self.config,
+        )?;
+
+        // Validate calibration quality
+        self.validate_calibration_quality(&adaptive_params, data)?;
+
+        Ok(adaptive_params)
+    }
+
+    /// Validate that calibration produces balanced class distributions
+    fn validate_calibration_quality(
+        &self,
+        params: &AdaptiveParameters,
+        data: &DataFrame,
+    ) -> Result<()> {
+        // Check that each target type produces ~20% per class
+        for target_type in [TargetType::PriceLevel, TargetType::Direction,
+                           TargetType::Volatility, TargetType::Sentiment, TargetType::Volume] {
+            let distribution = self.calculate_class_distribution(target_type, params, data)?;
+            self.validate_balanced_distribution(&distribution)?;
+        }
+        Ok(())
+    }
+}
+```
+
+### **Key Benefits**
+
+✅ **Automatic Calibration**: No manual threshold tuning required
+✅ **Balanced Distribution**: Ensures 20% per class for optimal training
+✅ **Symbol-Agnostic**: Works consistently across all trading pairs
+✅ **Market Adaptive**: Adjusts to different market conditions and volatility
+✅ **Consistent Methodology**: Same calibration approach across all 5 targets
+✅ **Quality Validation**: Automatic validation of calibration quality
     config: &DirectionConfig,
 ) -> Result<Vec<i32>> {
     let mut targets = vec![-1; prices.len()];
@@ -761,17 +1082,27 @@ impl PreparedTargets {
         for horizon in &horizons {
             // Validate price level targets
             if let Some(price_targets) = self.price_levels.get(horizon) {
-                validate_target_range(price_targets, 0, 6)?;
+                validate_target_range(price_targets, 0, 4)?; // 5 classes (0-4)
             }
 
             // Validate direction targets
-            if let Some(direction_targets) = self.direction.get(horizon) {
-                validate_target_range(direction_targets, 0, 2)?;
+            if let Some(direction_targets) = self.directions.get(horizon) {
+                validate_target_range(direction_targets, 0, 4)?; // 5 classes (0-4)
             }
 
             // Validate volatility targets
             if let Some(volatility_targets) = self.volatility.get(horizon) {
-                validate_target_range(volatility_targets, 0, 2)?;
+                validate_target_range(volatility_targets, 0, 4)?; // 5 classes (0-4)
+            }
+
+            // Validate sentiment targets
+            if let Some(sentiment_targets) = self.sentiment.get(horizon) {
+                validate_target_range(sentiment_targets, 0, 4)?; // 5 classes (0-4)
+            }
+
+            // Validate volume targets
+            if let Some(volume_targets) = self.volume.get(horizon) {
+                validate_target_range(volume_targets, 0, 4)?; // 5 classes (0-4)
             }
         }
 
@@ -790,7 +1121,7 @@ pub fn calculate_statistics(&self) -> TargetStatistics {
         stats.price_level_distributions.insert(horizon.clone(), distribution);
     }
 
-    for (horizon, targets) in &self.direction {
+    for (horizon, targets) in &self.directions {
         let distribution = calculate_class_distribution(targets);
         stats.direction_distributions.insert(horizon.clone(), distribution);
     }
@@ -798,6 +1129,16 @@ pub fn calculate_statistics(&self) -> TargetStatistics {
     for (horizon, targets) in &self.volatility {
         let distribution = calculate_class_distribution(targets);
         stats.volatility_distributions.insert(horizon.clone(), distribution);
+    }
+
+    for (horizon, targets) in &self.sentiment {
+        let distribution = calculate_class_distribution(targets);
+        stats.sentiment_distributions.insert(horizon.clone(), distribution);
+    }
+
+    for (horizon, targets) in &self.volume {
+        let distribution = calculate_class_distribution(targets);
+        stats.volume_distributions.insert(horizon.clone(), distribution);
     }
 
     stats
@@ -817,9 +1158,11 @@ let target_generator = TargetGenerator::with_defaults();
 let targets = target_generator.generate_all_targets(&df).await?;
 
 // Access specific targets
-let price_1h = targets.get_targets("1h", TargetType::PriceLevels);
+let price_1h = targets.get_targets("1h", TargetType::PriceLevel);
 let direction_4h = targets.get_targets("4h", TargetType::Direction);
 let volatility_1d = targets.get_targets("1d", TargetType::Volatility);
+let sentiment_1h = targets.get_targets("1h", TargetType::Sentiment);
+let volume_4h = targets.get_targets("4h", TargetType::Volume);
 ```
 
 ### **Custom Configuration**

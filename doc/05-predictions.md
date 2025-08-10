@@ -36,7 +36,7 @@ let results = predictor.predict(ModelWrapper::MultiTarget(&model)).await?;
 
 ### **Prediction Output Structure**
 
-Current prediction output includes all 3 targets × 5 classes:
+Current prediction output includes all 5 targets × 5 classes:
 
 ```rust
 // Each prediction result contains:
@@ -51,8 +51,10 @@ pub struct PredictionResult {
 // Example output structure:
 // predictions = {
 //     "price_level_1h": [0.1, 0.2, 0.4, 0.2, 0.1],  // 5 classes: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
-//     "direction_1h": [0.15, 0.25, 0.3, 0.2, 0.1],
-//     "volatility_1h": [0.2, 0.3, 0.3, 0.15, 0.05],
+//     "direction_1h": [0.15, 0.25, 0.3, 0.2, 0.1],   // 5 classes: DUMP, DOWN, SIDEWAYS, UP, PUMP
+//     "volatility_1h": [0.2, 0.3, 0.3, 0.15, 0.05],  // 5 classes: VeryLow, Low, Medium, High, VeryHigh
+//     "sentiment_1h": [0.1, 0.2, 0.3, 0.25, 0.15],   // 5 classes: Strong Panic, Moderate Panic, Neutral, Moderate Greed, Strong Greed
+//     "volume_1h": [0.05, 0.2, 0.4, 0.25, 0.1],      // 5 classes: Very Low, Low, Medium, High, Very High
 // }
 ```
 
@@ -253,19 +255,43 @@ for symbol in symbols {
 
 ## Data Processing During Prediction
 
-### **Feature Engineering**
+### **Feature Engineering (TA Crate Integration)**
 ```rust
-// Same feature generation as training (50+ indicators)
-// Implemented in src/features/technical.rs
+// Professional technical analysis with TA crate integration
+// Implemented in src/features/technical.rs + src/features/ta_tests.rs
 pub async fn generate_technical_indicators(df: DataFrame, config: &TechnicalIndicatorsConfig) -> Result<DataFrame> {
     // Ensures consistent feature set between training and prediction
-    // Generates same 50+ technical indicators:
-    // - Trend: SMA, EMA, MACD, Bollinger Bands
-    // - Momentum: RSI, Stochastic, Williams %R, CCI
-    // - Volume: OBV, Volume SMA, MFI
-    // - Volatility: ATR, Keltner Channels
-    // - Crypto-specific: Price velocity, VWAP, VWAP deviation
-    // Maintains feature order and naming consistency
+    // Generates 50+ professional technical indicators using TA crate:
+
+    // Trend Indicators (TA Crate)
+    // - SMA, EMA, DEMA, TEMA (multiple periods)
+    // - MACD with signal line and histogram
+    // - Bollinger Bands with professional implementation
+    // - Parabolic SAR, Supertrend
+
+    // Momentum Indicators (TA Crate)
+    // - RSI with proper gain/loss averaging
+    // - Stochastic Oscillator (%K and %D)
+    // - Williams %R, CCI, ROC, Momentum
+    // - Ultimate Oscillator, Detrended Price Oscillator
+
+    // Volume Indicators (TA Crate)
+    // - OBV, MFI, A/D Line with professional calculation
+    // - Volume SMA, Volume Rate of Change
+    // - VWAP with volume-weighted accuracy
+
+    // Volatility Indicators (TA Crate)
+    // - ATR with true range calculation
+    // - Keltner Channels, Standard Deviation
+    // - Professional volatility measurement
+
+    // Crypto-specific Features
+    // - Price velocity and acceleration
+    // - VWAP deviations and momentum
+    // - Market microstructure indicators
+
+    // Maintains feature order and naming consistency with training
+    // Uses same TA crate configuration for reproducible results
 }
 ```
 
@@ -414,12 +440,16 @@ VANGA generates structured JSON predictions with crypto-native terminology and 5
   "predictions": {
     "price_level_4h": [0.05, 0.15, 0.40, 0.30, 0.10],
     "direction_4h": [0.10, 0.20, 0.30, 0.25, 0.15],
-    "volatility_4h": [0.20, 0.30, 0.30, 0.15, 0.05]
+    "volatility_4h": [0.20, 0.30, 0.30, 0.15, 0.05],
+    "sentiment_4h": [0.08, 0.18, 0.35, 0.28, 0.11],
+    "volume_4h": [0.12, 0.22, 0.32, 0.24, 0.10]
   },
   "class_labels": {
     "price_level": ["Strong Down", "Moderate Down", "Neutral", "Moderate Up", "Strong Up"],
-    "direction": ["Strong Down", "Moderate Down", "Neutral", "Moderate Up", "Strong Up"],
-    "volatility": ["Very Low", "Low", "Medium", "High", "Very High"]
+    "direction": ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"],
+    "volatility": ["Very Low", "Low", "Medium", "High", "Very High"],
+    "sentiment": ["Strong Panic", "Moderate Panic", "Neutral", "Moderate Greed", "Strong Greed"],
+    "volume": ["Very Low", "Low", "Medium", "High", "Very High"]
   },
   "most_likely_predictions": {
     "price_level_4h": {
@@ -428,7 +458,7 @@ VANGA generates structured JSON predictions with crypto-native terminology and 5
       "class_index": 2
     },
     "direction_4h": {
-      "class": "Neutral",
+      "class": "SIDEWAYS",
       "probability": 0.30,
       "class_index": 2
     },
@@ -436,14 +466,24 @@ VANGA generates structured JSON predictions with crypto-native terminology and 5
       "class": "Low",
       "probability": 0.30,
       "class_index": 1
+    },
+    "sentiment_4h": {
+      "class": "Neutral",
+      "probability": 0.35,
+      "class_index": 2
+    },
+    "volume_4h": {
+      "class": "Medium",
+      "probability": 0.32,
+      "class_index": 2
     }
   },
   "confidence": 0.82,
   "model_info": {
     "model_type": "MultiTargetLSTM",
-    "num_targets": 3,
+    "num_targets": 5,
     "num_classes_per_target": 5,
-    "total_outputs": 15,
+    "total_outputs": 25,
     "trained_horizons": ["1h", "4h", "1d"],
     "input_features": 55
   }
@@ -457,8 +497,10 @@ For compatibility with external tools:
 ```csv
 symbol,timestamp,horizon,target,class_0,class_1,class_2,class_3,class_4,most_likely_class,confidence
 BTCUSDT,2024-01-15T10:30:00Z,4h,price_level,0.05,0.15,0.40,0.30,0.10,Neutral,0.82
-BTCUSDT,2024-01-15T10:30:00Z,4h,direction,0.10,0.20,0.30,0.25,0.15,Neutral,0.82
+BTCUSDT,2024-01-15T10:30:00Z,4h,direction,0.10,0.20,0.30,0.25,0.15,SIDEWAYS,0.82
 BTCUSDT,2024-01-15T10:30:00Z,4h,volatility,0.20,0.30,0.30,0.15,0.05,Low,0.82
+BTCUSDT,2024-01-15T10:30:00Z,4h,sentiment,0.08,0.18,0.35,0.28,0.11,Neutral,0.82
+BTCUSDT,2024-01-15T10:30:00Z,4h,volume,0.12,0.22,0.32,0.24,0.10,Medium,0.82
 ```
 
 ### **5-Class System Explained**
@@ -497,7 +539,7 @@ let volatility_probs = [0.20, 0.30, 0.30, 0.15, 0.05];
 ### **Performance Metrics**
 - **Feature Generation**: ~3ms for 50+ indicators per 1000 data points
 - **Sequence Generation**: ~2ms per 1000 sequences
-- **Multi-Target LSTM Prediction**: ~5ms per 100 sequences (3 targets × 5 classes)
+- **Multi-Target LSTM Prediction**: ~5ms per 100 sequences (5 targets × 5 classes)
 - **Single LSTM Prediction**: ~1ms per 100 sequences (1 target × 5 classes)
 - **Output Generation**: <1ms for JSON/CSV writing
 - **Total Pipeline**: ~10ms per prediction batch
@@ -506,7 +548,7 @@ let volatility_probs = [0.20, 0.30, 0.30, 0.15, 0.05];
 - **Input Data**: ~1MB per 10K samples
 - **With Features**: ~5MB per 10K samples (50+ indicators)
 - **Prediction Sequences**: ~2MB per 1K sequences
-- **Multi-Target Output**: ~15 values per prediction (3 targets × 5 classes)
+- **Multi-Target Output**: ~25 values per prediction (5 targets × 5 classes)
 - **Single Target Output**: ~5 values per prediction (1 target × 5 classes)
 
 ### **Scalability**
@@ -655,6 +697,81 @@ async fn predict_symbol(symbol: &str) -> Result<Vec<PredictionResult>> {
     let predictor = Predictor::new(config);
     predictor.predict(ModelWrapper::MultiTarget(&model)).await
 }
+```
+
+## 🆕 **Advanced Prediction Features**
+
+### **Prediction Quality Assessment**
+
+VANGA now includes comprehensive prediction quality metrics during inference:
+
+```rust
+// Enhanced prediction with quality assessment
+// Implemented in src/model/lstm/inference.rs
+impl LSTMModel {
+    pub async fn predict_with_quality(&self, sequences: &Array3<f64>) -> Result<PredictionWithQuality> {
+        // 1. Generate predictions
+        let predictions = self.predict(sequences).await?;
+
+        // 2. Calculate prediction quality metrics
+        let quality_metrics = self.assess_prediction_quality(&predictions, sequences)?;
+
+        // 3. Calculate confidence scores
+        let confidence_scores = self.calculate_confidence_scores(&predictions)?;
+
+        // 4. Apply distance weighting for multi-horizon predictions
+        let weighted_quality = self.calculate_distance_weighted_quality(&predictions)?;
+
+        Ok(PredictionWithQuality {
+            predictions,
+            quality_metrics,
+            confidence_scores,
+            weighted_quality,
+        })
+    }
+
+    /// Calculate trading-specific quality metrics
+    fn assess_prediction_quality(
+        &self,
+        predictions: &Array2<f64>,
+        sequences: &Array3<f64>,
+    ) -> Result<QualityMetrics> {
+        let mut quality_metrics = QualityMetrics::new();
+
+        // Entropy-based confidence (lower entropy = higher confidence)
+        for pred_row in predictions.outer_iter() {
+            let entropy = self.calculate_entropy(pred_row.as_slice().unwrap())?;
+            quality_metrics.entropy_scores.push(entropy);
+        }
+
+        // Prediction consistency across similar sequences
+        let consistency_score = self.calculate_prediction_consistency(predictions, sequences)?;
+        quality_metrics.consistency_score = consistency_score;
+
+        // Market regime alignment
+        let regime_alignment = self.assess_market_regime_alignment(predictions, sequences)?;
+        quality_metrics.regime_alignment = regime_alignment;
+
+        Ok(quality_metrics)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PredictionWithQuality {
+    pub predictions: Array2<f64>,
+    pub quality_metrics: QualityMetrics,
+    pub confidence_scores: Vec<f64>,
+    pub weighted_quality: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QualityMetrics {
+    pub entropy_scores: Vec<f64>,
+    pub consistency_score: f64,
+    pub regime_alignment: f64,
+    pub trading_quality: f64,
+}
+```
 ```
 
 ## Prediction Validation

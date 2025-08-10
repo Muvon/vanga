@@ -43,7 +43,7 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 - **Complete Modular Architecture**: 12+ specialized modules with clear separation of concerns
 - **Multi-Layer Support**: 1-4+ layers with MultiLSTM, StackedLSTM, BidirectionalLSTM
 - **Enhanced Attention**: Multi-head attention + Mixture-of-Head attention with configurable dropout
-- **Multi-Target Prediction**: 3 targets × 5 classes each (price levels, direction, volatility)
+- **Multi-Target Prediction**: 5 targets per horizon (price levels, direction, volatility, sentiment, volume)
 - **Model Persistence**: Save/load trained models with complete state preservation
 - **Unified Training System**: Single configurable training method with advanced features
 - **Perfect Balance Validation**: Automatic class balance detection and correction
@@ -99,7 +99,7 @@ src/
 │   └── *_test.rs      # Comprehensive test coverage in separate files
 ├── model/
 │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
-│   ├── multi_target.rs # Multi-target wrapper (3 targets × 5 classes)
+│   ├── multi_target.rs # Multi-target wrapper (5 targets per horizon)
 │   ├── attention.rs   # Multi-head attention mechanisms
 │   ├── attention_moh.rs # Mixture-of-Head attention module
 │   ├── attention_moh_wrapper.rs # MoH integration wrapper
@@ -108,7 +108,7 @@ src/
 │   └── tft.rs         # Temporal Fusion Transformer
 ├── api/               # High-level training/prediction APIs
 ├── features/          # Technical indicators and cross-asset features
-├── targets/           # Target generation (3 targets × 5 classes each)
+├── targets/           # Target generation (5 targets per horizon)
 ├── data/              # Data loading, preprocessing, and normalization
 └── config/            # Configuration management and validation
 ```

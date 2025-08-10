@@ -182,7 +182,12 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
   - `loss.rs` - Loss calculation, validation metrics, gradient utilities
   - `gradient_clipper.rs` - Gradient clipping with proper scaling
   - `window_aware_lr.rs` - Window-aware learning rate scheduling
-- **Unified Training System**: Single configurable training method with 9 modern optimizers and advanced features:
+- **Enhanced Training System**: Single configurable training method with 9 modern optimizers and advanced features:
+  - Error metrics for prediction quality assessment
+  - Deterministic dropout for reproducible training
+  - Distance-weighted quality metrics for predictions
+  - Gradient accumulation prevention during clipping
+  - Unified deterministic shuffling for consistency
   - Perfect balance validation for targets
   - Per-target balanced train/validation splits
   - Window-aware learning rate scheduling with decay
@@ -190,7 +195,7 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
   - Seed support for reproducible training
   - Progressive window increment configuration
 - **Symbol-Agnostic Design**: Each trading pair gets its own specialized multi-target LSTM model
-- **Multi-Target Prediction**: Price levels, direction, and volatility with separate specialized models
+- **5-Target Prediction System**: Price levels, direction, volatility, sentiment, and volume (5 targets per horizon)
 - **Configuration-Driven**: All behavior controlled via TOML configuration files with enhanced parameters
 - **Backward Compatibility**: All existing APIs preserved through `lstm_simple.rs` compatibility layer
 - **Advanced Optimizers**: AdamW, RMSprop, NAdam, RAdam with intelligent learning rate scheduling
@@ -214,11 +219,13 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
 
 ### Auto-Generated Features
 
-**Technical Indicators:**
-- Moving Averages: SMA, EMA, WMA (multiple periods)
-- Momentum: RSI, MACD, Stochastic, Williams %R, CCI
-- Volatility: Bollinger Bands, ATR, Keltner Channels
-- Volume: OBV, Volume SMA, MFI, A/D Line
+**Technical Indicators (TA Crate Integration):**
+- Moving Averages: SMA, EMA, WMA, DEMA, TEMA (multiple periods)
+- Momentum: RSI, MACD, Stochastic, Williams %R, CCI, ROC, MOM
+- Volatility: Bollinger Bands, ATR, Keltner Channels, Standard Deviation
+- Volume: OBV, Volume SMA, MFI, A/D Line, VWAP, Volume Rate of Change
+- Trend: ADX, Aroon, Parabolic SAR, Supertrend, Ichimoku components
+- Oscillators: Ultimate Oscillator, Commodity Channel Index, Detrended Price
 
 **Crypto-Specific Features:**
 - Price velocity and acceleration
@@ -325,10 +332,20 @@ vanga models ensemble --symbols BTCUSDT,ETHUSDT,ADAUSDT --strategies weighted,vo
 }
 ```
 
-### Direction & Volatility Predictions
+### 5-Target Prediction System
 ```json
 {
   "symbol": "BTCUSDT",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "horizon": "4h",
+  "current_price": 42500.0,
+  "price_levels": {
+    "class_0": {"range": "Strong Down", "probability": 0.05},
+    "class_1": {"range": "Moderate Down", "probability": 0.15},
+    "class_2": {"range": "Neutral", "probability": 0.35},
+    "class_3": {"range": "Moderate Up", "probability": 0.30},
+    "class_4": {"range": "Strong Up", "probability": 0.15}
+  },
   "direction": {
     "up_probability": 0.68,
     "down_probability": 0.32,
@@ -336,9 +353,23 @@ vanga models ensemble --symbols BTCUSDT,ETHUSDT,ADAUSDT --strategies weighted,vo
     "confidence": 0.68
   },
   "volatility": {
-    "expected_1h": 0.018,
-    "expected_4h": 0.035,
-    "expected_24h": 0.062
+    "class": "Medium",
+    "atr_ratio": 1.25,
+    "expected_change": 0.035,
+    "regime": "moderate_volatility"
+  },
+  "sentiment": {
+    "score": 0.72,
+    "class": "Moderate Greed",
+    "body_ratio": 0.65,
+    "volume_confirmation": 0.84,
+    "consistency": 0.78
+  },
+  "volume": {
+    "class": "High",
+    "log_ratio": 0.372,
+    "regime": "volume_surge",
+    "classification": "above_average"
   }
 }
 ```
@@ -441,7 +472,7 @@ vanga/
 │   │   │   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   │   │   └── mod.rs         # Public API and re-exports
 │   │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
-│   │   ├── multi_target.rs # Multi-target wrapper (3 targets × 5 classes)
+│   │   ├── multi_target.rs # Multi-target wrapper (5 targets per horizon)
 │   │   ├── attention.rs   # Multi-head attention mechanisms
 │   │   ├── attention_moh.rs # Mixture-of-Head attention module
 │   │   ├── attention_moh_wrapper.rs # MoH integration wrapper
@@ -462,9 +493,16 @@ vanga/
 │   │   ├── schema.rs      # Data schema definitions
 │   │   ├── structures.rs  # Core data structures
 │   │   └── target_converter.rs # Target conversion utilities
-│   ├── targets/       # Target generation (3 targets × 5 classes each)
+│   ├── targets/       # Target generation (5 targets per horizon)
 │   │   ├── mod.rs         # Target orchestration and conversion
-│   │   └── price_levels.rs # VWAP-weighted 5-class price level system
+│   │   ├── price_levels.rs # VWAP-weighted 5-class price level system
+│   │   ├── direction.rs   # Directional movement classification
+│   │   ├── volatility.rs  # Volatility regime classification with ATR analysis
+│   │   ├── sentiment.rs   # Market sentiment analysis with volume-price correlation
+│   │   ├── volume.rs      # Volume regime classification with log-ratio analysis
+│   │   ├── adaptive_parameters.rs # Unified adaptive target calibration
+│   │   ├── unified_calibrator.rs # Target calibration system
+│   │   └── sequence_reconstruction.rs # Target reconstruction utilities
 │   ├── config/        # Configuration management
 │   │   ├── training.rs    # TrainingConfig with 9 optimizers
 │   │   ├── features.rs    # Feature configurations
@@ -478,7 +516,15 @@ vanga/
 │   │   ├── objective.rs   # Optimization objectives
 │   │   └── optimizer_selector.rs # Intelligent optimizer selection
 │   ├── output/        # Output formatting and parsing
+│   │   ├── mod.rs         # Output orchestration
+│   │   ├── formatter.rs   # Prediction output formatting
+│   │   ├── multi_target_parser.rs # Multi-target output parsing
+│   │   ├── adaptive_orders.rs # Adaptive trading orders
+│   │   └── adaptive_signal.rs # Adaptive trading signals
 │   ├── realtime/      # Real-time streaming prediction
+│   │   ├── mod.rs         # Real-time orchestration
+│   │   ├── stream.rs      # Data streaming utilities
+│   │   └── predictor.rs   # Real-time prediction engine
 │   ├── tests/         # Integration tests
 │   └── utils/         # Utilities and error handling
 │       ├── error.rs       # VangaError types and handling
