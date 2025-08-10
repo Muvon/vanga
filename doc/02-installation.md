@@ -119,7 +119,7 @@ vanga/
 │   │   ├── attention.rs   # Attention mechanisms
 │   │   ├── tft/           # Temporal Fusion Transformer
 │   │   └── xgboost.rs     # XGBoost hybrid models
-│   ├── targets/           # Multi-target system (price_levels.rs, direction.rs, volatility.rs)
+│   ├── targets/           # Multi-target system (price_levels.rs, direction.rs, volatility.rs, sentiment.rs, volume.rs)
 │   ├── optimization/      # Auto-optimization (feature_selection.rs, hyperparameter.rs, etc.)
 │   ├── output/            # Output formatting
 │   ├── realtime/          # Real-time streaming

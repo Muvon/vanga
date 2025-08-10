@@ -288,7 +288,167 @@ pub fn create_window_aware_config(
 }
 ```
 
-### **Reproducible Weight Initialization** (`src/model/lstm/seeded_weights.rs`)
+### **🆕 Advanced Training Features Implementation**
+
+#### **Error Metrics for Prediction Quality** (`src/model/lstm/loss.rs`)
+```rust
+#[derive(Debug, Clone)]
+pub struct ErrorMetrics {
+    pub mae: f64,
+    pub mse: f64,
+    pub rmse: f64,
+    pub mape: f64,
+    pub trading_quality: f64,
+}
+
+impl LSTMModel {
+    /// Calculate comprehensive error metrics during training
+    pub fn calculate_error_metrics(
+        &self,
+        predictions: &Tensor,
+        targets: &Tensor,
+    ) -> Result<ErrorMetrics> {
+        let pred_array = predictions.to_vec2::<f64>()?;
+        let target_array = targets.to_vec2::<f64>()?;
+
+        let mut mae_sum = 0.0;
+        let mut mse_sum = 0.0;
+        let mut mape_sum = 0.0;
+        let mut count = 0;
+
+        for (pred_row, target_row) in pred_array.iter().zip(target_array.iter()) {
+            for (pred, target) in pred_row.iter().zip(target_row.iter()) {
+                let error = pred - target;
+                mae_sum += error.abs();
+                mse_sum += error * error;
+
+                if target.abs() > 1e-8 {
+                    mape_sum += (error / target).abs();
+                }
+                count += 1;
+            }
+        }
+
+        let mae = mae_sum / count as f64;
+        let mse = mse_sum / count as f64;
+        let rmse = mse.sqrt();
+        let mape = (mape_sum / count as f64) * 100.0;
+
+        // Calculate trading-specific quality metric
+        let trading_quality = self.calculate_trading_quality(&pred_array, &target_array)?;
+
+        Ok(ErrorMetrics {
+            mae,
+            mse,
+            rmse,
+            mape,
+            trading_quality,
+        })
+    }
+
+    /// Calculate distance-weighted quality metrics for multi-horizon predictions
+    fn calculate_trading_quality(
+        &self,
+        predictions: &Vec<Vec<f64>>,
+        targets: &Vec<Vec<f64>>,
+    ) -> Result<f64> {
+        let mut weighted_error = 0.0;
+        let mut total_weight = 0.0;
+
+        for (pred_row, target_row) in predictions.iter().zip(targets.iter()) {
+            for (i, (pred, target)) in pred_row.iter().zip(target_row.iter()).enumerate() {
+                // Weight errors by temporal distance (closer predictions more important)
+                let distance_weight = 1.0 / (1.0 + i as f64 * 0.1);
+                let error = (pred - target).abs();
+
+                weighted_error += error * distance_weight;
+                total_weight += distance_weight;
+            }
+        }
+
+        Ok(1.0 - (weighted_error / total_weight).min(1.0))
+    }
+}
+```
+
+#### **Deterministic Dropout Implementation** (`src/model/lstm/core.rs`)
+```rust
+pub struct DeterministicDropout {
+    pub rate: f64,
+    pub seed: u64,
+    pub enabled: bool,
+}
+
+impl DeterministicDropout {
+    pub fn new(rate: f64, seed: u64) -> Self {
+        Self {
+            rate,
+            seed,
+            enabled: true,
+        }
+    }
+
+    pub fn apply(&self, input: &Tensor, training: bool) -> Result<Tensor> {
+        if !self.enabled || !training || self.rate == 0.0 {
+            return Ok(input.clone());
+        }
+
+        // Create deterministic dropout mask using seed
+        let mut rng = StdRng::seed_from_u64(self.seed);
+        let shape = input.shape();
+        let total_elements = shape.iter().product::<usize>();
+
+        let mask: Vec<f32> = (0..total_elements)
+            .map(|_| if rng.gen::<f64>() < self.rate { 0.0 } else { 1.0 / (1.0 - self.rate) })
+            .collect();
+
+        let mask_tensor = Tensor::from_vec(mask, shape, input.device())?;
+        input.mul(&mask_tensor)
+    }
+}
+```
+
+#### **Gradient Accumulation Prevention** (`src/model/lstm/gradient_clipper.rs`)
+```rust
+impl GradientClipper {
+    /// Enhanced gradient clipping with accumulation prevention
+    pub fn clip_gradients_with_prevention(
+        &mut self,
+        grads: &GradStore,
+        prevent_accumulation: bool,
+    ) -> Result<()> {
+        // Calculate gradient norm
+        let mut total_norm = 0.0;
+        for (_, grad) in grads.iter() {
+            let grad_norm = grad.sqr()?.sum_all()?.to_scalar::<f64>()?;
+            total_norm += grad_norm;
+        }
+        total_norm = total_norm.sqrt();
+
+        // Apply clipping if necessary
+        if total_norm > self.threshold {
+            self.scaling_factor = self.threshold / total_norm;
+
+            // Scale gradients
+            for (_, grad) in grads.iter() {
+                let scaled_grad = grad.mul(&Tensor::new(self.scaling_factor, grad.device())?)?;
+
+                // Prevent accumulation by ensuring contiguous memory layout
+                if prevent_accumulation {
+                    *grad = scaled_grad.contiguous()?;
+                } else {
+                    *grad = scaled_grad;
+                }
+            }
+
+            log::debug!("🔧 Gradient clipping applied: norm={:.6}, scale={:.6}, prevention={}",
+                       total_norm, self.scaling_factor, prevent_accumulation);
+        }
+
+        Ok(())
+    }
+}
+```
 
 #### **Seeded Weight Initialization**
 ```rust
@@ -342,6 +502,151 @@ impl SeededWeights {
 
 ---
 
+## 📈 **TA Crate Integration** (`src/features/ta_tests.rs`)
+
+### **Professional Technical Analysis Library Integration**
+```rust
+use ta::{
+    indicators::{
+        SimpleMovingAverage, ExponentialMovingAverage, RelativeStrengthIndex,
+        BollingerBands, MACD, Stochastic, WilliamsR, CommodityChannelIndex,
+        OnBalanceVolume, MoneyFlowIndex, AverageTrueRange,
+    },
+    Next, Reset,
+};
+
+pub struct TechnicalIndicatorEngine {
+    // Trend Indicators
+    pub sma_indicators: HashMap<usize, SimpleMovingAverage>,
+    pub ema_indicators: HashMap<usize, ExponentialMovingAverage>,
+    pub dema_indicators: HashMap<usize, DoubleExponentialMovingAverage>,
+    pub tema_indicators: HashMap<usize, TripleExponentialMovingAverage>,
+    pub macd_indicator: MACD,
+    pub bollinger_bands: BollingerBands,
+
+    // Momentum Indicators
+    pub rsi_indicator: RelativeStrengthIndex,
+    pub stochastic_indicator: Stochastic,
+    pub williams_r_indicator: WilliamsR,
+    pub cci_indicator: CommodityChannelIndex,
+    pub roc_indicator: RateOfChange,
+    pub momentum_indicator: Momentum,
+
+    // Volume Indicators
+    pub obv_indicator: OnBalanceVolume,
+    pub mfi_indicator: MoneyFlowIndex,
+    pub ad_line_indicator: AccumulationDistributionLine,
+
+    // Volatility Indicators
+    pub atr_indicator: AverageTrueRange,
+    pub keltner_channels: KeltnerChannels,
+    pub standard_deviation: StandardDeviation,
+}
+
+impl TechnicalIndicatorEngine {
+    pub fn process_candle(&mut self, candle: &MarketDataRow) -> Result<TechnicalFeatures> {
+        let mut features = TechnicalFeatures::new();
+
+        // Process trend indicators
+        for (period, sma) in &mut self.sma_indicators {
+            let sma_value = sma.next(candle.close);
+            features.insert(format!("sma_{}", period), sma_value);
+        }
+
+        for (period, ema) in &mut self.ema_indicators {
+            let ema_value = ema.next(candle.close);
+            features.insert(format!("ema_{}", period), ema_value);
+        }
+
+        // Process momentum indicators
+        let rsi_value = self.rsi_indicator.next(candle.close);
+        features.insert("rsi".to_string(), rsi_value);
+
+        let macd_result = self.macd_indicator.next(candle.close);
+        features.insert("macd".to_string(), macd_result.macd);
+        features.insert("macd_signal".to_string(), macd_result.signal);
+        features.insert("macd_histogram".to_string(), macd_result.histogram);
+
+        // Process volume indicators
+        let obv_value = self.obv_indicator.next(&ta::DataItem::builder()
+            .high(candle.high)
+            .low(candle.low)
+            .close(candle.close)
+            .volume(candle.volume)
+            .build()
+            .unwrap());
+        features.insert("obv".to_string(), obv_value);
+
+        // Process volatility indicators
+        let atr_value = self.atr_indicator.next(&ta::DataItem::builder()
+            .high(candle.high)
+            .low(candle.low)
+            .close(candle.close)
+            .build()
+            .unwrap());
+        features.insert("atr".to_string(), atr_value);
+
+        Ok(features)
+    }
+}
+```
+
+### **Feature Validation System** (`src/features/validation.rs`)
+```rust
+pub struct FeatureValidator {
+    pub min_values: HashMap<String, f64>,
+    pub max_values: HashMap<String, f64>,
+    pub nan_tolerance: f64,
+}
+
+impl FeatureValidator {
+    pub fn validate_features(&self, features: &DataFrame) -> Result<ValidationReport> {
+        let mut report = ValidationReport::new();
+
+        for column in features.get_columns() {
+            let column_name = column.name();
+
+            // Check for NaN values
+            let nan_count = self.count_nan_values(column)?;
+            let nan_percentage = nan_count as f64 / column.len() as f64;
+
+            if nan_percentage > self.nan_tolerance {
+                report.add_warning(format!(
+                    "Column '{}' has {:.2}% NaN values (tolerance: {:.2}%)",
+                    column_name, nan_percentage * 100.0, self.nan_tolerance * 100.0
+                ));
+            }
+
+            // Check value ranges for technical indicators
+            if let Ok(numeric_column) = column.f64() {
+                let min_val = numeric_column.min().unwrap_or(f64::NAN);
+                let max_val = numeric_column.max().unwrap_or(f64::NAN);
+
+                // Validate RSI range (0-100)
+                if column_name == "rsi" && (min_val < 0.0 || max_val > 100.0) {
+                    report.add_error(format!(
+                        "RSI values out of range [0,100]: min={:.2}, max={:.2}",
+                        min_val, max_val
+                    ));
+                }
+
+                // Validate Stochastic range (0-100)
+                if column_name.starts_with("stoch") && (min_val < 0.0 || max_val > 100.0) {
+                    report.add_error(format!(
+                        "Stochastic values out of range [0,100]: min={:.2}, max={:.2}",
+                        min_val, max_val
+                    ));
+                }
+            }
+        }
+
+        Ok(report)
+    }
+}
+```
+
+---
+
 ## 🔗 **Hybrid Model Integration**
 
 ### **XGBoost Integration** (`src/model/xgboost.rs` + `src/model/smartcore_backend.rs`)
@@ -388,6 +693,11 @@ pub fn get_objective_for_target(target_type: &TargetType) -> String {
     match target_type {
         TargetType::PriceLevel => "multi:softprob".to_string(),    // 5-class classification
         TargetType::Direction => "multi:softprob".to_string(),     // 5-class classification
+        TargetType::Volatility => "multi:softprob".to_string(),    // 5-class classification
+        TargetType::Sentiment => "multi:softprob".to_string(),     // 5-class classification (NEW)
+        TargetType::Volume => "multi:softprob".to_string(),        // 5-class classification (NEW)
+    }
+}
         TargetType::Volatility => "multi:softprob".to_string(),    // 5-class classification
     }
 }
@@ -498,7 +808,15 @@ pub fn calculate_weighted_soft_crossentropy_loss(
 Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Target Generation →
 Sequence Creation → Multi-Model Training → Hybrid Models → Predictions
     ↓           ↓                    ↓             ↓                ↓
-OHLCV Data  Technical Indicators  Clean Data   Processed Data   3×5 Targets
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   5×5 Targets
+```
+
+### **5-Target System Architecture**
+- **Total Output**: 5 targets × 5 classes = 25 outputs per prediction
+- **Target Types**: Price levels, direction, volatility, sentiment, volume
+- **Adaptive Parameters**: Automatic threshold calibration for balanced distribution
+- **Symbol-Agnostic**: Consistent performance across all trading pairs
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   5×5 Targets
 ```
 
 **Key Principles:**

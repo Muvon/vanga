@@ -23,8 +23,8 @@ This guide covers VANGA's **single-config LSTM training system** with intelligen
 - **35% better performance** compared to basic SGD on crypto datasets
 
 ### ✅ **Advanced Loss Function System (NEW)**
-- **Multi-Target Loss Weighting**: Proper weighted loss calculation for 3 targets × 5 classes each
-- **Crypto-Optimized Weights**: Direction (50%), Price Levels (20%), Volatility (20%), Risk (10%)
+- **Multi-Target Loss Weighting**: Proper weighted loss calculation for 5 targets × 5 classes each
+- **Crypto-Optimized Weights**: Direction (30%), Price Levels (25%), Volatility (20%), Sentiment (15%), Volume (10%)
 - **CryptoComposite Loss**: Specialized loss function for cryptocurrency trading optimization
 - **Market Regime Awareness**: Adjusts loss calculation based on market conditions
 - **Meaningful Early Stopping**: Fixed min_delta thresholds for proper convergence detection
@@ -269,7 +269,7 @@ class_weight_strategy = "Global"             # Global class weighting
 ```
 
 **Features:**
-- Balanced splits for price levels, direction, and volatility targets
+- Balanced splits for price levels, direction, volatility, sentiment, and volume targets
 - Maintains chronological order while ensuring class balance
 - Prevents overfitting to dominant classes
 - Configurable validation gap to prevent information leakage
@@ -321,6 +321,66 @@ seed = 42                                    # Fixed seed for reproducibility
 - Reproducible results for research and debugging
 - Deterministic weight initialization
 - Enables proper A/B testing of configurations
+
+### **🆕 Advanced Training Features (Latest)**
+
+#### **Error Metrics for Prediction Quality**
+```rust
+// Automatic error metric calculation during training
+pub fn calculate_error_metrics(
+    predictions: &Tensor,
+    targets: &Tensor,
+) -> Result<ErrorMetrics>
+```
+
+**Features:**
+- Real-time prediction quality assessment during training
+- Distance-weighted quality metrics for better evaluation
+- Trading-specific error metrics optimized for crypto markets
+- Automatic quality threshold detection for early stopping
+
+#### **Deterministic Dropout for Reproducible Training**
+```toml
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.2 }
+deterministic = true                         # NEW: Reproducible dropout
+```
+
+**Benefits:**
+- Consistent dropout patterns across training runs
+- Reproducible model behavior for debugging
+- Maintains regularization benefits while ensuring determinism
+- Critical for research and model comparison
+
+#### **Distance-Weighted Quality Metrics**
+```rust
+// Advanced quality assessment for predictions
+pub fn calculate_distance_weighted_quality(
+    predictions: &Array2<f64>,
+    targets: &Array2<f64>,
+    horizons: &[String],
+) -> Result<QualityMetrics>
+```
+
+**Features:**
+- Weights prediction errors by temporal distance
+- More accurate quality assessment for multi-horizon predictions
+- Crypto-specific quality thresholds
+- Integrated with early stopping for optimal model selection
+
+#### **Gradient Accumulation Prevention**
+```toml
+[training]
+gradient_clip = 1.0
+prevent_accumulation = true                  # NEW: Prevents gradient buildup
+```
+
+**Benefits:**
+- Prevents gradient accumulation during clipping
+- Maintains training stability across different batch sizes
+- Optimized for LSTM gradient flow patterns
+- Reduces memory usage during training
 
 ## Multi-Layer Training Modes
 
@@ -411,7 +471,7 @@ impl ModelTrainer {
         // 1. Load and prepare training data
         let prepared_data = data_pipeline.prepare_training_data(&self.config.data_path, &self.config).await?;
 
-        // 2. Generate targets (price/direction/volatility)
+        // 2. Generate targets (5 targets per horizon: price/direction/volatility/sentiment/volume)
         let target_generator = TargetGenerator::with_defaults();
         let targets = target_generator.generate_all_targets(&df).await?;
 

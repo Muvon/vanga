@@ -11,7 +11,7 @@ VANGA's backtesting system provides professional-grade performance evaluation by
 ### Core Capabilities
 - **Real Data Pipeline**: Uses actual CSV data loading and processing
 - **Chronological Splitting**: Prevents data leakage with time-based train/test splits
-- **Multi-Target Evaluation**: Tests price levels, direction, and volatility predictions
+- **Multi-Target Evaluation**: Tests price levels, direction, volatility, sentiment, and volume predictions
 - **Comprehensive Metrics**: Regression and classification metrics from real predictions
 - **Batch Processing**: Support for multiple symbols simultaneously
 

@@ -443,11 +443,13 @@ learning_rate = 0.1                           # XGBoost learning rate
 subsample = 0.8                               # Subsample ratio
 colsample_bytree = 0.8                        # Feature subsample ratio
 
-# Target-specific XGBoost configuration
+# Target-specific XGBoost configuration (5 targets)
 [model.xgboost.targets]
 price_levels = { objective = "multi:softprob", eval_metric = "mlogloss" }
-direction = { objective = "binary:logistic", eval_metric = "logloss" }
-volatility = { objective = "reg:squarederror", eval_metric = "rmse" }
+direction = { objective = "multi:softprob", eval_metric = "mlogloss" }
+volatility = { objective = "multi:softprob", eval_metric = "mlogloss" }
+sentiment = { objective = "multi:softprob", eval_metric = "mlogloss" }  # NEW
+volume = { objective = "multi:softprob", eval_metric = "mlogloss" }     # NEW
 ```
 
 #### **TFT (Temporal Fusion Transformer) Integration**
@@ -472,28 +474,48 @@ selection_threshold = 0.1                     # Variable importance threshold
 max_variables = 50                            # Maximum selected variables
 ```
 
-### **Output Heads Configuration**
+### **Output Heads Configuration (5-Target System)**
 
 ```toml
 [model.output_heads]
 
-# Price level prediction (probability distribution)
+# Price level prediction (5-class probability distribution)
 [model.output_heads.price_levels]
 enabled = true                                 # Enable price level prediction
-bins = 10                                      # Number of price bins (5-20 range)
+classes = 5                                    # 5-class system (Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up)
 range_percent = 0.05                          # Price range (±5%)
+vwap_weighted = true                          # Use VWAP-weighted analysis
 
-# Direction prediction (up/down)
+# Direction prediction (5-class directional movement)
 [model.output_heads.direction]
 enabled = true                                 # Enable direction prediction
+classes = 5                                    # 5-class system (DUMP, DOWN, SIDEWAYS, UP, PUMP)
 threshold = 0.01                              # Significance threshold (1%)
 confidence_calibration = true                  # Calibrate confidence scores
 
-# Volatility prediction (risk estimation)
+# Volatility prediction (5-class volatility regime)
 [model.output_heads.volatility]
 enabled = true                                 # Enable volatility prediction
-method = "Direct"                             # Prediction method
+classes = 5                                    # 5-class system (VeryLow, Low, Medium, High, VeryHigh)
+method = "ATR"                                # ATR-based volatility with horizon weighting
 horizons = ["1h", "4h", "1d"]                # Time horizons
+
+# Sentiment prediction (5-class market psychology) - NEW
+[model.output_heads.sentiment]
+enabled = true                                 # Enable sentiment prediction
+classes = 5                                    # 5-class system (Strong Panic, Moderate Panic, Neutral, Moderate Greed, Strong Greed)
+method = "CandleBodyAnalysis"                 # Candle body psychology analysis
+volume_confirmation = true                     # Use volume confirmation
+body_ratio_weight = 0.6                      # Body ratio importance
+wick_imbalance_weight = 0.4                  # Wick imbalance importance
+
+# Volume prediction (5-class volume regime) - NEW
+[model.output_heads.volume]
+enabled = true                                 # Enable volume prediction
+classes = 5                                    # 5-class system (Very Low, Low, Medium, High, Very High)
+method = "LogarithmicRatio"                   # Logarithmic volume ratio classification
+baseline_window = 30                          # Baseline volume window (periods)
+log_transformation = true                      # Use logarithmic transformation for symmetry
 ```
 
 ---
@@ -701,6 +723,110 @@ normalization = "MinMaxScaler"
 # FEATURES: Scales to [0, 1] range
 # BEST FOR: When you need bounded outputs
 # EFFECT: Preserves relationships, bounded range
+```
+
+### **🆕 Adaptive Parameters Configuration**
+
+```toml
+[targets.adaptive_parameters]
+enabled = true                                # Enable adaptive parameter calibration
+calibration_method = "Percentile"             # Calibration method (Percentile, Quantile)
+target_distribution = "Balanced"              # Target class distribution (Balanced, Natural)
+recalibration_frequency = "Never"             # Recalibration frequency (Never, Daily, Weekly)
+
+# Price level adaptive parameters
+[targets.adaptive_parameters.price_level]
+base_sensitivity = 0.02                       # Base sensitivity (2%)
+extreme_multiplier = 2.0                      # Extreme threshold multiplier
+momentum_weighting = 0.7                      # VWAP momentum weighting
+neutral_band_factor = 1.2                     # Neutral band expansion factor
+
+# Sentiment adaptive parameters
+[targets.adaptive_parameters.sentiment]
+volume_baseline_window = 50                   # Volume baseline calculation window
+body_ratio_scaling = 1.0                      # Body ratio scaling factor
+wick_imbalance_weight = 0.4                   # Wick imbalance importance
+volume_confirmation_threshold = 1.5           # Volume confirmation threshold
+
+# Volume adaptive parameters
+[targets.adaptive_parameters.volume]
+baseline_window = 30                          # Volume baseline window (periods)
+log_transformation = true                     # Use logarithmic transformation
+symmetry_enforcement = true                   # Enforce symmetric thresholds
+outlier_filtering = true                      # Filter volume outliers
+
+# Volatility adaptive parameters
+[targets.adaptive_parameters.volatility]
+atr_period = 14                              # ATR calculation period
+horizon_weighting = true                      # Apply horizon-specific weighting
+regime_detection = true                       # Enable volatility regime detection
+smoothing_factor = 0.1                       # Volatility smoothing factor
+
+# Direction adaptive parameters
+[targets.adaptive_parameters.direction]
+base_threshold = 0.01                        # Base directional threshold (1%)
+volatility_adjustment = true                  # Adjust thresholds based on volatility
+momentum_confirmation = true                  # Require momentum confirmation
+trend_alignment = true                        # Consider trend alignment
+```
+
+### **🆕 TA Crate Integration Configuration**
+
+```toml
+[features.ta_crate]
+enabled = true                                # Enable professional TA library integration
+validation_enabled = true                     # Enable indicator validation
+nan_handling = "Forward"                      # NaN handling method (Forward, Backward, Drop)
+
+# Trend indicators configuration
+[features.ta_crate.trend]
+sma_periods = [5, 10, 20, 50, 200]          # Simple Moving Average periods
+ema_periods = [5, 10, 20, 50, 200]          # Exponential Moving Average periods
+dema_periods = [10, 20, 50]                 # Double EMA periods
+tema_periods = [10, 20, 50]                 # Triple EMA periods
+
+# MACD configuration
+[features.ta_crate.trend.macd]
+fast_period = 12                             # MACD fast period
+slow_period = 26                             # MACD slow period
+signal_period = 9                            # MACD signal period
+
+# Bollinger Bands configuration
+[features.ta_crate.trend.bollinger_bands]
+period = 20                                  # Bollinger Bands period
+std_dev = 2.0                               # Standard deviation multiplier
+
+# Momentum indicators configuration
+[features.ta_crate.momentum]
+rsi_period = 14                             # RSI period
+stochastic_k_period = 14                    # Stochastic %K period
+stochastic_d_period = 3                     # Stochastic %D period
+williams_r_period = 14                      # Williams %R period
+cci_period = 20                             # CCI period
+roc_period = 10                             # Rate of Change period
+momentum_period = 10                        # Momentum period
+
+# Volume indicators configuration
+[features.ta_crate.volume]
+obv_enabled = true                          # On-Balance Volume
+mfi_period = 14                             # Money Flow Index period
+ad_line_enabled = true                      # Accumulation/Distribution Line
+volume_sma_periods = [10, 20, 50]          # Volume SMA periods
+volume_roc_period = 10                      # Volume Rate of Change period
+
+# Volatility indicators configuration
+[features.ta_crate.volatility]
+atr_period = 14                             # Average True Range period
+keltner_period = 20                         # Keltner Channels period
+keltner_multiplier = 2.0                    # Keltner multiplier
+standard_deviation_period = 20              # Standard Deviation period
+
+# Indicator validation settings
+[features.ta_crate.validation]
+min_valid_ratio = 0.8                       # Minimum valid data ratio
+max_nan_consecutive = 5                      # Maximum consecutive NaN values
+range_validation = true                      # Enable range validation (e.g., RSI 0-100)
+consistency_checks = true                    # Enable consistency checks
 ```
 
 ---

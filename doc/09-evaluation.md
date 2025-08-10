@@ -1,6 +1,6 @@
 # Model Evaluation and Metrics
 
-Comprehensive evaluation framework for assessing LSTM model performance across different prediction tasks in VANGA.
+Comprehensive evaluation framework for assessing LSTM model performance across different prediction tasks in VANGA's 5-target system.
 
 ## Evaluation Architecture
 
@@ -63,7 +63,7 @@ pub fn calculate_classification_metrics(predictions: &[i32], targets: &[i32]) ->
 
 ### **1. Classification Metrics (5-Class System)**
 
-For all targets (price level, direction, volatility) using 5-class classification:
+For all 5 targets (price level, direction, volatility, sentiment, volume) using 5-class classification:
 
 ```rust
 // Current metrics structure - src/utils/metrics.rs
@@ -90,7 +90,7 @@ pub struct EvaluationMetrics {
 ```rust
 use vanga::utils::metrics::calculate_classification_metrics;
 
-// Convert probability predictions to class predictions
+// Convert probability predictions to class predictions for 5-target system
 let predicted_classes: Vec<i32> = predictions.iter()
     .map(|probs| probs.iter()
         .enumerate()
@@ -104,7 +104,7 @@ println!("Overall Accuracy: {:.3}", metrics.accuracy);
 println!("Macro F1: {:.3}", metrics.macro_f1);
 println!("Weighted F1: {:.3}", metrics.weighted_f1);
 
-// Per-class metrics
+// Per-class metrics for all 5 classes
 for class in 0..5 {
     if let (Some(&precision), Some(&recall), Some(&f1)) =
         (metrics.precision.get(&class), metrics.recall.get(&class), metrics.f1_score.get(&class)) {
@@ -112,6 +112,126 @@ for class in 0..5 {
                  class, precision, recall, f1);
     }
 }
+```
+
+**5-Target Class Interpretation**:
+- **Price Level**: Strong Down (0), Moderate Down (1), Neutral (2), Moderate Up (3), Strong Up (4)
+- **Direction**: DUMP (0), DOWN (1), SIDEWAYS (2), UP (3), PUMP (4)
+- **Volatility**: Very Low (0), Low (1), Medium (2), High (3), Very High (4)
+- **Sentiment**: Very Bearish (0), Bearish (1), Neutral (2), Bullish (3), Very Bullish (4)
+- **Volume**: Very Low (0), Low (1), Normal (2), High (3), Very High (4)
+
+### **2. Enhanced Error Metrics and Quality Assessment**
+
+VANGA includes advanced error metrics for prediction quality assessment:
+
+#### **Distance-Weighted Quality Metrics**
+```rust
+// Advanced quality assessment from src/utils/metrics.rs
+pub fn calculate_distance_weighted_accuracy(predictions: &[i32], targets: &[i32]) -> Result<f64> {
+    if predictions.len() != targets.len() {
+        return Err(VangaError::DataError("Length mismatch".to_string()));
+    }
+
+    let mut weighted_score = 0.0;
+    let mut total_weight = 0.0;
+
+    for (&pred, &target) in predictions.iter().zip(targets.iter()) {
+        let distance = (pred - target).abs() as f64;
+
+        // Weight calculation: closer predictions get higher weights
+        let weight = match distance {
+            0.0 => 1.0,      // Perfect prediction
+            1.0 => 0.7,      // Off by 1 class
+            2.0 => 0.4,      // Off by 2 classes
+            3.0 => 0.1,      // Off by 3 classes
+            _ => 0.0,        // Off by 4 classes (worst case)
+        };
+
+        weighted_score += weight;
+        total_weight += 1.0;
+    }
+
+    Ok(weighted_score / total_weight)
+}
+```
+
+#### **Prediction Confidence Analysis**
+```rust
+// Confidence-based evaluation for probability predictions
+pub fn calculate_confidence_metrics(
+    probabilities: &[Vec<f64>],
+    targets: &[i32]
+) -> Result<ConfidenceMetrics> {
+    let mut high_confidence_correct = 0;
+    let mut high_confidence_total = 0;
+    let mut low_confidence_correct = 0;
+    let mut low_confidence_total = 0;
+
+    let confidence_threshold = 0.6; // Configurable threshold
+
+    for (probs, &target) in probabilities.iter().zip(targets.iter()) {
+        let max_prob = probs.iter().fold(0.0, |a, &b| a.max(b));
+        let predicted_class = probs.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(idx, _)| idx as i32)
+            .unwrap_or(2);
+
+        let is_correct = predicted_class == target;
+
+        if max_prob >= confidence_threshold {
+            high_confidence_total += 1;
+            if is_correct { high_confidence_correct += 1; }
+        } else {
+            low_confidence_total += 1;
+            if is_correct { low_confidence_correct += 1; }
+        }
+    }
+
+    Ok(ConfidenceMetrics {
+        high_confidence_accuracy: high_confidence_correct as f64 / high_confidence_total as f64,
+        low_confidence_accuracy: low_confidence_correct as f64 / low_confidence_total as f64,
+        high_confidence_ratio: high_confidence_total as f64 / probabilities.len() as f64,
+    })
+}
+```
+
+#### **Multi-Target Evaluation**
+```rust
+// Comprehensive evaluation across all 5 targets
+pub fn evaluate_multi_target_predictions(
+    predictions: &MultiTargetPredictions,
+    targets: &MultiTargetLabels,
+) -> Result<MultiTargetMetrics> {
+    let mut target_metrics = HashMap::new();
+
+    // Evaluate each target type separately
+    for target_type in &["price_level", "direction", "volatility", "sentiment", "volume"] {
+        let pred_classes = predictions.get_target_predictions(target_type)?;
+        let true_classes = targets.get_target_labels(target_type)?;
+
+        let metrics = calculate_classification_metrics(&pred_classes, &true_classes)?;
+        let distance_accuracy = calculate_distance_weighted_accuracy(&pred_classes, &true_classes)?;
+
+        target_metrics.insert(target_type.to_string(), TargetMetrics {
+            classification_metrics: metrics,
+            distance_weighted_accuracy: distance_accuracy,
+        });
+    }
+
+    // Calculate overall metrics
+    let overall_accuracy = target_metrics.values()
+        .map(|m| m.classification_metrics.accuracy)
+        .sum::<f64>() / target_metrics.len() as f64;
+
+    Ok(MultiTargetMetrics {
+        target_metrics,
+        overall_accuracy,
+        total_targets: 5,
+    })
+}
+```
 ```
 
 **Class Interpretation**:
@@ -210,9 +330,147 @@ println!("R²: {:.3}", regression_metrics.r_squared);
 println!("MAPE: {:.2}%", regression_metrics.mape);
 ```
 
-### **3. Financial Metrics**
+### **3. Error Handling and Robustness**
 
-For trading performance evaluation:
+VANGA includes comprehensive error handling for evaluation metrics to ensure reliable performance assessment.
+
+#### **Input Validation**
+```rust
+// Comprehensive input validation for evaluation metrics
+pub fn validate_evaluation_inputs(
+    predictions: &[f64],
+    targets: &[f64],
+    metric_name: &str,
+) -> Result<()> {
+    // Length validation
+    if predictions.len() != targets.len() {
+        return Err(VangaError::DataError(format!(
+            "{}: Prediction and target lengths must match ({} vs {})",
+            metric_name, predictions.len(), targets.len()
+        )));
+    }
+
+    // Empty data validation
+    if predictions.is_empty() {
+        return Err(VangaError::DataError(format!(
+            "{}: Cannot calculate metrics on empty data",
+            metric_name
+        )));
+    }
+
+    // NaN/Infinite value validation
+    let invalid_predictions = predictions.iter().filter(|&&x| !x.is_finite()).count();
+    let invalid_targets = targets.iter().filter(|&&x| !x.is_finite()).count();
+
+    if invalid_predictions > 0 {
+        return Err(VangaError::DataError(format!(
+            "{}: Found {} invalid prediction values (NaN/Inf)",
+            metric_name, invalid_predictions
+        )));
+    }
+
+    if invalid_targets > 0 {
+        return Err(VangaError::DataError(format!(
+            "{}: Found {} invalid target values (NaN/Inf)",
+            metric_name, invalid_targets
+        )));
+    }
+
+    Ok(())
+}
+```
+
+#### **Graceful Degradation**
+```rust
+// Robust metric calculation with fallback strategies
+pub fn calculate_robust_metrics(
+    predictions: &[f64],
+    targets: &[f64],
+) -> Result<RobustMetrics> {
+    // Validate inputs first
+    validate_evaluation_inputs(predictions, targets, "RobustMetrics")?;
+
+    // Filter out any remaining problematic values
+    let valid_pairs: Vec<(f64, f64)> = predictions.iter()
+        .zip(targets.iter())
+        .filter(|(&p, &t)| p.is_finite() && t.is_finite())
+        .map(|(&p, &t)| (p, t))
+        .collect();
+
+    if valid_pairs.is_empty() {
+        return Err(VangaError::DataError(
+            "No valid prediction-target pairs found".to_string()
+        ));
+    }
+
+    let (valid_predictions, valid_targets): (Vec<f64>, Vec<f64>) = valid_pairs.into_iter().unzip();
+
+    // Calculate metrics with robust error handling
+    let mse = calculate_mse_safe(&valid_predictions, &valid_targets)?;
+    let mae = calculate_mae_safe(&valid_predictions, &valid_targets)?;
+    let r_squared = calculate_r_squared_safe(&valid_predictions, &valid_targets)?;
+
+    Ok(RobustMetrics {
+        mse,
+        mae,
+        r_squared,
+        valid_samples: valid_predictions.len(),
+        total_samples: predictions.len(),
+    })
+}
+```
+
+#### **Error Recovery Strategies**
+```rust
+// Error recovery for edge cases in metric calculations
+pub fn calculate_mse_safe(predictions: &[f64], targets: &[f64]) -> Result<f64> {
+    if predictions.is_empty() {
+        return Ok(f64::NAN);
+    }
+
+    let mut sum_squared_errors = 0.0;
+    let mut valid_count = 0;
+
+    for (&pred, &target) in predictions.iter().zip(targets.iter()) {
+        if pred.is_finite() && target.is_finite() {
+            let error = pred - target;
+            sum_squared_errors += error * error;
+            valid_count += 1;
+        }
+    }
+
+    if valid_count == 0 {
+        Ok(f64::NAN)
+    } else {
+        Ok(sum_squared_errors / valid_count as f64)
+    }
+}
+
+pub fn calculate_r_squared_safe(predictions: &[f64], targets: &[f64]) -> Result<f64> {
+    if predictions.len() < 2 {
+        return Ok(f64::NAN);
+    }
+
+    let target_mean = targets.iter().sum::<f64>() / targets.len() as f64;
+
+    // Handle case where all targets are the same (zero variance)
+    let ss_tot: f64 = targets.iter().map(|&x| (x - target_mean).powi(2)).sum();
+    if ss_tot == 0.0 {
+        return Ok(f64::NAN); // Cannot calculate R² with zero variance
+    }
+
+    let ss_res: f64 = predictions.iter()
+        .zip(targets.iter())
+        .map(|(&pred, &target)| (target - pred).powi(2))
+        .sum();
+
+    Ok(1.0 - (ss_res / ss_tot))
+}
+```
+
+### **4. Financial Metrics**
+
+For trading performance evaluation with enhanced error handling:
 
 #### **Sharpe Ratio**
 ```rust
@@ -319,10 +577,10 @@ println!("Directional Accuracy: {:.3}", dir_acc);
 
 ## Model Evaluation Framework
 
-### **Current Evaluation Pipeline**
+### **Enhanced Multi-Target Evaluation Pipeline**
 ```rust
-// Comprehensive model evaluation - future implementation
-use vanga::utils::metrics::{calculate_classification_metrics, calculate_regression_metrics};
+// Comprehensive model evaluation for 5-target system
+use vanga::utils::metrics::{calculate_classification_metrics, calculate_distance_weighted_accuracy};
 use vanga::model::multi_target::MultiTargetLSTMModel;
 use vanga::api::predictor::{Predictor, ModelWrapper};
 
@@ -330,9 +588,12 @@ pub async fn evaluate_multi_target_model(
     model: &MultiTargetLSTMModel,
     test_data_path: &Path,
 ) -> Result<MultiTargetEvaluationReport> {
-    // 1. Load test data
+    // 1. Load test data with validation
     let data_pipeline = DataPipeline::new();
     let test_df = data_pipeline.load_csv(test_data_path).await?;
+
+    // Validate test data quality
+    validate_test_data(&test_df)?;
 
     // 2. Generate features and sequences (same as training)
     let prepared_data = data_pipeline.prepare_prediction_data(&PredictionConfig {
@@ -346,38 +607,101 @@ pub async fn evaluate_multi_target_model(
         batch_size: None,
     }).await?;
 
-    // 3. Generate targets for comparison
+    // 3. Generate all 5 targets for comparison
     let target_generator = TargetGenerator::with_config(&model.get_training_config().unwrap().targets);
     let all_targets = target_generator.generate_all_targets(&test_df).await?;
 
-    // 4. Make predictions
+    // 4. Make predictions with error handling
     let predictor = Predictor::new(config);
-    let predictions = predictor.predict(ModelWrapper::MultiTarget(model)).await?;
+    let predictions = match predictor.predict(ModelWrapper::MultiTarget(model)).await {
+        Ok(preds) => preds,
+        Err(e) => {
+            log::error!("Prediction failed: {}", e);
+            return Err(VangaError::PredictionError(format!("Model prediction failed: {}", e)));
+        }
+    };
 
-    // 5. Calculate metrics for each target
+    // 5. Calculate metrics for each of the 5 targets
     let mut target_metrics = HashMap::new();
+    let target_names = ["price_level", "direction", "volatility", "sentiment", "volume"];
 
-    for (target_name, target_data) in all_targets {
-        // Convert probability predictions to class predictions
-        let predicted_classes = convert_probabilities_to_classes(&predictions, &target_name)?;
-        let actual_classes = convert_targets_to_classes(&target_data)?;
+    for target_name in &target_names {
+        if let (Some(target_data), Some(pred_data)) = (
+            all_targets.get(*target_name),
+            predictions.get_target_predictions(*target_name)
+        ) {
+            // Convert probability predictions to class predictions
+            let predicted_classes = convert_probabilities_to_classes(&pred_data)?;
+            let actual_classes = convert_targets_to_classes(&target_data)?;
 
-        // Calculate classification metrics
-        let metrics = calculate_classification_metrics(&predicted_classes, &actual_classes)?;
-        target_metrics.insert(target_name, metrics);
+            // Calculate comprehensive metrics
+            let classification_metrics = calculate_classification_metrics(&predicted_classes, &actual_classes)?;
+            let distance_accuracy = calculate_distance_weighted_accuracy(&predicted_classes, &actual_classes)?;
+            let confidence_metrics = calculate_confidence_metrics(&pred_data, &actual_classes)?;
+
+            target_metrics.insert(target_name.to_string(), TargetEvaluationMetrics {
+                classification_metrics,
+                distance_weighted_accuracy: distance_accuracy,
+                confidence_metrics,
+                target_type: target_name.to_string(),
+            });
+        }
     }
 
-    // 6. Calculate financial metrics
-    let financial_metrics = calculate_financial_metrics(&predictions, &test_df)?;
+    // 6. Calculate financial metrics with error handling
+    let financial_metrics = match calculate_financial_metrics(&predictions, &test_df) {
+        Ok(metrics) => Some(metrics),
+        Err(e) => {
+            log::warn!("Financial metrics calculation failed: {}", e);
+            None
+        }
+    };
 
+    // 7. Generate comprehensive report
     Ok(MultiTargetEvaluationReport {
         model_info: ModelInfo::from_model(model),
         target_metrics,
         financial_metrics,
+        overall_accuracy: calculate_overall_accuracy(&target_metrics),
         evaluation_date: chrono::Utc::now().to_rfc3339(),
         test_data_period: extract_date_range(&test_df)?,
+        total_predictions: predictions.len(),
+        evaluation_config: EvaluationConfig::default(),
     })
 }
+```
+
+### **Evaluation Report Structure**
+```rust
+// Enhanced evaluation report for 5-target system
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiTargetEvaluationReport {
+    pub model_info: ModelInfo,
+    pub target_metrics: HashMap<String, TargetEvaluationMetrics>,
+    pub financial_metrics: Option<FinancialMetrics>,
+    pub overall_accuracy: f64,
+    pub evaluation_date: String,
+    pub test_data_period: DateRange,
+    pub total_predictions: usize,
+    pub evaluation_config: EvaluationConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetEvaluationMetrics {
+    pub classification_metrics: EvaluationMetrics,
+    pub distance_weighted_accuracy: f64,
+    pub confidence_metrics: ConfidenceMetrics,
+    pub target_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceMetrics {
+    pub high_confidence_accuracy: f64,
+    pub low_confidence_accuracy: f64,
+    pub high_confidence_ratio: f64,
+    pub average_confidence: f64,
+}
+```
 
 fn convert_probabilities_to_classes(
     predictions: &[PredictionResult],
@@ -416,9 +740,9 @@ pub struct MultiTargetEvaluationReport {
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub model_type: String,              // "MultiTargetLSTM"
-    pub num_targets: usize,              // 3 (PriceLevel, Direction, Volatility)
+    pub num_targets: usize,              // 5 (PriceLevel, Direction, Volatility, Sentiment, Volume)
     pub num_classes_per_target: usize,   // 5 (Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up)
-    pub total_outputs: usize,            // 15 (3 targets × 5 classes)
+    pub total_outputs: usize,            // 25 (5 targets × 5 classes)
     pub trained_horizons: Vec<String>,   // ["1h", "4h", "1d"]
     pub input_features: usize,           // Number of input features (e.g., 55)
     pub sequence_length: usize,          // LSTM sequence length
@@ -566,7 +890,7 @@ pub async fn compare_models_command(
 Example evaluation output:
 ```
 🔍 Evaluating model for symbol: BTCUSDT
-✅ Model loaded: 3 targets, 2 horizons
+✅ Model loaded: 5 targets, 2 horizons
 
 📊 Evaluation Results:
 Overall Performance:
@@ -615,7 +939,7 @@ Financial Metrics:
 - **Classification Metrics**: ~1ms per 1000 predictions (5-class system)
 - **Regression Metrics**: ~0.5ms per 1000 predictions
 - **Financial Metrics**: ~2ms per 1000 data points
-- **Multi-Target Evaluation**: ~5ms per 1000 predictions (3 targets × 5 classes)
+- **Multi-Target Evaluation**: ~5ms per 1000 predictions (5 targets × 5 classes)
 - **Complete Evaluation Report**: ~10ms per 1000 predictions
 
 ### **Memory Usage**
