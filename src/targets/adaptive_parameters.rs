@@ -133,6 +133,10 @@ pub struct VolatilityAdaptiveParams {
     /// Coefficient of variation adjustment factor
     pub cv_adjustment_factor: f64,
 
+    /// Calibrated horizon decay factor for recent-weighted ATR calculation
+    /// Values < 1.0 emphasize recent volatility, 1.0 = uniform weighting
+    pub horizon_decay_factor: f64,
+
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
 }
@@ -144,6 +148,7 @@ impl Default for VolatilityAdaptiveParams {
             extreme_multiplier: 2.0,
             atr_distribution_stats: AtrDistributionStats::default(),
             cv_adjustment_factor: 1.0,
+            horizon_decay_factor: 1.0, // Uniform weighting as default fallback
             achieved_balance: ClassDistributionBalance::default(),
         }
     }
@@ -481,6 +486,7 @@ impl AdaptiveParameterCalibrator {
                     best_params = VolatilityAdaptiveParams {
                         bandwidth_size: bandwidth,
                         extreme_multiplier,
+                        horizon_decay_factor: 1.0, // Default uniform weighting for old calibration
                         atr_distribution_stats: AtrDistributionStats::default(),
                         cv_adjustment_factor: 1.0,
                         achieved_balance: balance,
@@ -1175,24 +1181,21 @@ impl AdaptiveParameterCalibrator {
     ) -> Result<VolatilityAdaptiveParams> {
         use crate::targets::volatility::get_sequence_atr_baseline;
 
-        log::debug!("🎯 Starting volatility parameter calibration...");
+        log::debug!("🎯 Starting volatility parameter calibration with horizon weighting...");
 
         if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
             log::warn!("Insufficient data for volatility calibration, using defaults");
             return Ok(VolatilityAdaptiveParams::default());
         }
 
-        // Step 1: Sample ATR ratios for distribution analysis
-        let mut atr_ratios = Vec::new();
-        let mut log_ratios = Vec::new();
-        let mut sequence_atr_values = Vec::new();
-        let mut horizon_atr_values = Vec::new();
+        // Step 1: Pre-calculate sequence and horizon candle pairs for grid search
+        let mut candle_pairs = Vec::new();
 
         for &seq_idx in sequence_indices
             .iter()
             .take(sequence_indices.len().min(1000))
+        // Limit for performance
         {
-            // Limit for performance
             let sequence_end_idx = seq_idx + sequence_length;
             let target_end_idx = sequence_end_idx + horizon_steps;
 
@@ -1201,100 +1204,120 @@ impl AdaptiveParameterCalibrator {
                 let horizon_candles = &ohlcv_data[sequence_end_idx..target_end_idx];
 
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-                    // Calculate sequence and horizon ATR
-                    let seq_atr = get_sequence_atr_baseline(sequence_candles)?;
-                    let hor_atr = get_sequence_atr_baseline(horizon_candles)?;
+                    candle_pairs.push((sequence_candles, horizon_candles));
+                }
+            }
+        }
 
-                    if seq_atr > 0.0 && hor_atr > 0.0 {
-                        let atr_ratio = hor_atr / seq_atr;
-                        let log_ratio = atr_ratio.ln();
+        if candle_pairs.is_empty() {
+            log::warn!("No valid candle pairs found, using defaults");
+            return Ok(VolatilityAdaptiveParams::default());
+        }
 
-                        if atr_ratio.is_finite() && log_ratio.is_finite() {
-                            atr_ratios.push(atr_ratio);
-                            log_ratios.push(log_ratio);
-                            sequence_atr_values.push(seq_atr);
-                            horizon_atr_values.push(hor_atr);
-                        }
+        log::debug!(
+            "📊 Analyzing {} candle pairs for calibration",
+            candle_pairs.len()
+        );
+
+        // Step 2: Calculate baseline ATR distribution statistics (sequence only)
+        let mut sequence_atr_values = Vec::new();
+        for (sequence_candles, _) in &candle_pairs {
+            if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles) {
+                if seq_atr > 0.0 && seq_atr.is_finite() {
+                    sequence_atr_values.push(seq_atr);
+                }
+            }
+        }
+
+        let atr_stats = calculate_atr_distribution_stats(&sequence_atr_values);
+
+        // Step 3: Grid search for optimal parameters including horizon decay factor
+        let bandwidth_candidates = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0];
+        let extreme_multiplier_candidates = vec![1.5, 2.0, 2.5, 3.0];
+        let horizon_decay_candidates = vec![0.85, 0.90, 0.95, 1.0]; // 1.0 = uniform (current behavior)
+
+        let mut best_params = VolatilityAdaptiveParams::default();
+        let mut best_balance_score = f64::INFINITY;
+        let mut total_combinations = 0;
+
+        for &bandwidth in &bandwidth_candidates {
+            for &extreme_mult in &extreme_multiplier_candidates {
+                for &horizon_decay in &horizon_decay_candidates {
+                    total_combinations += 1;
+
+                    // Test this parameter combination
+                    let balance = self.evaluate_volatility_parameters_with_decay(
+                        &candle_pairs,
+                        bandwidth,
+                        extreme_mult,
+                        horizon_decay,
+                    )?;
+
+                    // MIN-CLASS OPTIMIZATION: Prioritize parameters that maximize minimum class representation
+                    let min_class_ratio = balance
+                        .class_percentages
+                        .iter()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap())
+                        .unwrap()
+                        / 100.0;
+                    let min_class_threshold = 0.15; // 15% minimum per class
+
+                    // Heavy penalty if any class falls below threshold
+                    let min_class_penalty = if min_class_ratio < min_class_threshold {
+                        (min_class_threshold - min_class_ratio) * 50.0
+                    } else {
+                        0.0
+                    };
+
+                    // Score this configuration (lower is better)
+                    let score = balance.balance_score
+                        + (balance.imbalance_ratio - 1.0) * 0.1
+                        + min_class_penalty;
+
+                    if score < best_balance_score {
+                        best_balance_score = score;
+                        best_params = VolatilityAdaptiveParams {
+                            bandwidth_size: bandwidth,
+                            extreme_multiplier: extreme_mult,
+                            horizon_decay_factor: horizon_decay,
+                            atr_distribution_stats: AtrDistributionStats {
+                                mean: atr_stats.mean,
+                                std_dev: atr_stats.std_dev,
+                                median: atr_stats.median,
+                                percentile_25: atr_stats.percentile_25,
+                                percentile_75: atr_stats.percentile_75,
+                                coefficient_of_variation: if atr_stats.mean > 1e-8 {
+                                    atr_stats.std_dev / atr_stats.mean
+                                } else {
+                                    0.5
+                                },
+                            },
+                            cv_adjustment_factor: 1.0, // Will be calculated from final parameters
+                            achieved_balance: balance,
+                        };
                     }
                 }
             }
         }
 
-        if atr_ratios.is_empty() {
-            log::warn!("No valid ATR ratios found, using defaults");
-            return Ok(VolatilityAdaptiveParams::default());
-        }
-
-        log::debug!(
-            "📊 Analyzed {} ATR ratios for calibration",
-            atr_ratios.len()
-        );
-
-        // Step 2: Calculate ATR distribution statistics
-        let atr_stats = calculate_atr_distribution_stats(&sequence_atr_values);
-
-        // Step 3: Analyze log ratio distribution for threshold calibration
-        let mut sorted_log_ratios = log_ratios.clone();
-        sorted_log_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let n = sorted_log_ratios.len();
-        let log_ratio_std = {
-            let mean = log_ratios.iter().sum::<f64>() / n as f64;
-            let variance = log_ratios.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
-            variance.sqrt()
-        };
-
-        // Step 4: Grid search for optimal parameters
-        let bandwidth_candidates = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0];
-        let extreme_multiplier_candidates = vec![1.5, 2.0, 2.5, 3.0];
-
-        let mut best_params = VolatilityAdaptiveParams::default();
-        let mut best_balance_score = f64::INFINITY;
-
-        for &bandwidth in &bandwidth_candidates {
-            for &extreme_mult in &extreme_multiplier_candidates {
-                // Test this parameter combination
-                let balance = self.evaluate_volatility_parameters(
-                    &sequence_atr_values,
-                    &horizon_atr_values,
-                    bandwidth,
-                    extreme_mult,
-                )?;
-
-                // Score this configuration (lower is better)
-                let score = balance.balance_score + (balance.imbalance_ratio - 1.0) * 0.1;
-
-                if score < best_balance_score {
-                    best_balance_score = score;
-                    best_params = VolatilityAdaptiveParams {
-                        bandwidth_size: bandwidth,
-                        extreme_multiplier: extreme_mult,
-                        atr_distribution_stats: AtrDistributionStats {
-                            mean: atr_stats.mean,
-                            std_dev: atr_stats.std_dev,
-                            median: atr_stats.median,
-                            percentile_25: atr_stats.percentile_25,
-                            percentile_75: atr_stats.percentile_75,
-                            coefficient_of_variation: if atr_stats.mean > 1e-8 {
-                                atr_stats.std_dev / atr_stats.mean
-                            } else {
-                                0.5
-                            },
-                        },
-                        cv_adjustment_factor: log_ratio_std / 0.5, // Normalize to 0.5 baseline
-                        achieved_balance: balance,
-                    };
-                }
-            }
-        }
+        let min_class_ratio = best_params
+            .achieved_balance
+            .class_percentages
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+            / 100.0;
 
         log::info!(
-            "🎯 Volatility calibration: bandwidth={:.3}, extreme_mult={:.2}, cv={:.3}, balance_score={:.4}, imbalance={:.1}x",
+            "🎯 Volatility calibration: bandwidth={:.3}, extreme_mult={:.2}, horizon_decay={:.3}, cv={:.3}, balance_score={:.4}, imbalance={:.1}x, min_class={:.1}% ({} combinations tested)",
             best_params.bandwidth_size,
             best_params.extreme_multiplier,
+            best_params.horizon_decay_factor,
             best_params.atr_distribution_stats.coefficient_of_variation,
             best_params.achieved_balance.balance_score,
-            best_params.achieved_balance.imbalance_ratio
+            best_params.achieved_balance.imbalance_ratio,
+            min_class_ratio * 100.0,
+            total_combinations
         );
 
         Ok(best_params)
@@ -1326,6 +1349,59 @@ impl AdaptiveParameterCalibrator {
         // Classify each ATR ratio pair
         for (i, &seq_atr) in sequence_atr_values.iter().enumerate() {
             if let Some(&hor_atr) = horizon_atr_values.get(i) {
+                if seq_atr > 0.0 && hor_atr > 0.0 {
+                    let class = classify_volatility_log_ratio(seq_atr, hor_atr, &thresholds);
+                    if (0..5).contains(&class) {
+                        class_counts[class as usize] += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(calculate_class_distribution_balance(&class_counts))
+    }
+    /// Evaluate volatility parameters with horizon decay factor by simulating classification
+    ///
+    /// This function tests parameter combinations including horizon decay weighting
+    /// to find optimal balance across all volatility classes.
+    fn evaluate_volatility_parameters_with_decay(
+        &self,
+        candle_pairs: &[(&[MarketDataRow], &[MarketDataRow])],
+        bandwidth_size: f64,
+        extreme_multiplier: f64,
+        horizon_decay_factor: f64,
+    ) -> Result<ClassDistributionBalance> {
+        use crate::targets::volatility::{
+            classify_volatility_log_ratio, get_horizon_weighted_atr_baseline,
+            get_sequence_atr_baseline, LogVolatilityThresholds,
+        };
+
+        let mut class_counts = [0usize; 5];
+
+        // Create thresholds using same logic as volatility.rs
+        let half_bandwidth = bandwidth_size / 2.0;
+        let extreme_bandwidth = bandwidth_size * extreme_multiplier;
+
+        let thresholds = LogVolatilityThresholds {
+            very_low_max: -extreme_bandwidth,
+            low_max: -half_bandwidth,
+            medium_max: half_bandwidth,
+            high_max: extreme_bandwidth,
+        };
+
+        // Classify each candle pair using the specified decay factor
+        for (sequence_candles, horizon_candles) in candle_pairs {
+            // Calculate sequence ATR (baseline - no weighting)
+            if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles) {
+                // Calculate horizon ATR with decay weighting
+                let hor_atr = if (horizon_decay_factor - 1.0).abs() < f64::EPSILON {
+                    // Use uniform weighting for decay_factor = 1.0
+                    get_sequence_atr_baseline(horizon_candles)?
+                } else {
+                    // Use weighted calculation
+                    get_horizon_weighted_atr_baseline(horizon_candles, horizon_decay_factor)?
+                };
+
                 if seq_atr > 0.0 && hor_atr > 0.0 {
                     let class = classify_volatility_log_ratio(seq_atr, hor_atr, &thresholds);
                     if (0..5).contains(&class) {
