@@ -29,6 +29,26 @@ impl SequenceGenerator {
         data_config: &crate::config::training::DataConfig,
         feature_config: &crate::config::FeatureConfig,
     ) -> Result<PreparedData> {
+        self.generate_training_sequences_with_adaptive_params(
+            df,
+            horizons,
+            model_config,
+            data_config,
+            feature_config,
+            None,
+        )
+        .await
+    }
+
+    pub async fn generate_training_sequences_with_adaptive_params(
+        &self,
+        df: DataFrame, // RAW data with features, NOT pre-normalized
+        horizons: &[String],
+        model_config: &crate::config::ModelConfig,
+        data_config: &crate::config::training::DataConfig,
+        feature_config: &crate::config::FeatureConfig,
+        adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    ) -> Result<PreparedData> {
         log::info!(
             "Generating training sequences for LSTM with {} horizons...",
             horizons.len()
@@ -86,6 +106,7 @@ impl SequenceGenerator {
                 &df,
                 data_config,
                 model_config,
+                adaptive_params,
             )
             .await?;
 
@@ -490,6 +511,7 @@ impl SequenceGenerator {
         df: &DataFrame,
         data_config: &crate::config::training::DataConfig,
         model_config: &crate::config::ModelConfig,
+        adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
     ) -> Result<(
         Array3<f64>,
         crate::targets::PreparedTargets,
@@ -608,7 +630,13 @@ impl SequenceGenerator {
 
         let target_generator = crate::targets::TargetGenerator::new(target_config);
         let targets = target_generator
-            .generate_all_targets(df, Some(model_config), &sequence_indices, sequence_length)
+            .generate_all_targets_with_adaptive_params(
+                df,
+                Some(model_config),
+                &sequence_indices,
+                sequence_length,
+                adaptive_params,
+            )
             .await?;
 
         // Create sequence position indices

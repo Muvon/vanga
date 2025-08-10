@@ -731,10 +731,11 @@ impl AdaptiveParameterCalibrator {
 
         // Step 4: Grid search for optimal sensitivity
         let sensitivity_candidates = vec![
-            0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1,
+            0.0005, 0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1, 0.2,
+            0.3, 0.4, 0.5,
         ];
 
-        let extreme_multiplier_candidates = vec![1.5, 2.0, 2.5, 3.0];
+        let extreme_multiplier_candidates = vec![1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0];
 
         let mut best_params = DirectionAdaptiveParams::default();
         let mut best_balance_score = f64::INFINITY;
