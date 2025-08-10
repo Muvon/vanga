@@ -100,7 +100,13 @@ fn test_sentiment_classification_balanced_distribution() {
     let sequence_data = &test_data[0..5];
     let horizon_data = &test_data[5..10];
 
-    let result = classify_sentiment(sequence_data, horizon_data, &config, &sentiment_config);
+    let result = classify_sentiment(
+        sequence_data,
+        horizon_data,
+        &config,
+        &sentiment_config,
+        None,
+    );
     assert!(result.is_ok());
 
     let class = result.unwrap();
@@ -196,10 +202,10 @@ fn test_sentiment_edge_cases() {
         volume: 500.0,
     }];
 
-    let result = classify_sentiment(&empty_data, &test_data, &config, &sentiment_config);
+    let result = classify_sentiment(&empty_data, &test_data, &config, &sentiment_config, None);
     assert!(result.is_err(), "Should fail with empty sequence data");
 
-    let result = classify_sentiment(&test_data, &empty_data, &config, &sentiment_config);
+    let result = classify_sentiment(&test_data, &empty_data, &config, &sentiment_config, None);
     assert!(result.is_err(), "Should fail with empty horizon data");
 
     // Test with invalid candle (high < low)
@@ -276,5 +282,84 @@ fn test_sentiment_reconstruction() {
     assert!(
         result.is_err(),
         "Should fail with wrong number of probabilities"
+    );
+}
+#[test]
+fn test_body_conviction_scoring() {
+    use crate::targets::sentiment::calculate_sequence_sentiment_score_with_weighting;
+
+    // Test data with different body conviction scenarios
+    let test_data = vec![
+        // Full green body (bullish sentiment)
+        MarketDataRow {
+            timestamp: 1,
+            open: 100.0,
+            high: 105.0,
+            low: 100.0,
+            close: 105.0, // Full body, no wicks
+            volume: 1000.0,
+        },
+        // Full red body (bearish sentiment)
+        MarketDataRow {
+            timestamp: 2,
+            open: 105.0,
+            high: 105.0,
+            low: 100.0,
+            close: 100.0, // Full body, no wicks
+            volume: 1000.0,
+        },
+        // Doji (neutral sentiment)
+        MarketDataRow {
+            timestamp: 3,
+            open: 102.5,
+            high: 105.0,
+            low: 100.0,
+            close: 102.5, // No body, all wicks
+            volume: 1000.0,
+        },
+        // Small green body with wicks (weak bullish)
+        MarketDataRow {
+            timestamp: 4,
+            open: 101.0,
+            high: 105.0,
+            low: 100.0,
+            close: 102.0, // Small body
+            volume: 1000.0,
+        },
+    ];
+
+    // Test uniform weighting (decay_factor = 1.0)
+    let uniform_score = calculate_sequence_sentiment_score_with_weighting(&test_data, 1.0);
+
+    // Test recent emphasis (decay_factor = 0.9)
+    let weighted_score = calculate_sequence_sentiment_score_with_weighting(&test_data, 0.9);
+
+    // Scores should be different due to weighting
+    assert_ne!(uniform_score, weighted_score);
+
+    // Test individual candle scoring
+    let full_green = calculate_sequence_sentiment_score_with_weighting(&test_data[0..1], 1.0);
+    let full_red = calculate_sequence_sentiment_score_with_weighting(&test_data[1..2], 1.0);
+    let doji = calculate_sequence_sentiment_score_with_weighting(&test_data[2..3], 1.0);
+
+    // Full green should be positive, full red negative, doji near zero
+    assert!(
+        full_green > 0.0,
+        "Full green body should have positive sentiment"
+    );
+    assert!(
+        full_red < 0.0,
+        "Full red body should have negative sentiment"
+    );
+    assert!(doji.abs() < 0.1, "Doji should have near-zero sentiment");
+
+    // Full bodies should have stronger sentiment than partial bodies
+    assert!(
+        full_green.abs() > 0.5,
+        "Full green body should have strong sentiment"
+    );
+    assert!(
+        full_red.abs() > 0.5,
+        "Full red body should have strong sentiment"
     );
 }
