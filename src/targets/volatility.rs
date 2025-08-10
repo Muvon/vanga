@@ -238,11 +238,12 @@ pub fn generate_volatility_targets_with_adaptive_params(
                         extreme_multiplier,
                     };
 
-                    // Use enhanced classification with calibrated bandwidth
+                    // Use enhanced classification with calibrated bandwidth and horizon weighting
                     let volatility_class = classify_volatility_with_distribution_analysis(
                         sequence_candles,
                         horizon_candles,
                         &adaptive_targets_config,
+                        adaptive_params, // Pass adaptive parameters for horizon weighting
                     )?;
 
                     horizon_targets[seq_position] = volatility_class;
@@ -497,6 +498,99 @@ pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f
     Ok(sequence_atr.max(0.005)) // Ensure minimum 0.5% volatility baseline
 }
 
+/// Calculate horizon ATR with adaptive exponential weighting toward recent steps
+///
+/// This function computes ATR for horizon candles using exponential decay weighting
+/// where recent time steps (closer to the prediction point) receive higher weights.
+/// This provides more responsive volatility classification that emphasizes recent
+/// market conditions over historical patterns.
+///
+/// ## Algorithm
+/// 1. Calculate True Range for each horizon candle (standard ATR calculation)
+/// 2. Apply exponential decay weights: `weight = decay_factor^(steps_from_end)`
+/// 3. Compute weighted average of normalized true ranges
+/// 4. Recent steps get higher weights, earlier steps get progressively lower weights
+///
+/// ## Parameters
+/// - `horizon_candles`: OHLCV data for the horizon period
+/// - `decay_factor`: Exponential decay factor (from adaptive calibration)
+///   - Values < 1.0: Emphasize recent volatility (e.g., 0.95, 0.90)
+///   - Value = 1.0: Uniform weighting (equivalent to get_sequence_atr_baseline)
+///   - Typical calibrated range: 0.85 - 1.0
+///
+/// ## Returns
+/// Weighted ATR value emphasizing recent volatility patterns
+///
+/// ## Mathematical Foundation
+/// For horizon with N candles, weights are calculated as:
+/// ```text
+/// candle[i] weight = decay_factor^(N - i - 1)
+///
+/// Example with decay_factor=0.95, N=4:
+/// candle[0]: weight = 0.95^3 = 0.857 (earliest, lowest weight)
+/// candle[1]: weight = 0.95^2 = 0.903
+/// candle[2]: weight = 0.95^1 = 0.950
+/// candle[3]: weight = 0.95^0 = 1.000 (most recent, highest weight)
+/// ```
+///
+/// This ensures recent volatility patterns have stronger influence on classification
+/// while maintaining mathematical consistency with the logarithmic ratio approach.
+pub fn get_horizon_weighted_atr_baseline(
+    horizon_candles: &[MarketDataRow],
+    decay_factor: f64,
+) -> Result<f64> {
+    // Fallback to uniform weighting for insufficient data or uniform decay factor
+    if horizon_candles.len() < 2 || (decay_factor - 1.0).abs() < f64::EPSILON {
+        return get_sequence_atr_baseline(horizon_candles);
+    }
+
+    let mut weighted_true_ranges = Vec::new();
+    let mut total_weight = 0.0;
+
+    // Calculate weighted True Range for each candle pair
+    for i in 1..horizon_candles.len() {
+        let current = &horizon_candles[i];
+        let previous = &horizon_candles[i - 1];
+
+        // Standard True Range calculation
+        let hl = current.high - current.low;
+        let hc = (current.high - previous.close).abs();
+        let lc = (current.low - previous.close).abs();
+        let true_range = hl.max(hc).max(lc);
+
+        if true_range.is_finite() && true_range > 0.0 {
+            // Exponential weighting: recent steps get higher weights
+            // steps_from_end = 0 for most recent, increases for older candles
+            let steps_from_end = horizon_candles.len() - i - 1;
+            let weight = decay_factor.powi(steps_from_end as i32);
+
+            // Normalize by current price and apply weight
+            let normalized_tr = true_range / current.close;
+            weighted_true_ranges.push(normalized_tr * weight);
+            total_weight += weight;
+        }
+    }
+
+    // Fallback to uniform calculation if no valid true ranges
+    if weighted_true_ranges.is_empty() || total_weight == 0.0 {
+        return get_sequence_atr_baseline(horizon_candles);
+    }
+
+    // Calculate weighted average ATR
+    let weighted_atr = weighted_true_ranges.iter().sum::<f64>() / total_weight;
+
+    log::trace!(
+        "🎯 Horizon Weighted ATR: {} candles, decay_factor={:.3}, {} weighted_ranges, weighted_atr={:.6}, total_weight={:.3}",
+        horizon_candles.len(),
+        decay_factor,
+        weighted_true_ranges.len(),
+        weighted_atr,
+        total_weight
+    );
+
+    Ok(weighted_atr.max(0.005)) // Ensure minimum 0.5% volatility baseline
+}
+
 /// Logarithmic volatility thresholds for regime classification
 ///
 /// This struct defines the boundary values used to classify volatility ratios
@@ -531,29 +625,33 @@ pub struct LogVolatilityThresholds {
                            // Above high_max = VeryHigh
 }
 
-/// Classify volatility using sequence-adaptive distribution analysis
+/// Classify volatility using sequence-adaptive distribution analysis with horizon weighting
 ///
 /// This is the enhanced classification function that provides superior volatility
-/// regime detection through ATR distribution analysis and adaptive thresholds.
-/// Designed for production use with balanced class distribution across market conditions.
+/// regime detection through ATR distribution analysis, adaptive thresholds, and
+/// calibrated horizon weighting. Designed for production use with balanced class
+/// distribution across market conditions.
 ///
 /// ## Key Features
 /// - **ATR Distribution Analysis**: Analyzes rolling ATR patterns for adaptive thresholds
 /// - **Sequence-Adaptive Bandwidth**: Automatically adjusts to volatility characteristics
+/// - **Horizon Weighting**: Uses calibrated decay factor to emphasize recent volatility
 /// - **Logarithmic Symmetry**: Maintains mathematical consistency in ratio space
 /// - **Balanced Classification**: Targets ~20% distribution per class
 ///
 /// ## Algorithm
 /// 1. Calculate rolling ATR series from sequence data
 /// 2. Analyze ATR distribution statistics
-/// 3. Calculate adaptive bandwidth based on distribution characteristics
-/// 4. Apply logarithmic ratio classification with adaptive thresholds
-/// 5. Return balanced volatility regime classification
+/// 3. Calculate sequence baseline ATR (mean of distribution)
+/// 4. Calculate horizon ATR with calibrated weighting (if available)
+/// 5. Apply logarithmic ratio classification with adaptive thresholds
+/// 6. Return balanced volatility regime classification
 ///
 /// ## Parameters
 /// - `sequence_candles`: Input sequence OHLCV data for baseline analysis
 /// - `horizon_candles`: Horizon period OHLCV data for classification
 /// - `targets_config`: Unified targets configuration for adaptive thresholds
+/// - `adaptive_params`: Optional calibrated parameters with horizon decay factor
 ///
 /// ## Returns
 /// Volatility class [0-4]: VeryLow, Low, Medium, High, VeryHigh
@@ -561,6 +659,7 @@ pub fn classify_volatility_with_distribution_analysis(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
     targets_config: &TargetsConfig,
+    adaptive_params: Option<&crate::targets::adaptive_parameters::VolatilityAdaptiveParams>,
 ) -> Result<i32> {
     if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
         return Ok(2); // Default to Medium for insufficient data
@@ -574,8 +673,20 @@ pub fn classify_volatility_with_distribution_analysis(
     let sequence_atr_stats = calculate_atr_distribution_stats(&atr_series);
     let baseline_atr = sequence_atr_stats.mean;
 
-    // Step 3: Calculate horizon ATR for comparison
-    let horizon_atr = get_sequence_atr_baseline(horizon_candles)?;
+    // Step 3: Calculate horizon ATR with calibrated weighting (if available)
+    let horizon_atr = if let Some(params) = adaptive_params {
+        // Use calibrated horizon decay factor for weighted ATR calculation
+        if (params.horizon_decay_factor - 1.0).abs() < f64::EPSILON {
+            // Uniform weighting (decay_factor = 1.0)
+            get_sequence_atr_baseline(horizon_candles)?
+        } else {
+            // Weighted calculation with calibrated decay factor
+            get_horizon_weighted_atr_baseline(horizon_candles, params.horizon_decay_factor)?
+        }
+    } else {
+        // Fallback to uniform weighting when no adaptive parameters available
+        get_sequence_atr_baseline(horizon_candles)?
+    };
 
     // Step 4: Calculate adaptive thresholds using calibrated sensitivity
     let log_thresholds = calculate_log_volatility_thresholds(targets_config)?;
@@ -584,9 +695,13 @@ pub fn classify_volatility_with_distribution_analysis(
     let volatility_class =
         classify_volatility_log_ratio(baseline_atr, horizon_atr, &log_thresholds);
 
+    let decay_factor = adaptive_params
+        .map(|p| p.horizon_decay_factor)
+        .unwrap_or(1.0);
+
     log::debug!(
-        "🎯 Volatility Distribution Analysis: seq_atr={:.6}, hor_atr={:.6}, calibrated_sensitivity={:.4}, class={}",
-        baseline_atr, horizon_atr, targets_config.base_sensitivity, volatility_class
+        "🎯 Volatility Distribution Analysis: seq_atr={:.6}, hor_atr={:.6}, decay_factor={:.3}, calibrated_sensitivity={:.4}, class={}",
+        baseline_atr, horizon_atr, decay_factor, targets_config.base_sensitivity, volatility_class
     );
 
     Ok(volatility_class)

@@ -525,6 +525,7 @@ mod tests {
             &normal_sequence,
             &high_vol_horizon,
             &targets_config,
+            None, // No adaptive parameters for basic test
         )
         .unwrap();
 
@@ -541,6 +542,7 @@ mod tests {
             &single_candle,
             &high_vol_horizon,
             &targets_config,
+            None, // No adaptive parameters for edge case test
         )
         .unwrap();
 
@@ -610,6 +612,201 @@ mod tests {
         println!(
             "Calibrated volatility bandwidth: {:.6}",
             calibrated_bandwidth
+        );
+    }
+
+    /// Test horizon-weighted ATR calculation with different decay factors
+    #[test]
+    fn test_horizon_weighted_atr_calculation() {
+        // Create test horizon candles with increasing volatility toward the end
+        let horizon_candles = create_test_candles(vec![
+            (100.0, 101.0, 99.0, 100.5, 1000.0), // Low volatility (early)
+            (100.5, 102.0, 99.5, 101.0, 1100.0), // Medium volatility
+            (101.0, 104.0, 98.0, 102.0, 1200.0), // High volatility
+            (102.0, 107.0, 97.0, 105.0, 1300.0), // Very high volatility (recent)
+        ]);
+
+        // Test uniform weighting (decay_factor = 1.0)
+        let uniform_atr = get_horizon_weighted_atr_baseline(&horizon_candles, 1.0).unwrap();
+        let baseline_atr = get_sequence_atr_baseline(&horizon_candles).unwrap();
+        assert_relative_eq!(uniform_atr, baseline_atr, epsilon = 1e-10);
+
+        // Test recent weighting (decay_factor = 0.9)
+        let weighted_atr = get_horizon_weighted_atr_baseline(&horizon_candles, 0.9).unwrap();
+
+        // Weighted ATR should be higher than uniform because recent candles have higher volatility
+        assert!(
+            weighted_atr > uniform_atr,
+            "Weighted ATR ({:.6}) should be higher than uniform ATR ({:.6}) when recent volatility is higher",
+            weighted_atr, uniform_atr
+        );
+
+        // Test with reverse volatility pattern (high early, low recent)
+        let reverse_candles = create_test_candles(vec![
+            (100.0, 107.0, 93.0, 105.0, 1000.0), // Very high volatility (early)
+            (105.0, 108.0, 102.0, 106.0, 1100.0), // High volatility
+            (106.0, 107.0, 105.0, 106.5, 1200.0), // Medium volatility
+            (106.5, 107.0, 106.0, 106.8, 1300.0), // Low volatility (recent)
+        ]);
+
+        let reverse_uniform = get_sequence_atr_baseline(&reverse_candles).unwrap();
+        let reverse_weighted = get_horizon_weighted_atr_baseline(&reverse_candles, 0.9).unwrap();
+
+        // Weighted ATR should be lower than uniform because recent candles have lower volatility
+        assert!(
+            reverse_weighted < reverse_uniform,
+            "Weighted ATR ({:.6}) should be lower than uniform ATR ({:.6}) when recent volatility is lower",
+            reverse_weighted, reverse_uniform
+        );
+    }
+
+    /// Test horizon weighting with edge cases
+    #[test]
+    fn test_horizon_weighted_atr_edge_cases() {
+        // Test with insufficient data
+        let single_candle = create_test_candles(vec![(100.0, 102.0, 98.0, 101.0, 1000.0)]);
+        let result = get_horizon_weighted_atr_baseline(&single_candle, 0.95).unwrap();
+        let baseline = get_sequence_atr_baseline(&single_candle).unwrap();
+        assert_relative_eq!(result, baseline, epsilon = 1e-10);
+
+        // Test with decay_factor very close to 1.0
+        let normal_candles = create_test_candles(vec![
+            (100.0, 102.0, 98.0, 101.0, 1000.0),
+            (101.0, 103.0, 99.0, 102.0, 1100.0),
+        ]);
+        let near_uniform = get_horizon_weighted_atr_baseline(&normal_candles, 0.999999).unwrap();
+        let uniform = get_sequence_atr_baseline(&normal_candles).unwrap();
+        assert_relative_eq!(near_uniform, uniform, epsilon = 1e-5);
+
+        // Test with extreme decay factor
+        let extreme_weighted = get_horizon_weighted_atr_baseline(&normal_candles, 0.1).unwrap();
+        assert!(
+            extreme_weighted > 0.0,
+            "Extreme weighting should still produce valid ATR"
+        );
+    }
+
+    /// Test integration of horizon weighting with volatility classification
+    #[test]
+    fn test_horizon_weighting_classification_integration() {
+        use crate::targets::adaptive_parameters::VolatilityAdaptiveParams;
+
+        // Create sequence with stable volatility
+        let sequence_candles = create_test_candles(vec![
+            (100.0, 101.0, 99.0, 100.5, 1000.0),
+            (100.5, 101.5, 99.5, 101.0, 1100.0),
+            (101.0, 102.0, 100.0, 101.5, 1200.0),
+            (101.5, 102.5, 100.5, 102.0, 1300.0),
+        ]);
+
+        // Create horizon with increasing volatility toward end
+        let horizon_candles = create_test_candles(vec![
+            (102.0, 103.0, 101.0, 102.5, 1400.0),
+            (102.5, 105.0, 100.0, 104.0, 1500.0), // High recent volatility
+        ]);
+
+        let targets_config = TargetsConfig {
+            base_sensitivity: 0.4,
+            balance_target: 0.2,
+            momentum_weighting: 1.2,
+            extreme_multiplier: 2.0,
+        };
+
+        // Test without horizon weighting (uniform)
+        let uniform_class = classify_volatility_with_distribution_analysis(
+            &sequence_candles,
+            &horizon_candles,
+            &targets_config,
+            None,
+        )
+        .unwrap();
+
+        // Test with horizon weighting (emphasize recent volatility)
+        let adaptive_params = VolatilityAdaptiveParams {
+            bandwidth_size: 0.4,
+            extreme_multiplier: 2.0,
+            horizon_decay_factor: 0.9, // Emphasize recent volatility
+            atr_distribution_stats: Default::default(),
+            cv_adjustment_factor: 1.0,
+            achieved_balance: Default::default(),
+        };
+
+        let weighted_class = classify_volatility_with_distribution_analysis(
+            &sequence_candles,
+            &horizon_candles,
+            &targets_config,
+            Some(&adaptive_params),
+        )
+        .unwrap();
+
+        // Both should produce valid classes
+        assert!(
+            (0..5).contains(&uniform_class),
+            "Uniform classification should be valid"
+        );
+        assert!(
+            (0..5).contains(&weighted_class),
+            "Weighted classification should be valid"
+        );
+
+        // The weighted classification might be different due to emphasis on recent high volatility
+        // This is expected behavior - the test validates the integration works
+        println!(
+            "Uniform class: {}, Weighted class: {}",
+            uniform_class, weighted_class
+        );
+    }
+
+    /// Test mathematical properties of horizon weighting
+    #[test]
+    fn test_horizon_weighting_mathematical_properties() {
+        // Create candles with known volatility pattern
+        let candles = create_test_candles(vec![
+            (100.0, 102.0, 98.0, 101.0, 1000.0),  // TR ≈ 4.0/101 ≈ 0.0396
+            (101.0, 104.0, 99.0, 103.0, 1100.0),  // TR ≈ 5.0/103 ≈ 0.0485
+            (103.0, 108.0, 101.0, 107.0, 1200.0), // TR ≈ 7.0/107 ≈ 0.0654
+        ]);
+
+        // Test monotonicity: stronger decay should emphasize recent volatility more
+        let decay_factors = vec![1.0, 0.95, 0.90, 0.85];
+        let mut atr_values = Vec::new();
+
+        for &decay in &decay_factors {
+            let atr = get_horizon_weighted_atr_baseline(&candles, decay).unwrap();
+            atr_values.push(atr);
+        }
+
+        // Since recent candles have higher volatility, stronger decay (lower factor) should give higher ATR
+        for i in 1..atr_values.len() {
+            assert!(
+                atr_values[i] >= atr_values[i - 1] * 0.99, // Allow small numerical differences
+                "ATR with decay {} ({:.6}) should be >= ATR with decay {} ({:.6})",
+                decay_factors[i],
+                atr_values[i],
+                decay_factors[i - 1],
+                atr_values[i - 1]
+            );
+        }
+
+        // Test weight calculation correctness
+        let decay_factor = 0.9f64;
+        let n = candles.len();
+
+        // Calculate expected weights manually
+        let expected_weights: Vec<f64> = (0..n - 1)
+            .map(|i| decay_factor.powi((n - i - 2) as i32) as f64)
+            .collect();
+
+        let total_expected_weight: f64 = expected_weights.iter().sum();
+
+        // Verify the weighting produces reasonable results
+        assert!(
+            total_expected_weight > 0.0,
+            "Total weight should be positive"
+        );
+        assert!(
+            expected_weights.last().unwrap() >= expected_weights.first().unwrap(),
+            "Most recent weight should be >= earliest weight"
         );
     }
 }

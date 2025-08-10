@@ -195,6 +195,9 @@ async fn test_model_persistence_with_adaptive_parameters() -> Result<()> {
         volatility: VolatilityAdaptiveParams {
             bandwidth_size: 0.456,
             extreme_multiplier: 2.2,
+            horizon_decay_factor: 0.95, // Test with moderate recent weighting
+            atr_distribution_stats: AtrDistributionStats::default(),
+            cv_adjustment_factor: 1.0,
             achieved_balance: ClassDistributionBalance {
                 class_percentages: vec![20.5, 19.8, 20.2, 19.7, 19.8],
                 imbalance_ratio: 1.04,
@@ -430,6 +433,9 @@ async fn test_multi_target_generator_with_adaptive_params() -> Result<()> {
         volatility: VolatilityAdaptiveParams {
             bandwidth_size: 0.5,
             extreme_multiplier: 2.5,
+            horizon_decay_factor: 1.0, // Test with uniform weighting
+            atr_distribution_stats: AtrDistributionStats::default(),
+            cv_adjustment_factor: 1.0,
             achieved_balance: ClassDistributionBalance {
                 class_percentages: vec![20.0, 20.0, 20.0, 20.0, 20.0],
                 imbalance_ratio: 1.0,
@@ -553,6 +559,9 @@ fn test_adaptive_parameter_serialization() {
         volatility: VolatilityAdaptiveParams {
             bandwidth_size: 0.456,
             extreme_multiplier: 2.2,
+            horizon_decay_factor: 0.90, // Test with aggressive recent weighting
+            atr_distribution_stats: AtrDistributionStats::default(),
+            cv_adjustment_factor: 1.0,
             achieved_balance: ClassDistributionBalance {
                 class_percentages: vec![20.5, 19.8, 20.2, 19.7, 19.8],
                 imbalance_ratio: 1.04,
