@@ -63,6 +63,9 @@ pub struct LogVolumeThresholds {
 /// Volume configuration for classification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeConfig {
+    /// Controls the width of adaptive thresholds for volume regime classification.
+    /// A larger value increases the separation between classes, making classification stricter.
+    /// Typical range: 0.2–0.6. Default is 0.4. Adjust based on volume volatility.
     pub bandwidth_size: f64,
     pub extreme_multiplier: f64,
     pub smoothing_periods: usize,
