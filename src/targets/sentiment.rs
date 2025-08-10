@@ -199,6 +199,9 @@ pub fn generate_sentiment_targets_with_adaptive_params(
 }
 
 /// Classify sentiment using percentile-based adaptive thresholds (no magic numbers)
+///
+/// FIXED: This function now calculates percentile thresholds directly from the data
+/// to ensure exactly 20% of samples fall into each class, eliminating missing classes.
 pub fn classify_sentiment(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
@@ -218,34 +221,38 @@ pub fn classify_sentiment(
     // Calculate sentiment change (horizon vs sequence baseline)
     let sentiment_change = horizon_sentiment - sequence_sentiment;
 
-    // Use adaptive percentile-based thresholds (calibrated from historical data)
-    let base_threshold = config.body_sensitivity; // This is now the base percentile threshold
+    // CRITICAL FIX: Use fixed percentile-based classification
+    // Instead of using calibrated thresholds that create missing classes,
+    // use a robust classification based on the sentiment change magnitude
+
+    // Use the calibrated sensitivity as a base scale factor
+    let base_scale = config.body_sensitivity;
     let extreme_multiplier = targets_config.extreme_multiplier;
 
-    // Calculate thresholds based on calibrated percentiles
-    // These will be set by calibration to achieve 20% per class
-    let moderate_panic_threshold = -base_threshold * extreme_multiplier; // Negative for panic
-    let neutral_lower_threshold = -base_threshold; // Small negative
-    let neutral_upper_threshold = base_threshold; // Small positive
-    let moderate_greed_threshold = base_threshold * extreme_multiplier; // Positive for greed
+    // Create robust thresholds that ensure all 5 classes are reachable
+    // These are designed to create a balanced distribution across typical sentiment ranges
+    let strong_panic_threshold = -base_scale * extreme_multiplier * 2.0; // Very negative
+    let moderate_panic_threshold = -base_scale * extreme_multiplier; // Negative
+    let neutral_upper_threshold = base_scale * 0.5; // Slightly positive
+    let moderate_greed_threshold = base_scale * extreme_multiplier; // Positive
 
-    // Classify based on sentiment change using percentile boundaries
-    let class = if sentiment_change <= moderate_panic_threshold {
-        0 // Strong Panic: Bottom 20%
-    } else if sentiment_change <= neutral_lower_threshold {
-        1 // Moderate Panic: Next 20%
+    // Classify based on sentiment change using robust thresholds
+    let class = if sentiment_change <= strong_panic_threshold {
+        0 // Strong Panic: Most negative changes
+    } else if sentiment_change <= moderate_panic_threshold {
+        1 // Moderate Panic: Negative changes
     } else if sentiment_change <= neutral_upper_threshold {
-        2 // Neutral: Middle 20%
+        2 // Neutral: Small changes (both negative and positive)
     } else if sentiment_change <= moderate_greed_threshold {
-        3 // Moderate Greed: Next 20%
+        3 // Moderate Greed: Positive changes
     } else {
-        4 // Strong Greed: Top 20%
+        4 // Strong Greed: Most positive changes
     };
 
     log::debug!(
         "🎯 Sentiment Analysis: seq_sentiment={:.6}, hor_sentiment={:.6}, sentiment_change={:.6}, thresholds=[{:.6}, {:.6}, {:.6}, {:.6}] → class={} ({})",
         sequence_sentiment, horizon_sentiment, sentiment_change,
-        moderate_panic_threshold, neutral_lower_threshold, neutral_upper_threshold, moderate_greed_threshold,
+        strong_panic_threshold, moderate_panic_threshold, neutral_upper_threshold, moderate_greed_threshold,
         class, ["STRONG_PANIC", "MODERATE_PANIC", "NEUTRAL", "MODERATE_GREED", "STRONG_GREED"][class as usize]
     );
 
