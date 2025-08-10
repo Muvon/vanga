@@ -182,7 +182,13 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
   - `loss.rs` - Loss calculation, validation metrics, gradient utilities
   - `gradient_clipper.rs` - Gradient clipping with proper scaling
   - `window_aware_lr.rs` - Window-aware learning rate scheduling
-- **Enhanced Training System**: Single configurable training method with 9 modern optimizers and advanced features:
+  - `optimizer_bridge.rs` - Multi-optimizer integration bridge
+  - `seeded_weights.rs` - Reproducible weight initialization
+
+### Enhanced Training System
+- **Single Configurable Training Method**: Unified approach handling all scenarios through configuration
+- **9 Modern Optimizers**: AdamW, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
+- **Advanced Features**:
   - Error metrics for prediction quality assessment
   - Deterministic dropout for reproducible training
   - Distance-weighted quality metrics for predictions
@@ -194,13 +200,18 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
   - Gradient clipping with scaling
   - Seed support for reproducible training
   - Progressive window increment configuration
+
+### Multi-Target Architecture
 - **Symbol-Agnostic Design**: Each trading pair gets its own specialized multi-target LSTM model
-- **5-Target Prediction System**: Price levels, direction, volatility, sentiment, and volume (5 targets per horizon)
-- **Configuration-Driven**: All behavior controlled via TOML configuration files with enhanced parameters
+- **5-Target Prediction System**: Price levels, direction, volatility, sentiment, and volume (5 classes each)
+- **Adaptive Parameters**: Automatic parameter calibration for balanced class distribution
+- **Configuration-Driven**: All behavior controlled via TOML configuration files
+
+### Advanced Features
 - **Backward Compatibility**: All existing APIs preserved through `lstm_simple.rs` compatibility layer
-- **Advanced Optimizers**: AdamW, RMSprop, NAdam, RAdam with intelligent learning rate scheduling
 - **Hybrid Models**: SmartCore backend integration, XGBoost support, and TFT (Temporal Fusion Transformer)
 - **Enhanced Attention**: Mixture-of-Head attention module with comprehensive dropout configurations
+- **Real-time Streaming**: Live prediction capabilities with streaming data support
 - **Testing Architecture**: All tests in separate `*_test.rs` files with comprehensive coverage
 
 ### Required Data Format
@@ -469,10 +480,9 @@ vanga/
 │   │   │   ├── optimizer_bridge.rs # Optimizer integration bridge
 │   │   │   ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 │   │   │   ├── schedule_validation.rs # Schedule validation utilities
-│   │   │   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   │   │   └── mod.rs         # Public API and re-exports
 │   │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
-│   │   ├── multi_target.rs # Multi-target wrapper (5 targets per horizon)
+│   │   ├── multi_target.rs # Multi-target wrapper (separate models per target×horizon)
 │   │   ├── attention.rs   # Multi-head attention mechanisms
 │   │   ├── attention_moh.rs # Mixture-of-Head attention module
 │   │   ├── attention_moh_wrapper.rs # MoH integration wrapper
@@ -492,17 +502,19 @@ vanga/
 │   │   ├── sequence.rs    # Sequence generation for LSTM
 │   │   ├── schema.rs      # Data schema definitions
 │   │   ├── structures.rs  # Core data structures
+│   │   ├── balance.rs     # Data balancing and sampling
+│   │   ├── diversity.rs   # Data diversity analysis
 │   │   └── target_converter.rs # Target conversion utilities
-│   ├── targets/       # Target generation (5 targets per horizon)
+│   ├── targets/       # Multi-target generation with adaptive parameters
 │   │   ├── mod.rs         # Target orchestration and conversion
 │   │   ├── price_levels.rs # VWAP-weighted 5-class price level system
-│   │   ├── direction.rs   # Directional movement classification
-│   │   ├── volatility.rs  # Volatility regime classification with ATR analysis
-│   │   ├── sentiment.rs   # Market sentiment analysis with volume-price correlation
-│   │   ├── volume.rs      # Volume regime classification with log-ratio analysis
-│   │   ├── adaptive_parameters.rs # Unified adaptive target calibration
-│   │   ├── unified_calibrator.rs # Target calibration system
-│   │   └── sequence_reconstruction.rs # Target reconstruction utilities
+│   │   ├── direction.rs   # Directional movement classification (5-class)
+│   │   ├── volatility.rs  # Volatility regime classification (5-class)
+│   │   ├── volume.rs      # Volume analysis targets
+│   │   ├── sentiment.rs   # Market sentiment targets
+│   │   ├── adaptive_parameters.rs # Adaptive parameter calibration
+│   │   ├── unified_calibrator.rs # System-wide parameter optimization
+│   │   └── sequence_reconstruction.rs # Sequence reconstruction targets
 │   ├── config/        # Configuration management
 │   │   ├── training.rs    # TrainingConfig with 9 optimizers
 │   │   ├── features.rs    # Feature configurations

@@ -893,6 +893,133 @@ let config = TechnicalIndicatorsConfig {
 };
 ```
 
+## 📊 **Output System Architecture**
+
+### **Output Module Structure**
+```rust
+src/output/
+├── mod.rs                    # Output orchestration
+├── formatter.rs              # Prediction output formatting
+├── multi_target_parser.rs    # Multi-target output parsing
+├── structures.rs             # Output data structures
+├── prediction_types.rs       # Prediction type definitions
+├── adaptive_orders.rs        # Adaptive trading orders
+├── adaptive_signals.rs       # Adaptive trading signals
+├── trading_orders.rs         # Trading order generation
+├── metadata.rs               # Prediction metadata
+└── post_processor.rs         # Output post-processing
+```
+
+### **Structured Prediction Output**
+```rust
+pub struct PredictionResult {
+    pub symbol: String,
+    pub horizon: String,
+    pub current_price: f64,
+    pub timestamp: DateTime<Utc>,
+
+    // Multi-target predictions (5 targets × 5 classes each)
+    pub price_levels: Option<PriceLevelPrediction>,
+    pub direction: Option<DirectionPrediction>,
+    pub volatility: Option<VolatilityPrediction>,
+    pub sentiment: Option<SentimentPrediction>,
+    pub volume: Option<VolumePrediction>,
+
+    // Trading integration
+    pub orders: TradingOrders,
+    pub adaptive_signal: Option<AdaptiveTradingSignal>,
+    pub confidence: f64,
+    pub metadata: PredictionMetadata,
+}
+```
+
+### **Multi-Target Output Parsing**
+```rust
+pub struct MultiTargetParser {
+    pub segments: HashMap<String, (usize, usize)>,  // Target name -> (start, end) indices
+}
+
+impl MultiTargetParser {
+    pub fn parse_output(&self, raw_output: ArrayView1<f64>) -> Result<ParsedPrediction> {
+        // Parse 15-element output: 5 (price) + 5 (direction) + 5 (volatility)
+        let price_levels = self.parse_price_levels(&raw_output[0..5])?;
+        let direction = self.parse_direction(&raw_output[5..10])?;
+        let volatility = self.parse_volatility(&raw_output[10..15])?;
+
+        Ok(ParsedPrediction {
+            price_levels: Some(price_levels),
+            direction: Some(direction),
+            volatility: Some(volatility),
+        })
+    }
+}
+```
+
+## 🔄 **Real-time Streaming Architecture**
+
+### **Real-time Module Structure**
+```rust
+src/realtime/
+├── mod.rs          # Real-time orchestration
+├── stream.rs       # Data streaming utilities
+├── predictor.rs    # Real-time prediction engine
+└── watcher.rs      # Market data watcher
+```
+
+### **Streaming Prediction Engine**
+```rust
+pub struct RealtimePredictor {
+    pub models: HashMap<String, MultiTargetLSTMModel>,
+    pub data_buffer: VecDeque<MarketData>,
+    pub sequence_length: usize,
+    pub update_interval: Duration,
+}
+
+impl RealtimePredictor {
+    pub async fn start_streaming(&mut self, symbols: Vec<String>) -> Result<()> {
+        // Initialize streaming for multiple symbols
+        for symbol in symbols {
+            self.spawn_symbol_stream(symbol).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn process_market_data(&mut self, data: MarketData) -> Result<Option<PredictionResult>> {
+        // Update buffer and generate prediction if sequence is complete
+        self.data_buffer.push_back(data);
+
+        if self.data_buffer.len() >= self.sequence_length {
+            let prediction = self.generate_prediction().await?;
+            return Ok(Some(prediction));
+        }
+
+        Ok(None)
+    }
+}
+```
+
+### **Market Data Streaming**
+```rust
+pub struct MarketDataStream {
+    pub symbol: String,
+    pub interval: String,
+    pub buffer_size: usize,
+    pub websocket_url: String,
+}
+
+impl MarketDataStream {
+    pub async fn connect(&mut self) -> Result<()> {
+        // Connect to market data WebSocket
+        // Handle reconnection and error recovery
+    }
+
+    pub async fn next_candle(&mut self) -> Result<Option<OHLCV>> {
+        // Receive next market data candle
+        // Apply feature engineering in real-time
+    }
+}
+```
+
 ## 🔧 **Troubleshooting**
 
 ### **Multi-Layer LSTM Issues**

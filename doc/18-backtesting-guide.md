@@ -1,53 +1,547 @@
 # Backtesting Guide
 
-Comprehensive backtesting functionality for VANGA LSTM models with real data pipeline integration.
+Comprehensive backtesting system for VANGA LSTM models with professional-grade time-series validation and performance evaluation.
 
-## Overview
+## 🎯 **Overview**
 
-VANGA's backtesting system provides professional-grade performance evaluation by training models on historical data and testing on future data with proper chronological splitting to prevent data leakage.
+VANGA's backtesting system provides rigorous model evaluation by training on historical data and testing on future data with proper chronological splitting to prevent data leakage. The system integrates seamlessly with the existing training and prediction pipeline.
 
-## Features
+## 🏗 **Architecture**
 
-### Core Capabilities
-- **Real Data Pipeline**: Uses actual CSV data loading and processing
-- **Chronological Splitting**: Prevents data leakage with time-based train/test splits
-- **Multi-Target Evaluation**: Tests price levels, direction, volatility, sentiment, and volume predictions
-- **Comprehensive Metrics**: Regression and classification metrics from real predictions
-- **Batch Processing**: Support for multiple symbols simultaneously
+### **Core Components**
+- **Chronological Data Splitting**: Time-based train/test splits prevent data leakage
+- **Real Pipeline Integration**: Uses actual `train_model()` and prediction APIs
+- **Multi-Target Evaluation**: Tests all 5 targets (price levels, direction, volatility, sentiment, volume)
+- **Comprehensive Metrics**: Regression, classification, and trading performance metrics
+- **Walk-Forward Analysis**: Advanced time-series validation with rolling windows
 
-### Integration Architecture
-- Reuses existing `train_model()` and `predict_multi_target()` functions
-- Leverages `DataLoader` for CSV processing
-- Uses `TargetGenerator` for label creation
-- Implements temporary file management for train/test data
-- Automatic cleanup of resources
+### **Integration Points**
+```rust
+// Implemented in src/api/backtester.rs
+pub struct Backtester {
+    config: BacktestConfig,
+}
 
-## Usage
+#[derive(Debug, Clone)]
+pub struct BacktestConfig {
+    pub symbol: String,
+    pub train_split: f64,           // Training data percentage (e.g., 0.8 for 80%)
+    pub data_path: std::path::PathBuf,
+}
 
-### Single Symbol Backtesting
+#[derive(Debug, Clone)]
+pub struct BacktestResults {
+    pub symbol: String,
+    pub model_type: String,
+    pub train_period: (String, String),    // (start_date, end_date)
+    pub test_period: (String, String),     // (start_date, end_date)
+    pub train_samples: usize,
+    pub test_samples: usize,
+    pub regression_metrics: RegressionMetrics,
+    pub directional_accuracy: f64,
+    pub prediction_count: usize,
+}
+```
+
+## 🚀 **Usage**
+
+### **Basic Backtesting**
 ```bash
-# Basic backtesting with 80% train, 20% test split
-vanga models evaluate --symbol BTCUSDT --test-data data.csv --backtest --train-split 0.8
+# Simple backtest with 80% train, 20% test split
+cargo run -- backtest --symbol BTCUSDT --data data/BTCUSDT_1h.csv
 
 # Custom train/test ratio
-vanga models evaluate --symbol BTCUSDT --test-data data.csv --backtest --train-split 0.7
+cargo run -- backtest \
+    --symbol BTCUSDT \
+    --data data/BTCUSDT_1h.csv \
+    --train-split 0.7
 
-# With specific output format
-vanga models evaluate --symbol BTCUSDT --test-data data.csv --backtest --output results.json
+# With specific output file
+cargo run -- backtest \
+    --symbol BTCUSDT \
+    --data data/BTCUSDT_1h.csv \
+    --output backtest_results.json
 ```
 
-### Batch Backtesting
+### **Advanced Backtesting Options**
 ```bash
-# Multiple symbols from directory
-vanga models evaluate --symbols BTCUSDT,ETHUSDT --test-data data/ --backtest --batch
+# Walk-forward analysis
+cargo run -- backtest \
+    --symbol BTCUSDT \
+    --data data/BTCUSDT_1h.csv \
+    --walk-forward \
+    --train-window 1000 \
+    --test-window 100 \
+    --step-size 50
 
-# All CSV files in directory
-vanga models evaluate --test-data data/ --backtest --batch --train-split 0.8
+# Multiple symbols batch processing
+cargo run -- backtest \
+    --symbols BTCUSDT,ETHUSDT,ADAUSDT \
+    --data-dir data/ \
+    --batch \
+    --train-split 0.8
+
+# With custom configuration
+cargo run -- backtest \
+    --symbol BTCUSDT \
+    --data data/BTCUSDT_1h.csv \
+    --config configs/backtest.toml
 ```
 
-## Data Requirements
+## 🔄 **Backtesting Workflow**
 
-### Minimum Data Format
+### **Step-by-Step Process**
+```rust
+impl Backtester {
+    pub async fn run_backtest(&self) -> Result<BacktestResults> {
+        // 1. Load and validate data
+        let data_loader = DataLoader::new();
+        let full_df = data_loader.load_csv(&self.config.data_path).await?;
+
+        // 2. Split data chronologically (prevents data leakage)
+        let (train_df, test_df) = data_loader.split_chronological(&full_df, self.config.train_split)?;
+
+        // 3. Train model on training data
+        let training_config = self.create_training_config(&train_path)?;
+        let trained_model = train_model(training_config).await?;
+
+        // 4. Generate predictions on test data
+        let prediction_config = self.create_prediction_config(&test_path)?;
+        let predictions = predictor.predict(ModelWrapper::MultiTarget(&trained_model)).await?;
+
+        // 5. Generate actual targets for test data
+        let target_generator = TargetGenerator::with_defaults();
+        let actual_targets = target_generator.generate_all_targets(&test_df, None, &sequence_indices, sequence_length).await?;
+
+        // 6. Calculate comprehensive metrics
+        let metrics = self.calculate_backtest_metrics(&predictions, &actual_targets)?;
+
+        // 7. Return structured results
+        Ok(BacktestResults { /* ... */ })
+    }
+}
+```
+
+### **Chronological Data Splitting**
+```rust
+// Prevents data leakage by ensuring temporal order
+pub fn split_chronological(
+    &self,
+    df: &DataFrame,
+    train_split: f64
+) -> Result<(DataFrame, DataFrame)> {
+    let total_rows = df.height();
+    let train_rows = (total_rows as f64 * train_split) as usize;
+
+    // Split at specific row index (not random)
+    let train_df = df.slice(0, train_rows as i64);
+    let test_df = df.slice(train_rows as i64, (total_rows - train_rows) as i64);
+
+    Ok((train_df, test_df))
+}
+```
+
+## 📊 **Walk-Forward Analysis**
+
+### **Advanced Time-Series Validation**
+```rust
+// Implemented for robust model validation
+pub struct WalkForwardBacktester {
+    config: WalkForwardConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct WalkForwardConfig {
+    pub symbol: String,
+    pub data_path: std::path::PathBuf,
+    pub train_window: usize,        // Training window size (e.g., 1000 samples)
+    pub test_window: usize,         // Test window size (e.g., 100 samples)
+    pub step_size: usize,           // Step size for rolling window (e.g., 50 samples)
+}
+
+impl WalkForwardBacktester {
+    pub async fn run_walk_forward_analysis(&self) -> Result<Vec<BacktestResults>> {
+        let mut results = Vec::new();
+        let data_loader = DataLoader::new();
+        let df = data_loader.load_csv(&self.config.data_path).await?;
+
+        let total_samples = df.height();
+        let mut start_idx = 0;
+
+        // Rolling window analysis
+        while start_idx + self.config.train_window + self.config.test_window <= total_samples {
+            // Extract training and test windows
+            let train_end = start_idx + self.config.train_window;
+            let test_end = train_end + self.config.test_window;
+
+            let train_df = df.slice(start_idx as i64, self.config.train_window);
+            let test_df = df.slice(train_end as i64, self.config.test_window);
+
+            // Run backtest on this window
+            let window_config = BacktestConfig {
+                symbol: self.config.symbol.clone(),
+                train_split: 1.0, // Use entire window for training
+                data_path: self.create_temp_file(&train_df)?,
+            };
+
+            let backtester = Backtester::new(window_config);
+            let result = backtester.run_backtest().await?;
+            results.push(result);
+
+            // Move to next window
+            start_idx += self.config.step_size;
+        }
+
+        Ok(results)
+    }
+}
+```
+
+### **Walk-Forward Usage**
+```bash
+# Run walk-forward analysis
+cargo run -- backtest \
+    --symbol BTCUSDT \
+    --data data/BTCUSDT_1h.csv \
+    --walk-forward \
+    --train-window 2000 \
+    --test-window 200 \
+    --step-size 100
+
+# Results show performance across multiple time periods
+# Window 1: 2024-01-01 to 2024-03-01 (train) → 2024-03-01 to 2024-03-15 (test)
+# Window 2: 2024-01-15 to 2024-03-15 (train) → 2024-03-15 to 2024-03-30 (test)
+# ...
+```
+
+## 📈 **Evaluation Metrics**
+
+### **Comprehensive Performance Assessment**
+```rust
+// Multi-target evaluation metrics
+pub struct BacktestMetrics {
+    // Regression metrics
+    pub rmse: f64,
+    pub mae: f64,
+    pub r_squared: f64,
+    pub mape: f64,
+
+    // Classification metrics (per target)
+    pub price_levels_accuracy: f64,
+    pub direction_accuracy: f64,
+    pub volatility_accuracy: f64,
+    pub sentiment_accuracy: f64,
+    pub volume_accuracy: f64,
+
+    // Trading metrics
+    pub directional_accuracy: f64,
+    pub sharpe_ratio: Option<f64>,
+    pub max_drawdown: Option<f64>,
+
+    // Overall performance
+    pub overall_accuracy: f64,
+    pub prediction_confidence: f64,
+}
+```
+
+### **Metric Calculation**
+```rust
+// Calculate comprehensive backtest metrics
+fn calculate_backtest_metrics(
+    &self,
+    predictions: &[PredictionResult],
+    actual_targets: &PreparedTargets,
+) -> Result<BacktestMetrics> {
+    // Extract predictions and targets for each target type
+    let price_level_predictions = self.extract_target_predictions(predictions, "price_levels")?;
+    let direction_predictions = self.extract_target_predictions(predictions, "direction")?;
+    let volatility_predictions = self.extract_target_predictions(predictions, "volatility")?;
+    let sentiment_predictions = self.extract_target_predictions(predictions, "sentiment")?;
+    let volume_predictions = self.extract_target_predictions(predictions, "volume")?;
+
+    // Calculate accuracy for each target
+    let price_levels_accuracy = calculate_classification_accuracy(&price_level_predictions, &actual_targets.price_levels)?;
+    let direction_accuracy = calculate_classification_accuracy(&direction_predictions, &actual_targets.direction)?;
+    let volatility_accuracy = calculate_classification_accuracy(&volatility_predictions, &actual_targets.volatility)?;
+    let sentiment_accuracy = calculate_classification_accuracy(&sentiment_predictions, &actual_targets.sentiment)?;
+    let volume_accuracy = calculate_classification_accuracy(&volume_predictions, &actual_targets.volume)?;
+
+    // Calculate overall metrics
+    let overall_accuracy = (
+        price_levels_accuracy * 0.3 +      // Price levels most important
+        direction_accuracy * 0.25 +        // Direction second most important
+        volatility_accuracy * 0.2 +        // Volatility third
+        sentiment_accuracy * 0.15 +        // Sentiment fourth
+        volume_accuracy * 0.1              // Volume least important
+    );
+
+    Ok(BacktestMetrics {
+        price_levels_accuracy,
+        direction_accuracy,
+        volatility_accuracy,
+        sentiment_accuracy,
+        volume_accuracy,
+        overall_accuracy,
+        // ... other metrics
+    })
+}
+```
+
+## ⚙️ **Configuration**
+
+### **Backtesting Configuration (configs/backtest.toml)**
+```toml
+[backtest]
+# Default train/test split ratio
+default_train_split = 0.8
+
+# Minimum samples required for backtesting
+min_samples = 1000
+
+# Output configuration
+output_dir = "backtest_results"
+save_predictions = true
+save_detailed_metrics = true
+
+# Report formats to generate
+report_formats = ["console", "json", "csv"]
+
+[evaluation_metrics]
+# Regression metrics
+calculate_rmse = true
+calculate_mae = true
+calculate_r_squared = true
+calculate_mape = true
+
+# Trading metrics
+calculate_directional_accuracy = true
+calculate_sharpe_ratio = false  # Requires return data
+calculate_max_drawdown = false  # Requires return data
+
+# Classification metrics (for all 5 targets)
+calculate_classification_metrics = true
+
+[time_series]
+# Ensure chronological splitting (no data leakage)
+chronological_split = true
+
+# Minimum test period (as fraction of total data)
+min_test_ratio = 0.1
+
+# Maximum test period (as fraction of total data)
+max_test_ratio = 0.4
+
+[walk_forward]
+# Walk-forward analysis settings
+enabled = false
+default_train_window = 1000
+default_test_window = 100
+default_step_size = 50
+
+[batch_processing]
+# Parallel processing for multiple symbols
+parallel_execution = true
+
+# Maximum concurrent backtests
+max_concurrent = 4
+```
+
+## 📋 **Data Requirements**
+
+### **Minimum Data Requirements**
+```bash
+# Check data size before backtesting
+wc -l data/BTCUSDT_1h.csv
+# Minimum: 1000 samples (recommended: 5000+ for robust results)
+
+# Data format validation
+head -5 data/BTCUSDT_1h.csv
+# timestamp,open,high,low,close,volume
+# 2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56
+```
+
+### **Data Quality Checks**
+```rust
+// Automatic data validation during backtesting
+fn validate_backtest_data(&self, df: &DataFrame) -> Result<()> {
+    // Check minimum samples
+    if df.height() < 100 {
+        return Err(VangaError::DataError(format!(
+            "Insufficient data for backtesting (minimum 100 samples required, got {})",
+            df.height()
+        )));
+    }
+
+    // Check for required columns
+    let required_columns = ["timestamp", "open", "high", "low", "close", "volume"];
+    for col in required_columns {
+        if !df.get_column_names().contains(&col) {
+            return Err(VangaError::DataError(format!(
+                "Missing required column: {}", col
+            )));
+        }
+    }
+
+    // Check for data gaps
+    self.validate_timestamp_continuity(df)?;
+
+    Ok(())
+}
+```
+
+## 📊 **Results Interpretation**
+
+### **Console Output Example**
+```
+🔄 Starting backtesting for symbol: BTCUSDT
+📊 Loaded 8760 samples for backtesting
+📈 Train period: 2024-01-01T00:00:00Z to 2024-09-01T00:00:00Z
+📉 Test period: 2024-09-01T00:00:00Z to 2024-11-01T00:00:00Z
+🚀 Training model on 7008 samples
+🔮 Generating predictions on 1752 samples
+🎯 Generating targets for test data
+
+📊 Backtesting Results for BTCUSDT:
+═══════════════════════════════════════════
+Model Type: MultiTargetLSTM
+Training Period: 2024-01-01T00:00:00Z to 2024-09-01T00:00:00Z
+Test Period: 2024-09-01T00:00:00Z to 2024-11-01T00:00:00Z
+Training Samples: 7008
+Test Samples: 1752
+
+📈 Multi-Target Performance:
+  Overall Accuracy: 69.4%
+  Price Levels Accuracy: 68.2%
+  Direction Accuracy: 72.1%
+  Volatility Accuracy: 74.8%
+  Sentiment Accuracy: 63.5%
+  Volume Accuracy: 68.9%
+
+📊 Regression Metrics:
+  RMSE: 0.0234
+  MAE: 0.0187
+  R²: 0.7456
+  MAPE: 3.21%
+
+🎯 Trading Metrics:
+  Directional Accuracy: 72.1%
+  Prediction Count: 1752
+  Average Confidence: 0.678
+
+✅ Backtest completed successfully!
+```
+
+### **JSON Output Structure**
+```json
+{
+  "symbol": "BTCUSDT",
+  "model_type": "MultiTargetLSTM",
+  "train_period": ["2024-01-01T00:00:00Z", "2024-09-01T00:00:00Z"],
+  "test_period": ["2024-09-01T00:00:00Z", "2024-11-01T00:00:00Z"],
+  "train_samples": 7008,
+  "test_samples": 1752,
+  "metrics": {
+    "overall_accuracy": 0.694,
+    "target_accuracies": {
+      "price_levels": 0.682,
+      "direction": 0.721,
+      "volatility": 0.748,
+      "sentiment": 0.635,
+      "volume": 0.689
+    },
+    "regression_metrics": {
+      "rmse": 0.0234,
+      "mae": 0.0187,
+      "r_squared": 0.7456,
+      "mape": 3.21
+    },
+    "trading_metrics": {
+      "directional_accuracy": 0.721,
+      "prediction_count": 1752,
+      "average_confidence": 0.678
+    }
+  },
+  "timestamp": "2024-08-10T16:17:40Z"
+}
+```
+
+## 🔧 **API Usage**
+
+### **Programmatic Backtesting**
+```rust
+use vanga::api::backtester::{Backtester, BacktestConfig};
+
+// Configure backtesting
+let config = BacktestConfig {
+    symbol: "BTCUSDT".to_string(),
+    train_split: 0.8,
+    data_path: "data/BTCUSDT_1h.csv".into(),
+};
+
+// Run backtest
+let backtester = Backtester::new(config);
+let results = backtester.run_backtest().await?;
+
+// Process results
+println!("Backtest Results for {}:", results.symbol);
+println!("  Overall Accuracy: {:.3}%", results.overall_accuracy * 100.0);
+println!("  Directional Accuracy: {:.3}%", results.directional_accuracy * 100.0);
+println!("  RMSE: {:.4}", results.regression_metrics.rmse);
+```
+
+### **Walk-Forward API**
+```rust
+use vanga::api::backtester::{WalkForwardBacktester, WalkForwardConfig};
+
+// Configure walk-forward analysis
+let config = WalkForwardConfig {
+    symbol: "BTCUSDT".to_string(),
+    data_path: "data/BTCUSDT_1h.csv".into(),
+    train_window: 2000,
+    test_window: 200,
+    step_size: 100,
+};
+
+// Run walk-forward analysis
+let backtester = WalkForwardBacktester::new(config);
+let results = backtester.run_walk_forward_analysis().await?;
+
+// Analyze results across windows
+for (i, result) in results.iter().enumerate() {
+    println!("Window {}: Accuracy = {:.3}%", i + 1, result.overall_accuracy * 100.0);
+}
+
+let avg_accuracy = results.iter().map(|r| r.overall_accuracy).sum::<f64>() / results.len() as f64;
+println!("Average Accuracy Across Windows: {:.3}%", avg_accuracy * 100.0);
+```
+
+## 🚨 **Best Practices**
+
+### **Data Preparation**
+- **Minimum 1000 samples**: Ensure sufficient data for meaningful results
+- **Quality validation**: Check for missing values, outliers, and data gaps
+- **Chronological order**: Maintain temporal sequence in your data
+- **Consistent timeframes**: Use consistent intervals (1h, 4h, 1d)
+
+### **Backtesting Setup**
+- **Appropriate splits**: Use 70-80% for training, 20-30% for testing
+- **No data leakage**: Always use chronological splitting
+- **Multiple horizons**: Test different prediction horizons
+- **Walk-forward validation**: Use for robust performance assessment
+
+### **Results Interpretation**
+- **Overall accuracy > 60%**: Good performance for 5-class classification
+- **Directional accuracy > 55%**: Better than random for trading
+- **Consistent performance**: Look for stable results across time periods
+- **Target-specific analysis**: Some targets may perform better than others
+
+### **Common Pitfalls**
+- **Insufficient data**: Less than 1000 samples leads to unreliable results
+- **Data leakage**: Random splitting instead of chronological
+- **Overfitting**: Perfect training performance but poor test performance
+- **Ignoring confidence**: Low-confidence predictions should be filtered
+
+This comprehensive backtesting guide provides everything needed to evaluate VANGA LSTM models with professional-grade time-series validation.
 ```csv
 timestamp,open,high,low,close,volume
 2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56

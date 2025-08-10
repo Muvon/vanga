@@ -1,33 +1,46 @@
-# VANGA Single-Config Usage Examples
+# VANGA Usage Examples
 
-## 🚀 **Complete Usage Guide**
+Comprehensive usage examples for VANGA's cryptocurrency forecasting system with current CLI interface and configuration system.
 
-This document provides comprehensive usage examples for the VANGA LSTM cryptocurrency forecasting system with current CLI commands and configuration system.
+## 🚀 **Current System Overview**
 
----
+### **CLI Interface**
+All operations use the `cargo run --` command structure:
+
+```bash
+# Training
+cargo run -- train --symbol SYMBOL --data PATH [OPTIONS]
+
+# Prediction
+cargo run -- predict --symbol SYMBOL --input PATH [OPTIONS]
+
+# Backtesting
+cargo run -- backtest --symbol SYMBOL --data PATH [OPTIONS]
+
+# Real-time streaming
+cargo run -- stream --symbol SYMBOL --data-path PATH [OPTIONS]
+```
+
+### **System Architecture**
+- **Multi-Target Prediction**: 5 targets (price_levels, direction, volatility, sentiment, volume) × 5 classes each
+- **Modular LSTM**: Separate modules for training, inference, loss calculation
+- **9 Modern Optimizers**: AdamW, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
+- **Adaptive Parameters**: Automatic parameter calibration for balanced predictions
+- **Real-time Streaming**: Live prediction capabilities with file watching
 
 ## 📋 **Prerequisites**
 
 ### **System Requirements**
 - Rust 1.87.0 or later
-- Compiled VANGA binary (`vanga`)
 - CSV data files with OHLCV format
+- Minimum 1000 rows for meaningful training
 
 ### **Data Format**
-Your CSV files should contain the following columns:
 ```csv
 timestamp,open,high,low,close,volume
-2024-01-01 00:00:00,50000.0,51000.0,49500.0,50500.0,1000.0
-2024-01-01 01:00:00,50500.0,51200.0,50000.0,51000.0,1200.0
-...
+2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56
+2024-01-01T01:00:00Z,42300.0,42800.0,42100.0,42600.0,1567.89
 ```
-
----
-
-## 🔧 **Current CLI System Overview**
-
-### **Available Commands**
-All parameters are managed through CLI arguments with optional TOML configuration files:
 
 | Command | Purpose | Key Features |
 |---------|---------|--------------|

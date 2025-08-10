@@ -77,7 +77,7 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 ### **NEW: Modular Data Pipeline**
 ```
 CSV Data → Target Generation → Feature Engineering → Normalization → Sequences →
-Unified Training → Hybrid Models → Multi-Target Prediction → CSV Output
+Unified Training → Multi-Target Prediction → Structured Output → CSV/JSON Export
 ```
 
 ### **Modular System Components**
@@ -95,22 +95,34 @@ src/
 │   ├── optimizer_bridge.rs # Optimizer integration bridge
 │   ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 │   ├── schedule_validation.rs # Schedule validation utilities
-│   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   └── *_test.rs      # Comprehensive test coverage in separate files
 ├── model/
 │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
-│   ├── multi_target.rs # Multi-target wrapper (5 targets per horizon)
+│   ├── multi_target.rs # Multi-target wrapper (separate models per target×horizon)
 │   ├── attention.rs   # Multi-head attention mechanisms
 │   ├── attention_moh.rs # Mixture-of-Head attention module
 │   ├── attention_moh_wrapper.rs # MoH integration wrapper
+│   ├── attention_optimizer.rs # Optimized attention implementations
+│   ├── attention_loss.rs # Attention-specific loss functions
+│   ├── attention_viz.rs # Attention visualization utilities
 │   ├── xgboost.rs     # XGBoost hybrid integration (SmartCore backend)
 │   ├── smartcore_backend.rs # SmartCore ML backend integration
 │   └── tft.rs         # Temporal Fusion Transformer
 ├── api/               # High-level training/prediction APIs
 ├── features/          # Technical indicators and cross-asset features
-├── targets/           # Target generation (5 targets per horizon)
+├── targets/           # Multi-target generation with adaptive parameters
+│   ├── adaptive_parameters.rs # Adaptive parameter calibration
+│   ├── unified_calibrator.rs # System-wide parameter optimization
+│   ├── price_levels.rs # VWAP-weighted 5-class price level system
+│   ├── direction.rs   # Directional movement classification (5-class)
+│   ├── volatility.rs  # Volatility regime classification (5-class)
+│   ├── volume.rs      # Volume analysis targets
+│   └── sentiment.rs   # Market sentiment targets
 ├── data/              # Data loading, preprocessing, and normalization
-└── config/            # Configuration management and validation
+├── config/            # Configuration management and validation
+├── optimization/      # Auto-optimization and feature selection
+├── output/            # Output formatting and parsing
+└── realtime/          # Real-time streaming prediction
 ```
 
 ### **Critical Architecture Principles**

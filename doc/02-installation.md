@@ -1,25 +1,27 @@
 # Installation Guide
 
-This guide will walk you through installing and setting up VANGA on your system.
+Complete installation and setup guide for VANGA's cryptocurrency forecasting system.
 
-## System Requirements
+## 🖥 **System Requirements**
 
 ### **Minimum Requirements**
 - **OS**: Linux, macOS, or Windows
-- **RAM**: 4GB (8GB recommended for large datasets)
-- **Storage**: 1GB free space for system and models
+- **RAM**: 8GB (16GB recommended for large datasets)
+- **Storage**: 2GB free space for system and models
 - **CPU**: Any modern x64 or ARM64 processor
+- **Rust**: 1.87.0 or later
 
 ### **Recommended Requirements**
-- **RAM**: 16GB for optimal performance with large datasets
-- **Storage**: SSD with 5GB+ free space
-- **CPU**: Multi-core processor (4+ cores recommended)
+- **RAM**: 32GB for optimal performance with large datasets
+- **Storage**: SSD with 10GB+ free space
+- **CPU**: Multi-core processor (8+ cores recommended)
+- **GPU**: CUDA-compatible GPU for accelerated training (optional)
 
-## Prerequisites
+## 🛠 **Prerequisites**
 
-### **1. Install Rust**
+### **1. Install Rust (Required)**
 
-VANGA is built in Rust, so you need the Rust toolchain:
+VANGA requires Rust 1.87.0 or later:
 
 ```bash
 # Install Rust via rustup
@@ -27,6 +29,300 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Source the environment
 source ~/.cargo/env
+
+# Verify installation
+rustc --version
+# Should show: rustc 1.87.0 or later
+```
+
+### **2. Install Build Dependencies**
+
+#### **Linux (Ubuntu/Debian)**
+```bash
+# Essential build tools
+sudo apt update
+sudo apt install build-essential pkg-config libssl-dev
+
+# Optional: CUDA for GPU acceleration
+sudo apt install nvidia-cuda-toolkit
+```
+
+#### **macOS**
+```bash
+# Install Xcode command line tools
+xcode-select --install
+
+# Optional: Install Homebrew for additional tools
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+#### **Windows**
+```bash
+# Install Visual Studio Build Tools
+# Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+
+# Or install Visual Studio Community with C++ workload
+```
+
+## 📦 **Installation Methods**
+
+### **Method 1: From Source (Recommended)**
+
+```bash
+# Clone the repository
+git clone https://github.com/muvon/vanga.git
+cd vanga
+
+# Build in development mode (faster compilation)
+cargo check --message-format=short
+
+# Build optimized release version (for production)
+cargo build --release
+
+# The binary will be available at:
+# - Development: target/debug/vanga (via cargo run)
+# - Production: target/release/vanga
+```
+
+### **Method 2: Direct Cargo Install**
+
+```bash
+# Install directly from Git (when available)
+cargo install --git https://github.com/muvon/vanga.git
+
+# The binary will be installed to ~/.cargo/bin/vanga
+```
+
+## ⚡ **Quick Verification**
+
+### **Test Installation**
+```bash
+# Development mode
+cargo run -- --help
+
+# Or if using release binary
+./target/release/vanga --help
+
+# Expected output:
+# LSTM-based cryptocurrency forecasting system
+#
+# Usage: vanga <COMMAND>
+#
+# Commands:
+#   train     Train a new model or continue training
+#   predict   Generate predictions using trained model
+#   backtest  Run backtesting analysis
+#   stream    Start real-time prediction streaming
+#   help      Print this message or the help of the given subcommand(s)
+```
+
+### **Test with Sample Data**
+```bash
+# Create sample data file
+cat > sample_data.csv << EOF
+timestamp,open,high,low,close,volume
+2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56
+2024-01-01T01:00:00Z,42300.0,42800.0,42100.0,42600.0,1567.89
+2024-01-01T02:00:00Z,42600.0,43000.0,42400.0,42800.0,1890.12
+EOF
+
+# Test training (will fail due to insufficient data, but validates setup)
+cargo run -- train --symbol BTCUSDT --data sample_data.csv
+```
+
+## 🔧 **Development Setup**
+
+### **IDE Configuration**
+
+#### **VS Code (Recommended)**
+```bash
+# Install Rust extension
+code --install-extension rust-lang.rust-analyzer
+
+# Optional: Additional helpful extensions
+code --install-extension vadimcn.vscode-lldb  # Debugging
+code --install-extension serayuzgur.crates    # Crate management
+```
+
+#### **IntelliJ IDEA / CLion**
+```bash
+# Install Rust plugin from JetBrains marketplace
+# File → Settings → Plugins → Search "Rust"
+```
+
+### **Development Workflow**
+```bash
+# Fast development cycle (recommended during development)
+cargo check --message-format=short  # Fast compilation check
+cargo clippy --all-features --all-targets -- -D warnings  # Code quality
+cargo test  # Run tests
+
+# NEVER use --release during development (extremely slow)
+# Only use for final production builds
+```
+
+## 📊 **Data Preparation**
+
+### **Required Data Format**
+```csv
+timestamp,open,high,low,close,volume
+2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56
+2024-01-01T01:00:00Z,42300.0,42800.0,42100.0,42600.0,1567.89
+```
+
+### **Data Requirements**
+- **Minimum**: 1000 rows for basic training
+- **Recommended**: 5000+ rows for robust models
+- **Format**: CSV with exact column names (case-sensitive)
+- **Timestamps**: ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)
+- **Values**: Numeric values (no commas, proper decimal points)
+
+### **Data Validation**
+```bash
+# Check data format
+head -5 your_data.csv
+
+# Count rows
+wc -l your_data.csv
+
+# Validate with VANGA (when implemented)
+cargo run -- validate-data --file your_data.csv
+```
+
+## 🚀 **First Steps**
+
+### **1. Quick Training Test**
+```bash
+# Download sample data or use your own
+# Minimum 1000 rows recommended
+
+# Train with quick start configuration
+cargo run -- train \
+    --symbol BTCUSDT \
+    --data data/BTCUSDT_1h.csv \
+    --config configs/quick_start.toml
+```
+
+### **2. Generate Predictions**
+```bash
+# After training, generate predictions
+cargo run -- predict \
+    --symbol BTCUSDT \
+    --input data/recent_data.csv \
+    --output predictions.json
+```
+
+### **3. Run Backtesting**
+```bash
+# Evaluate model performance
+cargo run -- backtest \
+    --symbol BTCUSDT \
+    --data data/BTCUSDT_1h.csv \
+    --train-split 0.8
+```
+
+## 🔍 **Troubleshooting**
+
+### **Common Installation Issues**
+
+#### **Rust Version Too Old**
+```bash
+# Update Rust to latest version
+rustup update
+
+# Check version
+rustc --version
+```
+
+#### **Build Failures**
+```bash
+# Clean and rebuild
+cargo clean
+cargo check --message-format=short
+
+# If still failing, check dependencies
+cargo tree
+```
+
+#### **Memory Issues During Compilation**
+```bash
+# Reduce parallel compilation
+export CARGO_BUILD_JOBS=2
+cargo build --release
+```
+
+#### **GPU/CUDA Issues**
+```bash
+# Check CUDA installation
+nvcc --version
+
+# Test GPU availability
+cargo run -- device-info
+```
+
+### **Performance Optimization**
+
+#### **Development Performance**
+```bash
+# Use these commands during development (much faster)
+cargo check --message-format=short  # Fastest
+cargo clippy --all-features --all-targets -- -D warnings
+cargo test
+
+# Avoid these during development (very slow)
+cargo build --release  # Only for production
+```
+
+#### **Runtime Performance**
+```bash
+# For production use
+cargo build --release
+./target/release/vanga train --symbol BTCUSDT --data large_dataset.csv
+
+# Enable GPU if available
+cargo run -- train --symbol BTCUSDT --data data.csv --device cuda:0
+```
+
+## 📁 **Directory Structure**
+
+After installation, your project structure should look like:
+
+```
+vanga/
+├── src/                    # Source code
+├── configs/                # Configuration files
+│   ├── quick_start.toml   # Beginner configuration
+│   ├── training.toml      # Full-featured configuration
+│   └── ...                # Other configurations
+├── data/                   # Your CSV data files (create this)
+├── models/                 # Trained models (auto-created)
+├── target/                 # Compiled binaries
+│   ├── debug/             # Development builds
+│   └── release/           # Production builds
+├── Cargo.toml             # Project configuration
+└── README.md              # Project documentation
+```
+
+## 🎯 **Next Steps**
+
+After successful installation:
+
+1. **Read the Quick Start Guide**: [doc/12-quick-start.md](12-quick-start.md)
+2. **Explore Configurations**: Check `configs/` directory
+3. **Prepare Your Data**: Follow the data format requirements
+4. **Start Training**: Begin with `configs/quick_start.toml`
+5. **Join the Community**: Contribute to the project
+
+## 🆘 **Getting Help**
+
+If you encounter issues:
+
+1. **Check Troubleshooting**: [doc/14-troubleshooting.md](14-troubleshooting.md)
+2. **Review Documentation**: Browse other guides in `doc/`
+3. **Check System Requirements**: Ensure your system meets minimum requirements
+4. **Update Dependencies**: Make sure Rust and system packages are current
+
+**Ready to start cryptocurrency forecasting with VANGA!** 🚀
 
 # Verify installation
 rustc --version

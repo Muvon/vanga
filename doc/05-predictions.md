@@ -2,17 +2,17 @@
 
 This guide covers how to generate predictions using trained LSTM models in VANGA.
 
-**Status**: ✅ **Complete Implementation** - Full prediction pipeline functional
+**Status**: ✅ **Complete Implementation** - Full prediction pipeline functional with modular LSTM architecture
 
 ## Quick Start
 
 ### **Basic Prediction with Current API**
 
-Generate predictions using the current Rust API:
+Generate predictions using the current unified prediction API:
 
 ```rust
 // Using current prediction API - src/api/predictor.rs
-use vanga::api::predictor::{predict_single_model, predict_multi_target_model, ModelWrapper};
+use vanga::api::{ModelWrapper, Predictor};
 use vanga::config::PredictionConfig;
 use vanga::model::multi_target::MultiTargetLSTMModel;
 
@@ -29,32 +29,45 @@ let config = PredictionConfig {
     min_confidence: 0.0,
 };
 
-// Make predictions
+// Make predictions using unified predictor
 let predictor = Predictor::new(config);
 let results = predictor.predict(ModelWrapper::MultiTarget(&model)).await?;
 ```
 
-### **Prediction Output Structure**
+### **Structured Prediction Output**
 
-Current prediction output includes all 5 targets × 5 classes:
+Current prediction output includes all 5 targets with structured components:
 
 ```rust
-// Each prediction result contains:
+// Each prediction result contains structured predictions:
 pub struct PredictionResult {
     pub symbol: String,
     pub timestamp: String,
     pub horizon: String,
-    pub predictions: HashMap<String, Vec<f64>>,  // target_name -> 5 class probabilities
+    pub current_price: f64,
+
+    // Structured prediction components (5 targets)
+    pub price_levels: Option<PriceLevelPrediction>,    // VWAP-weighted price ranges
+    pub direction: Option<DirectionPrediction>,        // 5-class directional movement
+    pub volatility: Option<VolatilityPrediction>,      // 5-class volatility regimes
+    pub sentiment: Option<SentimentPrediction>,        // 5-class market sentiment
+    pub volume: Option<VolumePrediction>,              // 5-class volume regimes
+
     pub confidence: f64,
+    pub metadata: PredictionMetadata,
+    pub orders: TradingOrders,                         // Generated trading orders
+    pub adaptive_signal: Option<AdaptiveTradingSignal>, // Adaptive trading signals
 }
 
-// Example output structure:
-// predictions = {
-//     "price_level_1h": [0.1, 0.2, 0.4, 0.2, 0.1],  // 5 classes: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
-//     "direction_1h": [0.15, 0.25, 0.3, 0.2, 0.1],   // 5 classes: DUMP, DOWN, SIDEWAYS, UP, PUMP
-//     "volatility_1h": [0.2, 0.3, 0.3, 0.15, 0.05],  // 5 classes: VeryLow, Low, Medium, High, VeryHigh
-//     "sentiment_1h": [0.1, 0.2, 0.3, 0.25, 0.15],   // 5 classes: Strong Panic, Moderate Panic, Neutral, Moderate Greed, Strong Greed
-//     "volume_1h": [0.05, 0.2, 0.4, 0.25, 0.1],      // 5 classes: Very Low, Low, Medium, High, Very High
+// Example structured output:
+// price_levels: PriceLevelPrediction {
+//     bins: {
+//         "strong_down": PriceBin { range: [-15.0, -8.0], probability: 0.15 },
+//         "moderate_down": PriceBin { range: [-8.0, -3.0], probability: 0.25 },
+//         "neutral": PriceBin { range: [-3.0, 3.0], probability: 0.20 },
+//         "moderate_up": PriceBin { range: [3.0, 8.0], probability: 0.25 },
+//         "strong_up": PriceBin { range: [8.0, 15.0], probability: 0.15 }
+//     }
 // }
 ```
 
@@ -65,31 +78,97 @@ pub struct PredictionResult {
 // Implemented in src/api/predictor.rs with modular LSTM architecture
 impl Predictor {
     pub async fn predict(&self, model: ModelWrapper<'_>) -> Result<Vec<PredictionResult>> {
-        // 1. Initialize device from configuration
-        let device = DeviceManager::create_device(&self.config.device.to_device_string())?;
-
-        // 2. Initialize data pipeline
+        // 1. Initialize data pipeline with device configuration
         let data_pipeline = DataPipeline::new();
 
-        // 3. Load and prepare prediction data
+        // 2. Load and prepare prediction data with feature engineering
         let prepared_data = data_pipeline.prepare_prediction_data(&self.config).await?;
 
-        // 4. Make predictions using model (single or multi-target)
+        // 3. Make predictions using wrapped model (single or multi-target)
         let raw_predictions = model.predict(&prepared_data.sequences).await?;
 
-        // 5. Post-process predictions with confidence filtering
+        // 4. Post-process predictions with confidence filtering
         let post_processor = PostProcessor::new(&self.config);
         let processed_predictions = post_processor.process_predictions(raw_predictions)?;
 
-        // 6. Format output (JSON/CSV)
-        let formatter = OutputFormatter::new(&self.config);
-        let results = formatter.format_predictions(processed_predictions, &model)?;
+        // 5. Format structured output with multi-target parsing
+        let formatter = OutputFormatter::new(self.config.output.clone())
+            .with_sequence_ohlcv(prepared_data.sequence_ohlcv.clone())
+            .with_metadata(prepared_data.feature_count, prepared_data.sequence_length);
+
+        let results = formatter.format_predictions(processed_predictions, &prepared_data)?;
 
         Ok(results)
     }
 }
 ```
 
+### **Multi-Target Output Parsing**
+```rust
+// Implemented in src/output/multi_target_parser.rs
+pub struct OutputSegments {
+    pub price_levels: Option<(usize, usize)>,  // 0-4 (5 classes)
+    pub direction: Option<(usize, usize)>,     // 5-9 (5 classes)
+    pub volatility: Option<(usize, usize)>,    // 10-14 (5 classes)
+    pub sentiment: Option<(usize, usize)>,     // 15-19 (5 classes)
+    pub volume: Option<(usize, usize)>,        // 20-24 (5 classes)
+}
+
+impl MultiTargetParser {
+    pub fn parse_output(&self, raw_output: ArrayView1<f64>) -> Result<ParsedOutput> {
+        // Parse 25-element output vector into 5 targets × 5 classes each
+        let price_levels = self.extract_segment(raw_output, &self.segments.price_levels)?;
+        let direction = self.extract_segment(raw_output, &self.segments.direction)?;
+        let volatility = self.extract_segment(raw_output, &self.segments.volatility)?;
+        let sentiment = self.extract_segment(raw_output, &self.segments.sentiment)?;
+        let volume = self.extract_segment(raw_output, &self.segments.volume)?;
+
+        Ok(ParsedOutput {
+            price_levels,
+            direction,
+            volatility,
+            sentiment,
+            volume,
+        })
+    }
+}
+```
+
+### **Modular LSTM Inference**
+```rust
+// Implemented in src/model/lstm/inference.rs
+impl LSTMModel {
+    pub async fn predict(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
+        // 1. Convert sequences to tensors with proper device placement
+        let (seq_tensor, _) = self.convert_sequences_to_tensors(sequences, &Array2::zeros((1, 5)))?;
+
+        // 2. Forward pass through modular LSTM architecture
+        let predictions = self.forward(&seq_tensor).await?;
+
+        // 3. Apply softmax activation for probability distribution
+        let probabilities = candle_nn::ops::softmax(&predictions, 1)?;
+
+        // 4. Convert back to ndarray format
+        let result = self.tensor_to_array2(&probabilities)?;
+
+        Ok(result)
+    }
+
+    pub async fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        // Forward pass through LSTM layers with proper gradient flow
+        let mut hidden = input.clone();
+
+        // Process through LSTM layers
+        for layer in &self.lstm_layers {
+            hidden = layer.forward(&hidden)?;
+        }
+
+        // Apply output projection
+        let output = self.output_layer.forward(&hidden)?;
+
+        Ok(output)
+    }
+}
 ### **Multi-Target Model Prediction**
 ```rust
 // Implemented in src/model/multi_target.rs
@@ -115,34 +194,6 @@ impl MultiTargetLSTMModel {
         let combined_predictions = self.combine_target_predictions(all_predictions)?;
 
         Ok(combined_predictions)
-    }
-}
-```
-
-### **Single LSTM Model Prediction**
-```rust
-// Implemented in src/model/lstm/inference.rs
-impl LSTMModel {
-    pub async fn predict(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
-        // 1. Validate network is trained
-        if self.network.is_none() {
-            return Err(VangaError::ModelError("Network not initialized".to_string()));
-        }
-
-        // 2. Convert sequences to tensors
-        let seq_tensor = self.convert_sequences_to_tensor(sequences)?;
-
-        // 3. Forward pass through LSTM network
-        let network = self.network.as_ref().unwrap();
-        let output = network.forward(&seq_tensor)?;
-
-        // 4. Apply softmax for classification outputs
-        let probabilities = candle_nn::ops::softmax(&output, 1)?;
-
-        // 5. Convert back to ndarray
-        let predictions = self.tensor_to_array2(&probabilities)?;
-
-        Ok(predictions)
     }
 }
 ```
@@ -178,20 +229,56 @@ pub enum DeviceConfig {
 }
 ```
 
-## Prediction Commands
+## Enhanced Configuration & Usage
+
+### **Configuration Examples**
+
+#### Basic Prediction Configuration
+```toml
+# configs/prediction.toml
+[prediction]
+symbols = ["BTCUSDT", "ETHUSDT"]
+input_path = "data/recent_market_data.csv"
+output_path = "predictions.json"
+horizons = ["1h", "4h", "1d"]
+min_confidence = 0.6
+
+[prediction.device]
+type = "Auto"  # Auto-detect best device
+
+[prediction.output]
+format = "JSON"
+include_metadata = true
+include_orders = true
+include_adaptive_signals = true
+```
+
+#### Advanced Output Configuration
+```toml
+# configs/advanced_prediction.toml
+[prediction.output]
+format = "ProbabilityDistribution"
+include_metadata = true
+include_orders = false
+include_adaptive_signals = false
+
+# Optional batch processing
+[prediction]
+batch_size = 64
+```
 
 ### **Current API Usage**
 
 ```rust
-// Basic prediction with multi-target model
-use vanga::api::predictor::{Predictor, ModelWrapper};
+// Basic prediction with enhanced output
+use vanga::api::{Predictor, ModelWrapper};
 use vanga::config::PredictionConfig;
 use vanga::model::multi_target::MultiTargetLSTMModel;
 
 // Load model
 let model = MultiTargetLSTMModel::load("models/BTCUSDT")?;
 
-// Configure prediction
+// Configure prediction with enhanced output
 let config = PredictionConfig {
     symbols: vec!["BTCUSDT".to_string()],
     input_path: "data/recent_data.csv".into(),
@@ -199,7 +286,12 @@ let config = PredictionConfig {
     horizons: vec!["1h".to_string(), "4h".to_string()],
     device: DeviceConfig::Auto,
     min_confidence: 0.0,
-    output_format: OutputFormat::JSON,
+    output: OutputConfig {
+        format: OutputFormat::JSON,
+        include_metadata: true,
+        include_orders: true,
+        include_adaptive_signals: true,
+    },
     batch_size: None,
 };
 
@@ -219,7 +311,12 @@ let config = PredictionConfig {
     horizons: vec!["4h".to_string()],
     device: DeviceConfig::GPU { device_id: 0 },
     min_confidence: 0.8,  // Only high-confidence predictions
-    output_format: OutputFormat::JSON,
+    output: OutputConfig {
+        format: OutputFormat::ProbabilityDistribution,
+        include_metadata: true,
+        include_orders: false,
+        include_adaptive_signals: false,
+    },
     batch_size: Some(32),
 };
 
@@ -227,23 +324,205 @@ let predictor = Predictor::new(config);
 let results = predictor.predict(ModelWrapper::MultiTarget(&model)).await?;
 ```
 
-### **Batch Prediction for Multiple Symbols**
+## Real-Time Prediction
 
+### **Streaming Prediction Engine**
 ```rust
-// Predict multiple symbols
-let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string(), "ADAUSDT".to_string()];
+// Implemented in src/realtime/predictor.rs
+use vanga::realtime::{StreamingPredictor, RealtimeConfig};
+
+// Create real-time prediction configuration
+let config = RealtimeConfig {
+    symbol: "BTCUSDT".to_string(),
+    model_path: "models/BTCUSDT".into(),
+    data_path: "data/live_btc.csv".into(),
+    output_path: Some("live_predictions.json".into()),
+    horizons: vec!["1h".to_string(), "4h".to_string()],
+    prediction_interval: Duration::from_secs(300), // 5 minutes
+    buffer_size: 1000,
+    min_confidence: 0.7,
+    output_format: OutputFormat::JSON,
+};
+
+// Start streaming predictions
+let mut predictor = StreamingPredictor::new(config).await?;
+predictor.start_streaming().await?;
+```
+
+### **Real-Time Features**
+- **File Watching**: Monitors CSV files for new data rows
+- **Incremental Processing**: Processes only new data points
+- **Feature Buffer Management**: Maintains sliding window of features
+- **Configurable Intervals**: Customizable prediction frequency
+- **Live Output**: Real-time JSON/CSV output generation
+- **Error Recovery**: Robust error handling and recovery
+
+## Output Formats
+
+### **Structured JSON Output**
+```json
+{
+  "symbol": "BTCUSDT",
+  "timestamp": "2024-08-10T16:17:40Z",
+  "horizon": "4h",
+  "current_price": 42500.0,
+  "price_levels": {
+    "bins": {
+      "strong_down": {
+        "range": [-15.0, -8.0],
+        "vwap_range": [-15.0, -8.0],
+        "price": [36000.0, 39000.0],
+        "probability": 0.15
+      },
+      "moderate_down": {
+        "range": [-8.0, -3.0],
+        "vwap_range": [-8.0, -3.0],
+        "price": [39000.0, 41000.0],
+        "probability": 0.25
+      },
+      "neutral": {
+        "range": [-3.0, 3.0],
+        "vwap_range": [-3.0, 3.0],
+        "price": [41000.0, 44000.0],
+        "probability": 0.20
+      },
+      "moderate_up": {
+        "range": [3.0, 8.0],
+        "vwap_range": [3.0, 8.0],
+        "price": [44000.0, 47000.0],
+        "probability": 0.25
+      },
+      "strong_up": {
+        "range": [8.0, 15.0],
+        "vwap_range": [8.0, 15.0],
+        "price": [47000.0, 51000.0],
+        "probability": 0.15
+      }
+    }
+  },
+  "direction": {
+    "prediction": "UP",
+    "confidence": 0.75,
+    "probabilities": {
+      "dump": 0.05,
+      "down": 0.15,
+      "sideways": 0.20,
+      "up": 0.45,
+      "pump": 0.15
+    }
+  },
+  "volatility": {
+    "regime": "MEDIUM",
+    "confidence": 0.68,
+    "probabilities": {
+      "very_low": 0.10,
+      "low": 0.20,
+      "medium": 0.40,
+      "high": 0.25,
+      "very_high": 0.05
+    }
+  },
+  "sentiment": {
+    "regime": "MODERATE_GREED",
+    "confidence": 0.72,
+    "probabilities": {
+      "strong_panic": 0.05,
+      "moderate_panic": 0.15,
+      "neutral": 0.25,
+      "moderate_greed": 0.40,
+      "strong_greed": 0.15
+    }
+  },
+  "volume": {
+    "regime": "HIGH",
+    "confidence": 0.65,
+    "probabilities": {
+      "very_low": 0.05,
+      "low": 0.15,
+      "medium": 0.25,
+      "high": 0.35,
+      "very_high": 0.20
+    }
+  },
+  "confidence": 0.78,
+  "metadata": {
+    "feature_count": 127,
+    "sequence_length": 60,
+    "model_version": "v2.1.0",
+    "prediction_time": "2024-08-10T16:17:40Z"
+  },
+  "orders": {
+    "long_entries": [
+      {"price": 41800.0, "confidence": 0.75, "size_pct": 0.25},
+      {"price": 41200.0, "confidence": 0.68, "size_pct": 0.35}
+    ],
+    "long_exits": [
+      {"price": 46500.0, "confidence": 0.72, "size_pct": 0.50},
+      {"price": 48200.0, "confidence": 0.65, "size_pct": 0.50}
+    ]
+  },
+  "adaptive_signal": {
+    "action": "BUY",
+    "strength": 0.75,
+    "horizon_adjusted": true,
+    "risk_level": "MEDIUM"
+  }
+}
+```
+
+### **CSV Output Format**
+```csv
+symbol,timestamp,horizon,current_price,direction_prediction,direction_confidence,volatility_regime,volatility_confidence,price_level_prediction,overall_confidence
+BTCUSDT,2024-08-10T16:17:40Z,4h,42500.0,UP,0.75,MEDIUM,0.68,MODERATE_UP,0.78
+ETHUSDT,2024-08-10T16:17:40Z,4h,2850.0,SIDEWAYS,0.62,LOW,0.71,NEUTRAL,0.65
+```
+
+### **Probability Distribution Output**
+```json
+{
+  "symbol": "BTCUSDT",
+  "timestamp": "2024-08-10T16:17:40Z",
+  "horizon": "4h",
+  "raw_probabilities": {
+    "price_levels": [0.15, 0.25, 0.20, 0.25, 0.15],
+    "direction": [0.05, 0.15, 0.20, 0.45, 0.15],
+    "volatility": [0.10, 0.20, 0.40, 0.25, 0.05],
+    "sentiment": [0.05, 0.15, 0.25, 0.40, 0.15],
+    "volume": [0.05, 0.15, 0.25, 0.35, 0.20]
+  },
+  "class_labels": {
+    "price_levels": ["strong_down", "moderate_down", "neutral", "moderate_up", "strong_up"],
+    "direction": ["dump", "down", "sideways", "up", "pump"],
+    "volatility": ["very_low", "low", "medium", "high", "very_high"],
+    "sentiment": ["strong_panic", "moderate_panic", "neutral", "moderate_greed", "strong_greed"],
+    "volume": ["very_low", "low", "medium", "high", "very_high"]
+  }
+}
+```
+
+## Batch Processing
+
+### **Multiple Symbol Prediction**
+```rust
+// Predict multiple symbols efficiently
+let symbols = vec!["BTCUSDT", "ETHUSDT", "ADAUSDT"];
 let mut all_results = Vec::new();
 
 for symbol in symbols {
     let model = MultiTargetLSTMModel::load(&format!("models/{}", symbol))?;
     let config = PredictionConfig {
-        symbols: vec![symbol.clone()],
+        symbols: vec![symbol.to_string()],
         input_path: format!("data/{}_recent.csv", symbol).into(),
         output_path: Some(format!("predictions/{}_forecast.json", symbol).into()),
         horizons: vec!["1h".to_string(), "4h".to_string()],
         device: DeviceConfig::Auto,
         min_confidence: 0.0,
-        output_format: OutputFormat::JSON,
+        output: OutputConfig {
+            format: OutputFormat::JSON,
+            include_metadata: true,
+            include_orders: true,
+            include_adaptive_signals: true,
+        },
         batch_size: None,
     };
 

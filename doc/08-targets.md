@@ -851,6 +851,211 @@ fn parse_horizon_to_steps(horizon: &str) -> Result<usize> {
 }
 ```
 
+## 🔧 **Adaptive Parameter System (NEW)**
+
+### **Unified Target Calibration**
+
+VANGA now includes an **adaptive parameter system** that automatically finds optimal parameters for balanced class distribution across all target types:
+
+```rust
+// Implemented in src/targets/adaptive_parameters.rs
+pub struct AdaptiveTargetParameters {
+    pub price_levels: PriceLevelAdaptiveParams,
+    pub direction: DirectionAdaptiveParams,
+    pub volatility: VolatilityAdaptiveParams,
+    pub sentiment: SentimentAdaptiveParams,
+    pub volume: VolumeAdaptiveParams,
+    pub calibration_metadata: CalibrationMetadata,
+}
+
+// Unified calibrator for system-wide optimization
+// Implemented in src/targets/unified_calibrator.rs
+pub struct UnifiedTargetCalibrator {
+    pub target_balance: f64,           // Target balance (e.g., 0.2 = 20% per class)
+    pub max_iterations: usize,         // Maximum calibration iterations
+    pub convergence_threshold: f64,    // Convergence threshold
+}
+
+impl UnifiedTargetCalibrator {
+    /// Calibrate all target parameters for balanced distribution
+    pub fn calibrate_all_targets(
+        &self,
+        data: &DataFrame,
+        horizons: &[String],
+    ) -> Result<AdaptiveTargetParameters> {
+        // Calibrate each target type independently
+        let price_levels = self.calibrate_price_levels(data, horizons)?;
+        let direction = self.calibrate_direction(data, horizons)?;
+        let volatility = self.calibrate_volatility(data, horizons)?;
+        let sentiment = self.calibrate_sentiment(data, horizons)?;
+        let volume = self.calibrate_volume(data, horizons)?;
+
+        Ok(AdaptiveTargetParameters {
+            price_levels,
+            direction,
+            volatility,
+            sentiment,
+            volume,
+            calibration_metadata: CalibrationMetadata::new(),
+        })
+    }
+}
+```
+
+### **Adaptive Parameter Types**
+
+#### **Price Level Adaptive Parameters**
+```rust
+pub struct PriceLevelAdaptiveParams {
+    pub sensitivity_multiplier: f64,    // Sensitivity adjustment (0.5-2.0)
+    pub vwap_weight: f64,              // VWAP weighting factor (0.8-1.5)
+    pub extreme_threshold: f64,         // Extreme class threshold (1.5-3.0)
+    pub balance_adjustment: f64,        // Balance adjustment factor (0.8-1.2)
+}
+```
+
+#### **Direction Adaptive Parameters**
+```rust
+pub struct DirectionAdaptiveParams {
+    pub base_threshold: f64,           // Base movement threshold (0.005-0.05)
+    pub momentum_factor: f64,          // Momentum weighting (0.8-1.5)
+    pub extreme_multiplier: f64,       // Extreme movement multiplier (2.0-5.0)
+    pub volume_confirmation: f64,      // Volume confirmation weight (0.5-2.0)
+}
+```
+
+#### **Volatility Adaptive Parameters**
+```rust
+pub struct VolatilityAdaptiveParams {
+    pub atr_window: usize,             // ATR calculation window (10-50)
+    pub volatility_multiplier: f64,    // Volatility scaling factor (0.5-2.0)
+    pub regime_threshold: f64,         // Regime change threshold (0.1-0.5)
+    pub horizon_weight: f64,           // Horizon-specific weighting (0.8-1.5)
+}
+```
+
+#### **Sentiment Adaptive Parameters**
+```rust
+pub struct SentimentAdaptiveParams {
+    pub body_weight: f64,              // Candle body importance (0.5-2.0)
+    pub wick_weight: f64,              // Wick analysis importance (0.3-1.5)
+    pub volume_baseline: f64,          // Volume baseline for confirmation
+    pub psychology_factor: f64,        // Market psychology weighting (0.8-1.5)
+}
+```
+
+#### **Volume Adaptive Parameters**
+```rust
+pub struct VolumeAdaptiveParams {
+    pub baseline_window: usize,        // Volume baseline window (20-60)
+    pub log_scaling: f64,              // Logarithmic scaling factor (0.5-2.0)
+    pub spike_threshold: f64,          // Volume spike detection (1.5-5.0)
+    pub regime_sensitivity: f64,       // Regime change sensitivity (0.1-0.5)
+}
+```
+
+### **Calibration Process**
+
+```rust
+// Automatic parameter calibration workflow
+pub fn calibrate_targets_for_symbol(
+    symbol: &str,
+    data: &DataFrame,
+    horizons: &[String],
+) -> Result<AdaptiveTargetParameters> {
+    let calibrator = UnifiedTargetCalibrator::new(0.2, 100, 0.01); // 20% target, 100 iterations, 1% threshold
+
+    // Step 1: Analyze data characteristics
+    let data_stats = analyze_data_characteristics(data)?;
+
+    // Step 2: Calibrate all targets
+    let mut params = calibrator.calibrate_all_targets(data, horizons)?;
+
+    // Step 3: Validate class distribution balance
+    let balance = calculate_class_distribution_balance(data, horizons, &params)?;
+
+    // Step 4: Fine-tune if needed
+    if balance.overall_balance < 0.15 || balance.overall_balance > 0.25 {
+        params = calibrator.fine_tune_parameters(data, horizons, params)?;
+    }
+
+    Ok(params)
+}
+```
+
+### **Model Integration**
+
+The adaptive parameters are automatically saved and loaded with the model:
+
+```rust
+// Model persistence includes adaptive parameters
+impl LSTMModel {
+    pub fn save_with_adaptive_params(
+        &self,
+        path: &Path,
+        adaptive_params: &AdaptiveTargetParameters,
+    ) -> Result<()> {
+        // Save model state and adaptive parameters together
+        let model_data = ModelPersistenceData {
+            model_state: self.get_state()?,
+            adaptive_params: adaptive_params.clone(),
+            calibration_metadata: adaptive_params.calibration_metadata.clone(),
+        };
+
+        // Serialize and save
+        let serialized = bincode::serialize(&model_data)?;
+        std::fs::write(path, serialized)?;
+
+        Ok(())
+    }
+
+    pub fn load_with_adaptive_params(
+        path: &Path,
+    ) -> Result<(Self, AdaptiveTargetParameters)> {
+        // Load model and adaptive parameters together
+        let data = std::fs::read(path)?;
+        let model_data: ModelPersistenceData = bincode::deserialize(&data)?;
+
+        let model = Self::from_state(model_data.model_state)?;
+
+        Ok((model, model_data.adaptive_params))
+    }
+}
+```
+
+### **Configuration Integration**
+
+```toml
+# Enable adaptive parameter calibration
+[model.targets.adaptive]
+enabled = true                         # Enable adaptive parameter system
+target_balance = 0.2                   # Target 20% balance per class
+max_iterations = 100                   # Maximum calibration iterations
+convergence_threshold = 0.01           # 1% convergence threshold
+auto_recalibrate = false               # Auto-recalibrate on new data
+
+# Per-target calibration settings
+[model.targets.adaptive.price_levels]
+sensitivity_range = [0.5, 2.0]         # Sensitivity multiplier range
+vwap_weight_range = [0.8, 1.5]         # VWAP weighting range
+
+[model.targets.adaptive.direction]
+threshold_range = [0.005, 0.05]        # Base threshold range
+momentum_range = [0.8, 1.5]            # Momentum factor range
+
+[model.targets.adaptive.volatility]
+atr_window_range = [10, 50]            # ATR window range
+multiplier_range = [0.5, 2.0]          # Volatility multiplier range
+
+[model.targets.adaptive.sentiment]
+body_weight_range = [0.5, 2.0]         # Body weight range
+wick_weight_range = [0.3, 1.5]         # Wick weight range
+
+[model.targets.adaptive.volume]
+baseline_window_range = [20, 60]       # Baseline window range
+scaling_range = [0.5, 2.0]             # Log scaling range
+```
+
 ## Configuration System
 
 ### **Unified TargetsConfig**

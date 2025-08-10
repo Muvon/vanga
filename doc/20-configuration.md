@@ -996,6 +996,130 @@ The modular architecture provides:
 
 ---
 
+## 📊 **Output Configuration**
+
+### **Output Formatting**
+```toml
+[output]
+# Output format selection
+format = "JSON"                                # JSON, CSV, or Both
+# format = "CSV"                              # CSV only
+# format = "Both"                             # Both JSON and CSV
+
+# Output file paths
+json_path = "predictions.json"                 # JSON output file
+csv_path = "predictions.csv"                   # CSV output file
+
+# Structured output options
+include_metadata = true                        # Include prediction metadata
+include_confidence = true                      # Include confidence scores
+include_trading_signals = true                # Include trading recommendations
+
+# Multi-target output parsing
+[output.multi_target]
+enabled = true                                 # Enable multi-target parsing
+parse_price_levels = true                      # Parse price level predictions
+parse_direction = true                         # Parse direction predictions
+parse_volatility = true                        # Parse volatility predictions
+parse_sentiment = true                         # Parse sentiment predictions
+parse_volume = true                            # Parse volume predictions
+
+# Trading order generation
+[output.trading_orders]
+enabled = true                                 # Generate trading orders
+order_type = "Adaptive"                        # Adaptive, Fixed, or Probability
+risk_level = "Medium"                          # Low, Medium, High
+position_sizing = "Kelly"                      # Kelly, Fixed, Percentage
+```
+
+### **Prediction Output Structure**
+```toml
+[output.structure]
+# Prediction result components
+include_symbol = true                          # Trading symbol
+include_horizon = true                         # Prediction horizon
+include_timestamp = true                       # Prediction timestamp
+include_current_price = true                   # Current market price
+
+# Multi-target predictions (5 targets × 5 classes each)
+include_price_levels = true                    # Price level predictions
+include_direction = true                       # Direction predictions
+include_volatility = true                      # Volatility predictions
+include_sentiment = true                       # Sentiment predictions
+include_volume = true                          # Volume predictions
+
+# Trading integration
+include_adaptive_signal = true                 # Adaptive trading signal
+include_orders = true                          # Trading orders
+include_risk_metrics = true                    # Risk assessment
+```
+
+---
+
+## 🔄 **Real-time Configuration**
+
+### **Streaming Prediction**
+```toml
+[realtime]
+# Real-time streaming settings
+enabled = false                                # Enable real-time prediction
+update_interval = "1m"                         # Update frequency (1m, 5m, 15m, 1h)
+buffer_size = 1000                            # Data buffer size
+
+# WebSocket configuration
+[realtime.websocket]
+enabled = true                                 # Enable WebSocket streaming
+url = "wss://stream.binance.com:9443/ws/"     # WebSocket URL
+reconnect_attempts = 5                         # Reconnection attempts
+reconnect_delay = 5000                         # Reconnection delay (ms)
+
+# Market data streaming
+[realtime.market_data]
+symbols = ["BTCUSDT", "ETHUSDT"]              # Symbols to stream
+interval = "1m"                               # Candle interval
+include_volume = true                          # Include volume data
+include_trades = false                         # Include trade data
+
+# Real-time prediction engine
+[realtime.prediction]
+sequence_length = 60                           # Sequence length for prediction
+prediction_threshold = 0.7                    # Minimum confidence threshold
+batch_predictions = false                      # Batch multiple predictions
+save_predictions = true                        # Save predictions to file
+
+# Notification system
+[realtime.notifications]
+enabled = false                                # Enable notifications
+webhook_url = ""                              # Webhook URL for notifications
+email_alerts = false                          # Email alert system
+discord_webhook = ""                          # Discord webhook URL
+```
+
+### **Market Data Watcher**
+```toml
+[realtime.watcher]
+# Market monitoring settings
+enabled = false                                # Enable market watcher
+watch_symbols = ["BTCUSDT", "ETHUSDT"]        # Symbols to monitor
+alert_thresholds = { price_change = 0.05, volume_spike = 2.0 }
+
+# Data quality monitoring
+[realtime.watcher.quality]
+check_data_gaps = true                         # Monitor data gaps
+max_gap_duration = "5m"                        # Maximum allowed gap
+check_price_anomalies = true                   # Monitor price anomalies
+anomaly_threshold = 0.1                        # Anomaly detection threshold
+
+# Performance monitoring
+[realtime.watcher.performance]
+monitor_latency = true                         # Monitor prediction latency
+max_latency = 1000                            # Maximum latency (ms)
+monitor_memory = true                          # Monitor memory usage
+max_memory_mb = 2048                          # Maximum memory usage (MB)
+```
+
+---
+
 ## 🔍 **Configuration Troubleshooting**
 
 ### **Common Errors**

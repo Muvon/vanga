@@ -1,33 +1,417 @@
 # VANGA Troubleshooting Guide
 
-## 🔧 **Common Issues and Solutions**
+Comprehensive troubleshooting guide for VANGA's cryptocurrency forecasting system with current development practices and solutions.
 
-This document provides solutions to common issues encountered during VANGA development and usage with the current CLI-based system.
+## 🔧 **Development Workflow Issues**
 
----
+### **Build Performance (CRITICAL)**
 
-## ✅ **Tensor Operations and Memory Layout Issues (RESOLVED)**
+**Issue**: Slow compilation during development
 
-### **Tensor Contiguity Problems - FIXED**
+**Solution**: Use fast development commands:
+```bash
+# ✅ FAST - Use during development
+cargo check --message-format=short  # Fastest compilation check
+cargo clippy --all-features --all-targets -- -D warnings  # Code quality
+cargo test  # Run tests
 
-**Issue**: "view size is not compatible" errors during tensor reshaping operations.
-
-**Root Cause**: Non-contiguous memory layout after operations like `transpose()`, `narrow()`, `broadcast_*()`, and `Tensor::cat()`.
-
-**Solution Applied**: Added `.contiguous()` calls after operations that break memory contiguity:
-
-```rust
-// ✅ Fixed Pattern
-tensor.transpose(1, 2)?.contiguous()?.reshape((batch, seq, dim))
-tensor.narrow(1, start, len)?.contiguous()?.squeeze(1)?.contiguous()
-Tensor::cat(&tensors, dim)?.contiguous()
+# ❌ SLOW - Only for production
+cargo build --release  # Extremely slow, only use for final builds
 ```
 
-**Files Fixed**:
-- `src/model/attention.rs` - Attention reshape operations
-- `src/model/attention_optimizer.rs` - Tensor concatenation and windowing
-- `src/model/lstm_simple.rs` - LSTM forward pass operations
-- `src/model/attention_loss.rs` - Temporal consistency operations
+**Performance Comparison**:
+- `cargo check`: ~30 seconds
+- `cargo build`: ~2 minutes
+- `cargo build --release`: ~15 minutes (avoid during development)
+
+### **Memory Issues During Compilation**
+
+**Issue**: Out of memory during build
+
+**Solution**: Reduce parallel compilation:
+```bash
+# Limit parallel jobs
+export CARGO_BUILD_JOBS=2
+cargo check --message-format=short
+
+# Or use single-threaded compilation
+export CARGO_BUILD_JOBS=1
+cargo build
+```
+
+## 🎯 **Training Issues**
+
+### **Insufficient Data Error**
+
+**Issue**: "Insufficient data for training" error
+
+**Root Cause**: Less than 1000 rows in CSV file
+
+**Solution**:
+```bash
+# Check data size
+wc -l data/your_data.csv
+
+# Minimum requirements:
+# - Training: 1000+ rows
+# - Backtesting: 1000+ rows
+# - Robust results: 5000+ rows
+```
+
+### **Model Not Found Error**
+
+**Issue**: "Model not found" during prediction
+
+**Root Cause**: Model wasn't saved or wrong path
+
+**Solution**:
+```bash
+# Check if model exists
+ls models/BTCUSDT/
+
+# Retrain if missing
+cargo run -- train --symbol BTCUSDT --data data/BTCUSDT_1h.csv
+
+# Models are saved to: models/{SYMBOL}/
+```
+
+### **Training Fails with "Invalid CSV Format"**
+
+**Issue**: CSV parsing errors during training
+
+**Root Cause**: Incorrect column names or format
+
+**Solution**:
+```bash
+# Verify exact column names (case-sensitive)
+head -1 data/your_data.csv
+# Must be: timestamp,open,high,low,close,volume
+
+# Check data format
+head -5 data/your_data.csv
+# timestamp,open,high,low,close,volume
+# 2024-01-01T00:00:00Z,42000.0,42500.0,41800.0,42300.0,1234.56
+```
+
+## 🔮 **Prediction Issues**
+
+### **Shape Mismatch Errors**
+
+**Issue**: Tensor shape mismatch during prediction
+
+**Root Cause**: Model trained with different feature count
+
+**Solution**:
+```bash
+# Check model info
+cargo run -- model-info --symbol BTCUSDT
+
+# Retrain with fresh data if feature count changed
+cargo run -- train --symbol BTCUSDT --data data/new_data.csv --fresh
+```
+
+### **Low Prediction Confidence**
+
+**Issue**: All predictions have low confidence scores
+
+**Root Cause**: Model needs more training or better data
+
+**Solution**:
+```bash
+# Continue training with more data
+cargo run -- train --symbol BTCUSDT --data data/extended_data.csv --continue-training
+
+# Or retrain with better configuration
+cargo run -- train --symbol BTCUSDT --data data/BTCUSDT_1h.csv --config configs/training.toml
+```
+
+## 🏗 **Configuration Issues**
+
+### **Configuration File Not Found**
+
+**Issue**: "Config file not found" error
+
+**Root Cause**: Wrong path or missing file
+
+**Solution**:
+```bash
+# List available configurations
+ls configs/
+# quick_start.toml, training.toml, etc.
+
+# Use absolute path if needed
+cargo run -- train --symbol BTCUSDT --data data.csv --config $(pwd)/configs/training.toml
+```
+
+### **Invalid Configuration Values**
+
+**Issue**: Configuration validation errors
+
+**Root Cause**: Invalid TOML syntax or values
+
+**Solution**:
+```bash
+# Validate TOML syntax
+cargo run -- validate-config --config configs/your_config.toml
+
+# Check example configurations
+cat configs/quick_start.toml
+```
+
+## 💾 **Data Issues**
+
+### **Data Loading Failures**
+
+**Issue**: "Failed to load CSV" error
+
+**Root Cause**: File permissions, encoding, or format issues
+
+**Solution**:
+```bash
+# Check file permissions
+ls -la data/your_data.csv
+
+# Check file encoding (should be UTF-8)
+file data/your_data.csv
+
+# Check for hidden characters
+cat -A data/your_data.csv | head -5
+```
+
+### **Missing Timestamps**
+
+**Issue**: "Invalid timestamp format" error
+
+**Root Cause**: Incorrect timestamp format
+
+**Solution**:
+```bash
+# Correct format: ISO 8601
+# ✅ CORRECT: 2024-01-01T00:00:00Z
+# ❌ WRONG: 2024-01-01 00:00:00
+# ❌ WRONG: 01/01/2024 00:00:00
+
+# Fix timestamps in your data
+sed 's/ /T/g' data/input.csv | sed 's/$/Z/' > data/fixed.csv
+```
+
+## 🖥 **System Issues**
+
+### **GPU Not Detected**
+
+**Issue**: CUDA device not available
+
+**Root Cause**: CUDA not installed or configured
+
+**Solution**:
+```bash
+# Check CUDA installation
+nvcc --version
+
+# Check GPU availability
+nvidia-smi
+
+# Test GPU with VANGA
+cargo run -- device-info
+
+# Use CPU if GPU unavailable
+cargo run -- train --symbol BTCUSDT --data data.csv --device cpu
+```
+
+### **Out of Memory Errors**
+
+**Issue**: System runs out of memory during training
+
+**Root Cause**: Dataset too large or insufficient RAM
+
+**Solution**:
+```bash
+# Reduce batch size in configuration
+[training]
+batch_size = { Fixed = 16 }  # Instead of Auto
+
+# Reduce sequence length
+[model]
+sequence_length = { Fixed = 60 }  # Instead of Auto
+
+# Use smaller model
+[model]
+hidden_units = { Fixed = 128 }  # Instead of Auto
+```
+
+## 🔄 **Real-time Streaming Issues**
+
+### **File Watcher Not Working**
+
+**Issue**: Real-time streaming not detecting new data
+
+**Root Cause**: File system permissions or polling issues
+
+**Solution**:
+```bash
+# Check file permissions
+ls -la data/live_data.csv
+
+# Use shorter polling interval
+cargo run -- stream \
+    --symbol BTCUSDT \
+    --data-path data/live_data.csv \
+    --interval 30s  # Shorter interval
+```
+
+### **Streaming Performance Issues**
+
+**Issue**: High CPU usage during streaming
+
+**Root Cause**: Too frequent predictions or large buffer
+
+**Solution**:
+```bash
+# Increase prediction interval
+cargo run -- stream \
+    --symbol BTCUSDT \
+    --data-path data/live_data.csv \
+    --interval 5m  # Less frequent predictions
+
+# Reduce buffer size
+[realtime]
+buffer_size = 500  # Instead of 1000
+```
+
+## 🧪 **Testing and Debugging**
+
+### **Enable Verbose Logging**
+
+```bash
+# Debug level logging
+RUST_LOG=debug cargo run -- train --symbol BTCUSDT --data data.csv
+
+# Info level logging
+RUST_LOG=info cargo run -- train --symbol BTCUSDT --data data.csv
+
+# Log to file
+RUST_LOG=info cargo run -- train --symbol BTCUSDT --data data.csv 2> training.log
+```
+
+### **Test with Minimal Data**
+
+```bash
+# Create minimal test dataset
+head -1000 data/large_dataset.csv > data/test_sample.csv
+
+# Test training
+cargo run -- train --symbol BTCUSDT --data data/test_sample.csv --config configs/quick_start.toml
+```
+
+### **Validate Installation**
+
+```bash
+# Check Rust version
+rustc --version
+# Should be 1.87.0 or later
+
+# Check VANGA help
+cargo run -- --help
+
+# Test compilation
+cargo check --message-format=short
+```
+
+## 🔍 **Performance Optimization**
+
+### **Development Performance**
+```bash
+# Fast development cycle
+cargo check --message-format=short  # Use this 90% of the time
+cargo clippy --all-features --all-targets -- -D warnings  # Code quality
+cargo test  # Testing
+
+# Only when you need the binary
+cargo build  # Debug build
+```
+
+### **Production Performance**
+```bash
+# Optimized build (only for production)
+cargo build --release
+
+# Use release binary for large datasets
+./target/release/vanga train --symbol BTCUSDT --data large_dataset.csv
+```
+
+### **Memory Optimization**
+```toml
+# In your configuration file
+[training]
+batch_size = { Fixed = 32 }  # Smaller batches
+sequence_length = { Fixed = 60 }  # Shorter sequences
+
+[model]
+hidden_units = { Fixed = 256 }  # Smaller model
+```
+
+## 📊 **Common Error Messages**
+
+### **"Tensor shape mismatch"**
+- **Cause**: Model expects different input size
+- **Fix**: Retrain model or check feature engineering
+
+### **"Insufficient data for sequence generation"**
+- **Cause**: Not enough data for sequence length
+- **Fix**: Use more data or reduce sequence length
+
+### **"Model architecture mismatch"**
+- **Cause**: Trying to load model with different architecture
+- **Fix**: Retrain with correct architecture or use compatible config
+
+### **"CUDA out of memory"**
+- **Cause**: GPU memory exhausted
+- **Fix**: Reduce batch size or use CPU
+
+### **"Permission denied"**
+- **Cause**: File system permissions
+- **Fix**: Check file permissions and ownership
+
+## 🆘 **Getting Help**
+
+### **Self-Diagnosis Checklist**
+1. ✅ Rust version 1.87.0+?
+2. ✅ Data has 1000+ rows?
+3. ✅ Correct CSV format?
+4. ✅ Using `cargo check` for development?
+5. ✅ Sufficient disk space?
+6. ✅ Correct file permissions?
+
+### **Debug Information to Collect**
+```bash
+# System information
+rustc --version
+cargo --version
+uname -a
+
+# VANGA information
+cargo run -- --help
+ls -la models/
+ls -la configs/
+
+# Data information
+wc -l data/*.csv
+head -5 data/your_data.csv
+```
+
+### **Performance Monitoring**
+```bash
+# Monitor memory usage
+top -p $(pgrep -f vanga)
+
+# Monitor disk usage
+df -h
+
+# Monitor GPU usage (if applicable)
+nvidia-smi -l 1
+```
+
+**Remember**: Use `cargo check --message-format=short` for fast development, save `--release` builds for production only!
 - `src/model/tft/variable_selection.rs` - Broadcast operations
 - `src/model/tft/quantile_regression.rs` - Quantile concatenation
 
