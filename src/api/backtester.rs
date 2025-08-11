@@ -487,7 +487,7 @@ impl Backtester {
         }
 
         // Get actual direction values
-        let actual_directions = actual_targets.directions.get("1h").ok_or_else(|| {
+        let actual_directions = actual_targets.direction.get("1h").ok_or_else(|| {
             VangaError::DataError("No actual direction targets found".to_string())
         })?;
 

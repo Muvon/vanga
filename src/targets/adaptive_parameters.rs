@@ -21,6 +21,7 @@
 
 use crate::config::model::TargetsConfig;
 use crate::data::structures::MarketDataRow;
+use crate::targets::interface::AdaptiveParameters;
 use crate::targets::volatility::{calculate_atr_distribution_stats, AtrDistributionStats};
 use crate::utils::error::Result;
 use polars::frame::DataFrame;
@@ -73,6 +74,16 @@ pub struct DirectionAdaptiveParams {
     pub achieved_balance: ClassDistributionBalance,
 }
 
+impl AdaptiveParameters for DirectionAdaptiveParams {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn AdaptiveParameters> {
+        Box::new(self.clone())
+    }
+}
+
 impl Default for DirectionAdaptiveParams {
     fn default() -> Self {
         Self {
@@ -104,6 +115,16 @@ pub struct PriceLevelAdaptiveParams {
 
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
+}
+
+impl AdaptiveParameters for PriceLevelAdaptiveParams {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn AdaptiveParameters> {
+        Box::new(self.clone())
+    }
 }
 
 impl Default for PriceLevelAdaptiveParams {
@@ -141,6 +162,16 @@ pub struct VolatilityAdaptiveParams {
     pub achieved_balance: ClassDistributionBalance,
 }
 
+impl AdaptiveParameters for VolatilityAdaptiveParams {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn AdaptiveParameters> {
+        Box::new(self.clone())
+    }
+}
+
 impl Default for VolatilityAdaptiveParams {
     fn default() -> Self {
         Self {
@@ -174,6 +205,16 @@ pub struct SentimentAdaptiveParams {
     pub achieved_balance: ClassDistributionBalance,
 }
 
+impl AdaptiveParameters for SentimentAdaptiveParams {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn AdaptiveParameters> {
+        Box::new(self.clone())
+    }
+}
+
 impl Default for SentimentAdaptiveParams {
     fn default() -> Self {
         Self {
@@ -200,6 +241,16 @@ pub struct VolumeAdaptiveParams {
 
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
+}
+
+impl AdaptiveParameters for VolumeAdaptiveParams {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn AdaptiveParameters> {
+        Box::new(self.clone())
+    }
 }
 
 impl Default for VolumeAdaptiveParams {
@@ -930,7 +981,7 @@ impl AdaptiveParameterCalibrator {
         horizon_steps: usize,
         sequence_indices: &[usize],
     ) -> Result<PriceLevelAdaptiveParams> {
-        use crate::targets::price_levels::{
+        use crate::targets::{
             get_horizon_exponential_weighted_close, get_sequence_exponential_weighted_close,
         };
 
@@ -1107,7 +1158,7 @@ impl AdaptiveParameterCalibrator {
         horizon_steps: usize,
         params: &PriceLevelEvaluationParams,
     ) -> Result<ClassDistributionBalance> {
-        use crate::targets::price_levels::get_horizon_exponential_weighted_close;
+        use crate::targets::get_horizon_exponential_weighted_close;
         use crate::targets::sequence_reconstruction::{
             SequenceAnalyzer, SequenceReconstructionConfig,
         };

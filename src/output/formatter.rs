@@ -13,7 +13,7 @@ use crate::output::structures::{
 use crate::targets::PreparedTargets;
 // Import reconstruction methods from target modules
 use crate::targets::direction::reconstruct_direction;
-use crate::targets::price_levels::reconstruct_price_levels;
+use crate::targets::reconstruct_price_levels;
 use crate::targets::sentiment::reconstruct_sentiment;
 use crate::targets::volatility::reconstruct_volatility;
 use crate::targets::volume::reconstruct_volume;
@@ -337,7 +337,7 @@ impl OutputFormatter {
 
             // Calculate sequence VWAP using the same method as training
             if let Some(ohlcv_data) = &self.sequence_ohlcv {
-                use crate::targets::price_levels::get_sequence_exponential_weighted_close;
+                use crate::targets::get_sequence_exponential_weighted_close;
                 match get_sequence_exponential_weighted_close(ohlcv_data) {
                     Ok(sequence_vwap) => {
                         result.current_vwap_price = sequence_vwap;
@@ -1527,7 +1527,7 @@ fn calculate_target_based_confidence(targets: &PreparedTargets, horizon: &str) -
     }
 
     // Check direction distribution balance
-    if let Some(directions) = targets.directions.get(horizon) {
+    if let Some(directions) = targets.direction.get(horizon) {
         let balance = calculate_class_balance(directions);
         confidence_factors.push(balance);
     }

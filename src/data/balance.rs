@@ -1349,7 +1349,7 @@ pub async fn create_sequences_with_targets(
             }
 
             // Directions
-            if let Some(direction_targets) = targets.directions.get(&horizon) {
+            if let Some(direction_targets) = targets.direction.get(&horizon) {
                 if seq_idx < direction_targets.len() {
                     target_map.insert(
                         (TargetType::Direction, horizon.clone()),

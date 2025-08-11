@@ -67,7 +67,7 @@ impl TargetConverter {
 
             // 2. Direction Head (Classification - One-hot encoding)
             let direction_target =
-                self.extract_target_value(&targets.directions, horizon, data_idx, "directions")?;
+                self.extract_target_value(&targets.direction, horizon, data_idx, "directions")?;
 
             // Convert to one-hot encoding (5-class system)
             if direction_target < NUM_CLASSES {
@@ -144,7 +144,7 @@ impl TargetConverter {
         }
 
         // Check directions if enabled
-        if !targets.directions.contains_key(horizon) {
+        if !targets.direction.contains_key(horizon) {
             return Err(VangaError::ConfigError(format!(
                 "Missing direction targets for horizon: {}",
                 horizon

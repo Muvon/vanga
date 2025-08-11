@@ -463,13 +463,13 @@ async fn test_multi_target_generator_with_adaptive_params() -> Result<()> {
 
     // Verify all target types were generated
     assert!(prepared_targets.price_levels.contains_key("1h"));
-    assert!(prepared_targets.directions.contains_key("1h"));
+    assert!(prepared_targets.direction.contains_key("1h"));
     assert!(prepared_targets.volatility.contains_key("1h"));
 
     // Verify target lengths match sequence count
     let expected_length = sequence_indices.len();
     assert_eq!(prepared_targets.price_levels["1h"].len(), expected_length);
-    assert_eq!(prepared_targets.directions["1h"].len(), expected_length);
+    assert_eq!(prepared_targets.direction["1h"].len(), expected_length);
     assert_eq!(prepared_targets.volatility["1h"].len(), expected_length);
 
     // Verify targets validation passes

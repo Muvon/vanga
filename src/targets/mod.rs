@@ -16,37 +16,46 @@
 
 pub mod adaptive_parameters;
 pub mod direction;
+pub mod generators;
+pub mod interface;
+pub mod price_levels;
+pub mod registry;
+
+#[cfg(test)]
+mod interface_test;
+pub mod sentiment;
+pub mod sequence_reconstruction;
+pub mod unified_calibrator;
+pub mod volatility;
+pub mod volume;
+
 #[cfg(test)]
 mod direction_test;
-
 #[cfg(test)]
 mod math_consistency_test;
 #[cfg(test)]
 mod price_level_test;
-pub mod price_levels;
-pub mod sentiment;
 #[cfg(test)]
 mod sentiment_test;
-pub mod sequence_reconstruction;
-pub mod unified_calibrator;
-pub mod volatility;
 #[cfg(test)]
 mod volatility_test;
-pub mod volume;
 #[cfg(test)]
 mod volume_test;
 
 use crate::config::model::TargetsConfig;
+use crate::targets::adaptive_parameters::AdaptiveTargetParameters;
+use crate::targets::interface::AdaptiveParameters;
+use crate::targets::registry::TargetRegistry;
 use crate::utils::error::Result;
 use polars::prelude::*;
+use rayon::prelude::*; // RESTORED: Parallel execution support
 use std::collections::HashMap;
 
 // Re-export configurations and adaptive parameters
 pub use adaptive_parameters::{
-    calculate_class_distribution_balance, AdaptiveParameterCalibrator, AdaptiveTargetParameters,
-    CalibrationMetadata, ClassDistributionBalance, DirectionAdaptiveParams,
-    PriceLevelAdaptiveParams, SentimentAdaptiveParams, VolatilityAdaptiveParams,
-    VolumeAdaptiveParams,
+    calculate_class_distribution_balance, AdaptiveParameterCalibrator, CalibrationMetadata,
+    ClassDistributionBalance, DirectionAdaptiveParams, PriceLevelAdaptiveParams,
+    SentimentAdaptiveParams, VolatilityAdaptiveParams, VolumeAdaptiveParams,
 };
 pub use direction::{
     generate_direction_targets, generate_direction_targets_with_adaptive_params, Direction,
@@ -54,7 +63,8 @@ pub use direction::{
 pub use price_levels::{
     generate_price_level_targets, generate_price_level_targets_from_model_config,
     generate_price_level_targets_with_adaptive_params,
-    generate_price_level_targets_with_targets_config, PriceLevelConfig,
+    generate_price_level_targets_with_targets_config, get_horizon_exponential_weighted_close,
+    get_sequence_exponential_weighted_close, reconstruct_price_levels, PriceLevelConfig,
 };
 pub use sentiment::{
     generate_sentiment_targets, generate_sentiment_targets_with_adaptive_params,
@@ -80,6 +90,16 @@ pub use volume::{
 pub struct MultiTargetConfig {
     pub price_level_config: PriceLevelConfig,
     pub horizons: Vec<String>,
+    pub price_levels: TargetTypeConfig,
+    pub direction: TargetTypeConfig,
+    pub volatility: TargetTypeConfig,
+    pub sentiment: TargetTypeConfig,
+    pub volume: TargetTypeConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetTypeConfig {
+    pub enabled: bool,
 }
 
 impl Default for MultiTargetConfig {
@@ -89,6 +109,11 @@ impl Default for MultiTargetConfig {
             horizons: vec![
                 "1h".to_string(), // FIXED: Default to single horizon - should be overridden by training config
             ],
+            price_levels: TargetTypeConfig { enabled: true },
+            direction: TargetTypeConfig { enabled: true },
+            volatility: TargetTypeConfig { enabled: true },
+            sentiment: TargetTypeConfig { enabled: true },
+            volume: TargetTypeConfig { enabled: true },
         }
     }
 }
@@ -106,6 +131,11 @@ impl MultiTargetConfig {
                 neutral_band_factor: 0.4, // Default neutral band factor (40% of range)
             },
             horizons,
+            price_levels: TargetTypeConfig { enabled: true },
+            direction: TargetTypeConfig { enabled: true },
+            volatility: TargetTypeConfig { enabled: true },
+            sentiment: TargetTypeConfig { enabled: true },
+            volume: TargetTypeConfig { enabled: true },
         }
     }
 }
@@ -114,7 +144,7 @@ impl MultiTargetConfig {
 #[derive(Debug, Clone)]
 pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,
-    pub directions: HashMap<String, Vec<i32>>,
+    pub direction: HashMap<String, Vec<i32>>,
     pub volatility: HashMap<String, Vec<i32>>,
     pub sentiment: HashMap<String, Vec<i32>>,
     pub volume: HashMap<String, Vec<i32>>,
@@ -128,7 +158,7 @@ impl PreparedTargets {
     pub fn new(data_length: usize) -> Self {
         Self {
             price_levels: HashMap::new(),
-            directions: HashMap::new(),
+            direction: HashMap::new(),
             volatility: HashMap::new(),
             sentiment: HashMap::new(),
             volume: HashMap::new(),
@@ -142,7 +172,7 @@ impl PreparedTargets {
     pub fn get_targets(&self, horizon: &str, target_type: TargetType) -> Option<&Vec<i32>> {
         match target_type {
             TargetType::PriceLevel => self.price_levels.get(horizon),
-            TargetType::Direction => self.directions.get(horizon),
+            TargetType::Direction => self.direction.get(horizon),
             TargetType::Volatility => self.volatility.get(horizon),
             TargetType::Sentiment => self.sentiment.get(horizon),
             TargetType::Volume => self.volume.get(horizon),
@@ -155,7 +185,7 @@ impl PreparedTargets {
 
         // Collect horizons from all target types
         horizons.extend(self.price_levels.keys().cloned());
-        horizons.extend(self.directions.keys().cloned());
+        horizons.extend(self.direction.keys().cloned());
         horizons.extend(self.volatility.keys().cloned());
         horizons.extend(self.sentiment.keys().cloned());
         horizons.extend(self.volume.keys().cloned());
@@ -171,7 +201,7 @@ impl PreparedTargets {
 
         for horizon in &horizons {
             let price_len = self.price_levels.get(horizon).map(|v| v.len());
-            let direction_len = self.directions.get(horizon).map(|v| v.len());
+            let direction_len = self.direction.get(horizon).map(|v| v.len());
             let volatility_len = self.volatility.get(horizon).map(|v| v.len());
             let sentiment_len = self.sentiment.get(horizon).map(|v| v.len());
             let volume_len = self.volume.get(horizon).map(|v| v.len());
@@ -212,7 +242,7 @@ impl PreparedTargets {
             );
         }
 
-        for (horizon, targets) in &self.directions {
+        for (horizon, targets) in &self.direction {
             let valid_targets: Vec<i32> = targets.iter().filter(|&&t| t >= 0).copied().collect();
             stats.direction_stats.insert(
                 horizon.clone(),
@@ -275,12 +305,16 @@ pub struct ClassDistribution {
 /// Target generation orchestrator
 pub struct TargetGenerator {
     config: MultiTargetConfig,
+    registry: TargetRegistry, // NEW: Add registry for trait-based approach
 }
 
 impl TargetGenerator {
     /// Create new target generator with configuration
     pub fn new(config: MultiTargetConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            registry: TargetRegistry::new(), // NEW: Initialize registry
+        }
     }
 
     /// Create target generator with default configuration
@@ -452,7 +486,7 @@ impl TargetGenerator {
 
         // Assign results
         prepared_targets.price_levels = price_targets?;
-        prepared_targets.directions = direction_targets?;
+        prepared_targets.direction = direction_targets?;
         prepared_targets.volatility = volatility_targets?;
         prepared_targets.sentiment = sentiment_targets?;
         prepared_targets.volume = volume_targets?;
@@ -481,6 +515,143 @@ impl TargetGenerator {
         );
 
         Ok(prepared_targets)
+    }
+
+    /// Generate all targets using trait-based approach (NEW METHOD)
+    ///
+    /// This method uses the new trait-based interface for target generation,
+    /// providing better extensibility and cleaner code while maintaining
+    /// full backward compatibility with existing logic.
+    pub async fn generate_all_targets_trait_based(
+        &self,
+        df: &DataFrame,
+        model_config: Option<&crate::config::model::ModelConfig>,
+        sequence_indices: &[usize],
+        sequence_length: usize,
+        adaptive_params: Option<&AdaptiveTargetParameters>,
+    ) -> Result<PreparedTargets> {
+        let data_length = sequence_indices.len();
+        let mut prepared_targets = PreparedTargets::new(data_length);
+
+        let default_config = TargetsConfig::default();
+        let targets_config = model_config
+            .map(|cfg| &cfg.targets)
+            .unwrap_or(&default_config);
+
+        // Get enabled target generators from registry
+        let enabled_generators = self.registry.get_enabled_generators(&self.config);
+
+        log::info!(
+            "🎯 Generating targets using {} enabled generators: [{}]",
+            enabled_generators.len(),
+            enabled_generators
+                .iter()
+                .map(|g| g.target_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        // Generate all targets in parallel using trait interface
+        // RESTORED: Parallel execution using rayon to match original performance
+        let target_results: Result<Vec<_>> = enabled_generators
+            .par_iter()
+            .map(|generator| {
+                let adaptive_param =
+                    self.get_adaptive_param_for_target(generator.target_type(), adaptive_params);
+
+                let result = generator.generate_targets(
+                    df,
+                    &self.config.horizons,
+                    targets_config,
+                    sequence_indices,
+                    sequence_length,
+                    adaptive_param,
+                )?;
+
+                Ok((generator.target_type(), result))
+            })
+            .collect();
+
+        let target_results = target_results?;
+
+        // Process results and merge into prepared_targets
+        for (target_type, result) in target_results {
+            self.merge_target_results(&mut prepared_targets, target_type, &result)?;
+        }
+
+        // Validate final results
+        prepared_targets.validate()?;
+
+        log::info!(
+            "✅ Trait-based target generation completed: {} sequences across {} horizons",
+            data_length,
+            self.config.horizons.len()
+        );
+
+        Ok(prepared_targets)
+    }
+
+    /// Get adaptive parameter for specific target type
+    fn get_adaptive_param_for_target<'a>(
+        &self,
+        target_type: &str,
+        adaptive_params: Option<&'a AdaptiveTargetParameters>,
+    ) -> Option<&'a dyn AdaptiveParameters> {
+        adaptive_params.and_then(|params| match target_type {
+            "price_levels" => Some(&params.price_levels as &dyn AdaptiveParameters),
+            "direction" => Some(&params.direction as &dyn AdaptiveParameters),
+            "volatility" => Some(&params.volatility as &dyn AdaptiveParameters),
+            "sentiment" => Some(&params.sentiment as &dyn AdaptiveParameters),
+            "volume" => Some(&params.volume as &dyn AdaptiveParameters),
+            _ => None,
+        })
+    }
+
+    /// Merge target results into prepared targets structure
+    fn merge_target_results(
+        &self,
+        prepared_targets: &mut PreparedTargets,
+        target_type: &str,
+        target_map: &HashMap<String, Vec<i32>>,
+    ) -> Result<()> {
+        for (horizon, targets) in target_map {
+            match target_type {
+                "price_levels" => {
+                    prepared_targets
+                        .price_levels
+                        .insert(horizon.clone(), targets.clone());
+                }
+                "direction" => {
+                    prepared_targets
+                        .direction
+                        .insert(horizon.clone(), targets.clone());
+                }
+                "volatility" => {
+                    prepared_targets
+                        .volatility
+                        .insert(horizon.clone(), targets.clone());
+                }
+                "sentiment" => {
+                    prepared_targets
+                        .sentiment
+                        .insert(horizon.clone(), targets.clone());
+                }
+                "volume" => {
+                    prepared_targets
+                        .volume
+                        .insert(horizon.clone(), targets.clone());
+                }
+                _ => {
+                    log::warn!("Unknown target type: {}", target_type);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get target registry (for testing and extensibility)
+    pub fn get_registry(&self) -> &TargetRegistry {
+        &self.registry
     }
 }
 

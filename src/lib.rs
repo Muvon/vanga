@@ -99,7 +99,7 @@ mod integration_tests {
 
         // Directions: 5 classes (0=DUMP, 1=DOWN, 2=SIDEWAYS, 3=UP, 4=PUMP)
         targets
-            .directions
+            .direction
             .insert("1h".to_string(), vec![0, 1, 2, 0, 1, 2, 0, 1, 2, 0]);
 
         // Volatility: 5 levels (0-4)
