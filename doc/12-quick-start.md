@@ -79,7 +79,12 @@ VANGA predicts 5 different aspects of cryptocurrency markets:
 5. **Volume** (5 classes): Very Low, Low, Medium, High, Very High
 
 ### **Key Features**
-- **Modular LSTM Architecture**: Separate modules for training, inference, loss calculation
+- **Modular LSTM Architecture**: Separate modules in `src/model/lstm/` for training, inference, loss calculation
+  - `training.rs` - Unified training method (THE main training logic)
+  - `config.rs` - Configuration structs and 9 optimizer enums
+  - `core.rs` - Model lifecycle and initialization
+  - `inference.rs` - Prediction pipeline and forward pass
+  - `loss.rs` - Loss calculation with tensor broadcasting
 - **9 Modern Optimizers**: AdamW, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
 - **Adaptive Parameters**: Automatic parameter calibration for balanced predictions
 - **Real-time Streaming**: Live prediction capabilities with file watching

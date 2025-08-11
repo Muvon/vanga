@@ -1,6 +1,18 @@
 # VANGA LSTM Usage Guide
 
-Comprehensive guide for using VANGA's cryptocurrency forecasting system with current modular LSTM architecture and CLI interface.
+Comprehensive guide for using VANGA's cryptocurrency forecasting system with current **modular LSTM architecture** and CLI interface.
+
+## 🏗️ **Current Modular Architecture**
+
+VANGA now uses a **modular LSTM architecture** with focused modules:
+
+- **`src/model/lstm/training.rs`** - THE unified training method (main training logic)
+- **`src/model/lstm/config.rs`** - Configuration structs and 9 optimizer enums
+- **`src/model/lstm/core.rs`** - Model lifecycle and initialization
+- **`src/model/lstm/inference.rs`** - Prediction pipeline and forward pass
+- **`src/model/lstm/loss.rs`** - Loss calculation with tensor broadcasting
+- **`src/model/lstm_simple.rs`** - Backward compatibility layer (`pub use crate::model::lstm::*;`)
+- **`src/model/multi_target.rs`** - Multi-target wrapper (separate models per target×horizon)
 
 ## 🚀 **Current CLI Interface**
 
