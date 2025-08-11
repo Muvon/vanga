@@ -23,7 +23,6 @@ pub mod price_levels;
 pub mod registry;
 pub mod sentiment;
 pub mod sequence_reconstruction;
-pub mod unified_calibrator;
 pub mod volatility;
 pub mod volume;
 
@@ -63,10 +62,6 @@ pub use sentiment::{
 };
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
-};
-pub use unified_calibrator::{
-    calibrate_adaptive_parameters, CrossTargetCorrelation, SystemBalanceMetrics,
-    UnifiedTargetCalibrator, UnifiedValidationResult,
 };
 pub use volatility::generate_volatility_targets_with_adaptive_params;
 pub use volume::{
