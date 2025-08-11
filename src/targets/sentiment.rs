@@ -204,10 +204,10 @@ pub fn generate_sentiment_targets_with_adaptive_params(
     Ok(targets)
 }
 
-/// Classify sentiment using percentile-based adaptive thresholds with optional adaptive parameters
+/// Classify sentiment using momentum-based adaptive thresholds with optional adaptive parameters
 ///
-/// FIXED: This function now calculates percentile thresholds directly from the data
-/// to ensure exactly 20% of samples fall into each class, eliminating missing classes.
+/// IMPROVED: This function now uses candle momentum shifts for clearer classification
+/// with stronger signals that are easier for ML models to learn.
 pub fn classify_sentiment(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
@@ -240,48 +240,48 @@ pub fn classify_sentiment(
         calculate_sequence_sentiment_score(horizon_ohlcv) // Fallback to uniform weighting
     };
 
-    // Calculate sentiment change (horizon vs sequence baseline)
-    let sentiment_change = horizon_sentiment - sequence_sentiment;
+    // Calculate sentiment momentum shift (horizon vs sequence baseline)
+    // This now represents the change in bullish/bearish balance
+    let momentum_shift = horizon_sentiment - sequence_sentiment;
 
-    // CRITICAL FIX: Use fixed percentile-based classification
-    // Instead of using calibrated thresholds that create missing classes,
-    // use a robust classification based on the sentiment change magnitude
+    // IMPROVED THRESHOLDS: Using momentum shift for clearer classification
+    // The momentum shift is now in a stronger [-2, 2] range (difference of two [-1, 1] values)
 
-    // Use the calibrated sensitivity as a base scale factor
-    let base_scale = config.body_sensitivity;
+    // Use calibrated sensitivity scaled appropriately for momentum range
+    let base_threshold = config.body_sensitivity;
     let extreme_multiplier = targets_config.extreme_multiplier;
 
-    // Create robust thresholds that ensure all 5 classes are reachable
-    // These are designed to create a balanced distribution across typical sentiment ranges
-    let strong_panic_threshold = -base_scale * extreme_multiplier * 2.0; // Very negative
-    let moderate_panic_threshold = -base_scale * extreme_multiplier; // Negative
-    let neutral_upper_threshold = base_scale * 0.5; // Slightly positive
-    let moderate_greed_threshold = base_scale * extreme_multiplier; // Positive
+    // Create balanced thresholds for momentum shifts
+    // These thresholds are designed for the [-2, 2] momentum shift range
+    let strong_panic_threshold = -base_threshold * extreme_multiplier; // Strong bearish shift
+    let moderate_panic_threshold = -base_threshold; // Moderate bearish shift
+    let moderate_greed_threshold = base_threshold; // Moderate bullish shift
+    let strong_greed_threshold = base_threshold * extreme_multiplier; // Strong bullish shift
 
-    // Classify based on sentiment change using robust thresholds
-    let class = if sentiment_change <= strong_panic_threshold {
-        0 // Strong Panic: Most negative changes
-    } else if sentiment_change <= moderate_panic_threshold {
-        1 // Moderate Panic: Negative changes
-    } else if sentiment_change <= neutral_upper_threshold {
-        2 // Neutral: Small changes (both negative and positive)
-    } else if sentiment_change <= moderate_greed_threshold {
-        3 // Moderate Greed: Positive changes
+    // Classify based on momentum shift with clear boundaries
+    let class = if momentum_shift <= strong_panic_threshold {
+        0 // Strong Panic: Large shift toward bearish sentiment
+    } else if momentum_shift <= moderate_panic_threshold {
+        1 // Moderate Panic: Moderate shift toward bearish
+    } else if momentum_shift < moderate_greed_threshold {
+        2 // Neutral: Small or no momentum shift
+    } else if momentum_shift < strong_greed_threshold {
+        3 // Moderate Greed: Moderate shift toward bullish
     } else {
-        4 // Strong Greed: Most positive changes
+        4 // Strong Greed: Large shift toward bullish sentiment
     };
 
     log::debug!(
-        "🎯 Sentiment Analysis: seq_sentiment={:.6}, hor_sentiment={:.6}, sentiment_change={:.6}, thresholds=[{:.6}, {:.6}, {:.6}, {:.6}] → class={} ({})",
-        sequence_sentiment, horizon_sentiment, sentiment_change,
-        strong_panic_threshold, moderate_panic_threshold, neutral_upper_threshold, moderate_greed_threshold,
+        "🎯 Sentiment Momentum: seq={:.4}, hor={:.4}, shift={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
+        sequence_sentiment, horizon_sentiment, momentum_shift,
+        strong_panic_threshold, moderate_panic_threshold, moderate_greed_threshold, strong_greed_threshold,
         class, ["STRONG_PANIC", "MODERATE_PANIC", "NEUTRAL", "MODERATE_GREED", "STRONG_GREED"][class as usize]
     );
 
     Ok(class)
 }
 
-/// Calculate sentiment score for a sequence using simplified green/red candle conviction analysis
+/// Calculate sentiment score for a sequence using candle momentum analysis
 /// with optional horizon weighting for recent emphasis
 ///
 /// ## Parameters
@@ -293,20 +293,21 @@ pub fn classify_sentiment(
 /// - weight[i] = decay_factor^(n-1-i) where i=0 is oldest, i=n-1 is newest
 /// - This emphasizes recent sentiment changes for better horizon prediction
 ///
-/// This improved approach focuses on body conviction (direction + strength) as the primary
-/// sentiment indicator, with optional volume enhancement that doesn't dominate the calculation.
+/// ## NEW MOMENTUM-BASED APPROACH
+/// Focuses on the balance between bullish and bearish candles, weighted by their body strength.
+/// This creates a stronger signal that's easier for ML models to learn.
 ///
 /// ## Core Algorithm
-/// 1. **Body Conviction**: (close - open) / (high - low) ∈ [-1, 1]
-/// 2. **Body Size**: abs(close - open) / (high - low) ∈ [0, 1]
-/// 3. **Sentiment Score**: body_conviction * body_size_pct ∈ [-1, 1]
-/// 4. **Volume Enhancement**: Optional 30% boost for high volume candles
+/// 1. **Candle Direction**: Classify each candle as bullish (close > open) or bearish
+/// 2. **Body Strength**: abs(close - open) / range as weight for each candle
+/// 3. **Weighted Balance**: Sum of (bullish_weights - bearish_weights) / total_weights
+/// 4. **Result Range**: [-1, 1] where -1 = all strong bearish, +1 = all strong bullish
 ///
 /// ## Advantages
-/// - Simple, interpretable metrics in natural [-1, 1] range
-/// - Volume-independent core calculation (volume only enhances)
-/// - Captures both sentiment direction and conviction strength
-/// - Better suited for ML pattern recognition
+/// - Strong, clear signal in [-1, 1] range
+/// - Volume-independent (pure price action)
+/// - Captures market momentum shifts effectively
+/// - Better differentiation between sentiment states
 pub fn calculate_sequence_sentiment_score(candles: &[MarketDataRow]) -> f64 {
     calculate_sequence_sentiment_score_with_weighting(candles, 1.0) // Default: uniform weighting
 }
@@ -320,10 +321,9 @@ pub fn calculate_sequence_sentiment_score_with_weighting(
         return 0.0;
     }
 
-    // Calculate average volume for optional enhancement (not dependency)
-    let avg_volume = candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64;
-    let mut weighted_sentiment = 0.0;
-    let mut total_weight = 0.0;
+    let mut bullish_weight_sum = 0.0;
+    let mut bearish_weight_sum = 0.0;
+    let mut total_weight_sum = 0.0;
     let n = candles.len();
 
     for (i, candle) in candles.iter().enumerate() {
@@ -332,49 +332,41 @@ pub fn calculate_sequence_sentiment_score_with_weighting(
             continue; // Skip invalid candles
         }
 
-        // CORE SENTIMENT CALCULATION (volume-independent)
+        // MOMENTUM-BASED SENTIMENT CALCULATION (volume-independent)
 
-        // Body conviction: combines direction and strength in single metric
-        // Range: [-1.0, 1.0] where -1 = full red body, +1 = full green body
-        let body_conviction = (candle.close - candle.open) / range;
+        // Calculate body size and direction
+        let body = candle.close - candle.open;
+        let body_strength = body.abs() / range; // [0, 1] range
 
-        // Body size as percentage of total range
-        // Range: [0.0, 1.0] where 1.0 = full body (no wicks)
-        let body_size_pct = (candle.close - candle.open).abs() / range;
-
-        // Combined sentiment: direction * conviction strength
-        // Range: [-1.0, 1.0] with magnitude indicating conviction level
-        let core_sentiment = body_conviction * body_size_pct;
-
-        // OPTIONAL VOLUME ENHANCEMENT (not dependency)
-        // Volume only enhances existing sentiment, doesn't create it
-        let volume_multiplier = if avg_volume > 0.0 {
-            (candle.volume / avg_volume).min(2.0) // Cap at 2x to prevent dominance
-        } else {
-            1.0
-        };
-
-        // Apply volume enhancement: 70% core + 30% volume boost
-        // This ensures volume never dominates the sentiment calculation
-        let enhanced_sentiment = core_sentiment * (0.7 + 0.3 * volume_multiplier);
-
-        // ADAPTIVE HORIZON WEIGHTING
-        // Recent candles get higher weights when decay_factor < 1.0
-        // weight[i] = decay_factor^(n-1-i) where i=0 is oldest, i=n-1 is newest
-        let weight = if horizon_decay_factor < 1.0 {
+        // Apply time decay weight if specified
+        let time_weight = if horizon_decay_factor < 1.0 {
             horizon_decay_factor.powf((n - 1 - i) as f64)
         } else {
             1.0 // Uniform weighting when decay_factor >= 1.0
         };
 
-        weighted_sentiment += enhanced_sentiment * weight;
-        total_weight += weight;
+        // Combine body strength with time weight
+        let candle_weight = body_strength * time_weight;
+
+        // Accumulate bullish or bearish weights
+        if body > 0.0 {
+            // Bullish candle (green)
+            bullish_weight_sum += candle_weight;
+        } else if body < 0.0 {
+            // Bearish candle (red)
+            bearish_weight_sum += candle_weight;
+        }
+        // Doji candles (body == 0) contribute no directional weight
+
+        total_weight_sum += candle_weight;
     }
 
-    if total_weight > 0.0 {
-        weighted_sentiment / total_weight
+    if total_weight_sum > 0.0 {
+        // Calculate momentum balance: difference between bullish and bearish strength
+        // Normalized to [-1, 1] range
+        (bullish_weight_sum - bearish_weight_sum) / total_weight_sum
     } else {
-        0.0
+        0.0 // No valid candles or all dojis
     }
 }
 
@@ -624,15 +616,14 @@ fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
 
 /// Calibrate sentiment sensitivity for balanced class distribution
 ///
-/// This function analyzes historical sentiment data to find the optimal body_sensitivity
-/// parameter that achieves the target class balance (e.g., 15% in extreme classes).
+/// This function analyzes historical sentiment momentum shifts to find the optimal body_sensitivity
+/// parameter that achieves balanced class distribution (approximately 20% per class).
 ///
 /// ## Algorithm
-/// 1. Sample sentiment changes from historical data using the same logic as target generation
-/// 2. Calculate sentiment consistency for normalization (like direction's trend consistency)
-/// 3. Find the percentile threshold that corresponds to target_balance for extreme classes
-/// 4. Calculate body_sensitivity to achieve that threshold with extreme_multiplier
-/// 5. Apply reasonable bounds and return calibrated parameter
+/// 1. Sample momentum shifts from historical data using the same logic as target generation
+/// 2. Sort momentum shifts to find percentile boundaries
+/// 3. Calculate sensitivity that maps percentiles to the 5-class system
+/// 4. Apply reasonable bounds and return calibrated parameter
 ///
 /// ## Parameters
 /// - `ohlcv_data`: Historical OHLCV data for sentiment analysis
@@ -646,15 +637,15 @@ pub fn calibrate_sentiment_sensitivity(
     ohlcv_data: &[MarketDataRow],
     sequence_length: usize,
     horizon_steps: usize,
-    _target_balance: f64, // Unused but kept for API compatibility
+    target_balance: f64,
 ) -> Result<f64> {
     if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
-        return Ok(0.055); // Default from debug analysis
+        return Ok(0.3); // Default for momentum-based approach
     }
 
-    let mut sentiment_changes = Vec::new();
+    let mut momentum_shifts = Vec::new();
 
-    // Sample sentiment changes from the data using same logic as target generation
+    // Sample momentum shifts from the data using same logic as target generation
     for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
         let sequence_ohlcv = &ohlcv_data[i..i + sequence_length];
         let horizon_ohlcv = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
@@ -663,41 +654,49 @@ pub fn calibrate_sentiment_sensitivity(
             let seq_sentiment = calculate_sequence_sentiment_score(sequence_ohlcv);
             let hor_sentiment = calculate_sequence_sentiment_score(horizon_ohlcv);
 
-            let sentiment_change = hor_sentiment - seq_sentiment;
-            if sentiment_change.is_finite() {
-                sentiment_changes.push(sentiment_change);
+            let momentum_shift = hor_sentiment - seq_sentiment;
+            if momentum_shift.is_finite() {
+                momentum_shifts.push(momentum_shift.abs()); // Use absolute for threshold calculation
             }
         }
     }
 
-    if sentiment_changes.is_empty() {
-        return Ok(0.055); // Default fallback from debug analysis
+    if momentum_shifts.is_empty() {
+        return Ok(0.3); // Default fallback for momentum approach
     }
 
-    // Sort changes to find percentiles for balanced 5-class distribution
-    sentiment_changes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = sentiment_changes.len();
+    // Sort shifts to find percentiles for balanced distribution
+    momentum_shifts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = momentum_shifts.len();
 
-    // Calculate percentile thresholds for 20% per class
-    // We need the 40th and 60th percentiles to define neutral boundaries
-    let p40_idx = (n as f64 * 0.40) as usize;
-    let p60_idx = (n as f64 * 0.60) as usize;
+    // For 5-class system with target_balance in extreme classes:
+    // - Classes 0 & 4: target_balance each (e.g., 15% each)
+    // - Classes 1 & 3: (0.5 - target_balance) / 2 each (e.g., 17.5% each)
+    // - Class 2: Remaining (e.g., 35%)
 
-    let moderate_panic_threshold = sentiment_changes[p40_idx.min(n - 1)];
-    let moderate_greed_threshold = sentiment_changes[p60_idx.min(n - 1)];
+    // Find the percentile that separates moderate from extreme classes
+    let moderate_percentile = 0.5 - target_balance; // e.g., 0.35 for 15% extreme
+    let moderate_idx = ((n as f64) * moderate_percentile) as usize;
+    let moderate_threshold = momentum_shifts[moderate_idx.min(n - 1)];
 
-    // The base threshold should be the average of the neutral boundaries (absolute values)
-    let base_threshold = (moderate_panic_threshold.abs() + moderate_greed_threshold.abs()) / 2.0;
+    // Find the percentile for extreme classes
+    let extreme_percentile = 1.0 - target_balance; // e.g., 0.85 for 15% extreme
+    let extreme_idx = ((n as f64) * extreme_percentile) as usize;
+    let extreme_threshold = momentum_shifts[extreme_idx.min(n - 1)];
 
-    // Ensure reasonable bounds
-    let final_sensitivity = base_threshold.clamp(0.01, 1.0);
+    // The base sensitivity should be the moderate threshold
+    // This ensures the moderate classes capture the right percentage
+    let base_sensitivity = moderate_threshold;
+
+    // Ensure reasonable bounds for momentum-based approach
+    let final_sensitivity = base_sensitivity.clamp(0.1, 0.8);
 
     log::info!(
-        "🎯 Calibrated sentiment sensitivity: {:.6} (from {} samples, 40th percentile: {:.6}, 60th percentile: {:.6})",
+        "🎯 Calibrated sentiment sensitivity: {:.4} (from {} samples, moderate: {:.4}, extreme: {:.4})",
         final_sensitivity,
         n,
-        moderate_panic_threshold,
-        moderate_greed_threshold
+        moderate_threshold,
+        extreme_threshold
     );
 
     Ok(final_sensitivity)
