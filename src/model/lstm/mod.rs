@@ -38,7 +38,6 @@
 
 pub mod config;
 pub mod core;
-pub mod gradient_clipper;
 pub mod inference;
 pub mod loss;
 pub mod schedule_benchmark;
