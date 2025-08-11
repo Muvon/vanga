@@ -64,6 +64,9 @@ impl LSTMModel {
 ```
 
 #### **`training.rs` - Unified Training System**
+
+**🚨 CRITICAL BUG FIX**: Fixed gradient explosion caused by double backward pass in gradient clipping.
+
 ```rust
 impl LSTMModel {
     /// THE main training method - handles all training scenarios
@@ -76,8 +79,23 @@ impl LSTMModel {
         validation_targets: Option<&Array2<f64>>,
         class_weights: Option<&Array1<f64>>,
     ) -> Result<()>
+
+    /// FIXED: Gradient clipping without double backward pass
+    fn apply_gradient_clipping_and_step(
+        &self,
+        optimizer: &mut OptimizerWrapper,
+        base_loss: &Tensor,
+        clip_value: Option<f64>,
+        epoch: usize,
+        batch_idx: usize,
+    ) -> Result<f64>
 }
 ```
+
+**Key Fix**:
+- **Before**: `backward() + backward_step()` = 2 backward passes → gradient explosion
+- **After**: `backward() + step(grads)` = 1 backward pass → stable training
+- **Impact**: Eliminates gradient accumulation that caused exponential gradient growth
 
 #### **`inference.rs` - Prediction Pipeline**
 ```rust

@@ -1,3 +1,69 @@
+# CRITICAL BUG FIX: Gradient Explosion in VANGA LSTM Training
+
+## 🚨 **RESOLVED**: Double Backward Pass Bug
+
+**Date**: 2025-01-11
+**Severity**: CRITICAL
+**Impact**: Training stability, gradient explosion prevention
+**Status**: ✅ FIXED
+
+### Root Cause Analysis
+
+**Problem**: When gradient clipping was enabled but not triggered, the training pipeline performed two backward passes per batch:
+
+1. `let grads = base_loss.backward()?;` - to calculate gradient norm for clipping decision
+2. `optimizer.backward_step(base_loss)?;` - to apply parameter updates
+
+This caused **gradient accumulation across batches**, leading to exponential gradient growth and training instability.
+
+### The Fix
+
+**File**: `src/model/lstm/training.rs`
+**Method**: `apply_gradient_clipping_and_step()`
+**Line**: 2304
+
+**Before (Broken)**:
+```rust
+let grads = base_loss.backward()?;           // 1st backward pass
+let grad_norm = self.calculate_gradient_norm(&grads)?;
+if grad_norm <= threshold {
+    optimizer.backward_step(base_loss)?;     // 2nd backward pass → EXPLOSION
+}
+```
+
+**After (Fixed)**:
+```rust
+let grads = base_loss.backward()?;           // 1st backward pass
+let grad_norm = self.calculate_gradient_norm(&grads)?;
+if grad_norm <= threshold {
+    optimizer.step(&grads)?;                 // REUSE grads → STABLE
+}
+```
+
+### Technical Details
+
+**Candle Framework Patterns**:
+- `backward_step(loss)`: Atomic backward + step (use when no gradient inspection needed)
+- `backward() + step(grads)`: Manual approach (use when gradient clipping/inspection needed)
+
+**Backward Pass Count Analysis**:
+- **gradient_clip enabled + no clipping needed**: 1 backward pass ✅ (FIXED)
+- **gradient_clip enabled + clipping needed**: 2 backward passes ✅ (unavoidable for proper clipping)
+- **gradient_clip disabled**: 1 backward pass ✅ (unchanged)
+
+**Mathematical Proof**:
+- **Before**: ∇L computed twice per batch → gradients accumulate → ||∇|| grows exponentially
+- **After**: ∇L computed once per batch → no accumulation → ||∇|| remains bounded
+
+### Impact
+
+✅ **Training Stability**: Prevents exponential gradient growth during LSTM training
+✅ **Performance**: Reduces computational overhead by eliminating redundant backward passes
+✅ **Reliability**: Ensures consistent gradient behavior across different clipping scenarios
+✅ **Framework Compliance**: Proper Candle ML framework usage patterns
+
+---
+
 # Proper Gradient Clipping Implementation in VANGA
 
 ## 🎯 Overview

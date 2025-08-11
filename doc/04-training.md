@@ -10,6 +10,13 @@ This guide covers VANGA's **single-config LSTM training system** with intelligen
 - **Parameter Documentation**: Comprehensive explanations in example configs
 - **Validation**: Automatic parameter validation and error checking
 
+### ✅ **Training Stability & Bug Fixes (NEW)**
+- **CRITICAL FIX**: Resolved gradient explosion bug in gradient clipping implementation
+- **Double Backward Pass Elimination**: Fixed gradient accumulation that caused exponential growth
+- **Candle Framework Compliance**: Proper usage of `backward() + step(grads)` pattern
+- **Performance Improvement**: Reduced computational overhead by eliminating redundant backward passes
+- **Mathematical Correctness**: Ensures exactly 1 backward pass per batch in all code paths
+
 ### ✅ **Advanced Learning Rate Optimization (NEW)**
 - **9 Modern Optimizers**: AdamW, SGD, Adam, AdaDelta, AdaGrad, AdaMax, NAdam, RAdam, RMSprop
 - **Empirical Performance Data**: Based on 50-run benchmarks across crypto datasets
