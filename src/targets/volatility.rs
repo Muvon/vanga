@@ -498,6 +498,37 @@ pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f
     Ok(sequence_atr.max(0.005)) // Ensure minimum 0.5% volatility baseline
 }
 
+/// Calculate proportional ATR window based on available data dimensions
+///
+/// This function determines the optimal ATR window size based on the actual data
+/// available for analysis, ensuring fair comparison between sequence and horizon
+/// periods regardless of their relative sizes.
+///
+/// ## Mathematical Foundation
+/// The ATR window should be proportional to the data we have available:
+/// - Uses the SMALLER of sequence_length or horizon_length as reference
+/// - ATR window = half of the minimum period (but at least 2 for calculation)
+/// - This ensures consistent volatility measurement across all scenarios
+///
+/// ## Examples
+/// - `sequence_length = 30, horizon_steps = 5` → `atr_window = 2` (half of 5)
+/// - `sequence_length = 10, horizon_steps = 20` → `atr_window = 5` (half of 10)
+/// - `sequence_length = 60, horizon_steps = 1` → `atr_window = 2` (minimum viable)
+///
+/// ## Parameters
+/// - `sequence_length`: Length of the input sequence data
+/// - `horizon_length`: Length of the horizon period data
+///
+/// ## Returns
+/// Proportional ATR window size optimized for fair volatility comparison
+fn calculate_proportional_atr_window(sequence_length: usize, horizon_length: usize) -> usize {
+    // Use the SMALLER of the two periods to ensure fair comparison
+    let min_period = sequence_length.min(horizon_length);
+
+    // ATR window = half of the minimum period (but at least 2 for calculation)
+    (min_period / 2).max(2)
+}
+
 /// Calculate horizon ATR with adaptive exponential weighting toward recent steps
 ///
 /// This function computes ATR for horizon candles using exponential decay weighting
@@ -665,9 +696,10 @@ pub fn classify_volatility_with_distribution_analysis(
         return Ok(2); // Default to Medium for insufficient data
     }
 
-    // Step 1: Calculate rolling ATR series for distribution analysis
-    let rolling_window = (sequence_candles.len() / 3).clamp(3, 10); // Adaptive window size
-    let atr_series = calculate_rolling_atr_series(sequence_candles, rolling_window)?;
+    // Step 1: Calculate rolling ATR series using proportional window
+    let proportional_window =
+        calculate_proportional_atr_window(sequence_candles.len(), horizon_candles.len());
+    let atr_series = calculate_rolling_atr_series(sequence_candles, proportional_window)?;
 
     // Step 2: Calculate sequence baseline ATR (mean of distribution)
     let sequence_atr_stats = calculate_atr_distribution_stats(&atr_series);
@@ -700,8 +732,8 @@ pub fn classify_volatility_with_distribution_analysis(
         .unwrap_or(1.0);
 
     log::debug!(
-        "🎯 Volatility Distribution Analysis: seq_atr={:.6}, hor_atr={:.6}, decay_factor={:.3}, calibrated_sensitivity={:.4}, class={}",
-        baseline_atr, horizon_atr, decay_factor, targets_config.base_sensitivity, volatility_class
+        "🎯 Volatility Distribution Analysis: seq_atr={:.6}, hor_atr={:.6}, proportional_window={}, decay_factor={:.3}, calibrated_sensitivity={:.4}, class={}",
+        baseline_atr, horizon_atr, proportional_window, decay_factor, targets_config.base_sensitivity, volatility_class
     );
 
     Ok(volatility_class)
@@ -745,8 +777,27 @@ pub fn calibrate_volatility_bandwidth(
         let horizon_candles = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
         if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-            let seq_atr = get_sequence_atr_baseline(sequence_candles)?;
-            let hor_atr = get_sequence_atr_baseline(horizon_candles)?;
+            // Use proportional ATR window for consistent comparison
+            let proportional_window =
+                calculate_proportional_atr_window(sequence_candles.len(), horizon_candles.len());
+
+            let seq_atr = if sequence_candles.len() >= proportional_window {
+                calculate_rolling_atr_series(sequence_candles, proportional_window)?
+                    .last()
+                    .copied()
+                    .unwrap_or_else(|| get_sequence_atr_baseline(sequence_candles).unwrap_or(0.02))
+            } else {
+                get_sequence_atr_baseline(sequence_candles)?
+            };
+
+            let hor_atr = if horizon_candles.len() >= proportional_window {
+                calculate_rolling_atr_series(horizon_candles, proportional_window)?
+                    .last()
+                    .copied()
+                    .unwrap_or_else(|| get_sequence_atr_baseline(horizon_candles).unwrap_or(0.02))
+            } else {
+                get_sequence_atr_baseline(horizon_candles)?
+            };
 
             if seq_atr > 0.0 && hor_atr > 0.0 {
                 let atr_ratio = hor_atr / seq_atr;
@@ -782,7 +833,7 @@ pub fn calibrate_volatility_bandwidth(
     let final_bandwidth = calibrated_bandwidth.clamp(0.05, 1.0);
 
     log::info!(
-        "🎯 Calibrated volatility bandwidth: {:.6} (from {} samples, extreme_threshold: {:.6})",
+        "🎯 Calibrated volatility bandwidth: {:.6} (from {} samples, extreme_threshold: {:.6}, proportional_windows used)",
         final_bandwidth,
         n,
         extreme_threshold
