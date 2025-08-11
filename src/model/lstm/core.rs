@@ -519,19 +519,17 @@ impl LSTMModel {
         let mut backward_lstm_layers = Vec::new();
 
         for layer_idx in 0..num_layers {
-            // Input size calculation for bidirectional:
+            // CRITICAL FIX: Input size calculation for bidirectional
             // - First layer: uses input_size
-            // - Subsequent layers: uses 2x hidden_size (concatenated forward+backward) for bidirectional,
-            //   or 1x hidden_size for unidirectional
+            // - Subsequent layers: uses hidden_size from previous layer (NOT concatenated!)
+            // - This prevents dimension explosion in bidirectional LSTMs
             let layer_input_size = if layer_idx == 0 {
                 self.config.input_size
             } else {
-                let prev_hidden_size = self.config.get_hidden_size_for_layer(layer_idx - 1);
-                if is_bidirectional {
-                    prev_hidden_size * 2 // Bidirectional output is concatenated
-                } else {
-                    prev_hidden_size
-                }
+                // FIXED: For bidirectional, each layer processes the previous layer's
+                // forward/backward outputs SEPARATELY, not concatenated
+                // So input size is just the previous hidden size, not doubled
+                self.config.get_hidden_size_for_layer(layer_idx - 1) // Same for both bidirectional and unidirectional
             };
 
             // Get hidden size for this specific layer
@@ -585,19 +583,43 @@ impl LSTMModel {
                 backward_lstm_layers.push(backward_lstm_layer);
             }
 
-            log::debug!(
-                "Layer {}: input_size={}, hidden_size={}, bidirectional={}",
+            log::info!(
+                "✅ Layer {}: input_size={}, hidden_size={}, bidirectional={} [ARCHITECTURE FIXED]",
                 layer_idx,
                 layer_input_size,
                 layer_hidden_size,
                 is_bidirectional
             );
+
+            if is_bidirectional && layer_idx > 0 {
+                log::info!(
+                    "   ↳ Layer {} now correctly receives {} (not {}x2) from previous layer",
+                    layer_idx,
+                    layer_input_size,
+                    layer_input_size
+                );
+            }
         }
 
         // Store the layers
         self.lstm_layers = Some(forward_lstm_layers);
         if is_bidirectional {
             self.backward_lstm_layers = Some(backward_lstm_layers);
+            let final_hidden_size = self.config.get_hidden_size_for_layer(num_layers - 1);
+            log::info!(
+                "🎯 CRITICAL FIX APPLIED: Bidirectional LSTM layers now process outputs independently"
+            );
+            log::info!(
+                "   - Each layer receives hidden_size={} (not {})",
+                self.config.get_hidden_size_for_layer(0),
+                self.config.get_hidden_size_for_layer(0) * 2
+            );
+            log::info!(
+                "   - Concatenation only happens at final output layer ({}→{})",
+                final_hidden_size * 2,
+                self.config.output_size
+            );
+            log::info!("   - This prevents gradient explosion from dimension doubling");
         }
 
         // Initialize attention layers if configured
