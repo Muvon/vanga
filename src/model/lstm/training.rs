@@ -946,26 +946,18 @@ impl LSTMModel {
                     let avg_grad_norm = epoch_grad_norm / batch_count as f64;
                     let gradient_growth_rate = effective_grad_norm / avg_grad_norm.max(1e-12_f64);
 
-                    // CRITICAL CHECK: With fixed bidirectional architecture, gradients should stabilize
-                    if gradient_growth_rate > 2.0 && batch_idx % 10 == 0 {
+                    // Only warn if we have meaningful data and significant growth
+                    // Growth rate > 3.0x suggests potential gradient accumulation
+                    if avg_grad_norm > 1e-12_f64 && gradient_growth_rate > 3.0 {
                         log::warn!(
-                            "⚠️ Gradient growth detected: {:.2}x average. Current: {:.3e}, Avg: {:.3e}",
-                            gradient_growth_rate,
+                            "⚠️ Potential gradient accumulation detected: current_norm={:.6e}, avg_norm={:.6e}, growth_rate={:.2}x",
                             effective_grad_norm,
-                            avg_grad_norm
+                            avg_grad_norm,
+                            gradient_growth_rate
                         );
-
-                        // Check if this is due to the old architecture bug
-                        if matches!(
-                            self.architecture,
-                            Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
-                        ) {
-                            log::info!(
-                                "✅ Architecture fix applied - gradients should stabilize soon"
-                            );
-                        }
                     }
                 }
+
                 // Accumulate gradient norm for epoch-level reporting and analysis
                 epoch_grad_norm += effective_grad_norm;
                 batch_count += 1;
