@@ -1290,7 +1290,7 @@ fn extract_targets_for_multi_model(
         // Get the appropriate target data based on type
         let target_data = match target_type {
             "price_level" => targets.price_levels.get(horizon),
-            "direction" => targets.directions.get(horizon),
+            "direction" => targets.direction.get(horizon),
             "volatility" => targets.volatility.get(horizon),
             "sentiment" => targets.sentiment.get(horizon),
             "volume" => targets.volume.get(horizon),

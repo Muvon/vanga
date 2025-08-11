@@ -344,7 +344,7 @@ impl FeatureSelector {
 
         // Use target data size to influence scoring
         let target_count =
-            targets.price_levels.len() + targets.directions.len() + targets.volatility.len();
+            targets.price_levels.len() + targets.direction.len() + targets.volatility.len();
         let complexity_factor = (target_count as f64 / 10.0).min(1.0); // Normalize to 0-1
 
         for feature in features {
@@ -377,7 +377,7 @@ impl FeatureSelector {
 
         // Use actual target data characteristics
         let has_price_targets = !targets.price_levels.is_empty();
-        let has_direction_targets = !targets.directions.is_empty();
+        let has_direction_targets = !targets.direction.is_empty();
         let has_volatility_targets = !targets.volatility.is_empty();
 
         for feature in features {
@@ -473,7 +473,7 @@ impl FeatureSelector {
         // Analyze target characteristics
         let has_multi_timeframe = targets.price_levels.len() > 1;
         let has_all_target_types = !targets.price_levels.is_empty()
-            && !targets.directions.is_empty()
+            && !targets.direction.is_empty()
             && !targets.volatility.is_empty();
 
         for feature in features {
@@ -522,7 +522,7 @@ impl FeatureSelector {
             .values()
             .map(|v| v.len())
             .sum::<usize>()
-            + targets.directions.values().map(|v| v.len()).sum::<usize>()
+            + targets.direction.values().map(|v| v.len()).sum::<usize>()
             + targets.volatility.values().map(|v| v.len()).sum::<usize>();
 
         let size_factor = (total_target_size as f64 / 1000.0).min(1.0); // Normalize
@@ -645,7 +645,7 @@ impl FeatureSelector {
 
             targets.price_levels.insert(horizon.to_string(), price_data);
             targets
-                .directions
+                .direction
                 .insert(horizon.to_string(), direction_data);
             targets
                 .volatility
@@ -743,7 +743,7 @@ impl FeatureSelector {
     fn calculate_target_diversity(&self, targets: &PreparedTargets) -> f64 {
         let type_count = [
             !targets.price_levels.is_empty(),
-            !targets.directions.is_empty(),
+            !targets.direction.is_empty(),
             !targets.volatility.is_empty(),
         ]
         .iter()
@@ -753,7 +753,7 @@ impl FeatureSelector {
         let timeframe_count = targets
             .price_levels
             .len()
-            .max(targets.directions.len())
+            .max(targets.direction.len())
             .max(targets.volatility.len());
 
         // Diversity based on type variety and timeframe variety

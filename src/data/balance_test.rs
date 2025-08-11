@@ -256,7 +256,7 @@ async fn test_create_sequences_with_targets() {
         .price_levels
         .insert("1h".to_string(), vec![0, 1, 2, 1, 0]);
     targets
-        .directions
+        .direction
         .insert("1h".to_string(), vec![1, 1, 0, 0, 1]);
     targets
         .volatility

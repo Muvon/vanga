@@ -19,7 +19,7 @@ fn test_perfect_balance_validation_success() {
         .price_levels
         .insert(horizon.clone(), balanced_data.clone());
     targets
-        .directions
+        .direction
         .insert(horizon.clone(), balanced_data.clone());
     targets
         .volatility
@@ -53,7 +53,7 @@ fn test_perfect_balance_validation_failure() {
         .price_levels
         .insert(horizon.clone(), imbalanced_data.clone());
     targets
-        .directions
+        .direction
         .insert(horizon.clone(), imbalanced_data.clone());
     targets
         .volatility

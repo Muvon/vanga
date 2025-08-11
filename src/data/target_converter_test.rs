@@ -7,7 +7,7 @@ fn create_test_targets() -> PreparedTargets {
         .price_levels
         .insert("1h".to_string(), vec![0, 1, 2, 3, 4]);
     targets
-        .directions
+        .direction
         .insert("1h".to_string(), vec![0, 1, 2, 3, 4]); // Use full 5-class range
     targets
         .volatility

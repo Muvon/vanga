@@ -867,7 +867,7 @@ impl DataPipeline {
                 }
                 crate::targets::TargetType::Direction => {
                     targets
-                        .directions
+                        .direction
                         .insert(horizon.clone(), vec![-1; num_sequences]);
                 }
                 crate::targets::TargetType::Volatility => {
@@ -904,7 +904,7 @@ impl DataPipeline {
                                 }
                             }
                             crate::targets::TargetType::Direction => {
-                                if let Some(targets_vec) = targets.directions.get_mut(horizon) {
+                                if let Some(targets_vec) = targets.direction.get_mut(horizon) {
                                     targets_vec[new_idx] = target_value;
                                 }
                             }
