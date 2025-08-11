@@ -16,16 +16,15 @@ src/model/lstm/
 ├── core.rs        # Model lifecycle, initialization, and persistence
 ├── training.rs    # Training pipeline and optimization (MAIN LOGIC)
 ├── inference.rs   # Prediction pipeline and forward pass
-├── loss.rs        # Loss calculation, metrics, and gradient utilities
-├── gradient_clipper.rs # Gradient clipping with proper scaling
+├── loss.rs        # Loss calculation with tensor broadcasting
+├── manual_lstm.rs # Manual LSTM cell implementation
 ├── window_aware_lr.rs # Window-aware learning rate scheduling
 ├── seeded_weights.rs # Reproducible weight initialization
-├── optimizer_bridge.rs # Optimizer integration bridge
 ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 ├── schedule_validation.rs # Schedule validation utilities
-├── manual_lstm.rs # Manual LSTM cell implementation
 ├── balance_validation_test.rs # Balance validation tests
 ├── hidden_state_test.rs # Hidden state tests
+├── inference_test.rs # Inference tests
 ├── loss_test.rs   # Loss function tests
 ├── schedule_test.rs # Schedule tests
 └── mod.rs         # Public API and re-exports for backward compatibility
@@ -578,13 +577,17 @@ pub struct MultiTargetGenerator {
     price_level_generator: PriceLevelGenerator,
     direction_generator: DirectionGenerator,
     volatility_generator: VolatilityGenerator,
+    sentiment_generator: SentimentGenerator,     // NEW
+    volume_generator: VolumeGenerator,           // NEW
 }
 
-// Multi-horizon predictions
+// Multi-horizon predictions (5 targets × N horizons)
 pub struct MultiTargetPredictions {
-    pub price_levels: HashMap<String, Vec<f32>>,    // 1h, 4h, 1d, 7d
-    pub directions: HashMap<String, Vec<i8>>,       // -1, 0, 1 for down/flat/up
-    pub volatility: HashMap<String, Vec<f32>>,      // Volatility forecasts
+    pub price_levels: HashMap<String, Vec<i32>>,    // 5-class categorical (1h, 4h, 1d, 7d)
+    pub directions: HashMap<String, Vec<i32>>,      // 5-class categorical
+    pub volatility: HashMap<String, Vec<i32>>,      // 5-class categorical
+    pub sentiment: HashMap<String, Vec<i32>>,       // 5-class categorical (NEW)
+    pub volume: HashMap<String, Vec<i32>>,          // 5-class categorical (NEW)
 }
 ```
 

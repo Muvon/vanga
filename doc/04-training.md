@@ -38,6 +38,13 @@ This guide covers VANGA's **single-config LSTM training system** with intelligen
 - **Architecture Optimization**: Automatic layer count and sizing based on data
 - **Performance Monitoring**: Real-time training metrics, LR tracking, and convergence monitoring
 
+### ✅ **Modular LSTM Architecture (NEW)**
+- **Unified Training Method**: Single `train()` method in `src/model/lstm/training.rs` handles all scenarios
+- **Modular Structure**: LSTM implementation split into focused modules (config, core, training, inference, loss)
+- **Backward Compatibility**: All existing APIs preserved through `src/model/lstm_simple.rs` compatibility layer
+- **Enhanced Loss Functions**: Tensor broadcasting fixes and proper class weighting in `src/model/lstm/loss.rs`
+- **Multi-Target Coordination**: `src/model/multi_target.rs` manages separate models per target×horizon combination
+
 ### ✅ **Configuration Templates**
 - **Quick Start**: `configs/quick_start.toml` - Minimal but effective
 - **Standard**: `configs/training.toml` - Production single-asset with AdamW

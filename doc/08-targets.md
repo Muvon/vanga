@@ -621,9 +621,9 @@ pub struct VolumeThresholds {
 }
 ```
 
-### **Unified Calibrator**
+### **Unified Calibration System**
 
-**Implementation**: `src/targets/unified_calibrator.rs`
+**Implementation**: `src/targets/calibration.rs` (NEW)
 ```rust
 pub struct UnifiedCalibrator {
     pub config: TargetsConfig,
@@ -662,6 +662,49 @@ impl UnifiedCalibrator {
             self.validate_balanced_distribution(&distribution)?;
         }
         Ok(())
+    }
+}
+```
+
+### **Target Generation Interface**
+
+**Implementation**: `src/targets/interface.rs` (NEW)
+```rust
+pub trait TargetGenerator {
+    fn generate_targets(
+        &self,
+        data: &DataFrame,
+        horizon: &str,
+        adaptive_params: Option<&AdaptiveParameters>,
+    ) -> Result<Vec<i32>>;
+
+    fn get_target_type(&self) -> TargetType;
+    fn get_num_classes(&self) -> usize { 5 } // All targets use 5 classes
+}
+```
+
+### **Target Registry System**
+
+**Implementation**: `src/targets/registry.rs` (NEW)
+```rust
+pub struct TargetRegistry {
+    generators: HashMap<TargetType, Box<dyn TargetGenerator>>,
+}
+
+impl TargetRegistry {
+    pub fn new() -> Self {
+        let mut registry = Self {
+            generators: HashMap::new(),
+        };
+
+        // Register all 5 target generators
+        registry.register(TargetType::PriceLevel, Box::new(PriceLevelGenerator::new()));
+        registry.register(TargetType::Direction, Box::new(DirectionGenerator::new()));
+        registry.register(TargetType::Volatility, Box::new(VolatilityGenerator::new()));
+        registry.register(TargetType::Sentiment, Box::new(SentimentGenerator::new()));
+        registry.register(TargetType::Volume, Box::new(VolumeGenerator::new()));
+
+        registry
     }
 }
 ```

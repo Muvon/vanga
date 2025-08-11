@@ -88,11 +88,10 @@ src/
 │   ├── config.rs      # Configuration structs and 9 optimizer enums
 │   ├── core.rs        # Model lifecycle and initialization
 │   ├── inference.rs   # Prediction pipeline and forward pass
-│   ├── loss.rs        # Loss calculation, metrics, and gradient utilities
-│   ├── gradient_clipper.rs # Gradient clipping with proper scaling
+│   ├── loss.rs        # Loss calculation with tensor broadcasting
+│   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   ├── window_aware_lr.rs # Window-aware learning rate scheduling
 │   ├── seeded_weights.rs # Reproducible weight initialization
-│   ├── optimizer_bridge.rs # Optimizer integration bridge
 │   ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 │   ├── schedule_validation.rs # Schedule validation utilities
 │   └── *_test.rs      # Comprehensive test coverage in separate files
@@ -112,7 +111,10 @@ src/
 ├── features/          # Technical indicators and cross-asset features
 ├── targets/           # Multi-target generation with adaptive parameters
 │   ├── adaptive_parameters.rs # Adaptive parameter calibration
-│   ├── unified_calibrator.rs # System-wide parameter optimization
+│   ├── calibration.rs # Unified calibration system
+│   ├── generators.rs  # Target generation engines
+│   ├── interface.rs   # Unified target interface
+│   ├── registry.rs    # Target type registry
 │   ├── price_levels.rs # VWAP-weighted 5-class price level system
 │   ├── direction.rs   # Directional movement classification (5-class)
 │   ├── volatility.rs  # Volatility regime classification (5-class)

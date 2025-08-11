@@ -9,6 +9,7 @@ VANGA uses a **unified configuration system** where all parameters (training, mo
 - **Template-Based**: Pre-configured templates for common use cases
 - **Self-Documenting**: Comprehensive parameter explanations in example files
 - **Validated**: Automatic parameter validation with clear error messages
+- **Modular Architecture**: Configurations map to modular LSTM structure (`src/model/lstm/`, `src/targets/`, `src/config/`)
 
 ## 🚀 **NEW: Advanced Learning Rate Optimization**
 

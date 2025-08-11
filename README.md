@@ -203,7 +203,7 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
 
 ### Multi-Target Architecture
 - **Symbol-Agnostic Design**: Each trading pair gets its own specialized multi-target LSTM model
-- **5-Target Prediction System**: Price levels, direction, volatility, sentiment, and volume (5 classes each)
+- **5-Target Prediction System**: Price levels, direction, volatility, sentiment, and volume (5 classes each per horizon)
 - **Adaptive Parameters**: Automatic parameter calibration for balanced class distribution
 - **Configuration-Driven**: All behavior controlled via TOML configuration files
 
@@ -473,11 +473,10 @@ vanga/
 │   │   │   ├── core.rs        # Model lifecycle and initialization
 │   │   │   ├── training.rs    # Unified training method (MAIN LOGIC)
 │   │   │   ├── inference.rs   # Prediction and forward pass
-│   │   │   ├── loss.rs        # Loss calculation and metrics
-│   │   │   ├── gradient_clipper.rs # Gradient clipping with scaling
+│   │   │   ├── loss.rs        # Loss calculation with tensor broadcasting
+│   │   │   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   │   │   ├── window_aware_lr.rs # Window-aware learning rate scheduling
 │   │   │   ├── seeded_weights.rs # Reproducible weight initialization
-│   │   │   ├── optimizer_bridge.rs # Optimizer integration bridge
 │   │   │   ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 │   │   │   ├── schedule_validation.rs # Schedule validation utilities
 │   │   │   └── mod.rs         # Public API and re-exports
@@ -510,10 +509,13 @@ vanga/
 │   │   ├── price_levels.rs # VWAP-weighted 5-class price level system
 │   │   ├── direction.rs   # Directional movement classification (5-class)
 │   │   ├── volatility.rs  # Volatility regime classification (5-class)
-│   │   ├── volume.rs      # Volume analysis targets
-│   │   ├── sentiment.rs   # Market sentiment targets
-│   │   ├── adaptive_parameters.rs # Adaptive parameter calibration
-│   │   ├── unified_calibrator.rs # System-wide parameter optimization
+│   │   ├── volume.rs      # Volume analysis targets (NEW)
+│   │   ├── sentiment.rs   # Market sentiment targets (NEW)
+│   │   ├── adaptive_parameters.rs # Adaptive parameter calibration (NEW)
+│   │   ├── calibration.rs # Unified calibration system (NEW)
+│   │   ├── generators.rs  # Target generation engines (NEW)
+│   │   ├── interface.rs   # Unified target interface (NEW)
+│   │   ├── registry.rs    # Target type registry (NEW)
 │   │   └── sequence_reconstruction.rs # Sequence reconstruction targets
 │   ├── config/        # Configuration management
 │   │   ├── training.rs    # TrainingConfig with 9 optimizers

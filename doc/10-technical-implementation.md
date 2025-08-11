@@ -15,16 +15,15 @@ src/model/lstm/
 ├── core.rs        # Model lifecycle, initialization, and persistence
 ├── training.rs    # Unified training method (THE main training logic)
 ├── inference.rs   # Prediction pipeline and forward pass
-├── loss.rs        # Loss calculation, metrics, and gradient utilities
-├── gradient_clipper.rs # Gradient clipping with proper scaling
+├── loss.rs        # Loss calculation with tensor broadcasting
+├── manual_lstm.rs # Manual LSTM cell implementation
 ├── window_aware_lr.rs # Window-aware learning rate scheduling
 ├── seeded_weights.rs # Reproducible weight initialization
-├── optimizer_bridge.rs # Optimizer integration bridge
 ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 ├── schedule_validation.rs # Schedule validation utilities
-├── manual_lstm.rs # Manual LSTM cell implementation
 ├── balance_validation_test.rs # Balance validation tests
 ├── hidden_state_test.rs # Hidden state tests
+├── inference_test.rs # Inference tests
 ├── loss_test.rs   # Loss function tests
 ├── schedule_test.rs # Schedule tests
 └── mod.rs         # Public API with backward compatibility re-exports
@@ -199,24 +198,13 @@ pub fn validate_perfect_balance(targets: &Array2<f64>, data_name: &str) -> Resul
 }
 ```
 
-### **Gradient Clipping with Scaling** (`src/model/lstm/gradient_clipper.rs`)
+### **Gradient Clipping Implementation** (`src/model/lstm/loss.rs`)
 
-#### **Gradient Clipper Implementation**
+#### **Gradient Clipping in Loss Module**
 ```rust
-pub struct GradientClipper {
-    pub threshold: f64,
-    pub scaling_factor: f64,
-}
-
-impl GradientClipper {
-    pub fn new(threshold: f64) -> Self {
-        Self {
-            threshold,
-            scaling_factor: 1.0,
-        }
-    }
-
-    pub fn clip_gradients(&mut self, grads: &GradStore) -> Result<()> {
+// Gradient clipping is now integrated into the loss calculation
+impl LSTMModel {
+    pub fn apply_gradient_clipping(&self, grads: &GradStore, threshold: f64) -> Result<()> {
         // Calculate gradient norm
         let mut total_norm = 0.0;
         for (_, grad) in grads.iter() {
@@ -226,17 +214,17 @@ impl GradientClipper {
         total_norm = total_norm.sqrt();
 
         // Apply clipping if necessary
-        if total_norm > self.threshold {
-            self.scaling_factor = self.threshold / total_norm;
+        if total_norm > threshold {
+            let scaling_factor = threshold / total_norm;
             log::debug!("🔧 Gradient clipping: norm={:.6}, scale={:.6}",
-                       total_norm, self.scaling_factor);
+                       total_norm, scaling_factor);
 
-            // Scale gradients
+            // Scale gradients with proper tensor broadcasting
             for (_, grad) in grads.iter() {
-                *grad = grad.mul(&Tensor::new(self.scaling_factor, grad.device())?)?;
+                let scale_tensor = Tensor::new(scaling_factor, grad.device())?;
+                let scale_broadcast = scale_tensor.broadcast_as(grad.shape())?;
+                *grad = grad.mul(&scale_broadcast)?.contiguous()?;
             }
-        } else {
-            self.scaling_factor = 1.0;
         }
 
         Ok(())
@@ -408,13 +396,14 @@ impl DeterministicDropout {
 }
 ```
 
-#### **Gradient Accumulation Prevention** (`src/model/lstm/gradient_clipper.rs`)
+#### **Gradient Clipping Integration** (`src/model/lstm/loss.rs`)
 ```rust
-impl GradientClipper {
-    /// Enhanced gradient clipping with accumulation prevention
-    pub fn clip_gradients_with_prevention(
-        &mut self,
+impl LSTMModel {
+    /// Enhanced gradient clipping with tensor broadcasting
+    pub fn apply_gradient_clipping_with_prevention(
+        &self,
         grads: &GradStore,
+        threshold: f64,
         prevent_accumulation: bool,
     ) -> Result<()> {
         // Calculate gradient norm
@@ -426,12 +415,14 @@ impl GradientClipper {
         total_norm = total_norm.sqrt();
 
         // Apply clipping if necessary
-        if total_norm > self.threshold {
-            self.scaling_factor = self.threshold / total_norm;
+        if total_norm > threshold {
+            let scaling_factor = threshold / total_norm;
 
-            // Scale gradients
+            // Scale gradients with proper broadcasting
             for (_, grad) in grads.iter() {
-                let scaled_grad = grad.mul(&Tensor::new(self.scaling_factor, grad.device())?)?;
+                let scale_tensor = Tensor::new(scaling_factor, grad.device())?;
+                let scale_broadcast = scale_tensor.broadcast_as(grad.shape())?;
+                let scaled_grad = grad.mul(&scale_broadcast)?;
 
                 // Prevent accumulation by ensuring contiguous memory layout
                 if prevent_accumulation {
@@ -442,7 +433,7 @@ impl GradientClipper {
             }
 
             log::debug!("🔧 Gradient clipping applied: norm={:.6}, scale={:.6}, prevention={}",
-                       total_norm, self.scaling_factor, prevent_accumulation);
+                       total_norm, scaling_factor, prevent_accumulation);
         }
 
         Ok(())
