@@ -1159,20 +1159,63 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
     Ok(())
 }
 
-/// Configure rayon thread pool for optimal CPU utilization
+/// Configure rayon thread pool and CPU backend threading for optimal utilization
 fn configure_rayon_threads() {
     let num_cpus = num_cpus::get();
     let optimal_threads = std::cmp::max(1, num_cpus - 1); // Leave one core for system
+    let max_threads = num_cpus; // Use all cores for tensor operations
 
+    // Configure Rayon thread pool for parallel data processing
     rayon::ThreadPoolBuilder::new()
         .num_threads(optimal_threads)
         .build_global()
         .expect("Failed to configure rayon thread pool");
 
+    // Configure CPU backend threading for Candle tensor operations
+    configure_cpu_backend_threading(max_threads);
+
     log::info!(
         "🚀 Configured rayon with {} threads for {} CPU cores",
         optimal_threads,
         num_cpus
+    );
+}
+
+/// Configure CPU backend threading for optimal tensor operations (cross-platform)
+fn configure_cpu_backend_threading(max_threads: usize) {
+    let thread_count = max_threads.to_string();
+
+    // Set environment variables for different CPU backends
+    // These are checked by Candle's CPU backend automatically
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: Use Accelerate framework threading
+        std::env::set_var("VECLIB_MAXIMUM_THREADS", &thread_count);
+        log::info!(
+            "🍎 macOS: Set VECLIB_MAXIMUM_THREADS={} for Accelerate framework",
+            thread_count
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // x86/Linux: Use Intel MKL threading
+        std::env::set_var("MKL_NUM_THREADS", &thread_count);
+        std::env::set_var("OMP_NUM_THREADS", &thread_count);
+        log::info!(
+            "🔧 x86/Linux: Set MKL_NUM_THREADS={} and OMP_NUM_THREADS={} for Intel MKL",
+            thread_count,
+            thread_count
+        );
+    }
+
+    // Universal OpenMP setting (fallback for other systems)
+    std::env::set_var("OMP_NUM_THREADS", &thread_count);
+
+    log::info!(
+        "⚡ CPU Backend Threading: Configured {} threads for tensor operations (max utilization)",
+        thread_count
     );
 }
 
