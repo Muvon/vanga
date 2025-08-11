@@ -106,7 +106,6 @@ pub struct TrainingParams {
 
 /// Strategy for calculating class weights in imbalanced datasets
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-
 pub enum DeviceConfig {
     #[default]
     Auto,
