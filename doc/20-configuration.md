@@ -9,7 +9,12 @@ VANGA uses a **unified configuration system** where all parameters (training, mo
 - **Template-Based**: Pre-configured templates for common use cases
 - **Self-Documenting**: Comprehensive parameter explanations in example files
 - **Validated**: Automatic parameter validation with clear error messages
-- **Modular Architecture**: Configurations map to modular LSTM structure (`src/model/lstm/`, `src/targets/`, `src/config/`)
+- **Modular Architecture**: Configurations map to modular LSTM structure:
+  - `[training]` → `src/model/lstm/training.rs` (unified training method)
+  - `[model]` → `src/model/lstm/config.rs` (LSTMConfig, OptimizerWrapper)
+  - `[features]` → `src/features/` (technical indicators, cross-asset)
+  - `[targets]` → `src/targets/` (price levels, direction, volatility, sentiment, volume)
+  - `[data]` → `src/data/` (preprocessing, normalization)
 
 ## 🚀 **NEW: Advanced Learning Rate Optimization**
 

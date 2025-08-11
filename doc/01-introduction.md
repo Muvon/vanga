@@ -94,7 +94,12 @@ src/
 │   ├── seeded_weights.rs # Reproducible weight initialization
 │   ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 │   ├── schedule_validation.rs # Schedule validation utilities
-│   └── *_test.rs      # Comprehensive test coverage in separate files
+│   ├── balance_validation_test.rs # Balance validation tests
+│   ├── hidden_state_test.rs # Hidden state tests
+│   ├── inference_test.rs # Inference tests
+│   ├── loss_test.rs   # Loss function tests
+│   ├── schedule_test.rs # Schedule tests
+│   └── mod.rs         # Public API with backward compatibility re-exports
 ├── model/
 │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
 │   ├── multi_target.rs # Multi-target wrapper (separate models per target×horizon)
