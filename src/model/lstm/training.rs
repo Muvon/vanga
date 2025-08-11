@@ -716,8 +716,24 @@ impl LSTMModel {
         // Memory prevalidation and warnings
         self.validate_batch_configuration(total_train_samples, batch_size)?;
 
-        // Setup advanced optimizer with all configurations
-        let mut optimizer = self.setup_advanced_optimizer(config)?;
+        // Setup or reuse optimizer with proper learning rate for this window
+        let mut optimizer = if let Some(mut existing_optimizer) = self.optimizer.take() {
+            // CRITICAL: Reuse existing optimizer to preserve momentum/velocity
+            // BUT update learning rate for window decay
+            let new_lr = config.training.learning_rate;
+            log::info!(
+                "♻️ REUSING optimizer with preserved momentum/velocity, updating LR to {:.6} (window decay applied)",
+                new_lr
+            );
+
+            // Update learning rate while preserving optimizer state
+            existing_optimizer.set_learning_rate(new_lr);
+            existing_optimizer
+        } else {
+            // Fresh training: create new optimizer
+            log::info!("🆕 Creating fresh optimizer (no previous state to preserve)");
+            self.setup_advanced_optimizer(config)?
+        };
 
         // Extract learning rate configuration
         let target_lr = config.training.learning_rate;
@@ -1374,6 +1390,11 @@ impl LSTMModel {
             log::info!("🔄 Starting XGBoost hybrid training phase...");
             self.train_xgboost_phase(sequences, targets, config).await?;
         }
+
+        // CRITICAL: Store optimizer state for next window/continuation
+        // This preserves momentum/velocity for incremental training
+        self.optimizer = Some(optimizer);
+        log::info!("💾 Optimizer state preserved for potential continuation training");
 
         Ok(())
     }
