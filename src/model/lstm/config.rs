@@ -159,6 +159,10 @@ pub struct LSTMModel {
     /// class distributions and must be reused during prediction for consistency
     pub adaptive_target_parameters:
         Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+
+    /// Preserved optimizer state for incremental/window training
+    /// Maintains momentum/velocity across training windows while allowing LR updates
+    pub optimizer: Option<OptimizerWrapper>,
 }
 
 /// Serializable model state for persistence - Enhanced with adaptive parameters

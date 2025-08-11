@@ -59,6 +59,7 @@ impl LSTMModel {
             best_epoch: None,           // No best epoch initially
             seed: None,                 // No seed by default (random initialization)
             adaptive_target_parameters: None, // No adaptive parameters initially
+            optimizer: None,            // No optimizer initially (created during training)
         })
     }
 
