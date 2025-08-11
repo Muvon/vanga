@@ -3,7 +3,6 @@
 //! This module contains the actual target generator implementations
 //! that implement the TargetGenerator trait for each target type.
 
-use crate::config::model::TargetsConfig;
 use crate::targets::adaptive_parameters::{
     DirectionAdaptiveParams, PriceLevelAdaptiveParams, SentimentAdaptiveParams,
     VolatilityAdaptiveParams, VolumeAdaptiveParams,
@@ -39,20 +38,20 @@ impl TargetGenerator for PriceLevelTargetGenerator {
         &self,
         df: &DataFrame,
         horizons: &[String],
-        targets_config: &TargetsConfig,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
         let params =
             adaptive_params.and_then(|p| p.as_any().downcast_ref::<PriceLevelAdaptiveParams>());
+        let default_params = PriceLevelAdaptiveParams::default();
+        let final_params = params.unwrap_or(&default_params);
         crate::targets::generate_price_level_targets_with_adaptive_params(
             df,
             horizons,
-            targets_config,
             sequence_indices,
             sequence_length,
-            params,
+            final_params,
         )
     }
 
@@ -61,7 +60,6 @@ impl TargetGenerator for PriceLevelTargetGenerator {
         df: &DataFrame,
         sequence_length: usize,
         horizon_steps: usize,
-        targets_config: &TargetsConfig,
     ) -> Result<Box<dyn AdaptiveParameters>> {
         // Delegate to the existing calibration system to preserve original logic
         // This ensures the original grid search and MIN-CLASS optimization is used
@@ -81,10 +79,10 @@ impl TargetGenerator for PriceLevelTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create calibrator with same parameters as original
-        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(
-            targets_config.clone(),
-        );
+        // Create default config for calibration
+        let default_config = crate::config::model::TargetsConfig::default();
+        let calibrator =
+            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -119,20 +117,20 @@ impl TargetGenerator for DirectionTargetGenerator {
         &self,
         df: &DataFrame,
         horizons: &[String],
-        targets_config: &TargetsConfig,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
         let params =
             adaptive_params.and_then(|p| p.as_any().downcast_ref::<DirectionAdaptiveParams>());
+        let default_params = DirectionAdaptiveParams::default();
+        let final_params = params.unwrap_or(&default_params);
         crate::targets::generate_direction_targets_with_adaptive_params(
             df,
             horizons,
-            targets_config,
             sequence_indices,
             sequence_length,
-            params,
+            final_params,
         )
     }
 
@@ -141,9 +139,7 @@ impl TargetGenerator for DirectionTargetGenerator {
         df: &DataFrame,
         sequence_length: usize,
         horizon_steps: usize,
-        targets_config: &TargetsConfig,
     ) -> Result<Box<dyn AdaptiveParameters>> {
-        // Delegate to the existing calibration system to preserve original logic
         // This ensures the original grid search and MIN-CLASS optimization is used
 
         // Extract OHLCV data for calibration
@@ -161,10 +157,10 @@ impl TargetGenerator for DirectionTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create calibrator with same parameters as original
-        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(
-            targets_config.clone(),
-        );
+        // Create default config for calibration
+        let default_config = crate::config::model::TargetsConfig::default();
+        let calibrator =
+            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -199,20 +195,20 @@ impl TargetGenerator for VolatilityTargetGenerator {
         &self,
         df: &DataFrame,
         horizons: &[String],
-        targets_config: &TargetsConfig,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
         let params =
             adaptive_params.and_then(|p| p.as_any().downcast_ref::<VolatilityAdaptiveParams>());
+        let default_params = VolatilityAdaptiveParams::default();
+        let final_params = params.unwrap_or(&default_params);
         crate::targets::generate_volatility_targets_with_adaptive_params(
             df,
             horizons,
-            targets_config,
             sequence_indices,
             sequence_length,
-            params,
+            final_params,
         )
     }
 
@@ -221,9 +217,7 @@ impl TargetGenerator for VolatilityTargetGenerator {
         df: &DataFrame,
         sequence_length: usize,
         horizon_steps: usize,
-        targets_config: &TargetsConfig,
     ) -> Result<Box<dyn AdaptiveParameters>> {
-        // Delegate to the existing calibration system to preserve original logic
         // This ensures the original grid search and MIN-CLASS optimization is used
 
         // Extract OHLCV data for calibration
@@ -241,10 +235,10 @@ impl TargetGenerator for VolatilityTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create calibrator with same parameters as original
-        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(
-            targets_config.clone(),
-        );
+        // Create default config for calibration
+        let default_config = crate::config::model::TargetsConfig::default();
+        let calibrator =
+            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -285,20 +279,20 @@ impl TargetGenerator for SentimentTargetGenerator {
         &self,
         df: &DataFrame,
         horizons: &[String],
-        targets_config: &TargetsConfig,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
         let params =
             adaptive_params.and_then(|p| p.as_any().downcast_ref::<SentimentAdaptiveParams>());
+        let default_params = SentimentAdaptiveParams::default();
+        let final_params = params.unwrap_or(&default_params);
         crate::targets::generate_sentiment_targets_with_adaptive_params(
             df,
             horizons,
-            targets_config,
             sequence_indices,
             sequence_length,
-            params,
+            final_params,
         )
     }
 
@@ -307,9 +301,7 @@ impl TargetGenerator for SentimentTargetGenerator {
         df: &DataFrame,
         sequence_length: usize,
         horizon_steps: usize,
-        targets_config: &TargetsConfig,
     ) -> Result<Box<dyn AdaptiveParameters>> {
-        // Delegate to the existing calibration system to preserve original logic
         // This ensures the original grid search and MIN-CLASS optimization is used
 
         // Extract OHLCV data for calibration
@@ -327,10 +319,10 @@ impl TargetGenerator for SentimentTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create calibrator with same parameters as original
-        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(
-            targets_config.clone(),
-        );
+        // Create default config for calibration
+        let default_config = crate::config::model::TargetsConfig::default();
+        let calibrator =
+            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -365,20 +357,20 @@ impl TargetGenerator for VolumeTargetGenerator {
         &self,
         df: &DataFrame,
         horizons: &[String],
-        targets_config: &TargetsConfig,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
         let params =
             adaptive_params.and_then(|p| p.as_any().downcast_ref::<VolumeAdaptiveParams>());
+        let default_params = VolumeAdaptiveParams::default();
+        let final_params = params.unwrap_or(&default_params);
         crate::targets::generate_volume_targets_with_adaptive_params(
             df,
             horizons,
-            targets_config,
             sequence_indices,
             sequence_length,
-            params,
+            final_params,
         )
     }
 
@@ -387,9 +379,7 @@ impl TargetGenerator for VolumeTargetGenerator {
         df: &DataFrame,
         sequence_length: usize,
         horizon_steps: usize,
-        targets_config: &TargetsConfig,
     ) -> Result<Box<dyn AdaptiveParameters>> {
-        // Delegate to the existing calibration system to preserve original logic
         // This ensures the original grid search and MIN-CLASS optimization is used
 
         // Extract OHLCV data for calibration
@@ -407,10 +397,10 @@ impl TargetGenerator for VolumeTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create calibrator with same parameters as original
-        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(
-            targets_config.clone(),
-        );
+        // Create default config for calibration
+        let default_config = crate::config::model::TargetsConfig::default();
+        let calibrator =
+            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;

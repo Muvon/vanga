@@ -633,7 +633,6 @@ impl SequenceGenerator {
         let targets = target_generator
             .generate_all_targets_with_adaptive_params(
                 df,
-                Some(model_config),
                 &sequence_indices,
                 sequence_length,
                 adaptive_params,

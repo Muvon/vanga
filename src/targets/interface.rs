@@ -3,7 +3,6 @@
 //! This module provides a clean trait-based interface for all target generators,
 //! enabling consistent method signatures, dynamic registration, and extensibility.
 
-use crate::config::model::TargetsConfig;
 use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -30,7 +29,6 @@ pub trait TargetGenerator: Send + Sync {
         &self,
         df: &DataFrame,
         horizons: &[String],
-        targets_config: &TargetsConfig,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
@@ -45,7 +43,6 @@ pub trait TargetGenerator: Send + Sync {
         df: &DataFrame,
         sequence_length: usize,
         horizon_steps: usize,
-        targets_config: &TargetsConfig,
     ) -> Result<Box<dyn AdaptiveParameters>>;
 }
 

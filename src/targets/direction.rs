@@ -107,32 +107,6 @@ pub enum Direction {
     Pump = 4,     // Extreme up movement
 }
 
-/// Generate direction targets for multiple horizons using trend acceleration analysis
-///
-/// FLOW:
-/// 1. Extract close prices from DataFrame
-/// 2. For each sequence position:
-///    - Get INPUT sequence prices (for trend baseline calculation)
-///    - Get HORIZON sequence prices (for trend comparison)
-///    - Calculate linear regression slopes for both periods
-///    - Classify based on trend acceleration (slope change)
-pub fn generate_direction_targets(
-    df: &DataFrame,
-    horizons: &[String],
-    targets_config: &TargetsConfig, // Use new unified config
-    sequence_indices: &[usize],
-    sequence_length: usize,
-) -> Result<HashMap<String, Vec<i32>>> {
-    generate_direction_targets_with_adaptive_params(
-        df,
-        horizons,
-        targets_config,
-        sequence_indices,
-        sequence_length,
-        None, // No adaptive parameters - use calibration
-    )
-}
-
 /// Generate direction targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
@@ -140,50 +114,27 @@ pub fn generate_direction_targets(
 pub fn generate_direction_targets_with_adaptive_params(
     df: &DataFrame,
     horizons: &[String],
-    targets_config: &TargetsConfig,
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: Option<&crate::targets::adaptive_parameters::DirectionAdaptiveParams>,
+    adaptive_params: &crate::targets::adaptive_parameters::DirectionAdaptiveParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
-    // Use adaptive parameters if available, otherwise calibrate
-    let calibrated_sensitivity = if let Some(params) = adaptive_params {
-        log::info!(
-            "🎯 Using pre-calibrated direction sensitivity: {:.6}",
-            params.base_sensitivity
-        );
-        params.base_sensitivity
-    } else {
-        log::info!("🎯 Calibrating direction sensitivity (no adaptive parameters provided)");
-        // Use first horizon for calibration
-        let first_horizon_steps = parse_horizon_to_steps(&horizons[0])?;
-        calibrate_direction_sensitivity(
-            &close_prices,
-            sequence_length,
-            first_horizon_steps,
-            targets_config.balance_target,
-        )?
-    };
+    // Use pre-calibrated adaptive parameters
+    let calibrated_sensitivity = adaptive_params.base_sensitivity;
+    log::info!(
+        "🎯 Using pre-calibrated direction sensitivity: {:.6}",
+        calibrated_sensitivity
+    );
 
     // Create adaptive targets config with calibrated or pre-set sensitivity
     let adaptive_targets_config = TargetsConfig {
         base_sensitivity: calibrated_sensitivity,
-        balance_target: targets_config.balance_target,
-        momentum_weighting: targets_config.momentum_weighting,
-        extreme_multiplier: if let Some(params) = adaptive_params {
-            params.extreme_multiplier
-        } else {
-            targets_config.extreme_multiplier
-        },
+        balance_target: 0.2,
+        momentum_weighting: calibrated_sensitivity,
+        extreme_multiplier: adaptive_params.extreme_multiplier,
     };
-
-    log::info!(
-        "🎯 Direction targets using calibrated sensitivity: {:.6} (was base: {:.6})",
-        calibrated_sensitivity,
-        targets_config.base_sensitivity
-    );
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;

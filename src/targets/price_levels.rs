@@ -597,24 +597,6 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
     Ok(())
 }
 
-/// Generate price level targets using TargetsConfig (NEW UNIFIED APPROACH)
-pub fn generate_price_level_targets_with_targets_config(
-    df: &DataFrame,
-    horizons: &[String],
-    targets_config: &TargetsConfig,
-    sequence_indices: &[usize],
-    sequence_length: usize,
-) -> Result<HashMap<String, Vec<i32>>> {
-    generate_price_level_targets_with_adaptive_params(
-        df,
-        horizons,
-        targets_config,
-        sequence_indices,
-        sequence_length,
-        None, // No adaptive parameters - use base config
-    )
-}
-
 /// Generate price level targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
@@ -622,50 +604,20 @@ pub fn generate_price_level_targets_with_targets_config(
 pub fn generate_price_level_targets_with_adaptive_params(
     df: &DataFrame,
     horizons: &[String],
-    targets_config: &TargetsConfig,
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: Option<&crate::targets::adaptive_parameters::PriceLevelAdaptiveParams>,
+    adaptive_params: &crate::targets::adaptive_parameters::PriceLevelAdaptiveParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    let config = if let Some(params) = adaptive_params {
-        log::info!(
-            "🎯 Using pre-calibrated price level parameters: bandwidth={:.4}, neutral_band={:.2}",
-            params.bandwidth_size,
-            params.neutral_band_factor
-        );
-        PriceLevelConfig {
-            bandwidth_size: params.bandwidth_size,
-            neutral_band_factor: params.neutral_band_factor,
-        }
-    } else {
-        log::info!(
-            "🎯 Using base price level bandwidth: {:.4}, default neutral_band: 0.4",
-            targets_config.base_sensitivity
-        );
-        PriceLevelConfig {
-            bandwidth_size: targets_config.base_sensitivity,
-            neutral_band_factor: 0.4, // Default neutral band factor
-        }
+    let config = PriceLevelConfig {
+        bandwidth_size: adaptive_params.bandwidth_size,
+        neutral_band_factor: adaptive_params.neutral_band_factor,
     };
+    log::info!(
+        "🎯 Using pre-calibrated price level parameters: bandwidth={:.4}, neutral_band={:.2}",
+        config.bandwidth_size,
+        config.neutral_band_factor
+    );
     generate_price_level_targets(df, horizons, &config, sequence_indices, sequence_length)
-}
-
-/// DEPRECATED: Generate price level targets from ModelConfig (use generate_price_level_targets_with_targets_config instead)
-pub fn generate_price_level_targets_from_model_config(
-    df: &DataFrame,
-    horizons: &[String],
-    model_config: &crate::config::model::ModelConfig,
-    sequence_indices: &[usize],
-    sequence_length: usize,
-) -> Result<HashMap<String, Vec<i32>>> {
-    // Use the new TargetsConfig approach
-    generate_price_level_targets_with_targets_config(
-        df,
-        horizons,
-        &model_config.targets,
-        sequence_indices,
-        sequence_length,
-    )
 }
 
 // ============================================================================

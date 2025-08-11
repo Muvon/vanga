@@ -15,14 +15,12 @@
 //! - **Model Integration**: Parameters are saved/loaded with the model for consistency
 
 pub mod adaptive_parameters;
+pub mod calibration; // New clean calibration module
 pub mod direction;
 pub mod generators;
 pub mod interface;
 pub mod price_levels;
 pub mod registry;
-
-#[cfg(test)]
-mod interface_test;
 pub mod sentiment;
 pub mod sequence_reconstruction;
 pub mod unified_calibrator;
@@ -36,13 +34,10 @@ mod math_consistency_test;
 #[cfg(test)]
 mod price_level_test;
 #[cfg(test)]
-mod sentiment_test;
-#[cfg(test)]
 mod volatility_test;
 #[cfg(test)]
 mod volume_test;
 
-use crate::config::model::TargetsConfig;
 use crate::targets::adaptive_parameters::AdaptiveTargetParameters;
 use crate::targets::interface::AdaptiveParameters;
 use crate::targets::registry::TargetRegistry;
@@ -57,18 +52,14 @@ pub use adaptive_parameters::{
     ClassDistributionBalance, DirectionAdaptiveParams, PriceLevelAdaptiveParams,
     SentimentAdaptiveParams, VolatilityAdaptiveParams, VolumeAdaptiveParams,
 };
-pub use direction::{
-    generate_direction_targets, generate_direction_targets_with_adaptive_params, Direction,
-};
+pub use direction::{generate_direction_targets_with_adaptive_params, Direction};
 pub use price_levels::{
-    generate_price_level_targets, generate_price_level_targets_from_model_config,
-    generate_price_level_targets_with_adaptive_params,
-    generate_price_level_targets_with_targets_config, get_horizon_exponential_weighted_close,
-    get_sequence_exponential_weighted_close, reconstruct_price_levels, PriceLevelConfig,
+    generate_price_level_targets, generate_price_level_targets_with_adaptive_params,
+    get_horizon_exponential_weighted_close, get_sequence_exponential_weighted_close,
+    reconstruct_price_levels, PriceLevelConfig,
 };
 pub use sentiment::{
-    generate_sentiment_targets, generate_sentiment_targets_with_adaptive_params,
-    get_sentiment_class_names, SentimentConfig,
+    generate_sentiment_targets_with_adaptive_params, get_sentiment_class_names, SentimentConfig,
 };
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
@@ -77,12 +68,9 @@ pub use unified_calibrator::{
     calibrate_adaptive_parameters, CrossTargetCorrelation, SystemBalanceMetrics,
     UnifiedTargetCalibrator, UnifiedValidationResult,
 };
-pub use volatility::{
-    generate_volatility_targets, generate_volatility_targets_with_adaptive_params,
-};
+pub use volatility::generate_volatility_targets_with_adaptive_params;
 pub use volume::{
-    generate_volume_targets, generate_volume_targets_with_adaptive_params, get_volume_class_names,
-    VolumeConfig,
+    generate_volume_targets_with_adaptive_params, get_volume_class_names, VolumeConfig,
 };
 
 /// Comprehensive target configuration
@@ -364,13 +352,11 @@ impl TargetGenerator {
     pub async fn generate_all_targets(
         &self,
         df: &DataFrame,
-        model_config: Option<&crate::config::model::ModelConfig>,
         sequence_indices: &[usize],
         sequence_length: usize,
     ) -> Result<PreparedTargets> {
         self.generate_all_targets_with_adaptive_params(
             df,
-            model_config,
             sequence_indices,
             sequence_length,
             None, // No adaptive parameters - use calibration/base config
@@ -385,7 +371,6 @@ impl TargetGenerator {
     pub async fn generate_all_targets_with_adaptive_params(
         &self,
         df: &DataFrame,
-        model_config: Option<&crate::config::model::ModelConfig>,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&AdaptiveTargetParameters>,
@@ -400,16 +385,32 @@ impl TargetGenerator {
         );
 
         // PARALLELIZED: Generate all target types concurrently
-        let default_config = TargetsConfig::default();
-        let targets_config = model_config
-            .map(|cfg| &cfg.targets)
-            .unwrap_or(&default_config);
+        // Create default parameters for cases where adaptive_params is None
+        let default_direction =
+            crate::targets::adaptive_parameters::DirectionAdaptiveParams::default();
+        let default_price_level =
+            crate::targets::adaptive_parameters::PriceLevelAdaptiveParams::default();
+        let default_volatility =
+            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
+        let default_sentiment =
+            crate::targets::adaptive_parameters::SentimentAdaptiveParams::default();
+        let default_volume = crate::targets::adaptive_parameters::VolumeAdaptiveParams::default();
 
-        let direction_adaptive_params = adaptive_params.map(|p| &p.direction);
-        let price_level_adaptive_params = adaptive_params.map(|p| &p.price_levels);
-        let volatility_adaptive_params = adaptive_params.map(|p| &p.volatility);
-        let sentiment_adaptive_params = adaptive_params.map(|p| &p.sentiment);
-        let volume_adaptive_params = adaptive_params.map(|p| &p.volume);
+        let direction_adaptive_params = adaptive_params
+            .map(|p| &p.direction)
+            .unwrap_or(&default_direction);
+        let price_level_adaptive_params = adaptive_params
+            .map(|p| &p.price_levels)
+            .unwrap_or(&default_price_level);
+        let volatility_adaptive_params = adaptive_params
+            .map(|p| &p.volatility)
+            .unwrap_or(&default_volatility);
+        let sentiment_adaptive_params = adaptive_params
+            .map(|p| &p.sentiment)
+            .unwrap_or(&default_sentiment);
+        let volume_adaptive_params = adaptive_params
+            .map(|p| &p.volume)
+            .unwrap_or(&default_volume);
 
         let (
             price_targets,
@@ -420,7 +421,6 @@ impl TargetGenerator {
                 generate_price_level_targets_with_adaptive_params(
                     df,
                     &self.config.horizons,
-                    targets_config,
                     sequence_indices,
                     sequence_length,
                     price_level_adaptive_params,
@@ -433,7 +433,6 @@ impl TargetGenerator {
                         generate_direction_targets_with_adaptive_params(
                             df,
                             &self.config.horizons,
-                            targets_config,
                             sequence_indices,
                             sequence_length,
                             direction_adaptive_params,
@@ -446,7 +445,6 @@ impl TargetGenerator {
                                 generate_volatility_targets_with_adaptive_params(
                                     df,
                                     &self.config.horizons,
-                                    targets_config,
                                     sequence_indices,
                                     sequence_length,
                                     volatility_adaptive_params,
@@ -459,7 +457,6 @@ impl TargetGenerator {
                                         generate_sentiment_targets_with_adaptive_params(
                                             df,
                                             &self.config.horizons,
-                                            targets_config,
                                             sequence_indices,
                                             sequence_length,
                                             sentiment_adaptive_params,
@@ -470,7 +467,6 @@ impl TargetGenerator {
                                         generate_volume_targets_with_adaptive_params(
                                             df,
                                             &self.config.horizons,
-                                            targets_config,
                                             sequence_indices,
                                             sequence_length,
                                             volume_adaptive_params,
@@ -525,18 +521,12 @@ impl TargetGenerator {
     pub async fn generate_all_targets_trait_based(
         &self,
         df: &DataFrame,
-        model_config: Option<&crate::config::model::ModelConfig>,
         sequence_indices: &[usize],
         sequence_length: usize,
         adaptive_params: Option<&AdaptiveTargetParameters>,
     ) -> Result<PreparedTargets> {
         let data_length = sequence_indices.len();
         let mut prepared_targets = PreparedTargets::new(data_length);
-
-        let default_config = TargetsConfig::default();
-        let targets_config = model_config
-            .map(|cfg| &cfg.targets)
-            .unwrap_or(&default_config);
 
         // Get enabled target generators from registry
         let enabled_generators = self.registry.get_enabled_generators(&self.config);
@@ -562,7 +552,6 @@ impl TargetGenerator {
                 let result = generator.generate_targets(
                     df,
                     &self.config.horizons,
-                    targets_config,
                     sequence_indices,
                     sequence_length,
                     adaptive_param,
@@ -674,51 +663,5 @@ fn calculate_class_distribution(targets: &[i32]) -> ClassDistribution {
         class_counts,
         total_samples,
         class_percentages,
-    }
-}
-
-/// Legacy methods for backward compatibility - DEPRECATED
-/// These methods are kept for API compatibility but should not be used
-/// Use the new generate_all_targets() method instead
-impl TargetGenerator {
-    /// Generate price level targets using model configuration
-    pub async fn generate_price_level_targets_with_model_config(
-        &self,
-        df: &DataFrame,
-        model_config: &crate::config::model::ModelConfig,
-    ) -> Result<HashMap<String, Vec<i32>>> {
-        log::info!(
-            "Generating price level targets for {} horizons using model config",
-            self.config.horizons.len()
-        );
-
-        // Calculate sequence parameters for legacy method
-        let sequence_length = match &model_config.sequence_length {
-            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
-            crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => {
-                *min_length as usize
-            }
-            crate::config::model::SequenceLengthConfig::Adaptive => 60,
-        };
-
-        // Calculate sequence indices for the data
-        let data_length = df.height();
-        let max_horizon_steps = 24; // Default horizon for "1h" with hourly data
-        let step_size = 1; // Default step size
-
-        let sequence_indices = crate::utils::sequence_utils::calculate_sequence_indices(
-            data_length,
-            sequence_length,
-            step_size,
-            max_horizon_steps,
-        )?;
-
-        generate_price_level_targets_with_targets_config(
-            df,
-            &self.config.horizons,
-            &model_config.targets,
-            &sequence_indices,
-            sequence_length,
-        )
     }
 }

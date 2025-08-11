@@ -1,23 +1,15 @@
-//! Adaptive Target Parameters System
+//! Target Parameter Calibration System - Legacy Compatibility Layer
 //!
-//! This module implements automatic parameter optimization for all target types
-//! to achieve balanced class distributions across different market conditions.
+//! ⚠️  LEGACY CODE - SCHEDULED FOR REMOVAL ⚠️
 //!
-//! ## Core Philosophy: "Sweet Spot" Optimization
+//! This file maintains backward compatibility while the codebase transitions
+//! to the new clean calibration system in calibration.rs
 //!
-//! Instead of using fixed parameters, this system:
-//! 1. **Analyzes actual market data** to understand distribution patterns
-//! 2. **Finds optimal parameters** that maximize balanced class distribution
-//! 3. **Stores adaptive parameters** with the model for consistent prediction
-//! 4. **Ensures reproducibility** between training and inference
-//!
-//! ## Key Benefits
-//!
-//! - **Automatic Optimization**: No manual parameter tuning required
-//! - **Market Adaptive**: Parameters adjust to specific market characteristics
-//! - **Balanced Distribution**: Targets ~20% per class across all conditions
-//! - **Prediction Consistency**: Same parameters used in training and inference
-//! - **Symbol Agnostic**: Works across different trading pairs and timeframes
+//! TODO: Remove this entire file once all code uses the new calibration system
+//! - All new calibration logic is in src/targets/calibration.rs
+//! - This file only exists for compatibility during migration
+//! - The verbose parameter conversion in trainer.rs should be removed
+//! - Tests should be migrated to calibration_test.rs
 
 use crate::config::model::TargetsConfig;
 use crate::data::structures::MarketDataRow;
@@ -28,60 +20,34 @@ use polars::frame::DataFrame;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Comprehensive adaptive parameters for all target types
-///
-/// This struct stores the calibrated parameters found during training
-/// that produce optimal balanced class distributions. These parameters
-/// are saved with the model and reused during prediction to ensure
-/// consistent target generation.
+// Standard extreme multiplier for all target types
+// This creates boundaries for extreme classes (very high/low) vs moderate classes
+pub const STANDARD_EXTREME_MULTIPLIER: f64 = 2.0;
+
+// Re-export clean types from calibration module
+pub use crate::targets::calibration::{
+    CalibrationMetadata, ClassBalance as ClassDistributionBalance,
+};
+
+// Legacy AdaptiveTargetParameters structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AdaptiveTargetParameters {
-    /// Direction target parameters (momentum-based)
     pub direction: DirectionAdaptiveParams,
-
-    /// Price level target parameters (exponentially-weighted)
     pub price_levels: PriceLevelAdaptiveParams,
-
-    /// Volatility target parameters (ATR distribution-based)
     pub volatility: VolatilityAdaptiveParams,
-
-    /// Sentiment target parameters (candle body analysis)
     pub sentiment: SentimentAdaptiveParams,
-
-    /// Volume target parameters (logarithmic volume analysis)
     pub volume: VolumeAdaptiveParams,
-
-    /// Calibration metadata
     pub calibration_info: CalibrationMetadata,
 }
 
-/// Adaptive parameters for direction targets (momentum-based classification)
+/// Legacy DirectionAdaptiveParams for backward compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionAdaptiveParams {
-    /// Calibrated base sensitivity for momentum change thresholds
     pub base_sensitivity: f64,
-
-    /// Extreme multiplier for DUMP/PUMP vs DOWN/UP boundaries
     pub extreme_multiplier: f64,
-
-    /// Momentum weighting factor for recent data emphasis
     pub momentum_weighting: f64,
-
-    /// Trend consistency normalization factor
     pub trend_consistency_factor: f64,
-
-    /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
-}
-
-impl AdaptiveParameters for DirectionAdaptiveParams {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn clone_box(&self) -> Box<dyn AdaptiveParameters> {
-        Box::new(self.clone())
-    }
 }
 
 impl Default for DirectionAdaptiveParams {
@@ -93,6 +59,16 @@ impl Default for DirectionAdaptiveParams {
             trend_consistency_factor: 1.0,
             achieved_balance: ClassDistributionBalance::default(),
         }
+    }
+}
+
+impl AdaptiveParameters for DirectionAdaptiveParams {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn AdaptiveParameters> {
+        Box::new(self.clone())
     }
 }
 
@@ -197,6 +173,9 @@ pub struct SentimentAdaptiveParams {
     /// Consistency factor for adaptive threshold scaling
     pub consistency_factor: f64,
 
+    /// Multiplier for extreme class boundaries (consistent with other targets)
+    pub extreme_multiplier: f64,
+
     /// Horizon decay factor for recent-weighted sentiment calculation
     /// Values < 1.0 emphasize recent candles, 1.0 = uniform weighting
     pub horizon_decay_factor: f64,
@@ -221,6 +200,7 @@ impl Default for SentimentAdaptiveParams {
             body_sensitivity: 0.05, // Lower default for new body conviction approach
             volume_weight: 0.2,     // Reduced volume dependency
             consistency_factor: 1.0,
+            extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier, // Consistent with other target types
             horizon_decay_factor: 1.0, // Uniform weighting as default fallback
             achieved_balance: ClassDistributionBalance::default(),
         }
@@ -264,69 +244,8 @@ impl Default for VolumeAdaptiveParams {
     }
 }
 
-/// Class distribution balance metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClassDistributionBalance {
-    /// Percentage of samples in each class [0, 1, 2, 3, 4]
-    pub class_percentages: [f64; 5],
-
-    /// Imbalance ratio (max_class_size / min_class_size)
-    pub imbalance_ratio: f64,
-
-    /// Total valid samples used for calibration
-    pub total_samples: usize,
-
-    /// Standard deviation of class percentages (lower = more balanced)
-    pub balance_score: f64,
-}
-
-impl Default for ClassDistributionBalance {
-    fn default() -> Self {
-        Self {
-            class_percentages: [20.0, 20.0, 20.0, 20.0, 20.0], // Perfect balance
-            imbalance_ratio: 1.0,
-            total_samples: 0,
-            balance_score: 0.0,
-        }
-    }
-}
-
-/// Calibration metadata for tracking and debugging
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CalibrationMetadata {
-    /// Data characteristics used for calibration
-    pub data_length: usize,
-    pub sequence_length: usize,
-    pub horizon_steps: usize,
-
-    /// Calibration process information
-    pub calibration_samples: usize,
-    pub calibration_iterations: usize,
-    pub optimization_time_ms: u64,
-
-    /// Target balance configuration used
-    pub target_balance: f64,
-
-    /// Overall calibration success metrics
-    pub overall_balance_score: f64,
-    pub calibration_success: bool,
-}
-
-impl Default for CalibrationMetadata {
-    fn default() -> Self {
-        Self {
-            data_length: 0,
-            sequence_length: 60,
-            horizon_steps: 24,
-            calibration_samples: 0,
-            calibration_iterations: 0,
-            optimization_time_ms: 0,
-            target_balance: 0.2,
-            overall_balance_score: 0.0,
-            calibration_success: false,
-        }
-    }
-}
+// Legacy ClassDistributionBalance - keeping for backward compatibility
+// The actual implementation is imported from calibration module above
 
 /// Adaptive parameter calibration orchestrator
 pub struct AdaptiveParameterCalibrator {
@@ -1566,6 +1485,7 @@ pub fn calculate_class_distribution_balance(class_counts: &[usize; 5]) -> ClassD
         imbalance_ratio,
         total_samples,
         balance_score,
+        target_balance: 0.2, // Default target balance
     }
 }
 
@@ -1669,6 +1589,8 @@ impl AdaptiveParameterCalibrator {
                             body_sensitivity,
                             volume_weight,
                             consistency_factor,
+                            extreme_multiplier: DirectionAdaptiveParams::default()
+                                .extreme_multiplier,
                             horizon_decay_factor,
                             achieved_balance: ClassDistributionBalance::default(),
                         };
@@ -1789,10 +1711,9 @@ impl AdaptiveParameterCalibrator {
         let targets = generate_sentiment_targets_with_adaptive_params(
             df,
             horizons,
-            &self.base_config,
             sequence_indices,
             sequence_length,
-            Some(params),
+            params,
         )?;
 
         // Calculate balance score across all horizons
@@ -1836,10 +1757,9 @@ impl AdaptiveParameterCalibrator {
         let targets = generate_volume_targets_with_adaptive_params(
             df,
             horizons,
-            &self.base_config,
             sequence_indices,
             sequence_length,
-            Some(params),
+            params,
         )?;
 
         // Calculate balance score across all horizons
@@ -1912,6 +1832,7 @@ impl AdaptiveParameterCalibrator {
             body_sensitivity: calibrated_sensitivity,
             volume_weight: 0.1,
             consistency_factor: 0.8,
+            extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier,
             horizon_decay_factor: 1.0, // Default uniform weighting
             achieved_balance: balance,
         };
@@ -2044,6 +1965,7 @@ impl AdaptiveParameterCalibrator {
             body_sensitivity,
             volume_weight,
             consistency_factor,
+            extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier,
             horizon_decay_factor,
             achieved_balance: ClassDistributionBalance::default(),
         };
@@ -2069,9 +1991,8 @@ impl AdaptiveParameterCalibrator {
                     match classify_sentiment(
                         sequence_data,
                         horizon_data,
-                        &self.base_config,
                         &config,
-                        Some(&test_params), // Pass the adaptive parameters
+                        &test_params, // Pass the adaptive parameters
                     ) {
                         Ok(class) => {
                             if (0..5).contains(&class) {

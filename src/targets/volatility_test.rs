@@ -521,11 +521,13 @@ mod tests {
             (1120.0, 1200.0, 1000.0, 1160.0, 700.0),
         ]);
 
+        let default_params =
+            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
         let class = classify_volatility_with_distribution_analysis(
             &normal_sequence,
             &high_vol_horizon,
             &targets_config,
-            None, // No adaptive parameters for basic test
+            &default_params, // Use default parameters for basic test
         )
         .unwrap();
 
@@ -538,11 +540,13 @@ mod tests {
         // Test case 2: Edge cases
         let single_candle = create_test_candles(vec![(1000.0, 1020.0, 980.0, 1010.0, 100.0)]);
 
+        let default_params =
+            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
         let edge_class = classify_volatility_with_distribution_analysis(
             &single_candle,
             &high_vol_horizon,
             &targets_config,
-            None, // No adaptive parameters for edge case test
+            &default_params, // Use default parameters for edge case test
         )
         .unwrap();
 
@@ -713,11 +717,13 @@ mod tests {
         };
 
         // Test without horizon weighting (uniform)
+        let default_params =
+            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
         let uniform_class = classify_volatility_with_distribution_analysis(
             &sequence_candles,
             &horizon_candles,
             &targets_config,
-            None,
+            &default_params,
         )
         .unwrap();
 
@@ -735,7 +741,7 @@ mod tests {
             &sequence_candles,
             &horizon_candles,
             &targets_config,
-            Some(&adaptive_params),
+            &adaptive_params,
         )
         .unwrap();
 
