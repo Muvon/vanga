@@ -128,44 +128,27 @@ impl LSTMModel {
         );
 
         let lstm_output = if is_bidirectional {
-            // Bidirectional processing - FIXED to prevent dimension explosion
+            // Bidirectional processing
             let backward_lstm_layers = self.backward_lstm_layers.as_ref().ok_or_else(|| {
                 VangaError::ModelError(
                     "Backward LSTM layers not initialized for bidirectional model".to_string(),
                 )
             })?;
 
-            // CRITICAL FIX: Process layers independently, don't feed concatenated outputs between layers
-            // Each layer processes the previous layer's outputs separately for forward/backward
-            let mut forward_outputs: Vec<Tensor> = Vec::new();
-            let mut backward_outputs: Vec<Tensor> = Vec::new();
-
-            // Process the first layer with original input
-            let first_input = input.clone();
+            // Process each layer bidirectionally
+            let mut current_input = input.clone();
 
             for (layer_idx, (forward_layer, backward_layer)) in forward_lstm_layers
                 .iter()
                 .zip(backward_lstm_layers.iter())
                 .enumerate()
             {
-                // Determine input for this layer
-                let layer_input = if layer_idx == 0 {
-                    // First layer uses original input
-                    first_input.clone()
-                } else {
-                    // Subsequent layers use ONLY the previous layer's forward output for forward direction
-                    // and ONLY the previous layer's backward output for backward direction
-                    // This prevents dimension explosion!
-                    forward_outputs[layer_idx - 1].clone()
-                };
-
-                // CRITICAL FIX: Reset hidden states for EVERY batch during training
-                // This prevents gradient accumulation across batches
-                let batch_size = layer_input.dim(0)?;
+                // Reset hidden states for each batch to prevent contamination
+                let batch_size = current_input.dim(0)?;
                 let zero_state = forward_layer.zero_state(batch_size)?;
 
                 // Forward direction processing
-                let forward_states = forward_layer.seq_init(&layer_input, &zero_state)?;
+                let forward_states = forward_layer.seq_init(&current_input, &zero_state)?;
 
                 if forward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
@@ -180,10 +163,10 @@ impl LSTMModel {
                 }
                 let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
 
-                // Backward direction processing - uses same input as forward
+                // Backward direction processing
                 let backward_zero_state = backward_layer.zero_state(batch_size)?;
                 let backward_states =
-                    backward_layer.seq_init(&layer_input, &backward_zero_state)?;
+                    backward_layer.seq_init(&current_input, &backward_zero_state)?;
 
                 if backward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
@@ -198,11 +181,10 @@ impl LSTMModel {
                 }
                 let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
 
-                // Store outputs for next layer (NOT concatenated!)
-                forward_outputs.push(forward_output.clone());
-                backward_outputs.push(backward_output.clone());
+                // Concatenate forward and backward outputs for next layer
+                current_input = Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
-                // Apply dropout to individual outputs if needed (not concatenated)
+                // Apply dropout if needed
                 let should_apply_dropout = if let Some(dropout_config) = &self.dropout_config {
                     dropout_config.enabled && training && layer_idx < forward_lstm_layers.len() - 1
                 } else {
@@ -210,35 +192,23 @@ impl LSTMModel {
                 };
 
                 if should_apply_dropout {
-                    // Apply dropout to the stored outputs for next layer
-                    let last_idx = forward_outputs.len() - 1;
-                    forward_outputs[last_idx] = self.apply_dropout(&forward_outputs[last_idx])?;
-                    backward_outputs[last_idx] = self.apply_dropout(&backward_outputs[last_idx])?;
+                    current_input = self.apply_dropout(&current_input)?;
                     log::debug!(
-                        "🔧 Applied LSTM layer dropout (layer: {}) [FIXED ARCHITECTURE]",
+                        "🔧 Applied LSTM layer dropout (layer: {})",
                         layer_idx
                     );
                 }
 
                 log::debug!(
-                    "✅ Bidirectional layer {} - Forward: {:?}, Backward: {:?} (NOT concatenated between layers)",
+                    "Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
                     layer_idx,
                     forward_output.shape(),
-                    backward_output.shape()
+                    backward_output.shape(),
+                    current_input.shape()
                 );
             }
 
-            // ONLY concatenate at the very end for the output layer
-            let final_forward = forward_outputs.last().unwrap();
-            let final_backward = backward_outputs.last().unwrap();
-            let final_output = Tensor::cat(&[final_forward, final_backward], 2)?.contiguous()?;
-
-            log::debug!(
-                "🎯 Final bidirectional output concatenated: {:?} (only at the end)",
-                final_output.shape()
-            );
-
-            final_output
+            current_input
         } else {
             // Unidirectional processing (original logic)
             let mut current_output = input.clone();
