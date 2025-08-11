@@ -7,6 +7,8 @@ Comprehensive evaluation framework for assessing LSTM model performance across V
 ### **Current Metrics System Overview**
 ```rust
 // Implemented in src/utils/metrics.rs with comprehensive classification and regression metrics
+// Loss functions in src/model/lstm/loss.rs with tensor broadcasting
+// Multi-target evaluation in src/model/multi_target.rs
 pub fn calculate_classification_metrics(
     predictions: &[i32],
     targets: &[i32]
@@ -133,6 +135,7 @@ pub fn evaluate_multi_target_predictions(
 ### **Current Loss Function Architecture**
 ```rust
 // Implemented in src/model/lstm/loss.rs with target-aware loss calculation
+// Tensor broadcasting fixes for proper loss computation
 impl LSTMModel {
     pub fn calculate_loss(
         &self,

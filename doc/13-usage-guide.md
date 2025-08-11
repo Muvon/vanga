@@ -1,6 +1,6 @@
 # VANGA LSTM Usage Guide
 
-Comprehensive guide for using VANGA's cryptocurrency forecasting system with current API and CLI interface.
+Comprehensive guide for using VANGA's cryptocurrency forecasting system with current modular LSTM architecture and CLI interface.
 
 ## 🚀 **Current CLI Interface**
 

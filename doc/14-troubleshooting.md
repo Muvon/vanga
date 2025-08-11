@@ -1,6 +1,6 @@
 # VANGA Troubleshooting Guide
 
-Comprehensive troubleshooting guide for VANGA's cryptocurrency forecasting system with current development practices and solutions.
+Comprehensive troubleshooting guide for VANGA's cryptocurrency forecasting system with current modular architecture and development practices.
 
 ## 🔧 **Development Workflow Issues**
 

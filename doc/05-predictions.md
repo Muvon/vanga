@@ -2,7 +2,7 @@
 
 This guide covers how to generate predictions using trained LSTM models in VANGA.
 
-**Status**: ✅ **Complete Implementation** - Full prediction pipeline functional with modular LSTM architecture
+**Status**: ✅ **Complete Implementation** - Full prediction pipeline functional with modular LSTM architecture (`src/model/lstm/inference.rs`)
 
 ## Quick Start
 
@@ -12,6 +12,8 @@ Generate predictions using the current unified prediction API:
 
 ```rust
 // Using current prediction API - src/api/predictor.rs
+// Modular LSTM inference - src/model/lstm/inference.rs
+// Multi-target coordination - src/model/multi_target.rs
 use vanga::api::{ModelWrapper, Predictor};
 use vanga::config::PredictionConfig;
 use vanga::model::multi_target::MultiTargetLSTMModel;

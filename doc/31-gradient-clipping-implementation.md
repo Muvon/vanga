@@ -32,11 +32,11 @@ Our gradient clipping implementation uses the standard L2 norm approach:
 
 ### Core Components
 
-#### 1. **ClippableGradStore** (`src/model/lstm/gradient_clipper.rs`)
-- Extracts gradients from Candle's read-only GradStore
-- Calculates proper L2 gradient norms
-- Applies gradient scaling when needed
-- Validates gradient flow
+#### 1. **Gradient Clipping Integration** (`src/model/lstm/loss.rs`)
+- Gradient clipping integrated into loss calculation module
+- Calculates proper L2 gradient norms with tensor broadcasting
+- Applies gradient scaling when needed using broadcast_as()
+- Validates gradient flow with contiguous tensor operations
 
 #### 2. **PracticalGradientClipper** (`src/model/lstm/gradient_clipper_practical.rs`)
 - Works within Candle framework constraints

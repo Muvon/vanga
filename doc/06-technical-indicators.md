@@ -4,13 +4,15 @@
 
 VANGA includes a comprehensive technical indicators engine with 50+ professionally implemented indicators using **parallel processing** and **cryptocurrency-specific optimizations**. The system integrates professional technical analysis calculations with custom crypto market features.
 
-**Status**: ✅ **Complete Implementation** - All indicators functional with parallel processing and comprehensive testing
+**Status**: ✅ **Complete Implementation** - All indicators functional with parallel processing and comprehensive testing (`src/features/technical.rs`, `src/features/cross_asset.rs`, `src/features/engineering.rs`)
 
 ## 🆕 **Current Architecture**
 
 ### **Professional Technical Analysis Engine**
 ```rust
 // Implemented in src/features/technical.rs with parallel processing
+// Cross-asset features in src/features/cross_asset.rs
+// Feature engineering pipeline in src/features/engineering.rs
 pub async fn generate_technical_indicators(
     mut df: DataFrame,
     config: &TechnicalIndicatorsConfig,
