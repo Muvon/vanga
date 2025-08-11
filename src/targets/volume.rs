@@ -40,7 +40,6 @@
 //! - Adjusts to volume volatility and market conditions
 //! - Uses same pattern as volatility target for consistency
 
-use crate::config::model::TargetsConfig;
 use crate::targets::adaptive_parameters::VolumeAdaptiveParams;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
@@ -90,24 +89,6 @@ pub struct VolumeDistributionStats {
     pub max: f64,
 }
 
-/// Generate volume targets using TargetsConfig (UNIFIED APPROACH)
-pub fn generate_volume_targets(
-    df: &DataFrame,
-    horizons: &[String],
-    targets_config: &TargetsConfig,
-    sequence_indices: &[usize],
-    sequence_length: usize,
-) -> Result<HashMap<String, Vec<i32>>> {
-    generate_volume_targets_with_adaptive_params(
-        df,
-        horizons,
-        targets_config,
-        sequence_indices,
-        sequence_length,
-        None, // No adaptive parameters - use base config
-    )
-}
-
 /// Generate volume targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
@@ -115,54 +96,31 @@ pub fn generate_volume_targets(
 pub fn generate_volume_targets_with_adaptive_params(
     df: &DataFrame,
     horizons: &[String],
-    targets_config: &TargetsConfig,
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: Option<&VolumeAdaptiveParams>,
+    adaptive_params: &VolumeAdaptiveParams, // Now mandatory
 ) -> Result<HashMap<String, Vec<i32>>> {
     let volume_data = extract_volume_data(df)?;
 
-    // Use adaptive parameters if available, otherwise calibrate
-    let calibrated_bandwidth = if let Some(params) = adaptive_params {
-        log::info!(
-            "🎯 Using pre-calibrated volume parameters: bandwidth={:.4}, extreme_multiplier={:.2}",
-            params.bandwidth_size,
-            params.extreme_multiplier
-        );
-        params.bandwidth_size
-    } else {
-        log::info!("🎯 Calibrating volume sensitivity (no adaptive parameters provided)");
-        // Use first horizon for calibration
-        let first_horizon_steps = parse_horizon_steps(&horizons[0])?;
-        calibrate_volume_sensitivity(
-            &volume_data,
-            sequence_length,
-            first_horizon_steps,
-            targets_config.balance_target,
-        )?
-    };
+    // Use pre-calibrated parameters (always available)
+    log::info!(
+        "🎯 Using calibrated volume parameters: bandwidth={:.4}, extreme_multiplier={:.2}, smoothing={}",
+        adaptive_params.bandwidth_size,
+        adaptive_params.extreme_multiplier,
+        adaptive_params.smoothing_periods
+    );
 
     let config = VolumeConfig {
-        bandwidth_size: calibrated_bandwidth,
-        extreme_multiplier: if let Some(params) = adaptive_params {
-            params.extreme_multiplier
-        } else {
-            targets_config.extreme_multiplier
-        },
-        smoothing_periods: if let Some(params) = adaptive_params {
-            params.smoothing_periods
-        } else {
-            3
-        },
+        bandwidth_size: adaptive_params.bandwidth_size,
+        extreme_multiplier: adaptive_params.extreme_multiplier,
+        smoothing_periods: adaptive_params.smoothing_periods,
     };
 
     log::info!(
-        "🎯 Volume targets using calibrated bandwidth: {:.6} (was base: {:.6})",
-        calibrated_bandwidth,
-        targets_config.base_sensitivity
+        "🎯 Volume targets using calibrated bandwidth: {:.6}",
+        adaptive_params.bandwidth_size
     );
 
-    let volume_data = extract_volume_data(df)?;
     let mut targets = HashMap::new();
 
     // Calculate logarithmic volume thresholds

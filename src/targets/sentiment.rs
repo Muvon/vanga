@@ -40,7 +40,6 @@
 //! - Adjusts to market volatility and sentiment consistency
 //! - No hardcoded thresholds - fully adaptive system
 
-use crate::config::model::TargetsConfig;
 use crate::targets::adaptive_parameters::SentimentAdaptiveParams;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
@@ -86,24 +85,6 @@ impl Default for SentimentConfig {
     }
 }
 
-/// Generate sentiment targets using TargetsConfig (UNIFIED APPROACH)
-pub fn generate_sentiment_targets(
-    df: &DataFrame,
-    horizons: &[String],
-    targets_config: &TargetsConfig,
-    sequence_indices: &[usize],
-    sequence_length: usize,
-) -> Result<HashMap<String, Vec<i32>>> {
-    generate_sentiment_targets_with_adaptive_params(
-        df,
-        horizons,
-        targets_config,
-        sequence_indices,
-        sequence_length,
-        None, // No adaptive parameters - use base config
-    )
-}
-
 /// Generate sentiment targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
@@ -111,51 +92,27 @@ pub fn generate_sentiment_targets(
 pub fn generate_sentiment_targets_with_adaptive_params(
     df: &DataFrame,
     horizons: &[String],
-    targets_config: &TargetsConfig,
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: Option<&SentimentAdaptiveParams>,
+    adaptive_params: &SentimentAdaptiveParams, // Now mandatory
 ) -> Result<HashMap<String, Vec<i32>>> {
-    let ohlcv_data = extract_ohlcv_data(df)?;
-
-    // Use adaptive parameters if available, otherwise calibrate
-    let calibrated_body_sensitivity = if let Some(params) = adaptive_params {
-        log::info!(
-            "🎯 Using pre-calibrated sentiment parameters: body_sensitivity={:.4}, volume_weight={:.4}",
-            params.body_sensitivity,
-            params.volume_weight
-        );
-        params.body_sensitivity
-    } else {
-        log::info!("🎯 Calibrating sentiment sensitivity (no adaptive parameters provided)");
-        // Use first horizon for calibration
-        let first_horizon_steps = parse_horizon_steps(&horizons[0])?;
-        calibrate_sentiment_sensitivity(
-            &ohlcv_data,
-            sequence_length,
-            first_horizon_steps,
-            targets_config.balance_target,
-        )?
-    };
+    // Use pre-calibrated parameters (always available)
+    log::info!(
+        "🎯 Using calibrated sentiment parameters: body_sensitivity={:.6}, volume_weight={:.3}, consistency_factor={:.3}",
+        adaptive_params.body_sensitivity,
+        adaptive_params.volume_weight,
+        adaptive_params.consistency_factor
+    );
 
     let config = SentimentConfig {
-        body_sensitivity: calibrated_body_sensitivity,
-        volume_weight: if let Some(params) = adaptive_params {
-            params.volume_weight
-        } else {
-            0.3
-        },
-        consistency_factor: if let Some(params) = adaptive_params {
-            params.consistency_factor
-        } else {
-            1.0
-        },
+        body_sensitivity: adaptive_params.body_sensitivity,
+        volume_weight: adaptive_params.volume_weight,
+        consistency_factor: adaptive_params.consistency_factor,
     };
 
     log::info!(
-        "🎯 Sentiment targets using calibrated sensitivity: {:.6} (was base: {:.6})",
-        calibrated_body_sensitivity,
-        targets_config.base_sensitivity
+        "🎯 Sentiment targets using calibrated sensitivity: {:.6}",
+        adaptive_params.body_sensitivity
     );
 
     let ohlcv_data = extract_ohlcv_data(df)?;
@@ -176,13 +133,7 @@ pub fn generate_sentiment_targets_with_adaptive_params(
             let sequence_data = &ohlcv_data[seq_start..seq_end];
             let horizon_data = &ohlcv_data[seq_end..horizon_end];
 
-            match classify_sentiment(
-                sequence_data,
-                horizon_data,
-                targets_config,
-                &config,
-                adaptive_params,
-            ) {
+            match classify_sentiment(sequence_data, horizon_data, &config, adaptive_params) {
                 Ok(class) => horizon_targets.push(class),
                 Err(e) => {
                     log::warn!(
@@ -211,9 +162,8 @@ pub fn generate_sentiment_targets_with_adaptive_params(
 pub fn classify_sentiment(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
-    targets_config: &TargetsConfig,
     config: &SentimentConfig,
-    adaptive_params: Option<&SentimentAdaptiveParams>,
+    adaptive_params: &SentimentAdaptiveParams,
 ) -> Result<i32> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
         return Err(VangaError::DataError(
@@ -222,23 +172,15 @@ pub fn classify_sentiment(
     }
 
     // Calculate sentiment metrics for both sequence and horizon using adaptive weighting
-    let sequence_sentiment = if let Some(params) = adaptive_params {
-        calculate_sequence_sentiment_score_with_weighting(
-            sequence_ohlcv,
-            params.horizon_decay_factor,
-        )
-    } else {
-        calculate_sequence_sentiment_score(sequence_ohlcv) // Fallback to uniform weighting
-    };
+    let sequence_sentiment = calculate_sequence_sentiment_score_with_weighting(
+        sequence_ohlcv,
+        adaptive_params.horizon_decay_factor,
+    );
 
-    let horizon_sentiment = if let Some(params) = adaptive_params {
-        calculate_sequence_sentiment_score_with_weighting(
-            horizon_ohlcv,
-            params.horizon_decay_factor,
-        )
-    } else {
-        calculate_sequence_sentiment_score(horizon_ohlcv) // Fallback to uniform weighting
-    };
+    let horizon_sentiment = calculate_sequence_sentiment_score_with_weighting(
+        horizon_ohlcv,
+        adaptive_params.horizon_decay_factor,
+    );
 
     // Calculate sentiment momentum shift (horizon vs sequence baseline)
     // This now represents the change in bullish/bearish balance
@@ -249,7 +191,7 @@ pub fn classify_sentiment(
 
     // Use calibrated sensitivity scaled appropriately for momentum range
     let base_threshold = config.body_sensitivity;
-    let extreme_multiplier = targets_config.extreme_multiplier;
+    let extreme_multiplier = adaptive_params.extreme_multiplier;
 
     // Create balanced thresholds for momentum shifts
     // These thresholds are designed for the [-2, 2] momentum shift range

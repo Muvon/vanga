@@ -136,7 +136,7 @@ impl Backtester {
         })?;
 
         let actual_targets = match target_generator
-            .generate_all_targets(&test_df, None, &sequence_indices, sequence_length)
+            .generate_all_targets(&test_df, &sequence_indices, sequence_length)
             .await
         {
             Ok(targets) => targets,

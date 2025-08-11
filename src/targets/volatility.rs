@@ -110,62 +110,6 @@ use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Generate volatility targets for multiple horizons using logarithmic ratio approach
-///
-/// This is the main function that generates volatility regime classifications for
-/// cryptocurrency market data using ATR-based logarithmic ratio analysis.
-///
-/// ## Algorithm
-/// 1. **Extract OHLCV Data**: Get Open, High, Low, Close, Volume from DataFrame
-/// 2. **For Each Sequence Position**:
-///    - Calculate `train_atr`: ATR from input sequence (baseline volatility)
-///    - Calculate `target_atr`: ATR from horizon period (volatility to classify)
-///    - Compute `log_ratio = ln(target_atr / train_atr)` for symmetric classification
-///    - Apply bandwidth_size-based thresholds to classify volatility regime
-///
-/// ## Parameters
-/// - `df`: Market data DataFrame with OHLCV columns
-/// - `horizons`: Prediction horizons (e.g., ["1h", "4h", "1d"])
-/// - `model_config`: Optional VolatilityHead configuration
-/// - `sequence_indices`: Starting indices for each sequence
-/// - `sequence_length`: Length of input sequences for ATR calculation
-///
-/// ## Returns
-/// HashMap mapping horizon strings to vectors of volatility class integers:
-/// - 0: VeryLow (extreme volatility decrease)
-/// - 1: Low (moderate volatility decrease)
-/// - 2: Medium (similar volatility)
-/// - 3: High (moderate volatility increase)
-/// - 4: VeryHigh (extreme volatility increase)
-///
-/// ## Configuration
-/// Uses `bandwidth_size` from model_config to control regime sensitivity:
-/// - Default: 0.4 (balanced regime detection)
-/// - Lower values: More sensitive to volatility changes
-/// - Higher values: Less sensitive, only major regime shifts
-///
-/// ## Mathematical Foundation
-/// The logarithmic approach ensures symmetric treatment of volatility ratios:
-/// - 2x volatility increase: ln(2.0) = +0.693
-/// - 0.5x volatility decrease: ln(0.5) = -0.693 (perfectly symmetric)
-///   This prevents bias toward volatility increases in linear space.
-pub fn generate_volatility_targets(
-    df: &DataFrame,
-    horizons: &[String],
-    targets_config: &TargetsConfig, // Use new unified config
-    sequence_indices: &[usize],
-    sequence_length: usize,
-) -> Result<HashMap<String, Vec<i32>>> {
-    generate_volatility_targets_with_adaptive_params(
-        df,
-        horizons,
-        targets_config,
-        sequence_indices,
-        sequence_length,
-        None, // No adaptive parameters - use calibration
-    )
-}
-
 /// Generate volatility targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
@@ -173,38 +117,21 @@ pub fn generate_volatility_targets(
 pub fn generate_volatility_targets_with_adaptive_params(
     df: &DataFrame,
     horizons: &[String],
-    targets_config: &TargetsConfig,
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: Option<&crate::targets::adaptive_parameters::VolatilityAdaptiveParams>,
+    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
 
-    // Use adaptive parameters if available, otherwise calibrate
-    let calibrated_bandwidth = if let Some(params) = adaptive_params {
-        log::info!(
-            "🎯 Using pre-calibrated volatility bandwidth: {:.6}",
-            params.bandwidth_size
-        );
-        params.bandwidth_size
-    } else {
-        log::info!("🎯 Calibrating volatility bandwidth (no adaptive parameters provided)");
-        // Auto-calibrate bandwidth using unified config
-        let first_horizon_steps = parse_horizon_to_steps(&horizons[0])?;
-        calibrate_volatility_bandwidth(
-            &ohlcv_data,
-            sequence_length,
-            first_horizon_steps,
-            targets_config.balance_target,
-        )?
-    };
+    // Use pre-calibrated adaptive parameters
+    let calibrated_bandwidth = adaptive_params.bandwidth_size;
+    log::info!(
+        "🎯 Using pre-calibrated volatility bandwidth: {:.6}",
+        calibrated_bandwidth
+    );
 
-    let extreme_multiplier = if let Some(params) = adaptive_params {
-        params.extreme_multiplier
-    } else {
-        targets_config.extreme_multiplier
-    };
+    let extreme_multiplier = adaptive_params.extreme_multiplier;
 
     log::info!(
         "🎯 Volatility targets using bandwidth: {:.6}, extreme_multiplier: {:.2}",
@@ -233,8 +160,8 @@ pub fn generate_volatility_targets_with_adaptive_params(
                     // Create adaptive config with calibrated bandwidth and extreme multiplier
                     let adaptive_targets_config = TargetsConfig {
                         base_sensitivity: calibrated_bandwidth,
-                        balance_target: targets_config.balance_target,
-                        momentum_weighting: targets_config.momentum_weighting,
+                        balance_target: 0.2,
+                        momentum_weighting: 1.0, // Use fixed momentum weighting
                         extreme_multiplier,
                     };
 
@@ -690,7 +617,7 @@ pub fn classify_volatility_with_distribution_analysis(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
     targets_config: &TargetsConfig,
-    adaptive_params: Option<&crate::targets::adaptive_parameters::VolatilityAdaptiveParams>,
+    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
 ) -> Result<i32> {
     if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
         return Ok(2); // Default to Medium for insufficient data
@@ -705,19 +632,13 @@ pub fn classify_volatility_with_distribution_analysis(
     let sequence_atr_stats = calculate_atr_distribution_stats(&atr_series);
     let baseline_atr = sequence_atr_stats.mean;
 
-    // Step 3: Calculate horizon ATR with calibrated weighting (if available)
-    let horizon_atr = if let Some(params) = adaptive_params {
-        // Use calibrated horizon decay factor for weighted ATR calculation
-        if (params.horizon_decay_factor - 1.0).abs() < f64::EPSILON {
-            // Uniform weighting (decay_factor = 1.0)
-            get_sequence_atr_baseline(horizon_candles)?
-        } else {
-            // Weighted calculation with calibrated decay factor
-            get_horizon_weighted_atr_baseline(horizon_candles, params.horizon_decay_factor)?
-        }
-    } else {
-        // Fallback to uniform weighting when no adaptive parameters available
+    // Step 3: Calculate horizon ATR with calibrated weighting
+    let horizon_atr = if (adaptive_params.horizon_decay_factor - 1.0).abs() < f64::EPSILON {
+        // Uniform weighting (decay_factor = 1.0)
         get_sequence_atr_baseline(horizon_candles)?
+    } else {
+        // Weighted calculation with calibrated decay factor
+        get_horizon_weighted_atr_baseline(horizon_candles, adaptive_params.horizon_decay_factor)?
     };
 
     // Step 4: Calculate adaptive thresholds using calibrated sensitivity
@@ -727,9 +648,7 @@ pub fn classify_volatility_with_distribution_analysis(
     let volatility_class =
         classify_volatility_log_ratio(baseline_atr, horizon_atr, &log_thresholds);
 
-    let decay_factor = adaptive_params
-        .map(|p| p.horizon_decay_factor)
-        .unwrap_or(1.0);
+    let decay_factor = adaptive_params.horizon_decay_factor;
 
     log::debug!(
         "🎯 Volatility Distribution Analysis: seq_atr={:.6}, hor_atr={:.6}, proportional_window={}, decay_factor={:.3}, calibrated_sensitivity={:.4}, class={}",
