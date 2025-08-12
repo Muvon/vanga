@@ -65,7 +65,6 @@ pub use api::trainer::train_model;
 // 4. Prediction with structured JSON output
 #[cfg(test)]
 mod integration_tests {
-    use crate::config::model::TargetsConfig;
     use crate::config::ModelConfig;
     use crate::data::TargetConverter;
     use crate::output::MultiTargetParser;
@@ -75,18 +74,13 @@ mod integration_tests {
     #[test]
     fn test_model_config_creation() {
         let config = create_test_model_config();
-        // Test the new TargetsConfig system
-        assert_eq!(config.targets.base_sensitivity, 0.02);
-        assert_eq!(config.targets.balance_target, 0.2);
-        assert_eq!(config.targets.momentum_weighting, 1.2);
-        assert_eq!(config.targets.extreme_multiplier, 2.0);
+        // Test the model config creation (targets config moved to training config)
+        assert!(config.attention.enabled);
+        assert_eq!(config.attention.heads, 8);
     }
 
     fn create_test_model_config() -> ModelConfig {
-        ModelConfig {
-            targets: TargetsConfig::default(),
-            ..Default::default()
-        }
+        ModelConfig::default()
     }
 
     fn create_test_targets() -> PreparedTargets {
