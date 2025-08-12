@@ -736,16 +736,60 @@ impl LSTMModel {
         let batch_size = self.training_config.batch_size;
 
         log::info!(
-            "🎯 Using {} train samples{}, batch_size={}, optimizer={:?}",
+            "🎯 Dataset: {} train samples{}, batch_size={}",
             total_train_samples,
             if use_validation {
                 format!(", {} val samples", total_val_samples)
             } else {
                 String::new()
             },
-            batch_size,
-            config.training.optimizer
+            batch_size
         );
+
+        // Calculate and log samples that will actually be used (complete batches only)
+        let num_complete_train_batches = total_train_samples / batch_size;
+        let train_samples_used = num_complete_train_batches * batch_size;
+        let train_samples_dropped = total_train_samples - train_samples_used;
+
+        if train_samples_dropped > 0 {
+            log::info!(
+                "📊 Training: Using {} samples ({} complete batches), dropping {} incomplete samples ({:.1}%)",
+                train_samples_used,
+                num_complete_train_batches,
+                train_samples_dropped,
+                (train_samples_dropped as f64 / total_train_samples as f64) * 100.0
+            );
+        } else {
+            log::info!(
+                "📊 Training: Using all {} samples ({} complete batches)",
+                train_samples_used,
+                num_complete_train_batches
+            );
+        }
+
+        if use_validation {
+            let num_complete_val_batches = total_val_samples / batch_size;
+            let val_samples_used = num_complete_val_batches * batch_size;
+            let val_samples_dropped = total_val_samples - val_samples_used;
+
+            if val_samples_dropped > 0 {
+                log::info!(
+                    "📊 Validation: Using {} samples ({} complete batches), dropping {} incomplete samples ({:.1}%)",
+                    val_samples_used,
+                    num_complete_val_batches,
+                    val_samples_dropped,
+                    (val_samples_dropped as f64 / total_val_samples as f64) * 100.0
+                );
+            } else {
+                log::info!(
+                    "📊 Validation: Using all {} samples ({} complete batches)",
+                    val_samples_used,
+                    num_complete_val_batches
+                );
+            }
+        }
+
+        log::info!("🔧 Optimizer: {:?}", config.training.optimizer);
 
         // Memory prevalidation and warnings
         self.validate_batch_configuration(total_train_samples, batch_size)?;
@@ -914,11 +958,16 @@ impl LSTMModel {
                 }
             }
 
-            // Training phase - process data in shuffled batches
-            for (batch_idx, batch_start) in (0..total_train_samples).step_by(batch_size).enumerate()
+            // Training phase - process data in shuffled batches (drop incomplete batches for stability)
+            let num_complete_batches = total_train_samples / batch_size;
+            let samples_used_for_training = num_complete_batches * batch_size;
+
+            for (batch_idx, batch_start) in (0..samples_used_for_training)
+                .step_by(batch_size)
+                .enumerate()
             {
-                let batch_end = std::cmp::min(batch_start + batch_size, total_train_samples);
-                let actual_batch_size = batch_end - batch_start;
+                let batch_end = batch_start + batch_size; // Always complete batch
+                let actual_batch_size = batch_size; // Always full batch size
 
                 // Extract shuffled batch indices
                 let batch_indices = &sample_indices[batch_start..batch_end];
@@ -1024,8 +1073,8 @@ impl LSTMModel {
                 epoch_train_loss += batch_loss * actual_batch_size as f32;
             }
 
-            // Calculate average training loss and gradient norm
-            let avg_train_loss = epoch_train_loss / total_train_samples as f32;
+            // Calculate average training loss and gradient norm (using only complete batches)
+            let avg_train_loss = epoch_train_loss / samples_used_for_training as f32;
             let avg_grad_norm = if batch_count > 0 {
                 epoch_grad_norm / batch_count as f64
             } else {
@@ -1069,10 +1118,15 @@ impl LSTMModel {
                 (&val_sequences_final, &val_targets_final)
             {
                 let mut epoch_val_loss = 0.0;
+                let total_val_samples = val_seq.shape()[0];
 
-                for batch_start in (0..total_val_samples).step_by(batch_size) {
-                    let batch_end = std::cmp::min(batch_start + batch_size, total_val_samples);
-                    let actual_batch_size = batch_end - batch_start;
+                // Drop incomplete batches for validation consistency
+                let num_complete_val_batches = total_val_samples / batch_size;
+                let val_samples_used = num_complete_val_batches * batch_size;
+
+                for batch_start in (0..val_samples_used).step_by(batch_size) {
+                    let batch_end = batch_start + batch_size; // Always complete batch
+                    let actual_batch_size = batch_size; // Always full batch size
 
                     // Extract validation batch
                     let batch_sequences = val_seq
@@ -1115,12 +1169,12 @@ impl LSTMModel {
                     epoch_val_loss += val_batch_loss * actual_batch_size as f32;
                 }
 
-                let avg_val_loss = epoch_val_loss / total_val_samples as f32;
+                let avg_val_loss = epoch_val_loss / val_samples_used as f32;
 
                 // 🔍 EPOCH VALIDATION SUMMARY DEBUG
                 log::debug!(
-                    "🔍 VAL E{} SUMMARY: total_weighted_loss={:.6}, total_samples={}, avg_loss={:.6}",
-                    epoch + 1, epoch_val_loss, total_val_samples, avg_val_loss
+                    "🔍 VAL E{} SUMMARY: total_weighted_loss={:.6}, samples_used={}, avg_loss={:.6}",
+                    epoch + 1, epoch_val_loss, val_samples_used, avg_val_loss
                 );
 
                 // Calculate categorical metrics for all categorical targets

@@ -182,7 +182,8 @@ impl LSTMModel {
                 let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
 
                 // Concatenate forward and backward outputs for next layer
-                current_input = Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
+                current_input =
+                    Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
                 // Apply dropout if needed
                 let should_apply_dropout = if let Some(dropout_config) = &self.dropout_config {
@@ -193,10 +194,7 @@ impl LSTMModel {
 
                 if should_apply_dropout {
                     current_input = self.apply_dropout(&current_input)?;
-                    log::debug!(
-                        "🔧 Applied LSTM layer dropout (layer: {})",
-                        layer_idx
-                    );
+                    log::debug!("🔧 Applied LSTM layer dropout (layer: {})", layer_idx);
                 }
 
                 log::debug!(
