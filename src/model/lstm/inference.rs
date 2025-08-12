@@ -193,8 +193,12 @@ impl LSTMModel {
                 };
 
                 if should_apply_dropout {
-                    current_input = self.apply_dropout(&current_input)?;
-                    log::debug!("🔧 Applied LSTM layer dropout (layer: {})", layer_idx);
+                    current_input = self.apply_dropout(&current_input, training)?;
+                    log::debug!(
+                        "🔧 Applied LSTM layer dropout (layer: {}, training: {})",
+                        layer_idx,
+                        training
+                    );
                 }
 
                 log::debug!(
@@ -239,8 +243,12 @@ impl LSTMModel {
                     .unwrap_or(false);
 
                 if should_apply_dropout && i < forward_lstm_layers.len() - 1 {
-                    current_output = self.apply_dropout(&current_output)?;
-                    log::debug!("🔧 Applied LSTM layer dropout (layer: {}) [CONSISTENT]", i);
+                    current_output = self.apply_dropout(&current_output, training)?;
+                    log::debug!(
+                        "🔧 Applied LSTM layer dropout (layer: {}, training: {})",
+                        i,
+                        training
+                    );
                 }
 
                 // Track dropout behavior in metrics collector if available
@@ -567,15 +575,21 @@ impl LSTMModel {
             .map_err(|e| VangaError::ModelError(format!("Failed to create Array2: {}", e)))
     }
 
-    /// Apply consistent dropout with proper rate calculation based on configuration
-    fn apply_dropout(&self, tensor: &Tensor) -> Result<Tensor> {
+    /// Apply dropout with proper training/validation distinction
+    /// CRITICAL FIX: Pass training flag through to ensure dropout is ONLY applied during training
+    fn apply_dropout(&self, tensor: &Tensor, training: bool) -> Result<Tensor> {
         let dropout_config = self
             .dropout_config
             .as_ref()
             .ok_or_else(|| VangaError::ModelError("Dropout configuration not set".to_string()))?;
 
-        // Only apply dropout if enabled
-        if !dropout_config.enabled {
+        // CRITICAL FIX: Only apply dropout if enabled AND in training mode
+        if !dropout_config.enabled || !training {
+            log::trace!(
+                "🔧 Dropout skipped - enabled: {}, training: {}",
+                dropout_config.enabled,
+                training
+            );
             return Ok(tensor.clone());
         }
 
@@ -592,17 +606,18 @@ impl LSTMModel {
             }
         };
 
-        // Apply dropout using deterministic seeded dropout - CONSISTENT behavior
+        // FIXED: Pass the actual training flag instead of hardcoded true
         let dropped_tensor = SeededTensorUtils::deterministic_dropout(
             tensor,
             dropout_rate as f32,
-            true, // Always training mode when this function is called
+            training, // FIX: Use the actual training flag passed to this function
         )?;
 
         log::debug!(
-            "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [CONSISTENT]",
+            "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [training={}]",
             dropout_rate,
-            tensor.shape()
+            tensor.shape(),
+            training
         );
 
         Ok(dropped_tensor)
