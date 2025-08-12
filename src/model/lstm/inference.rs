@@ -193,10 +193,6 @@ impl LSTMModel {
                 }
                 let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
 
-                // Concatenate forward and backward outputs along the feature dimension
-                // forward_output: [batch_size, seq_len, hidden_size]
-                // backward_output: [batch_size, seq_len, hidden_size]
-                // Result: [batch_size, seq_len, 2*hidden_size]
                 current_input =
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
@@ -209,10 +205,7 @@ impl LSTMModel {
 
                 if should_apply_dropout && layer_idx < forward_lstm_layers.len() - 1 {
                     current_input = self.apply_dropout(&current_input)?;
-                    log::debug!(
-                        "🔧 Applied LSTM layer dropout (layer: {}) [CONSISTENT]",
-                        layer_idx
-                    );
+                    log::debug!("🔧 Applied LSTM layer dropout (layer: {})", layer_idx);
                 }
 
                 // Track dropout behavior in metrics collector if available
