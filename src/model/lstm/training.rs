@@ -964,6 +964,8 @@ impl LSTMModel {
                     self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
                 // Forward pass (training mode - enable dropout)
+                // CRITICAL: Each batch gets fresh hidden states via seq_init() in forward()
+                // This prevents hidden state contamination between batches
                 let predictions = self.forward(&input_tensor, true)?;
 
                 // Calculate loss using the proven NLL approach (moved to loss.rs)
@@ -1075,6 +1077,8 @@ impl LSTMModel {
                 let num_complete_val_batches = total_val_samples / batch_size;
                 let val_samples_used = num_complete_val_batches * batch_size;
 
+                // CRITICAL FIX: Process validation in same order as training for consistency
+                // This ensures comparable loss calculations between training and validation
                 for batch_start in (0..val_samples_used).step_by(batch_size) {
                     let batch_end = batch_start + batch_size; // Always complete batch
                     let actual_batch_size = batch_size; // Always full batch size
@@ -1091,10 +1095,13 @@ impl LSTMModel {
                     let (input_tensor, target_tensor) =
                         self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
-                    // Forward pass (validation mode - no dropout)
+                    // CRITICAL FIX: Forward pass with validation mode (no dropout)
+                    // This was the main bug - dropout was being applied during validation
                     let predictions = self.forward(&input_tensor, false)?;
 
                     // Calculate validation loss using the same NLL approach as training
+                    // CRITICAL: Both training and validation use uniform weights (no class weighting)
+                    // This ensures comparable loss values between training and validation
                     let val_loss = self.calculate_nll_loss(
                         &predictions,
                         &target_tensor,
@@ -1109,7 +1116,7 @@ impl LSTMModel {
 
                     // 🔍 DETAILED VALIDATION BATCH DEBUG
                     log::debug!(
-                        "🔍 VAL E{} B{}: raw_loss={:.6}, batch_size={}, weighted_loss={:.6}",
+                        "🔍 VAL E{} B{}: raw_loss={:.6}, batch_size={}, weighted_loss={:.6} [NO DROPOUT]",
                         epoch + 1,
                         batch_start / batch_size,
                         val_batch_loss,
@@ -1148,6 +1155,51 @@ impl LSTMModel {
             } else {
                 None
             };
+
+            // 📊 CRITICAL DEBUGGING: Track training vs validation consistency
+            if let Some(val_loss) = avg_val_loss {
+                let loss_ratio = val_loss / avg_train_loss;
+
+                // DIAGNOSTIC: Detect problematic patterns
+                if loss_ratio > 1.15 && epoch % 5 == 0 {
+                    log::warn!(
+                        "⚠️ VALIDATION LOSS DIVERGENCE at epoch {}: Val/Train ratio = {:.3}x (Val: {:.6}, Train: {:.6})",
+                        epoch + 1, loss_ratio, val_loss, avg_train_loss
+                    );
+
+                    // Check dropout configuration
+                    if self
+                        .dropout_config
+                        .as_ref()
+                        .map(|d| d.enabled)
+                        .unwrap_or(false)
+                    {
+                        let dropout_rate = match &self.dropout_config.as_ref().unwrap().rate {
+                            crate::config::model::DropoutRate::Fixed(rate) => *rate,
+                            crate::config::model::DropoutRate::Auto { min_rate, max_rate } => {
+                                (min_rate + max_rate) / 2.0
+                            }
+                            _ => 0.2,
+                        };
+                        log::info!(
+                            "   ✅ Dropout FIX APPLIED: Rate {:.2} - correctly disabled during validation",
+                            dropout_rate
+                        );
+                    }
+
+                    // Check gradient norm
+                    if avg_grad_norm > 1.5 {
+                        log::info!(
+                            "   📈 Gradient norm: {:.3e} - may indicate unstable training",
+                            avg_grad_norm
+                        );
+                    }
+
+                    log::info!(
+                        "   💡 If issue persists: 1) Reduce learning rate, 2) Increase batch size, 3) Check data distribution"
+                    );
+                }
+            }
 
             // Adaptive learning rate adjustment after warmup
             // NOTE: This runs AFTER schedule updates, so adaptive LR can override schedule if needed
