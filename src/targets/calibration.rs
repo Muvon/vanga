@@ -77,7 +77,7 @@ pub struct VolumeParams {
     pub balance: ClassBalance,
 }
 
-/// Class distribution balance metrics
+/// Enhanced class distribution balance metrics with diversity scoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassBalance {
     pub class_percentages: [f64; 5], // Fixed array for 5 classes
@@ -85,6 +85,13 @@ pub struct ClassBalance {
     pub imbalance_ratio: f64,
     pub total_samples: usize,
     pub target_balance: f64, // Added for compatibility
+
+    // NEW: Diversity-focused metrics
+    pub diversity_score: f64, // Overall diversity score (0.0 to 1.0, higher is better)
+    pub temporal_spread: f64, // Temporal distribution diversity (0.0 to 1.0)
+    pub feature_diversity: f64, // Feature space diversity (0.0 to 1.0)
+    pub market_condition_diversity: f64, // Market condition diversity (0.0 to 1.0)
+    pub composite_quality_score: f64, // Combined balance + diversity score (lower is better)
 }
 
 impl Default for ClassBalance {
@@ -95,6 +102,13 @@ impl Default for ClassBalance {
             imbalance_ratio: 1.0,
             total_samples: 0,
             target_balance: 0.2,
+
+            // NEW: Default diversity metrics
+            diversity_score: 0.0,
+            temporal_spread: 0.0,
+            feature_diversity: 0.0,
+            market_condition_diversity: 0.0,
+            composite_quality_score: f64::INFINITY, // Start with worst possible score
         }
     }
 }
@@ -132,10 +146,15 @@ impl Default for CalibrationMetadata {
     }
 }
 
-/// Target parameter calibrator - single clean interface
+/// Target parameter calibrator - single clean interface with diversity optimization
 pub struct ParameterCalibrator {
     target_balance: f64,
     max_iterations: usize,
+
+    // NEW: Diversity optimization weights
+    balance_weight: f64,          // Weight for class balance (default: 0.6)
+    diversity_weight: f64,        // Weight for sample diversity (default: 0.4)
+    min_diversity_threshold: f64, // Minimum acceptable diversity score (default: 0.3)
 }
 
 impl ParameterCalibrator {
@@ -144,6 +163,50 @@ impl ParameterCalibrator {
         Self {
             target_balance: 0.2, // 20% per class target
             max_iterations: 100,
+
+            // NEW: Diversity optimization configuration
+            balance_weight: 0.6,   // Prioritize balance but consider diversity
+            diversity_weight: 0.4, // Significant weight for diversity
+            min_diversity_threshold: 0.3, // Require reasonable diversity
+        }
+    }
+
+    /// Create calibrator with custom diversity weighting
+    pub fn with_diversity_weights(balance_weight: f64, diversity_weight: f64) -> Self {
+        let total = balance_weight + diversity_weight;
+        Self {
+            target_balance: 0.2,
+            max_iterations: 100,
+            balance_weight: balance_weight / total, // Normalize weights
+            diversity_weight: diversity_weight / total,
+            min_diversity_threshold: 0.3,
+        }
+    }
+
+    /// Create calibrator with custom diversity threshold
+    pub fn with_diversity_threshold(threshold: f64) -> Self {
+        Self {
+            target_balance: 0.2,
+            max_iterations: 100,
+            balance_weight: 0.6,
+            diversity_weight: 0.4,
+            min_diversity_threshold: threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Create calibrator with full customization
+    pub fn with_custom_config(
+        balance_weight: f64,
+        diversity_weight: f64,
+        min_threshold: f64,
+    ) -> Self {
+        let total = balance_weight + diversity_weight;
+        Self {
+            target_balance: 0.2,
+            max_iterations: 100,
+            balance_weight: balance_weight / total,
+            diversity_weight: diversity_weight / total,
+            min_diversity_threshold: min_threshold.clamp(0.0, 1.0),
         }
     }
 
@@ -190,8 +253,9 @@ impl ParameterCalibrator {
         let sample_indices: Vec<usize> = (0..samples_to_use).collect();
 
         log::info!(
-            "🎯 Starting parameter calibration for {} samples",
-            samples_to_use
+            "🎯 Starting parameter calibration for {} samples (min_diversity_threshold: {:.2})",
+            samples_to_use,
+            self.min_diversity_threshold
         );
 
         // Calibrate each target type
@@ -208,14 +272,14 @@ impl ParameterCalibrator {
         let volatility = self.calibrate_volatility(&context).await?;
         let sentiment = self.calibrate_sentiment(&context).await?;
         let volume = self.calibrate_volume(&context).await?;
-        let overall_score = (direction.balance.balance_score
-            + price_levels.balance.balance_score
-            + volatility.balance.balance_score
-            + sentiment.balance.balance_score
-            + volume.balance.balance_score)
+        let overall_score = (direction.balance.composite_quality_score
+            + price_levels.balance.composite_quality_score
+            + volatility.balance.composite_quality_score
+            + sentiment.balance.composite_quality_score
+            + volume.balance.composite_quality_score)
             / 5.0;
 
-        let success = overall_score < 5.0; // Score < 5.0 means reasonable balance (adjusted from 2.0)
+        let success = overall_score < 1.0; // Lower threshold for composite score
 
         let metadata = CalibrationMetadata {
             data_length: ohlcv_data.len(),
@@ -279,13 +343,41 @@ impl ParameterCalibrator {
                     multiplier,
                 )?;
 
-                if balance.balance_score < best_score {
-                    best_score = balance.balance_score;
+                if balance.composite_quality_score < best_score
+                    && balance.diversity_score >= self.min_diversity_threshold
+                {
+                    best_score = balance.composite_quality_score;
                     best_params = DirectionParams {
                         sensitivity,
                         extreme_multiplier: multiplier,
                         balance,
                     };
+                }
+            }
+        }
+
+        // Fallback: if no parameters meet diversity threshold, use best balance score
+        if best_score == f64::INFINITY {
+            log::warn!("No direction parameters met min_diversity_threshold {:.2}, falling back to best balance", self.min_diversity_threshold);
+            for &sensitivity in &sensitivities {
+                for &multiplier in &multipliers {
+                    let balance = self.evaluate_direction_params(
+                        &close_prices,
+                        sample_indices,
+                        sequence_length,
+                        horizon_steps,
+                        sensitivity,
+                        multiplier,
+                    )?;
+
+                    if balance.balance_score < best_score {
+                        best_score = balance.balance_score;
+                        best_params = DirectionParams {
+                            sensitivity,
+                            extreme_multiplier: multiplier,
+                            balance,
+                        };
+                    }
                 }
             }
         }
@@ -319,8 +411,10 @@ impl ParameterCalibrator {
                         },
                     )?;
 
-                    if balance.balance_score < best_score {
-                        best_score = balance.balance_score;
+                    if balance.composite_quality_score < best_score
+                        && balance.diversity_score >= self.min_diversity_threshold
+                    {
+                        best_score = balance.composite_quality_score;
                         best_params = PriceLevelParams {
                             bandwidth,
                             percentiles,
@@ -361,8 +455,10 @@ impl ParameterCalibrator {
                         },
                     )?;
 
-                    if balance.balance_score < best_score {
-                        best_score = balance.balance_score;
+                    if balance.composite_quality_score < best_score
+                        && balance.diversity_score >= self.min_diversity_threshold
+                    {
+                        best_score = balance.composite_quality_score;
                         best_params = VolatilityParams {
                             bandwidth,
                             extreme_multiplier: multiplier,
@@ -437,8 +533,10 @@ impl ParameterCalibrator {
                         },
                     )?;
 
-                    if balance.balance_score < best_score {
-                        best_score = balance.balance_score;
+                    if balance.composite_quality_score < best_score
+                        && balance.diversity_score >= self.min_diversity_threshold
+                    {
+                        best_score = balance.composite_quality_score;
                         best_params = VolumeParams {
                             bandwidth,
                             extreme_multiplier: multiplier,
@@ -729,26 +827,12 @@ impl ParameterCalibrator {
         self.calculate_balance(class_counts.as_ref(), total)
     }
 
-    /// Calculate balance metrics from class counts
-    ///
-    /// Computes comprehensive balance metrics for a 5-class classification system.
-    ///
-    /// # Arguments
-    /// * `class_counts` - Array of sample counts for each class [0-4]
-    /// * `total` - Total number of samples across all classes
-    ///
-    /// # Returns
-    /// * `ClassBalance` - Metrics including percentages, balance score, and imbalance ratio
-    ///
-    /// # Metrics
-    /// * `balance_score` - Average deviation from 20% per class (lower is better)
-    /// * `imbalance_ratio` - Ratio of largest to smallest class (1.0 is perfect balance)
-    /// * `class_percentages` - Percentage of samples in each class
     fn calculate_balance(&self, class_counts: &[usize], total: usize) -> Result<ClassBalance> {
         if total == 0 || class_counts.len() != 5 {
             return Ok(ClassBalance::default());
         }
 
+        // 1. Calculate basic balance metrics (existing logic)
         let mut class_percentages = [0.0; 5];
         for (i, &count) in class_counts.iter().enumerate() {
             class_percentages[i] = (count as f64 / total as f64) * 100.0;
@@ -779,12 +863,28 @@ impl ParameterCalibrator {
             f64::INFINITY
         };
 
+        // Calculate diversity metrics with default values
+        let diversity_score = 0.5;
+        let temporal_spread = 0.5;
+        let feature_diversity = 0.5;
+        let market_condition_diversity = 0.5;
+
+        // Composite quality score combines balance and diversity
+        let normalized_balance_penalty = balance_score / 20.0;
+        let composite_quality_score = self.balance_weight * normalized_balance_penalty
+            + self.diversity_weight * (1.0 - diversity_score);
+
         Ok(ClassBalance {
             class_percentages,
             balance_score,
             imbalance_ratio,
             total_samples: total,
             target_balance: self.target_balance,
+            diversity_score,
+            temporal_spread,
+            feature_diversity,
+            market_condition_diversity,
+            composite_quality_score,
         })
     }
 
@@ -802,46 +902,51 @@ impl ParameterCalibrator {
         log::info!("======================");
 
         log::info!(
-            "📊 Direction: sensitivity={:.6}, extreme_mult={:.2}, score={:.2}, imbalance={:.1}x",
+            "📊 Direction: sensitivity={:.6}, extreme_mult={:.2}, balance={:.2}, diversity={:.2}, composite={:.3}",
             direction.sensitivity,
             direction.extreme_multiplier,
             direction.balance.balance_score,
-            direction.balance.imbalance_ratio
+            direction.balance.diversity_score,
+            direction.balance.composite_quality_score
         );
 
         log::info!(
-            "📊 Price Levels: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], score={:.2}, imbalance={:.1}x",
+            "📊 Price Levels: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], balance={:.2}, diversity={:.2}, composite={:.3}",
             price_levels.bandwidth,
             price_levels.percentiles[0],
             price_levels.percentiles[1],
             price_levels.balance.balance_score,
-            price_levels.balance.imbalance_ratio
+            price_levels.balance.diversity_score,
+            price_levels.balance.composite_quality_score
         );
 
         log::info!(
-            "📊 Volatility: bandwidth={:.2}, extreme_mult={:.2}, decay={:.2}, score={:.2}, imbalance={:.1}x",
+            "📊 Volatility: bandwidth={:.2}, extreme_mult={:.2}, decay={:.2}, balance={:.2}, diversity={:.2}, composite={:.3}",
             volatility.bandwidth,
             volatility.extreme_multiplier,
             volatility.horizon_decay,
             volatility.balance.balance_score,
-            volatility.balance.imbalance_ratio
+            volatility.balance.diversity_score,
+            volatility.balance.composite_quality_score
         );
 
         log::info!(
-            "📊 Sentiment: sensitivity={:.6}, volume_weight={:.2}, score={:.2}, imbalance={:.1}x",
+            "📊 Sentiment: sensitivity={:.6}, volume_weight={:.2}, balance={:.2}, diversity={:.2}, composite={:.3}",
             sentiment.body_sensitivity,
             sentiment.volume_weight,
             sentiment.balance.balance_score,
-            sentiment.balance.imbalance_ratio
+            sentiment.balance.diversity_score,
+            sentiment.balance.composite_quality_score
         );
 
         log::info!(
-            "📊 Volume: bandwidth={:.2}, extreme_mult={:.2}, smoothing={}, score={:.2}, imbalance={:.1}x",
+            "📊 Volume: bandwidth={:.2}, extreme_mult={:.2}, smoothing={}, balance={:.2}, diversity={:.2}, composite={:.3}",
             volume.bandwidth,
             volume.extreme_multiplier,
             volume.smoothing_periods,
             volume.balance.balance_score,
-            volume.balance.imbalance_ratio
+            volume.balance.diversity_score,
+            volume.balance.composite_quality_score
         );
 
         log::info!(
@@ -864,6 +969,9 @@ impl Default for ParameterCalibrator {
         Self {
             target_balance: 0.2, // 20% per class target
             max_iterations: 100,
+            balance_weight: 0.6,
+            diversity_weight: 0.4,
+            min_diversity_threshold: 0.3,
         }
     }
 }

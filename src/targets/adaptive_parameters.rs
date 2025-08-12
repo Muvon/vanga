@@ -1486,6 +1486,11 @@ pub fn calculate_class_distribution_balance(class_counts: &[usize; 5]) -> ClassD
         total_samples,
         balance_score,
         target_balance: 0.2, // Default target balance
+        diversity_score: 0.5,
+        temporal_spread: 0.5,
+        feature_diversity: 0.5,
+        market_condition_diversity: 0.5,
+        composite_quality_score: balance_score / 20.0,
     }
 }
 

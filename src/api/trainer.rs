@@ -436,6 +436,17 @@ impl ModelTrainer {
                     imbalance_ratio: calibrated_params.direction.balance.imbalance_ratio,
                     total_samples: calibrated_params.direction.balance.total_samples,
                     target_balance: calibrated_params.direction.balance.target_balance,
+                    diversity_score: calibrated_params.direction.balance.diversity_score,
+                    temporal_spread: calibrated_params.direction.balance.temporal_spread,
+                    feature_diversity: calibrated_params.direction.balance.feature_diversity,
+                    market_condition_diversity: calibrated_params
+                        .direction
+                        .balance
+                        .market_condition_diversity,
+                    composite_quality_score: calibrated_params
+                        .direction
+                        .balance
+                        .composite_quality_score,
                 },
             },
             price_levels: crate::targets::adaptive_parameters::PriceLevelAdaptiveParams {
@@ -449,6 +460,17 @@ impl ModelTrainer {
                     imbalance_ratio: calibrated_params.price_levels.balance.imbalance_ratio,
                     total_samples: calibrated_params.price_levels.balance.total_samples,
                     target_balance: calibrated_params.price_levels.balance.target_balance,
+                    diversity_score: calibrated_params.price_levels.balance.diversity_score,
+                    temporal_spread: calibrated_params.price_levels.balance.temporal_spread,
+                    feature_diversity: calibrated_params.price_levels.balance.feature_diversity,
+                    market_condition_diversity: calibrated_params
+                        .price_levels
+                        .balance
+                        .market_condition_diversity,
+                    composite_quality_score: calibrated_params
+                        .price_levels
+                        .balance
+                        .composite_quality_score,
                 },
             },
             volatility: crate::targets::adaptive_parameters::VolatilityAdaptiveParams {
@@ -463,6 +485,17 @@ impl ModelTrainer {
                     imbalance_ratio: calibrated_params.volatility.balance.imbalance_ratio,
                     total_samples: calibrated_params.volatility.balance.total_samples,
                     target_balance: calibrated_params.volatility.balance.target_balance,
+                    diversity_score: calibrated_params.volatility.balance.diversity_score,
+                    temporal_spread: calibrated_params.volatility.balance.temporal_spread,
+                    feature_diversity: calibrated_params.volatility.balance.feature_diversity,
+                    market_condition_diversity: calibrated_params
+                        .volatility
+                        .balance
+                        .market_condition_diversity,
+                    composite_quality_score: calibrated_params
+                        .volatility
+                        .balance
+                        .composite_quality_score,
                 },
             },
             sentiment: crate::targets::adaptive_parameters::SentimentAdaptiveParams {
@@ -477,6 +510,17 @@ impl ModelTrainer {
                     imbalance_ratio: calibrated_params.sentiment.balance.imbalance_ratio,
                     total_samples: calibrated_params.sentiment.balance.total_samples,
                     target_balance: calibrated_params.sentiment.balance.target_balance,
+                    diversity_score: calibrated_params.sentiment.balance.diversity_score,
+                    temporal_spread: calibrated_params.sentiment.balance.temporal_spread,
+                    feature_diversity: calibrated_params.sentiment.balance.feature_diversity,
+                    market_condition_diversity: calibrated_params
+                        .sentiment
+                        .balance
+                        .market_condition_diversity,
+                    composite_quality_score: calibrated_params
+                        .sentiment
+                        .balance
+                        .composite_quality_score,
                 },
             },
             volume: crate::targets::adaptive_parameters::VolumeAdaptiveParams {
@@ -489,6 +533,17 @@ impl ModelTrainer {
                     imbalance_ratio: calibrated_params.volume.balance.imbalance_ratio,
                     total_samples: calibrated_params.volume.balance.total_samples,
                     target_balance: calibrated_params.volume.balance.target_balance,
+                    diversity_score: calibrated_params.volume.balance.diversity_score,
+                    temporal_spread: calibrated_params.volume.balance.temporal_spread,
+                    feature_diversity: calibrated_params.volume.balance.feature_diversity,
+                    market_condition_diversity: calibrated_params
+                        .volume
+                        .balance
+                        .market_condition_diversity,
+                    composite_quality_score: calibrated_params
+                        .volume
+                        .balance
+                        .composite_quality_score,
                 },
             },
             calibration_info: crate::targets::adaptive_parameters::CalibrationMetadata {
