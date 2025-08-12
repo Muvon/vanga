@@ -407,9 +407,35 @@ impl LSTMModel {
         self.dropout_config = Some(dropout_config.clone());
 
         log::debug!(
-            "✅ Dropout configured: enabled={}, rate={:?}",
+            "✅ Dropout configured: enabled={}, rate={:?}, variational={}, recurrent={}",
             dropout_config.enabled,
-            dropout_config.rate
+            dropout_config.rate,
+            dropout_config.variational,
+            dropout_config.recurrent
+        );
+    }
+
+    /// Clear variational dropout masks (call at end of epoch or sequence)
+    ///
+    /// This prevents memory leaks and ensures fresh masks for new sequences.
+    /// Should be called at the end of each training epoch or when switching
+    /// between training and validation.
+    pub fn clear_dropout_masks(&self) {
+        use crate::model::lstm::seeded_weights::SeededTensorUtils;
+        SeededTensorUtils::clear_variational_masks(None);
+        log::debug!("🧹 Cleared all variational dropout masks");
+    }
+
+    /// Clear specific sequence dropout mask
+    ///
+    /// # Arguments
+    /// * `sequence_id` - Specific sequence ID to clear
+    pub fn clear_sequence_dropout_mask(&self, sequence_id: &str) {
+        use crate::model::lstm::seeded_weights::SeededTensorUtils;
+        SeededTensorUtils::clear_variational_masks(Some(sequence_id));
+        log::debug!(
+            "🧹 Cleared variational dropout mask for sequence: {}",
+            sequence_id
         );
     }
 

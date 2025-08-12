@@ -204,11 +204,18 @@ impl LSTMModel {
                 };
 
                 if should_apply_dropout {
-                    current_input = self.apply_dropout(&current_input, training)?;
+                    // Generate sequence ID for variational dropout consistency
+                    let sequence_id = format!("bidirectional_layer_{}", layer_idx);
+                    current_input = self.apply_dropout_with_context(
+                        &current_input,
+                        training,
+                        Some(&sequence_id),
+                    )?;
                     log::debug!(
-                        "🔧 Applied LSTM layer dropout (layer: {}, training: {})",
+                        "🔧 Applied LSTM layer dropout (layer: {}, training: {}, sequence: {})",
                         layer_idx,
-                        training
+                        training,
+                        sequence_id
                     );
                 }
 
@@ -265,11 +272,18 @@ impl LSTMModel {
                     .unwrap_or(false);
 
                 if should_apply_dropout && i < forward_lstm_layers.len() - 1 {
-                    current_output = self.apply_dropout(&current_output, training)?;
+                    // Generate sequence ID for variational dropout consistency
+                    let sequence_id = format!("unidirectional_layer_{}", i);
+                    current_output = self.apply_dropout_with_context(
+                        &current_output,
+                        training,
+                        Some(&sequence_id),
+                    )?;
                     log::debug!(
-                        "🔧 Applied LSTM layer dropout (layer: {}, training: {})",
+                        "🔧 Applied LSTM layer dropout (layer: {}, training: {}, sequence: {})",
                         i,
-                        training
+                        training,
+                        sequence_id
                     );
                 }
 
@@ -597,9 +611,18 @@ impl LSTMModel {
             .map_err(|e| VangaError::ModelError(format!("Failed to create Array2: {}", e)))
     }
 
-    /// Apply dropout with proper training/validation distinction
-    /// CRITICAL FIX: Pass training flag through to ensure dropout is ONLY applied during training
-    fn apply_dropout(&self, tensor: &Tensor, training: bool) -> Result<Tensor> {
+    /// Apply dropout with sequence context for variational dropout
+    ///
+    /// # Arguments
+    /// * `tensor` - Input tensor to apply dropout to
+    /// * `training` - Whether model is in training mode
+    /// * `sequence_context` - Optional sequence ID for variational dropout consistency
+    fn apply_dropout_with_context(
+        &self,
+        tensor: &Tensor,
+        training: bool,
+        sequence_context: Option<&str>,
+    ) -> Result<Tensor> {
         let dropout_config = self
             .dropout_config
             .as_ref()
@@ -628,18 +651,47 @@ impl LSTMModel {
             }
         };
 
-        // FIXED: Pass the actual training flag instead of hardcoded true
-        let dropped_tensor = SeededTensorUtils::deterministic_dropout(
-            tensor,
-            dropout_rate as f32,
-            training, // FIX: Use the actual training flag passed to this function
-        )?;
+        // Choose dropout method based on configuration
+        let dropped_tensor = if dropout_config.variational && sequence_context.is_some() {
+            // Use variational dropout with sequence context
+            let sequence_id = sequence_context.unwrap();
+            log::debug!(
+                "🔧 Applying variational dropout with rate {:.3} to tensor shape {:?} [sequence: {}]",
+                dropout_rate,
+                tensor.shape(),
+                sequence_id
+            );
+            SeededTensorUtils::variational_dropout(
+                tensor,
+                dropout_rate as f32,
+                training,
+                sequence_id,
+            )?
+        } else if dropout_config.recurrent {
+            // Use recurrent dropout (for hidden state connections)
+            log::debug!(
+                "🔧 Applying recurrent dropout with rate {:.3} to tensor shape {:?}",
+                dropout_rate,
+                tensor.shape()
+            );
+            SeededTensorUtils::recurrent_dropout(tensor, dropout_rate as f32, training)?
+        } else {
+            // Fall back to standard dropout
+            log::debug!(
+                "🔧 Applying standard dropout with rate {:.3} to tensor shape {:?}",
+                dropout_rate,
+                tensor.shape()
+            );
+            SeededTensorUtils::deterministic_dropout(tensor, dropout_rate as f32, training)?
+        };
 
         log::debug!(
-            "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [training={}]",
+            "🔧 Applied LSTM dropout with rate {:.3} to tensor shape {:?} [training={}, variational={}, recurrent={}]",
             dropout_rate,
             tensor.shape(),
-            training
+            training,
+            dropout_config.variational,
+            dropout_config.recurrent
         );
 
         Ok(dropped_tensor)
