@@ -839,6 +839,163 @@ impl LSTMModel {
         log::info!("  - Adaptive factor: {:.3}", adaptive_factor);
         log::info!("  - Target learning rate: {:.6}", target_lr);
 
+        // 🔍 COMPREHENSIVE MODEL DIAGNOSTICS - Log model capacity and configuration
+        log::info!("🏗️ MODEL ARCHITECTURE DIAGNOSTICS:");
+        log::info!("   📐 Hidden sizes: {:?}", self.config.hidden_sizes);
+        log::info!("   🔢 Total layers: {}", self.config.num_layers);
+        log::info!("   📊 Input size: {}", self.config.input_size);
+        log::info!("   🎯 Output size: {}", self.config.output_size);
+        log::info!("   📏 Sequence length: {}", self.config.sequence_length);
+
+        // Calculate total parameters for capacity analysis
+        let total_params = self.config.total_parameters();
+        log::info!(
+            "   🧮 Total parameters: {} ({:.2}M)",
+            total_params,
+            total_params as f64 / 1_000_000.0
+        );
+
+        // DEBUG: Log detailed parameter calculation
+        log::debug!("🔍 PARAMETER CALCULATION DEBUG:");
+        log::debug!("   📊 Input size: {}", self.config.input_size);
+        log::debug!("   🔢 Number of layers: {}", self.config.num_layers);
+        log::debug!("   📐 Hidden sizes: {:?}", self.config.hidden_sizes);
+        for layer_idx in 0..self.config.num_layers {
+            let input_size = if layer_idx == 0 {
+                self.config.input_size
+            } else {
+                self.config.get_hidden_size_for_layer(layer_idx - 1)
+            };
+            let hidden_size = self.config.get_hidden_size_for_layer(layer_idx);
+            let layer_params = (input_size + hidden_size + 1) * hidden_size * 4;
+            log::debug!(
+                "   🔍 Layer {}: input={}, hidden={}, params={}",
+                layer_idx,
+                input_size,
+                hidden_size,
+                layer_params
+            );
+        }
+
+        // Log regularization settings
+        log::info!("🛡️ REGULARIZATION DIAGNOSTICS:");
+        if let Some(dropout_config) = &self.dropout_config {
+            log::info!("   💧 Dropout enabled: {}", dropout_config.enabled);
+            if dropout_config.enabled {
+                log::info!("   💧 Dropout rate: {:?}", dropout_config.rate);
+            }
+        } else {
+            log::info!("   💧 Dropout: DISABLED");
+        }
+
+        // Log optimizer configuration with weight decay emphasis
+        log::info!("⚙️ OPTIMIZER DIAGNOSTICS:");
+        log::info!("   📈 Learning rate: {:.6}", config.training.learning_rate);
+        match &config.training.optimizer {
+            crate::config::training::OptimizerType::AdamW {
+                weight_decay,
+                beta1,
+                beta2,
+                eps,
+            } => {
+                log::info!(
+                    "   🏋️ Weight decay: {:.4} (L2 regularization strength)",
+                    weight_decay
+                );
+                log::info!(
+                    "   📊 AdamW params: β1={:.3}, β2={:.3}, ε={:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+
+                // Warn if weight decay might be too low for overfitting prevention
+                if *weight_decay < 0.001 {
+                    log::warn!(
+                        "   ⚠️ Weight decay ({:.4}) is very low - may not prevent overfitting",
+                        weight_decay
+                    );
+                } else if *weight_decay > 0.1 {
+                    log::warn!(
+                        "   ⚠️ Weight decay ({:.4}) is very high - may cause underfitting",
+                        weight_decay
+                    );
+                }
+            }
+            _ => {
+                log::info!("   🏋️ Weight decay: N/A (not AdamW)");
+                log::warn!("   ⚠️ No weight decay regularization - overfitting risk increased");
+            }
+        }
+
+        // Log data configuration
+        log::info!("📊 DATA DIAGNOSTICS:");
+        log::info!("   🎯 Training samples: {}", total_train_samples);
+        log::debug!("   🔍 Training data shape: {:?}", train_sequences.shape());
+        if use_validation {
+            log::info!("   ✅ Validation samples: {}", total_val_samples);
+            let val_ratio = total_val_samples as f64 / total_train_samples as f64;
+            log::info!("   📊 Validation ratio: {:.1}%", val_ratio * 100.0);
+        } else {
+            log::info!("   ❌ Validation: DISABLED");
+        }
+        log::info!("   📦 Batch size: {}", batch_size);
+
+        // Calculate effective learning data for LSTM time series models
+        let sequence_length = self.config.sequence_length;
+        let num_features = self.config.input_size;
+        let effective_data_points = total_train_samples * sequence_length * num_features;
+        let samples_per_param = if total_params > 0 {
+            effective_data_points as f64 / total_params as f64
+        } else {
+            f64::INFINITY
+        };
+
+        log::info!("🧮 LSTM TIME SERIES CAPACITY ASSESSMENT:");
+        log::info!("   📊 Training sequences: {}", total_train_samples);
+        log::info!("   📏 Sequence length: {}", sequence_length);
+        log::info!("   🔢 Features per timestep: {}", num_features);
+        log::info!(
+            "   📈 Effective data points: {} ({} × {} × {})",
+            effective_data_points,
+            total_train_samples,
+            sequence_length,
+            num_features
+        );
+        log::info!("   🧮 Model parameters: {}", total_params);
+        log::info!("   📊 Data points per parameter: {:.1}", samples_per_param);
+
+        // LSTM-specific capacity assessment (different from traditional ML)
+        if total_params == 0 {
+            log::error!("   🚨 CRITICAL: Model has 0 parameters! Configuration error!");
+        } else if total_train_samples == 0 {
+            log::error!("   🚨 CRITICAL: No training sequences! Data loading error!");
+        } else if samples_per_param < 1.0 {
+            log::warn!(
+                "   ⚠️ LOW data density: {:.1} data points per parameter",
+                samples_per_param
+            );
+            log::warn!("   💡 Consider: More sequences, longer sequences, or smaller model");
+        } else if samples_per_param < 10.0 {
+            log::warn!(
+                "   ⚠️ MODERATE data density: {:.1} data points per parameter",
+                samples_per_param
+            );
+            log::warn!("   💡 Strong regularization recommended (dropout, weight decay)");
+        } else if samples_per_param < 100.0 {
+            log::info!(
+                "   ✅ GOOD data density: {:.1} data points per parameter",
+                samples_per_param
+            );
+            log::info!("   💡 Standard regularization should work well");
+        } else {
+            log::info!(
+                "   ✅ EXCELLENT data density: {:.1} data points per parameter",
+                samples_per_param
+            );
+            log::info!("   💡 Model has sufficient data for complex pattern learning");
+        }
+
         // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
         for epoch in 0..self.training_config.epochs {
             // Initialize epoch tracking variables
@@ -1077,21 +1234,64 @@ impl LSTMModel {
                 let num_complete_val_batches = total_val_samples / batch_size;
                 let val_samples_used = num_complete_val_batches * batch_size;
 
-                // CRITICAL FIX: Process validation in same order as training for consistency
-                // This ensures comparable loss calculations between training and validation
-                for batch_start in (0..val_samples_used).step_by(batch_size) {
+                // CRITICAL ISSUE FOUND: Training uses SHUFFLED data, validation uses SEQUENTIAL data
+                // This creates a fundamental distribution mismatch that causes divergence!
+                //
+                // TRAINING: Shuffled batches break temporal patterns, model learns on random sequences
+                // VALIDATION: Sequential batches preserve temporal patterns, different data distribution
+                //
+                // SOLUTION: Either both should be shuffled OR both should be sequential
+                // For time series, SEQUENTIAL is more appropriate for both
+
+                // TEMPORARY FIX: Process validation in shuffled order to match training
+                // Create shuffled indices for validation (same approach as training)
+                let mut val_sample_indices: Vec<usize> = (0..val_samples_used).collect();
+                let val_shuffle_seed_components = [
+                    epoch as u64,
+                    42u64, // Different base seed for validation
+                    val_samples_used as u64,
+                ];
+                let _val_shuffle_seed = shuffle_indices_deterministic(
+                    &mut val_sample_indices,
+                    &val_shuffle_seed_components,
+                );
+
+                log::debug!(
+                    "🔀 VALIDATION SHUFFLE FIX: Epoch {} - shuffling {} validation samples to match training distribution",
+                    epoch + 1, val_samples_used
+                );
+
+                for (batch_idx, batch_start) in
+                    (0..val_samples_used).step_by(batch_size).enumerate()
+                {
                     let batch_end = batch_start + batch_size; // Always complete batch
                     let actual_batch_size = batch_size; // Always full batch size
 
-                    // Extract validation batch
-                    let batch_sequences = val_seq
-                        .slice(ndarray::s![batch_start..batch_end, .., ..])
-                        .to_owned();
-                    let batch_targets = val_tgt
-                        .slice(ndarray::s![batch_start..batch_end, ..])
-                        .to_owned();
+                    // Extract shuffled validation batch indices (MATCHING TRAINING APPROACH)
+                    let batch_indices = &val_sample_indices[batch_start..batch_end];
 
-                    // Convert batch to tensors
+                    // Create batch arrays using shuffled indices (SAME AS TRAINING)
+                    let mut batch_sequences = ndarray::Array3::<f64>::zeros((
+                        actual_batch_size,
+                        val_seq.shape()[1], // sequence_length
+                        val_seq.shape()[2], // num_features
+                    ));
+                    let mut batch_targets = ndarray::Array2::<f64>::zeros((
+                        actual_batch_size,
+                        val_tgt.shape()[1], // num_targets
+                    ));
+
+                    // Fill batch with shuffled samples (SAME AS TRAINING)
+                    for (batch_pos, &sample_idx) in batch_indices.iter().enumerate() {
+                        batch_sequences
+                            .slice_mut(ndarray::s![batch_pos, .., ..])
+                            .assign(&val_seq.slice(ndarray::s![sample_idx, .., ..]));
+                        batch_targets
+                            .slice_mut(ndarray::s![batch_pos, ..])
+                            .assign(&val_tgt.slice(ndarray::s![sample_idx, ..]));
+                    }
+
+                    // Convert batch to tensors (SAME AS TRAINING)
                     let (input_tensor, target_tensor) =
                         self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
 
@@ -1116,9 +1316,9 @@ impl LSTMModel {
 
                     // 🔍 DETAILED VALIDATION BATCH DEBUG
                     log::debug!(
-                        "🔍 VAL E{} B{}: raw_loss={:.6}, batch_size={}, weighted_loss={:.6} [NO DROPOUT]",
+                        "🔍 VAL E{} B{}: raw_loss={:.6}, batch_size={}, weighted_loss={:.6} [SHUFFLED LIKE TRAINING]",
                         epoch + 1,
-                        batch_start / batch_size,
+                        batch_idx,
                         val_batch_loss,
                         actual_batch_size,
                         val_batch_loss * actual_batch_size as f32
@@ -1160,44 +1360,92 @@ impl LSTMModel {
             if let Some(val_loss) = avg_val_loss {
                 let loss_ratio = val_loss / avg_train_loss;
 
-                // DIAGNOSTIC: Detect problematic patterns
+                // ENHANCED DIAGNOSTIC: Detect problematic patterns with detailed analysis
                 if loss_ratio > 1.15 && epoch % 5 == 0 {
                     log::warn!(
-                        "⚠️ VALIDATION LOSS DIVERGENCE at epoch {}: Val/Train ratio = {:.3}x (Val: {:.6}, Train: {:.6})",
-                        epoch + 1, loss_ratio, val_loss, avg_train_loss
+                        "\n🚨 VALIDATION LOSS DIVERGENCE DETECTED at epoch {}:",
+                        epoch + 1
                     );
+                    log::warn!(
+                        "   📊 Val/Train ratio: {:.3}x (threshold: 1.15x)",
+                        loss_ratio
+                    );
+                    log::warn!("   📈 Validation loss: {:.6}", val_loss);
+                    log::warn!("   📉 Training loss: {:.6}", avg_train_loss);
+                    log::warn!("   📊 Loss difference: {:.6}", val_loss - avg_train_loss);
+
+                    // Analyze potential causes
+                    log::warn!("🔍 POTENTIAL CAUSES ANALYSIS:");
+
+                    // Focus on regularization and training parameters (not capacity)
+                    // LSTM models can handle complex patterns with proper regularization
 
                     // Check dropout configuration
-                    if self
-                        .dropout_config
-                        .as_ref()
-                        .map(|d| d.enabled)
-                        .unwrap_or(false)
-                    {
-                        let dropout_rate = match &self.dropout_config.as_ref().unwrap().rate {
-                            crate::config::model::DropoutRate::Fixed(rate) => *rate,
-                            crate::config::model::DropoutRate::Auto { min_rate, max_rate } => {
-                                (min_rate + max_rate) / 2.0
+                    if let Some(dropout_config) = &self.dropout_config {
+                        if dropout_config.enabled {
+                            let dropout_rate = match &dropout_config.rate {
+                                crate::config::model::DropoutRate::Fixed(rate) => *rate,
+                                crate::config::model::DropoutRate::Auto { min_rate, max_rate } => {
+                                    (min_rate + max_rate) / 2.0
+                                }
+                                _ => 0.2,
+                            };
+                            log::warn!(
+                                "   💧 Dropout: {:.1}% (may need increase)",
+                                dropout_rate * 100.0
+                            );
+                        } else {
+                            log::warn!("   💧 Dropout: DISABLED (consider enabling)");
+                        }
+                    } else {
+                        log::warn!("   💧 Dropout: NOT CONFIGURED (consider adding)");
+                    }
+
+                    // Check weight decay
+                    match &config.training.optimizer {
+                        crate::config::training::OptimizerType::AdamW { weight_decay, .. } => {
+                            if *weight_decay < 0.01 {
+                                log::warn!(
+                                    "   🏋️ Weight decay: {:.4} (consider increasing to 0.01-0.1)",
+                                    weight_decay
+                                );
+                            } else {
+                                log::warn!(
+                                    "   🏋️ Weight decay: {:.4} (seems reasonable)",
+                                    weight_decay
+                                );
                             }
-                            _ => 0.2,
-                        };
-                        log::info!(
-                            "   ✅ Dropout FIX APPLIED: Rate {:.2} - correctly disabled during validation",
-                            dropout_rate
-                        );
+                        }
+                        _ => {
+                            log::warn!("   🏋️ Weight decay: N/A (consider using AdamW)");
+                        }
+                    }
+
+                    // Check learning rate
+                    if current_lr > 0.001 {
+                        log::warn!("   📈 Learning rate: {:.6} (consider reducing)", current_lr);
                     }
 
                     // Check gradient norm
-                    if avg_grad_norm > 1.5 {
-                        log::info!(
-                            "   📈 Gradient norm: {:.3e} - may indicate unstable training",
+                    let avg_grad_norm = epoch_grad_norm / batch_count as f64;
+                    if avg_grad_norm > 1.0 {
+                        log::warn!(
+                            "   📊 Gradient norm: {:.3} (high, may indicate instability)",
                             avg_grad_norm
                         );
                     }
 
-                    log::info!(
-                        "   💡 If issue persists: 1) Reduce learning rate, 2) Increase batch size, 3) Check data distribution"
+                    log::warn!("🔧 SUGGESTED FIXES FOR LSTM TIME SERIES:");
+                    log::warn!("   1. Increase dropout rate (current → +0.1-0.2)");
+                    log::warn!("   2. Increase weight decay (0.01 → 0.05-0.1)");
+                    log::warn!(
+                        "   3. Reduce learning rate ({:.6} → {:.6})",
+                        current_lr,
+                        current_lr * 0.5
                     );
+                    log::warn!("   4. Add early stopping with smaller patience");
+                    log::warn!("   5. Use gradient clipping (< 1.0)");
+                    log::warn!("   6. Consider sequence length reduction\n");
                 }
             }
 
