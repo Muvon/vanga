@@ -4,6 +4,14 @@
 //! using Candle's native Device::set_seed() functionality.
 
 use candle_core::{DType, Device, Result, Tensor};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+// Thread-local storage for variational dropout masks
+// Key: sequence_id, Value: dropout mask tensor
+thread_local! {
+    static VARIATIONAL_MASKS: RefCell<HashMap<String, Tensor>> = RefCell::new(HashMap::new());
+}
 
 /// Seeded tensor creation utilities using Candle's native device seeding
 pub struct SeededTensorUtils;
@@ -85,6 +93,123 @@ impl SeededTensorUtils {
         let masked_tensor = tensor.mul(&keep_mask.to_dtype(tensor.dtype())?)?;
         let scale_tensor = Tensor::new(scale, device)?.broadcast_as(tensor.shape())?;
         masked_tensor.mul(&scale_tensor)
+    }
+
+    /// Variational dropout - uses same mask across all time steps in a sequence
+    ///
+    /// This implements the variational dropout technique from Gal & Ghahramani (2016)
+    /// where the same dropout mask is applied across all time steps to prevent
+    /// temporal inconsistency in LSTM training.
+    ///
+    /// # Arguments
+    /// * `tensor` - Input tensor to apply dropout to
+    /// * `dropout_rate` - Dropout probability (0.0 to 1.0)
+    /// * `training` - Whether model is in training mode
+    /// * `sequence_id` - Unique identifier for this sequence (for mask consistency)
+    ///
+    /// # Returns
+    /// * Tensor with variational dropout applied (same mask across time steps)
+    pub fn variational_dropout(
+        tensor: &Tensor,
+        dropout_rate: f32,
+        training: bool,
+        sequence_id: &str,
+    ) -> Result<Tensor> {
+        // No dropout during inference or if rate is 0
+        if !training || dropout_rate <= 0.0 || dropout_rate >= 1.0 {
+            return Ok(tensor.clone());
+        }
+
+        let device = tensor.device();
+        let shape = tensor.shape();
+
+        // Try to get existing mask for this sequence
+        let mask = VARIATIONAL_MASKS.with(|masks| -> Result<Tensor> {
+            let mut masks_map = masks.borrow_mut();
+
+            if let Some(existing_mask) = masks_map.get(sequence_id) {
+                // Check if existing mask shape matches current tensor
+                if existing_mask.shape() == shape {
+                    return Ok(existing_mask.clone());
+                } else {
+                    // Shape mismatch, remove old mask and create new one
+                    masks_map.remove(sequence_id);
+                }
+            }
+
+            // Create new mask for this sequence
+            let random_tensor = Tensor::rand(0.0, 1.0, shape, device)?;
+            let keep_mask = random_tensor.gt(dropout_rate)?;
+            let mask_tensor = keep_mask.to_dtype(tensor.dtype())?;
+
+            // Store mask for future time steps in this sequence
+            masks_map.insert(sequence_id.to_string(), mask_tensor.clone());
+
+            Ok(mask_tensor)
+        })?;
+
+        // Apply mask and scale by 1/(1-p) to maintain expected value
+        let scale = 1.0 / (1.0 - dropout_rate);
+        let masked_tensor = tensor.mul(&mask)?;
+        let scale_tensor = Tensor::new(scale, device)?.broadcast_as(tensor.shape())?;
+        masked_tensor.mul(&scale_tensor)
+    }
+
+    /// Recurrent dropout - applies dropout to hidden state connections
+    ///
+    /// This applies dropout specifically to the recurrent connections (h_t-1 → h_t)
+    /// rather than the input connections (x_t → h_t). This is critical for LSTM
+    /// regularization in time series tasks.
+    ///
+    /// # Arguments
+    /// * `hidden_tensor` - Hidden state tensor to apply dropout to
+    /// * `dropout_rate` - Dropout probability (0.0 to 1.0)
+    /// * `training` - Whether model is in training mode
+    ///
+    /// # Returns
+    /// * Tensor with recurrent dropout applied
+    pub fn recurrent_dropout(
+        hidden_tensor: &Tensor,
+        dropout_rate: f32,
+        training: bool,
+    ) -> Result<Tensor> {
+        // No dropout during inference or if rate is 0
+        if !training || dropout_rate <= 0.0 || dropout_rate >= 1.0 {
+            return Ok(hidden_tensor.clone());
+        }
+
+        let device = hidden_tensor.device();
+        let shape = hidden_tensor.shape();
+
+        // Create random tensor for recurrent connections
+        let random_tensor = Tensor::rand(0.0, 1.0, shape, device)?;
+
+        // Create dropout mask: keep values where random > dropout_rate
+        let keep_mask = random_tensor.gt(dropout_rate)?;
+
+        // Apply mask and scale by 1/(1-p) to maintain expected value
+        let scale = 1.0 / (1.0 - dropout_rate);
+        let masked_tensor = hidden_tensor.mul(&keep_mask.to_dtype(hidden_tensor.dtype())?)?;
+        let scale_tensor = Tensor::new(scale, device)?.broadcast_as(hidden_tensor.shape())?;
+        masked_tensor.mul(&scale_tensor)
+    }
+
+    /// Clear variational dropout masks (call at end of sequence or epoch)
+    ///
+    /// This clears stored masks to prevent memory leaks and ensure fresh masks
+    /// for new sequences.
+    ///
+    /// # Arguments
+    /// * `sequence_id` - Optional specific sequence ID to clear, or None to clear all
+    pub fn clear_variational_masks(sequence_id: Option<&str>) {
+        VARIATIONAL_MASKS.with(|masks| {
+            let mut masks_map = masks.borrow_mut();
+            if let Some(id) = sequence_id {
+                masks_map.remove(id);
+            } else {
+                masks_map.clear();
+            }
+        });
     }
 }
 

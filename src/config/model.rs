@@ -178,8 +178,8 @@ impl Default for DropoutConfig {
                 min_rate: 0.1,
                 max_rate: 0.5,
             },
-            variational: false,
-            recurrent: false,
+            variational: true, // Enable variational dropout by default for LSTM
+            recurrent: true,   // Enable recurrent dropout by default for LSTM
         }
     }
 }

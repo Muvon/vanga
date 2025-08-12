@@ -998,6 +998,9 @@ impl LSTMModel {
 
         // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
         for epoch in 0..self.training_config.epochs {
+            // Clear variational dropout masks at the start of each epoch for fresh randomization
+            self.clear_dropout_masks();
+
             // Initialize epoch tracking variables
             let mut epoch_train_loss = 0.0;
             let mut epoch_grad_norm = 0.0; // Track gradient norm for epoch logging
@@ -1224,6 +1227,9 @@ impl LSTMModel {
             );
 
             // Validation phase (only if validation data is available)
+            // Clear variational dropout masks before validation to ensure fresh masks
+            self.clear_dropout_masks();
+
             let avg_val_loss = if let (Some(val_seq), Some(val_tgt)) =
                 (&val_sequences_final, &val_targets_final)
             {
