@@ -134,6 +134,10 @@ pub struct VolatilityAdaptiveParams {
     /// Values < 1.0 emphasize recent volatility, 1.0 = uniform weighting
     pub horizon_decay_factor: f64,
 
+    /// Minimum baseline ATR to avoid extreme ratios
+    /// Prevents division by very small values in ratio calculations
+    pub min_baseline_atr: f64,
+
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
 }
@@ -156,6 +160,7 @@ impl Default for VolatilityAdaptiveParams {
             atr_distribution_stats: AtrDistributionStats::default(),
             cv_adjustment_factor: 1.0,
             horizon_decay_factor: 1.0, // Uniform weighting as default fallback
+            min_baseline_atr: 0.005,   // 0.5% minimum volatility baseline
             achieved_balance: ClassDistributionBalance::default(),
         }
     }
@@ -180,6 +185,10 @@ pub struct SentimentAdaptiveParams {
     /// Values < 1.0 emphasize recent candles, 1.0 = uniform weighting
     pub horizon_decay_factor: f64,
 
+    /// Minimum baseline bullish strength to avoid extreme ratios
+    /// Prevents division by very small values in ratio calculations
+    pub min_baseline_strength: f64,
+
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
 }
@@ -202,6 +211,7 @@ impl Default for SentimentAdaptiveParams {
             consistency_factor: 1.0,
             extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier, // Consistent with other target types
             horizon_decay_factor: 1.0, // Uniform weighting as default fallback
+            min_baseline_strength: 0.1, // 10% minimum bullish strength baseline
             achieved_balance: ClassDistributionBalance::default(),
         }
     }
@@ -464,6 +474,7 @@ impl AdaptiveParameterCalibrator {
                         horizon_decay_factor: 1.0, // Default uniform weighting for old calibration
                         atr_distribution_stats: AtrDistributionStats::default(),
                         cv_adjustment_factor: 1.0,
+                        min_baseline_atr: 0.005, // Add missing field with default value
                         achieved_balance: balance,
                     };
                 }
@@ -1258,16 +1269,14 @@ impl AdaptiveParameterCalibrator {
                             atr_distribution_stats: AtrDistributionStats {
                                 mean: atr_stats.mean,
                                 std_dev: atr_stats.std_dev,
-                                median: atr_stats.median,
-                                percentile_25: atr_stats.percentile_25,
-                                percentile_75: atr_stats.percentile_75,
-                                coefficient_of_variation: if atr_stats.mean > 1e-8 {
-                                    atr_stats.std_dev / atr_stats.mean
-                                } else {
-                                    0.5
-                                },
+                                median: 0.0,        // Default value
+                                percentile_25: 0.0, // Default value
+                                percentile_75: 0.0, // Default value
+                                coefficient_of_variation: atr_stats.std_dev
+                                    / atr_stats.mean.max(0.0001),
                             },
-                            cv_adjustment_factor: 1.0, // Will be calculated from final parameters
+                            cv_adjustment_factor: 1.0,
+                            min_baseline_atr: 0.005, // Add missing field with default value
                             achieved_balance: balance,
                         };
                     }
@@ -1597,6 +1606,7 @@ impl AdaptiveParameterCalibrator {
                             extreme_multiplier: DirectionAdaptiveParams::default()
                                 .extreme_multiplier,
                             horizon_decay_factor,
+                            min_baseline_strength: 0.1, // Add missing field with default value
                             achieved_balance: ClassDistributionBalance::default(),
                         };
 
@@ -1838,7 +1848,8 @@ impl AdaptiveParameterCalibrator {
             volume_weight: 0.1,
             consistency_factor: 0.8,
             extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier,
-            horizon_decay_factor: 1.0, // Default uniform weighting
+            horizon_decay_factor: 1.0,  // Add missing field
+            min_baseline_strength: 0.1, // Add missing field with default value
             achieved_balance: balance,
         };
 
@@ -1972,6 +1983,7 @@ impl AdaptiveParameterCalibrator {
             consistency_factor,
             extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier,
             horizon_decay_factor,
+            min_baseline_strength: 0.1, // Add missing field with default value
             achieved_balance: ClassDistributionBalance::default(),
         };
 

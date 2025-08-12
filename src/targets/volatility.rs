@@ -425,36 +425,7 @@ pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f
     Ok(sequence_atr.max(0.005)) // Ensure minimum 0.5% volatility baseline
 }
 
-/// Calculate proportional ATR window based on available data dimensions
-///
-/// This function determines the optimal ATR window size based on the actual data
-/// available for analysis, ensuring fair comparison between sequence and horizon
-/// periods regardless of their relative sizes.
-///
-/// ## Mathematical Foundation
-/// The ATR window should be proportional to the data we have available:
-/// - Uses the SMALLER of sequence_length or horizon_length as reference
-/// - ATR window = half of the minimum period (but at least 2 for calculation)
-/// - This ensures consistent volatility measurement across all scenarios
-///
-/// ## Examples
-/// - `sequence_length = 30, horizon_steps = 5` → `atr_window = 2` (half of 5)
-/// - `sequence_length = 10, horizon_steps = 20` → `atr_window = 5` (half of 10)
-/// - `sequence_length = 60, horizon_steps = 1` → `atr_window = 2` (minimum viable)
-///
-/// ## Parameters
-/// - `sequence_length`: Length of the input sequence data
-/// - `horizon_length`: Length of the horizon period data
-///
-/// ## Returns
-/// Proportional ATR window size optimized for fair volatility comparison
-fn calculate_proportional_atr_window(sequence_length: usize, horizon_length: usize) -> usize {
-    // Use the SMALLER of the two periods to ensure fair comparison
-    let min_period = sequence_length.min(horizon_length);
-
-    // ATR window = half of the minimum period (but at least 2 for calculation)
-    (min_period / 2).max(2)
-}
+// Removed unused function calculate_proportional_atr_window - no longer needed in simplified approach
 
 /// Calculate horizon ATR with adaptive exponential weighting toward recent steps
 ///
@@ -583,101 +554,88 @@ pub struct LogVolatilityThresholds {
                            // Above high_max = VeryHigh
 }
 
-/// Classify volatility using sequence-adaptive distribution analysis with horizon weighting
+/// Classify volatility using sequence→horizon ATR ratio for strong ML signals
 ///
-/// This is the enhanced classification function that provides superior volatility
-/// regime detection through ATR distribution analysis, adaptive thresholds, and
-/// calibrated horizon weighting. Designed for production use with balanced class
-/// distribution across market conditions.
-///
-/// ## Key Features
-/// - **ATR Distribution Analysis**: Analyzes rolling ATR patterns for adaptive thresholds
-/// - **Sequence-Adaptive Bandwidth**: Automatically adjusts to volatility characteristics
-/// - **Horizon Weighting**: Uses calibrated decay factor to emphasize recent volatility
-/// - **Logarithmic Symmetry**: Maintains mathematical consistency in ratio space
-/// - **Balanced Classification**: Targets ~20% distribution per class
+/// CORRECTED APPROACH: Uses sequence ATR as baseline, horizon ATR as target measurement.
+/// Creates strong ratio-based signals that are easier for LSTM to learn.
 ///
 /// ## Algorithm
-/// 1. Calculate rolling ATR series from sequence data
-/// 2. Analyze ATR distribution statistics
-/// 3. Calculate sequence baseline ATR (mean of distribution)
-/// 4. Calculate horizon ATR with calibrated weighting (if available)
-/// 5. Apply logarithmic ratio classification with adaptive thresholds
-/// 6. Return balanced volatility regime classification
+/// 1. Calculate simple ATR for sequence (baseline volatility context)
+/// 2. Calculate simple ATR for horizon (target volatility measurement)
+/// 3. Compute volatility ratio = horizon_atr / sequence_atr
+/// 4. Classify using adaptive thresholds on ratio values
 ///
-/// ## Parameters
-/// - `sequence_candles`: Input sequence OHLCV data for baseline analysis
-/// - `horizon_candles`: Horizon period OHLCV data for classification
-/// - `targets_config`: Unified targets configuration for adaptive thresholds
-/// - `adaptive_params`: Optional calibrated parameters with horizon decay factor
-///
-/// ## Returns
-/// Volatility class [0-4]: VeryLow, Low, Medium, High, VeryHigh
+/// ## Signal Strength
+/// - **Strong Signal**: Direct ratio in [0, ∞] range
+/// - **Clear Meaning**: >1 = higher volatility, <1 = lower volatility, =1 = same volatility
+/// - **ML Friendly**: Consistent, predictable patterns for LSTM learning
 pub fn classify_volatility_with_distribution_analysis(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
-    targets_config: &TargetsConfig,
+    _targets_config: &TargetsConfig, // Kept for API compatibility, replaced by adaptive_params
     adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
 ) -> Result<i32> {
     if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
         return Ok(2); // Default to Medium for insufficient data
     }
 
-    // Step 1: Calculate rolling ATR series using proportional window
-    let proportional_window =
-        calculate_proportional_atr_window(sequence_candles.len(), horizon_candles.len());
-    let atr_series = calculate_rolling_atr_series(sequence_candles, proportional_window)?;
+    // Calculate simple ATR for both sequence (baseline) and horizon (target)
+    let sequence_atr =
+        calculate_simple_atr_with_params(sequence_candles, adaptive_params.min_baseline_atr)?;
+    let horizon_atr =
+        calculate_simple_atr_with_params(horizon_candles, adaptive_params.min_baseline_atr)?;
 
-    // Step 2: Calculate sequence baseline ATR (mean of distribution)
-    let sequence_atr_stats = calculate_atr_distribution_stats(&atr_series);
-    let baseline_atr = sequence_atr_stats.mean;
+    // Calculate volatility ratio: horizon/sequence (with adaptive minimum baseline)
+    let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr);
+    let volatility_ratio = horizon_atr / baseline_atr;
 
-    // Step 3: Calculate horizon ATR with calibrated weighting
-    let horizon_atr = if (adaptive_params.horizon_decay_factor - 1.0).abs() < f64::EPSILON {
-        // Uniform weighting (decay_factor = 1.0)
-        get_sequence_atr_baseline(horizon_candles)?
+    // Use adaptive thresholds calibrated for balanced distribution on ratio values
+    let moderate_threshold = adaptive_params.bandwidth_size; // Now represents ratio threshold
+    let extreme_threshold = adaptive_params.bandwidth_size * adaptive_params.extreme_multiplier;
+
+    // Classify based on volatility ratio with clear boundaries
+    // volatility_ratio range: [0, ∞] where 1.0 = same volatility
+    let class = if volatility_ratio <= (1.0 - extreme_threshold) {
+        0 // VeryLow: Much lower volatility than sequence
+    } else if volatility_ratio <= (1.0 - moderate_threshold) {
+        1 // Low: Somewhat lower volatility than sequence
+    } else if volatility_ratio < (1.0 + moderate_threshold) {
+        2 // Medium: Similar volatility to sequence
+    } else if volatility_ratio < (1.0 + extreme_threshold) {
+        3 // High: Somewhat higher volatility than sequence
     } else {
-        // Weighted calculation with calibrated decay factor
-        get_horizon_weighted_atr_baseline(horizon_candles, adaptive_params.horizon_decay_factor)?
+        4 // VeryHigh: Much higher volatility than sequence
     };
 
-    // Step 4: Calculate adaptive thresholds using calibrated sensitivity
-    let log_thresholds = calculate_log_volatility_thresholds(targets_config)?;
-
-    // Step 5: Classify using enhanced logarithmic ratio approach
-    let volatility_class =
-        classify_volatility_log_ratio(baseline_atr, horizon_atr, &log_thresholds);
-
-    let decay_factor = adaptive_params.horizon_decay_factor;
-
     log::debug!(
-        "🎯 Volatility Distribution Analysis: seq_atr={:.6}, hor_atr={:.6}, proportional_window={}, decay_factor={:.3}, calibrated_sensitivity={:.4}, class={}",
-        baseline_atr, horizon_atr, proportional_window, decay_factor, targets_config.base_sensitivity, volatility_class
+        "🎯 Volatility Ratio: seq_atr={:.6}, hor_atr={:.6}, ratio={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
+        sequence_atr, horizon_atr, volatility_ratio,
+        1.0 - extreme_threshold, 1.0 - moderate_threshold, 1.0 + moderate_threshold, 1.0 + extreme_threshold,
+        class, ["VeryLow", "Low", "Medium", "High", "VeryHigh"][class as usize]
     );
 
-    Ok(volatility_class)
+    Ok(class)
 }
 
-/// Calibrate volatility bandwidth based on actual market data distribution
+/// Calibrate volatility thresholds for balanced class distribution using ATR ratios
 ///
-/// This function analyzes the distribution of ATR ratios in the data to automatically
-/// determine appropriate bandwidth_size thresholds that will produce balanced
-/// class distributions across different market conditions.
+/// This function analyzes historical ATR ratios (horizon/sequence) to find optimal
+/// thresholds that achieve balanced class distribution (approximately 20% per class).
 ///
-/// ## Algorithm
-/// 1. Calculate ATR ratios for all sequences and horizons in the data
-/// 2. Compute log ratio distribution
-/// 3. Use percentiles to set balanced thresholds
-/// 4. Return calibrated bandwidth_size value
+/// ## CORRECTED ALGORITHM
+/// 1. Calculate ATR ratios for all sequence→horizon pairs in historical data
+/// 2. Sort ratio values to find percentile boundaries
+/// 3. Calculate thresholds that map percentiles to balanced 5-class system
+/// 4. Return calibrated base_sensitivity parameter for ratio-based threshold calculation
 ///
 /// ## Parameters
-/// - `ohlcv_data`: Market data for calibration analysis
+/// - `ohlcv_data`: Historical OHLCV data for volatility analysis
 /// - `sequence_length`: Length of input sequences
-/// - `horizon_steps`: Horizon period length
-/// - `target_balance`: Target percentage for extreme classes (e.g., 0.15 for 15%)
+/// - `horizon_steps`: Number of steps in prediction horizon
+/// - `target_balance`: Target percentage for each class (e.g., 0.2 for 20%)
 ///
 /// ## Returns
-/// Calibrated bandwidth_size optimized for balanced class distribution
+/// Calibrated base_sensitivity parameter for balanced volatility classification
 pub fn calibrate_volatility_bandwidth(
     ohlcv_data: &[MarketDataRow],
     sequence_length: usize,
@@ -685,83 +643,142 @@ pub fn calibrate_volatility_bandwidth(
     target_balance: f64,
 ) -> Result<f64> {
     if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
-        return Ok(0.2); // Default fallback for insufficient data
+        return Ok(0.3); // Default threshold for ratio-based approach
     }
 
-    let mut log_ratios = Vec::new();
+    let mut volatility_ratios = Vec::new();
 
-    // Sample ATR ratios from the data
+    // Sample ATR ratios from historical sequence→horizon pairs
     for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
         let sequence_candles = &ohlcv_data[i..i + sequence_length];
         let horizon_candles = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
         if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-            // Use proportional ATR window for consistent comparison
-            let proportional_window =
-                calculate_proportional_atr_window(sequence_candles.len(), horizon_candles.len());
+            let sequence_atr = calculate_simple_atr(sequence_candles).unwrap_or(0.01);
+            let horizon_atr = calculate_simple_atr(horizon_candles).unwrap_or(0.01);
 
-            let seq_atr = if sequence_candles.len() >= proportional_window {
-                calculate_rolling_atr_series(sequence_candles, proportional_window)?
-                    .last()
-                    .copied()
-                    .unwrap_or_else(|| get_sequence_atr_baseline(sequence_candles).unwrap_or(0.02))
-            } else {
-                get_sequence_atr_baseline(sequence_candles)?
-            };
+            // Calculate ratio with default minimum baseline (will be replaced by adaptive params)
+            let baseline_atr = sequence_atr.max(0.005);
+            let volatility_ratio = horizon_atr / baseline_atr;
 
-            let hor_atr = if horizon_candles.len() >= proportional_window {
-                calculate_rolling_atr_series(horizon_candles, proportional_window)?
-                    .last()
-                    .copied()
-                    .unwrap_or_else(|| get_sequence_atr_baseline(horizon_candles).unwrap_or(0.02))
-            } else {
-                get_sequence_atr_baseline(horizon_candles)?
-            };
-
-            if seq_atr > 0.0 && hor_atr > 0.0 {
-                let atr_ratio = hor_atr / seq_atr;
-                let log_ratio = atr_ratio.ln();
-
-                if log_ratio.is_finite() {
-                    log_ratios.push(log_ratio.abs()); // Use absolute values for threshold calculation
-                }
+            if volatility_ratio.is_finite() && volatility_ratio > 0.0 {
+                volatility_ratios.push(volatility_ratio);
             }
         }
     }
 
-    if log_ratios.is_empty() {
-        return Ok(0.2); // Default fallback
+    if volatility_ratios.is_empty() {
+        return Ok(0.3); // Default fallback
     }
 
-    // Sort log ratios to find percentiles
-    log_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = log_ratios.len();
+    // Sort ratios to find percentiles for balanced distribution
+    volatility_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = volatility_ratios.len();
 
-    // Find the percentile that corresponds to target_balance for extreme classes
-    // We want target_balance% in each extreme class, so (1.0 - 2*target_balance) in middle classes
-    let extreme_percentile = 1.0 - target_balance;
-    let extreme_idx = ((n as f64) * extreme_percentile) as usize;
-    let extreme_threshold = log_ratios[extreme_idx.min(n - 1)];
+    // For 5-class system with target_balance per class (e.g., 20% each):
+    // Find percentile boundaries around neutral (1.0 for ratios)
+    let p20_idx = ((n as f64) * target_balance) as usize;
+    let p40_idx = ((n as f64) * (2.0 * target_balance)) as usize;
+    let p60_idx = ((n as f64) * (3.0 * target_balance)) as usize;
+    let p80_idx = ((n as f64) * (4.0 * target_balance)) as usize;
 
-    // The bandwidth_size should be set so that extreme_threshold becomes the extreme boundary
-    // With extreme_multiplier = 2.0: extreme_boundary = bandwidth_size * 2.0
-    // So: bandwidth_size = extreme_threshold / 2.0
-    let calibrated_bandwidth = extreme_threshold / 2.0;
+    let p20_value = volatility_ratios[p20_idx.min(n - 1)];
+    let p40_value = volatility_ratios[p40_idx.min(n - 1)];
+    let p60_value = volatility_ratios[p60_idx.min(n - 1)];
+    let p80_value = volatility_ratios[p80_idx.min(n - 1)];
 
-    // Ensure reasonable bounds
-    let final_bandwidth = calibrated_bandwidth.clamp(0.05, 1.0);
+    // Calculate threshold distances from neutral (1.0 for ratios)
+    let threshold_40 = (1.0 - p40_value).abs();
+    let threshold_60 = (p60_value - 1.0).abs();
+
+    // Use the moderate threshold as base sensitivity
+    let moderate_threshold = (threshold_40 + threshold_60) / 2.0;
+
+    // Ensure reasonable bounds for ratio-based approach
+    let final_sensitivity = moderate_threshold.clamp(0.1, 0.8);
 
     log::info!(
-        "🎯 Calibrated volatility bandwidth: {:.6} (from {} samples, extreme_threshold: {:.6}, proportional_windows used)",
-        final_bandwidth,
-        n,
-        extreme_threshold
+        "🎯 Calibrated volatility sensitivity: {:.4} (from {} samples)",
+        final_sensitivity,
+        n
+    );
+    log::info!(
+        "🎯 Volatility ratio percentiles: P20={:.3}, P40={:.3}, P60={:.3}, P80={:.3}",
+        p20_value,
+        p40_value,
+        p60_value,
+        p80_value
     );
 
-    Ok(final_bandwidth)
+    Ok(final_sensitivity)
 }
 
-/// Calculate ATR baseline for a sequence of candles with adaptive fallback
+/// Calculate simple ATR for sequence→horizon comparison
+///
+/// CORRECTED APPROACH: Simple, direct ATR calculation without complex windowing or weighting.
+/// Used for both sequence (baseline) and horizon (target) measurements.
+///
+/// ## Core Algorithm
+/// 1. **True Range**: Calculate max(high-low, |high-prev_close|, |low-prev_close|) for each candle
+/// 2. **Price Normalization**: Divide each true range by current close price
+/// 3. **Average**: Simple average of all normalized true ranges
+///
+/// ## Result
+/// - **Normalized ATR**: Average true range as percentage of price
+/// - **Comparable**: Same calculation for sequence and horizon enables direct ratio comparison
+/// - **Stable**: Simple average without complex weighting schemes
+///
+/// ## Usage
+/// - **Sequence**: Establishes volatility baseline/context
+/// - **Horizon**: Measures target volatility for comparison
+/// - **Ratio**: horizon_atr / sequence_atr shows volatility change
+pub fn calculate_simple_atr(candles: &[MarketDataRow]) -> Result<f64> {
+    calculate_simple_atr_with_params(candles, 0.005) // Default minimum for backward compatibility
+}
+
+/// Calculate simple ATR with configurable minimum baseline
+pub fn calculate_simple_atr_with_params(
+    candles: &[MarketDataRow],
+    min_baseline: f64,
+) -> Result<f64> {
+    if candles.len() < 2 {
+        return Ok(min_baseline * 2.0); // Default volatility for insufficient data
+    }
+
+    let mut true_ranges = Vec::new();
+
+    // Calculate True Range for each candle pair
+    for i in 1..candles.len() {
+        let current = &candles[i];
+        let previous = &candles[i - 1];
+
+        // Standard True Range calculation
+        let high_low = current.high - current.low;
+        let high_close = (current.high - previous.close).abs();
+        let low_close = (current.low - previous.close).abs();
+        let true_range = high_low.max(high_close).max(low_close);
+
+        if true_range.is_finite() && true_range > 0.0 && current.close > 0.0 {
+            // Normalize by current price for percentage-based comparison
+            let normalized_tr = true_range / current.close;
+            true_ranges.push(normalized_tr);
+        }
+    }
+
+    if true_ranges.is_empty() {
+        // Fallback: use price range as volatility estimate
+        let prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let price_range = (max_price - min_price) / min_price;
+        return Ok(price_range.max(min_baseline));
+    }
+
+    // Simple average of normalized true ranges
+    let simple_atr = true_ranges.iter().sum::<f64>() / true_ranges.len() as f64;
+
+    Ok(simple_atr.max(min_baseline))
+}
 ///
 /// This function computes the threshold boundaries used to classify volatility ratios
 /// into the 5-class volatility regime system (VeryLow, Low, Medium, High, VeryHigh).
@@ -938,22 +955,22 @@ pub struct VolatilityReconstruction {
     pub train_atr: f64,
 }
 
-/// Reconstruct volatility predictions from model probabilities
+/// Reconstruct volatility predictions from model probabilities using ratio-based approach
 ///
-/// This method reverses the training classification logic to convert
+/// This method reverses the new ratio-based classification logic to convert
 /// raw model probabilities back to meaningful ATR ratios and volatility changes.
 ///
 /// # Arguments
 /// * `probabilities` - 5-element array of class probabilities [VeryLow, Low, Medium, High, VeryHigh]
 /// * `sequence_ohlcv` - OHLCV data for the input sequence (same as used in training)
-/// * `config` - Optional configuration (uses defaults if None)
+/// * `adaptive_params` - Adaptive parameters used during training (for threshold calculation)
 ///
 /// # Returns
 /// * `VolatilityReconstruction` - Complete reconstruction with ATR ratios and volatility metrics
 pub fn reconstruct_volatility(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
-    config: Option<&TargetsConfig>,
+    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
 ) -> Result<VolatilityReconstruction> {
     // Validate inputs
     if probabilities.len() != 5 {
@@ -968,65 +985,71 @@ pub fn reconstruct_volatility(
         ));
     }
 
-    // Use same configuration as training
-    let targets_config = config.cloned().unwrap_or_default();
-    let log_thresholds = calculate_log_volatility_thresholds(&targets_config)?;
+    // Calculate sequence ATR baseline (same as training)
+    let sequence_atr = calculate_simple_atr(sequence_ohlcv)?;
+    let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr); // Same minimum as training
 
-    // Calculate training ATR baseline (same as training)
-    let train_atr = get_sequence_atr_baseline(sequence_ohlcv)?;
-    if train_atr <= 0.0 {
+    if baseline_atr <= 0.0 {
         return Err(crate::utils::error::VangaError::DataError(
-            "Invalid training ATR baseline for volatility reconstruction".to_string(),
+            "Invalid sequence ATR baseline for volatility reconstruction".to_string(),
         ));
     }
 
-    // Calculate representative ATR ratios for each class (reverse of classification)
-    // Use midpoints of log space boundaries, then convert to ratio space
-    let log_midpoints = [
-        log_thresholds.very_low_max - 0.2, // VeryLow: below very_low_max
-        (log_thresholds.very_low_max + log_thresholds.low_max) / 2.0, // Low: between very_low_max and low_max
-        (log_thresholds.low_max + log_thresholds.medium_max) / 2.0, // Medium: between low_max and medium_max
-        (log_thresholds.medium_max + log_thresholds.high_max) / 2.0, // High: between medium_max and high_max
-        log_thresholds.high_max + 0.2,                               // VeryHigh: above high_max
+    // Use adaptive parameters for threshold calculation (same as training)
+    let moderate_threshold = adaptive_params.bandwidth_size;
+    let extreme_threshold = adaptive_params.bandwidth_size * adaptive_params.extreme_multiplier;
+
+    // Calculate representative ATR ratios for each class (midpoints)
+    // These correspond to the classification ranges:
+    let class_ratio_midpoints = [
+        (1.0 - extreme_threshold) * 0.75, // VeryLow
+        (1.0 - extreme_threshold + 1.0 - moderate_threshold) / 2.0, // Low
+        1.0,                              // Medium (same as sequence)
+        (1.0 + moderate_threshold + 1.0 + extreme_threshold) / 2.0, // High
+        (1.0 + extreme_threshold) * 1.25, // VeryHigh
     ];
 
-    // Convert log space midpoints to ATR ratios
-    let atr_ratios: Vec<f64> = log_midpoints
-        .iter()
-        .map(|&log_val| log_val.exp()) // e^log_val = ratio
-        .collect();
+    // Convert ratios to actual ATR values
+    let atr_ratios: Vec<f64> = class_ratio_midpoints.to_vec();
 
     // Convert ATR ratios to volatility change percentages
     let volatility_changes: Vec<f64> = atr_ratios
         .iter()
-        .map(|&ratio| (ratio - 1.0) * 100.0) // (ratio - 1) * 100 = percentage change
+        .map(|&ratio| (ratio - 1.0) * 100.0) // Convert to percentage change
         .collect();
 
-    // Find most likely class and confidence
-    let (most_likely_class, confidence) = probabilities
+    // Find most likely class
+    let most_likely_class = probabilities
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(idx, &prob)| (idx, prob))
-        .unwrap_or((2, 0.2)); // Default to Medium
+        .map(|(i, _)| i)
+        .unwrap_or(2); // Default to medium
 
-    // Calculate expected values (weighted averages)
-    let expected_atr_ratio: f64 = probabilities
+    let confidence = probabilities[most_likely_class];
+
+    // Calculate expected ATR ratio (weighted average)
+    let expected_atr_ratio = probabilities
         .iter()
-        .zip(atr_ratios.iter())
-        .map(|(&prob, &ratio)| prob * ratio)
-        .sum();
+        .zip(class_ratio_midpoints.iter())
+        .map(|(prob, ratio)| prob * ratio)
+        .sum::<f64>();
 
-    let expected_volatility_change: f64 = probabilities
-        .iter()
-        .zip(volatility_changes.iter())
-        .map(|(&prob, &change)| prob * change)
-        .sum();
+    // Calculate expected volatility change percentage
+    let expected_volatility_change = (expected_atr_ratio - 1.0) * 100.0;
 
-    // Calculate regime probabilities
+    // Calculate volatility regime probabilities
     let low_volatility_probability = probabilities[0] + probabilities[1]; // VeryLow + Low
     let high_volatility_probability = probabilities[3] + probabilities[4]; // High + VeryHigh
     let extreme_volatility_probability = probabilities[0] + probabilities[4]; // VeryLow + VeryHigh
+
+    // Create simplified thresholds structure for compatibility
+    let log_thresholds = LogVolatilityThresholds {
+        very_low_max: (1.0 - extreme_threshold).ln(),
+        low_max: (1.0 - moderate_threshold).ln(),
+        medium_max: (1.0 + moderate_threshold).ln(),
+        high_max: (1.0 + extreme_threshold).ln(),
+    };
 
     Ok(VolatilityReconstruction {
         probabilities: probabilities.to_vec(),
@@ -1040,8 +1063,22 @@ pub fn reconstruct_volatility(
         high_volatility_probability,
         extreme_volatility_probability,
         log_thresholds,
-        train_atr,
+        train_atr: baseline_atr,
     })
+}
+
+/// Backward compatibility wrapper for reconstruct_volatility
+///
+/// This function provides compatibility with the old signature while using default adaptive parameters.
+/// The config parameter is kept for API compatibility but not used.
+pub fn reconstruct_volatility_legacy(
+    probabilities: &[f64],
+    sequence_ohlcv: &[MarketDataRow],
+    _config: Option<&TargetsConfig>, // Kept for API compatibility, replaced by adaptive params
+) -> Result<VolatilityReconstruction> {
+    // Use default adaptive parameters for backward compatibility
+    let default_params = crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
+    reconstruct_volatility(probabilities, sequence_ohlcv, &default_params)
 }
 
 /// Convert class probabilities to expected ATR ratios
@@ -1052,7 +1089,7 @@ pub fn reconstruct_volatility(
 /// # Arguments
 /// * `probabilities` - 5-element array of class probabilities
 /// * `sequence_ohlcv` - OHLCV data for ATR baseline calculation
-/// * `config` - Optional configuration
+/// * `config` - Optional configuration (ignored, uses default adaptive params)
 ///
 /// # Returns
 /// * `Vec<f64>` - Expected ATR ratio for each class [VeryLow, Low, Medium, High, VeryHigh]
@@ -1067,7 +1104,7 @@ pub fn probabilities_to_atr_ratios(
         ));
     }
 
-    let reconstruction = reconstruct_volatility(probabilities, sequence_ohlcv, config)?;
+    let reconstruction = reconstruct_volatility_legacy(probabilities, sequence_ohlcv, config)?;
     Ok(reconstruction.atr_ratios)
 }
 
@@ -1076,7 +1113,7 @@ pub fn probabilities_to_atr_ratios(
 /// # Arguments
 /// * `probabilities` - 5-element array of class probabilities
 /// * `sequence_ohlcv` - OHLCV data for ATR baseline calculation
-/// * `config` - Optional configuration
+/// * `config` - Optional configuration (ignored, uses default adaptive params)
 ///
 /// # Returns
 /// * `Vec<f64>` - Volatility change percentage for each class
@@ -1091,7 +1128,7 @@ pub fn probabilities_to_volatility_changes(
         ));
     }
 
-    let reconstruction = reconstruct_volatility(probabilities, sequence_ohlcv, config)?;
+    let reconstruction = reconstruct_volatility_legacy(probabilities, sequence_ohlcv, config)?;
     Ok(reconstruction.volatility_changes)
 }
 

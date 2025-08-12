@@ -155,161 +155,142 @@ pub fn generate_sentiment_targets_with_adaptive_params(
     Ok(targets)
 }
 
-/// Classify sentiment using momentum-based adaptive thresholds with optional adaptive parameters
+/// Classify sentiment using sequence→horizon bullish strength ratio for strong ML signals
 ///
-/// IMPROVED: This function now uses candle momentum shifts for clearer classification
-/// with stronger signals that are easier for ML models to learn.
+/// CORRECTED APPROACH: Uses sequence as baseline, horizon as target measurement.
+/// Creates strong ratio-based signals that are easier for LSTM to learn.
+///
+/// ## Algorithm
+/// 1. Calculate bullish strength for sequence (baseline context)
+/// 2. Calculate bullish strength for horizon (target measurement)
+/// 3. Compute bullish ratio = horizon_strength / sequence_strength
+/// 4. Classify using adaptive thresholds on ratio values
+///
+/// ## Signal Strength
+/// - **Strong Signal**: Direct ratio in [0, ∞] range
+/// - **Clear Meaning**: >1 = more bullish, <1 = more bearish, =1 = same sentiment
+/// - **ML Friendly**: Consistent, predictable patterns for LSTM learning
 pub fn classify_sentiment(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
-    config: &SentimentConfig,
+    _config: &SentimentConfig, // Kept for API compatibility, will be removed in future version
     adaptive_params: &SentimentAdaptiveParams,
 ) -> Result<i32> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
         return Err(VangaError::DataError(
-            "Empty OHLCV data for sentiment analysis".to_string(),
+            "Empty sequence or horizon OHLCV data for sentiment analysis".to_string(),
         ));
     }
 
-    // Calculate sentiment metrics for both sequence and horizon using adaptive weighting
-    let sequence_sentiment = calculate_sequence_sentiment_score_with_weighting(
-        sequence_ohlcv,
-        adaptive_params.horizon_decay_factor,
-    );
+    // Calculate bullish strength for both sequence (baseline) and horizon (target)
+    let sequence_bullish_strength = calculate_bullish_strength(sequence_ohlcv);
+    let horizon_bullish_strength = calculate_bullish_strength(horizon_ohlcv);
 
-    let horizon_sentiment = calculate_sequence_sentiment_score_with_weighting(
-        horizon_ohlcv,
-        adaptive_params.horizon_decay_factor,
-    );
+    // Calculate bullish ratio: horizon/sequence (with adaptive minimum baseline)
+    let baseline_strength = sequence_bullish_strength.max(adaptive_params.min_baseline_strength);
+    let bullish_ratio = horizon_bullish_strength / baseline_strength;
 
-    // Calculate sentiment momentum shift (horizon vs sequence baseline)
-    // This now represents the change in bullish/bearish balance
-    let momentum_shift = horizon_sentiment - sequence_sentiment;
+    // Use adaptive thresholds calibrated for balanced distribution on ratio values
+    let moderate_threshold = adaptive_params.body_sensitivity; // Now represents ratio threshold
+    let extreme_threshold = adaptive_params.body_sensitivity * adaptive_params.extreme_multiplier;
 
-    // IMPROVED THRESHOLDS: Using momentum shift for clearer classification
-    // The momentum shift is now in a stronger [-2, 2] range (difference of two [-1, 1] values)
-
-    // Use calibrated sensitivity scaled appropriately for momentum range
-    let base_threshold = config.body_sensitivity;
-    let extreme_multiplier = adaptive_params.extreme_multiplier;
-
-    // Create balanced thresholds for momentum shifts
-    // These thresholds are designed for the [-2, 2] momentum shift range
-    let strong_panic_threshold = -base_threshold * extreme_multiplier; // Strong bearish shift
-    let moderate_panic_threshold = -base_threshold; // Moderate bearish shift
-    let moderate_greed_threshold = base_threshold; // Moderate bullish shift
-    let strong_greed_threshold = base_threshold * extreme_multiplier; // Strong bullish shift
-
-    // Classify based on momentum shift with clear boundaries
-    let class = if momentum_shift <= strong_panic_threshold {
-        0 // Strong Panic: Large shift toward bearish sentiment
-    } else if momentum_shift <= moderate_panic_threshold {
-        1 // Moderate Panic: Moderate shift toward bearish
-    } else if momentum_shift < moderate_greed_threshold {
-        2 // Neutral: Small or no momentum shift
-    } else if momentum_shift < strong_greed_threshold {
-        3 // Moderate Greed: Moderate shift toward bullish
+    // Classify based on bullish ratio with clear boundaries
+    // bullish_ratio range: [0, ∞] where 1.0 = same sentiment
+    let class = if bullish_ratio <= (1.0 - extreme_threshold) {
+        0 // Strong Panic: Much less bullish than sequence
+    } else if bullish_ratio <= (1.0 - moderate_threshold) {
+        1 // Moderate Panic: Somewhat less bullish than sequence
+    } else if bullish_ratio < (1.0 + moderate_threshold) {
+        2 // Neutral: Similar bullish strength to sequence
+    } else if bullish_ratio < (1.0 + extreme_threshold) {
+        3 // Moderate Greed: Somewhat more bullish than sequence
     } else {
-        4 // Strong Greed: Large shift toward bullish sentiment
+        4 // Strong Greed: Much more bullish than sequence
     };
 
     log::debug!(
-        "🎯 Sentiment Momentum: seq={:.4}, hor={:.4}, shift={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
-        sequence_sentiment, horizon_sentiment, momentum_shift,
-        strong_panic_threshold, moderate_panic_threshold, moderate_greed_threshold, strong_greed_threshold,
+        "🎯 Sentiment Ratio: seq_bullish={:.4}, hor_bullish={:.4}, ratio={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
+        sequence_bullish_strength, horizon_bullish_strength, bullish_ratio,
+        1.0 - extreme_threshold, 1.0 - moderate_threshold, 1.0 + moderate_threshold, 1.0 + extreme_threshold,
         class, ["STRONG_PANIC", "MODERATE_PANIC", "NEUTRAL", "MODERATE_GREED", "STRONG_GREED"][class as usize]
     );
 
     Ok(class)
 }
 
-/// Calculate sentiment score for a sequence using candle momentum analysis
-/// with optional horizon weighting for recent emphasis
+/// Calculate bullish strength from candles for sequence→horizon comparison
 ///
-/// ## Parameters
-/// - `candles`: OHLCV data for sentiment analysis
-/// - `horizon_decay_factor`: Optional decay factor for recent emphasis (1.0 = uniform, <1.0 = recent emphasis)
-///
-/// ## Weighting Strategy
-/// When horizon_decay_factor < 1.0, recent candles get higher weights:
-/// - weight[i] = decay_factor^(n-1-i) where i=0 is oldest, i=n-1 is newest
-/// - This emphasizes recent sentiment changes for better horizon prediction
-///
-/// ## NEW MOMENTUM-BASED APPROACH
-/// Focuses on the balance between bullish and bearish candles, weighted by their body strength.
-/// This creates a stronger signal that's easier for ML models to learn.
+/// CORRECTED APPROACH: Calculate bullish vs bearish strength for any set of candles.
+/// Used for both sequence (baseline) and horizon (target) measurements.
 ///
 /// ## Core Algorithm
-/// 1. **Candle Direction**: Classify each candle as bullish (close > open) or bearish
-/// 2. **Body Strength**: abs(close - open) / range as weight for each candle
-/// 3. **Weighted Balance**: Sum of (bullish_weights - bearish_weights) / total_weights
-/// 4. **Result Range**: [-1, 1] where -1 = all strong bearish, +1 = all strong bullish
+/// 1. **Body Strength**: Calculate abs(close - open) / range for each candle
+/// 2. **Bullish Accumulation**: Sum body strength for bullish candles (close > open)
+/// 3. **Total Strength**: Sum all body strengths regardless of direction
+/// 4. **Bullish Ratio**: bullish_strength / total_strength
 ///
-/// ## Advantages
-/// - Strong, clear signal in [-1, 1] range
-/// - Volume-independent (pure price action)
-/// - Captures market momentum shifts effectively
-/// - Better differentiation between sentiment states
-pub fn calculate_sequence_sentiment_score(candles: &[MarketDataRow]) -> f64 {
-    calculate_sequence_sentiment_score_with_weighting(candles, 1.0) // Default: uniform weighting
-}
-
-/// Calculate weighted sentiment score with optional horizon decay for recent emphasis
-pub fn calculate_sequence_sentiment_score_with_weighting(
-    candles: &[MarketDataRow],
-    horizon_decay_factor: f64,
-) -> f64 {
+/// ## Result Range
+/// - **[0.0, 1.0]** where:
+///   - **0.0** = All strong bearish candles
+///   - **0.5** = Balanced bullish/bearish strength (neutral)
+///   - **1.0** = All strong bullish candles
+///
+/// ## Usage
+/// - **Sequence**: Establishes bullish strength baseline/context
+/// - **Horizon**: Measures target bullish strength for comparison
+/// - **Ratio**: horizon_strength / sequence_strength shows sentiment change
+pub fn calculate_bullish_strength(candles: &[MarketDataRow]) -> f64 {
     if candles.is_empty() {
-        return 0.0;
+        return 0.5; // Neutral if no data
     }
 
-    let mut bullish_weight_sum = 0.0;
-    let mut bearish_weight_sum = 0.0;
-    let mut total_weight_sum = 0.0;
-    let n = candles.len();
+    let mut bullish_strength = 0.0;
+    let mut total_strength = 0.0;
 
-    for (i, candle) in candles.iter().enumerate() {
+    for candle in candles {
         let range = candle.high - candle.low;
         if range <= 0.0 {
-            continue; // Skip invalid candles
+            continue; // Skip invalid candles (no price movement)
         }
 
-        // MOMENTUM-BASED SENTIMENT CALCULATION (volume-independent)
-
-        // Calculate body size and direction
+        // Calculate body strength (magnitude of price movement within range)
         let body = candle.close - candle.open;
-        let body_strength = body.abs() / range; // [0, 1] range
+        let body_strength = body.abs() / range; // [0, 1] normalized by range
 
-        // Apply time decay weight if specified
-        let time_weight = if horizon_decay_factor < 1.0 {
-            horizon_decay_factor.powf((n - 1 - i) as f64)
-        } else {
-            1.0 // Uniform weighting when decay_factor >= 1.0
-        };
-
-        // Combine body strength with time weight
-        let candle_weight = body_strength * time_weight;
-
-        // Accumulate bullish or bearish weights
+        // Accumulate bullish strength only for bullish candles
         if body > 0.0 {
-            // Bullish candle (green)
-            bullish_weight_sum += candle_weight;
-        } else if body < 0.0 {
-            // Bearish candle (red)
-            bearish_weight_sum += candle_weight;
+            bullish_strength += body_strength;
         }
-        // Doji candles (body == 0) contribute no directional weight
 
-        total_weight_sum += candle_weight;
+        // Always accumulate total strength (bullish + bearish)
+        total_strength += body_strength;
     }
 
-    if total_weight_sum > 0.0 {
-        // Calculate momentum balance: difference between bullish and bearish strength
-        // Normalized to [-1, 1] range
-        (bullish_weight_sum - bearish_weight_sum) / total_weight_sum
+    if total_strength > 0.0 {
+        // Return bullish ratio: [0, 1] where 0.5 = neutral
+        bullish_strength / total_strength
     } else {
-        0.0 // No valid candles or all dojis
+        0.5 // Neutral if no valid candles (all dojis)
     }
+}
+
+/// Legacy function for backward compatibility - now uses simplified approach
+pub fn calculate_sequence_sentiment_score(candles: &[MarketDataRow]) -> f64 {
+    // Convert [0, 1] bullish strength to [-1, 1] for legacy compatibility
+    let bullish_strength = calculate_bullish_strength(candles);
+    (bullish_strength - 0.5) * 2.0 // Map [0, 1] to [-1, 1]
+}
+
+/// Legacy function for backward compatibility - now uses simplified approach
+/// Calculate sentiment score with optional horizon decay weighting
+///
+/// Note: The horizon_decay_factor parameter is kept for API compatibility but not used
+/// in the simplified ratio-based approach. Will be removed in future version.
+pub fn calculate_sequence_sentiment_score_with_weighting(
+    candles: &[MarketDataRow],
+    _horizon_decay_factor: f64, // Kept for API compatibility, not used in ratio-based approach
+) -> f64 {
+    calculate_sequence_sentiment_score(candles)
 }
 
 /// Extract OHLCV data from DataFrame
@@ -538,11 +519,22 @@ pub struct SentimentReconstruction {
     pub sentiment_interpretation: String,
 }
 
-/// Reconstruct sentiment from model probabilities
+/// Reconstruct sentiment from model probabilities using ratio-based approach
+///
+/// This method reverses the new ratio-based classification logic to convert
+/// raw model probabilities back to meaningful bullish strength ratios and sentiment metrics.
+///
+/// # Arguments
+/// * `probabilities` - 5-element array of class probabilities [Strong Panic, Moderate Panic, Neutral, Moderate Greed, Strong Greed]
+/// * `sequence_ohlcv` - OHLCV data for the input sequence (same as used in training)
+/// * `adaptive_params` - Adaptive parameters used during training (for threshold calculation)
+///
+/// # Returns
+/// * `SentimentReconstruction` - Complete reconstruction with bullish ratios and sentiment metrics
 pub fn reconstruct_sentiment(
     probabilities: &[f64],
-    sequence_sentiment: f64,
-    thresholds: &[f64; 4], // [panic_extreme, panic_moderate, greed_moderate, greed_extreme]
+    sequence_ohlcv: &[MarketDataRow],
+    adaptive_params: &crate::targets::adaptive_parameters::SentimentAdaptiveParams,
 ) -> Result<SentimentReconstruction> {
     if probabilities.len() != 5 {
         return Err(VangaError::DataError(
@@ -550,23 +542,55 @@ pub fn reconstruct_sentiment(
         ));
     }
 
-    // Define sentiment ranges based on thresholds
-    let sentiment_ranges = vec![
-        [f64::NEG_INFINITY, sequence_sentiment - thresholds[0]], // Strong Panic
-        [
-            sequence_sentiment - thresholds[0],
-            sequence_sentiment - thresholds[1],
-        ], // Moderate Panic
-        [
-            sequence_sentiment - thresholds[1],
-            sequence_sentiment + thresholds[2],
-        ], // Neutral
-        [
-            sequence_sentiment + thresholds[2],
-            sequence_sentiment + thresholds[3],
-        ], // Moderate Greed
-        [sequence_sentiment + thresholds[3], f64::INFINITY],     // Strong Greed
+    if sequence_ohlcv.is_empty() {
+        return Err(VangaError::DataError(
+            "Sequence OHLCV data is required for sentiment reconstruction".to_string(),
+        ));
+    }
+
+    // Calculate sequence bullish strength baseline (same as training)
+    let sequence_bullish_strength = calculate_bullish_strength(sequence_ohlcv);
+    let baseline_strength = sequence_bullish_strength.max(adaptive_params.min_baseline_strength); // Same minimum as training
+
+    // Use adaptive parameters for threshold calculation (same as training)
+    let moderate_threshold = adaptive_params.body_sensitivity;
+    let extreme_threshold = adaptive_params.body_sensitivity * adaptive_params.extreme_multiplier;
+
+    // Define bullish ratio ranges for each class (reverse of classification logic)
+    let ratio_ranges = [
+        [0.0, 1.0 - extreme_threshold], // Strong Panic: Much less bullish
+        [1.0 - extreme_threshold, 1.0 - moderate_threshold], // Moderate Panic: Somewhat less bullish
+        [1.0 - moderate_threshold, 1.0 + moderate_threshold], // Neutral: Similar bullish strength
+        [1.0 + moderate_threshold, 1.0 + extreme_threshold], // Moderate Greed: Somewhat more bullish
+        [1.0 + extreme_threshold, f64::INFINITY],            // Strong Greed: Much more bullish
     ];
+    // Calculate representative bullish ratios for each class (midpoints)
+    // These ranges are used to determine expected values for reconstruction
+    let class_ratio_midpoints = [
+        (1.0 - extreme_threshold) * 0.75, // Strong Panic
+        (1.0 - extreme_threshold + 1.0 - moderate_threshold) / 2.0, // Moderate Panic
+        1.0,                              // Neutral (same as sequence)
+        (1.0 + moderate_threshold + 1.0 + extreme_threshold) / 2.0, // Moderate Greed
+        (1.0 + extreme_threshold) * 1.25, // Strong Greed
+    ];
+
+    // Convert ratio ranges to sentiment ranges (for compatibility)
+    let sentiment_ranges: Vec<[f64; 2]> = ratio_ranges
+        .iter()
+        .map(|&[low, high]| {
+            let low_sentiment = if low == 0.0 {
+                0.0
+            } else {
+                low * baseline_strength
+            };
+            let high_sentiment = if high == f64::INFINITY {
+                1.0
+            } else {
+                high * baseline_strength
+            };
+            [low_sentiment, high_sentiment]
+        })
+        .collect();
 
     // Find most likely class
     let most_likely_class = probabilities
@@ -578,27 +602,23 @@ pub fn reconstruct_sentiment(
 
     let confidence = probabilities[most_likely_class];
 
-    // Calculate expected sentiment (weighted average)
-    let class_midpoints = [
-        sequence_sentiment - thresholds[0] * 1.5, // Strong Panic
-        sequence_sentiment - (thresholds[0] + thresholds[1]) / 2.0, // Moderate Panic
-        sequence_sentiment,                       // Neutral
-        sequence_sentiment + (thresholds[2] + thresholds[3]) / 2.0, // Moderate Greed
-        sequence_sentiment + thresholds[3] * 1.5, // Strong Greed
-    ];
-
-    let expected_sentiment = probabilities
+    // Calculate expected bullish ratio (weighted average)
+    let expected_ratio = probabilities
         .iter()
-        .zip(class_midpoints.iter())
-        .map(|(prob, midpoint)| prob * midpoint)
+        .zip(class_ratio_midpoints.iter())
+        .map(|(prob, ratio)| prob * ratio)
         .sum::<f64>();
+
+    // Convert expected ratio back to sentiment score for compatibility
+    let expected_sentiment = expected_ratio * baseline_strength;
 
     // Generate interpretation
     let class_names = get_sentiment_class_names();
     let sentiment_interpretation = format!(
-        "{} (confidence: {:.1}%)",
+        "{} (confidence: {:.1}%, ratio: {:.3})",
         class_names[most_likely_class],
-        confidence * 100.0
+        confidence * 100.0,
+        class_ratio_midpoints[most_likely_class]
     );
 
     Ok(SentimentReconstruction {

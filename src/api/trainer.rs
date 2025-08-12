@@ -479,6 +479,7 @@ impl ModelTrainer {
                 atr_distribution_stats: Default::default(),
                 cv_adjustment_factor: 1.0,
                 horizon_decay_factor: calibrated_params.volatility.horizon_decay,
+                min_baseline_atr: 0.005, // Add missing field with default value
                 achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
                     class_percentages: calibrated_params.volatility.balance.class_percentages,
                     balance_score: calibrated_params.volatility.balance.balance_score,
@@ -504,6 +505,7 @@ impl ModelTrainer {
                 consistency_factor: calibrated_params.sentiment.consistency_factor,
                 extreme_multiplier: calibrated_params.sentiment.extreme_multiplier,
                 horizon_decay_factor: 1.0,
+                min_baseline_strength: 0.1, // Add missing field with default value
                 achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
                     class_percentages: calibrated_params.sentiment.balance.class_percentages,
                     balance_score: calibrated_params.sentiment.balance.balance_score,

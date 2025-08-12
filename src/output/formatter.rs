@@ -15,7 +15,7 @@ use crate::targets::PreparedTargets;
 use crate::targets::direction::reconstruct_direction;
 use crate::targets::reconstruct_price_levels;
 use crate::targets::sentiment::reconstruct_sentiment;
-use crate::targets::volatility::reconstruct_volatility;
+use crate::targets::volatility::reconstruct_volatility_legacy;
 use crate::targets::volume::reconstruct_volume;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
@@ -958,8 +958,8 @@ impl OutputFormatter {
                 volatility_output.very_high_probability,
             ];
 
-            // Use enhanced reconstruction from volatility module
-            match reconstruct_volatility(&probabilities, ohlcv_data, None) {
+            // Use enhanced reconstruction from volatility module with legacy wrapper
+            match reconstruct_volatility_legacy(&probabilities, ohlcv_data, None) {
                 Ok(reconstruction) => {
                     // Update existing fields with reconstruction results
                     // Use ATR ratio to enhance expected range calculation
@@ -968,10 +968,10 @@ impl OutputFormatter {
                             bandwidth * reconstruction.expected_atr_ratio;
                     }
 
-                    // Adjust position size multiplier based on volatility change
-                    let vol_change_factor =
-                        1.0 + (reconstruction.expected_volatility_change / 100.0).abs() * 0.1;
-                    prediction.position_size_multiplier = (1.0 / vol_change_factor).clamp(0.5, 2.0);
+                    // Expected ATR ratio is already in reconstruction
+                    // Clamp to reasonable range (0.1% to 100% expected range)
+                    prediction.expected_range_percent =
+                        prediction.expected_range_percent.clamp(0.001, 1.0);
 
                     log::debug!(
                         "🎯 Volatility reconstruction: atr_ratio={:.3}, vol_change={:.2}%, extreme_prob={:.3}",
@@ -1029,24 +1029,7 @@ impl OutputFormatter {
         if let (Some(adaptive_params), Some(sequence_ohlcv)) =
             (&self.adaptive_parameters, &self.sequence_ohlcv)
         {
-            // Calculate sequence sentiment score from OHLCV data
-            let sequence_sentiment = {
-                use crate::targets::sentiment::calculate_sequence_sentiment_score;
-                // Now using the same MarketDataRow structure everywhere
-                let sentiment_candles = sequence_ohlcv;
-                calculate_sequence_sentiment_score(sentiment_candles)
-            };
-
-            // Convert adaptive parameters to reconstruction thresholds
-            // Using the same logic as classify_sentiment: base_sensitivity with scaling
-            let base_sensitivity = adaptive_params.sentiment.body_sensitivity;
-            let thresholds = [
-                base_sensitivity * 2.0, // panic_extreme (strong panic threshold)
-                base_sensitivity,       // panic_moderate (moderate panic threshold)
-                base_sensitivity,       // greed_moderate (moderate greed threshold)
-                base_sensitivity * 2.0, // greed_extreme (strong greed threshold)
-            ];
-
+            // Prepare probabilities array for reconstruction
             // Prepare probabilities array for reconstruction
             let probabilities = vec![
                 sentiment_output.very_bearish_probability,
@@ -1057,7 +1040,8 @@ impl OutputFormatter {
             ];
 
             // Call reconstruction function with adaptive parameters
-            match reconstruct_sentiment(&probabilities, sequence_sentiment, &thresholds) {
+            match reconstruct_sentiment(&probabilities, sequence_ohlcv, &adaptive_params.sentiment)
+            {
                 Ok(reconstruction) => {
                     // Use reconstruction results to enhance prediction
                     // The reconstruction provides richer information than basic probabilities

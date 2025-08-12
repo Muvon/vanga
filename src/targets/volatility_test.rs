@@ -734,6 +734,7 @@ mod tests {
             horizon_decay_factor: 0.9, // Emphasize recent volatility
             atr_distribution_stats: Default::default(),
             cv_adjustment_factor: 1.0,
+            min_baseline_atr: 0.005, // Add missing field with default value
             achieved_balance: Default::default(),
         };
 
