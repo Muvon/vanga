@@ -55,12 +55,13 @@ outlier_handling = { enabled = true, method = "IQR", threshold = 2.5 }
 feature_engineering = { enabled = true, technical_indicators = true }
 normalization = { method = "zscore", per_feature = true }
 
-# Target configuration for 5-class system
+# Target configuration - enable/disable specific targets
 [targets]
-base_sensitivity = 0.02                         # Base sensitivity for all targets
-balance_target = 0.2                            # Target class balance (20% per class)
-momentum_weighting = 1.2                        # Recent data weighting
-extreme_multiplier = 2.0                        # Extreme class boundary multiplier
+price_level = true    # VWAP-weighted price classification
+direction = true      # Directional movement classification
+volatility = true     # Volatility regime classification
+sentiment = true      # Market sentiment classification
+volume = true         # Volume regime classification
 
 # Device configuration
 [device]

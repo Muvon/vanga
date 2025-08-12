@@ -68,7 +68,7 @@ impl TargetRegistry {
         let mut enabled = Vec::new();
 
         // Check which targets are enabled in config
-        if config.price_levels.enabled {
+        if config.price_level.enabled {
             if let Some(gen) = self.get("price_levels") {
                 enabled.push(gen);
             }

@@ -370,7 +370,7 @@ impl DataPipeline {
             .generate_training_sequences_with_adaptive_params(
                 training_df,
                 &config.horizons,
-                &config.model,
+                config,
                 &config.data,
                 &config.features,
                 adaptive_params,
@@ -402,13 +402,33 @@ impl DataPipeline {
 
         // STEP 5: Extract target-specific balanced datasets
         // CRITICAL: Each target gets its own optimal balance (no global minimum constraint)
-        let target_types = vec![
-            crate::targets::TargetType::PriceLevel,
-            crate::targets::TargetType::Direction,
-            crate::targets::TargetType::Volatility,
-            crate::targets::TargetType::Sentiment,
-            crate::targets::TargetType::Volume,
-        ];
+        // FIXED: Only use enabled targets from config instead of hardcoding all targets
+        let mut target_types = Vec::new();
+        if config.targets.price_level {
+            target_types.push(crate::targets::TargetType::PriceLevel);
+        }
+        if config.targets.direction {
+            target_types.push(crate::targets::TargetType::Direction);
+        }
+        if config.targets.volatility {
+            target_types.push(crate::targets::TargetType::Volatility);
+        }
+        if config.targets.sentiment {
+            target_types.push(crate::targets::TargetType::Sentiment);
+        }
+        if config.targets.volume {
+            target_types.push(crate::targets::TargetType::Volume);
+        }
+
+        // Validate we have at least one target enabled
+        if target_types.is_empty() {
+            return Err(VangaError::ConfigError(
+                "No targets enabled in configuration. At least one target must be enabled."
+                    .to_string(),
+            ));
+        }
+
+        log::info!("🎯 Enabled targets for training: {:?}", target_types);
 
         log::info!("🎯 TARGET-SPECIFIC BALANCE EXTRACTION: Each target balanced independently");
         let target_balanced_datasets = balancer.extract_target_specific_balanced_datasets(

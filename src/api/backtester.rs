@@ -268,6 +268,7 @@ impl Backtester {
             horizons: vec!["1h".to_string()], // Single horizon for backtesting
             fresh_training: true,             // Always start fresh for backtesting
             continue_training: false,
+            targets: crate::config::training::TargetsConfig::default(), // Add targets config
             features: FeatureConfig::default(),
             training: crate::config::training::TrainingParams {
                 device: crate::config::training::DeviceConfig::Auto,

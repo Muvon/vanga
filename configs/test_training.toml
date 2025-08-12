@@ -22,11 +22,13 @@ early_stopping = false        # Disable for quick test
 patience = 5
 print_every = 1              # Print every epoch for testing
 
+# Target configuration - enable/disable specific targets
 [targets]
-horizons = ["1h", "4h", "1d"]
-price_levels = true
+price_level = true
 direction = true
 volatility = true
+sentiment = false     # Disabled for quick testing
+volume = false        # Disabled for quick testing
 
 # Minimal features for fast testing
 [features.technical_indicators]

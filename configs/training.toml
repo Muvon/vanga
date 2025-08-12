@@ -435,3 +435,15 @@ method = "None"
 n_trials = 100
 timeout_seconds = 3600
 metric = "MAE"
+
+# ============================================================================
+# TARGET CONFIGURATION - Enable/disable specific targets
+# ============================================================================
+# Simple enable/disable flags for each target type
+# All parameters come from automatic calibration system
+[targets]
+price_level = true    # VWAP-weighted price classification (5 classes)
+direction = true      # Directional movement classification (5 classes)
+volatility = true     # Volatility regime classification (5 classes)
+sentiment = true      # Market sentiment classification (5 classes)
+volume = true         # Volume regime classification (5 classes)

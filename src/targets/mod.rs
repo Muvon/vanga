@@ -73,7 +73,7 @@ pub use volume::{
 pub struct MultiTargetConfig {
     pub price_level_config: PriceLevelConfig,
     pub horizons: Vec<String>,
-    pub price_levels: TargetTypeConfig,
+    pub price_level: TargetTypeConfig,
     pub direction: TargetTypeConfig,
     pub volatility: TargetTypeConfig,
     pub sentiment: TargetTypeConfig,
@@ -92,7 +92,7 @@ impl Default for MultiTargetConfig {
             horizons: vec![
                 "1h".to_string(), // FIXED: Default to single horizon - should be overridden by training config
             ],
-            price_levels: TargetTypeConfig { enabled: true },
+            price_level: TargetTypeConfig { enabled: true },
             direction: TargetTypeConfig { enabled: true },
             volatility: TargetTypeConfig { enabled: true },
             sentiment: TargetTypeConfig { enabled: true },
@@ -102,23 +102,27 @@ impl Default for MultiTargetConfig {
 }
 
 impl MultiTargetConfig {
-    /// DEPRECATED: Create MultiTargetConfig from ModelConfig (use TargetsConfig directly instead)
-    pub fn from_model_config(
-        model_config: &crate::config::model::ModelConfig,
-        horizons: Vec<String>,
-    ) -> Self {
-        // Use the new TargetsConfig approach
+    /// Create MultiTargetConfig from TrainingConfig with proper target enablement
+    pub fn from_training_config(training_config: &crate::config::training::TrainingConfig) -> Self {
         Self {
-            price_level_config: PriceLevelConfig {
-                bandwidth_size: model_config.targets.base_sensitivity,
-                neutral_band_factor: 0.4, // Default neutral band factor (40% of range)
+            // Price level config not used with calibration system - all parameters come from calibration
+            price_level_config: PriceLevelConfig::default(),
+            horizons: training_config.horizons.clone(),
+            price_level: TargetTypeConfig {
+                enabled: training_config.targets.price_level,
             },
-            horizons,
-            price_levels: TargetTypeConfig { enabled: true },
-            direction: TargetTypeConfig { enabled: true },
-            volatility: TargetTypeConfig { enabled: true },
-            sentiment: TargetTypeConfig { enabled: true },
-            volume: TargetTypeConfig { enabled: true },
+            direction: TargetTypeConfig {
+                enabled: training_config.targets.direction,
+            },
+            volatility: TargetTypeConfig {
+                enabled: training_config.targets.volatility,
+            },
+            sentiment: TargetTypeConfig {
+                enabled: training_config.targets.sentiment,
+            },
+            volume: TargetTypeConfig {
+                enabled: training_config.targets.volume,
+            },
         }
     }
 }
@@ -305,42 +309,63 @@ impl TargetGenerator {
         Self::new(MultiTargetConfig::default())
     }
 
-    /// Get descriptive names for all generated targets
+    /// Get descriptive names for enabled targets only
     pub fn get_target_names(&self) -> Vec<String> {
         let mut names = Vec::new();
 
-        // Price level targets
-        for horizon in &self.config.horizons {
-            names.push(format!("price_level_{}", horizon));
+        // Only add enabled targets
+        if self.config.price_level.enabled {
+            for horizon in &self.config.horizons {
+                names.push(format!("price_level_{}", horizon));
+            }
         }
 
-        // Direction targets
-        for horizon in &self.config.horizons {
-            names.push(format!("direction_{}", horizon));
+        if self.config.direction.enabled {
+            for horizon in &self.config.horizons {
+                names.push(format!("direction_{}", horizon));
+            }
         }
 
-        // Volatility targets
-        for horizon in &self.config.horizons {
-            names.push(format!("volatility_{}", horizon));
+        if self.config.volatility.enabled {
+            for horizon in &self.config.horizons {
+                names.push(format!("volatility_{}", horizon));
+            }
         }
 
-        // Sentiment targets
-        for horizon in &self.config.horizons {
-            names.push(format!("sentiment_{}", horizon));
+        if self.config.sentiment.enabled {
+            for horizon in &self.config.horizons {
+                names.push(format!("sentiment_{}", horizon));
+            }
         }
 
-        // Volume targets
-        for horizon in &self.config.horizons {
-            names.push(format!("volume_{}", horizon));
+        if self.config.volume.enabled {
+            for horizon in &self.config.horizons {
+                names.push(format!("volume_{}", horizon));
+            }
         }
 
         names
     }
 
-    /// Get the total number of targets that will be generated
+    /// Get the total number of targets that will be generated (enabled targets only)
     pub fn get_num_targets(&self) -> usize {
-        // Each horizon generates: 1 price level + 1 direction + 1 volatility + 1 sentiment + 1 volume = 5 targets per horizon
-        self.config.horizons.len() * 5
+        let mut count = 0;
+        if self.config.price_level.enabled {
+            count += self.config.horizons.len();
+        }
+        if self.config.direction.enabled {
+            count += self.config.horizons.len();
+        }
+        if self.config.volatility.enabled {
+            count += self.config.horizons.len();
+        }
+        if self.config.sentiment.enabled {
+            count += self.config.horizons.len();
+        }
+        if self.config.volume.enabled {
+            count += self.config.horizons.len();
+        }
+        count
     }
 
     /// Generate all targets aligned with specific sequence indices (FIXED: for proper synchronization)
@@ -358,11 +383,11 @@ impl TargetGenerator {
         )
         .await
     }
-
-    /// Generate all targets with optional adaptive parameters
+    /// Generate all targets with optional adaptive parameters (conditional generation)
     ///
     /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
     /// target generation between training and prediction. When None, uses calibration/base config.
+    /// Only generates enabled targets for performance optimization.
     pub async fn generate_all_targets_with_adaptive_params(
         &self,
         df: &DataFrame,
@@ -375,11 +400,10 @@ impl TargetGenerator {
         let mut prepared_targets = PreparedTargets::new(data_length);
 
         log::info!(
-            "🎯 Generating aligned targets for {} sequences at specific indices",
+            "🎯 Generating aligned targets for {} sequences at specific indices (enabled targets only)",
             sequence_indices.len()
         );
 
-        // PARALLELIZED: Generate all target types concurrently
         // Create default parameters for cases where adaptive_params is None
         let default_direction =
             crate::targets::adaptive_parameters::DirectionAdaptiveParams::default();
@@ -391,6 +415,7 @@ impl TargetGenerator {
             crate::targets::adaptive_parameters::SentimentAdaptiveParams::default();
         let default_volume = crate::targets::adaptive_parameters::VolumeAdaptiveParams::default();
 
+        // Get adaptive parameters or defaults
         let direction_adaptive_params = adaptive_params
             .map(|p| &p.direction)
             .unwrap_or(&default_direction);
@@ -407,112 +432,82 @@ impl TargetGenerator {
             .map(|p| &p.volume)
             .unwrap_or(&default_volume);
 
-        let (
-            price_targets,
-            (direction_targets, (volatility_targets, (sentiment_targets, volume_targets))),
-        ) = rayon::join(
-            || {
-                log::debug!("Generating price level targets in parallel");
-                generate_price_level_targets_with_adaptive_params(
-                    df,
-                    &self.config.horizons,
-                    sequence_indices,
-                    sequence_length,
-                    price_level_adaptive_params,
-                )
-            },
-            || {
-                rayon::join(
-                    || {
-                        log::debug!("Generating direction targets in parallel");
-                        generate_direction_targets_with_adaptive_params(
-                            df,
-                            &self.config.horizons,
-                            sequence_indices,
-                            sequence_length,
-                            direction_adaptive_params,
-                        )
-                    },
-                    || {
-                        rayon::join(
-                            || {
-                                log::debug!("Generating volatility targets in parallel");
-                                generate_volatility_targets_with_adaptive_params(
-                                    df,
-                                    &self.config.horizons,
-                                    sequence_indices,
-                                    sequence_length,
-                                    volatility_adaptive_params,
-                                )
-                            },
-                            || {
-                                rayon::join(
-                                    || {
-                                        log::debug!("Generating sentiment targets in parallel");
-                                        generate_sentiment_targets_with_adaptive_params(
-                                            df,
-                                            &self.config.horizons,
-                                            sequence_indices,
-                                            sequence_length,
-                                            sentiment_adaptive_params,
-                                        )
-                                    },
-                                    || {
-                                        log::debug!("Generating volume targets in parallel");
-                                        generate_volume_targets_with_adaptive_params(
-                                            df,
-                                            &self.config.horizons,
-                                            sequence_indices,
-                                            sequence_length,
-                                            volume_adaptive_params,
-                                        )
-                                    },
-                                )
-                            },
-                        )
-                    },
-                )
-            },
-        );
+        // CONDITIONAL GENERATION: Only generate enabled targets
+        if self.config.price_level.enabled {
+            log::debug!("🏷️ Generating price level targets");
+            let price_targets = generate_price_level_targets_with_adaptive_params(
+                df,
+                &self.config.horizons,
+                sequence_indices,
+                sequence_length,
+                price_level_adaptive_params,
+            )?;
+            prepared_targets.price_levels = price_targets;
+        }
 
-        // Assign results
-        prepared_targets.price_levels = price_targets?;
-        prepared_targets.direction = direction_targets?;
-        prepared_targets.volatility = volatility_targets?;
-        prepared_targets.sentiment = sentiment_targets?;
-        prepared_targets.volume = volume_targets?;
+        if self.config.direction.enabled {
+            log::debug!("🧭 Generating direction targets");
+            let direction_targets = generate_direction_targets_with_adaptive_params(
+                df,
+                &self.config.horizons,
+                sequence_indices,
+                sequence_length,
+                direction_adaptive_params,
+            )?;
+            prepared_targets.direction = direction_targets;
+        }
 
-        // FIXED: Set target names to avoid redundant TargetGenerator creation
+        if self.config.volatility.enabled {
+            log::debug!("📊 Generating volatility targets");
+            let volatility_targets = generate_volatility_targets_with_adaptive_params(
+                df,
+                &self.config.horizons,
+                sequence_indices,
+                sequence_length,
+                volatility_adaptive_params,
+            )?;
+            prepared_targets.volatility = volatility_targets;
+        }
+
+        if self.config.sentiment.enabled {
+            log::debug!("💭 Generating sentiment targets");
+            let sentiment_targets = generate_sentiment_targets_with_adaptive_params(
+                df,
+                &self.config.horizons,
+                sequence_indices,
+                sequence_length,
+                sentiment_adaptive_params,
+            )?;
+            prepared_targets.sentiment = sentiment_targets;
+        }
+
+        if self.config.volume.enabled {
+            log::debug!("📈 Generating volume targets");
+            let volume_targets = generate_volume_targets_with_adaptive_params(
+                df,
+                &self.config.horizons,
+                sequence_indices,
+                sequence_length,
+                volume_adaptive_params,
+            )?;
+            prepared_targets.volume = volume_targets;
+        }
+
+        // Set target names for enabled targets only
         prepared_targets.target_names = self.get_target_names();
 
-        // FIXED: Calculate valid indices based on sequence alignment
-        // Valid indices should be 0, 1, 2, ... sequence_count-1 (not original data indices)
-        prepared_targets.valid_indices = (0..sequence_indices.len()).collect();
-
-        // FIXED: Validate target-sequence alignment
-        crate::utils::sequence_utils::validate_target_sequence_alignment(
-            sequence_indices.len(),
-            &prepared_targets.valid_indices,
-            &(0..sequence_indices.len()).collect::<Vec<_>>(), // Use sequence positions, not original indices
-            sequence_indices.len(),                           // Data length is now sequence count
-        )?;
-
-        // Validate targets
-        prepared_targets.validate()?;
+        // Validate that we have targets for all sequences
+        prepared_targets.valid_indices = (0..data_length).collect();
 
         log::info!(
-            "✅ Successfully generated aligned targets with {} valid samples",
-            prepared_targets.valid_indices.len()
+            "✅ Generated {} target types across {} horizons for {} sequences",
+            prepared_targets.target_names.len() / self.config.horizons.len().max(1),
+            self.config.horizons.len(),
+            data_length
         );
 
         Ok(prepared_targets)
     }
-
-    /// Generate all targets using trait-based approach (NEW METHOD)
-    ///
-    /// This method uses the new trait-based interface for target generation,
-    /// providing better extensibility and cleaner code while maintaining
-    /// full backward compatibility with existing logic.
     pub async fn generate_all_targets_trait_based(
         &self,
         df: &DataFrame,

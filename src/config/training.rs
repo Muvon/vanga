@@ -36,6 +36,9 @@ pub struct TrainingConfig {
 
     /// Optimization configuration
     pub optimization: OptimizationConfig,
+
+    /// Target configuration (enable/disable targets)
+    pub targets: TargetsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1096,6 +1099,7 @@ impl Default for TrainingConfig {
             training: TrainingParams::default(),
             data: DataConfig::default(),
             optimization: OptimizationConfig::default(),
+            targets: TargetsConfig::default(), // Add targets config with all enabled by default
         }
     }
 }
@@ -1422,6 +1426,31 @@ impl TrainingConfig {
             self.features = features;
         }
 
+        // Load targets section from [model.targets]
+        if let Some(model_section) = parsed.get("model") {
+            if let Some(targets_value) = model_section.get("targets") {
+                let targets: TargetsConfig = targets_value.clone().try_into().map_err(|e| {
+                    crate::utils::error::VangaError::ConfigError(format!(
+                        "Failed to parse targets: {}",
+                        e
+                    ))
+                })?;
+                self.targets = targets;
+                log::info!("📋 Loaded targets configuration from file");
+                log::info!("   - price_level: {}", self.targets.price_level);
+                log::info!("   - direction: {}", self.targets.direction);
+                log::info!("   - volatility: {}", self.targets.volatility);
+                log::info!("   - sentiment: {}", self.targets.sentiment);
+                log::info!("   - volume: {}", self.targets.volume);
+            } else {
+                log::info!(
+                    "📋 No [model.targets] section in config file, using defaults (all enabled)"
+                );
+            }
+        } else {
+            log::info!("📋 No [model] section in config file, using defaults (all enabled)");
+        }
+
         // Configuration loaded successfully
 
         log::info!(
@@ -1433,11 +1462,29 @@ impl TrainingConfig {
 
     /// Validate the complete training configuration
     pub fn validate(&self) -> Result<()> {
+        // Validate targets configuration
+        self.targets.validate()?;
+
         // Validate training parameters
         self.training.validate()?;
 
         // Validate model configuration
         self.model.validate()?;
+
+        // Validate that we have at least one horizon
+        if self.horizons.is_empty() {
+            return Err(VangaError::ConfigError(
+                "At least one prediction horizon must be specified".to_string(),
+            ));
+        }
+
+        log::info!("✅ Training configuration validated successfully");
+        log::info!("   - Symbol: {}", self.symbol);
+        log::info!("   - Horizons: {:?}", self.horizons);
+        log::info!(
+            "   - Enabled targets: {:?}",
+            self.targets.get_enabled_targets()
+        );
 
         Ok(())
     }
@@ -1447,6 +1494,7 @@ impl TrainingConfig {
         let config = Self {
             symbol: "TESTUSDT".to_string(),
             data_path: std::path::PathBuf::from("test_data.csv"),
+            targets: TargetsConfig::default(), // Add targets config for testing
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(5),
                 batch_size: BatchSizeConfig::Fixed(16),
@@ -1467,5 +1515,96 @@ impl TrainingConfig {
         };
 
         Ok(config)
+    }
+}
+
+/// Target configuration - simple enable/disable flags
+/// All parameters come from automatic calibration system
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetsConfig {
+    /// Enable price level targets (VWAP-weighted price classification)
+    pub price_level: bool,
+
+    /// Enable direction targets (directional movement classification)
+    pub direction: bool,
+
+    /// Enable volatility targets (volatility regime classification)
+    pub volatility: bool,
+
+    /// Enable sentiment targets (market sentiment classification)
+    pub sentiment: bool,
+
+    /// Enable volume targets (volume regime classification)
+    pub volume: bool,
+}
+
+impl Default for TargetsConfig {
+    fn default() -> Self {
+        Self {
+            price_level: true,
+            direction: true,
+            volatility: true,
+            sentiment: true,
+            volume: true,
+        }
+    }
+}
+
+impl TargetsConfig {
+    /// Validate that at least one target is enabled
+    pub fn validate(&self) -> Result<()> {
+        if !self.price_level
+            && !self.direction
+            && !self.volatility
+            && !self.sentiment
+            && !self.volume
+        {
+            return Err(VangaError::ConfigError(
+                "At least one target must be enabled for training".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Get list of enabled target types
+    pub fn get_enabled_targets(&self) -> Vec<&'static str> {
+        let mut enabled = Vec::new();
+        if self.price_level {
+            enabled.push("price_level");
+        }
+        if self.direction {
+            enabled.push("direction");
+        }
+        if self.volatility {
+            enabled.push("volatility");
+        }
+        if self.sentiment {
+            enabled.push("sentiment");
+        }
+        if self.volume {
+            enabled.push("volume");
+        }
+        enabled
+    }
+
+    /// Count number of enabled targets
+    pub fn count_enabled(&self) -> usize {
+        let mut count = 0;
+        if self.price_level {
+            count += 1;
+        }
+        if self.direction {
+            count += 1;
+        }
+        if self.volatility {
+            count += 1;
+        }
+        if self.sentiment {
+            count += 1;
+        }
+        if self.volume {
+            count += 1;
+        }
+        count
     }
 }

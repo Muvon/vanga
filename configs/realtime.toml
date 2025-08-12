@@ -1,3 +1,11 @@
+# Target configuration - enable/disable specific targets
+[targets]
+price_level = true    # Enable all targets for realtime
+direction = true
+volatility = true
+sentiment = true
+volume = true
+
 [realtime]
 # Real-time prediction configuration
 

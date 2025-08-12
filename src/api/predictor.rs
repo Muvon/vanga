@@ -235,27 +235,7 @@ impl Predictor {
         // Pass metadata to formatter for accurate PredictionResult creation
         formatter = formatter.with_metadata(input_feature_count, sequence_length);
 
-        // Configure formatter with model's targets config for proper 5-class parsing
-        let targets_config = if let Some(training_config) = model.get_training_config() {
-            // Use targets config from model's training configuration
-            log::info!("✅ Using training configuration for prediction parameters");
-            Some(training_config.model.targets.clone())
-        } else {
-            // Fallback to default TargetsConfig - all targets are always enabled with NUM_CLASSES=5
-            log::warn!("⚠️  No training configuration available, using fallback defaults. This may cause prediction inconsistency with training.");
-            None // Let reconstruction methods use their defaults
-        };
-
-        // Pass training config to formatter for enhanced reconstruction
-        if let Some(ref config) = targets_config {
-            formatter = formatter.with_training_config(config.clone());
-            log::debug!(
-                "🔧 Training config for reconstruction: base_sensitivity={:.3}, extreme_multiplier={:.1}",
-                config.base_sensitivity,
-                config.extreme_multiplier
-            );
-        }
-
+        // The new approach relies entirely on adaptive parameters instead of config-based parameters
         // Pass adaptive target parameters to formatter for consistent reconstruction
         if let Some(adaptive_params) = model.get_adaptive_target_parameters() {
             formatter = formatter.with_adaptive_parameters(adaptive_params.clone());

@@ -3,6 +3,14 @@
 # For detailed parameter explanations, see configs/example_single_asset.toml
 # Usage: vanga train --symbol BTCUSDT --data data.csv --config configs/quick_start.toml
 
+# Target configuration - enable/disable specific targets
+[targets]
+price_level = true    # Enable price level targets
+direction = true      # Enable direction targets
+volatility = false    # Disable for quick start
+sentiment = false     # Disable for quick start
+volume = false        # Disable for quick start
+
 [training]
 # Auto early stopping with intelligent defaults
 epochs = { Auto = { max_epochs = 1000 } }

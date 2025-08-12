@@ -1,0 +1,83 @@
+# LSTM TIME SERIES OPTIMIZED CONFIGURATION
+# Based on financial time series research and LSTM best practices
+# Designed for proper sequence learning with appropriate regularization
+
+[training]
+# AdamW with moderate weight decay (research shows 0.01-0.05 works well)
+optimizer = { AdamW = { weight_decay = 0.03, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+
+# Conservative learning rate for financial time series
+learning_rate = 0.001
+
+# Early stopping with reasonable patience for LSTM convergence
+early_stopping = { patience = 20, min_delta = 0.0005 }
+
+# Sufficient epochs for LSTM pattern learning
+epochs = { Auto = { max_epochs = 300 } }
+
+# Warmup epochs
+warmup_epochs = 10
+
+# Gradient clipping (important for LSTM stability)
+clip_gradient = 1.0
+
+# Learning rate scheduling
+learning_schedule = { ReduceOnPlateau = { patience = 15, factor = 0.5, min_lr = 1e-6 } }
+
+# Seed for reproducibility
+seed = 42
+
+[model]
+# Multi-layer LSTM (2 layers is standard for financial forecasting)
+architecture = { MultiLSTM = { layers = 2 } }
+
+# Reasonable hidden units for financial patterns (research shows 64-128 works well)
+hidden_units = { Fixed = [64, 64] }
+
+# Sequence length optimized for financial patterns (30-60 is typical)
+sequence_length = { Fixed = 45 }
+
+# Dropout rate based on research (0.2-0.3 for financial time series)
+dropout = {
+    enabled = true,
+    rate = { Fixed = 0.25 },
+    apply_to_output = false
+}
+
+# No attention for simplicity
+attention = { enabled = false }
+
+# Single target focus
+targets = {
+    price_levels = { enabled = true },
+    direction = { enabled = false },
+    volatility = { enabled = false }
+}
+
+[data]
+# Standard validation split
+validation_split = 0.2
+
+# Validation gap
+validation_gap = "2h"
+
+# Outlier handling
+outlier_handling = { enabled = true, method = "IQR", threshold = 2.5 }
+
+# Batch size (32-64 is typical for LSTM time series)
+batch_size = { Fixed = 32 }
+
+# Device
+device = "Auto"
+
+# Training monitoring
+print_every = 1
+
+[loss]
+# MSE loss for regression-style targets
+loss_function = "MSE"
+
+[features]
+# Full feature set for pattern recognition
+technical_indicators = { enabled = true }
+cross_asset = { enabled = true }

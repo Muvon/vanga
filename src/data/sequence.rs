@@ -25,14 +25,14 @@ impl SequenceGenerator {
         &self,
         df: DataFrame, // RAW data with features, NOT pre-normalized
         horizons: &[String],
-        model_config: &crate::config::ModelConfig,
+        training_config: &crate::config::training::TrainingConfig,
         data_config: &crate::config::training::DataConfig,
         feature_config: &crate::config::FeatureConfig,
     ) -> Result<PreparedData> {
         self.generate_training_sequences_with_adaptive_params(
             df,
             horizons,
-            model_config,
+            training_config,
             data_config,
             feature_config,
             None,
@@ -44,7 +44,7 @@ impl SequenceGenerator {
         &self,
         df: DataFrame, // RAW data with features, NOT pre-normalized
         horizons: &[String],
-        model_config: &crate::config::ModelConfig,
+        training_config: &crate::config::training::TrainingConfig,
         data_config: &crate::config::training::DataConfig,
         feature_config: &crate::config::FeatureConfig,
         adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
@@ -59,7 +59,7 @@ impl SequenceGenerator {
 
         // Get basic info
         let total_records = df.height();
-        let sequence_length = match &model_config.sequence_length {
+        let sequence_length = match &training_config.model.sequence_length {
             crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
             crate::config::model::SequenceLengthConfig::Auto {
                 min_length,
@@ -105,7 +105,7 @@ impl SequenceGenerator {
                 horizons,
                 &df,
                 data_config,
-                model_config,
+                training_config,
                 adaptive_params,
             )
             .await?;
@@ -511,7 +511,7 @@ impl SequenceGenerator {
         horizons: &[String],
         df: &DataFrame,
         data_config: &crate::config::training::DataConfig,
-        model_config: &crate::config::ModelConfig,
+        training_config: &crate::config::training::TrainingConfig,
         adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
     ) -> Result<(
         Array3<f64>,
@@ -625,9 +625,9 @@ impl SequenceGenerator {
         // Convert sequences to Array3
         let sequences = self.convert_sequences_to_array3(all_sequences)?;
 
-        // FIXED: Generate targets using aligned sequence indices
+        // Generate targets using aligned sequence indices with new configuration
         let target_config =
-            crate::targets::MultiTargetConfig::from_model_config(model_config, horizons.to_vec());
+            crate::targets::MultiTargetConfig::from_training_config(training_config);
 
         let target_generator = crate::targets::TargetGenerator::new(target_config);
         let targets = target_generator

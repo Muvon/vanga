@@ -3,11 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Unified number of classes for all target types in the 5-class system
 pub const NUM_CLASSES: usize = 5;
 
-/// **UNIFIED TARGETS CONFIG**: Simple, clean, always adaptive
-///
-/// This replaces all the complex individual target configurations with a single,
-/// clean configuration that automatically calibrates everything for balanced
-/// class distribution across all market conditions.
+/// **DEPRECATED**: Legacy targets config for backward compatibility
+/// This is kept only for compatibility with existing code that hasn't been migrated yet.
+/// New code should use the boolean flags in `crate::config::training::TargetsConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetsConfig {
     /// Base sensitivity for all targets (auto-scaled by sequence volatility)
@@ -95,9 +93,6 @@ pub struct ModelConfig {
 
     /// XGBoost hybrid model configuration
     pub xgboost: XGBoostConfig,
-
-    /// **NEW UNIFIED TARGETS**: Replaces output_heads with adaptive configuration
-    pub targets: TargetsConfig,
 
     /// TFT Quantile regression configuration
     pub quantile_outputs: Option<TFTQuantileOutputConfig>,
@@ -395,34 +390,14 @@ impl Default for ModelConfig {
                 moh: None, // No MoH for default config
             },
             xgboost: XGBoostConfig::default(), // XGBoost disabled by default
-            targets: TargetsConfig::default(), // Use new unified config
             quantile_outputs: None,            // Disabled by default for backward compatibility
         }
     }
 }
 
 impl ModelConfig {
-    /// Get the active targets configuration (new unified or migrated from old)
-    pub fn get_targets_config(&self) -> &TargetsConfig {
-        &self.targets
-    }
-
     /// Validate the model configuration
     pub fn validate(&self) -> Result<(), crate::utils::error::VangaError> {
-        // Validate base_sensitivity
-        if self.targets.base_sensitivity <= 0.0 || self.targets.base_sensitivity > 1.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(
-                "base_sensitivity must be between 0.0 and 1.0".to_string(),
-            ));
-        }
-
-        // Validate balance_target
-        if self.targets.balance_target <= 0.0 || self.targets.balance_target > 1.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(
-                "balance_target must be between 0.0 and 1.0".to_string(),
-            ));
-        }
-
         // Validate sequence length
         match &self.sequence_length {
             SequenceLengthConfig::Fixed(length) => {

@@ -122,6 +122,7 @@ mod tests {
             horizons: vec!["1h".to_string()],
             features: crate::config::FeatureConfig::default(),
             model: crate::config::ModelConfig::default(),
+            targets: crate::config::training::TargetsConfig::default(),
             training: TrainingParams {
                 epochs: EpochConfig::Auto { max_epochs: 100 },
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
@@ -216,6 +217,7 @@ mod tests {
             horizons: vec!["1h".to_string()],
             features: crate::config::FeatureConfig::default(),
             model: crate::config::ModelConfig::default(),
+            targets: crate::config::training::TargetsConfig::default(),
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(5), // Fixed epochs - should bypass early stopping
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
@@ -312,6 +314,7 @@ mod tests {
             horizons: vec!["1h".to_string()],
             features: crate::config::FeatureConfig::default(),
             model: crate::config::ModelConfig::default(),
+            targets: crate::config::training::TargetsConfig::default(),
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(3), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
@@ -431,6 +434,7 @@ mod tests {
                 architecture: crate::config::model::LSTMArchitecture::StackedLSTM { layers: 3 },
                 ..crate::config::ModelConfig::default()
             },
+            targets: crate::config::training::TargetsConfig::default(),
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(5), // Quick training for test
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(16),
