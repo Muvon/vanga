@@ -1,20 +1,32 @@
 # VANGA LSTM Development Instructions & Onboarding
 
-## 🎯 Core Philosophy
+## 🎯 System Overview
 
-### Single Source of Truth
-- **One method, one purpose**: Don't create `train_a`, `train_b`, `train_with_xyz` - enhance the existing method
-- **Configuration-driven**: Use TOML configs and conditional logic, not method proliferation
-- **Unified interfaces**: Prefer single methods with optional parameters over multiple specialized methods
-- **Tensor-first architecture**: All operations use Candle tensors with proper broadcasting and gradient flow
+**VANGA** is a cryptocurrency forecasting system using LSTM neural networks with:
+- **5-Target Classification**: Price Levels, Direction, Volatility, Volume, Sentiment
+- **Per-Sequence Processing**: Each sequence normalized independently
+- **Adaptive Calibration**: Optimal parameters for balanced 20% per class distribution
+- **Multi-Model Architecture**: Separate LSTM per target×horizon combination
+- **Real-time Prediction**: Streaming WebSocket integration with live market data
 
-### CRITICAL: Global vs Per-Batch Calculations
-- **Global calculations**: Class weights, quantiles, normalization parameters must be calculated ONCE from entire training dataset
-- **Per-batch calculations**: Only use for gradient updates, loss accumulation, and batch-specific operations
-- **Loss consistency**: Training and validation must use SAME global parameters for comparable losses
-- **Chronological integrity**: Preserve time-series order - no shuffling in crypto/financial data
-- **Target consistency**: Use percentage-based quantiles for symbol-agnostic classification difficulty
-- **Normalization consistency**: Prediction must use training normalization statistics
+## 🏗️ Core Architecture Principles
+
+### Sequence-First Design
+- **No Global Normalization**: Each sequence (e.g., 60 timesteps) normalized using only its own data
+- **Sequence-Based Targets**: Each sequence generates ONE target based on horizon analysis
+- **Chronological Integrity**: Time-series order preserved, no shuffling
+- **Symbol-Agnostic**: Percentage-based calculations work for any trading pair
+
+### Calibration-Driven Classification
+- **Adaptive Parameters**: System finds optimal thresholds for balanced class distribution
+- **Training-Prediction Consistency**: Same calibrated parameters used in both phases
+- **5-Class System**: All targets use `NUM_CLASSES = 5` (0-4) for LSTM compatibility
+
+### Multi-Model Coordination
+- **Individual Models**: Each target×horizon = separate LSTM model
+- **Wrapper Architecture**: `MultiTargetLSTMModel` coordinates multiple individual models
+- **Shared Input**: Same normalized sequences fed to all models
+- **Different Targets**: Each model trained on different target classification
 
 ### Code Quality Standards
 - **Zero warnings**: All code must pass `cargo clippy --all-features --all-targets -- -D warnings`
@@ -23,6 +35,60 @@
 - **DRY principle**: Don't repeat yourself - extract common logic into shared functions
 - **Tensor safety**: Always use `broadcast_as()` for shape matching, ensure `.contiguous()` for operations
 - **Test organization**: ALL tests must be in separate `*_test.rs` files - NEVER inline `#[cfg(test)]` modules
+
+## 📊 Data Flow Architecture
+
+```
+Raw CSV Data (OHLCV + Volume)
+    ↓
+Feature Engineering (50+ Technical Indicators)
+    ↓
+Sequence Generation (Sliding Windows: 30-120 timesteps)
+    ↓
+Per-Sequence Normalization (Each sequence: mean=0, std=1)
+    ↓
+Calibration System (Find optimal adaptive parameters)
+    ↓
+Target Generation (5-class classification per sequence)
+    ↓
+Chronological Splitting (Train/Validation/Test by time)
+    ↓
+Multi-Model Training (Separate LSTM per target×horizon)
+    ↓
+Prediction & Reconstruction (Using same adaptive parameters)
+```
+
+### Key Processing Steps
+
+#### 1. Feature Engineering (`src/features/`)
+- **Technical Indicators**: 50+ crypto-optimized indicators (SMA, EMA, RSI, MACD, etc.)
+- **Cross-Asset Features**: BTC dominance, ETH/BTC ratio, market correlation
+- **Market Microstructure**: Price velocity, VWAP deviations, trade intensity
+- **Output**: Enhanced DataFrame with engineered features
+
+#### 2. Sequence Generation (`src/data/sequence.rs`)
+- **Sliding Windows**: Extract sequences of configurable length (30-120 timesteps)
+- **Per-Sequence Normalization**: Each sequence normalized independently
+- **No Global Stats**: Each sequence self-contained for symbol-agnostic operation
+- **Output**: `Array3<f64>` [batch_size, sequence_length, features]
+
+#### 3. Calibration System (`src/targets/calibration.rs`)
+- **Purpose**: Find optimal adaptive parameters for balanced class distribution
+- **Process**: Analyze entire dataset to find "sweet spot" thresholds
+- **Target**: 20% per class distribution across all 5 targets
+- **Output**: `CalibratedParameters` with optimized thresholds
+
+#### 4. Target Generation (`src/targets/`)
+- **5 Target Types**: Price Levels, Direction, Volatility, Volume, Sentiment
+- **5-Class System**: Each target classified into classes 0-4
+- **Sequence-Based**: Each sequence generates one target based on horizon analysis
+- **Adaptive Parameters**: Use calibrated thresholds for consistent classification
+
+#### 5. Multi-Model Training (`src/model/multi_target.rs`)
+- **Individual Models**: Each target×horizon = separate LSTM model
+- **Coordination**: `MultiTargetLSTMModel` wrapper manages all models
+- **Shared Input**: Same normalized sequences for all models
+- **Different Targets**: Each model trained on specific target classification
 
 ## 🚀 Quick Start Checklist
 
@@ -297,29 +363,6 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences       
 - **Prediction mode**: Loads and applies SAME normalization parameters
 - **Consistency rule**: Prediction MUST use training normalization stats
 - **Storage**: Normalization stats saved with model for inference consistency
-
-#### `configs/*.toml` - 30+ CONFIGURATIONS
-- **training.toml**: Main configuration with all 9 optimizers documented
-- **optimizer_examples/**: 9 optimizer-specific configurations (adamw_crypto_optimized.toml, etc.)
-- **quick_start.toml**: Beginner-friendly minimal setup
-- **cross_asset_training.toml**: Multi-asset correlation analysis
-- **hybrid_training.toml**: XGBoost + TFT integration examples
-- **backtest.toml**: Backtesting framework configuration
-
-#### Configuration Structure Example:
-```toml
-[training]
-optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
-epochs = { Auto = { max_epochs = 1000 } }
-batch_size = { Auto = { min_size = 16, max_size = 128 } }
-
-[model]
-architecture = { MultiLSTM = { layers = 2 } }
-sequence_length = { Auto = { min_length = 30, max_length = 120 } }
-
-[data]
-outlier_handling = { enabled = true, method = "IQR", threshold = 3.0 }
-```
 
 ## 🔧 Common Task Patterns
 
@@ -724,29 +767,168 @@ ls configs/
 ls configs/optimizer_examples/
 ```
 
-### Key Files for Common Tasks
-- **Training issues**: `src/model/lstm/training.rs` (NEW: main training logic)
-- **Loss functions**: `src/model/lstm/loss.rs` (NEW: tensor broadcasting, class weights)
-- **LSTM configuration**: `src/model/lstm/config.rs` (NEW: LSTMConfig, optimizers)
-- **Model lifecycle**: `src/model/lstm/core.rs` (NEW: initialization, persistence)
-- **Prediction**: `src/model/lstm/inference.rs` (NEW: predict method)
-- **Multi-target problems**: `src/model/multi_target.rs`
-- **Target generation**: `src/targets/price_levels.rs` (percentage-based quantiles)
-- **Feature normalization**: `src/data/preprocessor.rs` (training/prediction consistency)
-- **Feature engineering**: `src/features/technical.rs`, `src/features/cross_asset.rs`
-- **Configuration**: `src/config/training.rs`, `configs/*.toml`
-- **Data loading**: `src/data/loader.rs`
-- **Sequence generation**: `src/data/sequence.rs`
-- **Error handling**: `src/utils/error.rs`
-- **Tensor operations**: `src/model/loss.rs`, `src/model/attention.rs`
+## 🏗️ Project Structure
 
-### Critical Architecture Understanding
-1. **Symbol-Agnostic Design**: All code must work for any trading pair
-2. **Percentage-Based Targets**: Price levels use percentage changes, not raw prices
-3. **Normalization Consistency**: Prediction uses training normalization stats
-4. **Chronological Integrity**: Time-series order preserved, no shuffling
-5. **Configuration-Driven**: All behavior controlled via TOML configs
-6. **Tensor Safety**: Always use `broadcast_as()` for shape matching
+```
+src/
+├── api/                    # High-level training/prediction APIs
+│   ├── trainer.rs             # Training pipeline orchestration
+│   ├── predictor.rs           # Prediction pipeline orchestration
+│   └── backtester.rs          # Backtesting framework
+├── config/                 # Configuration management
+│   ├── training.rs            # TrainingConfig, 9 optimizers
+│   ├── model.rs               # ModelConfig, NUM_CLASSES = 5
+│   ├── features.rs            # FeatureConfig
+│   └── prediction.rs          # PredictionConfig
+├── data/                   # Data processing pipeline
+│   ├── loader.rs              # CSV loading + chronological splitting
+│   ├── sequence.rs            # Sequence generation + per-sequence normalization
+│   ├── preprocessor.rs        # Feature engineering pipeline
+│   ├── structures.rs          # Data structures (MarketDataRow, etc.)
+│   └── target_converter.rs    # Target format conversion
+├── features/               # Feature engineering
+│   ├── technical.rs           # 50+ technical indicators
+│   └── cross_asset.rs         # Cross-asset correlation features
+├── model/                  # LSTM implementations
+│   ├── lstm/                  # Modular LSTM implementation
+│   │   ├── config.rs             # LSTMConfig, OptimizerWrapper
+│   │   ├── core.rs               # Model lifecycle, initialization
+│   │   ├── training.rs           # Unified training method
+│   │   ├── inference.rs          # Prediction and forward pass
+│   │   └── loss.rs               # Loss calculation, tensor broadcasting
+│   ├── lstm_simple.rs         # Compatibility layer (re-exports)
+│   ├── multi_target.rs        # Multi-model wrapper coordination
+│   ├── attention.rs           # Multi-head attention mechanisms
+│   └── tft/                   # Temporal Fusion Transformer
+├── targets/                # Target generation (5-class system)
+│   ├── calibration.rs         # Adaptive parameter calibration
+│   ├── price_levels.rs        # Price movement classification
+│   ├── direction.rs           # Trend direction detection
+│   ├── volatility.rs          # Volatility regime classification
+│   ├── volume.rs              # Volume activity classification
+│   ├── sentiment.rs           # Market sentiment classification
+│   └── sequence_reconstruction.rs # Unified reconstruction logic
+├── output/                 # Output processing & formatting
+│   ├── multi_target_parser.rs # Prediction array segmentation
+│   ├── formatter.rs           # Reconstruction function application
+│   └── structures.rs          # Prediction result types
+├── optimization/           # Auto-optimization system
+│   └── feature_selection.rs  # Feature selection algorithms
+├── realtime/               # Real-time streaming prediction
+│   └── websocket.rs           # WebSocket integration
+└── utils/                  # Utilities and error handling
+    ├── error.rs               # VangaError types
+    └── metrics.rs             # Evaluation metrics
+```
+
+### Configuration Files (`configs/`)
+- **`training.toml`**: Main training configuration with all 9 optimizers
+- **`prediction.toml`**: Prediction pipeline configuration
+- **`realtime.toml`**: Real-time streaming settings
+- **`optimizer_examples/`**: 9 optimizer-specific configurations
+- **`quick_start.toml`**: Beginner-friendly minimal setup
+- **30+ specialized configs**: Various training scenarios and optimizations
+
+## 🔧 Development Workflow
+
+### Quick Start Commands
+```bash
+# Fast development cycle (PREFERRED)
+cargo check --message-format=short
+
+# Code quality enforcement (MANDATORY before commits)
+cargo clippy --all-features --all-targets -- -D warnings
+
+# Run tests
+cargo test
+
+# Training example
+cargo run -- train --symbol BTCUSDT --data data.csv --config configs/training.toml
+
+# Prediction example
+cargo run -- predict --symbol BTCUSDT --data recent_data.csv --model models/BTCUSDT.bin
+```
+
+### Understanding Problems (Debugging Checklist)
+1. **Sequence Context**: What sequence length/horizon is involved?
+2. **Normalization**: Is per-sequence normalization working correctly?
+3. **Calibration**: Are adaptive parameters being used consistently?
+4. **Target Classification**: Are all 5 targets using same classification logic?
+5. **Multi-Model**: Is each target×horizon handled by separate LSTM?
+6. **Tensor Broadcasting**: Are shapes compatible with `broadcast_as()`?
+
+### Making Changes (Development Rules)
+1. **Sequence-First Thinking**: How does this affect sequence processing?
+2. **Calibration Impact**: Do adaptive parameters need recalibration?
+3. **Training-Prediction Consistency**: Same logic in both phases?
+4. **Multi-Model Coordination**: Does wrapper handle all combinations?
+5. **Test with Real Data**: Verify with actual sequences, not synthetic data
+
+### Critical Implementation Patterns
+
+#### Per-Sequence Normalization
+```rust
+// Each sequence normalized independently
+fn normalize_sequence_window(&self, window_df: &DataFrame) -> Result<DataFrame> {
+    // Calculate mean/std from THIS WINDOW ONLY
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let std_dev = variance.sqrt();
+    // Normalize: (x - mean) / std using only window data
+}
+```
+
+#### Calibration Usage
+```rust
+// Training: Find optimal parameters
+let calibrated_params = calibrator.calibrate(ohlcv_data, sequence_length, horizon_steps).await?;
+
+// Apply consistently in training and prediction
+let target_class = classify_with_params(sequence, &calibrated_params);
+```
+
+#### Multi-Model Coordination
+```rust
+// Each target×horizon = separate LSTM model
+for target_type in ["price_levels", "direction", "volatility", "volume", "sentiment"] {
+    for horizon in ["1h", "4h", "1d"] {
+        let model = LSTMModel::new(config);
+        multi_target_model.add_model(target_type, horizon, model);
+    }
+}
+```
+
+### ⚠️ Critical Rules (NEVER BREAK)
+
+1. **Sequence-Based Processing**: All operations work on sequences, not individual data points
+2. **Per-Sequence Normalization**: Each sequence normalized using only its own data
+3. **Adaptive Parameter Consistency**: Same calibrated parameters in training and prediction
+4. **Chronological Integrity**: Never shuffle time-series data
+5. **Multi-Model Architecture**: Each target×horizon requires separate LSTM model
+6. **Tensor Broadcasting**: Always use `broadcast_as()` for shape compatibility
+7. **Test Separation**: ALL tests in separate `*_test.rs` files
+
+### 🚫 Anti-Patterns (AVOID)
+
+- **Global Normalization**: Using dataset-wide statistics for normalization
+- **Method Proliferation**: Creating `train_a`, `train_b` instead of enhancing existing methods
+- **Hardcoded Parameters**: Not using adaptive/calibrated parameters
+- **Data Shuffling**: Breaking chronological order in time-series data
+- **Inline Tests**: Using `#[cfg(test)]` modules within source files
+- **Hidden Variables**: Using `_variable` to silence warnings instead of fixing issues
+
+## 🎯 Architecture Mastery Checklist
+
+After reading this document, you should understand:
+
+✅ **Data Flow**: Raw CSV → Features → Sequences → Normalization → Calibration → Targets → Training
+✅ **Sequence Processing**: Each sequence self-contained, normalized independently
+✅ **Calibration System**: How adaptive parameters achieve balanced classification
+✅ **5-Class Targets**: All targets use unified classification (0-4)
+✅ **Multi-Model Reality**: Each target×horizon = separate LSTM model
+✅ **File Organization**: Where to find specific functionality
+✅ **Development Rules**: Critical patterns and anti-patterns
+
+**Ready to develop? Start with `cargo check` and explore the codebase!**
 
 ### Recent Critical Fixes (Architecture Impact)
 - **Composite Loss Class Weighting**: Fixed missing class weights in `TensorCryptoLossFunction` causing severe overfitting
