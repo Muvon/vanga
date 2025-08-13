@@ -267,15 +267,17 @@ pub fn extract_sequence_prices(sequence_ohlcv: &[MarketDataRow]) -> Vec<f64> {
 ///
 /// # Arguments
 /// * `sequence_ohlcv` - OHLCV data for the sequence
+/// * `fallback_percentiles` - Calibrated fallback percentiles (replaces hardcoded [0.1, 0.9])
 ///
 /// # Returns
 /// * `Result<[f64; 2]>` - Adaptive percentiles [lower, upper] optimized for the sequence
 pub fn calculate_adaptive_percentiles_from_sequence(
     sequence_ohlcv: &[MarketDataRow],
+    fallback_percentiles: Option<[f64; 2]>,
 ) -> Result<[f64; 2]> {
     if sequence_ohlcv.len() < 5 {
-        // Fallback for short sequences - use standard percentiles
-        return Ok([0.1, 0.9]);
+        // Use calibrated fallback percentiles instead of hardcoded [0.1, 0.9]
+        return Ok(fallback_percentiles.unwrap_or([0.1, 0.9]));
     }
 
     // 1. Calculate exponentially-weighted center (recent-focused fair value)
@@ -464,7 +466,7 @@ pub fn classify_price_level(
     let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
     // 3. Use adaptive percentiles based on sequence data
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
+    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, None)?;
     let base_bandwidth_size = 1.0;
 
     // 4. Calculate adaptive bandwidth if enabled
@@ -686,7 +688,7 @@ pub fn reconstruct_price_levels(
     }
 
     // Use same adaptive percentiles as training for consistency
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
+    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, None)?;
     let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
 
     // Calculate adaptive bandwidth (same logic as training)
@@ -802,7 +804,7 @@ pub fn probabilities_to_price_targets(
     }
 
     // Use same adaptive percentiles as training for consistency
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv)?;
+    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, None)?;
     let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
     let final_bandwidth_size = calculate_adaptive_bandwidth(sequence_ohlcv, bandwidth_size, None)?;
 

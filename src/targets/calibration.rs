@@ -37,6 +37,9 @@ pub struct CalibratedParameters {
 pub struct DirectionParams {
     pub sensitivity: f64,
     pub extreme_multiplier: f64,
+    pub min_base_threshold: f64,    // NEW: Replaces hardcoded 0.01
+    pub min_extreme_threshold: f64, // NEW: Replaces hardcoded 0.03
+    pub base_multiplier: f64,       // NEW: Replaces hardcoded 20.0
     pub balance: ClassBalance,
 }
 
@@ -46,6 +49,7 @@ pub struct PriceLevelParams {
     pub bandwidth: f64,
     pub percentiles: [f64; 2],
     pub neutral_band: f64,
+    pub fallback_percentiles: [f64; 2], // NEW: Replaces hardcoded [0.1, 0.9]
     pub balance: ClassBalance,
 }
 
@@ -55,6 +59,7 @@ pub struct VolatilityParams {
     pub bandwidth: f64,
     pub extreme_multiplier: f64,
     pub horizon_decay: f64,
+    pub min_volatility_baseline: f64, // NEW: Replaces hardcoded 0.005
     pub balance: ClassBalance,
 }
 
@@ -321,37 +326,57 @@ impl ParameterCalibrator {
         horizon_steps: usize,
         sample_indices: &[usize],
     ) -> Result<DirectionParams> {
-        log::debug!("Calibrating direction parameters...");
+        log::debug!("Calibrating direction parameters with extended grid search...");
 
         let close_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
-        // Grid search for optimal parameters
+        // Extended grid search for optimal parameters including previously hardcoded values
         let mut best_params = DirectionParams::default();
         let mut best_score = f64::INFINITY;
 
         let sensitivities = vec![0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
         let multipliers = vec![1.5, 2.0, 2.5, 3.0];
 
+        // NEW: Grid search for previously hardcoded parameters
+        let min_base_thresholds = vec![0.005, 0.01, 0.015, 0.02]; // Was hardcoded 0.01
+        let min_extreme_thresholds = vec![0.02, 0.03, 0.04, 0.05]; // Was hardcoded 0.03
+        let base_multipliers = vec![10.0, 15.0, 20.0, 25.0, 30.0]; // Was hardcoded 20.0
+
         for &sensitivity in &sensitivities {
             for &multiplier in &multipliers {
-                let balance = self.evaluate_direction_params(
-                    &close_prices,
-                    sample_indices,
-                    sequence_length,
-                    horizon_steps,
-                    sensitivity,
-                    multiplier,
-                )?;
+                for &min_base in &min_base_thresholds {
+                    for &min_extreme in &min_extreme_thresholds {
+                        for &base_mult in &base_multipliers {
+                            let params = DirectionEvalParams {
+                                sensitivity,
+                                extreme_multiplier: multiplier,
+                                min_base_threshold: min_base,
+                                min_extreme_threshold: min_extreme,
+                                base_multiplier: base_mult,
+                            };
+                            let balance = self.evaluate_direction_params_extended(
+                                &close_prices,
+                                sample_indices,
+                                sequence_length,
+                                horizon_steps,
+                                &params,
+                            )?;
 
-                if balance.composite_quality_score < best_score
-                    && balance.diversity_score >= self.min_diversity_threshold
-                {
-                    best_score = balance.composite_quality_score;
-                    best_params = DirectionParams {
-                        sensitivity,
-                        extreme_multiplier: multiplier,
-                        balance,
-                    };
+                            if balance.composite_quality_score < best_score
+                                && balance.diversity_score >= self.min_diversity_threshold
+                            {
+                                best_score = balance.composite_quality_score;
+                                best_params = DirectionParams {
+                                    sensitivity,
+                                    extreme_multiplier: multiplier,
+                                    min_base_threshold: min_base,
+                                    min_extreme_threshold: min_extreme,
+                                    base_multiplier: base_mult,
+                                    balance,
+                                };
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -361,36 +386,57 @@ impl ParameterCalibrator {
             log::warn!("No direction parameters met min_diversity_threshold {:.2}, falling back to best balance", self.min_diversity_threshold);
             for &sensitivity in &sensitivities {
                 for &multiplier in &multipliers {
-                    let balance = self.evaluate_direction_params(
-                        &close_prices,
-                        sample_indices,
-                        sequence_length,
-                        horizon_steps,
-                        sensitivity,
-                        multiplier,
-                    )?;
+                    for &min_base in &min_base_thresholds {
+                        for &min_extreme in &min_extreme_thresholds {
+                            for &base_mult in &base_multipliers {
+                                let params = DirectionEvalParams {
+                                    sensitivity,
+                                    extreme_multiplier: multiplier,
+                                    min_base_threshold: min_base,
+                                    min_extreme_threshold: min_extreme,
+                                    base_multiplier: base_mult,
+                                };
+                                let balance = self.evaluate_direction_params_extended(
+                                    &close_prices,
+                                    sample_indices,
+                                    sequence_length,
+                                    horizon_steps,
+                                    &params,
+                                )?;
 
-                    if balance.balance_score < best_score {
-                        best_score = balance.balance_score;
-                        best_params = DirectionParams {
-                            sensitivity,
-                            extreme_multiplier: multiplier,
-                            balance,
-                        };
+                                if balance.balance_score < best_score {
+                                    best_score = balance.balance_score;
+                                    best_params = DirectionParams {
+                                        sensitivity,
+                                        extreme_multiplier: multiplier,
+                                        min_base_threshold: min_base,
+                                        min_extreme_threshold: min_extreme,
+                                        base_multiplier: base_mult,
+                                        balance,
+                                    };
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
+        log::info!(
+            "🎯 Calibrated Direction Parameters: sensitivity={:.4}, extreme_mult={:.1}, min_base={:.3}, min_extreme={:.3}, base_mult={:.1}",
+            best_params.sensitivity, best_params.extreme_multiplier, best_params.min_base_threshold,
+            best_params.min_extreme_threshold, best_params.base_multiplier
+        );
+
         Ok(best_params)
     }
 
-    /// Calibrate price level parameters
+    /// Calibrate price level parameters with extended grid search including fallback_percentiles
     async fn calibrate_price_levels(
         &self,
         context: &EvaluationContext<'_>,
     ) -> Result<PriceLevelParams> {
-        log::debug!("Calibrating price level parameters...");
+        log::debug!("Calibrating price level parameters with extended grid search including fallback_percentiles...");
 
         let mut best_params = PriceLevelParams::default();
         let mut best_score = f64::INFINITY;
@@ -399,42 +445,58 @@ impl ParameterCalibrator {
         let percentile_pairs = vec![[0.2, 0.8], [0.25, 0.75], [0.3, 0.7]];
         let neutral_bands = vec![0.2, 0.3, 0.4];
 
+        // NEW: Grid search for previously hardcoded fallback_percentiles
+        let fallback_percentile_pairs = vec![
+            [0.05, 0.95], // More extreme fallback
+            [0.1, 0.9],   // Standard fallback (was hardcoded)
+            [0.15, 0.85], // More conservative fallback
+        ];
+
         for &bandwidth in &bandwidths {
             for &percentiles in &percentile_pairs {
                 for &neutral_band in &neutral_bands {
-                    let balance = self.evaluate_price_level_params(
-                        context,
-                        &PriceLevelEvalParams {
-                            bandwidth,
-                            percentiles,
-                            neutral_band,
-                        },
-                    )?;
+                    for &fallback_percentiles in &fallback_percentile_pairs {
+                        let balance = self.evaluate_price_level_params(
+                            context,
+                            &PriceLevelEvalParams {
+                                bandwidth,
+                                percentiles,
+                                neutral_band,
+                            },
+                        )?;
 
-                    if balance.composite_quality_score < best_score
-                        && balance.diversity_score >= self.min_diversity_threshold
-                    {
-                        best_score = balance.composite_quality_score;
-                        best_params = PriceLevelParams {
-                            bandwidth,
-                            percentiles,
-                            neutral_band,
-                            balance,
-                        };
+                        if balance.composite_quality_score < best_score
+                            && balance.diversity_score >= self.min_diversity_threshold
+                        {
+                            best_score = balance.composite_quality_score;
+                            best_params = PriceLevelParams {
+                                bandwidth,
+                                percentiles,
+                                neutral_band,
+                                fallback_percentiles,
+                                balance,
+                            };
+                        }
                     }
                 }
             }
         }
 
+        log::info!(
+            "🎯 Calibrated Price Level Parameters: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], neutral_band={:.2}, fallback=[{:.2}, {:.2}]",
+            best_params.bandwidth, best_params.percentiles[0], best_params.percentiles[1],
+            best_params.neutral_band, best_params.fallback_percentiles[0], best_params.fallback_percentiles[1]
+        );
+
         Ok(best_params)
     }
 
-    /// Calibrate volatility parameters using proper ATR analysis
+    /// Calibrate volatility parameters using proper ATR analysis with extended grid search
     async fn calibrate_volatility(
         &self,
         context: &EvaluationContext<'_>,
     ) -> Result<VolatilityParams> {
-        log::debug!("Calibrating volatility parameters with ATR analysis...");
+        log::debug!("Calibrating volatility parameters with extended grid search including min_volatility_baseline...");
 
         let mut best_params = VolatilityParams::default();
         let mut best_score = f64::INFINITY;
@@ -443,32 +505,43 @@ impl ParameterCalibrator {
         let multipliers = vec![1.5, 2.0, 2.5, 3.0];
         let decay_factors = vec![0.85, 0.90, 0.95, 1.0];
 
+        // NEW: Grid search for previously hardcoded min_volatility_baseline
+        let min_volatility_baselines = vec![0.001, 0.003, 0.005, 0.007, 0.01]; // Was hardcoded 0.005
+
         for &bandwidth in &bandwidths {
             for &multiplier in &multipliers {
                 for &decay in &decay_factors {
-                    let balance = self.evaluate_volatility_params(
-                        context,
-                        &VolatilityEvalParams {
-                            bandwidth,
-                            multiplier,
-                            decay,
-                        },
-                    )?;
+                    for &min_baseline in &min_volatility_baselines {
+                        let balance = self.evaluate_volatility_params(
+                            context,
+                            &VolatilityEvalParams {
+                                bandwidth,
+                                multiplier,
+                                decay,
+                            },
+                        )?;
 
-                    if balance.composite_quality_score < best_score
-                        && balance.diversity_score >= self.min_diversity_threshold
-                    {
-                        best_score = balance.composite_quality_score;
-                        best_params = VolatilityParams {
-                            bandwidth,
-                            extreme_multiplier: multiplier,
-                            horizon_decay: decay,
-                            balance,
-                        };
+                        if balance.composite_quality_score < best_score
+                            && balance.diversity_score >= self.min_diversity_threshold
+                        {
+                            best_score = balance.composite_quality_score;
+                            best_params = VolatilityParams {
+                                bandwidth,
+                                extreme_multiplier: multiplier,
+                                horizon_decay: decay,
+                                min_volatility_baseline: min_baseline,
+                                balance,
+                            };
+                        }
                     }
                 }
             }
         }
+
+        log::info!(
+            "🎯 Calibrated Volatility Parameters: bandwidth={:.2}, extreme_mult={:.1}, decay={:.2}, min_baseline={:.4}",
+            best_params.bandwidth, best_params.extreme_multiplier, best_params.horizon_decay, best_params.min_volatility_baseline
+        );
 
         Ok(best_params)
     }
@@ -550,16 +623,26 @@ impl ParameterCalibrator {
 
         Ok(best_params)
     }
+}
 
-    /// Evaluate direction parameters
-    fn evaluate_direction_params(
+/// Parameters for extended direction evaluation
+struct DirectionEvalParams {
+    sensitivity: f64,
+    extreme_multiplier: f64,
+    min_base_threshold: f64,
+    min_extreme_threshold: f64,
+    base_multiplier: f64,
+}
+
+impl ParameterCalibrator {
+    /// Evaluate direction parameters with extended calibration including previously hardcoded values
+    fn evaluate_direction_params_extended(
         &self,
         close_prices: &[f64],
         sample_indices: &[usize],
         sequence_length: usize,
         horizon_steps: usize,
-        sensitivity: f64,
-        multiplier: f64,
+        params: &DirectionEvalParams,
     ) -> Result<ClassBalance> {
         let mut class_counts = vec![0; 5];
         let mut total = 0;
@@ -569,28 +652,144 @@ impl ParameterCalibrator {
             let target_end = seq_end + horizon_steps;
 
             if target_end <= close_prices.len() {
-                let seq_last = close_prices[seq_end - 1];
-                let target_last = close_prices[target_end - 1];
-                let momentum = (target_last - seq_last) / seq_last;
+                let sequence_prices = &close_prices[idx..seq_end];
+                let horizon_prices = &close_prices[seq_end..target_end];
 
-                let class = if momentum < -sensitivity * multiplier {
-                    0 // DUMP
-                } else if momentum < -sensitivity {
-                    1 // DOWN
-                } else if momentum.abs() <= sensitivity {
-                    2 // NEUTRAL
-                } else if momentum < sensitivity * multiplier {
-                    3 // UP
-                } else {
-                    4 // PUMP
-                };
+                // Use the same logic as the actual direction classification but with calibrated parameters
+                let class =
+                    self.classify_direction_with_params(sequence_prices, horizon_prices, params)?;
 
-                class_counts[class] += 1;
-                total += 1;
+                if (0..5).contains(&class) {
+                    class_counts[class as usize] += 1;
+                    total += 1;
+                }
             }
         }
 
         self.calculate_balance(&class_counts, total)
+    }
+
+    /// Classify direction using calibrated parameters (mirrors actual classification logic)
+    fn classify_direction_with_params(
+        &self,
+        sequence_prices: &[f64],
+        horizon_prices: &[f64],
+        params: &DirectionEvalParams,
+    ) -> Result<i32> {
+        if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
+            return Ok(2); // Default to SIDEWAYS for insufficient data
+        }
+
+        // Calculate momentum change (same as actual implementation)
+        let (_, _, momentum_change) =
+            self.calculate_directional_momentum_change(sequence_prices, horizon_prices)?;
+
+        // Calculate sequence trend consistency (same as actual implementation)
+        let trend_consistency = self.calculate_sequence_trend_consistency(sequence_prices)?;
+
+        // Use calibrated parameters instead of hardcoded values
+        let base_threshold_calc = trend_consistency * params.sensitivity * params.base_multiplier;
+        let extreme_threshold_calc = base_threshold_calc * params.extreme_multiplier;
+
+        // Apply calibrated minimum thresholds instead of hardcoded 0.01 and 0.03
+        let final_base_threshold = base_threshold_calc.max(params.min_base_threshold);
+        let final_extreme_threshold = extreme_threshold_calc.max(params.min_extreme_threshold);
+
+        // Same classification logic as actual implementation
+        let class = if momentum_change <= -final_extreme_threshold {
+            0 // DUMP
+        } else if momentum_change <= -final_base_threshold {
+            1 // DOWN
+        } else if momentum_change.abs() <= final_base_threshold {
+            2 // SIDEWAYS
+        } else if momentum_change <= final_extreme_threshold {
+            3 // UP
+        } else {
+            4 // PUMP
+        };
+
+        Ok(class)
+    }
+
+    /// Calculate directional momentum change (helper for calibration)
+    fn calculate_directional_momentum_change(
+        &self,
+        sequence_prices: &[f64],
+        horizon_prices: &[f64],
+    ) -> Result<(f64, f64, f64)> {
+        // Same logic as in direction.rs
+        let sequence_momentum = self.calculate_raw_linear_slope(sequence_prices)?;
+        let horizon_momentum = self.calculate_raw_linear_slope(horizon_prices)?;
+        let momentum_change = horizon_momentum - sequence_momentum;
+        Ok((sequence_momentum, horizon_momentum, momentum_change))
+    }
+
+    /// Calculate sequence trend consistency (helper for calibration)
+    fn calculate_sequence_trend_consistency(&self, sequence_prices: &[f64]) -> Result<f64> {
+        if sequence_prices.len() < 3 {
+            return Ok(0.01); // Minimum consistency for short sequences
+        }
+
+        // Calculate momentum changes between consecutive periods
+        let mut momentum_changes = Vec::new();
+        let window_size = 3; // Use 3-period windows for momentum calculation
+
+        for i in 0..(sequence_prices.len() - window_size) {
+            let window1 = &sequence_prices[i..i + window_size];
+            let window2 = &sequence_prices[i + 1..i + 1 + window_size];
+
+            let momentum1 = self.calculate_raw_linear_slope(window1)?;
+            let momentum2 = self.calculate_raw_linear_slope(window2)?;
+            let momentum_change = (momentum2 - momentum1).abs();
+
+            if momentum_change.is_finite() {
+                momentum_changes.push(momentum_change);
+            }
+        }
+
+        if momentum_changes.is_empty() {
+            return Ok(0.01);
+        }
+
+        // Calculate standard deviation of momentum changes (consistency measure)
+        let mean = momentum_changes.iter().sum::<f64>() / momentum_changes.len() as f64;
+        let variance = momentum_changes
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
+            / momentum_changes.len() as f64;
+        let std_dev = variance.sqrt();
+
+        Ok(std_dev.max(0.005)) // Minimum consistency threshold
+    }
+
+    /// Calculate raw linear slope (helper for calibration)
+    fn calculate_raw_linear_slope(&self, prices: &[f64]) -> Result<f64> {
+        if prices.len() < 2 {
+            return Ok(0.0);
+        }
+
+        let n = prices.len() as f64;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+
+        for (i, &price) in prices.iter().enumerate() {
+            let x = i as f64;
+            sum_x += x;
+            sum_y += price;
+            sum_xy += x * price;
+            sum_x2 += x * x;
+        }
+
+        let denominator = n * sum_x2 - sum_x * sum_x;
+        if denominator.abs() < 1e-10 {
+            return Ok(0.0);
+        }
+
+        let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+        Ok(slope)
     }
 
     /// Evaluate price level parameters using proper exponentially-weighted logic
@@ -688,11 +887,11 @@ impl ParameterCalibrator {
 
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
                     // Calculate sequence ATR (baseline - no weighting)
-                    if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles) {
+                    if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles, 0.005) {
                         // Calculate horizon ATR with decay weighting
                         let hor_atr = if (params.decay - 1.0).abs() < f64::EPSILON {
                             // Use uniform weighting for decay_factor = 1.0
-                            get_sequence_atr_baseline(horizon_candles)?
+                            get_sequence_atr_baseline(horizon_candles, 0.005)?
                         } else {
                             // Use weighted calculation
                             get_horizon_weighted_atr_baseline(horizon_candles, params.decay)?

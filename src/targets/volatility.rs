@@ -213,7 +213,7 @@ pub fn calculate_rolling_atr_series(candles: &[MarketDataRow], window: usize) ->
     // Calculate rolling ATR for each possible window position
     for i in 0..=(candles.len() - effective_window) {
         let window_candles = &candles[i..i + effective_window];
-        let window_atr = get_sequence_atr_baseline(window_candles)?;
+        let window_atr = get_sequence_atr_baseline(window_candles, 0.005)?;
 
         if window_atr.is_finite() && window_atr > 0.0 {
             atr_series.push(window_atr);
@@ -372,15 +372,18 @@ pub fn calculate_adaptive_volatility_bandwidth(
     Ok(final_bandwidth)
 }
 ///
-/// Computes Average True Range for the sequence, using sequence-specific baseline
+/// Computes Average True Range for the sequence, using calibrated baseline
 /// instead of hardcoded values. Provides adaptive fallback based on sequence price volatility.
-pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f64> {
+pub fn get_sequence_atr_baseline(
+    sequence_candles: &[MarketDataRow],
+    min_volatility_baseline: f64,
+) -> Result<f64> {
     if sequence_candles.len() < 2 {
-        // ADAPTIVE FALLBACK: Use 0.5% of first candle's close price as minimum baseline
+        // ADAPTIVE FALLBACK: Use calibrated minimum baseline instead of hardcoded 0.005
         let fallback_atr = if !sequence_candles.is_empty() {
-            sequence_candles[0].close * 0.005 // 0.5% minimum volatility assumption
+            sequence_candles[0].close * min_volatility_baseline
         } else {
-            0.005 // Absolute minimum for edge cases
+            min_volatility_baseline // Use calibrated minimum for edge cases
         };
         return Ok(fallback_atr);
     }
@@ -409,7 +412,7 @@ pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f
         let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
         let price_range = (max_price - min_price) / min_price;
-        return Ok(price_range.max(0.005)); // At least 0.5% volatility
+        return Ok(price_range.max(min_volatility_baseline)); // Use calibrated minimum
     }
 
     // Average True Range of the sequence - this is our adaptive baseline
@@ -422,7 +425,7 @@ pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow]) -> Result<f
         sequence_atr
     );
 
-    Ok(sequence_atr.max(0.005)) // Ensure minimum 0.5% volatility baseline
+    Ok(sequence_atr.max(min_volatility_baseline)) // Use calibrated minimum volatility baseline
 }
 
 // Removed unused function calculate_proportional_atr_window - no longer needed in simplified approach
@@ -470,7 +473,7 @@ pub fn get_horizon_weighted_atr_baseline(
 ) -> Result<f64> {
     // Fallback to uniform weighting for insufficient data or uniform decay factor
     if horizon_candles.len() < 2 || (decay_factor - 1.0).abs() < f64::EPSILON {
-        return get_sequence_atr_baseline(horizon_candles);
+        return get_sequence_atr_baseline(horizon_candles, 0.005);
     }
 
     let mut weighted_true_ranges = Vec::new();
@@ -502,7 +505,7 @@ pub fn get_horizon_weighted_atr_baseline(
 
     // Fallback to uniform calculation if no valid true ranges
     if weighted_true_ranges.is_empty() || total_weight == 0.0 {
-        return get_sequence_atr_baseline(horizon_candles);
+        return get_sequence_atr_baseline(horizon_candles, 0.005);
     }
 
     // Calculate weighted average ATR

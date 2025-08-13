@@ -76,21 +76,21 @@ mod tests {
         let seq_prices = vec![100.0, 101.0, 102.0, 103.0, 104.0]; // slope ≈ 1.0
         let hor_prices = vec![104.0, 103.5, 103.0, 102.5, 102.0]; // slope ≈ -0.5
                                                                   // acceleration = -0.5 - 1.0 = -1.5 (between -2.0 and 2.0, so SIDEWAYS)
-        let class = classify_direction(&seq_prices, &hor_prices, &targets_config).unwrap();
+        let class = classify_direction(&seq_prices, &hor_prices, &targets_config, None).unwrap();
         assert_eq!(class, 2); // SIDEWAYS
 
         // Test case 2: Strong acceleration (PUMP)
         let seq_prices2 = vec![100.0, 100.5, 101.0, 101.5, 102.0]; // slope ≈ 0.5
         let hor_prices2 = vec![102.0, 103.0, 104.0, 105.0, 106.0]; // slope ≈ 1.0
                                                                    // acceleration = 1.0 - 0.5 = 0.5 (between -2.0 and 2.0, so SIDEWAYS)
-        let class2 = classify_direction(&seq_prices2, &hor_prices2, &targets_config).unwrap();
+        let class2 = classify_direction(&seq_prices2, &hor_prices2, &targets_config, None).unwrap();
         assert_eq!(class2, 2); // SIDEWAYS
 
         // Test case 3: Minimal change (SIDEWAYS)
         let seq_prices3 = vec![100.0, 100.1, 100.2, 100.3, 100.4]; // slope ≈ 0.1
         let hor_prices3 = vec![100.4, 100.5, 100.6, 100.7, 100.8]; // slope ≈ 0.1
                                                                    // acceleration = 0.1 - 0.1 = 0.0 (within ±2.0)
-        let class3 = classify_direction(&seq_prices3, &hor_prices3, &targets_config).unwrap();
+        let class3 = classify_direction(&seq_prices3, &hor_prices3, &targets_config, None).unwrap();
         assert_eq!(class3, 2); // SIDEWAYS
     }
 
@@ -103,7 +103,7 @@ mod tests {
         // Scenario 1: BTC bull run acceleration
         let btc_sequence = vec![45000.0, 46000.0, 47000.0, 48000.0, 49000.0]; // +1000/period
         let btc_horizon = vec![49000.0, 52000.0, 55000.0, 58000.0, 61000.0]; // +3000/period (strong acceleration)
-        let class = classify_direction(&btc_sequence, &btc_horizon, &targets_config).unwrap();
+        let class = classify_direction(&btc_sequence, &btc_horizon, &targets_config, None).unwrap();
         println!("BTC bull acceleration: class = {}", class);
         // Should be UP or PUMP (3 or 4) with stronger acceleration
         assert!(class >= 2); // At least SIDEWAYS, likely higher
@@ -111,7 +111,8 @@ mod tests {
         // Scenario 2: ETH bear market deceleration
         let eth_sequence = vec![3000.0, 2800.0, 2600.0, 2400.0, 2200.0]; // -200/period
         let eth_horizon = vec![2200.0, 2150.0, 2100.0, 2050.0, 2000.0]; // -50/period
-        let class2 = classify_direction(&eth_sequence, &eth_horizon, &targets_config).unwrap();
+        let class2 =
+            classify_direction(&eth_sequence, &eth_horizon, &targets_config, None).unwrap();
         println!("ETH bear deceleration: class = {}", class2);
         // Should be UP (trend becoming less bearish = acceleration)
         assert!(class2 >= 2);
@@ -119,7 +120,8 @@ mod tests {
         // Scenario 3: Sideways consolidation
         let alt_sequence = vec![100.0, 101.0, 99.0, 102.0, 98.0]; // choppy, ~0 slope
         let alt_horizon = vec![98.0, 99.0, 101.0, 100.0, 102.0]; // choppy, ~0 slope
-        let class3 = classify_direction(&alt_sequence, &alt_horizon, &targets_config).unwrap();
+        let class3 =
+            classify_direction(&alt_sequence, &alt_horizon, &targets_config, None).unwrap();
         println!("Sideways consolidation: class = {}", class3);
         // Should be SIDEWAYS (2) or close to it
         assert!((1..=3).contains(&class3)); // Allow some variation
@@ -134,19 +136,19 @@ mod tests {
         // Test case 1: Insufficient sequence data
         let short_seq = vec![100.0];
         let normal_hor = vec![100.0, 101.0, 102.0];
-        let class = classify_direction(&short_seq, &normal_hor, &targets_config).unwrap();
+        let class = classify_direction(&short_seq, &normal_hor, &targets_config, None).unwrap();
         assert_eq!(class, 2); // Should default to SIDEWAYS
 
         // Test case 2: Insufficient horizon data
         let normal_seq = vec![100.0, 101.0, 102.0];
         let short_hor = vec![102.0];
-        let class2 = classify_direction(&normal_seq, &short_hor, &targets_config).unwrap();
+        let class2 = classify_direction(&normal_seq, &short_hor, &targets_config, None).unwrap();
         assert_eq!(class2, 2); // Should default to SIDEWAYS
 
         // Test case 3: No config provided
         let seq = vec![100.0, 101.0, 102.0];
         let hor = vec![102.0, 103.0, 104.0];
-        let class3 = classify_direction(&seq, &hor, &targets_config).unwrap();
+        let class3 = classify_direction(&seq, &hor, &targets_config, None).unwrap();
         // Should use default values and work
         assert!((0..=4).contains(&class3));
     }
@@ -176,7 +178,8 @@ mod tests {
                 .map(|j| seq_prices[4] + horizon_slope * j as f64 * 1000.0)
                 .collect();
 
-            let class = classify_direction(&seq_prices, &hor_prices, &targets_config).unwrap();
+            let class =
+                classify_direction(&seq_prices, &hor_prices, &targets_config, None).unwrap();
             class_counts[class as usize] += 1;
         }
 
@@ -244,7 +247,7 @@ mod tests {
         ];
 
         for (i, (seq_prices, hor_prices, expected)) in test_cases.iter().enumerate() {
-            let class = classify_direction(seq_prices, hor_prices, &targets_config).unwrap();
+            let class = classify_direction(seq_prices, hor_prices, &targets_config, None).unwrap();
             println!("Test case {}: {} -> class = {}", i + 1, expected, class);
 
             // Calculate actual slopes for debugging

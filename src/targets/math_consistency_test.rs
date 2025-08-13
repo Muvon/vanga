@@ -132,7 +132,7 @@ mod tests {
                 (vol_mult * 2.0, "Higher volatility", 3..=4), // Should be High or VeryHigh
             ];
 
-            let train_atr = get_sequence_atr_baseline(&sequence).unwrap();
+            let train_atr = get_sequence_atr_baseline(&sequence, 0.005).unwrap();
             let targets_config = TargetsConfig {
                 base_sensitivity: 0.4,
                 balance_target: 0.2,
@@ -159,7 +159,7 @@ mod tests {
                     ),
                 ]);
 
-                let target_atr = get_sequence_atr_baseline(&target_sequence).unwrap();
+                let target_atr = get_sequence_atr_baseline(&target_sequence, 0.005).unwrap();
                 let class = classify_volatility_log_ratio(train_atr, target_atr, &thresholds);
 
                 println!(

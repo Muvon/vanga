@@ -40,7 +40,7 @@ mod tests {
             (103.0, 105.0, 102.0, 104.0, 1300.0),
         ]);
 
-        let atr = get_sequence_atr_baseline(&normal_candles).unwrap();
+        let atr = get_sequence_atr_baseline(&normal_candles, 0.005).unwrap();
         assert!(
             atr > 0.005,
             "ATR should be above minimum baseline, got {}",
@@ -59,7 +59,7 @@ mod tests {
             (110.0, 120.0, 100.0, 115.0, 2200.0),
         ]);
 
-        let high_atr = get_sequence_atr_baseline(&high_vol_candles).unwrap();
+        let high_atr = get_sequence_atr_baseline(&high_vol_candles, 0.005).unwrap();
         assert!(high_atr > atr, "High volatility should have higher ATR");
         assert!(
             high_atr > 0.05,
@@ -74,13 +74,13 @@ mod tests {
             (100.0, 100.02, 99.98, 100.0, 520.0),
         ]);
 
-        let low_atr = get_sequence_atr_baseline(&low_vol_candles).unwrap();
+        let low_atr = get_sequence_atr_baseline(&low_vol_candles, 0.005).unwrap();
         assert_eq!(low_atr, 0.005, "Low volatility should use minimum baseline");
 
         // Test case 4: Single candle fallback
         let single_candle = create_test_candles(vec![(100.0, 102.0, 98.0, 101.0, 1000.0)]);
 
-        let fallback_atr = get_sequence_atr_baseline(&single_candle).unwrap();
+        let fallback_atr = get_sequence_atr_baseline(&single_candle, 0.005).unwrap();
         assert!(
             (fallback_atr - 100.0 * 0.005).abs() < 0.01,
             "Single candle should use 0.5% of close price, got {}",
@@ -89,7 +89,7 @@ mod tests {
 
         // Test case 5: Empty sequence
         let empty_candles = vec![];
-        let empty_atr = get_sequence_atr_baseline(&empty_candles).unwrap();
+        let empty_atr = get_sequence_atr_baseline(&empty_candles, 0.005).unwrap();
         assert_eq!(
             empty_atr, 0.005,
             "Empty sequence should use absolute minimum"
@@ -117,8 +117,8 @@ mod tests {
             (104.0, 106.0, 102.0, 105.0, 1400.0),
         ]);
 
-        let train_atr = get_sequence_atr_baseline(&same_vol_seq).unwrap();
-        let target_atr = get_sequence_atr_baseline(&same_vol_hor).unwrap();
+        let train_atr = get_sequence_atr_baseline(&same_vol_seq, 0.005).unwrap();
+        let target_atr = get_sequence_atr_baseline(&same_vol_hor, 0.005).unwrap();
 
         // Should be similar ATR values, resulting in Medium classification
         let targets_config = TargetsConfig {
@@ -137,7 +137,7 @@ mod tests {
             (110.0, 125.0, 95.0, 120.0, 2100.0),
         ]);
 
-        let high_target_atr = get_sequence_atr_baseline(&high_vol_hor).unwrap();
+        let high_target_atr = get_sequence_atr_baseline(&high_vol_hor, 0.005).unwrap();
         let high_class = classify_volatility_log_ratio(train_atr, high_target_atr, &log_thresholds);
         assert!(
             high_class >= 3,
@@ -151,7 +151,7 @@ mod tests {
             (103.0, 103.05, 102.95, 103.0, 510.0),
         ]);
 
-        let low_target_atr = get_sequence_atr_baseline(&low_vol_hor).unwrap();
+        let low_target_atr = get_sequence_atr_baseline(&low_vol_hor, 0.005).unwrap();
         let low_class = classify_volatility_log_ratio(train_atr, low_target_atr, &log_thresholds);
         assert!(
             low_class <= 1,
@@ -258,8 +258,8 @@ mod tests {
             (51000.0, 53000.0, 47000.0, 52000.0, 600.0),
         ]);
 
-        let normal_atr = get_sequence_atr_baseline(&btc_normal).unwrap();
-        let volatile_atr = get_sequence_atr_baseline(&btc_volatile).unwrap();
+        let normal_atr = get_sequence_atr_baseline(&btc_normal, 0.005).unwrap();
+        let volatile_atr = get_sequence_atr_baseline(&btc_volatile, 0.005).unwrap();
 
         assert!(
             volatile_atr > normal_atr * 1.5,
@@ -279,8 +279,8 @@ mod tests {
             (3210.0, 3230.0, 3190.0, 3220.0, 85.0),
         ]);
 
-        let eth_vol_atr = get_sequence_atr_baseline(&eth_volatile).unwrap();
-        let eth_consol_atr = get_sequence_atr_baseline(&eth_consolidation).unwrap();
+        let eth_vol_atr = get_sequence_atr_baseline(&eth_volatile, 0.005).unwrap();
+        let eth_consol_atr = get_sequence_atr_baseline(&eth_consolidation, 0.005).unwrap();
 
         assert!(
             eth_consol_atr < eth_vol_atr * 0.5,
@@ -758,7 +758,7 @@ mod tests {
 
         // Test uniform weighting (decay_factor = 1.0)
         let uniform_atr = get_horizon_weighted_atr_baseline(&horizon_candles, 1.0).unwrap();
-        let baseline_atr = get_sequence_atr_baseline(&horizon_candles).unwrap();
+        let baseline_atr = get_sequence_atr_baseline(&horizon_candles, 0.005).unwrap();
         assert_relative_eq!(uniform_atr, baseline_atr, epsilon = 1e-10);
 
         // Test recent weighting (decay_factor = 0.9)
@@ -779,7 +779,7 @@ mod tests {
             (106.5, 107.0, 106.0, 106.8, 1300.0), // Low volatility (recent)
         ]);
 
-        let reverse_uniform = get_sequence_atr_baseline(&reverse_candles).unwrap();
+        let reverse_uniform = get_sequence_atr_baseline(&reverse_candles, 0.005).unwrap();
         let reverse_weighted = get_horizon_weighted_atr_baseline(&reverse_candles, 0.9).unwrap();
 
         // Weighted ATR should be lower than uniform because recent candles have lower volatility
@@ -796,7 +796,7 @@ mod tests {
         // Test with insufficient data
         let single_candle = create_test_candles(vec![(100.0, 102.0, 98.0, 101.0, 1000.0)]);
         let result = get_horizon_weighted_atr_baseline(&single_candle, 0.95).unwrap();
-        let baseline = get_sequence_atr_baseline(&single_candle).unwrap();
+        let baseline = get_sequence_atr_baseline(&single_candle, 0.005).unwrap();
         assert_relative_eq!(result, baseline, epsilon = 1e-10);
 
         // Test with decay_factor very close to 1.0
@@ -805,7 +805,7 @@ mod tests {
             (101.0, 103.0, 99.0, 102.0, 1100.0),
         ]);
         let near_uniform = get_horizon_weighted_atr_baseline(&normal_candles, 0.999999).unwrap();
-        let uniform = get_sequence_atr_baseline(&normal_candles).unwrap();
+        let uniform = get_sequence_atr_baseline(&normal_candles, 0.005).unwrap();
         assert_relative_eq!(near_uniform, uniform, epsilon = 1e-5);
 
         // Test with extreme decay factor

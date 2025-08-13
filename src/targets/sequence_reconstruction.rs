@@ -154,6 +154,7 @@ impl SequenceAnalyzer {
         let adaptive_percentiles =
             crate::targets::price_levels::calculate_adaptive_percentiles_from_sequence(
                 sequence_ohlcv,
+                None, // Use default fallback percentiles
             )?;
 
         let config = SequenceReconstructionConfig {

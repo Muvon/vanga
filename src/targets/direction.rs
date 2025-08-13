@@ -159,6 +159,7 @@ pub fn generate_direction_targets_with_adaptive_params(
                         sequence_prices,
                         horizon_prices,
                         &adaptive_targets_config,
+                        None, // Use default hardcoded parameters for now
                     )?;
 
                     horizon_targets[seq_position] = target_class;
@@ -204,13 +205,19 @@ pub fn classify_direction(
     sequence_prices: &[f64], // Input sequence for momentum baseline
     horizon_prices: &[f64],  // From sequence end to target horizon
     targets_config: &TargetsConfig,
+    adaptive_params: Option<&crate::targets::calibration::DirectionParams>, // NEW: Calibrated parameters
 ) -> Result<i32> {
     if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
         return Ok(2); // Default to SIDEWAYS for insufficient data
     }
 
     // Use the momentum change-based classification (the correct directional approach)
-    classify_direction_momentum_change(sequence_prices, horizon_prices, targets_config)
+    classify_direction_momentum_change(
+        sequence_prices,
+        horizon_prices,
+        targets_config,
+        adaptive_params,
+    )
 }
 
 /// Calculate raw linear regression slope without normalization
@@ -420,6 +427,7 @@ fn classify_direction_momentum_change(
     sequence_prices: &[f64],
     horizon_prices: &[f64],
     targets_config: &TargetsConfig,
+    adaptive_params: Option<&crate::targets::calibration::DirectionParams>,
 ) -> Result<i32> {
     // Step 1: Calculate momentum change between sequence and horizon
     let (sequence_momentum, horizon_momentum, momentum_change) =
@@ -429,15 +437,27 @@ fn classify_direction_momentum_change(
     let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
 
     // Step 3: Set adaptive thresholds based on trend consistency
-    let base_multiplier = targets_config.base_sensitivity * 20.0; // Scale for momentum changes
+    // Use calibrated parameters from adaptive_params if available
+    let base_multiplier = if let Some(adaptive_params) = adaptive_params {
+        adaptive_params.base_multiplier
+    } else {
+        targets_config.base_sensitivity * 20.0 // Fallback to old logic
+    };
+
     let extreme_multiplier = targets_config.extreme_multiplier;
 
-    let base_threshold = trend_consistency * base_multiplier;
-    let extreme_threshold = trend_consistency * base_multiplier * extreme_multiplier;
+    let base_threshold = trend_consistency * targets_config.base_sensitivity * base_multiplier;
+    let extreme_threshold = base_threshold * extreme_multiplier;
 
-    // Ensure reasonable minimum thresholds
-    let min_base = 0.01; // 1% minimum momentum change
-    let min_extreme = 0.03; // 3% minimum for extreme changes
+    // Use calibrated minimum thresholds if available, otherwise use hardcoded fallbacks
+    let (min_base, min_extreme) = if let Some(adaptive_params) = adaptive_params {
+        (
+            adaptive_params.min_base_threshold,
+            adaptive_params.min_extreme_threshold,
+        )
+    } else {
+        (0.01, 0.03) // Hardcoded fallbacks when no calibration available
+    };
 
     let final_base_threshold = base_threshold.max(min_base);
     let final_extreme_threshold = extreme_threshold.max(min_extreme);

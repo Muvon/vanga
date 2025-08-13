@@ -413,8 +413,8 @@ impl AdaptiveParameterCalibrator {
 
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
                     if let (Ok(seq_atr), Ok(hor_atr)) = (
-                        get_sequence_atr_baseline(sequence_candles),
-                        get_sequence_atr_baseline(horizon_candles),
+                        get_sequence_atr_baseline(sequence_candles, 0.005),
+                        get_sequence_atr_baseline(horizon_candles, 0.005),
                     ) {
                         if seq_atr > 0.0 && hor_atr > 0.0 {
                             sequence_atr_values.push(seq_atr);
@@ -1208,7 +1208,7 @@ impl AdaptiveParameterCalibrator {
         // Step 2: Calculate baseline ATR distribution statistics (sequence only)
         let mut sequence_atr_values = Vec::new();
         for (sequence_candles, _) in &candle_pairs {
-            if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles) {
+            if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles, 0.005) {
                 if seq_atr > 0.0 && seq_atr.is_finite() {
                     sequence_atr_values.push(seq_atr);
                 }
@@ -1389,11 +1389,11 @@ impl AdaptiveParameterCalibrator {
         // Classify each candle pair using the specified decay factor
         for (sequence_candles, horizon_candles) in candle_pairs {
             // Calculate sequence ATR (baseline - no weighting)
-            if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles) {
+            if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles, 0.005) {
                 // Calculate horizon ATR with decay weighting
                 let hor_atr = if (horizon_decay_factor - 1.0).abs() < f64::EPSILON {
                     // Use uniform weighting for decay_factor = 1.0
-                    get_sequence_atr_baseline(horizon_candles)?
+                    get_sequence_atr_baseline(horizon_candles, 0.005)?
                 } else {
                     // Use weighted calculation
                     get_horizon_weighted_atr_baseline(horizon_candles, horizon_decay_factor)?
