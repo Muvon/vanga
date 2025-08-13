@@ -11,6 +11,7 @@ use super::config::{LSTMModel, OptimizerWrapper};
 use super::loss::LossMode;
 
 use crate::targets::TargetType;
+use crate::utils::diagnostics::TrainingDiagnostics;
 use crate::utils::error::{Result, VangaError};
 use candle_core::Tensor;
 
@@ -877,125 +878,53 @@ impl LSTMModel {
             );
         }
 
-        // Log regularization settings
-        log::info!("🛡️ REGULARIZATION DIAGNOSTICS:");
-        if let Some(dropout_config) = &self.dropout_config {
-            log::info!("   💧 Dropout enabled: {}", dropout_config.enabled);
-            if dropout_config.enabled {
-                log::info!("   💧 Dropout rate: {:?}", dropout_config.rate);
-            }
-        } else {
-            log::info!("   💧 Dropout: DISABLED");
-        }
-
-        // Log optimizer configuration with weight decay emphasis
-        log::info!("⚙️ OPTIMIZER DIAGNOSTICS:");
-        log::info!("   📈 Learning rate: {:.6}", config.training.learning_rate);
-        match &config.training.optimizer {
-            crate::config::training::OptimizerType::AdamW {
-                weight_decay,
-                beta1,
-                beta2,
-                eps,
-            } => {
-                log::info!(
-                    "   🏋️ Weight decay: {:.4} (L2 regularization strength)",
-                    weight_decay
-                );
-                log::info!(
-                    "   📊 AdamW params: β1={:.3}, β2={:.3}, ε={:.2e}",
-                    beta1,
-                    beta2,
-                    eps
-                );
-
-                // Warn if weight decay might be too low for overfitting prevention
-                if *weight_decay < 0.001 {
-                    log::warn!(
-                        "   ⚠️ Weight decay ({:.4}) is very low - may not prevent overfitting",
-                        weight_decay
-                    );
-                } else if *weight_decay > 0.1 {
-                    log::warn!(
-                        "   ⚠️ Weight decay ({:.4}) is very high - may cause underfitting",
-                        weight_decay
-                    );
+        // Log regularization settings using diagnostics module
+        let dropout_enabled = self
+            .dropout_config
+            .as_ref()
+            .is_some_and(|config| config.enabled);
+        let dropout_rate = self.dropout_config.as_ref().and_then(|config| {
+            if config.enabled {
+                match &config.rate {
+                    crate::config::model::DropoutRate::Fixed(rate) => Some(*rate),
+                    crate::config::model::DropoutRate::Auto { min_rate, max_rate } => {
+                        // For diagnostics, show the average of the range
+                        Some((min_rate + max_rate) / 2.0)
+                    }
+                    crate::config::model::DropoutRate::Adaptive => {
+                        // For adaptive, we can't show a specific rate in diagnostics
+                        None
+                    }
                 }
+            } else {
+                None
             }
-            _ => {
-                log::info!("   🏋️ Weight decay: N/A (not AdamW)");
-                log::warn!("   ⚠️ No weight decay regularization - overfitting risk increased");
-            }
-        }
+        });
+        TrainingDiagnostics::log_regularization_config(dropout_enabled, dropout_rate);
 
-        // Log data configuration
-        log::info!("📊 DATA DIAGNOSTICS:");
-        log::info!("   🎯 Training samples: {}", total_train_samples);
-        log::debug!("   🔍 Training data shape: {:?}", train_sequences.shape());
-        if use_validation {
-            log::info!("   ✅ Validation samples: {}", total_val_samples);
-            let val_ratio = total_val_samples as f64 / total_train_samples as f64;
-            log::info!("   📊 Validation ratio: {:.1}%", val_ratio * 100.0);
-        } else {
-            log::info!("   ❌ Validation: DISABLED");
-        }
-        log::info!("   📦 Batch size: {}", batch_size);
+        // Log optimizer configuration using diagnostics module
+        TrainingDiagnostics::log_optimizer_config(
+            &config.training.optimizer,
+            config.training.learning_rate,
+        );
 
-        // Calculate effective learning data for LSTM time series models
+        // Log data configuration using diagnostics module
+        TrainingDiagnostics::log_data_config(
+            total_train_samples,
+            total_val_samples,
+            batch_size,
+            use_validation,
+        );
+
+        // Log LSTM capacity assessment using diagnostics module
         let sequence_length = self.config.sequence_length;
         let num_features = self.config.input_size;
-        let effective_data_points = total_train_samples * sequence_length * num_features;
-        let samples_per_param = if total_params > 0 {
-            effective_data_points as f64 / total_params as f64
-        } else {
-            f64::INFINITY
-        };
-
-        log::info!("🧮 LSTM TIME SERIES CAPACITY ASSESSMENT:");
-        log::info!("   📊 Training sequences: {}", total_train_samples);
-        log::info!("   📏 Sequence length: {}", sequence_length);
-        log::info!("   🔢 Features per timestep: {}", num_features);
-        log::info!(
-            "   📈 Effective data points: {} ({} × {} × {})",
-            effective_data_points,
+        TrainingDiagnostics::log_capacity_assessment(
             total_train_samples,
             sequence_length,
-            num_features
+            num_features,
+            total_params,
         );
-        log::info!("   🧮 Model parameters: {}", total_params);
-        log::info!("   📊 Data points per parameter: {:.1}", samples_per_param);
-
-        // LSTM-specific capacity assessment (different from traditional ML)
-        if total_params == 0 {
-            log::error!("   🚨 CRITICAL: Model has 0 parameters! Configuration error!");
-        } else if total_train_samples == 0 {
-            log::error!("   🚨 CRITICAL: No training sequences! Data loading error!");
-        } else if samples_per_param < 1.0 {
-            log::warn!(
-                "   ⚠️ LOW data density: {:.1} data points per parameter",
-                samples_per_param
-            );
-            log::warn!("   💡 Consider: More sequences, longer sequences, or smaller model");
-        } else if samples_per_param < 10.0 {
-            log::warn!(
-                "   ⚠️ MODERATE data density: {:.1} data points per parameter",
-                samples_per_param
-            );
-            log::warn!("   💡 Strong regularization recommended (dropout, weight decay)");
-        } else if samples_per_param < 100.0 {
-            log::info!(
-                "   ✅ GOOD data density: {:.1} data points per parameter",
-                samples_per_param
-            );
-            log::info!("   💡 Standard regularization should work well");
-        } else {
-            log::info!(
-                "   ✅ EXCELLENT data density: {:.1} data points per parameter",
-                samples_per_param
-            );
-            log::info!("   💡 Model has sufficient data for complex pattern learning");
-        }
-
         // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
         for epoch in 0..self.training_config.epochs {
             // Clear variational dropout masks at the start of each epoch for fresh randomization
