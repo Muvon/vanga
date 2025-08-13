@@ -51,9 +51,15 @@ pub struct SequenceBoundaries {
 }
 
 impl SequenceBoundaries {
-    /// Get the 5 price level ranges as percentage arrays from current price
-    pub fn get_price_level_ranges(&self, current_price: f64) -> Vec<[f64; 2]> {
-        let to_pct = |price: f64| ((price - current_price) / current_price) * 100.0;
+    /// Get the sequence center (midpoint between min and max)
+    pub fn get_sequence_center(&self) -> f64 {
+        (self.sequence_min + self.sequence_max) / 2.0
+    }
+
+    /// Get the 5 price level ranges as percentage arrays from sequence center
+    /// Using sequence center ensures neutral zone is properly centered around 0%
+    pub fn get_price_level_ranges(&self, reference_price: f64) -> Vec<[f64; 2]> {
+        let to_pct = |price: f64| ((price - reference_price) / reference_price) * 100.0;
 
         // Create non-overlapping ranges with tiny epsilon for JSON display
         let epsilon = 0.0001; // 0.0001% - tiny value to prevent overlap

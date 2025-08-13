@@ -327,31 +327,63 @@ impl TradingOrders {
         let sequence_bandwidth_pct = direction_pred.sequence_bandwidth_percent;
         let expected_upside = direction_pred.expected_upside_percent;
 
-        // ENTRY LOGIC: Use most likely downside range but keep it realistic
-        let neutral_bin = price_levels.bins.get("neutral");
+        // ENTRY LOGIC: For LONG positions, use DOWNSIDE ranges (below current price)
+        // This ensures we buy at lower prices than current market price
         let moderate_down_bin = price_levels.bins.get("moderate_down");
+        let strong_down_bin = price_levels.bins.get("strong_down");
+        let neutral_bin = price_levels.bins.get("neutral");
 
-        // Use neutral range lower bound as primary entry (most conservative)
-        let primary_entry_pct = neutral_bin
-            .map(|bin| bin.range[0]) // Lower bound of neutral
-            .unwrap_or(-sequence_bandwidth_pct * 0.3); // Fallback: 30% of bandwidth
+        // Log the actual ranges for debugging
+        if let Some(neutral) = neutral_bin {
+            log::debug!(
+                "📊 Neutral range: [{:.2}%, {:.2}%] (should be centered around 0%)",
+                neutral.range[0],
+                neutral.range[1]
+            );
+        }
+        if let Some(moderate_down) = moderate_down_bin {
+            log::debug!(
+                "📊 Moderate down range: [{:.2}%, {:.2}%] (should be negative)",
+                moderate_down.range[0],
+                moderate_down.range[1]
+            );
+        }
 
-        // Secondary entries: scale down from primary
-        let entry_1_pct = primary_entry_pct; // Best entry
-        let entry_2_pct = primary_entry_pct - sequence_bandwidth_pct * 0.2; // 20% bandwidth deeper
-        let entry_3_pct = primary_entry_pct - sequence_bandwidth_pct * 0.4; // 40% bandwidth deeper
+        // Use reconstructed downside ranges for LONG entries (buy below current price)
+        let entry_1_pct = moderate_down_bin
+            .map(|bin| bin.range[0].min(-0.1)) // Use lower bound, ensure it's negative
+            .unwrap_or(-sequence_bandwidth_pct * 0.2); // Fallback: 20% of bandwidth below
 
-        // POSITION SIZING: Simple probability weighting
-        let neutral_prob = neutral_bin.map(|bin| bin.probability).unwrap_or(0.4);
+        let entry_2_pct = moderate_down_bin
+            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0) // Use middle of moderate_down range
+            .unwrap_or(-sequence_bandwidth_pct * 0.4); // Fallback: 40% of bandwidth below
+
+        let entry_3_pct = strong_down_bin
+            .map(|bin| bin.range[1].min(-0.2)) // Use upper bound of strong_down, ensure it's negative
+            .unwrap_or(-sequence_bandwidth_pct * 0.6); // Fallback: 60% of bandwidth below
+
+        // POSITION SIZING: Use probabilities from downside bins for LONG entries
         let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.3);
+        let strong_down_prob = strong_down_bin.map(|bin| bin.probability).unwrap_or(0.2);
+
+        log::info!(
+            "📊 LONG Entry Logic: Using DOWNSIDE ranges for entries (buy below current price {:.2})",
+            current_price
+        );
+        log::debug!(
+            "💰 LONG Entry Percentages (RECONSTRUCTED): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
+            entry_1_pct,
+            entry_2_pct,
+            entry_3_pct
+        );
 
         let entry_levels = [
             OrderLevel {
                 price: current_price * (1.0 + entry_1_pct / 100.0),
-                quantity_percentage: neutral_prob.min(0.5), // Cap at 50%
+                quantity_percentage: moderate_down_prob.min(0.4), // Cap at 40%
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: neutral_prob,
+                confidence: moderate_down_prob,
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_2_pct / 100.0),
@@ -362,21 +394,34 @@ impl TradingOrders {
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_3_pct / 100.0),
-                quantity_percentage: (1.0 - neutral_prob - moderate_down_prob).max(0.2), // Remainder, min 20%
+                quantity_percentage: (1.0 - moderate_down_prob - moderate_down_prob).max(0.3), // Remainder, min 30%
                 atr_distance,
                 order_type: if is_breakout {
                     "STOP_LIMIT".to_string()
                 } else {
                     "LIMIT".to_string()
                 },
-                confidence: 0.2,
+                confidence: strong_down_prob,
             },
         ];
 
-        // EXIT LOGIC: Use expected upside with progressive scaling
-        let exit_1_pct = expected_upside * 0.5; // 50% of expected upside
-        let exit_2_pct = expected_upside * 0.8; // 80% of expected upside
-        let exit_3_pct = expected_upside; // Full expected upside
+        // EXIT LOGIC: For LONG positions, use UPSIDE ranges (above current price)
+        // This ensures we sell at higher prices than current market price
+        let moderate_up_bin = price_levels.bins.get("moderate_up");
+        let strong_up_bin = price_levels.bins.get("strong_up");
+
+        // Use reconstructed upside ranges for LONG exits (sell above current price)
+        let exit_1_pct = moderate_up_bin
+            .map(|bin| bin.range[0].max(0.1)) // Use lower bound of moderate_up, ensure it's positive
+            .unwrap_or(expected_upside * 0.5); // Fallback: 50% of expected upside
+
+        let exit_2_pct = moderate_up_bin
+            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0) // Use middle of moderate_up range
+            .unwrap_or(expected_upside * 0.8); // Fallback: 80% of expected upside
+
+        let exit_3_pct = strong_up_bin
+            .map(|bin| bin.range[0].max(0.2)) // Use lower bound of strong_up, ensure it's positive
+            .unwrap_or(expected_upside); // Fallback: Full expected upside
 
         let exit_levels = [
             OrderLevel {
@@ -513,6 +558,8 @@ impl TradingOrders {
         );
 
         // Use natural price positions from prediction data
+        // SHORT ENTRY LOGIC: Entry prices are ABOVE current price (sell high)
+        // This is correct for short selling: sell at higher price, buy back at lower price
         let entry_1_pct = entry_positions[0].max(0.5); // Ensure minimum above current
         let entry_2_pct = entry_positions[1].max(entry_1_pct + 0.2);
         let entry_3_pct = entry_positions[2].max(entry_2_pct + 0.2);
@@ -522,6 +569,11 @@ impl TradingOrders {
             entry_1_pct,
             entry_2_pct,
             entry_3_pct
+        );
+
+        log::info!(
+            "📊 SHORT Entry Logic: Selling ABOVE current price {:.2} (correct for short selling)",
+            current_price
         );
 
         let entry_levels = [

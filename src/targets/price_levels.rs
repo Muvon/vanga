@@ -705,31 +705,44 @@ pub fn reconstruct_price_levels(
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
 
-    // Calculate percentage ranges for each class
-    let percentage_ranges = boundaries.get_price_level_ranges(current_price);
+    // Calculate sequence exponentially-weighted close (this is our reference center)
+    let sequence_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
 
-    // Calculate absolute price ranges
-    let price_ranges: Vec<[f64; 2]> = percentage_ranges
+    // Calculate percentage ranges relative to sequence center
+    // This ensures neutral zone is properly centered around 0%
+    let percentage_ranges_from_center =
+        boundaries.get_price_level_ranges(sequence_exponential_weighted);
+
+    // Convert percentage ranges to be relative to current price for display
+    // This shows where the levels are relative to current market price
+    let percentage_ranges: Vec<[f64; 2]> = percentage_ranges_from_center
         .iter()
         .map(|[lower_pct, upper_pct]| {
-            let lower_price = current_price * (1.0 + lower_pct / 100.0);
-            let upper_price = current_price * (1.0 + upper_pct / 100.0);
+            // Convert from sequence-center-relative to current-price-relative
+            let lower_price_abs = sequence_exponential_weighted * (1.0 + lower_pct / 100.0);
+            let upper_price_abs = sequence_exponential_weighted * (1.0 + upper_pct / 100.0);
+            let lower_pct_from_current =
+                ((lower_price_abs - current_price) / current_price) * 100.0;
+            let upper_pct_from_current =
+                ((upper_price_abs - current_price) / current_price) * 100.0;
+            [lower_pct_from_current, upper_pct_from_current]
+        })
+        .collect();
+
+    // Calculate absolute price ranges
+    // These are the actual price levels based on the sequence analysis
+    let price_ranges: Vec<[f64; 2]> = percentage_ranges_from_center
+        .iter()
+        .map(|[lower_pct, upper_pct]| {
+            // Convert from percentages to absolute prices using sequence center
+            let lower_price = sequence_exponential_weighted * (1.0 + lower_pct / 100.0);
+            let upper_price = sequence_exponential_weighted * (1.0 + upper_pct / 100.0);
             [lower_price, upper_price]
         })
         .collect();
 
-    // Calculate sequence exponentially-weighted close for exponential_weighted_range calculation
-    let sequence_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
-
-    // Calculate exponentially-weighted close relative percentage ranges
-    let exponential_weighted_percentage_ranges: Vec<[f64; 2]> = price_ranges
-        .iter()
-        .map(|[lower_price, upper_price]| {
-            let lower_pct = ((lower_price / sequence_exponential_weighted) - 1.0) * 100.0;
-            let upper_pct = ((upper_price / sequence_exponential_weighted) - 1.0) * 100.0;
-            [lower_pct, upper_pct]
-        })
-        .collect();
+    // The exponentially-weighted percentage ranges are the same as from center
+    let exponential_weighted_percentage_ranges: Vec<[f64; 2]> = percentage_ranges_from_center;
 
     // Find most likely class and confidence
     let (most_likely_class, confidence) = probabilities

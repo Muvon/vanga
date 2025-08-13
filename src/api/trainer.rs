@@ -795,7 +795,10 @@ impl ModelTrainer {
             // COLLECT: Add to final model collection (ALL targets preserved)
             all_target_models.push(single_models.into_iter().next().unwrap());
             all_target_names.push(generate_target_name(target_type, &horizon));
-            all_horizons.push(horizon.clone());
+            // Only add horizon if not already present to avoid duplicates
+            if !all_horizons.contains(&horizon) {
+                all_horizons.push(horizon.clone());
+            }
 
             log::info!(
                 "✅ Collected trained model for {:?} {} ({}/{} models total)",
