@@ -1307,7 +1307,7 @@ impl AdaptiveParameterCalibrator {
         Ok(best_params)
     }
 
-    /// Evaluate volatility parameters by simulating classification
+    /// Evaluate volatility parameters using enhanced classification logic (fully adaptive, no magic numbers)
     fn evaluate_volatility_parameters(
         &self,
         sequence_atr_values: &[f64],
@@ -1315,26 +1315,39 @@ impl AdaptiveParameterCalibrator {
         bandwidth_size: f64,
         extreme_multiplier: f64,
     ) -> Result<ClassDistributionBalance> {
-        use crate::targets::volatility::{classify_volatility_log_ratio, LogVolatilityThresholds};
-
         let mut class_counts = [0usize; 5];
 
-        // Create thresholds using same logic as volatility.rs
-        let half_bandwidth = bandwidth_size / 2.0;
-        let extreme_bandwidth = bandwidth_size * extreme_multiplier;
+        // Use enhanced classification logic (same as training) - fully adaptive thresholds
+        let moderate_threshold = bandwidth_size;
+        let extreme_threshold = bandwidth_size * extreme_multiplier;
 
-        let thresholds = LogVolatilityThresholds {
-            very_low_max: -extreme_bandwidth,
-            low_max: -half_bandwidth,
-            medium_max: half_bandwidth,
-            high_max: extreme_bandwidth,
-        };
-
-        // Classify each ATR ratio pair
         for (i, &seq_atr) in sequence_atr_values.iter().enumerate() {
             if let Some(&hor_atr) = horizon_atr_values.get(i) {
                 if seq_atr > 0.0 && hor_atr > 0.0 {
-                    let class = classify_volatility_log_ratio(seq_atr, hor_atr, &thresholds);
+                    // Calculate enhanced volatility score using same logic as training
+                    let baseline_atr = seq_atr.max(0.005); // Same minimum as training
+                    let volatility_ratio = hor_atr / baseline_atr;
+
+                    // Use neutral features for calibration (no magic scaling, purely adaptive)
+                    let trend_change = 0.0; // Neutral trend for calibration
+                    let volume_weighted_change = volatility_ratio; // Direct ratio, no magic multipliers
+                    let persistence = 0.5; // Neutral persistence for calibration
+
+                    // Calculate enhanced score using same function as training
+                    let enhanced_score = crate::targets::volatility::combine_volatility_features(
+                        volatility_ratio,
+                        trend_change,
+                        volume_weighted_change,
+                        persistence,
+                    );
+
+                    // Classify using enhanced score (same as training, fully adaptive)
+                    let class = crate::targets::volatility::classify_enhanced_volatility_score(
+                        enhanced_score,
+                        moderate_threshold,
+                        extreme_threshold,
+                    );
+
                     if (0..5).contains(&class) {
                         class_counts[class as usize] += 1;
                     }

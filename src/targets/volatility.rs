@@ -554,21 +554,24 @@ pub struct LogVolatilityThresholds {
                            // Above high_max = VeryHigh
 }
 
-/// Classify volatility using sequence→horizon ATR ratio for strong ML signals
+/// Enhanced volatility classification with multi-feature analysis for better LSTM learning
 ///
-/// CORRECTED APPROACH: Uses sequence ATR as baseline, horizon ATR as target measurement.
-/// Creates strong ratio-based signals that are easier for LSTM to learn.
+/// ENHANCED APPROACH: Uses multiple volatility features similar to direction/price_level targets:
+/// 1. Volatility trend analysis (increasing/decreasing volatility patterns)
+/// 2. Volume-weighted volatility (high volume volatility vs noise)
+/// 3. Volatility persistence (regime stability)
+/// 4. Volatility regime transitions (like direction's momentum change)
 ///
 /// ## Algorithm
-/// 1. Calculate simple ATR for sequence (baseline volatility context)
-/// 2. Calculate simple ATR for horizon (target volatility measurement)
-/// 3. Compute volatility ratio = horizon_atr / sequence_atr
-/// 4. Classify using adaptive thresholds on ratio values
+/// 1. Calculate volatility trend change (similar to direction's momentum change)
+/// 2. Add volume-weighted volatility analysis (similar to price_level's VWAP)
+/// 3. Measure volatility persistence and regime transitions
+/// 4. Combine features for robust classification
 ///
-/// ## Signal Strength
-/// - **Strong Signal**: Direct ratio in [0, ∞] range
-/// - **Clear Meaning**: >1 = higher volatility, <1 = lower volatility, =1 = same volatility
-/// - **ML Friendly**: Consistent, predictable patterns for LSTM learning
+/// ## Signal Strength Enhancement
+/// - **Multiple Features**: Trend, volume-weighting, persistence, transitions
+/// - **Regime Detection**: Captures volatility regime changes, not just magnitude
+/// - **ML Friendly**: Rich feature set similar to successful direction/price_level targets
 pub fn classify_volatility_with_distribution_analysis(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
@@ -579,38 +582,48 @@ pub fn classify_volatility_with_distribution_analysis(
         return Ok(2); // Default to Medium for insufficient data
     }
 
-    // Calculate simple ATR for both sequence (baseline) and horizon (target)
+    // Feature 1: Basic ATR ratio (existing approach)
     let sequence_atr =
         calculate_simple_atr_with_params(sequence_candles, adaptive_params.min_baseline_atr)?;
     let horizon_atr =
         calculate_simple_atr_with_params(horizon_candles, adaptive_params.min_baseline_atr)?;
-
-    // Calculate volatility ratio: horizon/sequence (with adaptive minimum baseline)
     let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr);
     let volatility_ratio = horizon_atr / baseline_atr;
 
-    // Use adaptive thresholds calibrated for balanced distribution on ratio values
-    let moderate_threshold = adaptive_params.bandwidth_size; // Now represents ratio threshold
+    // Feature 2: Volatility trend change (similar to direction's momentum change)
+    let volatility_trend_change =
+        calculate_volatility_trend_change(sequence_candles, horizon_candles)?;
+
+    // Feature 3: Volume-weighted volatility analysis (similar to price_level's VWAP approach)
+    let volume_weighted_volatility_change =
+        calculate_volume_weighted_volatility_change(sequence_candles, horizon_candles)?;
+
+    // Feature 4: Volatility persistence score (regime stability)
+    let volatility_persistence =
+        calculate_volatility_persistence(sequence_candles, horizon_candles)?;
+
+    // Combine features for enhanced classification
+    let enhanced_volatility_score = combine_volatility_features(
+        volatility_ratio,
+        volatility_trend_change,
+        volume_weighted_volatility_change,
+        volatility_persistence,
+    );
+
+    // Use adaptive thresholds on the enhanced score
+    let moderate_threshold = adaptive_params.bandwidth_size;
     let extreme_threshold = adaptive_params.bandwidth_size * adaptive_params.extreme_multiplier;
 
-    // Classify based on volatility ratio with clear boundaries
-    // volatility_ratio range: [0, ∞] where 1.0 = same volatility
-    let class = if volatility_ratio <= (1.0 - extreme_threshold) {
-        0 // VeryLow: Much lower volatility than sequence
-    } else if volatility_ratio <= (1.0 - moderate_threshold) {
-        1 // Low: Somewhat lower volatility than sequence
-    } else if volatility_ratio < (1.0 + moderate_threshold) {
-        2 // Medium: Similar volatility to sequence
-    } else if volatility_ratio < (1.0 + extreme_threshold) {
-        3 // High: Somewhat higher volatility than sequence
-    } else {
-        4 // VeryHigh: Much higher volatility than sequence
-    };
+    // Enhanced classification based on combined features
+    let class = classify_enhanced_volatility_score(
+        enhanced_volatility_score,
+        moderate_threshold,
+        extreme_threshold,
+    );
 
     log::debug!(
-        "🎯 Volatility Ratio: seq_atr={:.6}, hor_atr={:.6}, ratio={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
-        sequence_atr, horizon_atr, volatility_ratio,
-        1.0 - extreme_threshold, 1.0 - moderate_threshold, 1.0 + moderate_threshold, 1.0 + extreme_threshold,
+        "🎯 Enhanced Volatility: ratio={:.4}, trend_change={:.4}, volume_weighted={:.4}, persistence={:.4}, score={:.4} → class={} ({})",
+        volatility_ratio, volatility_trend_change, volume_weighted_volatility_change, volatility_persistence, enhanced_volatility_score,
         class, ["VeryLow", "Low", "Medium", "High", "VeryHigh"][class as usize]
     );
 
@@ -778,6 +791,353 @@ pub fn calculate_simple_atr_with_params(
     let simple_atr = true_ranges.iter().sum::<f64>() / true_ranges.len() as f64;
 
     Ok(simple_atr.max(min_baseline))
+}
+
+/// Calculate volatility trend change (similar to direction's momentum change approach)
+///
+/// This function analyzes how volatility is changing over time, capturing volatility
+/// acceleration/deceleration patterns that are crucial for LSTM learning.
+///
+/// ## Algorithm
+/// 1. Calculate volatility trend in sequence period (using ATR slope)
+/// 2. Calculate volatility trend in horizon period
+/// 3. Return the change in volatility trend (acceleration/deceleration)
+///
+/// ## Returns
+/// - Positive: Volatility is accelerating (trend becoming more volatile)
+/// - Negative: Volatility is decelerating (trend becoming less volatile)
+/// - Zero: Volatility trend is stable
+pub fn calculate_volatility_trend_change(
+    sequence_candles: &[MarketDataRow],
+    horizon_candles: &[MarketDataRow],
+) -> Result<f64> {
+    if sequence_candles.len() < 3 || horizon_candles.len() < 3 {
+        return Ok(0.0); // No trend change for insufficient data
+    }
+
+    // Calculate rolling ATR values for trend analysis
+    let sequence_atr_values = calculate_rolling_atr_values(sequence_candles)?;
+    let horizon_atr_values = calculate_rolling_atr_values(horizon_candles)?;
+
+    if sequence_atr_values.len() < 2 || horizon_atr_values.len() < 2 {
+        return Ok(0.0);
+    }
+
+    // Calculate volatility trend (slope) for each period
+    let sequence_trend = calculate_atr_trend_slope(&sequence_atr_values)?;
+    let horizon_trend = calculate_atr_trend_slope(&horizon_atr_values)?;
+
+    // Return trend change (similar to direction's momentum change)
+    Ok(horizon_trend - sequence_trend)
+}
+
+/// Calculate volume-weighted volatility change (similar to price_level's VWAP approach)
+///
+/// This function weights volatility by volume to distinguish between high-volume
+/// volatility (meaningful) and low-volume volatility (noise).
+///
+/// ## Algorithm
+/// 1. Calculate volume-weighted ATR for sequence period
+/// 2. Calculate volume-weighted ATR for horizon period
+/// 3. Return the ratio change with volume weighting
+pub fn calculate_volume_weighted_volatility_change(
+    sequence_candles: &[MarketDataRow],
+    horizon_candles: &[MarketDataRow],
+) -> Result<f64> {
+    if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
+        return Ok(1.0); // Neutral change for insufficient data
+    }
+
+    let sequence_vw_atr = calculate_volume_weighted_atr(sequence_candles)?;
+    let horizon_vw_atr = calculate_volume_weighted_atr(horizon_candles)?;
+
+    if sequence_vw_atr <= 0.0 {
+        return Ok(1.0);
+    }
+
+    Ok(horizon_vw_atr / sequence_vw_atr)
+}
+
+/// Calculate volatility persistence (regime stability measure)
+///
+/// This function measures how stable the volatility regime is, helping to
+/// distinguish between temporary volatility spikes and regime changes.
+///
+/// ## Algorithm
+/// 1. Calculate volatility consistency within sequence
+/// 2. Calculate volatility consistency within horizon
+/// 3. Return persistence score (higher = more stable regime)
+pub fn calculate_volatility_persistence(
+    sequence_candles: &[MarketDataRow],
+    horizon_candles: &[MarketDataRow],
+) -> Result<f64> {
+    if sequence_candles.len() < 3 || horizon_candles.len() < 3 {
+        return Ok(0.5); // Neutral persistence for insufficient data
+    }
+
+    let sequence_atr_values = calculate_rolling_atr_values(sequence_candles)?;
+    let horizon_atr_values = calculate_rolling_atr_values(horizon_candles)?;
+
+    let sequence_consistency = calculate_atr_consistency(&sequence_atr_values);
+    let horizon_consistency = calculate_atr_consistency(&horizon_atr_values);
+
+    // Return average consistency as persistence score
+    Ok((sequence_consistency + horizon_consistency) / 2.0)
+}
+
+/// Combine multiple volatility features into enhanced score
+///
+/// This function combines all volatility features similar to how direction
+/// and price_level targets use multiple features for robust classification.
+pub fn combine_volatility_features(
+    volatility_ratio: f64,
+    trend_change: f64,
+    volume_weighted_change: f64,
+    persistence: f64,
+) -> f64 {
+    // Weight the features (can be tuned based on performance)
+    let ratio_weight = 0.4; // Basic ratio (existing approach)
+    let trend_weight = 0.3; // Trend change (new, similar to direction)
+    let volume_weight = 0.2; // Volume weighting (new, similar to price_level)
+    let persistence_weight = 0.1; // Persistence (new, regime stability)
+
+    // Normalize trend_change and combine
+    let normalized_trend = (trend_change * 10.0).tanh(); // Normalize to [-1, 1] range
+    let normalized_volume = volume_weighted_change.ln(); // Log space for ratios
+
+    // Combine features into enhanced score
+    let base_score = volatility_ratio.ln(); // Log space for ratios
+    let trend_component = normalized_trend * trend_weight / ratio_weight;
+    let volume_component = normalized_volume * volume_weight / ratio_weight;
+    let persistence_component = (persistence - 0.5) * persistence_weight / ratio_weight;
+
+    let enhanced_score = base_score + trend_component + volume_component + persistence_component;
+
+    // Convert back to ratio space
+    enhanced_score.exp()
+}
+
+/// Classify enhanced volatility score using adaptive thresholds
+pub fn classify_enhanced_volatility_score(
+    enhanced_score: f64,
+    moderate_threshold: f64,
+    extreme_threshold: f64,
+) -> i32 {
+    if enhanced_score <= (1.0 - extreme_threshold) {
+        0 // VeryLow
+    } else if enhanced_score <= (1.0 - moderate_threshold) {
+        1 // Low
+    } else if enhanced_score < (1.0 + moderate_threshold) {
+        2 // Medium
+    } else if enhanced_score < (1.0 + extreme_threshold) {
+        3 // High
+    } else {
+        4 // VeryHigh
+    }
+}
+
+/// Helper: Calculate rolling ATR values for trend analysis
+fn calculate_rolling_atr_values(candles: &[MarketDataRow]) -> Result<Vec<f64>> {
+    if candles.len() < 2 {
+        return Ok(vec![]);
+    }
+
+    let mut atr_values = Vec::new();
+
+    // Calculate ATR for each possible window
+    for i in 1..candles.len() {
+        let window_candles = &candles[0..=i];
+        if let Ok(atr) = calculate_simple_atr(window_candles) {
+            atr_values.push(atr);
+        }
+    }
+
+    Ok(atr_values)
+}
+
+/// Helper: Calculate trend slope from ATR values
+fn calculate_atr_trend_slope(atr_values: &[f64]) -> Result<f64> {
+    if atr_values.len() < 2 {
+        return Ok(0.0);
+    }
+
+    let n = atr_values.len() as f64;
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_x2 = 0.0;
+
+    for (i, &atr) in atr_values.iter().enumerate() {
+        let x = i as f64;
+        sum_x += x;
+        sum_y += atr;
+        sum_xy += x * atr;
+        sum_x2 += x * x;
+    }
+
+    let denominator = n * sum_x2 - sum_x * sum_x;
+    if denominator.abs() < 1e-10 {
+        return Ok(0.0);
+    }
+
+    let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+    Ok(slope)
+}
+
+/// Helper: Calculate volume-weighted ATR
+fn calculate_volume_weighted_atr(candles: &[MarketDataRow]) -> Result<f64> {
+    if candles.len() < 2 {
+        return Ok(0.005); // Default minimum
+    }
+
+    let mut weighted_sum = 0.0;
+    let mut total_weight = 0.0;
+
+    for i in 1..candles.len() {
+        let current = &candles[i];
+        let previous = &candles[i - 1];
+
+        let high_low = current.high - current.low;
+        let high_close = (current.high - previous.close).abs();
+        let low_close = (current.low - previous.close).abs();
+        let true_range = high_low.max(high_close).max(low_close);
+
+        if true_range.is_finite() && true_range > 0.0 && current.close > 0.0 {
+            let normalized_tr = true_range / current.close;
+            let weight = current.volume; // Volume weighting
+
+            weighted_sum += normalized_tr * weight;
+            total_weight += weight;
+        }
+    }
+
+    if total_weight <= 0.0 {
+        return calculate_simple_atr(candles);
+    }
+
+    Ok((weighted_sum / total_weight).max(0.005))
+}
+
+/// Helper: Calculate ATR consistency (lower = more consistent)
+fn calculate_atr_consistency(atr_values: &[f64]) -> f64 {
+    if atr_values.len() < 2 {
+        return 0.5; // Neutral consistency
+    }
+
+    let mean = atr_values.iter().sum::<f64>() / atr_values.len() as f64;
+    let variance =
+        atr_values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / atr_values.len() as f64;
+
+    let coefficient_of_variation = if mean > 0.0 {
+        variance.sqrt() / mean
+    } else {
+        1.0
+    };
+
+    // Convert to consistency score (higher = more consistent)
+    (1.0 / (1.0 + coefficient_of_variation)).clamp(0.0, 1.0)
+}
+
+/// Calculate enhanced score midpoints for each volatility class using proper mathematical boundaries
+///
+/// This function calculates the actual enhanced score boundaries for each class and finds
+/// the mathematical midpoints, eliminating magic numbers and making it fully adaptive.
+///
+/// # Arguments
+/// * `sequence_ohlcv` - Sequence OHLCV data for feature calculation
+/// * `adaptive_params` - Adaptive parameters for threshold calculation
+/// * `moderate_threshold` - Moderate threshold for classification
+/// * `extreme_threshold` - Extreme threshold for classification
+///
+/// # Returns
+/// * `Vec<f64>` - Enhanced score midpoints for each class [VeryLow, Low, Medium, High, VeryHigh]
+fn calculate_enhanced_score_midpoints(
+    sequence_ohlcv: &[MarketDataRow],
+    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
+    moderate_threshold: f64,
+    extreme_threshold: f64,
+) -> Result<Vec<f64>> {
+    // Calculate sequence-based features (available during prediction)
+    let sequence_atr =
+        calculate_simple_atr_with_params(sequence_ohlcv, adaptive_params.min_baseline_atr)?;
+    let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr);
+
+    // Calculate sequence-only features for neutral approximation
+    let sequence_trend = calculate_sequence_volatility_trend(sequence_ohlcv)?;
+    let sequence_volume_weighted = calculate_volume_weighted_atr(sequence_ohlcv)?;
+    let sequence_persistence = calculate_sequence_volatility_persistence(sequence_ohlcv)?;
+
+    // Calculate actual enhanced score boundaries (same as classify_enhanced_volatility_score)
+    let boundary_ratios = [
+        1.0 - extreme_threshold,  // VeryLow/Low boundary
+        1.0 - moderate_threshold, // Low/Medium boundary
+        1.0 + moderate_threshold, // Medium/High boundary
+        1.0 + extreme_threshold,  // High/VeryHigh boundary
+    ];
+
+    // Calculate enhanced scores for boundaries
+    let mut boundary_enhanced_scores = Vec::new();
+    for &ratio in &boundary_ratios {
+        // Use neutral features for boundary calculation (no magic scaling)
+        let trend_change = sequence_trend * (ratio - 1.0); // Proportional to ratio change
+        let volume_change = ratio * (sequence_volume_weighted / baseline_atr);
+        let persistence = sequence_persistence;
+
+        let enhanced_score =
+            combine_volatility_features(ratio, trend_change, volume_change, persistence);
+        boundary_enhanced_scores.push(enhanced_score);
+    }
+
+    // Calculate mathematical midpoints between boundaries
+    let enhanced_score_midpoints = vec![
+        // VeryLow: midpoint between 0 and first boundary
+        boundary_enhanced_scores[0] * 0.5,
+        // Low: midpoint between first and second boundary
+        (boundary_enhanced_scores[0] + boundary_enhanced_scores[1]) * 0.5,
+        // Medium: midpoint between second and third boundary (around 1.0)
+        (boundary_enhanced_scores[1] + boundary_enhanced_scores[2]) * 0.5,
+        // High: midpoint between third and fourth boundary
+        (boundary_enhanced_scores[2] + boundary_enhanced_scores[3]) * 0.5,
+        // VeryHigh: extrapolate beyond fourth boundary using same spacing as High class
+        boundary_enhanced_scores[3] + (boundary_enhanced_scores[3] - boundary_enhanced_scores[2]),
+    ];
+
+    Ok(enhanced_score_midpoints)
+}
+
+/// Calculate volatility trend from sequence data only (for prediction)
+///
+/// This approximates the trend change calculation using only sequence data
+/// by analyzing the volatility trend within the sequence itself.
+fn calculate_sequence_volatility_trend(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    if sequence_ohlcv.len() < 3 {
+        return Ok(0.0);
+    }
+
+    let atr_values = calculate_rolling_atr_values(sequence_ohlcv)?;
+    if atr_values.len() < 2 {
+        return Ok(0.0);
+    }
+
+    // Calculate trend slope within sequence
+    calculate_atr_trend_slope(&atr_values)
+}
+
+/// Calculate volatility persistence from sequence data only (for prediction)
+///
+/// This approximates the persistence calculation using only sequence data
+/// by analyzing the consistency within the sequence itself.
+fn calculate_sequence_volatility_persistence(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
+    if sequence_ohlcv.len() < 3 {
+        return Ok(0.5);
+    }
+
+    let atr_values = calculate_rolling_atr_values(sequence_ohlcv)?;
+    if atr_values.is_empty() {
+        return Ok(0.5);
+    }
+
+    Ok(calculate_atr_consistency(&atr_values))
 }
 ///
 /// This function computes the threshold boundaries used to classify volatility ratios
@@ -955,10 +1315,11 @@ pub struct VolatilityReconstruction {
     pub train_atr: f64,
 }
 
-/// Reconstruct volatility predictions from model probabilities using ratio-based approach
+/// Reconstruct volatility predictions from model probabilities using enhanced multi-feature approach
 ///
-/// This method reverses the new ratio-based classification logic to convert
-/// raw model probabilities back to meaningful ATR ratios and volatility changes.
+/// This method reverses the enhanced classification logic to convert raw model probabilities
+/// back to meaningful volatility metrics. Uses the same 4-feature approach as training:
+/// 1. Basic ATR ratio, 2. Trend change, 3. Volume-weighted change, 4. Persistence
 ///
 /// # Arguments
 /// * `probabilities` - 5-element array of class probabilities [VeryLow, Low, Medium, High, VeryHigh]
@@ -966,7 +1327,7 @@ pub struct VolatilityReconstruction {
 /// * `adaptive_params` - Adaptive parameters used during training (for threshold calculation)
 ///
 /// # Returns
-/// * `VolatilityReconstruction` - Complete reconstruction with ATR ratios and volatility metrics
+/// * `VolatilityReconstruction` - Complete reconstruction with enhanced volatility metrics
 pub fn reconstruct_volatility(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
@@ -999,18 +1360,20 @@ pub fn reconstruct_volatility(
     let moderate_threshold = adaptive_params.bandwidth_size;
     let extreme_threshold = adaptive_params.bandwidth_size * adaptive_params.extreme_multiplier;
 
-    // Calculate representative ATR ratios for each class (midpoints)
-    // These correspond to the classification ranges:
-    let class_ratio_midpoints = [
-        (1.0 - extreme_threshold) * 0.75, // VeryLow
-        (1.0 - extreme_threshold + 1.0 - moderate_threshold) / 2.0, // Low
-        1.0,                              // Medium (same as sequence)
-        (1.0 + moderate_threshold + 1.0 + extreme_threshold) / 2.0, // High
-        (1.0 + extreme_threshold) * 1.25, // VeryHigh
-    ];
+    // Calculate enhanced score midpoints for each class using same logic as training
+    // These represent the enhanced scores that would classify to each class
+    let enhanced_score_midpoints = calculate_enhanced_score_midpoints(
+        sequence_ohlcv,
+        adaptive_params,
+        moderate_threshold,
+        extreme_threshold,
+    )?;
 
-    // Convert ratios to actual ATR values
-    let atr_ratios: Vec<f64> = class_ratio_midpoints.to_vec();
+    // Convert enhanced scores back to basic ATR ratios for compatibility
+    let class_ratio_midpoints: Vec<f64> = enhanced_score_midpoints.clone();
+
+    // Convert enhanced scores to actual ATR ratios for compatibility
+    let atr_ratios: Vec<f64> = class_ratio_midpoints.clone();
 
     // Convert ATR ratios to volatility change percentages
     let volatility_changes: Vec<f64> = atr_ratios

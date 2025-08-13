@@ -496,7 +496,7 @@ mod tests {
         );
     }
 
-    /// Test enhanced volatility classification with distribution analysis
+    /// Test enhanced volatility classification with multi-feature analysis
     #[test]
     fn test_enhanced_volatility_classification() {
         let targets_config = TargetsConfig {
@@ -506,7 +506,7 @@ mod tests {
             extreme_multiplier: 2.0,
         };
 
-        // Test case 1: Normal to high volatility transition
+        // Test case 1: Normal to high volatility transition with volume increase
         let normal_sequence = create_test_candles(vec![
             (1000.0, 1020.0, 980.0, 1010.0, 100.0),
             (1010.0, 1030.0, 990.0, 1020.0, 110.0),
@@ -516,9 +516,9 @@ mod tests {
         ]);
 
         let high_vol_horizon = create_test_candles(vec![
-            (1050.0, 1100.0, 950.0, 1080.0, 500.0),
-            (1080.0, 1150.0, 980.0, 1120.0, 600.0),
-            (1120.0, 1200.0, 1000.0, 1160.0, 700.0),
+            (1050.0, 1100.0, 950.0, 1080.0, 500.0), // High volume, high volatility
+            (1080.0, 1150.0, 980.0, 1120.0, 600.0), // Increasing volume and volatility
+            (1120.0, 1200.0, 1000.0, 1160.0, 700.0), // Sustained high vol/volume
         ]);
 
         let default_params =
@@ -527,7 +527,7 @@ mod tests {
             &normal_sequence,
             &high_vol_horizon,
             &targets_config,
-            &default_params, // Use default parameters for basic test
+            &default_params,
         )
         .unwrap();
 
@@ -537,22 +537,148 @@ mod tests {
             class
         );
 
-        // Test case 2: Edge cases
+        // Should classify as high volatility due to multiple factors:
+        // 1. Higher ATR ratio
+        // 2. Increasing volatility trend
+        // 3. High volume weighting
+        assert!(
+            class >= 3,
+            "High volume + high volatility should classify as High or VeryHigh, got {}",
+            class
+        );
+
+        // Test case 2: Low volume volatility (should be less extreme)
+        let low_vol_horizon = create_test_candles(vec![
+            (1050.0, 1100.0, 950.0, 1080.0, 50.0), // High volatility but low volume
+            (1080.0, 1150.0, 980.0, 1120.0, 60.0), // Should be treated as noise
+            (1120.0, 1200.0, 1000.0, 1160.0, 70.0),
+        ]);
+
+        let low_vol_class = classify_volatility_with_distribution_analysis(
+            &normal_sequence,
+            &low_vol_horizon,
+            &targets_config,
+            &default_params,
+        )
+        .unwrap();
+
+        // Low volume volatility should be classified less extremely than high volume
+        assert!(
+            low_vol_class <= class,
+            "Low volume volatility should be less extreme than high volume volatility"
+        );
+
+        // Test case 3: Decreasing volatility trend
+        let decreasing_vol_horizon = create_test_candles(vec![
+            (1050.0, 1080.0, 1020.0, 1060.0, 200.0), // Moderate volatility
+            (1060.0, 1070.0, 1050.0, 1065.0, 210.0), // Decreasing volatility
+            (1065.0, 1068.0, 1062.0, 1067.0, 220.0), // Low volatility
+        ]);
+
+        let decreasing_class = classify_volatility_with_distribution_analysis(
+            &normal_sequence,
+            &decreasing_vol_horizon,
+            &targets_config,
+            &default_params,
+        )
+        .unwrap();
+
+        assert!(
+            decreasing_class <= 2,
+            "Decreasing volatility trend should classify as Low or Medium, got {}",
+            decreasing_class
+        );
+
+        // Test case 4: Edge cases
         let single_candle = create_test_candles(vec![(1000.0, 1020.0, 980.0, 1010.0, 100.0)]);
 
-        let default_params =
-            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
         let edge_class = classify_volatility_with_distribution_analysis(
             &single_candle,
             &high_vol_horizon,
             &targets_config,
-            &default_params, // Use default parameters for edge case test
+            &default_params,
         )
         .unwrap();
 
         assert_eq!(
             edge_class, 2,
             "Insufficient sequence data should default to Medium"
+        );
+    }
+
+    /// Test individual volatility feature calculations
+    #[test]
+    fn test_volatility_feature_calculations() {
+        // Test volatility trend change
+        let stable_sequence = create_test_candles(vec![
+            (100.0, 102.0, 98.0, 101.0, 1000.0),
+            (101.0, 103.0, 99.0, 102.0, 1000.0),
+            (102.0, 104.0, 100.0, 103.0, 1000.0),
+        ]);
+
+        let increasing_vol_horizon = create_test_candles(vec![
+            (103.0, 108.0, 98.0, 105.0, 1000.0), // Higher volatility
+            (105.0, 115.0, 95.0, 110.0, 1000.0), // Even higher volatility
+            (110.0, 125.0, 90.0, 120.0, 1000.0), // Highest volatility
+        ]);
+
+        let trend_change =
+            calculate_volatility_trend_change(&stable_sequence, &increasing_vol_horizon).unwrap();
+        assert!(
+            trend_change > 0.0,
+            "Increasing volatility should have positive trend change, got {}",
+            trend_change
+        );
+
+        // Test volume-weighted volatility
+        let high_volume_horizon = create_test_candles(vec![
+            (103.0, 108.0, 98.0, 105.0, 5000.0), // High volume
+            (105.0, 115.0, 95.0, 110.0, 6000.0), // Higher volume
+        ]);
+
+        let low_volume_horizon = create_test_candles(vec![
+            (103.0, 108.0, 98.0, 105.0, 100.0), // Low volume
+            (105.0, 115.0, 95.0, 110.0, 120.0), // Low volume
+        ]);
+
+        let high_vol_change =
+            calculate_volume_weighted_volatility_change(&stable_sequence, &high_volume_horizon)
+                .unwrap();
+        let low_vol_change =
+            calculate_volume_weighted_volatility_change(&stable_sequence, &low_volume_horizon)
+                .unwrap();
+
+        // Both should show increased volatility, but volume weighting should make a difference
+        assert!(
+            high_vol_change > 1.0,
+            "High volume volatility should show increase"
+        );
+        assert!(
+            low_vol_change > 1.0,
+            "Low volume volatility should show increase"
+        );
+
+        // Test volatility persistence
+        let consistent_horizon = create_test_candles(vec![
+            (103.0, 105.0, 101.0, 104.0, 1000.0), // Consistent volatility
+            (104.0, 106.0, 102.0, 105.0, 1000.0), // Similar volatility
+            (105.0, 107.0, 103.0, 106.0, 1000.0), // Consistent pattern
+        ]);
+
+        let erratic_horizon = create_test_candles(vec![
+            (103.0, 120.0, 90.0, 110.0, 1000.0),  // High volatility
+            (110.0, 112.0, 108.0, 111.0, 1000.0), // Low volatility
+            (111.0, 130.0, 85.0, 125.0, 1000.0),  // Very high volatility
+        ]);
+
+        let consistent_persistence =
+            calculate_volatility_persistence(&stable_sequence, &consistent_horizon).unwrap();
+        let erratic_persistence =
+            calculate_volatility_persistence(&stable_sequence, &erratic_horizon).unwrap();
+
+        assert!(
+            consistent_persistence > erratic_persistence,
+            "Consistent volatility should have higher persistence than erratic volatility"
         );
     }
 
