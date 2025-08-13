@@ -761,9 +761,16 @@ impl OutputFormatter {
             )
         })?;
 
-        // Use enhanced reconstruction from price_levels module
-        let targets_config = if self.bandwidth_size.is_some() {
-            // Create TargetsConfig from stored parameters
+        // Use adaptive parameters if available, otherwise fallback to bandwidth_size
+        let targets_config = if let Some(ref adaptive_params) = self.adaptive_parameters {
+            // Use calibrated adaptive parameters for price level reconstruction
+            Some(crate::config::model::TargetsConfig {
+                base_sensitivity: adaptive_params.price_levels.bandwidth_size,
+                extreme_multiplier: 2.0, // Price levels don't use extreme_multiplier
+                ..Default::default()
+            })
+        } else if self.bandwidth_size.is_some() {
+            // Fallback to bandwidth_size if no adaptive parameters
             Some(crate::config::model::TargetsConfig {
                 base_sensitivity: self.bandwidth_size.unwrap_or(1.0),
                 extreme_multiplier: 2.0, // Default value
@@ -843,8 +850,28 @@ impl OutputFormatter {
                 input.pump_probability,
             ];
 
-            // Use enhanced reconstruction from direction module
-            match reconstruct_direction(&probabilities, ohlcv_data, None) {
+            // Use adaptive parameters if available, otherwise create default config
+            let targets_config = if let Some(ref adaptive_params) = self.adaptive_parameters {
+                // Use calibrated adaptive parameters for direction reconstruction
+                Some(crate::config::model::TargetsConfig {
+                    base_sensitivity: adaptive_params.direction.base_sensitivity,
+                    extreme_multiplier: adaptive_params.direction.extreme_multiplier,
+                    momentum_weighting: adaptive_params.direction.momentum_weighting,
+                    ..Default::default()
+                })
+            } else if self.bandwidth_size.is_some() {
+                // Fallback to bandwidth_size if no adaptive parameters
+                Some(crate::config::model::TargetsConfig {
+                    base_sensitivity: self.bandwidth_size.unwrap_or(0.4), // Direction default
+                    extreme_multiplier: 2.0,                              // Default value
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+
+            // Use enhanced reconstruction from direction module with proper adaptive parameters
+            match reconstruct_direction(&probabilities, ohlcv_data, targets_config.as_ref()) {
                 Ok(reconstruction) => {
                     // Update existing fields with reconstruction results
                     prediction.breakout_probability = reconstruction.breakout_probability;
@@ -958,8 +985,20 @@ impl OutputFormatter {
                 volatility_output.very_high_probability,
             ];
 
-            // Use enhanced reconstruction from volatility module with legacy wrapper
-            match reconstruct_volatility_legacy(&probabilities, ohlcv_data, None) {
+            // Use enhanced reconstruction from volatility module with adaptive parameters
+            let volatility_result = if let Some(ref adaptive_params) = self.adaptive_parameters {
+                // Use calibrated adaptive parameters for volatility reconstruction
+                crate::targets::volatility::reconstruct_volatility(
+                    &probabilities,
+                    ohlcv_data,
+                    &adaptive_params.volatility,
+                )
+            } else {
+                // Fallback to legacy reconstruction with defaults
+                reconstruct_volatility_legacy(&probabilities, ohlcv_data, None)
+            };
+
+            match volatility_result {
                 Ok(reconstruction) => {
                     // Update existing fields with reconstruction results
                     // Use ATR ratio to enhance expected range calculation
