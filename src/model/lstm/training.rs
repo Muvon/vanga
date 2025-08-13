@@ -1859,7 +1859,12 @@ impl LSTMModel {
                     "Using AdaDelta optimizer with learning rate: {:.6}",
                     learning_rate
                 );
-                log::info!("AdaDelta parameters - rho: {:.3}, eps: {:.2e}", rho, eps);
+                log::info!(
+                    "AdaDelta parameters - weight_decay: {:.4}, rho: {:.3}, eps: {:.2e}",
+                    weight_decay.unwrap_or(0.0),
+                    rho,
+                    eps
+                );
 
                 let params = ParamsAdaDelta {
                     lr: learning_rate,
@@ -1885,7 +1890,8 @@ impl LSTMModel {
                     learning_rate
                 );
                 log::info!(
-                    "AdaGrad parameters - lr_decay: {:.3}, eps: {:.2e}, init_acc: {:.3}",
+                    "AdaGrad parameters - weight_decay: {:.4}, lr_decay: {:.3}, eps: {:.2e}, init_acc: {:.3}",
+                    weight_decay.unwrap_or(0.0),
                     lr_decay,
                     eps,
                     initial_accumulator_value
@@ -1915,7 +1921,8 @@ impl LSTMModel {
                     learning_rate
                 );
                 log::info!(
-                    "AdaMax parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    "AdaMax parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    weight_decay.unwrap_or(0.0),
                     beta1,
                     beta2,
                     eps
@@ -1947,8 +1954,12 @@ impl LSTMModel {
                     learning_rate
                 );
                 log::info!(
-                    "NAdam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}, momentum_decay: {:.3}",
-                    beta1, beta2, eps, momentum_decay
+                    "NAdam parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}, eps: {:.2e}, momentum_decay: {:.3}",
+                    weight_decay.unwrap_or(0.0),
+                    beta1,
+                    beta2,
+                    eps,
+                    momentum_decay
                 );
 
                 let params = ParamsNAdam {
@@ -1977,7 +1988,8 @@ impl LSTMModel {
                     learning_rate
                 );
                 log::info!(
-                    "RAdam parameters - beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    "RAdam parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    weight_decay.unwrap_or(0.0),
                     beta1,
                     beta2,
                     eps
