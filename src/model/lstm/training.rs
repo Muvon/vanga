@@ -1979,46 +1979,14 @@ impl LSTMModel {
         }
     }
     pub fn apply_xavier_initialization(&mut self) -> Result<()> {
-        log::info!(
-            "🔧 Applying Xavier/Glorot weight initialization to prevent exploding gradients..."
-        );
+        log::info!("🔧 Applying proper LSTM weight initialization (Xavier + Orthogonal)...");
 
-        let all_vars = self.varmap.all_vars();
-        let mut initialized_count = 0;
-
-        for var in all_vars.iter() {
-            // Get the tensor shape to determine initialization parameters
-            let shape = var.shape();
-
-            // Skip biases (1D tensors) - initialize only weights (2D tensors)
-            if shape.dims().len() == 2 {
-                let (fan_in, fan_out) = (shape.dims()[0], shape.dims()[1]);
-
-                // Xavier/Glorot initialization: std = sqrt(2.0 / (fan_in + fan_out))
-                let xavier_std = (2.0 / (fan_in + fan_out) as f64).sqrt();
-
-                log::debug!(
-                    "🎯 Xavier init: shape={:?}, fan_in={}, fan_out={}, std={:.6}",
-                    shape.dims(),
-                    fan_in,
-                    fan_out,
-                    xavier_std
-                );
-
-                initialized_count += 1;
-            }
-        }
-
-        if initialized_count == 0 {
-            log::warn!(
-                "⚠️ No weight tensors found for Xavier initialization - using Candle defaults"
-            );
-        } else {
-            log::info!(
-                "✅ Xavier initialization parameters calculated for {} weight tensors",
-                initialized_count
-            );
-        }
+        // Use the new comprehensive LSTM weight initialization
+        crate::model::lstm::seeded_weights::SeededTensorUtils::apply_lstm_weight_initialization(
+            &self.varmap,
+            &self.device,
+            self.seed,
+        )?;
 
         Ok(())
     }

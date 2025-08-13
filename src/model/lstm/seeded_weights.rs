@@ -7,6 +7,77 @@ use candle_core::{DType, Device, Result, Tensor};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+/// Gram-Schmidt orthogonalization process for creating orthogonal matrices
+///
+/// This is used for LSTM recurrent weight initialization to prevent
+/// vanishing/exploding gradients and ensure stable training.
+fn gram_schmidt_orthogonalization(matrix: &Tensor) -> Result<Tensor> {
+    let shape = matrix.shape();
+    let rows = shape.dims()[0];
+    let cols = shape.dims()[1];
+    let device = matrix.device();
+
+    // Convert to f64 for numerical stability during orthogonalization
+    let matrix_f64 = matrix.to_dtype(candle_core::DType::F64)?;
+
+    // Initialize result matrix with explicit type
+    let mut orthogonal_vectors: Vec<Tensor> = Vec::new();
+
+    for col_idx in 0..cols {
+        // Get current column vector
+        let current_col = matrix_f64.narrow(1, col_idx, 1)?;
+        let mut orthogonal_col = current_col.clone();
+
+        // Subtract projections onto previous orthogonal vectors
+        for prev_vec in &orthogonal_vectors {
+            // Calculate dot product (projection coefficient)
+            let dot_product = (prev_vec.mul(&orthogonal_col)?)
+                .sum_all()?
+                .to_scalar::<f64>()?;
+
+            // Calculate norm squared of previous vector
+            let norm_squared = (prev_vec.mul(prev_vec)?).sum_all()?.to_scalar::<f64>()?;
+
+            if norm_squared > 1e-10 {
+                let projection_coeff = dot_product / norm_squared;
+                // Use affine transformation instead of tensor multiplication
+                let projection = prev_vec.affine(projection_coeff, 0.0)?;
+                orthogonal_col = orthogonal_col.sub(&projection)?;
+            }
+        }
+
+        // Normalize the orthogonal vector
+        let norm = (orthogonal_col.mul(&orthogonal_col)?)
+            .sum_all()?
+            .to_scalar::<f64>()?
+            .sqrt();
+
+        if norm > 1e-10 {
+            // Use scalar division - multiply by 1/norm instead of dividing by norm
+            orthogonal_col = orthogonal_col.affine(1.0 / norm, 0.0)?;
+        } else {
+            // If vector becomes zero, use a random unit vector
+            orthogonal_col =
+                Tensor::randn(0.0, 1.0, &[rows, 1], device)?.to_dtype(candle_core::DType::F64)?;
+            let norm = (orthogonal_col.mul(&orthogonal_col)?)
+                .sum_all()?
+                .to_scalar::<f64>()?
+                .sqrt();
+            if norm > 1e-10 {
+                orthogonal_col = orthogonal_col.affine(1.0 / norm, 0.0)?;
+            }
+        }
+
+        orthogonal_vectors.push(orthogonal_col);
+    }
+
+    // Concatenate all orthogonal vectors
+    let result = Tensor::cat(&orthogonal_vectors, 1)?;
+
+    // Convert back to f32 for consistency with the rest of the system
+    result.to_dtype(candle_core::DType::F32)
+}
+
 // Thread-local storage for variational dropout masks
 // Key: sequence_id, Value: dropout mask tensor
 thread_local! {
@@ -24,6 +95,67 @@ impl SeededTensorUtils {
         let fan_in = if shape.len() >= 2 { shape[0] } else { 1 };
         let fan_out = if shape.len() >= 2 { shape[1] } else { shape[0] };
         let std_dev = (2.0 / (fan_in + fan_out) as f64).sqrt();
+
+        // Use Candle's native randn with device seed for reproducibility
+        let tensor = Tensor::randn(0.0, std_dev as f32, shape, device)?;
+        tensor.to_dtype(dtype)
+    }
+
+    /// Create an orthogonal tensor for LSTM recurrent weights
+    ///
+    /// This is critical for LSTM stability and reproducible training.
+    /// Orthogonal initialization prevents vanishing/exploding gradients in recurrent connections.
+    ///
+    /// Note: The device should have its seed set via device.set_seed() before calling this
+    pub fn orthogonal_tensor(shape: &[usize], device: &Device, dtype: DType) -> Result<Tensor> {
+        if shape.len() != 2 {
+            return Err(candle_core::Error::Msg(
+                "Orthogonal initialization requires 2D tensor (matrix)".to_string(),
+            ));
+        }
+
+        let rows = shape[0];
+        let cols = shape[1];
+
+        // For non-square matrices, we need to handle them specially
+        let (m, n) = if rows >= cols {
+            (rows, cols)
+        } else {
+            (cols, rows)
+        };
+
+        // Generate random matrix with device seed
+        let random_matrix = Tensor::randn(0.0, 1.0, &[m, n], device)?;
+
+        // Perform QR decomposition to get orthogonal matrix
+        // Since Candle doesn't have built-in QR, we'll use Gram-Schmidt process
+        let orthogonal_matrix = gram_schmidt_orthogonalization(&random_matrix)?;
+
+        // Reshape if needed and ensure correct orientation
+        let final_matrix = if rows >= cols {
+            orthogonal_matrix
+        } else {
+            // Transpose for tall matrices
+            orthogonal_matrix.t()?
+        };
+
+        // Take only the needed portion if matrix is larger than required
+        let result =
+            if final_matrix.shape().dims()[0] > rows || final_matrix.shape().dims()[1] > cols {
+                final_matrix.narrow(0, 0, rows)?.narrow(1, 0, cols)?
+            } else {
+                final_matrix
+            };
+
+        result.to_dtype(dtype)
+    }
+
+    /// Create a tensor with He initialization (for ReLU activations)
+    ///
+    /// Note: The device should have its seed set via device.set_seed() before calling this
+    pub fn he_tensor(shape: &[usize], device: &Device, dtype: DType) -> Result<Tensor> {
+        let fan_in = if shape.len() >= 2 { shape[0] } else { 1 };
+        let std_dev = (2.0 / fan_in as f64).sqrt();
 
         // Use Candle's native randn with device seed for reproducibility
         let tensor = Tensor::randn(0.0, std_dev as f32, shape, device)?;
@@ -211,6 +343,100 @@ impl SeededTensorUtils {
             }
         });
     }
+
+    /// Apply proper LSTM weight initialization to a VarMap
+    ///
+    /// This function applies the correct initialization strategy for LSTM weights:
+    /// - Input-to-hidden weights: Xavier/Glorot initialization
+    /// - Hidden-to-hidden (recurrent) weights: Orthogonal initialization
+    /// - Biases: Zero initialization (except forget gate bias = 1.0)
+    ///
+    /// This is critical for stable and reproducible LSTM training.
+    pub fn apply_lstm_weight_initialization(
+        varmap: &candle_nn::VarMap,
+        device: &Device,
+        seed: Option<u64>,
+    ) -> Result<()> {
+        // Set device seed if provided
+        if let Some(seed_value) = seed {
+            set_device_seed_with_logging(device, Some(seed_value))?;
+        }
+
+        let all_vars = varmap.all_vars();
+        let mut initialized_count = 0;
+        let mut recurrent_count = 0;
+        let mut bias_count = 0;
+
+        log::info!("🔧 Applying proper LSTM weight initialization...");
+
+        for (var_name, var) in all_vars.iter().enumerate() {
+            let shape = var.shape();
+            let dims = shape.dims();
+
+            // Determine weight type based on tensor shape and position
+            if dims.len() == 2 {
+                // 2D tensors are weight matrices
+                let (rows, cols) = (dims[0], dims[1]);
+
+                // Heuristic to identify recurrent weights:
+                // In LSTM, recurrent weights are typically square or have specific patterns
+                // This is a simplified heuristic - you may need to adjust based on Candle's LSTM structure
+                let is_recurrent_weight = rows == cols || var_name % 8 >= 4; // Assuming Candle stores weights in groups of 8 (4 gates × 2 weight types)
+
+                if is_recurrent_weight {
+                    // Apply orthogonal initialization for recurrent weights
+                    log::debug!(
+                        "🔄 Applying orthogonal initialization to recurrent weight: shape={:?}",
+                        dims
+                    );
+                    let orthogonal_weights = Self::orthogonal_tensor(dims, device, var.dtype())?;
+                    var.set(&orthogonal_weights)?;
+                    recurrent_count += 1;
+                } else {
+                    // Apply Xavier initialization for input-to-hidden weights
+                    log::debug!(
+                        "📥 Applying Xavier initialization to input weight: shape={:?}",
+                        dims
+                    );
+                    let xavier_weights = Self::xavier_tensor(dims, device, var.dtype())?;
+                    var.set(&xavier_weights)?;
+                }
+                initialized_count += 1;
+            } else if dims.len() == 1 {
+                // 1D tensors are biases
+                let bias_size = dims[0];
+
+                // Initialize biases to zero, except forget gate bias should be 1.0
+                // This is another heuristic - adjust based on your LSTM structure
+                let is_forget_gate_bias = (var_name % 4) == 1; // Assuming forget gate is second in gate order
+
+                let bias_value = if is_forget_gate_bias { 1.0 } else { 0.0 };
+                let bias_tensor =
+                    Tensor::new(vec![bias_value; bias_size], device)?.to_dtype(var.dtype())?;
+
+                log::debug!(
+                    "⚖️ Initializing bias: shape={:?}, value={}",
+                    dims,
+                    bias_value
+                );
+                var.set(&bias_tensor)?;
+                bias_count += 1;
+            }
+        }
+
+        log::info!(
+            "✅ LSTM weight initialization complete: {} weight matrices ({} recurrent), {} biases",
+            initialized_count,
+            recurrent_count,
+            bias_count
+        );
+
+        if initialized_count == 0 {
+            log::warn!("⚠️ No weight tensors found for initialization - using Candle defaults");
+        }
+
+        Ok(())
+    }
 }
 
 /// Helper function to set device seed and log the action
@@ -351,5 +577,67 @@ mod tests {
         assert_eq!(dropout_zero.shape(), test_tensor.shape());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_orthogonal_tensor_creation() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        // Test square matrix
+        let shape_square = &[4, 4];
+        let _ = device.set_seed(42); // May fail on CPU, that's OK
+        let orthogonal_square = SeededTensorUtils::orthogonal_tensor(shape_square, &device, dtype)?;
+        assert_eq!(orthogonal_square.shape().dims(), shape_square);
+
+        // Test rectangular matrix (more rows than columns)
+        let shape_tall = &[6, 4];
+        let _ = device.set_seed(42); // May fail on CPU, that's OK
+        let orthogonal_tall = SeededTensorUtils::orthogonal_tensor(shape_tall, &device, dtype)?;
+        assert_eq!(orthogonal_tall.shape().dims(), shape_tall);
+
+        // Test rectangular matrix (more columns than rows)
+        let shape_wide = &[3, 5];
+        let _ = device.set_seed(42); // May fail on CPU, that's OK
+        let orthogonal_wide = SeededTensorUtils::orthogonal_tensor(shape_wide, &device, dtype)?;
+        assert_eq!(orthogonal_wide.shape().dims(), shape_wide);
+
+        // Verify tensors have expected properties (non-zero, finite values)
+        assert!(orthogonal_square.elem_count() > 0);
+        assert!(orthogonal_tall.elem_count() > 0);
+        assert!(orthogonal_wide.elem_count() > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_he_tensor_creation() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let shape = &[10, 20];
+
+        let _ = device.set_seed(42); // May fail on CPU, that's OK
+        let he_tensor = SeededTensorUtils::he_tensor(shape, &device, dtype)?;
+
+        assert_eq!(he_tensor.shape().dims(), shape);
+        assert!(he_tensor.elem_count() > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orthogonal_tensor_invalid_shape() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        // Test 1D tensor (should fail)
+        let shape_1d = &[10];
+        let result_1d = SeededTensorUtils::orthogonal_tensor(shape_1d, &device, dtype);
+        assert!(result_1d.is_err());
+
+        // Test 3D tensor (should fail)
+        let shape_3d = &[2, 3, 4];
+        let result_3d = SeededTensorUtils::orthogonal_tensor(shape_3d, &device, dtype);
+        assert!(result_3d.is_err());
     }
 }

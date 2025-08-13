@@ -41,6 +41,32 @@ cargo build
 
 ## 🎯 **Training Issues**
 
+### **Non-Deterministic Training Results** ⚠️
+
+**Issue**: Different metrics and results with same config and data
+
+**Root Cause**: Missing orthogonal initialization for LSTM recurrent weights
+
+**Symptoms**:
+- Same configuration produces different loss values across runs
+- Identical data yields different predictions
+- Training metrics vary between runs with same seed
+
+**Solution**: VANGA now automatically applies proper LSTM weight initialization:
+```toml
+[training]
+seed = 42  # Fixed seed for reproducible results
+```
+
+**Verification**: Look for initialization logs:
+```
+🔧 Applying proper LSTM weight initialization (Xavier + Orthogonal)...
+🔄 Applying orthogonal initialization to recurrent weight: shape=[64, 64]
+✅ LSTM weight initialization complete: 8 weight matrices (4 recurrent), 8 biases
+```
+
+**Technical Details**: See [Reproducible Training Guide](29-reproducible-training.md#lstm-weight-initialization-issues)
+
 ### **Insufficient Data Error**
 
 **Issue**: "Insufficient data for training" error

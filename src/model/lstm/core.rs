@@ -697,6 +697,14 @@ impl LSTMModel {
             ));
         }
 
+        // Apply proper LSTM weight initialization after network creation
+        log::info!("🎯 Applying proper LSTM weight initialization...");
+        crate::model::lstm::seeded_weights::SeededTensorUtils::apply_lstm_weight_initialization(
+            &self.varmap,
+            &self.device,
+            self.seed,
+        )?;
+
         Ok(())
     }
     pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {

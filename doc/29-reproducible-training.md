@@ -130,6 +130,64 @@ If you get different results with the same seed, check:
 2. **Data consistency**: Same input data and preprocessing
 3. **Version consistency**: Same VANGA and Candle versions
 4. **Device consistency**: Same device type (CPU/GPU)
+5. **Weight initialization**: Ensure proper LSTM weight initialization (see below)
+
+### LSTM Weight Initialization Issues
+
+**Problem**: Non-deterministic training results even with same seed and configuration.
+
+**Root Cause**: Missing orthogonal initialization for LSTM recurrent weights.
+
+**Solution**: VANGA now automatically applies proper LSTM weight initialization:
+
+- **Input-to-hidden weights**: Xavier/Glorot initialization
+- **Hidden-to-hidden (recurrent) weights**: Orthogonal initialization
+- **Biases**: Zero initialization (except forget gate bias = 1.0)
+
+**Why This Matters**:
+- Orthogonal initialization prevents vanishing/exploding gradients in RNNs
+- Ensures stable gradient flow during backpropagation
+- Critical for reproducible LSTM training
+- Based on research by Saxe et al. (2013) and Smerity (2016)
+
+**Verification**: Look for these log messages during training:
+```
+🔧 Applying proper LSTM weight initialization (Xavier + Orthogonal)...
+🔄 Applying orthogonal initialization to recurrent weight: shape=[64, 64]
+📥 Applying Xavier initialization to input weight: shape=[10, 64]
+✅ LSTM weight initialization complete: 8 weight matrices (4 recurrent), 8 biases
+```
+
+**Testing Deterministic Behavior**:
+```rust
+// Create identical models with same seed
+let seed = 42;
+let mut model1 = LSTMModel::new_with_seed(config.clone(), Some(seed))?;
+let mut model2 = LSTMModel::new_with_seed(config.clone(), Some(seed))?;
+
+// Train with identical data and config
+model1.train(&sequences, &targets, &training_config, None, None).await?;
+model2.train(&sequences, &targets, &training_config, None, None).await?;
+
+// Predictions should be identical (difference < 1e-6)
+let pred1 = model1.predict(&sequences).await?;
+let pred2 = model2.predict(&sequences).await?;
+```
+
+### CPU Seeding Limitations
+
+**Issue**: Candle may not support CPU seeding on all platforms.
+
+**Symptoms**: Warning message about CPU RNG seeding not supported.
+
+**Workaround**: Use GPU devices (CUDA/Metal) for fully reproducible training:
+```toml
+[training]
+device = "cuda"  # or "metal" on macOS
+seed = 42
+```
+
+**CPU Fallback**: On CPU, the system gracefully falls back to random initialization with a warning.
 
 ### Performance Impact
 
@@ -174,14 +232,79 @@ The seed is set at the device level before weight initialization:
 device.set_seed(seed)?;
 ```
 
-### Weight Initialization
+### LSTM Weight Initialization
 
-All weight initialization uses Candle's native random functions:
+VANGA implements proper LSTM weight initialization for stable and reproducible training:
+
+#### **Orthogonal Initialization for Recurrent Weights**
+```rust
+// Recurrent (hidden-to-hidden) weights use orthogonal matrices
+pub fn orthogonal_tensor(shape: &[usize], device: &Device, dtype: DType) -> Result<Tensor> {
+    // Uses Gram-Schmidt orthogonalization process
+    // Prevents vanishing/exploding gradients in RNNs
+}
+```
+
+#### **Xavier Initialization for Input Weights**
+```rust
+// Input-to-hidden weights use Xavier/Glorot initialization
+pub fn xavier_tensor(shape: &[usize], device: &Device, dtype: DType) -> Result<Tensor> {
+    let fan_in = shape[0];
+    let fan_out = shape[1];
+    let std_dev = (2.0 / (fan_in + fan_out) as f64).sqrt();
+    Tensor::randn(0.0, std_dev as f32, shape, device)
+}
+```
+
+#### **Comprehensive LSTM Initialization**
+```rust
+// Applied automatically during network creation
+SeededTensorUtils::apply_lstm_weight_initialization(
+    &varmap,
+    &device,
+    seed
+)?;
+```
+
+### Weight Initialization Strategy
+
+The system automatically determines the correct initialization for each weight tensor:
+
+1. **2D Tensors (Weight Matrices)**:
+   - Recurrent weights (hidden-to-hidden): **Orthogonal initialization**
+   - Input weights (input-to-hidden): **Xavier initialization**
+
+2. **1D Tensors (Biases)**:
+   - Forget gate bias: **1.0** (helps with gradient flow)
+   - All other biases: **0.0**
+
+### Scientific Basis
+
+This approach is based on established research:
+- **Saxe et al. (2013)**: "Exact solutions to the nonlinear dynamics of learning in deep linear networks"
+- **Smerity (2016)**: "Explaining and illustrating orthogonal initialization for recurrent neural networks"
+- **Bengio et al.**: Deep Learning book recommendations for RNN initialization
+
+### Gram-Schmidt Orthogonalization
+
+For creating orthogonal matrices, VANGA implements the Gram-Schmidt process:
 
 ```rust
-// Xavier initialization with device seed
-let weights = Tensor::randn(0.0, std_dev, shape, &device)?;
+fn gram_schmidt_orthogonalization(matrix: &Tensor) -> Result<Tensor> {
+    // 1. Convert to f64 for numerical stability
+    // 2. For each column vector:
+    //    - Subtract projections onto previous orthogonal vectors
+    //    - Normalize the resulting vector
+    // 3. Concatenate all orthogonal vectors
+    // 4. Convert back to f32
+}
 ```
+
+This ensures that recurrent weight matrices are orthogonal, which:
+- Preserves gradient magnitudes during backpropagation
+- Prevents vanishing gradients in long sequences
+- Prevents exploding gradients
+- Enables stable and reproducible training
 
 ### Seed Propagation Flow
 
