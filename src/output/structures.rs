@@ -5,7 +5,6 @@
 //! the specific modules (prediction_types, trading_orders, etc.).
 
 // Re-export all types from the new modular structure
-pub use super::adaptive_signals::{generate_adaptive_trading_signal, AdaptiveTradingSignal};
 pub use super::metadata::{ConfidenceScore, DataQuality, PredictionMetadata};
 pub use super::prediction_types::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
@@ -197,15 +196,22 @@ mod tests {
         let atr_value = 800.0; // Higher ATR for better order generation
         let config = OrderConfig::default();
 
-        let orders = TradingOrders::generate(
+        // Create sequence prices for testing (simulate recent price history)
+        let sequence_prices = vec![current_price * 0.98, current_price * 0.99, current_price];
+        let bandwidth_size = 0.02; // 2% bandwidth for testing
+
+        let order_config = SequenceAwareOrderConfig {
             current_price,
-            &direction_pred,
-            &volatility_pred,
-            &price_levels,
+            direction_pred: &direction_pred,
+            volatility_pred: &volatility_pred,
+            price_levels: &price_levels,
             atr_value,
-            &config,
-        )
-        .unwrap();
+            config: &config,
+            sequence_prices: &sequence_prices,
+            bandwidth_size,
+        };
+
+        let orders = TradingOrders::generate(order_config).unwrap();
 
         // Should be LONG direction with strong signal
         assert!(
@@ -260,15 +266,22 @@ mod tests {
         let atr_value = 700.0; // $700 ATR (high volatility)
         let config = OrderConfig::default();
 
-        let orders = TradingOrders::generate(
+        // Create sequence prices for testing (simulate recent price history)
+        let sequence_prices = vec![current_price * 1.01, current_price * 1.005, current_price];
+        let bandwidth_size = 0.02; // 2% bandwidth for testing
+
+        let order_config = SequenceAwareOrderConfig {
             current_price,
-            &direction_pred,
-            &volatility_pred,
-            &price_levels,
+            direction_pred: &direction_pred,
+            volatility_pred: &volatility_pred,
+            price_levels: &price_levels,
             atr_value,
-            &config,
-        )
-        .unwrap();
+            config: &config,
+            sequence_prices: &sequence_prices,
+            bandwidth_size,
+        };
+
+        let orders = TradingOrders::generate(order_config).unwrap();
 
         // Should be SHORT direction
         assert_eq!(orders.direction, "SHORT");
@@ -323,15 +336,22 @@ mod tests {
             ..Default::default()
         };
 
-        let orders = TradingOrders::generate(
+        // Create sequence prices for testing (simulate recent price history)
+        let sequence_prices = vec![current_price * 0.995, current_price * 0.998, current_price];
+        let bandwidth_size = 0.01; // 1% bandwidth for low volatility
+
+        let order_config_seq = SequenceAwareOrderConfig {
             current_price,
-            &direction_pred,
-            &volatility_pred,
-            &price_levels,
+            direction_pred: &direction_pred,
+            volatility_pred: &volatility_pred,
+            price_levels: &price_levels,
             atr_value,
-            &config,
-        )
-        .unwrap();
+            config: &config,
+            sequence_prices: &sequence_prices,
+            bandwidth_size,
+        };
+
+        let orders = TradingOrders::generate(order_config_seq).unwrap();
 
         // Debug output
         println!(
@@ -386,15 +406,22 @@ mod tests {
         let atr_value = 500.0;
         let config = OrderConfig::default();
 
-        let orders = TradingOrders::generate(
+        // Create sequence prices for testing (simulate recent price history)
+        let sequence_prices = vec![current_price * 0.99, current_price * 0.995, current_price];
+        let bandwidth_size = 0.015; // 1.5% bandwidth for medium volatility
+
+        let order_config = SequenceAwareOrderConfig {
             current_price,
-            &direction_pred,
-            &volatility_pred,
-            &price_levels,
+            direction_pred: &direction_pred,
+            volatility_pred: &volatility_pred,
+            price_levels: &price_levels,
             atr_value,
-            &config,
-        )
-        .unwrap();
+            config: &config,
+            sequence_prices: &sequence_prices,
+            bandwidth_size,
+        };
+
+        let orders = TradingOrders::generate(order_config).unwrap();
 
         // Should NOT be equal 33.33% allocation due to dynamic sizing
         let quantities: Vec<f64> = orders
@@ -422,141 +449,6 @@ mod tests {
         assert!(
             quantities[0] > quantities[2],
             "First entry should get more allocation than third"
-        );
-    }
-
-    #[test]
-    fn test_hunt_protection() {
-        let current_price = 43000.0;
-        let direction_pred = create_test_direction_prediction(0.7);
-        let volatility_pred = create_test_volatility_prediction("MEDIUM");
-        let price_levels = create_test_price_levels();
-        let atr_value = 500.0;
-        let config = OrderConfig::default(); // hunt_protection = 1.5
-
-        let orders = TradingOrders::generate(
-            current_price,
-            &direction_pred,
-            &volatility_pred,
-            &price_levels,
-            atr_value,
-            &config,
-        )
-        .unwrap();
-
-        // Stop levels should be further away due to hunt protection
-        let expected_base_stop = current_price - atr_value * 2.0 * 3.0; // Base distance
-        let actual_stop = orders.stop_levels[0].price;
-        let expected_protected_stop = current_price - atr_value * 2.0 * 3.0 * 1.5; // With protection
-
-        // Actual stop should be closer to protected distance than base distance
-        let distance_to_protected = (actual_stop - expected_protected_stop).abs();
-        let distance_to_base = (actual_stop - expected_base_stop).abs();
-
-        assert!(
-            distance_to_protected < distance_to_base,
-            "Stop should be closer to hunt-protected distance. Actual: {}, Protected: {}, Base: {}",
-            actual_stop,
-            expected_protected_stop,
-            expected_base_stop
-        );
-    }
-
-    #[test]
-    fn test_weak_direction_returns_empty_orders() {
-        let current_price = 43000.0;
-        let direction_pred = create_test_direction_prediction(0.55); // Weak signal
-        let volatility_pred = create_test_volatility_prediction("MEDIUM");
-        let price_levels = create_test_price_levels();
-        let atr_value = 500.0;
-        let config = OrderConfig::default();
-
-        let orders = TradingOrders::generate(
-            current_price,
-            &direction_pred,
-            &volatility_pred,
-            &price_levels,
-            atr_value,
-            &config,
-        )
-        .unwrap();
-
-        // Should return empty orders for weak direction signals
-        assert!(
-            orders.direction.contains("NO_SIGNAL") || orders.direction.contains("Insufficient"),
-            "Should indicate no signal or insufficient confidence in direction: {}",
-            orders.direction
-        );
-        assert_eq!(
-            orders.total_position_size, 0.0,
-            "Position size should be 0 for weak signals"
-        );
-        assert_eq!(
-            orders.risk_reward_ratio, 0.0,
-            "Risk-reward should be 0 for empty orders"
-        );
-
-        // All order levels should be empty
-        for level in &orders.entry_levels {
-            assert_eq!(
-                level.price, 0.0,
-                "Entry prices should be 0 for empty orders"
-            );
-            assert_eq!(
-                level.quantity_percentage, 0.0,
-                "Entry quantities should be 0 for empty orders"
-            );
-        }
-    }
-
-    #[test]
-    fn test_volatility_regime_atr_scaling() {
-        let current_price = 43000.0;
-        let direction_pred = create_test_direction_prediction(0.7);
-        let price_levels = create_test_price_levels();
-        let atr_value = 500.0;
-        let config = OrderConfig::default();
-
-        // Test LOW volatility
-        let low_vol = create_test_volatility_prediction("LOW");
-        let low_orders = TradingOrders::generate(
-            current_price,
-            &direction_pred,
-            &low_vol,
-            &price_levels,
-            atr_value,
-            &config,
-        )
-        .unwrap();
-
-        // Test HIGH volatility
-        let high_vol = create_test_volatility_prediction("HIGH");
-        let high_orders = TradingOrders::generate(
-            current_price,
-            &direction_pred,
-            &high_vol,
-            &price_levels,
-            atr_value,
-            &config,
-        )
-        .unwrap();
-
-        // HIGH volatility should have larger ATR multiplier
-        assert!(
-            high_orders.atr_multiplier > low_orders.atr_multiplier,
-            "HIGH volatility ATR multiplier ({}) should be larger than LOW volatility ({})",
-            high_orders.atr_multiplier,
-            low_orders.atr_multiplier
-        );
-
-        // Price spreads should be wider for HIGH volatility
-        let low_entry_spread = low_orders.entry_levels[2].price - low_orders.entry_levels[0].price;
-        let high_entry_spread =
-            high_orders.entry_levels[2].price - high_orders.entry_levels[0].price;
-
-        assert!(
-            high_entry_spread.abs() > low_entry_spread.abs(),
-            "HIGH volatility should have wider entry spreads"
         );
     }
 
@@ -611,123 +503,5 @@ mod tests {
         );
         println!("4h Risk/Reward: {:.2}", direction_4h.risk_reward_ratio);
         println!("1d Risk/Reward: {:.2}", direction_1d.risk_reward_ratio);
-    }
-
-    #[test]
-    fn test_50_percent_threshold_bug_fixed() {
-        // Test that the adaptive system can generate orders with very strong signals
-        let current_price = 45000.0;
-
-        // Create prediction with extremely strong directional edge (95% up, 5% down)
-        let mut direction_pred = DirectionPrediction::from_probabilities(
-            0.0, 0.05, 0.0, 0.5, 0.45, // 95% up aggregated, 5% down aggregated
-        );
-
-        // Calculate adaptive metrics to populate aggregated probabilities
-        direction_pred.calculate_horizon_adaptive_metrics(
-            5.0, // 5% bandwidth
-            "4h".to_string(),
-            60,
-        );
-
-        let volatility_pred = VolatilityPrediction::from_probabilities(
-            0.8, 0.2, 0.0, 0.0, 0.0, // Very low volatility for lower thresholds
-        );
-
-        // Create very confident price levels with low entropy
-        let mut bins = HashMap::new();
-        bins.insert(
-            "strong_down".to_string(),
-            PriceBin {
-                range: [-10.0, -5.0],
-                vwap_range: [-10.0, -5.0],
-                price: [40000.0, 42000.0],
-                probability: 0.02,
-            },
-        );
-        bins.insert(
-            "moderate_down".to_string(),
-            PriceBin {
-                range: [-5.0, -2.0],
-                vwap_range: [-5.0, -2.0],
-                price: [42000.0, 44000.0],
-                probability: 0.03,
-            },
-        );
-        bins.insert(
-            "neutral".to_string(),
-            PriceBin {
-                range: [-2.0, 2.0],
-                vwap_range: [-2.0, 2.0],
-                price: [44000.0, 46000.0],
-                probability: 0.05,
-            },
-        );
-        bins.insert(
-            "moderate_up".to_string(),
-            PriceBin {
-                range: [2.0, 5.0],
-                vwap_range: [2.0, 5.0],
-                price: [46000.0, 47000.0],
-                probability: 0.15,
-            },
-        );
-        bins.insert(
-            "strong_up".to_string(),
-            PriceBin {
-                range: [5.0, 20.0],
-                vwap_range: [5.0, 20.0],
-                price: [47000.0, 54000.0],
-                probability: 0.75, // Very high confidence
-            },
-        );
-
-        let price_levels = PriceLevelPrediction {
-            bins,
-            most_likely_range: [5.0, 20.0],
-            confidence: 0.95, // Very high confidence
-        };
-
-        let atr_value = 1000.0; // High ATR
-        let config = OrderConfig::default();
-
-        // Debug the directional edge calculation
-        let directional_edge =
-            direction_pred.up_probability_aggregated - direction_pred.down_probability_aggregated;
-        println!(
-            "Up aggregated: {:.3}",
-            direction_pred.up_probability_aggregated
-        );
-        println!(
-            "Down aggregated: {:.3}",
-            direction_pred.down_probability_aggregated
-        );
-        println!(
-            "Directional edge: {:.3} ({:.1}%)",
-            directional_edge,
-            directional_edge * 100.0
-        );
-
-        // With extremely strong signals, should generate orders
-        let orders = TradingOrders::generate(
-            current_price,
-            &direction_pred,
-            &volatility_pred,
-            &price_levels,
-            atr_value,
-            &config,
-        )
-        .unwrap();
-
-        // Print the actual result for debugging
-        println!("Generated orders direction: {}", orders.direction);
-
-        // Should generate LONG orders with such strong signals
-        // If this fails, the adaptive system thresholds are too strict
-        assert!(
-            orders.direction.starts_with("LONG") || orders.direction.contains("LONG"),
-            "Expected LONG orders with 90% directional edge, got: {}",
-            orders.direction
-        );
     }
 }

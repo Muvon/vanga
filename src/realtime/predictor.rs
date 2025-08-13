@@ -672,7 +672,6 @@ impl StreamingPredictor {
             sentiment: ml_prediction.sentiment.clone(),
             volume: ml_prediction.volume.clone(),
             orders,
-            adaptive_signal: ml_prediction.adaptive_signal.clone(),
             confidence: ml_prediction.confidence,
             metadata: ml_prediction.metadata.clone(),
         })

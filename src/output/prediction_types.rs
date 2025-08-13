@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Import types that will be defined in other modules
-use super::adaptive_signals::AdaptiveTradingSignal;
 use super::metadata::PredictionMetadata;
 use super::trading_orders::{OrderLevel, TradingOrders};
 
@@ -52,10 +51,6 @@ pub struct PredictionResult {
 
     /// Trading orders with dynamic position sizing (always included)
     pub orders: TradingOrders,
-
-    /// Adaptive trading signal for enhanced order generation (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub adaptive_signal: Option<AdaptiveTradingSignal>,
 
     /// Overall prediction confidence
     pub confidence: f64,
@@ -872,7 +867,6 @@ impl PredictionResult {
             sentiment: None,
             volume: None,
             orders: TradingOrders::default(),
-            adaptive_signal: None,
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -908,7 +902,6 @@ impl PredictionResult {
             sentiment: None,
             volume: None,
             orders: TradingOrders::default(),
-            adaptive_signal: None,
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -970,25 +963,5 @@ impl PredictionResult {
     pub fn with_orders(mut self, orders: TradingOrders) -> Self {
         self.orders = orders;
         self
-    }
-
-    /// Set adaptive trading signal
-    pub fn with_adaptive_signal(mut self, signal: AdaptiveTradingSignal) -> Self {
-        self.adaptive_signal = Some(signal);
-        self
-    }
-
-    /// Generate adaptive trading signal that works for any horizon
-    pub fn generate_adaptive_trading_signal(
-        direction_pred: &DirectionPrediction,
-        volatility_pred: &VolatilityPrediction,
-        current_price: f64,
-    ) -> AdaptiveTradingSignal {
-        // Delegate to the function in adaptive_signals module
-        super::adaptive_signals::generate_adaptive_trading_signal(
-            direction_pred,
-            volatility_pred,
-            current_price,
-        )
     }
 }

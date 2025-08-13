@@ -131,37 +131,9 @@ pub struct SequenceAwareOrderConfig<'a> {
 }
 
 impl TradingOrders {
-    /// Generate trading orders from predictions with ADAPTIVE MATHEMATICAL OPTIMIZATION
-    /// This function now uses the new adaptive order generation system that maximizes
-    /// utilization of ALL prediction data instead of hardcoded thresholds
-    pub fn generate(
-        current_price: f64,
-        direction_pred: &DirectionPrediction,
-        volatility_pred: &VolatilityPrediction,
-        price_levels: &PriceLevelPrediction,
-        atr_value: f64,
-        config: &OrderConfig,
-    ) -> crate::utils::error::Result<Self> {
-        // 🚀 NEW: Use adaptive mathematical order generation system
-        use crate::output::adaptive_orders;
-
-        log::info!("🔄 Using NEW adaptive mathematical order generation system");
-
-        adaptive_orders::generate_adaptive_orders(
-            current_price,
-            direction_pred,
-            volatility_pred,
-            price_levels,
-            atr_value,
-            config,
-        )
-    }
-
     /// Generate sequence-aware trading orders using the same bandwidth logic as price levels
     /// This ensures consistency between price level predictions and order generation
-    pub fn generate_sequence_aware(
-        config: SequenceAwareOrderConfig,
-    ) -> crate::utils::error::Result<Self> {
+    pub fn generate(config: SequenceAwareOrderConfig) -> crate::utils::error::Result<Self> {
         // Validate that price_levels are consistent with our sequence-aware approach
         log::debug!(
             "Generating sequence-aware orders with price level confidence: {:.2}",

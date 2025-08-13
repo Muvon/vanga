@@ -568,15 +568,32 @@ impl ObjectiveFunction {
             let atr_value = self.calculate_atr_from_prices(&prices[..i + 1]);
 
             // Generate trading orders using sophisticated signal generation
-            let config = OrderConfig::default();
-            match TradingOrders::generate(
+            let order_config = OrderConfig::default();
+
+            // Create sequence prices for order generation (use recent price history)
+            let sequence_start = i.saturating_sub(30); // Use up to 30 recent prices
+            let sequence_prices = &prices[sequence_start..=i];
+
+            // Calculate bandwidth size from recent price volatility
+            let bandwidth_size = if sequence_prices.len() > 1 {
+                let price_std = self.calculate_std_dev(sequence_prices);
+                (price_std / current_price).max(0.01) // At least 1% bandwidth
+            } else {
+                0.02 // Default 2% bandwidth
+            };
+
+            let config = crate::output::structures::SequenceAwareOrderConfig {
                 current_price,
-                &direction_pred,
-                &volatility_pred,
-                &price_levels,
+                direction_pred: &direction_pred,
+                volatility_pred: &volatility_pred,
+                price_levels: &price_levels,
                 atr_value,
-                &config,
-            ) {
+                config: &order_config,
+                sequence_prices,
+                bandwidth_size,
+            };
+
+            match TradingOrders::generate(config) {
                 Ok(orders) => {
                     // Calculate strategy return based on trading orders
                     let strategy_return = self.calculate_return_from_orders(&orders, price_return);
@@ -705,6 +722,18 @@ impl ObjectiveFunction {
             / (prices.len() - prices.len() / 2) as f64;
 
         (second_half_avg - first_half_avg) / first_half_avg
+    }
+
+    /// Calculate standard deviation from prices
+    fn calculate_std_dev(&self, prices: &[f64]) -> f64 {
+        if prices.len() < 2 {
+            return 0.0;
+        }
+
+        let mean = prices.iter().sum::<f64>() / prices.len() as f64;
+        let variance = prices.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / prices.len() as f64;
+
+        variance.sqrt()
     }
 }
 

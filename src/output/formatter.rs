@@ -619,113 +619,24 @@ impl OutputFormatter {
                     bandwidth_size,
                 };
 
-                let orders =
-                    match crate::output::structures::TradingOrders::generate_sequence_aware(config)
-                    {
-                        Ok(orders) => {
-                            log::info!(
-                                "✅ Generated {} trading orders with {:.1}% directional edge",
-                                orders.direction,
-                                (direction.up_probability_aggregated
-                                    - direction.down_probability_aggregated)
-                                    * 100.0
-                            );
-                            orders
-                        }
-                        Err(e) => {
-                            log::error!("❌ Failed to generate sequence-aware orders: {}", e);
-                            return Err(e);
-                        }
-                    };
+                let orders = match crate::output::structures::TradingOrders::generate(config) {
+                    Ok(orders) => {
+                        log::info!(
+                            "✅ Generated {} trading orders with {:.1}% directional edge",
+                            orders.direction,
+                            (direction.up_probability_aggregated
+                                - direction.down_probability_aggregated)
+                                * 100.0
+                        );
+                        orders
+                    }
+                    Err(e) => {
+                        log::error!("❌ Failed to generate sequence-aware orders: {}", e);
+                        return Err(e);
+                    }
+                };
 
-                // 🚀 NEW: Generate adaptive trading signal for enhanced order generation
-                let adaptive_signal =
-                    crate::output::structures::PredictionResult::generate_adaptive_trading_signal(
-                        &direction,
-                        &volatility,
-                        current_price,
-                    );
-
-                // Log the adaptive signal for debugging
-                match &adaptive_signal {
-                    crate::output::structures::AdaptiveTradingSignal::SidewaysLong {
-                        confidence,
-                        sideways_probability,
-                        sequence_bias,
-                        risk_reward,
-                        ..
-                    } => {
-                        log::info!(
-                            "🔄 ADAPTIVE SIGNAL: SidewaysLong - confidence: {:.1}%, sideways: {:.1}%, bias: {}, R/R: {:.2}",
-                            confidence * 100.0, sideways_probability * 100.0, sequence_bias, risk_reward
-                        );
-                    }
-                    crate::output::structures::AdaptiveTradingSignal::SidewaysShort {
-                        confidence,
-                        sideways_probability,
-                        sequence_bias,
-                        risk_reward,
-                        ..
-                    } => {
-                        log::info!(
-                            "🔄 ADAPTIVE SIGNAL: SidewaysShort - confidence: {:.1}%, sideways: {:.1}%, bias: {}, R/R: {:.2}",
-                            confidence * 100.0, sideways_probability * 100.0, sequence_bias, risk_reward
-                        );
-                    }
-                    crate::output::structures::AdaptiveTradingSignal::Long {
-                        confidence,
-                        risk_reward,
-                        ..
-                    } => {
-                        log::info!(
-                            "📈 ADAPTIVE SIGNAL: Long - confidence: {:.1}%, R/R: {:.2}",
-                            confidence * 100.0,
-                            risk_reward
-                        );
-                    }
-                    crate::output::structures::AdaptiveTradingSignal::Short {
-                        confidence,
-                        risk_reward,
-                        ..
-                    } => {
-                        log::info!(
-                            "📉 ADAPTIVE SIGNAL: Short - confidence: {:.1}%, R/R: {:.2}",
-                            confidence * 100.0,
-                            risk_reward
-                        );
-                    }
-                    crate::output::structures::AdaptiveTradingSignal::StrongLong {
-                        confidence,
-                        risk_reward,
-                        ..
-                    } => {
-                        log::info!(
-                            "🚀 ADAPTIVE SIGNAL: StrongLong - confidence: {:.1}%, R/R: {:.2}",
-                            confidence * 100.0,
-                            risk_reward
-                        );
-                    }
-                    crate::output::structures::AdaptiveTradingSignal::StrongShort {
-                        confidence,
-                        risk_reward,
-                        ..
-                    } => {
-                        log::info!(
-                            "💥 ADAPTIVE SIGNAL: StrongShort - confidence: {:.1}%, R/R: {:.2}",
-                            confidence * 100.0,
-                            risk_reward
-                        );
-                    }
-                    crate::output::structures::AdaptiveTradingSignal::NoSignal {
-                        reason, ..
-                    } => {
-                        log::info!("❌ ADAPTIVE SIGNAL: NoSignal - {}", reason);
-                    }
-                }
-
-                result = result
-                    .with_orders(orders)
-                    .with_adaptive_signal(adaptive_signal);
+                result = result.with_orders(orders);
             }
 
             // Apply the calculated confidence to the prediction result
