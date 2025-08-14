@@ -10,6 +10,9 @@
 //! - Data-driven architecture selection
 
 pub mod feature_selection;
+pub mod frac_adam;
+pub mod frac_nadam;
+pub mod fractional;
 pub mod hyperparameter;
 pub mod objective;
 pub mod optimizer_selector;
@@ -18,6 +21,9 @@ pub mod optimizer_selector;
 pub use feature_selection::{
     CorrelationMatrix, FeatureSelector, ImportanceMethod, ImportanceScores,
 };
+pub use frac_adam::{FracAdam, ParamsFracAdam};
+pub use frac_nadam::{FracNAdam, ParamsFracNAdam};
+pub use fractional::{FractionalConfig, FractionalDerivative};
 pub use hyperparameter::{HyperparameterOptimizer, OptimizationMethod, SearchSpace};
 pub use objective::{ObjectiveFunction, OptimizationMetric};
 pub use optimizer_selector::{

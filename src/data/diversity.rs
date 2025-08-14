@@ -317,7 +317,7 @@ impl DiversitySelector {
         let avg_distance = total_distance / count as f64;
 
         // Cosine distance is already in 0-1 range, but normalize for consistency
-        let normalized_diversity = avg_distance.min(1.0).max(0.0);
+        let normalized_diversity = avg_distance.clamp(0.0, 1.0);
 
         Ok(normalized_diversity)
     }
@@ -398,7 +398,7 @@ impl DiversitySelector {
         }
 
         let avg_distance = total_distance / count as f64;
-        let normalized_diversity = avg_distance.min(1.0).max(0.0);
+        let normalized_diversity = avg_distance.clamp(0.0, 1.0);
 
         Ok(normalized_diversity)
     }
@@ -513,7 +513,7 @@ impl DiversitySelector {
 
         // Convert to cosine distance (1 - similarity)
         // Clamp to [0, 1] range to handle floating point precision issues
-        let cosine_distance = (1.0 - cosine_similarity).max(0.0).min(1.0);
+        let cosine_distance = (1.0 - cosine_similarity).clamp(0.0, 1.0);
 
         Ok(cosine_distance)
     }

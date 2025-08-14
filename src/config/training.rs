@@ -260,6 +260,26 @@ pub enum OptimizerType {
         momentum: f64,
         centered: bool,
     },
+    // Fractional optimizers with long-term memory effects
+    FracAdam {
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+        alpha: f64,           // Fractional order (0 < α ≤ 1)
+        memory_window: usize, // Memory window size (30-90 recommended)
+        step_size: f64,       // Discretization step size (typically 1.0)
+    },
+    FracNAdam {
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        weight_decay: Option<f64>,
+        momentum_decay: f64,
+        alpha: f64,           // Fractional order (0 < α ≤ 1)
+        memory_window: usize, // Memory window size (30-90 recommended)
+        step_size: f64,       // Discretization step size (typically 1.0)
+    },
 }
 
 impl OptimizerType {
@@ -318,6 +338,25 @@ impl OptimizerType {
                 weight_decay: None,
                 momentum: 0.0,
                 centered: false,
+            },
+            "FracAdam" => OptimizerType::FracAdam {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: None,
+                alpha: 0.9,        // Good balance between memory and stability
+                memory_window: 60, // Moderate memory window
+                step_size: 1.0,    // Standard discrete step
+            },
+            "FracNAdam" => OptimizerType::FracNAdam {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: None,
+                momentum_decay: 0.004,
+                alpha: 0.9,        // Good balance between memory and stability
+                memory_window: 60, // Moderate memory window
+                step_size: 1.0,    // Standard discrete step
             },
             _ => OptimizerType::AdamW {
                 weight_decay: 0.01,
@@ -760,6 +799,131 @@ impl TrainingParams {
                             wd
                         )));
                     }
+                }
+            }
+            OptimizerType::FracAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracAdam beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracAdam beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracAdam eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "FracAdam weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+                if *alpha <= 0.0 || *alpha > 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracAdam alpha (fractional order) must be in (0, 1], got: {}",
+                        alpha
+                    )));
+                }
+                if *memory_window == 0 {
+                    return Err(VangaError::ConfigError(
+                        "FracAdam memory_window must be positive".to_string(),
+                    ));
+                }
+                if *memory_window > 200 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracAdam memory_window too large ({}), maximum recommended: 200",
+                        memory_window
+                    )));
+                }
+                if *step_size <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracAdam step_size must be positive, got: {}",
+                        step_size
+                    )));
+                }
+            }
+            OptimizerType::FracNAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracNAdam beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracNAdam beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracNAdam eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "FracNAdam weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+                if *momentum_decay < 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracNAdam momentum_decay must be non-negative, got: {}",
+                        momentum_decay
+                    )));
+                }
+                if *alpha <= 0.0 || *alpha > 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracNAdam alpha (fractional order) must be in (0, 1], got: {}",
+                        alpha
+                    )));
+                }
+                if *memory_window == 0 {
+                    return Err(VangaError::ConfigError(
+                        "FracNAdam memory_window must be positive".to_string(),
+                    ));
+                }
+                if *memory_window > 200 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracNAdam memory_window too large ({}), maximum recommended: 200",
+                        memory_window
+                    )));
+                }
+                if *step_size <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracNAdam step_size must be positive, got: {}",
+                        step_size
+                    )));
                 }
             }
         }

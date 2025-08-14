@@ -1976,6 +1976,111 @@ impl LSTMModel {
                     })?,
                 ))
             }
+            crate::config::training::OptimizerType::FracAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                log::info!(
+                    "Using FracAdam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "FracAdam parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    weight_decay.map_or(0.0, |wd| wd),
+                    beta1,
+                    beta2,
+                    eps
+                );
+                log::info!(
+                    "FracAdam fractional parameters - alpha: {:.3}, memory_window: {}, step_size: {:.3}",
+                    alpha,
+                    memory_window,
+                    step_size
+                );
+
+                let params = crate::optimization::ParamsFracAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    fractional: crate::optimization::FractionalConfig {
+                        alpha: *alpha,
+                        memory_window: *memory_window,
+                        step_size: *step_size,
+                    },
+                };
+
+                Ok(OptimizerWrapper::FracAdam(
+                    crate::optimization::FracAdam::new(self.varmap.all_vars(), params).map_err(
+                        |e| {
+                            VangaError::ModelError(format!(
+                                "FracAdam optimizer creation failed: {}",
+                                e
+                            ))
+                        },
+                    )?,
+                ))
+            }
+            crate::config::training::OptimizerType::FracNAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                log::info!(
+                    "Using FracNAdam optimizer with learning rate: {:.6}",
+                    learning_rate
+                );
+                log::info!(
+                    "FracNAdam parameters - weight_decay: {:.4}, beta1: {:.3}, beta2: {:.3}, eps: {:.2e}",
+                    weight_decay.map_or(0.0, |wd| wd),
+                    beta1,
+                    beta2,
+                    eps
+                );
+                log::info!("FracNAdam momentum_decay: {:.4}", momentum_decay);
+                log::info!(
+                    "FracNAdam fractional parameters - alpha: {:.3}, memory_window: {}, step_size: {:.3}",
+                    alpha,
+                    memory_window,
+                    step_size
+                );
+
+                let params = crate::optimization::ParamsFracNAdam {
+                    lr: learning_rate,
+                    beta_1: *beta1,
+                    beta_2: *beta2,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    momentum_decay: *momentum_decay,
+                    fractional: crate::optimization::FractionalConfig {
+                        alpha: *alpha,
+                        memory_window: *memory_window,
+                        step_size: *step_size,
+                    },
+                };
+
+                Ok(OptimizerWrapper::FracNAdam(
+                    crate::optimization::FracNAdam::new(self.varmap.all_vars(), params).map_err(
+                        |e| {
+                            VangaError::ModelError(format!(
+                                "FracNAdam optimizer creation failed: {}",
+                                e
+                            ))
+                        },
+                    )?,
+                ))
+            }
         }
     }
     pub fn apply_xavier_initialization(&mut self) -> Result<()> {

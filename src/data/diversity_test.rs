@@ -1,8 +1,8 @@
-use crate::data::balance::SequenceWithTargets;
+// use crate::data::balance::SequenceWithTargets; // Unused import
 use crate::data::diversity::*;
 use crate::utils::error::Result;
 use ndarray::Array2;
-use std::collections::HashMap;
+// use std::collections::HashMap; // Unused import
 
 /// Test cosine distance calculation for normalized sequences
 #[test]
@@ -30,7 +30,7 @@ fn test_cosine_distance_normalized_sequences() -> Result<()> {
     let distance = selector.calculate_cosine_distance(&seq1, &seq2)?;
 
     // Distance should be in [0, 1] range
-    assert!(distance >= 0.0 && distance <= 1.0);
+    assert!((0.0..=1.0).contains(&distance));
 
     println!("✅ Cosine distance test passed: {:.4}", distance);
 

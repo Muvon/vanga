@@ -198,6 +198,58 @@ impl TrainingDiagnostics {
                 );
                 Self::log_optional_weight_decay(weight_decay);
             }
+            OptimizerType::FracAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                log::info!("   🔧 Optimizer: FracAdam (Fractional Adam)");
+                log::info!(
+                    "   📊 FracAdam params: β1={:.3}, β2={:.3}, ε={:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+                log::info!(
+                    "   🧮 Fractional params: α={:.3} (memory strength), window={} steps, step_size={:.3}",
+                    alpha,
+                    memory_window,
+                    step_size
+                );
+                Self::log_optional_weight_decay(weight_decay);
+                log::info!("   💡 FracAdam uses long-term memory effects for better time-series performance");
+            }
+            OptimizerType::FracNAdam {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                log::info!("   🔧 Optimizer: FracNAdam (Fractional NAdam with Nesterov)");
+                log::info!(
+                    "   📊 FracNAdam params: β1={:.3}, β2={:.3}, ε={:.2e}, momentum_decay={:.4}",
+                    beta1,
+                    beta2,
+                    eps,
+                    momentum_decay
+                );
+                log::info!(
+                    "   🧮 Fractional params: α={:.3} (memory strength), window={} steps, step_size={:.3}",
+                    alpha,
+                    memory_window,
+                    step_size
+                );
+                Self::log_optional_weight_decay(weight_decay);
+                log::info!("   💡 FracNAdam combines Nesterov acceleration with fractional memory for fast convergence");
+            }
         }
     }
 
@@ -387,6 +439,8 @@ impl TrainingDiagnostics {
             OptimizerType::NAdam { .. } => "NAdam",
             OptimizerType::RAdam { .. } => "RAdam",
             OptimizerType::RMSprop { .. } => "RMSprop",
+            OptimizerType::FracAdam { .. } => "FracAdam",
+            OptimizerType::FracNAdam { .. } => "FracNAdam",
         }
     }
 
@@ -419,6 +473,8 @@ impl TrainingDiagnostics {
             OptimizerType::NAdam { weight_decay, .. } => *weight_decay,
             OptimizerType::RAdam { weight_decay, .. } => *weight_decay,
             OptimizerType::RMSprop { weight_decay, .. } => *weight_decay,
+            OptimizerType::FracAdam { weight_decay, .. } => *weight_decay,
+            OptimizerType::FracNAdam { weight_decay, .. } => *weight_decay,
         }
     }
 }

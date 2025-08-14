@@ -64,6 +64,25 @@ optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1
 # optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.0, momentum = 0.0, centered = false } }
 
 # ============================================================================
+# FRACTIONAL OPTIMIZERS - Advanced optimizers with long-term memory effects
+# ============================================================================
+# These optimizers use fractional derivatives to incorporate gradient history,
+# providing better performance for time-series forecasting and sequential data.
+
+# FracAdam: Fractional Adam with long-term memory
+# - Combines Adam with fractional derivatives for enhanced time-series performance
+# - alpha: Fractional order (0 < α ≤ 1) - controls memory strength
+# - memory_window: Number of past gradients to consider (30-90 recommended)
+# - step_size: Discretization step size (typically 1.0)
+# optimizer = { FracAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0, alpha = 0.9, memory_window = 60, step_size = 1.0 } }
+
+# FracNAdam: Fractional NAdam with Nesterov acceleration and long-term memory
+# - Combines NAdam with fractional derivatives for faster convergence
+# - Includes momentum_decay for Nesterov acceleration
+# - Excellent for volatile cryptocurrency markets
+# optimizer = { FracNAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0, momentum_decay = 0.004, alpha = 0.9, memory_window = 60, step_size = 1.0 } }
+
+# ============================================================================
 # LEARNING RATE CONFIGURATION - Simple and clear
 # ============================================================================
 # Base learning rate (simple float value)

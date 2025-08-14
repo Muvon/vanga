@@ -192,6 +192,9 @@ pub enum OptimizerWrapper {
     NAdam(candle_optimisers::nadam::NAdam),
     RAdam(candle_optimisers::radam::RAdam),
     RMSprop(candle_optimisers::rmsprop::RMSprop),
+    // Fractional optimizers with long-term memory effects
+    FracAdam(crate::optimization::FracAdam),
+    FracNAdam(crate::optimization::FracNAdam),
 }
 
 /// Macro to eliminate code duplication in OptimizerWrapper method dispatch
@@ -221,6 +224,8 @@ macro_rules! optimizer_dispatch {
             OptimizerWrapper::NAdam(opt) => opt.$method($($args),*),
             OptimizerWrapper::RAdam(opt) => opt.$method($($args),*),
             OptimizerWrapper::RMSprop(opt) => opt.$method($($args),*),
+            OptimizerWrapper::FracAdam(opt) => opt.$method($($args),*),
+            OptimizerWrapper::FracNAdam(opt) => opt.$method($($args),*),
         }
     };
 }
@@ -237,6 +242,8 @@ impl OptimizerWrapper {
             OptimizerWrapper::NAdam(nadam) => nadam.set_learning_rate(lr),
             OptimizerWrapper::RAdam(radam) => radam.set_learning_rate(lr),
             OptimizerWrapper::RMSprop(rmsprop) => rmsprop.set_learning_rate(lr),
+            OptimizerWrapper::FracAdam(frac_adam) => frac_adam.set_learning_rate(lr),
+            OptimizerWrapper::FracNAdam(frac_nadam) => frac_nadam.set_learning_rate(lr),
         }
     }
 
