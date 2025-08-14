@@ -155,10 +155,10 @@ pub struct MixtureOfHeadAttention {
     head_type_router: Linear, // W_h ∈ ℝ^{2×d_in}
 
     // Routing history for load balance loss calculation
-    // Routing history for load balance loss calculation
     routing_history: Vec<Vec<f32>>,
     history_index: usize,    // For circular buffer implementation
     max_history_size: usize, // Maximum history size to prevent unbounded growth
+    step_count: usize,       // Track training steps for periodic cleanup
 
     device: Device,
 }
@@ -238,6 +238,7 @@ impl MixtureOfHeadAttention {
             routing_history: Vec::with_capacity(1000),
             history_index: 0,
             max_history_size: 1000,
+            step_count: 0,
             device,
         })
     }
@@ -261,6 +262,11 @@ impl MixtureOfHeadAttention {
 
     /// Forward pass with Mixture-of-Head attention and routing
     pub fn forward(&mut self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
+        // Increment step counter for memory management
+        if training {
+            self.step_count += 1;
+        }
+        
         // Validate input dimensions
         self.validate_input_dimensions(input)?;
 
@@ -295,18 +301,27 @@ impl MixtureOfHeadAttention {
         let routing_tensor = self.create_routing_tensor(&batch_routing_scores)?;
 
         // Store routing history for load balance loss (only during training)
-        // Store routing history for load balance loss (only during training)
         if training {
             // Average routing scores across batch and sequence for history
             let avg_routing_scores = self.average_routing_scores(&batch_routing_scores)?;
 
-            // OPTIMIZATION: Use circular buffer to prevent unbounded memory growth
+            // MEMORY FIX: Use circular buffer with proper memory management
             if self.routing_history.len() < self.max_history_size {
                 self.routing_history.push(avg_routing_scores);
             } else {
-                // Circular buffer: overwrite oldest entry
-                self.routing_history[self.history_index] = avg_routing_scores;
+                // Circular buffer: overwrite oldest entry and clear old memory
+                // Clone the new scores to ensure we don't hold references
+                let new_scores = avg_routing_scores;
+                
+                // Clear the old entry to ensure memory is freed
+                self.routing_history[self.history_index].clear();
+                self.routing_history[self.history_index] = new_scores;
                 self.history_index = (self.history_index + 1) % self.max_history_size;
+            }
+            
+            // Periodically compact memory to reduce fragmentation
+            if self.step_count % 1000 == 0 {
+                self.routing_history.shrink_to_fit();
             }
         }
 
@@ -672,6 +687,27 @@ impl MixtureOfHeadAttention {
         stats
     }
 
+    /// Clear routing history to free memory
+    pub fn clear_routing_history(&mut self) {
+        self.routing_history.clear();
+        self.history_index = 0;
+        self.step_count = 0;
+    }
+
+    /// Compact memory by reducing allocated but unused capacity
+    pub fn compact_memory(&mut self) {
+        self.routing_history.shrink_to_fit();
+        // Also shrink individual score vectors
+        for scores in &mut self.routing_history {
+            scores.shrink_to_fit();
+        }
+    }
+
+    /// Get memory usage estimate (number of float values stored)
+    pub fn memory_usage(&self) -> usize {
+        self.routing_history.len() * self.moh_config.total_heads as usize
+    }
+
     /// Calculate routing entropy to measure head usage diversity
     fn calculate_routing_entropy(&self, scores: &[f32]) -> f64 {
         let total: f32 = scores.iter().sum();
@@ -740,12 +776,6 @@ impl MixtureOfHeadAttention {
         );
 
         info
-    }
-
-    /// Clear routing history (useful for memory management)
-    pub fn clear_routing_history(&mut self) {
-        self.routing_history.clear();
-        log::debug!("Cleared MoH routing history");
     }
 
     /// Get configuration (for wrapper access)

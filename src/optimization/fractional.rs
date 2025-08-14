@@ -109,12 +109,18 @@ impl FractionalDerivative {
         for (i, gradient) in gradients.iter().enumerate() {
             let history = &mut self.gradient_history[i];
 
+            // MEMORY FIX: Clone gradient only once and manage memory properly
+            // Detach from computation graph to prevent holding references
+            let detached_gradient = gradient.detach();
+            
             // Add new gradient to front
-            history.push_front(gradient.clone());
+            history.push_front(detached_gradient);
 
             // Remove oldest gradient if we exceed memory window
+            // This properly drops the old tensor and releases memory
             if history.len() > self.memory_window {
-                history.pop_back();
+                // pop_back() returns Option<Tensor> which is dropped, releasing memory
+                let _ = history.pop_back();
             }
         }
 
@@ -257,6 +263,23 @@ impl FractionalDerivative {
         for history in &mut self.gradient_history {
             history.clear();
         }
+    }
+
+    /// Compact gradient history to reduce memory usage
+    /// This method forces deallocation of unused capacity
+    pub fn compact_history(&mut self) {
+        for history in &mut self.gradient_history {
+            // Shrink the VecDeque to fit its current contents
+            history.shrink_to_fit();
+        }
+    }
+
+    /// Get total memory usage estimate (in number of tensor elements)
+    pub fn memory_usage(&self) -> usize {
+        self.gradient_history
+            .iter()
+            .map(|h| h.len())
+            .sum()
     }
 
     /// Resize for different number of parameters

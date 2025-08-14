@@ -75,6 +75,28 @@ impl FracAdam {
             step_count: 0,
         })
     }
+
+    /// Clear optimizer state to free memory
+    pub fn clear_state(&mut self) {
+        self.first_moments.clear();
+        self.second_moments.clear();
+        self.fractional_derivative.clear_history();
+        self.step_count = 0;
+    }
+
+    /// Compact optimizer memory (reduce allocated but unused capacity)
+    pub fn compact_memory(&mut self) {
+        self.first_moments.shrink_to_fit();
+        self.second_moments.shrink_to_fit();
+        self.fractional_derivative.compact_history();
+    }
+
+    /// Get memory usage estimate
+    pub fn memory_usage(&self) -> usize {
+        let moment_count = self.first_moments.len() + self.second_moments.len();
+        let history_count = self.fractional_derivative.memory_usage();
+        moment_count + history_count
+    }
 }
 
 impl Optimizer for FracAdam {
@@ -293,9 +315,18 @@ impl Optimizer for FracAdam {
 
             var.set(&new_param)?;
 
-            // Store updated moments
-            self.first_moments.insert(i, first_moment);
-            self.second_moments.insert(i, second_moment);
+            // MEMORY FIX: Properly manage moment storage to prevent memory leaks
+            // Drop old moments before inserting new ones
+            if self.first_moments.contains_key(&i) {
+                self.first_moments.remove(&i);
+            }
+            if self.second_moments.contains_key(&i) {
+                self.second_moments.remove(&i);
+            }
+            
+            // Store updated moments (detached from computation graph)
+            self.first_moments.insert(i, first_moment.detach());
+            self.second_moments.insert(i, second_moment.detach());
         }
 
         Ok(())
