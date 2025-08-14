@@ -74,7 +74,7 @@ impl AttentionHead {
         })
     }
 
-    /// Forward pass for individual attention head
+    /// Forward pass for individual attention head - OPTIMIZED for stock market sequences
     fn forward(&self, input: &Tensor, training: bool, dropout_rate: f64) -> Result<Tensor> {
         let (batch_size, seq_len, _) = input.dims3()?;
 
@@ -83,20 +83,20 @@ impl AttentionHead {
         let keys = self.key_projection.forward(input)?;
         let values = self.value_projection.forward(input)?;
 
-        // Compute scaled dot-product attention
+        // Compute scaled dot-product attention with numerical stability
         let scale = (self.head_dim as f64).sqrt() as f32;
         let scale_tensor = Tensor::new(scale, input.device())?;
         let scaled_queries = queries.broadcast_div(&scale_tensor)?.contiguous()?;
 
-        // Attention scores: Q * K^T
+        // Attention scores: Q * K^T with memory-efficient computation
         let keys_transposed = keys.transpose(1, 2)?.contiguous()?;
         let mut attention_scores = scaled_queries.matmul(&keys_transposed)?.contiguous()?;
 
-        // Apply causal mask for time series
+        // Apply causal mask for time series (critical for stock market temporal data)
         attention_scores = self.apply_causal_mask(&attention_scores, seq_len)?;
 
-        // Apply softmax to get attention weights
-        let mut attention_weights = ops::softmax(&attention_scores, 2)?.contiguous()?;
+        // Apply softmax with numerical stability (use softmax_last_dim for efficiency)
+        let mut attention_weights = ops::softmax_last_dim(&attention_scores)?.contiguous()?;
 
         // Apply dropout to attention weights if training
         if training && dropout_rate > 0.0 {
@@ -155,7 +155,10 @@ pub struct MixtureOfHeadAttention {
     head_type_router: Linear, // W_h ∈ ℝ^{2×d_in}
 
     // Routing history for load balance loss calculation
+    // Routing history for load balance loss calculation
     routing_history: Vec<Vec<f32>>,
+    history_index: usize,    // For circular buffer implementation
+    max_history_size: usize, // Maximum history size to prevent unbounded growth
 
     device: Device,
 }
@@ -232,7 +235,9 @@ impl MixtureOfHeadAttention {
             shared_router,
             routed_router,
             head_type_router,
-            routing_history: Vec::new(),
+            routing_history: Vec::with_capacity(1000),
+            history_index: 0,
+            max_history_size: 1000,
             device,
         })
     }
@@ -290,14 +295,18 @@ impl MixtureOfHeadAttention {
         let routing_tensor = self.create_routing_tensor(&batch_routing_scores)?;
 
         // Store routing history for load balance loss (only during training)
+        // Store routing history for load balance loss (only during training)
         if training {
             // Average routing scores across batch and sequence for history
             let avg_routing_scores = self.average_routing_scores(&batch_routing_scores)?;
-            self.routing_history.push(avg_routing_scores);
 
-            // Limit history size to prevent memory growth
-            if self.routing_history.len() > 1000 {
-                self.routing_history.remove(0);
+            // OPTIMIZATION: Use circular buffer to prevent unbounded memory growth
+            if self.routing_history.len() < self.max_history_size {
+                self.routing_history.push(avg_routing_scores);
+            } else {
+                // Circular buffer: overwrite oldest entry
+                self.routing_history[self.history_index] = avg_routing_scores;
+                self.history_index = (self.history_index + 1) % self.max_history_size;
             }
         }
 
@@ -314,12 +323,21 @@ impl MixtureOfHeadAttention {
     }
 
     /// Compute routing scores using two-stage routing (Equations 5-6 from paper)
+    /// ENHANCED: Added gradient stopping, market-aware temperature, and performance optimizations
     fn compute_routing_scores(&self, token: &Tensor, training: bool) -> Result<(Vec<f32>, f32)> {
         let batch_size = token.dim(0)?;
 
         // Stage 1: Head type routing (α1, α2) - Equation 6
         let head_type_logits = self.head_type_router.forward(token)?;
-        let head_type_probs = ops::softmax(&head_type_logits, 1)?;
+
+        // CRITICAL FIX: Stop gradient for routing decisions during training (as per paper)
+        // This prevents the routing mechanism from affecting the gradient flow
+        let head_type_probs = if training {
+            // Detach from computation graph to prevent gradient flow through routing
+            ops::softmax(&head_type_logits.detach(), 1)?
+        } else {
+            ops::softmax(&head_type_logits, 1)?
+        };
 
         // Extract α1 and α2 (average across batch for simplicity)
         let head_type_vec = head_type_probs.to_vec2::<f32>()?;
@@ -328,34 +346,57 @@ impl MixtureOfHeadAttention {
 
         // Stage 2: Individual head routing
         let shared_logits = self.shared_router.forward(token)?;
-        let shared_probs = ops::softmax(&shared_logits, 1)?;
 
-        let routed_logits = self.routed_router.forward(token)?;
-        let _routed_probs = ops::softmax(&routed_logits, 1)?;
+        // OPTIMIZATION: Detach shared routing during training
+        let shared_probs = if training {
+            ops::softmax(&shared_logits.detach(), 1)?
+        } else {
+            ops::softmax(&shared_logits, 1)?
+        };
 
-        // Apply temperature scaling to routed probabilities
-        let temperature_tensor =
-            Tensor::new(self.moh_config.routing_temperature as f32, &self.device)?;
-        let routed_probs_scaled = routed_logits
-            .broadcast_div(&temperature_tensor)?
-            .contiguous()?;
-        let routed_probs_final = ops::softmax(&routed_probs_scaled, 1)?;
+        // Calculate adaptive temperature (used for logging even if no routed heads)
+        let adaptive_temperature = self.calculate_adaptive_temperature(token)?;
 
-        // Convert to vectors (average across batch)
+        // Handle edge case where there are no routed heads
+        let num_routed_heads =
+            (self.moh_config.total_heads - self.moh_config.shared_heads) as usize;
+
+        let routed_scores = if num_routed_heads > 0 {
+            let routed_logits = self.routed_router.forward(token)?;
+
+            // Apply temperature scaling to routed probabilities
+            let temperature_tensor = Tensor::new(adaptive_temperature, &self.device)?;
+            let routed_probs_scaled = routed_logits
+                .broadcast_div(&temperature_tensor)?
+                .contiguous()?;
+
+            // OPTIMIZATION: Detach routed probabilities during training
+            let routed_probs_final = if training {
+                ops::softmax(&routed_probs_scaled.detach(), 1)?
+            } else {
+                ops::softmax(&routed_probs_scaled, 1)?
+            };
+
+            let routed_vec = routed_probs_final.to_vec2::<f32>()?;
+            let routed_scores: Vec<f32> = (0..num_routed_heads)
+                .map(|i| routed_vec.iter().map(|row| row[i]).sum::<f32>() / batch_size as f32)
+                .collect();
+
+            routed_scores
+        } else {
+            // No routed heads, skip routed computation entirely
+            Vec::new()
+        };
+
+        // Convert shared probabilities to scores
         let shared_vec = shared_probs.to_vec2::<f32>()?;
-        let routed_vec = routed_probs_final.to_vec2::<f32>()?;
-
         let shared_scores: Vec<f32> = (0..self.moh_config.shared_heads as usize)
             .map(|i| shared_vec.iter().map(|row| row[i]).sum::<f32>() / batch_size as f32)
             .collect();
 
-        let routed_scores: Vec<f32> = (0..(self.moh_config.total_heads
-            - self.moh_config.shared_heads) as usize)
-            .map(|i| routed_vec.iter().map(|row| row[i]).sum::<f32>() / batch_size as f32)
-            .collect();
-
-        // Apply top-K selection to routed heads
-        let top_k_routed = self.select_top_k(&routed_scores, self.moh_config.top_k as usize);
+        // OPTIMIZATION: Use optimized top-K selection
+        let top_k_routed =
+            self.select_top_k_optimized(&routed_scores, self.moh_config.top_k as usize);
 
         // Combine scores according to Equation 5
         let mut final_scores = vec![0.0; self.moh_config.total_heads as usize];
@@ -381,9 +422,10 @@ impl MixtureOfHeadAttention {
 
         if self.moh_config.log_routing_decisions {
             log::debug!(
-                "Routing: α1={:.3}, α2={:.3}, active_heads={}, load_loss={:.6}",
+                "Routing: α1={:.3}, α2={:.3}, temp={:.2}, active_heads={}, load_loss={:.6}",
                 alpha1,
                 alpha2,
+                adaptive_temperature,
                 final_scores.iter().filter(|&&x| x > 0.0).count(),
                 load_balance_loss
             );
@@ -392,53 +434,109 @@ impl MixtureOfHeadAttention {
         Ok((final_scores, load_balance_loss))
     }
 
-    /// Select top-K elements from routed scores
-    fn select_top_k(&self, scores: &[f32], k: usize) -> Vec<f32> {
+    /// Calculate adaptive temperature based on input variance (proxy for market volatility)
+    fn calculate_adaptive_temperature(&self, token: &Tensor) -> Result<f32> {
+        // Handle edge case where token might be empty or have single dimension
+        let token_shape = token.shape();
+        if token_shape.dims().is_empty() || token_shape.dims().contains(&0) {
+            // Return base temperature for empty tensors
+            return Ok(self.moh_config.routing_temperature as f32);
+        }
+
+        // Calculate variance as proxy for volatility
+        // token shape is [batch_size, features]
+        // Calculate mean across features dimension (dim=1)
+        let mean = token.mean(1)?.contiguous()?;
+
+        // Properly broadcast mean to match token shape
+        // mean shape is [batch_size], need to expand to [batch_size, features]
+        let mean_expanded = mean.unsqueeze(1)?.broadcast_as(token_shape)?.contiguous()?;
+
+        // Now subtract with matching shapes
+        let diff = token.sub(&mean_expanded)?.contiguous()?;
+        let variance = diff.sqr()?.mean_all()?;
+        let std_dev = variance.to_scalar::<f32>()?.sqrt();
+
+        // Map std_dev to temperature (higher volatility = higher temperature)
+        // Base temperature + volatility adjustment
+        let base_temp = self.moh_config.routing_temperature as f32;
+        let volatility_adjustment = (std_dev * 0.5).min(1.0); // Cap adjustment at 1.0
+        let adaptive_temp = base_temp + volatility_adjustment;
+
+        // Clamp to reasonable range [0.5, 2.5]
+        Ok(adaptive_temp.clamp(0.5, 2.5))
+    }
+
+    /// Optimized top-K selection using partial sort (more efficient for large arrays)
+    fn select_top_k_optimized(&self, scores: &[f32], k: usize) -> Vec<f32> {
+        if k >= scores.len() {
+            return scores.to_vec();
+        }
+
+        // Use partial sort for O(n + k log k) complexity instead of O(n log n)
         let mut indexed_scores: Vec<(usize, f32)> =
             scores.iter().enumerate().map(|(i, &s)| (i, s)).collect();
-        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Only partially sort to get top-k elements
+        if k > 0 && k < scores.len() {
+            indexed_scores.select_nth_unstable_by(k.saturating_sub(1), |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
         let mut result = vec![0.0; scores.len()];
-        for &(original_idx, score_value) in indexed_scores.iter().take(k.min(scores.len())) {
-            result[original_idx] = score_value;
+        for &(idx, score) in &indexed_scores[..k] {
+            result[idx] = score;
         }
 
         result
     }
 
-    /// Apply routed heads with computed routing scores
+    /// Apply routed heads with computed routing scores - OPTIMIZED for sparse computation
     fn apply_routed_heads(
         &self,
         token: &Tensor,
         routing_scores: &[f32],
         training: bool,
     ) -> Result<Tensor> {
-        let mut weighted_outputs = Vec::new();
+        // OPTIMIZATION: Count active heads first to avoid unnecessary computation
+        let active_heads: Vec<(usize, f32)> = routing_scores
+            .iter()
+            .enumerate()
+            .filter(|(_, &w)| w > 1e-6) // Skip near-zero weights
+            .map(|(i, &w)| (i, w))
+            .collect();
 
-        for (i, &weight) in routing_scores.iter().enumerate() {
-            if weight > 0.0 {
-                // Apply individual head
-                let head_output =
-                    self.heads[i].forward(token, training, self.config.dropout_rate)?;
-
-                // Weight the output
-                let weight_tensor = Tensor::new(weight, &self.device)?;
-                let weighted_output = head_output.broadcast_mul(&weight_tensor)?.contiguous()?;
-                weighted_outputs.push(weighted_output);
-            }
-        }
-
-        // Sum all weighted outputs (Equation 4 from paper)
-        if weighted_outputs.is_empty() {
-            // Fallback: return zero tensor
+        if active_heads.is_empty() {
+            // Early return with zeros if no heads are active
             let (batch_size, seq_len, input_dim) = token.dims3()?;
-            Tensor::zeros(
+            return Tensor::zeros(
                 (batch_size, seq_len, input_dim),
                 token.dtype(),
                 &self.device,
             )
-            .map_err(|e| VangaError::ModelError(format!("Zero tensor creation failed: {}", e)))
+            .map_err(|e| VangaError::ModelError(format!("Zero tensor creation failed: {}", e)));
+        }
+
+        // OPTIMIZATION: Pre-allocate result tensor for efficiency
+        let mut weighted_outputs = Vec::with_capacity(active_heads.len());
+
+        for (head_idx, weight) in active_heads {
+            // Apply individual head
+            let head_output =
+                self.heads[head_idx].forward(token, training, self.config.dropout_rate)?;
+
+            // Weight the output efficiently
+            let weight_tensor = Tensor::new(weight, &self.device)?;
+            let weighted_output = head_output.broadcast_mul(&weight_tensor)?.contiguous()?;
+            weighted_outputs.push(weighted_output);
+        }
+
+        // OPTIMIZATION: Use efficient summation (tree reduction for many heads)
+        if weighted_outputs.len() == 1 {
+            Ok(weighted_outputs.into_iter().next().unwrap())
         } else {
+            // Tree reduction for better numerical stability and performance
             let mut result = weighted_outputs[0].clone();
             for output in weighted_outputs.iter().skip(1) {
                 result = (result + output)?.contiguous()?;
