@@ -155,25 +155,26 @@ pub fn generate_sentiment_targets_with_adaptive_params(
     Ok(targets)
 }
 
-/// Classify sentiment using sequence→horizon bullish strength ratio for strong ML signals
+/// Classify sentiment using simple price-volume momentum for strong ML signals
 ///
-/// CORRECTED APPROACH: Uses sequence as baseline, horizon as target measurement.
-/// Creates strong ratio-based signals that are easier for LSTM to learn.
+/// SIMPLE APPROACH: Direct price momentum with volume conviction - research-based and ML-friendly
+/// Research: "Momentum is the difference between current price and price N periods ago"
 ///
 /// ## Algorithm
-/// 1. Calculate bullish strength for sequence (baseline context)
-/// 2. Calculate bullish strength for horizon (target measurement)
-/// 3. Compute bullish ratio = horizon_strength / sequence_strength
-/// 4. Classify using adaptive thresholds on ratio values
+/// 1. Calculate average close price for sequence (baseline) and horizon (target)
+/// 2. Calculate price momentum = (horizon_price - sequence_price) / sequence_price
+/// 3. Calculate volume conviction = horizon_volume / sequence_volume
+/// 4. Combine momentum with volume conviction for final sentiment score
+/// 5. Classify using adaptive thresholds on combined score
 ///
 /// ## Signal Strength
-/// - **Strong Signal**: Direct ratio in [0, ∞] range
-/// - **Clear Meaning**: >1 = more bullish, <1 = more bearish, =1 = same sentiment
-/// - **ML Friendly**: Consistent, predictable patterns for LSTM learning
+/// - **Strong Signal**: Direct momentum values with clear positive/negative meaning
+/// - **Volume Conviction**: Higher volume amplifies momentum signals
+/// - **ML Friendly**: Unbounded numerical range perfect for LSTM learning
 pub fn classify_sentiment(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
-    _config: &SentimentConfig, // Kept for API compatibility, will be removed in future version
+    _config: &SentimentConfig, // Kept for API compatibility
     adaptive_params: &SentimentAdaptiveParams,
 ) -> Result<i32> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
@@ -182,113 +183,111 @@ pub fn classify_sentiment(
         ));
     }
 
-    // Calculate bullish strength for both sequence (baseline) and horizon (target)
-    let sequence_bullish_strength = calculate_bullish_strength(sequence_ohlcv);
-    let horizon_bullish_strength = calculate_bullish_strength(horizon_ohlcv);
+    // Calculate simple price momentum (research-based approach)
+    let sequence_price = calculate_bullish_strength(sequence_ohlcv); // Now returns avg close
+    let horizon_price = calculate_bullish_strength(horizon_ohlcv); // Now returns avg close
 
-    // Calculate bullish ratio: horizon/sequence (with adaptive minimum baseline)
-    let baseline_strength = sequence_bullish_strength.max(adaptive_params.min_baseline_strength);
-    let bullish_ratio = horizon_bullish_strength / baseline_strength;
+    // Price momentum: percentage change from sequence to horizon
+    let price_momentum = if sequence_price > 0.0 {
+        (horizon_price - sequence_price) / sequence_price
+    } else {
+        0.0 // Avoid division by zero
+    };
 
-    // Use adaptive thresholds calibrated for balanced distribution on ratio values
-    let moderate_threshold = adaptive_params.body_sensitivity; // Now represents ratio threshold
+    // Calculate volume conviction factor
+    let sequence_volume = calculate_volume_conviction(sequence_ohlcv);
+    let horizon_volume = calculate_volume_conviction(horizon_ohlcv);
+
+    // Volume conviction: ratio of horizon to sequence volume
+    let volume_conviction = if sequence_volume > 0.0 {
+        (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0) // Log scale, clamped
+    } else {
+        0.0 // Neutral if no volume data
+    };
+
+    // Combine momentum with volume conviction (momentum is primary signal)
+    let sentiment_score = price_momentum + (volume_conviction * adaptive_params.volume_weight);
+
+    // Use adaptive thresholds for classification (same structure as before)
+    let moderate_threshold = adaptive_params.body_sensitivity; // Now represents momentum threshold
     let extreme_threshold = adaptive_params.body_sensitivity * adaptive_params.extreme_multiplier;
 
-    // Classify based on bullish ratio with clear boundaries
-    // bullish_ratio range: [0, ∞] where 1.0 = same sentiment
-    let class = if bullish_ratio <= (1.0 - extreme_threshold) {
-        0 // Strong Panic: Much less bullish than sequence
-    } else if bullish_ratio <= (1.0 - moderate_threshold) {
-        1 // Moderate Panic: Somewhat less bullish than sequence
-    } else if bullish_ratio < (1.0 + moderate_threshold) {
-        2 // Neutral: Similar bullish strength to sequence
-    } else if bullish_ratio < (1.0 + extreme_threshold) {
-        3 // Moderate Greed: Somewhat more bullish than sequence
+    // Classify based on combined sentiment score
+    let class = if sentiment_score <= -extreme_threshold {
+        0 // Strong Panic: Large negative momentum
+    } else if sentiment_score <= -moderate_threshold {
+        1 // Moderate Panic: Moderate negative momentum
+    } else if sentiment_score < moderate_threshold {
+        2 // Neutral: Small momentum in either direction
+    } else if sentiment_score < extreme_threshold {
+        3 // Moderate Greed: Moderate positive momentum
     } else {
-        4 // Strong Greed: Much more bullish than sequence
+        4 // Strong Greed: Large positive momentum
     };
 
     log::debug!(
-        "🎯 Sentiment Ratio: seq_bullish={:.4}, hor_bullish={:.4}, ratio={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
-        sequence_bullish_strength, horizon_bullish_strength, bullish_ratio,
-        1.0 - extreme_threshold, 1.0 - moderate_threshold, 1.0 + moderate_threshold, 1.0 + extreme_threshold,
+        "🎯 Simple Momentum: seq_price={:.4}, hor_price={:.4}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
+        sequence_price, horizon_price, price_momentum, volume_conviction, sentiment_score,
+        -extreme_threshold, -moderate_threshold, moderate_threshold, extreme_threshold,
         class, ["STRONG_PANIC", "MODERATE_PANIC", "NEUTRAL", "MODERATE_GREED", "STRONG_GREED"][class as usize]
     );
 
     Ok(class)
 }
 
-/// Calculate bullish strength from candles for sequence→horizon comparison
+/// Calculate average close price for momentum calculation
 ///
-/// CORRECTED APPROACH: Calculate bullish vs bearish strength for any set of candles.
-/// Used for both sequence (baseline) and horizon (target) measurements.
-///
-/// ## Core Algorithm
-/// 1. **Body Strength**: Calculate abs(close - open) / range for each candle
-/// 2. **Bullish Accumulation**: Sum body strength for bullish candles (close > open)
-/// 3. **Total Strength**: Sum all body strengths regardless of direction
-/// 4. **Bullish Ratio**: bullish_strength / total_strength
-///
-/// ## Result Range
-/// - **[0.0, 1.0]** where:
-///   - **0.0** = All strong bearish candles
-///   - **0.5** = Balanced bullish/bearish strength (neutral)
-///   - **1.0** = All strong bullish candles
-///
-/// ## Usage
-/// - **Sequence**: Establishes bullish strength baseline/context
-/// - **Horizon**: Measures target bullish strength for comparison
-/// - **Ratio**: horizon_strength / sequence_strength shows sentiment change
+/// SIMPLE APPROACH: Returns average close price for momentum calculation
+/// Used in classify_sentiment for sequence vs horizon comparison
 pub fn calculate_bullish_strength(candles: &[MarketDataRow]) -> f64 {
     if candles.is_empty() {
-        return 0.5; // Neutral if no data
+        return 0.0; // Neutral if no data
     }
 
-    let mut bullish_strength = 0.0;
-    let mut total_strength = 0.0;
-
-    for candle in candles {
-        let range = candle.high - candle.low;
-        if range <= 0.0 {
-            continue; // Skip invalid candles (no price movement)
-        }
-
-        // Calculate body strength (magnitude of price movement within range)
-        let body = candle.close - candle.open;
-        let body_strength = body.abs() / range; // [0, 1] normalized by range
-
-        // Accumulate bullish strength only for bullish candles
-        if body > 0.0 {
-            bullish_strength += body_strength;
-        }
-
-        // Always accumulate total strength (bullish + bearish)
-        total_strength += body_strength;
-    }
-
-    if total_strength > 0.0 {
-        // Return bullish ratio: [0, 1] where 0.5 = neutral
-        bullish_strength / total_strength
-    } else {
-        0.5 // Neutral if no valid candles (all dojis)
-    }
+    // Calculate average close price (simple and effective)
+    candles.iter().map(|c| c.close).sum::<f64>() / candles.len() as f64
 }
 
-/// Legacy function for backward compatibility - now uses simplified approach
+/// Calculate average volume for conviction factor
+///
+/// SIMPLE APPROACH: Returns average volume for volume conviction calculation
+/// Higher volume = higher conviction in price moves
+pub fn calculate_volume_conviction(candles: &[MarketDataRow]) -> f64 {
+    if candles.is_empty() {
+        return 1.0; // Neutral conviction if no data
+    }
+
+    // Calculate average volume
+    candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64
+}
+
+/// Legacy function for backward compatibility - now uses simple momentum approach
 pub fn calculate_sequence_sentiment_score(candles: &[MarketDataRow]) -> f64 {
-    // Convert [0, 1] bullish strength to [-1, 1] for legacy compatibility
-    let bullish_strength = calculate_bullish_strength(candles);
-    (bullish_strength - 0.5) * 2.0 // Map [0, 1] to [-1, 1]
+    // For legacy compatibility, return simple price momentum relative to first candle
+    if candles.len() < 2 {
+        return 0.0; // Neutral if insufficient data
+    }
+
+    let first_price = candles[0].close;
+    let last_price = candles[candles.len() - 1].close;
+
+    if first_price > 0.0 {
+        // Return momentum as percentage change (compatible with [-1, 1] range expected by legacy code)
+        let momentum = (last_price - first_price) / first_price;
+        momentum.clamp(-1.0, 1.0) // Clamp to expected range
+    } else {
+        0.0 // Neutral if invalid price
+    }
 }
 
-/// Legacy function for backward compatibility - now uses simplified approach
+/// Legacy function for backward compatibility - now uses simple momentum approach
 /// Calculate sentiment score with optional horizon decay weighting
 ///
 /// Note: The horizon_decay_factor parameter is kept for API compatibility but not used
-/// in the simplified ratio-based approach. Will be removed in future version.
+/// in the simplified momentum-based approach. Will be removed in future version.
 pub fn calculate_sequence_sentiment_score_with_weighting(
     candles: &[MarketDataRow],
-    _horizon_decay_factor: f64, // Kept for API compatibility, not used in ratio-based approach
+    _horizon_decay_factor: f64, // Kept for API compatibility, not used in momentum-based approach
 ) -> f64 {
     calculate_sequence_sentiment_score(candles)
 }
@@ -399,92 +398,239 @@ fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
     );
 }
 
-/// Calibrate sentiment sensitivity for balanced class distribution
+/// Calibrate sentiment sensitivity for balanced class distribution using momentum approach
 ///
-/// This function analyzes historical sentiment momentum shifts to find the optimal body_sensitivity
-/// parameter that achieves balanced class distribution (approximately 20% per class).
+/// OPTIMAL APPROACH: Iteratively tests different parameter combinations to find the best
+/// balance for momentum-based sentiment classification. Now calibrates ALL parameters.
 ///
 /// ## Algorithm
-/// 1. Sample momentum shifts from historical data using the same logic as target generation
-/// 2. Sort momentum shifts to find percentile boundaries
-/// 3. Calculate sensitivity that maps percentiles to the 5-class system
-/// 4. Apply reasonable bounds and return calibrated parameter
+/// 1. Calculate all momentum and volume data from historical sequences
+/// 2. Test multiple combinations of sensitivity, volume_weight, and extreme_multiplier
+/// 3. For each combination, simulate classification and measure balance quality
+/// 4. Return parameters that achieve closest to 20% per class distribution
 ///
 /// ## Parameters
-/// - `ohlcv_data`: Historical OHLCV data for sentiment analysis
+/// - `ohlcv_data`: Historical OHLCV data for momentum analysis
 /// - `sequence_length`: Length of input sequences
 /// - `horizon_steps`: Number of steps in prediction horizon
-/// - `target_balance`: Target percentage for extreme classes (e.g., 0.15 for 15%)
+/// - `target_balance`: Target percentage per class (0.2 for 20% per class)
 ///
 /// ## Returns
-/// Calibrated body_sensitivity parameter for balanced sentiment classification
+/// Calibrated body_sensitivity parameter (other optimal params available via get_optimal_* functions)
 pub fn calibrate_sentiment_sensitivity(
     ohlcv_data: &[MarketDataRow],
     sequence_length: usize,
     horizon_steps: usize,
     target_balance: f64,
 ) -> Result<f64> {
-    if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
-        return Ok(0.3); // Default for momentum-based approach
+    let (sensitivity, volume_weight, extreme_multiplier) = calibrate_all_sentiment_parameters(
+        ohlcv_data,
+        sequence_length,
+        horizon_steps,
+        target_balance,
+    )?;
+
+    // Store optimal parameters in thread-local storage for retrieval
+    OPTIMAL_PARAMS.with(|params| {
+        let mut p = params.borrow_mut();
+        p.volume_weight = volume_weight;
+        p.extreme_multiplier = extreme_multiplier;
+    });
+
+    Ok(sensitivity)
+}
+
+/// Internal structure for optimal parameters
+#[derive(Debug, Clone)]
+struct OptimalParams {
+    volume_weight: f64,
+    extreme_multiplier: f64,
+}
+
+impl Default for OptimalParams {
+    fn default() -> Self {
+        Self {
+            volume_weight: 0.1,
+            extreme_multiplier: 2.0,
+        }
+    }
+}
+
+// Thread-local storage for optimal parameters (safer than global unsafe)
+use std::cell::RefCell;
+thread_local! {
+    static OPTIMAL_PARAMS: RefCell<OptimalParams> = RefCell::new(OptimalParams::default());
+}
+
+/// Get the optimal volume weight found during calibration
+pub fn get_optimal_volume_weight() -> f64 {
+    OPTIMAL_PARAMS.with(|params| params.borrow().volume_weight)
+}
+
+/// Get the optimal extreme multiplier found during calibration
+pub fn get_optimal_extreme_multiplier() -> f64 {
+    OPTIMAL_PARAMS.with(|params| params.borrow().extreme_multiplier)
+}
+
+/// Internal function that calibrates all parameters and returns them as tuple
+fn calibrate_all_sentiment_parameters(
+    ohlcv_data: &[MarketDataRow],
+    sequence_length: usize,
+    horizon_steps: usize,
+    target_balance: f64,
+) -> Result<(f64, f64, f64)> {
+    if ohlcv_data.len() < sequence_length + horizon_steps + 50 {
+        return Ok((0.02, 0.1, 2.0)); // Default parameters
     }
 
-    let mut momentum_shifts = Vec::new();
+    // Collect all momentum and volume data for testing
+    let mut test_data = Vec::new();
 
-    // Sample momentum shifts from the data using same logic as target generation
     for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
         let sequence_ohlcv = &ohlcv_data[i..i + sequence_length];
         let horizon_ohlcv = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
         if sequence_ohlcv.len() >= 3 && horizon_ohlcv.len() >= 3 {
-            let seq_sentiment = calculate_sequence_sentiment_score(sequence_ohlcv);
-            let hor_sentiment = calculate_sequence_sentiment_score(horizon_ohlcv);
+            let sequence_price = calculate_bullish_strength(sequence_ohlcv);
+            let horizon_price = calculate_bullish_strength(horizon_ohlcv);
+            let sequence_volume = calculate_volume_conviction(sequence_ohlcv);
+            let horizon_volume = calculate_volume_conviction(horizon_ohlcv);
 
-            let momentum_shift = hor_sentiment - seq_sentiment;
-            if momentum_shift.is_finite() {
-                momentum_shifts.push(momentum_shift.abs()); // Use absolute for threshold calculation
+            if sequence_price > 0.0 && sequence_volume > 0.0 {
+                let momentum = (horizon_price - sequence_price) / sequence_price;
+                let volume_conviction = (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0);
+
+                if momentum.is_finite() && volume_conviction.is_finite() {
+                    test_data.push((momentum, volume_conviction));
+                }
             }
         }
     }
 
-    if momentum_shifts.is_empty() {
-        return Ok(0.3); // Default fallback for momentum approach
+    if test_data.len() < 100 {
+        return Ok((0.02, 0.1, 2.0)); // Need sufficient data for calibration
     }
 
-    // Sort shifts to find percentiles for balanced distribution
-    momentum_shifts.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = momentum_shifts.len();
+    // Test different parameter combinations to find optimal balance
+    let sensitivity_candidates = vec![
+        0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.08,
+    ];
+    let volume_weight_candidates = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
+    let extreme_multiplier_candidates = vec![1.5, 1.8, 2.0, 2.2, 2.5, 3.0];
 
-    // For 5-class system with target_balance in extreme classes:
-    // - Classes 0 & 4: target_balance each (e.g., 15% each)
-    // - Classes 1 & 3: (0.5 - target_balance) / 2 each (e.g., 17.5% each)
-    // - Class 2: Remaining (e.g., 35%)
-
-    // Find the percentile that separates moderate from extreme classes
-    let moderate_percentile = 0.5 - target_balance; // e.g., 0.35 for 15% extreme
-    let moderate_idx = ((n as f64) * moderate_percentile) as usize;
-    let moderate_threshold = momentum_shifts[moderate_idx.min(n - 1)];
-
-    // Find the percentile for extreme classes
-    let extreme_percentile = 1.0 - target_balance; // e.g., 0.85 for 15% extreme
-    let extreme_idx = ((n as f64) * extreme_percentile) as usize;
-    let extreme_threshold = momentum_shifts[extreme_idx.min(n - 1)];
-
-    // The base sensitivity should be the moderate threshold
-    // This ensures the moderate classes capture the right percentage
-    let base_sensitivity = moderate_threshold;
-
-    // Ensure reasonable bounds for momentum-based approach
-    let final_sensitivity = base_sensitivity.clamp(0.1, 0.8);
+    let mut best_sensitivity = 0.02;
+    let mut best_volume_weight = 0.1;
+    let mut best_extreme_multiplier = 2.0;
+    let mut best_balance_score = f64::INFINITY;
 
     log::info!(
-        "🎯 Calibrated sentiment sensitivity: {:.4} (from {} samples, moderate: {:.4}, extreme: {:.4})",
-        final_sensitivity,
-        n,
-        moderate_threshold,
-        extreme_threshold
+        "🔍 Testing {} parameter combinations for optimal sentiment calibration...",
+        sensitivity_candidates.len()
+            * volume_weight_candidates.len()
+            * extreme_multiplier_candidates.len()
     );
 
-    Ok(final_sensitivity)
+    for &sensitivity in &sensitivity_candidates {
+        for &volume_weight in &volume_weight_candidates {
+            for &extreme_multiplier in &extreme_multiplier_candidates {
+                // Test this parameter combination
+                let balance_score = test_parameter_combination_full(
+                    &test_data,
+                    sensitivity,
+                    volume_weight,
+                    extreme_multiplier,
+                    target_balance,
+                );
+
+                if balance_score < best_balance_score {
+                    best_balance_score = balance_score;
+                    best_sensitivity = sensitivity;
+                    best_volume_weight = volume_weight;
+                    best_extreme_multiplier = extreme_multiplier;
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "🎯 Optimal sentiment parameters: sensitivity={:.4}, volume_weight={:.3}, extreme_multiplier={:.2}, balance_score={:.4}",
+        best_sensitivity, best_volume_weight, best_extreme_multiplier, best_balance_score
+    );
+
+    Ok((
+        best_sensitivity,
+        best_volume_weight,
+        best_extreme_multiplier,
+    ))
+}
+
+/// Test a specific parameter combination and return balance quality score
+fn test_parameter_combination_full(
+    test_data: &[(f64, f64)], // (momentum, volume_conviction) pairs
+    sensitivity: f64,
+    volume_weight: f64,
+    extreme_multiplier: f64,
+    target_balance: f64,
+) -> f64 {
+    let mut class_counts = [0usize; 5];
+    let extreme_threshold = sensitivity * extreme_multiplier; // Now calibrated!
+
+    // Classify all test samples with these parameters
+    for &(momentum, volume_conviction) in test_data {
+        let sentiment_score = momentum + (volume_conviction * volume_weight);
+
+        let class = if sentiment_score <= -extreme_threshold {
+            0 // Strong Panic
+        } else if sentiment_score <= -sensitivity {
+            1 // Moderate Panic
+        } else if sentiment_score < sensitivity {
+            2 // Neutral
+        } else if sentiment_score < extreme_threshold {
+            3 // Moderate Greed
+        } else {
+            4 // Strong Greed
+        };
+
+        class_counts[class] += 1;
+    }
+
+    // Calculate balance quality score (lower is better)
+    let total_samples = test_data.len() as f64;
+
+    let mut balance_score = 0.0f64;
+
+    for count in class_counts {
+        let actual_percentage = (count as f64) / total_samples;
+        let deviation = (actual_percentage - target_balance).abs();
+        balance_score += deviation * deviation; // Squared deviation penalty
+    }
+
+    // Log best candidates for debugging
+    if balance_score < 0.05 {
+        // Only log very good candidates
+        let percentages: Vec<String> = class_counts
+            .iter()
+            .enumerate()
+            .map(|(i, &count)| {
+                format!(
+                    "{}:{:.1}%",
+                    ["SP", "MP", "N", "MG", "SG"][i],
+                    (count as f64 / total_samples) * 100.0
+                )
+            })
+            .collect();
+
+        log::debug!(
+            "🔍 Good candidate: sens={:.4}, vol_wt={:.3}, ext_mult={:.2}, score={:.4}, dist=[{}]",
+            sensitivity,
+            volume_weight,
+            extreme_multiplier,
+            balance_score,
+            percentages.join(", ")
+        );
+    }
+
+    balance_score
 }
 
 /// Get sentiment class names in order
@@ -519,10 +665,10 @@ pub struct SentimentReconstruction {
     pub sentiment_interpretation: String,
 }
 
-/// Reconstruct sentiment from model probabilities using ratio-based approach
+/// Reconstruct sentiment from model probabilities using momentum-based approach
 ///
-/// This method reverses the new ratio-based classification logic to convert
-/// raw model probabilities back to meaningful bullish strength ratios and sentiment metrics.
+/// This method reverses the new momentum-based classification logic to convert
+/// raw model probabilities back to meaningful price momentum and sentiment metrics.
 ///
 /// # Arguments
 /// * `probabilities` - 5-element array of class probabilities [Strong Panic, Moderate Panic, Neutral, Moderate Greed, Strong Greed]
@@ -530,7 +676,7 @@ pub struct SentimentReconstruction {
 /// * `adaptive_params` - Adaptive parameters used during training (for threshold calculation)
 ///
 /// # Returns
-/// * `SentimentReconstruction` - Complete reconstruction with bullish ratios and sentiment metrics
+/// * `SentimentReconstruction` - Complete reconstruction with momentum values and sentiment metrics
 pub fn reconstruct_sentiment(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
@@ -548,47 +694,47 @@ pub fn reconstruct_sentiment(
         ));
     }
 
-    // Calculate sequence bullish strength baseline (same as training)
-    let sequence_bullish_strength = calculate_bullish_strength(sequence_ohlcv);
-    let baseline_strength = sequence_bullish_strength.max(adaptive_params.min_baseline_strength); // Same minimum as training
+    // Calculate sequence baseline price (same as training)
+    let sequence_price = calculate_bullish_strength(sequence_ohlcv); // Now returns avg close
 
     // Use adaptive parameters for threshold calculation (same as training)
     let moderate_threshold = adaptive_params.body_sensitivity;
     let extreme_threshold = adaptive_params.body_sensitivity * adaptive_params.extreme_multiplier;
 
-    // Define bullish ratio ranges for each class (reverse of classification logic)
-    let ratio_ranges = [
-        [0.0, 1.0 - extreme_threshold], // Strong Panic: Much less bullish
-        [1.0 - extreme_threshold, 1.0 - moderate_threshold], // Moderate Panic: Somewhat less bullish
-        [1.0 - moderate_threshold, 1.0 + moderate_threshold], // Neutral: Similar bullish strength
-        [1.0 + moderate_threshold, 1.0 + extreme_threshold], // Moderate Greed: Somewhat more bullish
-        [1.0 + extreme_threshold, f64::INFINITY],            // Strong Greed: Much more bullish
-    ];
-    // Calculate representative bullish ratios for each class (midpoints)
-    // These ranges are used to determine expected values for reconstruction
-    let class_ratio_midpoints = [
-        (1.0 - extreme_threshold) * 0.75, // Strong Panic
-        (1.0 - extreme_threshold + 1.0 - moderate_threshold) / 2.0, // Moderate Panic
-        1.0,                              // Neutral (same as sequence)
-        (1.0 + moderate_threshold + 1.0 + extreme_threshold) / 2.0, // Moderate Greed
-        (1.0 + extreme_threshold) * 1.25, // Strong Greed
+    // Define momentum ranges for each class (reverse of classification logic)
+    let momentum_ranges = [
+        [-f64::INFINITY, -extreme_threshold], // Strong Panic: Large negative momentum
+        [-extreme_threshold, -moderate_threshold], // Moderate Panic: Moderate negative momentum
+        [-moderate_threshold, moderate_threshold], // Neutral: Small momentum
+        [moderate_threshold, extreme_threshold], // Moderate Greed: Moderate positive momentum
+        [extreme_threshold, f64::INFINITY],   // Strong Greed: Large positive momentum
     ];
 
-    // Convert ratio ranges to sentiment ranges (for compatibility)
-    let sentiment_ranges: Vec<[f64; 2]> = ratio_ranges
+    // Calculate representative momentum values for each class (midpoints)
+    let class_momentum_midpoints = [
+        -extreme_threshold * 1.5,                        // Strong Panic
+        -(extreme_threshold + moderate_threshold) / 2.0, // Moderate Panic
+        0.0,                                             // Neutral
+        (moderate_threshold + extreme_threshold) / 2.0,  // Moderate Greed
+        extreme_threshold * 1.5,                         // Strong Greed
+    ];
+
+    // Convert momentum ranges to sentiment ranges (for compatibility)
+    let sentiment_ranges: Vec<[f64; 2]> = momentum_ranges
         .iter()
         .map(|&[low, high]| {
-            let low_sentiment = if low == 0.0 {
-                0.0
+            // Convert momentum to expected price ranges
+            let low_price = if low == -f64::INFINITY {
+                sequence_price * 0.5 // Assume 50% drop for extreme panic
             } else {
-                low * baseline_strength
+                sequence_price * (1.0 + low)
             };
-            let high_sentiment = if high == f64::INFINITY {
-                1.0
+            let high_price = if high == f64::INFINITY {
+                sequence_price * 2.0 // Assume 100% gain for extreme greed
             } else {
-                high * baseline_strength
+                sequence_price * (1.0 + high)
             };
-            [low_sentiment, high_sentiment]
+            [low_price.max(0.0), high_price.max(0.0)]
         })
         .collect();
 
@@ -602,23 +748,23 @@ pub fn reconstruct_sentiment(
 
     let confidence = probabilities[most_likely_class];
 
-    // Calculate expected bullish ratio (weighted average)
-    let expected_ratio = probabilities
+    // Calculate expected momentum (weighted average)
+    let expected_momentum = probabilities
         .iter()
-        .zip(class_ratio_midpoints.iter())
-        .map(|(prob, ratio)| prob * ratio)
+        .zip(class_momentum_midpoints.iter())
+        .map(|(prob, momentum)| prob * momentum)
         .sum::<f64>();
 
-    // Convert expected ratio back to sentiment score for compatibility
-    let expected_sentiment = expected_ratio * baseline_strength;
+    // Convert expected momentum back to sentiment score for compatibility
+    let expected_sentiment = expected_momentum; // Direct momentum value
 
     // Generate interpretation
     let class_names = get_sentiment_class_names();
     let sentiment_interpretation = format!(
-        "{} (confidence: {:.1}%, ratio: {:.3})",
+        "{} (confidence: {:.1}%, momentum: {:.3}%)",
         class_names[most_likely_class],
         confidence * 100.0,
-        class_ratio_midpoints[most_likely_class]
+        class_momentum_midpoints[most_likely_class] * 100.0
     );
 
     Ok(SentimentReconstruction {

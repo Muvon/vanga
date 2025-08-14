@@ -551,34 +551,46 @@ impl ParameterCalibrator {
         &self,
         context: &EvaluationContext<'_>,
     ) -> Result<SentimentParams> {
-        log::debug!("Calibrating sentiment parameters with percentile analysis...");
+        log::debug!("Calibrating sentiment parameters with comprehensive optimization...");
 
-        // Use the CORRECT calibration from sentiment.rs that calculates actual percentiles
-        use crate::targets::sentiment::calibrate_sentiment_sensitivity;
+        // Use the ENHANCED calibrate_sentiment_sensitivity that now optimizes ALL parameters
+        use crate::targets::sentiment::{
+            calibrate_sentiment_sensitivity, get_optimal_extreme_multiplier,
+            get_optimal_volume_weight,
+        };
 
-        // Calculate the proper sensitivity from actual data percentiles
-        let calibrated_sensitivity = calibrate_sentiment_sensitivity(
+        // This now finds optimal sensitivity, volume_weight, AND extreme_multiplier
+        let optimal_sensitivity = calibrate_sentiment_sensitivity(
             context.ohlcv_data,
             context.sequence_length,
             context.horizon_steps,
-            0.2, // target_balance (unused in the function)
+            0.2, // target 20% per class
         )?;
 
-        // Test this calibrated value to get the actual class distribution
+        // Get the other optimal parameters found during calibration
+        let optimal_volume_weight = get_optimal_volume_weight();
+        let optimal_extreme_multiplier = get_optimal_extreme_multiplier();
+
+        // Test the optimal parameters to get actual class distribution
         let balance = self.evaluate_sentiment_params(
             context,
             &SentimentEvalParams {
-                sensitivity: calibrated_sensitivity,
-                volume_weight: 0.1,
-                consistency_factor: 0.8,
+                sensitivity: optimal_sensitivity,
+                volume_weight: optimal_volume_weight,
+                consistency_factor: 0.8, // Keep this fixed for now
             },
         )?;
 
+        log::info!(
+            "🎯 Comprehensive sentiment calibration complete: sensitivity={:.4}, volume_weight={:.3}, extreme_multiplier={:.2}",
+            optimal_sensitivity, optimal_volume_weight, optimal_extreme_multiplier
+        );
+
         Ok(SentimentParams {
-            body_sensitivity: calibrated_sensitivity,
-            volume_weight: 0.1,
+            body_sensitivity: optimal_sensitivity,
+            volume_weight: optimal_volume_weight, // Now optimized!
             consistency_factor: 0.8,
-            extreme_multiplier: 2.0, // Standard extreme multiplier for sentiment
+            extreme_multiplier: optimal_extreme_multiplier, // Now optimized! No more magic numbers!
             balance,
         })
     }
