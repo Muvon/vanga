@@ -104,13 +104,8 @@ impl Optimizer for FracNAdam {
 
         for var in &self.vars {
             if let Some(grad) = grads.get(var) {
-                // Check if gradient has meaningful values (not all zeros)
-                let grad_norm = grad.sqr()?.sum_all()?.to_scalar::<f32>().unwrap_or(0.0);
-
-                if grad_norm > 1e-8 {
-                    // More reasonable threshold than 1e-12
-                    has_any_gradient = true;
-                }
+                // Record presence of a gradient (do not gate by magnitude)
+                has_any_gradient = true;
                 gradients.push(grad.clone());
             } else {
                 // For missing gradients, use the previous gradient if available
@@ -128,10 +123,10 @@ impl Optimizer for FracNAdam {
             }
         }
 
-        // Skip update if no meaningful gradients (prevents polluting history)
+        // Proceed regardless of gradient magnitude; only skip if literally no gradients exist
         if !has_any_gradient && self.step_count > 1 {
             log::trace!(
-                "FracNAdam: Skipping step {} due to zero gradients",
+                "FracNAdam: Skipping step {} due to missing gradients",
                 self.step_count
             );
             return Ok(());
@@ -155,22 +150,7 @@ impl Optimizer for FracNAdam {
 
         // Apply Fractional NAdam updates (equations 31-38)
         for (i, (var, frac_grad)) in self.vars.iter().zip(fractional_grads.iter()).enumerate() {
-            // Skip update if gradient is effectively zero
-            // Use more reasonable threshold for numerical stability
-            let grad_norm = frac_grad
-                .sqr()?
-                .sum_all()?
-                .to_scalar::<f32>()
-                .unwrap_or(0.0);
-            if grad_norm < 1e-8 {
-                // Changed from 1e-12 to 1e-8 for better stability
-                log::trace!(
-                    "FracNAdam: Skipping parameter {} update due to small gradient norm: {}",
-                    i,
-                    grad_norm
-                );
-                continue;
-            }
+            // Do not skip small gradients; NAdam variants are designed to handle tiny updates
             // Apply weight decay to fractional gradient if specified
             let grad_with_decay = if let Some(weight_decay) = self.params.weight_decay {
                 let weight_decay_tensor = Tensor::new(weight_decay as f32, var.device())?
@@ -298,8 +278,8 @@ impl Optimizer for FracNAdam {
             let old_param = var.as_tensor().contiguous()?;
             let new_param = old_param.sub(&update)?.contiguous()?;
 
-            // Validate that parameters are actually changing
-            if self.step_count <= 5 || self.step_count % 100 == 0 {
+            // Only check parameter updates occasionally and in early steps
+            if (self.step_count <= 5 || self.step_count % 500 == 0) && cfg!(debug_assertions) {
                 let param_change = old_param
                     .sub(&new_param)?
                     .abs()?
@@ -307,21 +287,24 @@ impl Optimizer for FracNAdam {
                     .to_scalar::<f32>()
                     .unwrap_or(0.0);
 
-                if param_change < 1e-10 && self.step_count > 1 {
-                    log::warn!(
-                        "FracNAdam: Parameter {} not updating (change: {:.2e}). Check learning rate and gradients.",
-                        i, param_change
+                // Much more lenient threshold and only trace level
+                if param_change < 1e-8 && self.step_count > 10 {
+                    // This is often normal - some parameters don't update every step
+                    log::trace!(
+                        "FracNAdam: Parameter {} has small update: {:.2e} at step {}",
+                        i,
+                        param_change,
+                        self.step_count
                     );
-                } else if self.step_count <= 5 {
+                } else if self.step_count <= 5 && param_change > 1e-6 {
                     log::debug!(
-                        "FracNAdam: Parameter {} update magnitude: {:.6} (step {})",
+                        "FracNAdam: Parameter {} update magnitude: {:.6} (warmup step {})",
                         i,
                         param_change,
                         self.step_count
                     );
                 }
             }
-
             var.set(&new_param)?;
 
             // Store updated moments

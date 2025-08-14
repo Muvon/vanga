@@ -11,7 +11,13 @@
 
 pub mod feature_selection;
 pub mod frac_adam;
+#[cfg(test)]
+mod frac_adam_test;
+#[cfg(test)]
+mod frac_integration_test;
 pub mod frac_nadam;
+#[cfg(test)]
+mod frac_nadam_test;
 pub mod fractional;
 pub mod hyperparameter;
 pub mod objective;
