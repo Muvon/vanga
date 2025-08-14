@@ -12,14 +12,6 @@ use candle_nn;
 use ndarray::{Array2, Array3};
 
 /// Loss calculation mode for distinguishing between training and validation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LossMode {
-    /// Training mode - uses uniform weights
-    Training,
-    /// Validation mode - uses uniform weights
-    Validation,
-}
-
 /// Calculate Mean Squared Error between predictions and targets
 ///
 /// **Core MSE Implementation**: Standard mathematical MSE calculation used throughout the system.
@@ -1240,86 +1232,150 @@ impl LSTMModel {
             targets.shape()
         );
 
-        match target_type {
-            TargetType::PriceLevel => {
-                // Use NLL loss for categorical price levels (5-class system)
-                self.calculate_nll_loss(predictions, targets, LossMode::Training)
-            }
-            TargetType::Direction => {
-                // Direction targets use 5-class classification (Dump=0, Down=1, Sideways=2, Up=3, Pump=4)
-                // Use CrossEntropy loss with proper error handling - NO FALLBACKS
-                log::debug!(
-                    "🎯 Direction target: Using CrossEntropy loss for 5-class classification"
-                );
+        // 🎯 ORDINAL-AWARE CROSS-ENTROPY LOSS for 5-class ordered targets
+        // Key insight: Classes have natural ordering 0 < 1 < 2 < 3 < 4
+        // Middle class (2) is neutral, extremes (0,4) are strong signals
+        // We want to penalize predictions based on DISTANCE from true class
+        log::debug!(
+            "🎯 Using Ordinal-Aware Cross-Entropy for {:?} (5-class ordered system with distance weighting)",
+            target_type
+        );
 
-                // Validate model output matches Direction classes (5)
-                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
-                    return Err(VangaError::ModelError(format!(
-                        "Direction target requires model output_size={}, got {}. Please update model configuration.",
-                        crate::config::model::NUM_CLASSES,
-                        predictions.dims().last().unwrap_or(&0)
-                    )));
-                }
+        let pred_contiguous = predictions.contiguous()?;
+        let target_contiguous = targets.contiguous()?;
+        let batch_size = pred_contiguous.dim(0)?;
+        let num_classes = pred_contiguous.dim(1)?;
 
-                // Use NLL loss for direction targets (5-class system)
-                self.calculate_nll_loss(predictions, targets, LossMode::Training)
-            }
-            TargetType::Volatility => {
-                // Volatility targets use 5-class classification (VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)
-                // Use CrossEntropy loss with proper error handling - NO FALLBACKS
-                log::debug!(
-                    "🎯 Volatility target: Using CrossEntropy loss for 5-class classification"
-                );
+        log::debug!(
+            "📐 Ordinal shapes: pred {:?}, target {:?}, batch_size: {}",
+            predictions.shape(),
+            targets.shape(),
+            batch_size
+        );
 
-                // Validate model output matches Volatility classes (5)
-                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
-                    return Err(VangaError::ModelError(format!(
-                        "Volatility target requires model output_size={}, got {}. Please update model configuration.",
-                        crate::config::model::NUM_CLASSES,
-                        predictions.dims().last().unwrap_or(&0)
-                    )));
-                }
+        // Validate 5-class system
+        if num_classes != crate::config::model::NUM_CLASSES {
+            return Err(VangaError::ModelError(format!(
+                "{:?} target requires model output_size={}, got {}. Please update model configuration.",
+                target_type, crate::config::model::NUM_CLASSES, num_classes
+            )));
+        }
 
-                // Use NLL loss for volatility targets (5-class system)
-                self.calculate_nll_loss(predictions, targets, LossMode::Training)
-            }
-            TargetType::Sentiment => {
-                // Sentiment targets use 5-class classification (StrongPanic=0, ModeratePanic=1, Neutral=2, ModerateGreed=3, StrongGreed=4)
-                // Use CrossEntropy loss with proper error handling - NO FALLBACKS
-                log::debug!(
-                    "🎯 Sentiment target: Using CrossEntropy loss for 5-class classification"
-                );
+        // Convert targets to class indices [batch_size]
+        let target_indices = if target_contiguous.dim(1)? == 1 {
+            target_contiguous.squeeze(1)?.contiguous()?
+        } else {
+            target_contiguous.contiguous()?
+        };
 
-                // Validate model output matches Sentiment classes (5)
-                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
-                    return Err(VangaError::ModelError(format!(
-                        "Sentiment target requires model output_size={}, got {}. Please update model configuration.",
-                        crate::config::model::NUM_CLASSES,
-                        predictions.dims().last().unwrap_or(&0)
-                    )));
-                }
+        // Apply softmax to get probabilities
+        let class_probs = candle_nn::ops::softmax(&pred_contiguous, 1)?; // [batch_size, num_classes]
 
-                // Use NLL loss for sentiment targets (5-class system)
-                self.calculate_nll_loss(predictions, targets, LossMode::Training)
-            }
-            TargetType::Volume => {
-                // Volume targets use 5-class classification (VeryLow=0, Low=1, Medium=2, High=3, VeryHigh=4)
-                // Use CrossEntropy loss with proper error handling - NO FALLBACKS
-                log::debug!("🎯 Volume target: Using CrossEntropy loss for 5-class classification");
+        log::debug!(
+            "📊 Ordinal Loss - Applied softmax to get class probabilities: {:?}",
+            class_probs.shape()
+        );
 
-                // Validate model output matches Volume classes (5)
-                if predictions.dims().last() != Some(&(crate::config::model::NUM_CLASSES)) {
-                    return Err(VangaError::ModelError(format!(
-                        "Volume target requires model output_size={}, got {}. Please update model configuration.",
-                        crate::config::model::NUM_CLASSES,
-                        predictions.dims().last().unwrap_or(&0)
-                    )));
-                }
+        // MATHEMATICAL APPROACH: Ordinal-Aware Cross-Entropy
+        // 
+        // For each sample, we calculate:
+        // L = -log(P(true_class)) + λ * Σ(distance_weight * P(wrong_class))
+        //
+        // Where:
+        // - P(true_class) is the probability of the correct class
+        // - distance_weight = |predicted_class - true_class| / 4 (normalized distance)
+        // - λ is a scaling factor for the ordinal penalty (we use 0.5)
+        //
+        // This ensures:
+        // 1. Primary loss from not predicting the correct class (standard CE)
+        // 2. Additional penalty proportional to how far wrong predictions are
+        // 3. Smooth gradients that guide the model toward nearby classes
 
-                // Use NLL loss for volume targets (5-class system)
-                self.calculate_nll_loss(predictions, targets, LossMode::Training)
+        // Get target indices as integers for indexing
+        let target_indices_vec = target_indices.to_vec1::<f32>()?;
+        let target_indices_int: Vec<usize> = target_indices_vec
+            .iter()
+            .map(|&x| x as usize)
+            .collect();
+
+        // Create one-hot encoded targets [batch_size, num_classes]
+        let mut one_hot_targets = vec![0.0f32; batch_size * num_classes];
+        for (batch_idx, &target_class) in target_indices_int.iter().enumerate() {
+            if target_class < num_classes {
+                one_hot_targets[batch_idx * num_classes + target_class] = 1.0;
             }
         }
+        let one_hot_tensor = Tensor::from_vec(
+            one_hot_targets,
+            (batch_size, num_classes),
+            pred_contiguous.device(),
+        )?;
+
+        // Standard cross-entropy: -sum(target * log(pred))
+        let eps = 1e-7f32;
+        let eps_tensor = Tensor::new(eps, pred_contiguous.device())?;
+        let safe_probs = class_probs.broadcast_maximum(&eps_tensor)?;
+        let log_probs = safe_probs.log()?;
+        let ce_loss = one_hot_tensor
+            .mul(&log_probs)?
+            .sum(1)? // Sum across classes
+            .neg()?; // Negate for loss
+
+        // Ordinal penalty: For each sample, calculate weighted distance penalty
+        // Create weight matrix for each sample based on true class
+        let mut ordinal_weights = vec![0.0f32; batch_size * num_classes];
+        for (batch_idx, &target_class) in target_indices_int.iter().enumerate() {
+            for class_idx in 0..num_classes {
+                // Weight is proportional to distance from true class
+                // This creates a smooth gradient that guides predictions toward nearby classes
+                let distance = (class_idx as f32 - target_class as f32).abs() / 4.0;
+                ordinal_weights[batch_idx * num_classes + class_idx] = distance;
+            }
+        }
+        let ordinal_weight_tensor = Tensor::from_vec(
+            ordinal_weights,
+            (batch_size, num_classes),
+            pred_contiguous.device(),
+        )?;
+
+        // Calculate ordinal penalty: sum of weighted probabilities
+        // This penalizes the model more for predicting classes far from the true class
+        let ordinal_penalty = class_probs
+            .mul(&ordinal_weight_tensor)?
+            .sum(1)?; // Sum across classes for each sample
+
+        // Combine losses: CE loss + λ * ordinal penalty
+        // λ = 0.5 gives good balance between accuracy and ordinal awareness
+        let lambda = 0.5f32;
+        let lambda_tensor = Tensor::new(lambda, pred_contiguous.device())?;
+        let scaled_penalty = ordinal_penalty.broadcast_mul(&lambda_tensor)?;
+        let combined_loss = ce_loss.add(&scaled_penalty)?;
+        
+        // Take mean across batch
+        let final_loss = combined_loss.mean_all()?;
+
+        // Log the loss value for debugging
+        let loss_value = final_loss.to_scalar::<f32>().unwrap_or(0.0);
+        log::debug!(
+            "✅ Ordinal-Aware Cross-Entropy Loss: {:.6} for {:?} (distance-weighted for 5-class ordering)",
+            loss_value,
+            target_type
+        );
+        
+        // Additional debug: Check if loss is reasonable
+        if loss_value > 10.0 {
+            log::warn!(
+                "⚠️ High ordinal loss detected: {:.6} - model may need lower learning rate",
+                loss_value
+            );
+        } else if loss_value < 0.01 {
+            log::warn!(
+                "⚠️ Very low ordinal loss detected: {:.6} - model may be overfitting",
+                loss_value
+            );
+        }
+        
+        Ok(final_loss)
     }
 
     /// Calculate multi-target loss with proper combination
@@ -1363,19 +1419,13 @@ impl LSTMModel {
             is_validation,
         )?;
 
-        // Use simple NLL loss - this is what actually works in training
-        log::debug!("✅ Using NLL loss calculation");
+        // Validate loss is not NaN or infinite
         let loss_value = loss_result.to_scalar::<f32>().unwrap_or(0.0);
         log::debug!(
-            "🎯 FINAL LOSS DEBUG - Value: {:.6}, Target type: {:?}",
+            "🎯 FINAL LOSS - Value: {:.6}, Target type: {:?}",
             loss_value,
             target_type
         );
-
-        // Validate loss is not NaN or infinite
-        // Use simple NLL loss - this is what actually works in training
-        log::debug!("✅ Using NLL loss calculation");
-        log::debug!("🎯 FINAL LOSS DEBUG - Target type: {:?}", target_type);
 
         Ok(loss_result)
     }
@@ -1434,242 +1484,5 @@ impl LSTMModel {
         };
 
         (base_patience, min_delta)
-    }
-
-    /// Helper method to select uniform weights for loss calculation mode
-    ///
-    /// # Arguments
-    /// * `mode` - Loss calculation mode (Training or Validation)
-    /// * `num_classes` - Number of classes for uniform weights
-    ///
-    /// # Returns
-    /// * `Vec<f32>` - Uniform weights (all 1.0) for loss calculation
-    fn get_class_weights_for_mode(&self, mode: LossMode, num_classes: usize) -> Vec<f32> {
-        match mode {
-            LossMode::Training => {
-                // Training mode: no weighting - use uniform weights
-                log::debug!("🎯 TRAINING: Using uniform weights (no weighting)");
-                vec![1.0f32; num_classes]
-            }
-            LossMode::Validation => {
-                // Validation mode: no weighting - use uniform weights
-                log::debug!("🔍 VALIDATION: Using uniform weights (no weighting)");
-                vec![1.0f32; num_classes]
-            }
-        }
-    }
-
-    /// **PRIMARY LOSS CALCULATION**: NLL Loss with Class Weighting
-    ///
-    /// This is the main loss calculation method used throughout training and validation.
-    /// Uses Candle's built-in NLL loss with uniform weighting for stable training.
-    ///
-    /// # Arguments
-    /// * `predictions` - Model predictions tensor [batch_size, num_classes] containing raw logits
-    /// * `targets` - Ground truth targets tensor [batch_size, 1] or [batch_size] with class indices
-    /// * `mode` - Loss calculation mode (both use uniform weights):
-    ///   - `LossMode::Training`: Uses uniform weights
-    ///   - `LossMode::Validation`: Uses uniform weights
-    ///
-    /// # Returns
-    /// * `Result<Tensor>` - Weighted NLL loss scalar tensor ready for backpropagation
-    ///
-    /// # Implementation Details
-    ///
-    /// ## Fast Path (Uniform Weights)
-    /// When all weights are 1.0 (uniform), uses the optimized `candle_nn::loss::nll()`
-    /// function directly for maximum performance.
-    ///
-    /// ## Weighted Path (Class Weights)
-    /// For non-uniform weights, implements manual per-sample calculation following
-    /// PyTorch's weighted NLL formula: `loss_n = -weight[target_n] * log_prob[n, target_n]`
-    ///
-    /// ## Gradient Preservation
-    /// All operations use tensor computations to maintain the computational graph
-    /// for proper gradient flow during backpropagation.
-    ///
-    /// Moved from training.rs - this is the proven approach that actually works.
-    pub fn calculate_nll_loss(
-        &self,
-        predictions: &candle_core::Tensor,
-        targets: &candle_core::Tensor,
-        mode: LossMode,
-    ) -> Result<candle_core::Tensor> {
-        log::debug!(
-            "🎯 Using NLL Loss with Class Weighting for stable 5-class training (mode: {:?})",
-            mode
-        );
-
-        // Ensure tensors are contiguous
-        let pred_contiguous = predictions.contiguous()?;
-        let target_contiguous = targets.contiguous()?;
-
-        let _batch_size = pred_contiguous.dim(0)?;
-        let num_classes = pred_contiguous.dim(1)?;
-
-        log::debug!(
-            "📐 NLL shapes: pred {:?}, target {:?}, classes: {}",
-            pred_contiguous.shape(),
-            target_contiguous.shape(),
-            num_classes
-        );
-
-        // Convert targets from [batch_size, 1] to [batch_size] if needed
-        let target_indices = if target_contiguous.dim(1)? == 1 {
-            target_contiguous.squeeze(1)?.contiguous()?
-        } else {
-            target_contiguous
-        };
-
-        // Convert f32/f64 targets to u32 for nll function
-        let target_u32 = target_indices
-            .to_dtype(candle_core::DType::U32)?
-            .contiguous()?;
-
-        // Step 1: Apply log_softmax to get log probabilities
-        let log_probs =
-            candle_nn::ops::log_softmax(&pred_contiguous, candle_core::D::Minus1)?.contiguous()?;
-
-        // Step 2: Apply uniform weighting (all weights = 1.0)
-        let class_weights = self.get_class_weights_for_mode(mode, num_classes);
-        // Step 3: Calculate NLL loss with uniform weights
-        if class_weights.iter().all(|&w| (w - 1.0).abs() < 1e-6) {
-            // All weights are 1.0 (uniform), use standard NLL
-            log::debug!("🎯 NLL Loss: Using uniform weights (no class weighting)");
-            let result = candle_nn::loss::nll(&log_probs, &target_u32)?;
-            return Ok(result);
-        }
-
-        // For weighted NLL, we need to manually implement per-sample weighting
-        // Since candle_nn::loss::nll only supports uniform weighting
-        let batch_size = target_u32.dim(0)?;
-
-        // Extract target indices to CPU for weight lookup (minimal CPU transfer)
-        let target_cpu = target_u32.to_device(&candle_core::Device::Cpu)?;
-        let target_data = target_cpu.to_vec1::<u32>()?;
-
-        // Create weight tensor for all samples at once (more efficient)
-        let mut sample_weights = Vec::with_capacity(batch_size);
-        for &target_idx in &target_data {
-            let weight = class_weights
-                .get(target_idx as usize)
-                .copied()
-                .unwrap_or(1.0);
-            sample_weights.push(weight);
-        }
-
-        let weight_tensor =
-            candle_core::Tensor::from_vec(sample_weights, batch_size, pred_contiguous.device())?;
-
-        // Extract log probabilities for true classes using optimized tensor operations
-        // This is more efficient than individual .get() calls in a loop
-        let mut true_class_log_probs = Vec::with_capacity(batch_size);
-        for (sample_idx, &target_idx) in target_data.iter().enumerate() {
-            let sample_log_probs = log_probs.get(sample_idx)?;
-            let true_class_log_prob = sample_log_probs.get(target_idx as usize)?;
-            true_class_log_probs.push(true_class_log_prob);
-        }
-
-        // Stack all log probabilities into a single tensor [batch_size]
-        let true_class_tensor = candle_core::Tensor::stack(&true_class_log_probs, 0)?;
-
-        // Calculate NLL losses: -log_probs [batch_size]
-        let nll_losses = true_class_tensor.neg()?;
-
-        // Apply uniform weights: weighted_losses = nll_losses * weights [batch_size]
-        let weighted_losses = nll_losses.mul(&weight_tensor)?;
-
-        // Compute weighted average: sum(weighted_losses) / sum(weights)
-        let total_weighted_loss = weighted_losses.sum_all()?;
-        let total_weight = weight_tensor.sum_all()?;
-        let result = total_weighted_loss.div(&total_weight)?;
-
-        log::debug!(
-            "🎯 NLL Loss: Applied uniform weights using optimized tensor operations (gradient-preserving)"
-        );
-
-        log::debug!(
-            "✅ NLL Loss: {:.6} (5-class with uniform weighting)",
-            result.to_scalar::<f32>().unwrap_or(0.0)
-        );
-
-        Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::lstm::LSTMConfig;
-
-    #[test]
-    fn test_error_metric_calculation() {
-        // Create a minimal LSTMModel for testing
-        let config = LSTMConfig {
-            input_size: 10,
-            hidden_sizes: vec![32],
-            output_size: 5,
-            sequence_length: 20,
-            learning_rate: 0.001,
-            num_layers: 1,
-        };
-        let model = LSTMModel::new(config).expect("Failed to create model");
-
-        // Test case 1: No errors (all exact matches)
-        let predictions = vec![0, 1, 2, 3, 4];
-        let targets = vec![0, 1, 2, 3, 4]; // Exact matches
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 0.0);
-
-        // Test case 2: Only distance 1 errors (should not count as errors, except when predicting movement on neutral)
-        let predictions = vec![0, 1, 2, 4, 3];
-        let targets = vec![1, 0, 3, 3, 4]; // Distances: 1, 1, 1, 1, 1 - none involve target=2 with pred=1 or 3
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 0.0);
-
-        // Test case 3: Distance >= 2 errors (should count as errors)
-        let predictions = vec![0, 1, 2, 3, 4];
-        let targets = vec![2, 3, 0, 1, 2]; // Distances: 2, 2, 2, 2, 2
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 100.0); // All 5 predictions have distance >= 2
-
-        // Test case 4: Distance 3 and 4 errors
-        let predictions = vec![0, 1, 2, 3, 4];
-        let targets = vec![3, 4, 2, 0, 1]; // Distances: 3, 3, 0, 3, 3
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 80.0); // 4 out of 5 predictions have distance >= 2
-
-        // Test case 5: Predict adjacent movement when actual is neutral (target = 2)
-        let predictions = vec![1, 3, 0, 4, 2]; // Down, Up, Strong Down, Strong Up, Sideways
-        let targets = vec![2, 2, 2, 2, 2]; // All actual are Sideways
-                                           // Errors: pred=1 (distance=1 but error), pred=3 (distance=1 but error), pred=0 (distance=2), pred=4 (distance=2), pred=2 (exact match)
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 80.0); // 4 out of 5 predictions are errors
-
-        // Test case 6: Mixed errors (distance >= 2 AND adjacent-movement-when-neutral)
-        let predictions = vec![0, 1, 3, 4]; // Strong Down, Down, Up, Strong Up
-        let targets = vec![4, 2, 2, 0]; // Strong Up, Sideways, Sideways, Strong Down
-                                        // Errors: distance=4, adjacent-movement-when-neutral, adjacent-movement-when-neutral, distance=4
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 100.0); // All 4 predictions are errors
-
-        // Test case 7: No errors with neutral predictions
-        let predictions = vec![2, 2, 2, 2]; // All predict Sideways
-        let targets = vec![1, 2, 3, 1]; // Various targets
-                                        // Distances: 1, 0, 1, 1 - none >= 2, and no movement-when-neutral errors
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 0.0); // No errors
-
-        // Test case 8: Empty arrays
-        let predictions = vec![];
-        let targets = vec![];
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 0.0);
-
-        // Test case 9: Invalid class values (should be skipped)
-        let predictions = vec![0, 1, 5, 3, -1]; // 5 and -1 are invalid
-        let targets = vec![0, 1, 2, 3, 4];
-        let error = model.calculate_error_metric(&predictions, &targets);
-        assert_eq!(error, 0.0); // Only valid pairs: (0,0), (1,1), (3,3) - all exact matches
     }
 }

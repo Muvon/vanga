@@ -8,7 +8,6 @@
 //! - Gradient flow monitoring and validation
 
 use super::config::{LSTMModel, OptimizerWrapper};
-use super::loss::LossMode;
 
 use crate::targets::TargetType;
 use crate::utils::diagnostics::TrainingDiagnostics;
@@ -1057,9 +1056,8 @@ impl LSTMModel {
                 // This prevents hidden state contamination between batches
                 let predictions = self.forward(&input_tensor, true)?;
 
-                // Calculate loss using the proven NLL approach (moved to loss.rs)
-                let base_loss =
-                    self.calculate_nll_loss(&predictions, &target_tensor, LossMode::Training)?;
+                // Calculate loss using ordinal regression for ordered 5-class targets
+                let base_loss = self.calculate_loss(&predictions, &target_tensor, config, false)?;
 
                 // Get loss value for reporting BEFORE gradient clipping (to avoid move issues)
                 let batch_loss_value = base_loss.to_scalar::<f32>().map_err(|e| {
@@ -1234,13 +1232,14 @@ impl LSTMModel {
                     // This was the main bug - dropout was being applied during validation
                     let predictions = self.forward(&input_tensor, false)?;
 
-                    // Calculate validation loss using the same NLL approach as training
-                    // CRITICAL: Both training and validation use uniform weights (no class weighting)
-                    // This ensures comparable loss values between training and validation
-                    let val_loss = self.calculate_nll_loss(
+                    // Calculate validation loss using ordinal regression (same as training)
+                    // CRITICAL: Both training and validation use same ordinal loss for comparability
+                    // This ensures consistent loss calculation between training and validation
+                    let val_loss = self.calculate_loss(
                         &predictions,
                         &target_tensor,
-                        LossMode::Validation,
+                        config,
+                        true, // is_validation = true
                     )?;
                     let val_batch_loss = val_loss.to_scalar::<f32>().map_err(|e| {
                         VangaError::ModelError(format!(
