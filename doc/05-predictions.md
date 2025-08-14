@@ -1,48 +1,49 @@
-# Making Predictions
+# Making Trading-Aware Ordinal Predictions
 
-This guide covers how to generate predictions using trained LSTM models in VANGA.
+This guide covers how to generate **trading-aware ordinal predictions** using trained LSTM models with **adaptive calibration** in VANGA.
 
-**Status**: ✅ **Complete Implementation** - Full prediction pipeline functional with modular LSTM architecture (`src/model/lstm/inference.rs`)
+**Status**: ✅ **Complete Implementation** - Full ordinal prediction pipeline functional with modular LSTM architecture (`src/model/lstm/inference.rs`)
 
 ## Quick Start
 
-### **Basic Prediction with Current API**
+### **Basic Ordinal Prediction with Current API**
 
-Generate predictions using the current unified prediction API:
+Generate ordinal predictions using the current unified prediction API with adaptive calibration:
 
 ```rust
-// Using current prediction API - src/api/predictor.rs
-// Modular LSTM inference - src/model/lstm/inference.rs
-// Multi-target coordination - src/model/multi_target.rs
+// Using current ordinal prediction API - src/api/predictor.rs
+// Modular LSTM inference with ordinal loss - src/model/lstm/inference.rs
+// Multi-target coordination with adaptive calibration - src/model/multi_target.rs
 use vanga::api::{ModelWrapper, Predictor};
 use vanga::config::PredictionConfig;
 use vanga::model::multi_target::MultiTargetLSTMModel;
 
-// Load trained multi-target model
+// Load trained multi-target model with calibrated parameters
 let model = MultiTargetLSTMModel::load("models/BTCUSDT")?;
 
-// Create prediction configuration
+// Create prediction configuration for ordinal output
 let config = PredictionConfig {
     symbols: vec!["BTCUSDT".to_string()],
     input_path: "data/recent_btc.csv".into(),
-    output_path: Some("predictions.json".into()),
+    output_path: Some("ordinal_predictions.json".into()),
     horizons: vec!["1h".to_string(), "4h".to_string()],
     device: DeviceConfig::Auto,
     min_confidence: 0.0,
+    use_adaptive_calibration: true,  // Use calibrated parameters
 };
 
-// Make predictions using unified predictor
+// Make ordinal predictions using unified predictor
 let predictor = Predictor::new(config);
 let results = predictor.predict(ModelWrapper::MultiTarget(&model)).await?;
 ```
 
-### **Structured Prediction Output**
+### **Structured Ordinal Prediction Output**
 
-Current prediction output includes all 5 targets with structured components:
+Current ordinal prediction output includes all 5 targets with 5-class ordinal structure:
 
 ```rust
-// Each prediction result contains structured predictions:
-pub struct PredictionResult {
+// Each ordinal prediction result contains structured predictions:
+pub struct OrdinalPredictionResult {
     pub symbol: String,
     pub timestamp: String,
     pub horizon: String,

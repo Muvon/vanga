@@ -1,6 +1,6 @@
 # Installation Guide
 
-Complete installation and setup guide for VANGA's cryptocurrency forecasting system.
+Complete installation and setup guide for VANGA's **trading-aware ordinal loss** cryptocurrency forecasting system.
 
 ## 🖥 **System Requirements**
 
@@ -11,11 +11,11 @@ Complete installation and setup guide for VANGA's cryptocurrency forecasting sys
 - **CPU**: Any modern x64 or ARM64 processor
 - **Rust**: 1.87.0 or later
 
-### **Recommended Requirements**
-- **RAM**: 32GB for optimal performance with large datasets
-- **Storage**: SSD with 10GB+ free space
-- **CPU**: Multi-core processor (8+ cores recommended)
-- **GPU**: CUDA-compatible GPU for accelerated training (optional)
+### **Recommended Requirements for Ordinal Loss Training**
+- **RAM**: 32GB for optimal performance with ordinal loss and adaptive calibration
+- **Storage**: SSD with 10GB+ free space for model storage
+- **CPU**: Multi-core processor (8+ cores recommended for parallel processing)
+- **GPU**: CUDA-compatible GPU for accelerated ordinal loss training (optional)
 
 ## ⚡ **CPU Multi-Threading Optimization**
 
@@ -41,11 +41,12 @@ When you run VANGA, it automatically:
 - Sets `MKL_NUM_THREADS=N` and `OMP_NUM_THREADS=N`
 - Leverages Intel's Math Kernel Library for maximum performance
 
-### **📊 Expected Performance Gains**
+### **📊 Expected Performance Gains with Ordinal Loss**
 
 - **Tensor operations**: 2-4x speedup from multi-threaded BLAS operations
 - **Data processing**: 1.5-2x speedup from parallel sequence generation
-- **Overall training**: 2-3x faster training on multi-core systems
+- **Ordinal loss training**: 2-3x faster training on multi-core systems
+- **Adaptive calibration**: Parallel parameter optimization for balanced classification
 
 ### **🔍 Verification**
 

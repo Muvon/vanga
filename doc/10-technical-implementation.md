@@ -1,8 +1,8 @@
 # VANGA LSTM Technical Implementation Guide
 
-## 🔧 **Current: Modular Architecture Implementation**
+## 🔧 **Current: Modular Architecture with Trading-Aware Ordinal Loss**
 
-This document provides detailed technical specifications for VANGA's **modular LSTM architecture** with **unified training system** and **9 modern optimizers**.
+This document provides detailed technical specifications for VANGA's **modular LSTM architecture** with **trading-aware ordinal loss** and **11 advanced optimizers**.
 
 ---
 
@@ -11,21 +11,17 @@ This document provides detailed technical specifications for VANGA's **modular L
 ### **Core Modular Structure**
 ```
 src/model/lstm/
-├── config.rs      # Configuration structs, enums, and validation
-├── core.rs        # Model lifecycle, initialization, and persistence
-├── training.rs    # Unified training method (THE main training logic)
+├── config.rs      # LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
+├── core.rs        # Model lifecycle, initialization, persistence, Xavier initialization
+├── training.rs    # Unified training method with ordinal loss and adaptive calibration
 ├── inference.rs   # Prediction pipeline and forward pass
-├── loss.rs        # Loss calculation with tensor broadcasting
-├── manual_lstm.rs # Manual LSTM cell implementation
+├── loss.rs        # Trading-aware ordinal loss, validation metrics, gradient utilities
+├── seeded_weights.rs # Reproducible weight initialization with orthogonal recurrent weights
 ├── window_aware_lr.rs # Window-aware learning rate scheduling
-├── seeded_weights.rs # Reproducible weight initialization
 ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 ├── schedule_validation.rs # Schedule validation utilities
-├── balance_validation_test.rs # Balance validation tests
 ├── hidden_state_test.rs # Hidden state tests
 ├── inference_test.rs # Inference tests
-├── loss_test.rs   # Loss function tests
-├── schedule_test.rs # Schedule tests
 └── mod.rs         # Public API with backward compatibility re-exports
 ```
 
@@ -38,7 +34,7 @@ pub use crate::model::lstm::*;
 ### **Technology Stack (Current)**
 - **Language**: Rust 1.87.0+
 - **ML Framework**: Candle (candle-core + candle-nn + candle-optimisers)
-- **Optimizers**: 9 modern optimizers (AdamW, RMSprop, NAdam, RAdam, etc.)
+- **Optimizers**: 11 advanced optimizers (AdamW, FracAdam, FracNAdam, RMSprop, NAdam, RAdam, etc.)
 - **Data Processing**: Polars 0.35+
 - **Serialization**: bincode + rmp-serde (MessagePack)
 - **Configuration**: TOML with comprehensive validation
@@ -46,7 +42,7 @@ pub use crate::model::lstm::*;
 
 ---
 
-## 🤖 **Unified Training System Implementation**
+## 🎯 **Trading-Aware Ordinal Loss Implementation**
 
 ### **Core Training Method** (`src/model/lstm/training.rs`)
 
@@ -63,7 +59,7 @@ impl LSTMModel {
         validation_targets: Option<&Array2<f64>>,
         class_weights: Option<&Array1<f64>>,
     ) -> Result<()> {
-        // 1. Configure optimizer (9 modern optimizers)
+        // 1. Configure optimizer (11 advanced optimizers)
         let optimizer = self.setup_optimizer(&config.training.optimizer)?;
 
         // 2. Setup learning rate scheduling
@@ -765,7 +761,7 @@ pub fn calculate_weighted_soft_crossentropy_loss(
         targets.clone()
     };
 
-    // Calculate cross-entropy loss
+    // Calculate trading-aware ordinal loss
     let log_probs = predictions.log_softmax(1)?;
     let mut loss = smoothed_targets.mul(&log_probs)?.sum(1)?.neg()?;
 
@@ -844,7 +840,7 @@ The VANGA modular LSTM architecture represents a **production-ready** implementa
 - **🤖 Unified Training**: Single configurable training method
 - **🚀 9 Modern Optimizers**: Complete optimizer suite with empirical data
 - **🔗 Hybrid Models**: XGBoost and TFT integration
-- **📊 Advanced Loss Functions**: Weighted soft cross-entropy with class balancing
+- **📊 Advanced Loss Functions**: Trading-aware ordinal loss with class balancing
 - **⚙️ Configuration-Driven**: All behavior controlled via TOML files
 - **🔄 Backward Compatible**: 100% API preservation
 

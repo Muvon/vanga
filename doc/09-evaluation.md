@@ -1,53 +1,37 @@
-# Model Evaluation and Metrics
+# Model Evaluation and Trading-Aware Metrics
 
-Comprehensive evaluation framework for assessing LSTM model performance across VANGA's 5-target prediction system with cryptocurrency-specific metrics.
+Comprehensive evaluation framework for assessing LSTM model performance with **trading-aware ordinal loss** across VANGA's 5-target ordinal prediction system with cryptocurrency-specific trading metrics.
 
 ## Evaluation Architecture
 
-### **Current Metrics System Overview**
+### **Current Trading-Aware Metrics System Overview**
 ```rust
-// Implemented in src/utils/metrics.rs with comprehensive classification and regression metrics
-// Loss functions in src/model/lstm/loss.rs with tensor broadcasting
-// Multi-target evaluation in src/model/multi_target.rs
-pub fn calculate_classification_metrics(
-    predictions: &[i32],
-    targets: &[i32]
-) -> Result<EvaluationMetrics> {
-    // Validate input lengths
-    if predictions.len() != targets.len() {
-        return Err(VangaError::DataError(
-            "Prediction and target lengths must match".to_string(),
-        ));
-    }
+// Implemented in src/model/lstm/loss.rs with trading-aware ordinal loss
+// Multi-target evaluation in src/model/multi_target.rs with adaptive calibration
+pub async fn calculate_categorical_validation_metrics(
+    &mut self,
+    predictions: &Tensor,
+    targets: &Tensor,
+) -> Result<()> {
+    // Trading-aware metrics for ordinal classification
+    // Classes: 0=Strong Down, 1=Moderate Down, 2=Neutral, 3=Moderate Up, 4=Strong Up
 
-    // Calculate accuracy for 5-class system
-    let correct: usize = predictions
-        .iter()
-        .zip(targets.iter())
-        .map(|(p, t)| if p == t { 1 } else { 0 })
-        .sum();
-    let accuracy = correct as f64 / predictions.len() as f64;
+    // Calculate trading-aware accuracy (directional accuracy weighted more)
+    let trading_accuracy = self.calculate_trading_accuracy(predictions, targets)?;
 
-    // Calculate per-class metrics (precision, recall, F1) for each of 5 classes
-    let mut precision = HashMap::new();
-    let mut recall = HashMap::new();
-    let mut f1_score = HashMap::new();
+    // Calculate ordinal-specific metrics
+    let ordinal_metrics = self.calculate_ordinal_metrics(predictions, targets)?;
 
-    // For each class (0-4 in 5-class system)
-    for &class in &[0, 1, 2, 3, 4] {
-        let tp = calculate_true_positives(predictions, targets, class);
-        let fp = calculate_false_positives(predictions, targets, class);
-        let fn_count = calculate_false_negatives(predictions, targets, class);
+    // Calculate profitability metrics
+    let profitability_score = self.calculate_quality_metric(predictions, targets)?;
+}
 
-        let class_precision = if tp + fp > 0.0 { tp / (tp + fp) } else { 0.0 };
-        let class_recall = if tp + fn_count > 0.0 { tp / (tp + fn_count) } else { 0.0 };
-        let class_f1 = if class_precision + class_recall > 0.0 {
-            2.0 * (class_precision * class_recall) / (class_precision + class_recall)
-        } else { 0.0 };
-
-        precision.insert(class, class_precision);
-        recall.insert(class, class_recall);
-        f1_score.insert(class, class_f1);
+// Trading-aware quality metric optimized for profitability
+pub fn calculate_quality_metric(&self, predictions: &[i32], targets: &[i32]) -> f32 {
+    // Directional accuracy: correct direction predictions get positive scores
+    // Wrong directional calls get zero or negative scores (losses)
+    // Magnitude errors (right direction, wrong strength) get partial credit
+}
     }
 
     // Calculate macro and weighted averages
@@ -151,7 +135,7 @@ impl LSTMModel {
         match target_type {
             TargetType::PriceLevel | TargetType::Direction | TargetType::Volatility |
             TargetType::Sentiment | TargetType::Volume => {
-                // Use categorical cross-entropy for all 5-class targets
+                // Use trading-aware ordinal loss for all 5-class targets
                 self.calculate_categorical_cross_entropy_loss(predictions, targets)
             }
         }

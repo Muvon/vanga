@@ -1,16 +1,17 @@
 # VANGA LSTM Usage Guide
 
-Comprehensive guide for using VANGA's cryptocurrency forecasting system with current **modular LSTM architecture** and CLI interface.
+Comprehensive guide for using VANGA's **trading-aware ordinal loss** cryptocurrency forecasting system with current **modular LSTM architecture** and CLI interface.
 
-## 🏗️ **Current Modular Architecture**
+## 🏗️ **Current Modular Architecture with Ordinal Loss**
 
-VANGA now uses a **modular LSTM architecture** with focused modules:
+VANGA now uses a **modular LSTM architecture** with trading-aware ordinal loss:
 
-- **`src/model/lstm/training.rs`** - THE unified training method (main training logic)
-- **`src/model/lstm/config.rs`** - Configuration structs and 9 optimizer enums
-- **`src/model/lstm/core.rs`** - Model lifecycle and initialization
+- **`src/model/lstm/training.rs`** - Unified training method with ordinal loss and adaptive calibration
+- **`src/model/lstm/config.rs`** - LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
+- **`src/model/lstm/core.rs`** - Model lifecycle, initialization, Xavier initialization
 - **`src/model/lstm/inference.rs`** - Prediction pipeline and forward pass
-- **`src/model/lstm/loss.rs`** - Loss calculation with tensor broadcasting
+- **`src/model/lstm/loss.rs`** - Trading-aware ordinal loss, validation metrics, gradient utilities
+- **`src/model/lstm/seeded_weights.rs`** - Orthogonal weight initialization for recurrent layers
 - **`src/model/lstm_simple.rs`** - Backward compatibility layer (`pub use crate::model::lstm::*;`)
 - **`src/model/multi_target.rs`** - Multi-target wrapper (separate models per target×horizon)
 
@@ -18,33 +19,33 @@ VANGA now uses a **modular LSTM architecture** with focused modules:
 
 ### **Main Commands**
 ```bash
-# Training
+# Training with ordinal loss
 cargo run -- train --symbol SYMBOL --data PATH [OPTIONS]
 
-# Prediction
+# Prediction with ordinal classes
 cargo run -- predict --symbol SYMBOL --input PATH [OPTIONS]
 
-# Backtesting
+# Backtesting with trading metrics
 cargo run -- backtest --symbol SYMBOL --data PATH [OPTIONS]
 
-# Real-time streaming
+# Real-time streaming with ordinal predictions
 cargo run -- stream --symbol SYMBOL --data-path PATH [OPTIONS]
 ```
 
-## 🎯 **Training Workflows**
+## 🎯 **Training Workflows with Ordinal Loss**
 
-### **Basic Training**
+### **Basic Training with Adaptive Calibration**
 ```bash
-# Train a new model with default configuration
+# Train a new model with ordinal loss and adaptive calibration
 cargo run -- train --symbol BTCUSDT --data data/BTCUSDT_1h.csv
 
-# Train with custom configuration
+# Train with custom ordinal loss configuration
 cargo run -- train \
     --symbol BTCUSDT \
     --data data/BTCUSDT_1h.csv \
-    --config configs/training.toml
+    --config configs/ordinal_training.toml
 
-# Train with specific horizons
+# Train with specific horizons and ordinal targets
 cargo run -- train \
     --symbol BTCUSDT \
     --data data/BTCUSDT_1h.csv \

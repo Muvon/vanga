@@ -2,51 +2,66 @@
 
 ## Introduction
 
-VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system built in Rust with **modular architecture**, **unified training system**, and **9 modern optimizers**. It combines advanced neural networks with comprehensive technical analysis and **hybrid model integration** (XGBoost + TFT) to deliver professional-grade cryptocurrency market predictions.
+VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system built in Rust with **modular architecture**, **trading-aware ordinal loss**, and **11 advanced optimizers**. It combines advanced neural networks with comprehensive technical analysis and **adaptive target calibration** to deliver professional-grade cryptocurrency market predictions optimized for trading profitability.
 
-## 🚀 **NEW: Key Architectural Improvements**
+## 🚀 **NEW: Trading-Aware Ordinal Loss & Adaptive Calibration**
+
+### 🎯 **Trading-Aware Ordinal Loss System**
+- **5-Class Ordinal Classification**: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
+- **Trading-Aware Penalties**: Wrong directional calls penalized more than magnitude errors
+- **Ordinal Relationships**: Preserves natural ordering between price movement classes
+- **Profitability Optimization**: Loss function designed for trading success, not just accuracy
+- **Balanced Classification**: Adaptive calibration ensures 20% per class distribution
+
+### 🔧 **Adaptive Target Calibration**
+- **Dynamic Parameter Optimization**: Finds optimal thresholds for balanced classification
+- **Diversity Metrics**: Cosine distance-based diversity scoring for robust parameters
+- **Quality Scoring**: Composite quality metrics balance accuracy and diversity
+- **Training-Prediction Consistency**: Same calibrated parameters used in both phases
+- **Multi-Target Coordination**: Separate calibration for each target type
 
 ### 🏗️ **Modular LSTM Architecture**
-- **Complete Module Structure**: 12+ specialized modules for focused functionality
-- **Core Modules**: `config`, `core`, `training`, `inference`, `loss`
-- **Advanced Features**: `gradient_clipper`, `window_aware_lr`, `seeded_weights`
-- **Optimization**: `optimizer_bridge`, `schedule_benchmark`, `schedule_validation`
+- **Core Modules**: `config`, `core`, `training`, `inference`, `loss`, `seeded_weights`
 - **Unified Training**: Single configurable training method handles all scenarios
+- **Orthogonal Initialization**: Proper LSTM weight initialization for stable training
+- **Variational Dropout**: Advanced regularization with recurrent dropout support
 - **Backward Compatibility**: 100% API compatibility through `lstm_simple.rs` re-exports
-- **Enhanced Maintainability**: Clear separation of concerns and responsibilities
 - **Testing Architecture**: All tests in separate `*_test.rs` files
 
-### 🤖 **9 Modern Optimizers**
+### 🤖 **11 Advanced Optimizers with Fractional Memory**
 - **AdamW**: Best overall performance (0.0234 avg validation loss, 98% success rate) - **RECOMMENDED**
+- **FracAdam**: NEW - Fractional memory adaptation for volatile markets
+- **FracNAdam**: NEW - Fractional Nesterov momentum with memory decay
 - **RMSprop**: Volatile market specialist (excellent for meme coins)
 - **NAdam**: Fastest convergence (72 epochs average, ideal for development)
 - **RAdam**: Most stable (100% success rate, perfect for production)
 - **Adam, AdaMax, AdaDelta, SGD, AdaGrad**: Complete optimizer suite
 
-### 🔗 **Hybrid Model Integration**
-- **SmartCore XGBoost**: Enhanced XGBoost integration with SmartCore backend
-- **TFT Support**: Temporal Fusion Transformer with quantile outputs
-- **Variable Selection**: Intelligent feature selection networks
-- **Multi-Phase Training**: LSTM → XGBoost pipeline optimization
+### 🔗 **Multi-Target Prediction System**
+- **5 Target Types**: Price levels, direction, volatility, volume, sentiment
+- **Individual Model Architecture**: Separate LSTM model per target×horizon combination
+- **Sequence-Based Processing**: Each sequence normalized independently
+- **Adaptive Parameters**: Target-specific calibrated thresholds for balanced classification
+- **Symbol-Agnostic Design**: Percentage-based calculations work for any trading pair
 
 ### 🆕 **Advanced Training Features**
-- **Perfect Balance Validation**: Automatic class balance detection and correction
-- **Per-Target Balanced Splits**: Individual balanced splits for each target type
-- **Window-Aware Learning Rate Scheduling**: Progressive window-based training with decay
-- **Gradient Clipping with Scaling**: Proper gradient explosion prevention
+- **Centralized Diagnostics**: Comprehensive training and validation monitoring
+- **Gradient Clipping**: Intelligent gradient norm clipping prevents exploding gradients
 - **Reproducible Training**: Deterministic training with configurable seeds
-- **Enhanced Attention**: Mixture-of-Head attention with comprehensive dropout options
+- **Perfect Balance Validation**: Automatic class balance detection and correction
+- **Variational Dropout**: Advanced regularization with recurrent dropout support
+- **Orthogonal Weight Initialization**: Proper LSTM weight initialization for stable training
 
 ## Key Features
 
 ### 🎯 **Advanced LSTM Implementation**
-- **Complete Modular Architecture**: 12+ specialized modules with clear separation of concerns
+- **Modular Architecture**: 6 specialized modules with clear separation of concerns
 - **Multi-Layer Support**: 1-4+ layers with MultiLSTM, StackedLSTM, BidirectionalLSTM
 - **Enhanced Attention**: Multi-head attention + Mixture-of-Head attention with configurable dropout
-- **Multi-Target Prediction**: 5 targets per horizon (price levels, direction, volatility, sentiment, volume)
+- **5-Target Prediction System**: Price levels, direction, volatility, volume, sentiment (5 classes each)
 - **Model Persistence**: Save/load trained models with complete state preservation
-- **Unified Training System**: Single configurable training method with advanced features
-- **Perfect Balance Validation**: Automatic class balance detection and correction
+- **Trading-Aware Ordinal Loss**: 5-class ordinal system optimized for trading profitability
+- **Adaptive Target Calibration**: Dynamic parameter optimization for balanced classification
 - **Reproducible Training**: Deterministic results with configurable seeds
 
 ### 🚀 **Professional Architecture**
@@ -84,11 +99,11 @@ Unified Training → Multi-Target Prediction → Structured Output → CSV/JSON 
 ```
 src/
 ├── model/lstm/        # NEW: Complete Modular LSTM Architecture
-│   ├── training.rs    # Unified training method (THE main training logic)
-│   ├── config.rs      # Configuration structs and 9 optimizer enums
+│   ├── training.rs    # Unified training method with ordinal loss and adaptive calibration
+│   ├── config.rs      # LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
 │   ├── core.rs        # Model lifecycle and initialization
 │   ├── inference.rs   # Prediction pipeline and forward pass
-│   ├── loss.rs        # Loss calculation with tensor broadcasting
+│   ├── loss.rs        # Trading-aware ordinal loss, validation metrics, gradient utilities
 │   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   ├── window_aware_lr.rs # Window-aware learning rate scheduling
 │   ├── seeded_weights.rs # Reproducible weight initialization
@@ -149,7 +164,7 @@ src/
 
 ### **Modular LSTM Training**
 - **Unified Method**: Single training method handles all scenarios
-- **Framework**: Candle integration with 9 modern optimizers
+- **Framework**: Candle integration with 11 advanced optimizers
 - **Persistence**: Complete model state preservation
 - **Sequences**: Optimized sliding window for time series
 - **Targets**: Percentage-based quantiles for symbol-agnostic performance
@@ -221,7 +236,7 @@ vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross
 ### **Next Steps**
 1. **[Installation](02-installation.md)** - Set up your development environment
 2. **[Data Preparation](03-data-preparation.md)** - Format your cryptocurrency data
-3. **[Training](04-training.md)** - Train with unified training system and 9 modern optimizers
+3. **[Training](04-training.md)** - Train with trading-aware ordinal loss and 11 advanced optimizers
 4. **[Optimizer Selection](22-optimizer-selection-guide.md)** - Choose the best optimizer for your data
 5. **[Configuration](20-configuration.md)** - Complete configuration reference
 6. **[Usage Examples](11-usage-examples.md)** - Comprehensive usage guide

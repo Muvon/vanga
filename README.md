@@ -1,16 +1,18 @@
 # VANGA 🔮
 
-**Advanced LSTM-based cryptocurrency forecasting system with state-of-the-art learning rate optimization and unified training architecture**
+**Advanced LSTM-based cryptocurrency forecasting system with trading-aware ordinal loss, adaptive calibration, and fractional memory optimizers**
 
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 🚀 NEW: Advanced Learning Rate Optimization & Unified Training
+## 🚀 NEW: Trading-Aware Ordinal Loss & Adaptive Calibration
 
-VANGA now features **professional-grade learning rate optimization** with modern optimizers, intelligent scheduling, and a **unified training architecture**:
+VANGA now features **trading-aware ordinal loss** for 5-class predictions, **adaptive target calibration**, and **fractional memory optimizers**:
 
-### 🎯 **9 Modern Optimizers with Empirical Performance Data**
+### 🎯 **11 Advanced Optimizers with Fractional Memory**
 - ✅ **AdamW** - Best overall performance (0.0234 avg validation loss, 98% success rate) - **RECOMMENDED**
+- ✅ **FracAdam** - NEW: Fractional memory adaptation for volatile markets
+- ✅ **FracNAdam** - NEW: Fractional Nesterov momentum with memory decay
 - ✅ **RMSprop** - Volatile market specialist (0.0267 avg loss, excellent for meme coins)
 - ✅ **NAdam** - Fastest convergence (72 epochs average, ideal for development)
 - ✅ **RAdam** - Most stable (100% success rate, perfect for production)
@@ -20,51 +22,62 @@ VANGA now features **professional-grade learning rate optimization** with modern
 - ✅ **SGD** - Fine-tuning specialist (transfer learning scenarios)
 - ✅ **AdaGrad** - Short training only (performance degrades after 35 epochs)
 
-### 🤖 **Intelligent Optimizer Selection**
-- ✅ **Automatic Data Analysis** - Analyzes volatility, trend strength, market regime
-- ✅ **Smart Recommendations** - AI-powered optimizer selection based on data characteristics
-- ✅ **Performance Prediction** - Expected validation loss, training time, convergence epochs
-- ✅ **Configuration Generation** - Auto-generates optimized TOML configs
-- ✅ **Market Regime Detection** - Trending/Ranging/Volatile/Extreme classification
+### 🎯 **Trading-Aware Ordinal Loss System**
+- ✅ **5-Class Ordinal Classification** - Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
+- ✅ **Trading-Aware Penalties** - Wrong directional calls penalized more than magnitude errors
+- ✅ **Ordinal Relationships** - Preserves natural ordering between price movement classes
+- ✅ **Balanced Class Distribution** - Adaptive calibration ensures 20% per class
+- ✅ **Symbol-Agnostic** - Percentage-based thresholds work across all trading pairs
 
-### 🧠 **Intelligent Learning Rate Management**
-- ✅ **Smart Auto Learning Rate** - Optimizes within specified ranges based on model complexity
-- ✅ **Adaptive ReduceLROnPlateau** - Automatically reduces LR when validation loss plateaus
-- ✅ **Linear Warmup Support** - Gradual LR increase prevents early training instability
-- ✅ **Configurable Scheduling** - Professional-grade LR scheduling options
+### 🔧 **Adaptive Target Calibration**
+- ✅ **Dynamic Parameter Optimization** - Finds optimal thresholds for balanced classification
+- ✅ **Diversity Metrics** - Cosine distance-based diversity scoring for robust parameters
+- ✅ **Quality Scoring** - Composite quality metrics balance accuracy and diversity
+- ✅ **Training-Prediction Consistency** - Same calibrated parameters used in both phases
+- ✅ **Multi-Target Coordination** - Separate calibration for each target type
 
-### 🔧 **Unified Training Architecture**
-- ✅ **Single Training Method** - Consolidated all training approaches into one configurable method
-- ✅ **Configuration-Driven** - All training behavior controlled via TOML configuration
-- ✅ **Backward Compatible** - All existing interfaces preserved
-- ✅ **Enhanced Monitoring** - Comprehensive logging with LR tracking and validation metrics
+### 🧠 **Modular LSTM Architecture**
+- ✅ **Unified Training Pipeline** - Single `train()` method handles all scenarios via configuration
+- ✅ **Orthogonal Weight Initialization** - Proper LSTM weight initialization for stable training
+- ✅ **Variational Dropout** - Advanced regularization with recurrent dropout support
+- ✅ **Gradient Clipping** - Intelligent gradient norm clipping prevents exploding gradients
+- ✅ **Centralized Diagnostics** - Comprehensive training and validation diagnostics
+
+### 🎯 **Multi-Target Prediction System**
+- ✅ **5 Target Types** - Price Levels, Direction, Volatility, Volume, Sentiment
+- ✅ **Individual Model Architecture** - Separate LSTM model per target×horizon combination
+- ✅ **Sequence-Based Processing** - Each sequence normalized independently
+- ✅ **Chronological Integrity** - Time-series order preserved, no shuffling
+- ✅ **Adaptive Parameters** - Target-specific calibrated thresholds
 
 ### 📈 **Performance Improvements**
+- ✅ **Trading-Aware Loss** - Ordinal loss system optimized for trading profitability
 - ✅ **35% better performance** than SGD on crypto datasets (empirically proven)
 - ✅ **Fastest convergence** with NAdam (72 epochs vs 180 for SGD)
 - ✅ **Most reliable** with RAdam (100% success rate in benchmarks)
 - ✅ **Volatility handling** with RMSprop (18% better on volatile markets)
-- ✅ **Production-ready** configurations with comprehensive TOML documentation
+- ✅ **Fractional memory** optimizers for extreme market conditions
 
 ### 🛠️ **Advanced Tools & Automation**
-- ✅ **Optimizer Benchmarking** - Compare all 9 optimizers on your data
+- ✅ **Adaptive Calibration** - Automatic parameter optimization for balanced classification
+- ✅ **Diversity Metrics** - Cosine distance-based parameter selection
+- ✅ **Optimizer Benchmarking** - Compare all 11 optimizers on your data
 - ✅ **Performance Analysis** - Detailed empirical performance documentation
-- ✅ **Configuration Examples** - 9 optimized TOML configs for different scenarios
+- ✅ **Configuration Examples** - 30+ optimized TOML configs for different scenarios
 - ✅ **CLI Tools** - Python and shell scripts for automation
-- ✅ **Quick Reference** - Decision matrices and troubleshooting guides
 
-## 🧠 Intelligent Training System
+## 🧠 Modular LSTM Training System
 
-VANGA features **unified training optimization** with modern optimizers and intelligent scheduling that eliminates hardcoded epochs and focuses on quality:
+VANGA features **modular LSTM architecture** with trading-aware ordinal loss and adaptive calibration that optimizes for trading profitability:
 
-- ✅ **Unified Training Architecture** - Single training method handles all scenarios through configuration
-- ✅ **Modern Optimizers** - AdamW with weight decay and SGD with momentum support
-- ✅ **Auto Early Stopping** - Stops when validation loss plateaus
-- ✅ **Adaptive Learning Rate** - ReduceLROnPlateau with configurable patience and reduction factor
-- ✅ **Linear Warmup Support** - Gradual LR increase prevents early training instability
-- ✅ **Quality-First Defaults** - Optimized for cryptocurrency forecasting
-- ✅ **Incremental Training** - Add new data without losing learned patterns
-- ✅ **30-50% faster training** through intelligent stopping and LR optimization
+- ✅ **Modular Architecture** - Separate modules for training, inference, loss calculation, and configuration
+- ✅ **Trading-Aware Ordinal Loss** - 5-class ordinal system optimized for trading decisions
+- ✅ **Adaptive Target Calibration** - Dynamic parameter optimization for balanced classification
+- ✅ **Orthogonal Weight Initialization** - Proper LSTM weight initialization for stable training
+- ✅ **Variational Dropout** - Advanced regularization with recurrent dropout support
+- ✅ **Fractional Memory Optimizers** - FracAdam and FracNAdam for volatile market conditions
+- ✅ **Centralized Diagnostics** - Comprehensive training and validation monitoring
+- ✅ **Quality-First Training** - Stops when validation loss plateaus, not at fixed epochs
 
 ## 🚀 Quick Start
 
@@ -85,18 +98,24 @@ vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/training.to
 vanga train --symbol BTCUSDT,ETHUSDT,ADAUSDT --data data/ --config configs/cross_asset_training.toml
 ```
 
-## 🤖 NEW: Intelligent Optimizer Selection
+## 🤖 NEW: Adaptive Target Calibration
 
-### **Automatic Optimizer Selection**
+### **Automatic Parameter Optimization**
 ```bash
-# Analyze your data and get optimizer recommendation
-python scripts/optimizer_selector.py --data data/BTCUSDT_1h.csv --symbol BTCUSDT
+# Analyze your data and calibrate target parameters
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/adaptive_calibration.toml
 
-# Generate optimized configuration
-python scripts/optimizer_selector.py --data data/BTCUSDT_1h.csv --symbol BTCUSDT --output custom_config.toml
+# Use pre-calibrated parameters for consistent results
+vanga predict --symbol BTCUSDT --data data/recent.csv --model models/BTCUSDT_calibrated.bin
+```
 
-# Train with recommended optimizer
-vanga train --symbol BTCUSDT --data data/BTCUSDT_1h.csv --config custom_config.toml
+### **Multi-Target Coordination**
+```bash
+# Train with all 5 target types using adaptive calibration
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/multi_target_adaptive.toml
+
+# Enable specific targets only
+vanga train --symbol BTCUSDT --data data/btc_1h.csv --config configs/price_levels_only.toml
 ```
 
 ### **Pre-Optimized Configurations**
@@ -175,37 +194,32 @@ vanga predict --symbol BTCUSDT --input data/recent_btc.csv
 
 ### Core Design Principles
 - **Modular LSTM Architecture**: Complete modular structure in `src/model/lstm/` with focused modules:
-  - `config.rs` - Configuration types and validation
-  - `core.rs` - Model lifecycle, initialization, persistence
-  - `training.rs` - Unified training method with advanced features
+  - `config.rs` - LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
+  - `core.rs` - Model lifecycle, initialization, persistence, Xavier initialization
+  - `training.rs` - Unified training method with ordinal loss and adaptive calibration
   - `inference.rs` - Prediction pipeline and forward pass
-  - `loss.rs` - Loss calculation, validation metrics, gradient utilities
-  - `gradient_clipper.rs` - Gradient clipping with proper scaling
-  - `window_aware_lr.rs` - Window-aware learning rate scheduling
-  - `optimizer_bridge.rs` - Multi-optimizer integration bridge
-  - `seeded_weights.rs` - Reproducible weight initialization
+  - `loss.rs` - Trading-aware ordinal loss, validation metrics, gradient utilities
+  - `seeded_weights.rs` - Reproducible weight initialization with orthogonal recurrent weights
 
-### Enhanced Training System
-- **Single Configurable Training Method**: Unified approach handling all scenarios through configuration
-- **9 Modern Optimizers**: AdamW, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
+### Trading-Aware Training System
+- **Ordinal Loss System**: 5-class ordinal classification optimized for trading profitability
+- **11 Advanced Optimizers**: AdamW, FracAdam, FracNAdam, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
 - **Advanced Features**:
-  - Error metrics for prediction quality assessment
-  - Deterministic dropout for reproducible training
-  - Distance-weighted quality metrics for predictions
-  - Gradient accumulation prevention during clipping
-  - Unified deterministic shuffling for consistency
-  - Perfect balance validation for targets
-  - Per-target balanced train/validation splits
-  - Window-aware learning rate scheduling with decay
-  - Gradient clipping with scaling
-  - Seed support for reproducible training
-  - Progressive window increment configuration
+  - Trading-aware ordinal loss with directional penalties
+  - Adaptive target calibration with diversity metrics
+  - Orthogonal weight initialization for recurrent layers
+  - Variational and recurrent dropout support
+  - Centralized training diagnostics and monitoring
+  - Gradient clipping with intelligent norm calculation
+  - Deterministic shuffling for reproducible training
+  - Perfect balance validation for target consistency
 
 ### Multi-Target Architecture
 - **Symbol-Agnostic Design**: Each trading pair gets its own specialized multi-target LSTM model
-- **5-Target Prediction System**: Price levels, direction, volatility, sentiment, and volume (5 classes each per horizon)
-- **Adaptive Parameters**: Automatic parameter calibration for balanced class distribution
-- **Configuration-Driven**: All behavior controlled via TOML configuration files
+- **5-Target Prediction System**: Price levels, direction, volatility, volume, sentiment (5 classes each)
+- **Adaptive Calibration**: Dynamic parameter optimization for balanced 20% per class distribution
+- **Individual Model Architecture**: Separate LSTM model per target×horizon combination
+- **Sequence-Based Processing**: Each sequence normalized independently for symbol-agnostic operation
 
 ### Advanced Features
 - **Backward Compatibility**: All existing APIs preserved through `lstm_simple.rs` compatibility layer

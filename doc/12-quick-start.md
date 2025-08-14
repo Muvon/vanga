@@ -1,6 +1,6 @@
 # VANGA Quick Start Guide
 
-Get up and running with VANGA's cryptocurrency forecasting system in minutes.
+Get up and running with VANGA's **trading-aware ordinal loss** cryptocurrency forecasting system in minutes.
 
 ## 🚀 **Installation & Setup**
 
@@ -27,27 +27,30 @@ cargo check --message-format=short  # Fast compilation check
 head -5 data/BTCUSDT_1h.csv
 ```
 
-## 🎯 **Quick Training (5 Minutes)**
+## 🎯 **Quick Training with Trading-Aware Ordinal Loss (5 Minutes)**
 
-### **Step 1: Basic Training**
+### **Step 1: Basic Training with Ordinal Loss**
 ```bash
-# Train a Bitcoin model with intelligent defaults
+# Train a Bitcoin model with trading-aware ordinal loss
 cargo run -- train --symbol BTCUSDT --data data/BTCUSDT_1h.csv --config configs/quick_start.toml
 
 # The system will automatically:
 # - Generate 50+ technical indicators
-# - Create 5 targets (price_levels, direction, volatility, sentiment, volume)
-# - Use adaptive parameters for balanced class distribution
+# - Create 5 ordinal targets (price_levels, direction, volatility, volume, sentiment)
+# - Use adaptive calibration for balanced 20% per class distribution
+# - Apply trading-aware ordinal loss optimized for profitability
+# - Use AdamW optimizer with weight decay for crypto volatility
 # - Apply early stopping when validation loss plateaus
-# - Save the trained model to models/BTCUSDT/
+# - Save the trained model with calibrated parameters to models/BTCUSDT/
 ```
 
-### **Step 2: Make Predictions**
+### **Step 2: Make Trading-Optimized Predictions**
 ```bash
-# Generate predictions with the trained model
+# Generate predictions with the trained ordinal loss model
 cargo run -- predict --symbol BTCUSDT --input data/BTCUSDT_recent.csv
 
-# Output: predictions.json with structured results
+# Output: predictions.json with 5-class ordinal predictions
+# Classes: 0=Strong Down, 1=Moderate Down, 2=Neutral, 3=Moderate Up, 4=Strong Up
 # - Price level predictions (5 classes)
 # - Direction predictions (5 classes)
 # - Volatility predictions (5 classes)

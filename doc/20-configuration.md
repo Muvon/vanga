@@ -2,26 +2,34 @@
 
 ## 📋 **Current Configuration System Overview**
 
-VANGA uses a **unified configuration system** where all parameters (training, model, features, data processing) are defined in TOML files and CLI arguments. This approach ensures consistency, simplifies management, and provides comprehensive parameter documentation.
+VANGA uses a **unified configuration system** with **trading-aware ordinal loss** and **adaptive target calibration** where all parameters are defined in TOML files and CLI arguments. This approach ensures consistency, simplifies management, and provides comprehensive parameter documentation.
 
 ### **Configuration Philosophy**
-- **All-in-One**: Single file contains all parameters
-- **Template-Based**: Pre-configured templates for common use cases
-- **Self-Documenting**: Comprehensive parameter explanations in example files
+- **All-in-One**: Single file contains all parameters for ordinal loss training
+- **Template-Based**: Pre-configured templates for trading-optimized scenarios
+- **Self-Documenting**: Comprehensive parameter explanations with ordinal loss examples
 - **Validated**: Automatic parameter validation with clear error messages
-- **Modular Architecture**: Configurations map to modular LSTM structure:
-  - `[training]` → `src/model/lstm/training.rs` (unified training method)
-  - `[model]` → `src/model/lstm/config.rs` (LSTMConfig, OptimizerWrapper)
+- **Modular Architecture**: Configurations map to modular LSTM structure with ordinal loss:
+  - `[training]` → `src/model/lstm/training.rs` (unified training with ordinal loss)
+  - `[model]` → `src/model/lstm/config.rs` (LSTMConfig, OptimizerWrapper with 11 optimizers)
   - `[features]` → `src/features/` (technical indicators, cross-asset)
-  - `[targets]` → `src/targets/` (price levels, direction, volatility, sentiment, volume)
+  - `[targets]` → `src/targets/` (adaptive calibration for 5 target types)
   - `[data]` → `src/data/` (preprocessing, normalization)
 
-## 🚀 **NEW: Advanced Learning Rate Optimization**
+## 🎯 **NEW: Trading-Aware Ordinal Loss Configuration**
 
-VANGA now features **professional-grade learning rate optimization** with modern optimizers and intelligent scheduling:
+VANGA now features **trading-aware ordinal loss** optimized for cryptocurrency trading profitability:
 
-### **Modern Optimizers**
-- **AdamW**: Modern optimizer with weight decay (RECOMMENDED for crypto - handles volatility well)
+### **Ordinal Loss System**
+- **5-Class Ordinal**: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
+- **Trading-Aware Penalties**: Wrong directional calls penalized more than magnitude errors
+- **Adaptive Calibration**: Dynamic parameter optimization for balanced classification
+- **Profitability Focus**: Loss function designed for trading success, not just accuracy
+
+### **Advanced Optimizers (11 Total)**
+- **AdamW**: Modern optimizer with weight decay (RECOMMENDED for crypto trading)
+- **FracAdam**: NEW - Fractional memory adaptation for volatile markets
+- **FracNAdam**: NEW - Fractional Nesterov momentum with memory decay
 - **Adam**: Classic adaptive optimizer, good general-purpose choice
 - **SGD**: Traditional optimizer with optional momentum, good for fine-tuning
 - **AdaDelta**: Adaptive without manual tuning, excellent for sparse crypto data
@@ -31,23 +39,22 @@ VANGA now features **professional-grade learning rate optimization** with modern
 - **RAdam**: Rectified Adam with variance correction, more stable early training
 - **RMSprop**: Excellent for RNNs and non-stationary objectives (perfect for crypto markets)
 
-### **Intelligent Learning Rate Modes**
-- **Auto**: Optimizes learning rate within specified ranges based on model complexity
-- **Adaptive**: ReduceLROnPlateau with configurable patience and reduction factor
-- **Fixed**: Constant learning rate for fine-tuning and controlled training
+### **Adaptive Target Calibration**
+- **Dynamic Parameters**: Automatic threshold optimization for balanced 20% per class
+- **Diversity Metrics**: Cosine distance-based parameter selection
+- **Quality Scoring**: Composite metrics balance accuracy and diversity
+- **Multi-Target Coordination**: Separate calibration for each target type
 
-### **Warmup Support**
-- **Linear warmup** from 0 to target learning rate over specified epochs
-- **Prevents early training instability** with large models
-- **Configurable warmup duration** (0-20 epochs recommended)
-
-### **Enhanced Training Configuration**
+### **Enhanced Trading Configuration**
 ```toml
 [training]
-# Modern optimizer with adaptive learning (RECOMMENDED for crypto)
+# Modern optimizer with ordinal loss (RECOMMENDED for crypto trading)
 optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
+loss_function = "OrdinalLoss"  # Trading-aware ordinal loss
 
-# Alternative optimizers for different crypto scenarios:
+# Fractional memory optimizers for extreme markets:
+# optimizer = { FracAdam = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, fractional_order = 0.8 } }
+# optimizer = { FracNAdam = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, momentum_decay = 0.004, fractional_order = 0.9 } }
 # optimizer = { Adam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, amsgrad = false } }
 # optimizer = { NAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, momentum_decay = 0.004 } }
 # optimizer = { RAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01 } }
@@ -144,7 +151,7 @@ epochs = { Auto = { max_epochs = 1000 } }     # Auto early stopping (RECOMMENDED
 # Learning rate - base learning rate for optimization
 learning_rate = 0.001                         # Base learning rate (0.0001-0.01 range)
 
-# Modern optimizer configuration (9 optimizers available)
+# Modern optimizer configuration (11 optimizers available)
 optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
 # Alternative optimizers:
 # optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.01, momentum = 0.0 } }
@@ -956,7 +963,7 @@ src/model/lstm/
 └── mod.rs         # Public API and re-exports
 
 src/config/
-├── training.rs    # TrainingConfig, TrainingParams, 9 optimizers
+├── training.rs    # TrainingConfig, TrainingParams, 11 optimizers
 ├── features.rs    # FeatureConfig and feature engineering
 ├── model.rs       # ModelConfig and architecture configurations
 ├── prediction.rs  # PredictionConfig for inference

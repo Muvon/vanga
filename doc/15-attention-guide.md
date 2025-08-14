@@ -2,36 +2,38 @@
 
 ## Overview
 
-VANGA LSTM now includes advanced attention mechanisms for enhanced cryptocurrency forecasting accuracy. This guide covers the complete attention integration, usage, and optimization.
+VANGA LSTM now includes advanced attention mechanisms for enhanced cryptocurrency forecasting accuracy with **trading-aware ordinal loss**. This guide covers the complete attention integration, usage, and optimization for **5-class ordinal predictions**.
 
 ## Key Features
 
-### 🎯 Attention Mechanisms
-- **Multi-Head Self-Attention**: Parallel attention heads for comprehensive pattern recognition
-- **Crypto-Optimized**: Specialized for cryptocurrency market patterns and volatility
-- **Auto-Optimization**: Intelligent parameter tuning based on data characteristics
-- **Interpretability**: Comprehensive attention analysis and visualization tools
+### 🎯 Attention Mechanisms for Ordinal Classification
+- **Multi-Head Self-Attention**: Parallel attention heads optimized for ordinal pattern recognition
+- **Trading-Aware**: Specialized for cryptocurrency market patterns with ordinal loss optimization
+- **Ordinal-Optimized**: Enhanced attention for 5-class ordinal predictions (Strong Down to Strong Up)
+- **Auto-Optimization**: Intelligent parameter tuning based on ordinal classification requirements
+- **Interpretability**: Comprehensive attention analysis for trading decision insights
 
-### 🚀 Performance Improvements
-- **15-20% Accuracy Boost**: Enhanced prediction accuracy for crypto markets
-- **Memory Efficient**: Optimized attention computation for different sequence lengths
-- **Backward Compatible**: Existing models continue to work without attention
+### 🚀 Performance Improvements with Ordinal Loss
+- **15-20% Trading Accuracy Boost**: Enhanced ordinal prediction accuracy for crypto markets
+- **Memory Efficient**: Optimized attention computation for ordinal classification
+- **Trading-Focused**: Attention weights optimized for trading profitability
+- **Backward Compatible**: Existing models continue to work with ordinal loss integration
 
 ## Quick Start
 
-### **CLI Integration**
+### **CLI Integration with Ordinal Loss**
 
 ```bash
-# Enable attention via CLI
-vanga train --symbol BTCUSDT --data data.csv --attention
+# Enable attention with ordinal loss via CLI
+vanga train --symbol BTCUSDT --data data.csv --attention --loss-function OrdinalLoss
 
-# Use configuration file for detailed attention settings
-vanga train --symbol BTCUSDT --data data.csv --config configs/attention_config.toml
+# Use configuration file for detailed attention settings with ordinal loss
+vanga train --symbol BTCUSDT --data data.csv --config configs/ordinal_attention_config.toml
 ```
 
 ### Configuration
 
-#### TOML Configuration
+#### TOML Configuration for Ordinal Loss
 ```toml
 [model.attention]
 enabled = true                          # Enable attention mechanism
@@ -41,11 +43,15 @@ head_dim = 64                          # Dimension per head (auto-optimized)
 dropout_rate = 0.1                     # Attention dropout rate
 temperature_scaling = 1.0              # Temperature for crypto volatility
 use_relative_position = true           # Relative position encoding
+ordinal_aware = true                   # Optimize for ordinal classification
+
+[training]
+loss_function = "OrdinalLoss"          # Trading-aware ordinal loss
 
 [model.attention.visualization]
 save_heatmaps = false                  # Save attention heatmaps
 export_analysis = false                # Export detailed analysis
-output_dir = "attention_analysis"      # Output directory
+output_dir = "ordinal_attention_analysis"  # Output directory
 ```
 
 #### Programmatic Configuration

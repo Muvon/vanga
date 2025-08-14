@@ -2,46 +2,48 @@
 
 ## Overview
 
-VANGA includes a comprehensive technical indicators engine with 50+ professionally implemented indicators using **parallel processing** and **cryptocurrency-specific optimizations**. The system integrates professional technical analysis calculations with custom crypto market features.
+VANGA includes a comprehensive technical indicators engine with 50+ professionally implemented indicators using **parallel processing** and **cryptocurrency-specific optimizations**. The system integrates professional technical analysis calculations with custom crypto market features optimized for **trading-aware ordinal loss** training.
 
 **Status**: ✅ **Complete Implementation** - All indicators functional with parallel processing and comprehensive testing (`src/features/technical.rs`, `src/features/cross_asset.rs`, `src/features/engineering.rs`)
 
-## 🆕 **Current Architecture**
+## 🆕 **Current Architecture with Ordinal Loss Integration**
 
-### **Professional Technical Analysis Engine**
+### **Professional Technical Analysis Engine for Ordinal Classification**
 ```rust
 // Implemented in src/features/technical.rs with parallel processing
 // Cross-asset features in src/features/cross_asset.rs
 // Feature engineering pipeline in src/features/engineering.rs
+// Optimized for 5-class ordinal predictions
 pub async fn generate_technical_indicators(
     mut df: DataFrame,
     config: &TechnicalIndicatorsConfig,
 ) -> Result<DataFrame> {
-    // PARALLELIZED indicator generation for maximum performance
+    // PARALLELIZED indicator generation optimized for ordinal classification
     // Processes 50+ indicators concurrently using async/await
+    // Features normalized for ordinal loss training
 
-    // 1. Trend Indicators (Parallel Processing)
+    // 1. Trend Indicators (Optimized for Ordinal Classes)
     df = add_sma_indicators(df, &config.sma_periods).await?;
     df = add_ema_indicators(df, &config.ema_periods).await?;
     df = add_macd_indicators(df, &config.macd).await?;
     df = add_bollinger_bands(df, &config.bollinger_bands).await?;
 
-    // 2. Momentum Indicators (Parallel Processing)
+    // 2. Momentum Indicators (Ordinal-Aware)
     df = add_rsi_indicators(df, &config.rsi_periods).await?;
     df = add_stochastic_indicators(df, &config.stochastic).await?;
     df = add_williams_r(df, &config.williams_r_period).await?;
     df = add_cci_indicator(df, &config.cci_period).await?;
 
-    // 3. Volume Indicators
+    // 3. Volume Indicators (Trading-Aware)
     df = add_volume_indicators(df, config).await?;
     df = add_obv_indicator(df, &close, &volume).await?;
     df = add_mfi_indicator(df, &high, &low, &close, &volume, config.mfi_period).await?;
 
-    // 4. Volatility Indicators
+    // 4. Volatility Indicators (Ordinal Classification)
     df = add_atr_indicators(df, &config.atr_periods).await?;
     df = add_keltner_channels(df, &config.keltner_channels).await?;
 
-    // 5. Cryptocurrency-Specific Features
+    // 5. Cryptocurrency-Specific Features (Trading-Optimized)
     df = add_crypto_specific_indicators(df, config).await?;
 
     Ok(df)

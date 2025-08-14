@@ -71,7 +71,7 @@ optimizer.step(&grads)?;
 ## 📊 Optimizer Compatibility
 
 ### ✅ **Fully Compatible Optimizers**
-All 9 optimizers now work correctly with gradient clipping:
+All 11 optimizers now work correctly with gradient clipping:
 
 | Optimizer | State Preservation | Performance | Notes |
 |-----------|-------------------|-------------|-------|
@@ -225,7 +225,7 @@ optimizer.step(&grads)?;
 ```rust
 #[tokio::test]
 async fn test_gradient_clipping_with_all_optimizers() {
-    // Tests all 9 optimizers with gradient clipping
+    // Tests all 11 optimizers with gradient clipping
     // Verifies state preservation and training success
 }
 ```
@@ -412,7 +412,7 @@ cargo test gradient_clipping
 VANGA's new gradient clipping implementation provides:
 
 - **✅ Mathematical Correctness**: Follows industry standards
-- **✅ Optimizer Compatibility**: Works with all 9 optimizers
+- **✅ Optimizer Compatibility**: Works with all 11 optimizers
 - **✅ State Preservation**: No corruption of momentum/accumulation
 - **✅ Performance**: <1% computational overhead
 - **✅ Monitoring**: Comprehensive gradient flow analysis

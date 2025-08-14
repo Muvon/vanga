@@ -1,6 +1,6 @@
 # VANGA Usage Examples
 
-Comprehensive usage examples for VANGA's cryptocurrency forecasting system with current CLI interface and configuration system.
+Comprehensive usage examples for VANGA's **trading-aware ordinal loss** cryptocurrency forecasting system with current CLI interface and configuration system.
 
 ## 🚀 **Current System Overview**
 
@@ -8,25 +8,27 @@ Comprehensive usage examples for VANGA's cryptocurrency forecasting system with 
 All operations use the `cargo run --` command structure:
 
 ```bash
-# Training
+# Training with ordinal loss
 cargo run -- train --symbol SYMBOL --data PATH [OPTIONS]
 
-# Prediction
+# Prediction with ordinal classes
 cargo run -- predict --symbol SYMBOL --input PATH [OPTIONS]
 
-# Backtesting
+# Backtesting with trading metrics
 cargo run -- backtest --symbol SYMBOL --data PATH [OPTIONS]
 
-# Real-time streaming
+# Real-time streaming with ordinal predictions
 cargo run -- stream --symbol SYMBOL --data-path PATH [OPTIONS]
 ```
 
 ### **System Architecture**
-- **Multi-Target Prediction**: 5 targets (price_levels, direction, volatility, sentiment, volume) × 5 classes each
-- **Modular LSTM**: Separate modules for training, inference, loss calculation
-- **9 Modern Optimizers**: AdamW, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
-- **Adaptive Parameters**: Automatic parameter calibration for balanced predictions
-- **Real-time Streaming**: Live prediction capabilities with file watching
+- **5-Target Ordinal Prediction**: Price levels, direction, volatility, volume, sentiment (5 ordinal classes each)
+- **Trading-Aware Ordinal Loss**: Optimized for trading profitability, not just accuracy
+- **Adaptive Target Calibration**: Dynamic parameter optimization for balanced 20% per class
+- **Modular LSTM**: Separate modules for training, inference, ordinal loss calculation
+- **11 Advanced Optimizers**: AdamW, FracAdam, FracNAdam, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
+- **Fractional Memory**: FracAdam and FracNAdam for volatile market conditions
+- **Real-time Streaming**: Live ordinal predictions with file watching
 
 ## 📋 **Prerequisites**
 
@@ -44,7 +46,7 @@ timestamp,open,high,low,close,volume
 
 | Command | Purpose | Key Features |
 |---------|---------|--------------|
-| `vanga train` | Model training | Single/multi-symbol, fresh/continue modes, 9 optimizers |
+| `vanga train` | Ordinal loss training | Single/multi-symbol, fresh/continue modes, 11 optimizers |
 | `vanga predict` | Make predictions | Single/batch, all horizons, confidence filtering |
 | `vanga models list` | List trained models | Shows available models and horizons |
 | `vanga models evaluate` | Model evaluation | Backtesting, performance metrics |

@@ -1,55 +1,71 @@
-# Multi-Target Prediction System
+# Multi-Target Prediction System with Adaptive Calibration
 
-The VANGA LSTM cryptocurrency forecasting system implements a comprehensive **5-target × 5-class prediction framework** designed specifically for cryptocurrency market analysis.
+The VANGA LSTM cryptocurrency forecasting system implements a comprehensive **5-target × 5-class prediction framework** with **adaptive target calibration** and **trading-aware ordinal loss** designed specifically for cryptocurrency market analysis.
 
-**Status**: ✅ **Complete Implementation** - All target types functional with unified 5-class system
+**Status**: ✅ **Complete Implementation** - All target types functional with adaptive calibration and ordinal loss
 
 ## Architecture Overview
 
-### **5 Targets per Horizon = 25 Total Outputs**
+### **5 Targets per Horizon with Adaptive Calibration**
 
-VANGA implements a unified multi-target system where each target type outputs exactly **5 categorical classes**:
+VANGA implements a unified multi-target system where each target type outputs exactly **5 ordinal classes** with adaptive calibration:
 
 ```rust
 // Target system architecture - src/targets/mod.rs
 pub enum TargetType {
-    PriceLevel,     // 5-class price level classification
-    Direction,      // 5-class directional movement
-    Volatility,     // 5-class volatility regime
-    Sentiment,      // 5-class market sentiment (NEW)
-    Volume,         // 5-class volume regime (NEW)
+    PriceLevel,     // 5-class ordinal price level classification
+    Direction,      // 5-class ordinal directional movement
+    Volatility,     // 5-class ordinal volatility regime
+    Volume,         // 5-class ordinal volume regime
+    Sentiment,      // 5-class ordinal market sentiment
 }
 
-// Each target outputs 5 classes using one-hot encoding
+// Each target outputs 5 ordinal classes (0-4)
 pub const NUM_CLASSES: usize = 5;
-// Total model output per horizon: 5 targets × 5 classes = 25 outputs per horizon
+// Classes: 0=Strong Down, 1=Moderate Down, 2=Neutral, 3=Moderate Up, 4=Strong Up
 ```
 
-### **Multi-Target Loss Function Integration**
+### **Adaptive Target Calibration System**
 
-VANGA implements proper weighted multi-target loss calculation with class weighting for extreme imbalance:
+VANGA implements dynamic parameter optimization for balanced classification:
 
 ```rust
-// Enhanced modular LSTM with weighted loss calculation
-// Implemented in src/model/lstm/loss.rs
+// Adaptive calibration system - src/targets/calibration.rs
+pub struct TargetCalibrator {
+    pub balance_weight: f64,    // Weight for class balance (default: 0.7)
+    pub diversity_weight: f64,  // Weight for parameter diversity (default: 0.3)
+    pub diversity_threshold: f64, // Minimum diversity threshold (default: 0.1)
+}
+
+impl TargetCalibrator {
+    /// Calibrate parameters for balanced 20% per class distribution
+    pub async fn calibrate(
+        &self,
+        ohlcv_data: &DataFrame,
+        sequence_length: usize,
+        horizon_steps: usize,
+    ) -> Result<CalibratedParameters>
+}
+```
+
+### **Trading-Aware Ordinal Loss Integration**
+
+VANGA implements trading-aware ordinal loss optimized for profitability:
+
+```rust
+// Trading-aware ordinal loss - src/model/lstm/loss.rs
 impl LSTMModel {
-    /// Calculate weighted soft cross-entropy loss for categorical targets
-    pub fn calculate_weighted_soft_crossentropy_loss(
+    /// Calculate ordinal loss with trading-aware penalties
+    pub fn calculate_ordinal_loss(
         &self,
         predictions: &Tensor,
         targets: &Tensor,
-        class_weights: Option<&Vec<f32>>,
+        class_weights: Option<&Tensor>,
     ) -> Result<Tensor> {
-        // Apply class weights for extreme imbalance (248x weight for rare classes)
-        if let Some(weights) = class_weights {
-            let weights_tensor = Tensor::from_vec(weights.clone(), weights.len(), &self.device)?;
-            let weights_broadcast = weights_tensor.broadcast_as(targets.shape())?;
-
-            // Weighted cross-entropy with proper broadcasting
-            let weighted_targets = targets.mul(&weights_broadcast)?.contiguous()?;
-            predictions.cross_entropy_with_logits(&weighted_targets)
+        // Ordinal loss penalizes wrong directions more than wrong magnitudes
+        // Classes maintain natural ordering: 0 < 1 < 2 < 3 < 4
         } else {
-            // Standard cross-entropy for balanced datasets
+            // Trading-aware ordinal loss for balanced datasets
             predictions.cross_entropy_with_logits(targets)
         }
     }

@@ -2,31 +2,27 @@
 
 ## Overview
 
-VANGA is a production-ready LSTM-based cryptocurrency forecasting system featuring **modular architecture**, **unified training system**, and **9 modern optimizers**. The system combines advanced deep learning with professional-grade technical indicators and hybrid models (XGBoost + TFT) for superior market predictions.
+VANGA is a production-ready LSTM-based cryptocurrency forecasting system featuring **modular architecture**, **trading-aware ordinal loss**, and **11 advanced optimizers**. The system combines advanced deep learning with professional-grade technical indicators and **adaptive target calibration** for superior market predictions optimized for trading profitability.
 
-## 🏗️ **NEW: Modular LSTM Architecture**
+## 🏗️ **NEW: Modular LSTM Architecture with Trading-Aware Ordinal Loss**
 
 ### **Core Module Structure**
 
-The LSTM implementation has been completely refactored into focused, maintainable modules:
+The LSTM implementation features focused, maintainable modules with trading-aware ordinal loss:
 
 ```rust
 src/model/lstm/
-├── config.rs      # Configuration structs, enums, and validation
-├── core.rs        # Model lifecycle, initialization, and persistence
-├── training.rs    # Training pipeline and optimization (MAIN LOGIC)
+├── config.rs      # LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
+├── core.rs        # Model lifecycle, initialization, persistence, Xavier initialization
+├── training.rs    # Unified training method with ordinal loss and adaptive calibration
 ├── inference.rs   # Prediction pipeline and forward pass
-├── loss.rs        # Loss calculation with tensor broadcasting
-├── manual_lstm.rs # Manual LSTM cell implementation
+├── loss.rs        # Trading-aware ordinal loss, validation metrics, gradient utilities
+├── seeded_weights.rs # Reproducible weight initialization with orthogonal recurrent weights
 ├── window_aware_lr.rs # Window-aware learning rate scheduling
-├── seeded_weights.rs # Reproducible weight initialization
 ├── schedule_benchmark.rs # Learning rate schedule benchmarking
 ├── schedule_validation.rs # Schedule validation utilities
-├── balance_validation_test.rs # Balance validation tests
 ├── hidden_state_test.rs # Hidden state tests
 ├── inference_test.rs # Inference tests
-├── loss_test.rs   # Loss function tests
-├── schedule_test.rs # Schedule tests
 └── mod.rs         # Public API and re-exports for backward compatibility
 ```
 
@@ -37,7 +33,7 @@ src/model/lstm/
 pub struct LSTMConfig {
     pub input_size: usize,
     pub hidden_sizes: Vec<usize>,  // Per-layer hidden sizes
-    pub output_size: usize,
+    pub output_size: usize,        // Always 5 for ordinal classification
     pub sequence_length: usize,
     pub learning_rate: f64,
     pub num_layers: usize,
@@ -45,6 +41,8 @@ pub struct LSTMConfig {
 
 pub enum OptimizerWrapper {
     AdamW(optim::AdamW),      // Best overall performance
+    FracAdam(FracAdam),       // NEW: Fractional memory adaptation
+    FracNAdam(FracNAdam),     // NEW: Fractional Nesterov momentum
     RMSprop(RMSprop),         // Volatile markets
     NAdam(NAdam),             // Fastest convergence
     RAdam(RAdam),             // Most stable
@@ -63,10 +61,10 @@ impl LSTMModel {
 }
 ```
 
-#### **`training.rs` - Unified Training System**
+#### **`training.rs` - Trading-Aware Training System**
 ```rust
 impl LSTMModel {
-    /// THE main training method - handles all training scenarios
+    /// THE main training method - handles ordinal loss and adaptive calibration
     pub async fn train(
         &mut self,
         sequences: &Array3<f64>,
@@ -74,7 +72,7 @@ impl LSTMModel {
         config: &TrainingConfig,
         validation_sequences: Option<&Array3<f64>>,
         validation_targets: Option<&Array2<f64>>,
-        class_weights: Option<&Array1<f64>>,
+        class_weights: Option<&Vec<f32>>,
     ) -> Result<()>
 }
 ```
@@ -87,14 +85,21 @@ impl LSTMModel {
 }
 ```
 
-#### **`loss.rs` - Loss Calculation & Metrics**
+#### **`loss.rs` - Trading-Aware Ordinal Loss**
 ```rust
-pub fn calculate_weighted_soft_crossentropy_loss(
+// Trading-aware ordinal loss for 5-class predictions
+pub fn calculate_ordinal_loss(
     predictions: &Tensor,
     targets: &Tensor,
     class_weights: Option<&Tensor>,
-    label_smoothing: f64,
 ) -> Result<Tensor>
+
+// Categorical validation metrics for trading performance
+pub async fn calculate_categorical_validation_metrics(
+    &mut self,
+    predictions: &Tensor,
+    targets: &Tensor,
+) -> Result<()>
 ```
 
 ### **Backward Compatibility Layer**
@@ -106,20 +111,18 @@ pub use crate::model::lstm::*;
 
 All existing code continues to work unchanged through re-exports.
 
-## 🚀 **Unified Training Architecture**
+## 🚀 **Trading-Aware Ordinal Loss Architecture**
 
-### **Single Training Method Philosophy**
+### **5-Class Ordinal System Philosophy**
 
-Instead of multiple training methods (`train_a`, `train_b`, `train_with_xyz`), VANGA uses **one configurable training method** that handles all scenarios:
+Instead of traditional classification, VANGA uses **trading-aware ordinal loss** optimized for profitability:
 
 ```rust
-// ❌ OLD APPROACH - Method proliferation
-pub async fn train() -> Result<()>
-pub async fn train_with_validation() -> Result<()>
-pub async fn train_with_early_stopping() -> Result<()>
-pub async fn train_with_custom_lr() -> Result<()>
+// ❌ OLD APPROACH - Traditional classification
+CrossEntropyLoss::new() // Treats all misclassifications equally
 
-// ✅ NEW APPROACH - Single configurable method
+// ✅ NEW APPROACH - Trading-aware ordinal loss
+OrdinalLoss::new() // Penalizes wrong directions more than wrong magnitudes
 pub async fn train(
     &mut self,
     sequences: &Array3<f64>,

@@ -1,24 +1,56 @@
-# VANGA Optimizer Selection Guide for Cryptocurrency Training
+# VANGA Optimizer Selection Guide for Cryptocurrency Trading with Ordinal Loss
 
-## 🎯 **RECOMMENDED DEFAULT: AdamW**
+## 🎯 **RECOMMENDED DEFAULT: AdamW for Trading-Aware Ordinal Loss**
 
-For **99% of cryptocurrency training scenarios**, use **AdamW** with these settings:
+For **99% of cryptocurrency trading scenarios** with ordinal loss, use **AdamW** with these settings:
 
 ```toml
 [training]
 optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999 } }
 learning_rate = { Adaptive = { initial_lr = 0.001, patience = 10, factor = 0.5 } }
 warmup_epochs = 5
+loss_function = "OrdinalLoss"  # Trading-aware ordinal loss
 ```
 
-**Why AdamW for Crypto:**
+**Why AdamW for Crypto Trading with Ordinal Loss:**
+- ✅ **Optimizes trading profitability** with ordinal loss function
 - ✅ **Handles volatility spikes** better than other optimizers
 - ✅ **Weight decay prevents overfitting** on noisy crypto data
 - ✅ **Adaptive learning rates** adjust to market regime changes
 - ✅ **20-40% better convergence** than SGD on crypto datasets
 - ✅ **Robust to hyperparameter choices** - works well with defaults
 
-## 🚀 **Alternative Optimizers for Specific Scenarios**
+## 🚀 **NEW: Fractional Memory Optimizers for Extreme Markets**
+
+### **FracAdam - For Volatile Market Conditions**
+```toml
+optimizer = { FracAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, fractional_order = 0.8 } }
+```
+**Use when:**
+- Training on extremely volatile crypto pairs (flash crashes, pump/dumps)
+- Market data shows extreme volatility clustering
+- Standard optimizers fail to converge
+
+**Benefits:**
+- Fractional memory adaptation for long-term dependencies
+- Better handling of extreme market events
+- Improved convergence in volatile conditions
+
+### **FracNAdam - For Momentum with Memory**
+```toml
+optimizer = { FracNAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, momentum_decay = 0.004, fractional_order = 0.9 } }
+```
+**Use when:**
+- Training on trending crypto markets with memory effects
+- Data shows strong momentum patterns with long-term dependencies
+- Need faster convergence with fractional memory
+
+**Benefits:**
+- Combines Nesterov acceleration with fractional memory
+- Excellent for trend following with memory effects
+- Superior performance on momentum-driven crypto patterns
+
+## 🚀 **Traditional Optimizers for Specific Scenarios**
 
 ### **RMSprop - For Highly Volatile Markets**
 ```toml
@@ -32,21 +64,7 @@ optimizer = { RMSprop = { alpha = 0.99, eps = 1e-8, weight_decay = 0.01, momentu
 **Benefits:**
 - Designed for non-stationary objectives (perfect for crypto)
 - Handles changing volatility regimes well
-- Good for LSTM/RNN architectures
-
-### **NAdam - For Momentum-Driven Markets**
-```toml
-optimizer = { NAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, momentum_decay = 0.004 } }
-```
-**Use when:**
-- Training on trending crypto markets
-- Data shows strong momentum patterns
-- Need faster convergence than standard Adam
-
-**Benefits:**
-- Nesterov acceleration helps with trend following
-- Often converges faster than Adam
-- Good for momentum-driven crypto patterns
+- Good for LSTM/RNN architectures with ordinal loss
 
 ### **RAdam - For Stable Training**
 ```toml

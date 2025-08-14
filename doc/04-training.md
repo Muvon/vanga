@@ -1,52 +1,42 @@
-# LSTM Training Guide - Single-Config System
+# LSTM Training Guide - Trading-Aware Ordinal Loss System
 
-This guide covers VANGA's **single-config LSTM training system** with intelligent architecture optimization, automatic early stopping, and **advanced learning rate optimization**.
+This guide covers VANGA's **trading-aware ordinal loss training system** with adaptive target calibration, orthogonal weight initialization, and **11 advanced optimizers**.
 
-## 🧠 Single-Config Training Features
+## 🎯 Trading-Aware Ordinal Loss Features
 
-### ✅ **Unified Configuration**
-- **All-in-One**: Training, model, and feature parameters in single TOML file
-- **Template-Based**: Pre-configured templates for different use cases
-- **Parameter Documentation**: Comprehensive explanations in example configs
-- **Validation**: Automatic parameter validation and error checking
+### ✅ **5-Class Ordinal Classification**
+- **Trading-Optimized Classes**: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
+- **Ordinal Relationships**: Preserves natural ordering between price movement classes
+- **Directional Penalties**: Wrong directional calls penalized more than magnitude errors
+- **Profitability Focus**: Loss function designed for trading success, not just accuracy
+- **Balanced Distribution**: Adaptive calibration ensures 20% per class
 
-### ✅ **Advanced Learning Rate Optimization (NEW)**
-- **11 Modern Optimizers**: AdamW, SGD, Adam, AdaDelta, AdaGrad, AdaMax, NAdam, RAdam, RMSprop, **FracAdam, FracNAdam**
-- **Fractional Optimizers**: Advanced optimizers with long-term memory effects for time-series forecasting
+### ✅ **Adaptive Target Calibration (NEW)**
+- **Dynamic Parameter Optimization**: Finds optimal thresholds for balanced classification
+- **Diversity Metrics**: Cosine distance-based diversity scoring for robust parameters
+- **Quality Scoring**: Composite quality metrics balance accuracy and diversity
+- **Training-Prediction Consistency**: Same calibrated parameters used in both phases
+- **Multi-Target Coordination**: Separate calibration for each target type
+
+### ✅ **Advanced Optimizer System (11 Optimizers)**
+- **11 Advanced Optimizers**: AdamW, FracAdam, FracNAdam, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
+- **Fractional Memory Optimizers**: FracAdam and FracNAdam for volatile market conditions
 - **Empirical Performance Data**: Based on 50-run benchmarks across crypto datasets
-- **Intelligent Selection**: Automatic optimizer recommendation based on data characteristics
 - **Crypto-Optimized Defaults**: AdamW with weight decay for cryptocurrency volatility patterns
 - **Smart Auto Learning Rate**: Optimizes within specified ranges based on model complexity
-- **Adaptive ReduceLROnPlateau**: Automatically reduces LR when validation loss plateaus with configurable patience
-- **Linear Warmup Support**: Gradual LR increase over configurable epochs prevents early training instability
-- **Unified Training Method**: Single training method handles all scenarios through configuration
-- **Enhanced Monitoring**: Real-time LR tracking, warmup status, and validation metrics
+- **Adaptive ReduceLROnPlateau**: Automatically reduces LR when validation loss plateaus
+- **Linear Warmup Support**: Gradual LR increase prevents early training instability
 - **35% better performance** compared to basic SGD on crypto datasets
 
-### ✅ **Advanced Loss Function System (NEW)**
-- **Multi-Target Loss Weighting**: Proper weighted loss calculation for 5 targets × 5 classes each
-- **Crypto-Optimized Weights**: Direction (30%), Price Levels (25%), Volatility (20%), Sentiment (15%), Volume (10%)
-- **CryptoComposite Loss**: Specialized loss function for cryptocurrency trading optimization
-- **Market Regime Awareness**: Adjusts loss calculation based on market conditions
-- **Meaningful Early Stopping**: Fixed min_delta thresholds for proper convergence detection
-- **Backward Compatible**: Falls back to MSE when no loss function configured
-
-### ✅ **Intelligent Training System**
-- **Unified Training Method**: Single training method handles all scenarios through configuration
-- **Auto Early Stopping**: Automatically stops when validation loss plateaus
-- **Adaptive Learning Rate**: Dynamic learning rate adjustment with configurable patience and reduction factor
-- **Linear Warmup**: Gradual learning rate increase over configurable epochs
-- **Architecture Optimization**: Automatic layer count and sizing based on data
-- **Performance Monitoring**: Real-time training metrics, LR tracking, and convergence monitoring
-
-### ✅ **Modular LSTM Architecture (NEW)**
-- **Unified Training Method**: Single `train()` method in `src/model/lstm/training.rs` handles all scenarios
-- **Modular Structure**: LSTM implementation split into focused modules:
-  - `src/model/lstm/config.rs` - Configuration structs and validation
-  - `src/model/lstm/core.rs` - Model lifecycle and initialization
-  - `src/model/lstm/training.rs` - **Main training logic** (THE unified training method)
-  - `src/model/lstm/inference.rs` - Prediction pipeline
-  - `src/model/lstm/loss.rs` - Loss calculation with tensor broadcasting
+### ✅ **Modular LSTM Architecture with Ordinal Loss**
+- **Unified Training Method**: Single `train()` method in `src/model/lstm/training.rs` with ordinal loss
+- **Modular Structure**: LSTM implementation with focused modules:
+  - `src/model/lstm/config.rs` - LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
+  - `src/model/lstm/core.rs` - Model lifecycle, initialization, Xavier initialization
+  - `src/model/lstm/training.rs` - **Unified training with ordinal loss and adaptive calibration**
+  - `src/model/lstm/inference.rs` - Prediction pipeline and forward pass
+  - `src/model/lstm/loss.rs` - **Trading-aware ordinal loss, validation metrics**
+  - `src/model/lstm/seeded_weights.rs` - Orthogonal weight initialization for recurrent layers
 - **Backward Compatibility**: All existing APIs preserved through `src/model/lstm_simple.rs` compatibility layer
 - **Enhanced Loss Functions**: Tensor broadcasting fixes and proper class weighting in `src/model/lstm/loss.rs`
 - **Multi-Target Coordination**: `src/model/multi_target.rs` manages separate models per target×horizon combination
@@ -337,7 +327,7 @@ seed = 42                                    # Fixed seed for reproducibility
 
 ### **🆕 9 Modern Optimizers (Latest)**
 
-VANGA now supports 9 modern optimizers with empirical performance data:
+VANGA now supports 11 advanced optimizers with empirical performance data:
 
 #### **Optimizer Performance Rankings**
 ```toml
@@ -579,7 +569,7 @@ impl LSTMModel {
         validation_targets: Option<&Array2<f64>>,
         class_weights: Option<&Array1<f64>>,
     ) -> Result<()> {
-        // 1. Configure optimizer (9 modern optimizers available)
+        // 1. Configure optimizer (11 advanced optimizers available)
         let optimizer = self.setup_optimizer(&config.training.optimizer)?;
 
         // 2. Setup learning rate scheduling
@@ -646,7 +636,7 @@ pub struct TrainingParams {
     pub epochs: EpochConfig,                     // Auto early stopping or fixed epochs
     pub batch_size: BatchSizeConfig,             // Auto or fixed batch sizing
     pub learning_rate: f64,                      // Base learning rate
-    pub optimizer: OptimizerType,                // 9 modern optimizers
+    pub optimizer: OptimizerType,                // 11 advanced optimizers
     pub warmup_epochs: u32,                      // Learning rate warmup
     pub learning_schedule: Option<LearningScheduleConfig>, // LR scheduling
     pub validation_split: f64,                   // Validation data ratio
@@ -793,7 +783,7 @@ models/
 
 ### **Optimizer Selection Guide**
 
-VANGA supports 9 modern optimizers with empirical performance data:
+VANGA supports 11 advanced optimizers with empirical performance data:
 
 | Optimizer | Best Use Case | Avg Val Loss | Success Rate | Config Example |
 |-----------|---------------|--------------|--------------|----------------|

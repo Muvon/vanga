@@ -1,6 +1,6 @@
 # VANGA Troubleshooting Guide
 
-Comprehensive troubleshooting guide for VANGA's cryptocurrency forecasting system with current modular architecture and development practices.
+Comprehensive troubleshooting guide for VANGA's **trading-aware ordinal loss** cryptocurrency forecasting system with current modular architecture and development practices.
 
 ## 🔧 **Development Workflow Issues**
 
@@ -39,13 +39,13 @@ export CARGO_BUILD_JOBS=1
 cargo build
 ```
 
-## 🎯 **Training Issues**
+## 🎯 **Trading-Aware Ordinal Loss Training Issues**
 
-### **Non-Deterministic Training Results** ⚠️
+### **Ordinal Loss Convergence Issues** ⚠️
 
-**Issue**: Different metrics and results with same config and data
+**Issue**: Ordinal loss not converging or poor trading performance
 
-**Root Cause**: Missing orthogonal initialization for LSTM recurrent weights
+**Root Cause**: Incorrect ordinal loss configuration or missing adaptive calibration
 
 **Symptoms**:
 - Same configuration produces different loss values across runs
