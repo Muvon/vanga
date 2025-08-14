@@ -1232,12 +1232,12 @@ impl LSTMModel {
             targets.shape()
         );
 
-        // 🎯 ORDINAL-AWARE CROSS-ENTROPY LOSS for 5-class ordered targets
-        // Key insight: Classes have natural ordering 0 < 1 < 2 < 3 < 4
-        // Middle class (2) is neutral, extremes (0,4) are strong signals
-        // We want to penalize predictions based on DISTANCE from true class
+        // 🎯 TRADING-AWARE ORDINAL LOSS for 5-class market prediction
+        // Optimized for profitability, not just mathematical accuracy
+        // Classes: 0=VeryDown, 1=Down, 2=Sideways(safe), 3=Up, 4=VeryUp
+        // Key: Wrong direction worse than wrong magnitude
         log::debug!(
-            "🎯 Using Ordinal-Aware Cross-Entropy for {:?} (5-class ordered system with distance weighting)",
+            "🎯 Using Trading-Aware Ordinal Loss for {:?} (asymmetric penalties for market profitability)",
             target_type
         );
 
@@ -1276,27 +1276,26 @@ impl LSTMModel {
             class_probs.shape()
         );
 
-        // MATHEMATICAL APPROACH: Ordinal-Aware Cross-Entropy
-        // 
-        // For each sample, we calculate:
-        // L = -log(P(true_class)) + λ * Σ(distance_weight * P(wrong_class))
+        // TRADING-AWARE ORDINAL LOSS: Optimized for Market Profitability
         //
-        // Where:
-        // - P(true_class) is the probability of the correct class
-        // - distance_weight = |predicted_class - true_class| / 4 (normalized distance)
-        // - λ is a scaling factor for the ordinal penalty (we use 0.5)
+        // Classes: 0=VeryDown, 1=Down, 2=Sideways, 3=Up, 4=VeryUp
+        // Key principle: Wrong DIRECTION is worse than wrong MAGNITUDE
         //
-        // This ensures:
-        // 1. Primary loss from not predicting the correct class (standard CE)
-        // 2. Additional penalty proportional to how far wrong predictions are
-        // 3. Smooth gradients that guide the model toward nearby classes
+        // Penalty Design:
+        // 1. Being on wrong side of middle (2) is heavily penalized
+        // 2. Missing opportunities (predict 2 when 0 or 4) is moderately penalized
+        // 3. Wrong magnitude on same side is lightly penalized
+        // 4. Asymmetric: Buying in crash (predict 4 when 0) worse than shorting rally
+        //
+        // This optimizes for:
+        // - Capital preservation (avoid wrong direction trades)
+        // - Opportunity capture (avoid sitting out big moves)
+        // - Risk management (middle point = safe zone)
 
         // Get target indices as integers for indexing
         let target_indices_vec = target_indices.to_vec1::<f32>()?;
-        let target_indices_int: Vec<usize> = target_indices_vec
-            .iter()
-            .map(|&x| x as usize)
-            .collect();
+        let target_indices_int: Vec<usize> =
+            target_indices_vec.iter().map(|&x| x as usize).collect();
 
         // Create one-hot encoded targets [batch_size, num_classes]
         let mut one_hot_targets = vec![0.0f32; batch_size * num_classes];
@@ -1321,15 +1320,30 @@ impl LSTMModel {
             .sum(1)? // Sum across classes
             .neg()?; // Negate for loss
 
-        // Ordinal penalty: For each sample, calculate weighted distance penalty
-        // Create weight matrix for each sample based on true class
+        // TRADING-AWARE PENALTY MATRIX
+        // Rows = true class, Columns = predicted class
+        // Higher values = worse mistakes for trading
+        let penalty_matrix: [[f32; 5]; 5] = [
+            // True = 0 (VeryDown)
+            [0.0, 0.3, 0.5, 1.5, 2.0], // Predicting UP in crash is worst
+            // True = 1 (Down)
+            [0.3, 0.0, 0.3, 1.2, 1.8], // Still bad to predict UP
+            // True = 2 (Sideways)
+            [0.8, 0.4, 0.0, 0.4, 0.8], // Symmetric penalties for unnecessary trades
+            // True = 3 (Up)
+            [1.8, 1.2, 0.3, 0.0, 0.3], // Bad to predict DOWN
+            // True = 4 (VeryUp)
+            [2.0, 1.5, 0.5, 0.3, 0.0], // Shorting in rally is worst
+        ];
+
+        // Create ordinal weight tensor based on trading-aware penalties
         let mut ordinal_weights = vec![0.0f32; batch_size * num_classes];
         for (batch_idx, &target_class) in target_indices_int.iter().enumerate() {
-            for class_idx in 0..num_classes {
-                // Weight is proportional to distance from true class
-                // This creates a smooth gradient that guides predictions toward nearby classes
-                let distance = (class_idx as f32 - target_class as f32).abs() / 4.0;
-                ordinal_weights[batch_idx * num_classes + class_idx] = distance;
+            if target_class < num_classes {
+                for pred_class in 0..num_classes {
+                    let penalty = penalty_matrix[target_class][pred_class];
+                    ordinal_weights[batch_idx * num_classes + pred_class] = penalty;
+                }
             }
         }
         let ordinal_weight_tensor = Tensor::from_vec(
@@ -1339,42 +1353,40 @@ impl LSTMModel {
         )?;
 
         // Calculate ordinal penalty: sum of weighted probabilities
-        // This penalizes the model more for predicting classes far from the true class
-        let ordinal_penalty = class_probs
-            .mul(&ordinal_weight_tensor)?
-            .sum(1)?; // Sum across classes for each sample
+        // This penalizes based on trading impact, not just mathematical distance
+        let ordinal_penalty = class_probs.mul(&ordinal_weight_tensor)?.sum(1)?; // Sum across classes for each sample
 
         // Combine losses: CE loss + λ * ordinal penalty
-        // λ = 0.5 gives good balance between accuracy and ordinal awareness
-        let lambda = 0.5f32;
+        // λ = 0.3 for trading (lower than pure ordinal since penalties are already strong)
+        let lambda = 0.3f32;
         let lambda_tensor = Tensor::new(lambda, pred_contiguous.device())?;
         let scaled_penalty = ordinal_penalty.broadcast_mul(&lambda_tensor)?;
         let combined_loss = ce_loss.add(&scaled_penalty)?;
-        
+
         // Take mean across batch
         let final_loss = combined_loss.mean_all()?;
 
         // Log the loss value for debugging
         let loss_value = final_loss.to_scalar::<f32>().unwrap_or(0.0);
         log::debug!(
-            "✅ Ordinal-Aware Cross-Entropy Loss: {:.6} for {:?} (distance-weighted for 5-class ordering)",
+            "✅ Trading-Aware Ordinal Loss: {:.6} for {:?} (asymmetric penalties for market profitability)",
             loss_value,
             target_type
         );
-        
+
         // Additional debug: Check if loss is reasonable
         if loss_value > 10.0 {
             log::warn!(
-                "⚠️ High ordinal loss detected: {:.6} - model may need lower learning rate",
+                "⚠️ High trading loss detected: {:.6} - model may need lower learning rate",
                 loss_value
             );
         } else if loss_value < 0.01 {
             log::warn!(
-                "⚠️ Very low ordinal loss detected: {:.6} - model may be overfitting",
+                "⚠️ Very low trading loss detected: {:.6} - model may be overfitting",
                 loss_value
             );
         }
-        
+
         Ok(final_loss)
     }
 
