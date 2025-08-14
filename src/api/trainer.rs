@@ -476,10 +476,11 @@ impl ModelTrainer {
             volatility: crate::targets::adaptive_parameters::VolatilityAdaptiveParams {
                 bandwidth_size: calibrated_params.volatility.bandwidth,
                 extreme_multiplier: calibrated_params.volatility.extreme_multiplier,
+                volume_weight: calibrated_params.volatility.volume_weight, // Use calibrated volume weight
                 atr_distribution_stats: Default::default(),
                 cv_adjustment_factor: 1.0,
                 horizon_decay_factor: calibrated_params.volatility.horizon_decay,
-                min_baseline_atr: 0.005, // Add missing field with default value
+                min_baseline_atr: calibrated_params.volatility.min_volatility_baseline, // Use calibrated baseline
                 achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
                     class_percentages: calibrated_params.volatility.balance.class_percentages,
                     balance_score: calibrated_params.volatility.balance.balance_score,

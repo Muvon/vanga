@@ -557,24 +557,20 @@ pub struct LogVolatilityThresholds {
                            // Above high_max = VeryHigh
 }
 
-/// Enhanced volatility classification with multi-feature analysis for better LSTM learning
+/// Simplified volatility classification using ATR momentum approach
 ///
-/// ENHANCED APPROACH: Uses multiple volatility features similar to direction/price_level targets:
-/// 1. Volatility trend analysis (increasing/decreasing volatility patterns)
-/// 2. Volume-weighted volatility (high volume volatility vs noise)
-/// 3. Volatility persistence (regime stability)
-/// 4. Volatility regime transitions (like direction's momentum change)
+/// SIMPLIFIED APPROACH: Following the successful sentiment pattern with 2 simple features:
+/// - **ATR Momentum**: How volatility is changing (horizon_atr - sequence_atr) / sequence_atr
+/// - **Volume Conviction**: Volume ratio adds conviction to volatility changes
 ///
-/// ## Algorithm
-/// 1. Calculate volatility trend change (similar to direction's momentum change)
-/// 2. Add volume-weighted volatility analysis (similar to price_level's VWAP)
-/// 3. Measure volatility persistence and regime transitions
-/// 4. Combine features for robust classification
+/// This replaces the complex 4-feature approach with a simple, effective method that
+/// mirrors the successful sentiment classification pattern.
 ///
-/// ## Signal Strength Enhancement
-/// - **Multiple Features**: Trend, volume-weighting, persistence, transitions
-/// - **Regime Detection**: Captures volatility regime changes, not just magnitude
-/// - **ML Friendly**: Rich feature set similar to successful direction/price_level targets
+/// ## Why Simplified?
+/// - **Sentiment Success**: Simple momentum + volume approach fixed sentiment performance
+/// - **ML Learning**: Simple features are easier for LSTM to learn patterns from
+/// - **Research-Based**: ATR momentum is a proven volatility measurement technique
+/// - **Volume Integration**: High volume volatility changes are more meaningful
 pub fn classify_volatility_with_distribution_analysis(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
@@ -585,48 +581,51 @@ pub fn classify_volatility_with_distribution_analysis(
         return Ok(2); // Default to Medium for insufficient data
     }
 
-    // Feature 1: Basic ATR ratio (existing approach)
+    // Calculate ATR for both periods (same as before)
     let sequence_atr =
         calculate_simple_atr_with_params(sequence_candles, adaptive_params.min_baseline_atr)?;
     let horizon_atr =
         calculate_simple_atr_with_params(horizon_candles, adaptive_params.min_baseline_atr)?;
+
+    // Ensure minimum baseline to avoid division by zero
     let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr);
-    let volatility_ratio = horizon_atr / baseline_atr;
 
-    // Feature 2: Volatility trend change (similar to direction's momentum change)
-    let volatility_trend_change =
-        calculate_volatility_trend_change(sequence_candles, horizon_candles)?;
+    // SIMPLE FEATURE 1: ATR momentum (identical to price momentum formula)
+    let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
 
-    // Feature 3: Volume-weighted volatility analysis (similar to price_level's VWAP approach)
-    let volume_weighted_volatility_change =
-        calculate_volume_weighted_volatility_change(sequence_candles, horizon_candles)?;
+    // SIMPLE FEATURE 2: Volume conviction (identical to sentiment approach)
+    let sequence_volume = calculate_average_volume(sequence_candles);
+    let horizon_volume = calculate_average_volume(horizon_candles);
+    let volume_conviction = if sequence_volume > 0.0 {
+        (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0) // Log scale, clamped
+    } else {
+        0.0 // Neutral if no volume data
+    };
 
-    // Feature 4: Volatility persistence score (regime stability)
-    let volatility_persistence =
-        calculate_volatility_persistence(sequence_candles, horizon_candles)?;
+    // Combine ATR momentum with volume conviction (momentum is primary signal)
+    let volatility_score = atr_momentum + (volume_conviction * adaptive_params.volume_weight);
 
-    // Combine features for enhanced classification
-    let enhanced_volatility_score = combine_volatility_features(
-        volatility_ratio,
-        volatility_trend_change,
-        volume_weighted_volatility_change,
-        volatility_persistence,
-    );
-
-    // Use adaptive thresholds on the enhanced score
-    let moderate_threshold = adaptive_params.bandwidth_size;
+    // Use adaptive thresholds for classification (same structure as sentiment)
+    let moderate_threshold = adaptive_params.bandwidth_size; // Now represents ATR momentum threshold
     let extreme_threshold = adaptive_params.bandwidth_size * adaptive_params.extreme_multiplier;
 
-    // Enhanced classification based on combined features
-    let class = classify_enhanced_volatility_score(
-        enhanced_volatility_score,
-        moderate_threshold,
-        extreme_threshold,
-    );
+    // Classify based on combined volatility score
+    let class = if volatility_score <= -extreme_threshold {
+        0 // VeryLow: Large ATR decrease
+    } else if volatility_score <= -moderate_threshold {
+        1 // Low: Moderate ATR decrease
+    } else if volatility_score < moderate_threshold {
+        2 // Medium: Small ATR change in either direction
+    } else if volatility_score < extreme_threshold {
+        3 // High: Moderate ATR increase
+    } else {
+        4 // VeryHigh: Large ATR increase
+    };
 
     log::debug!(
-        "🎯 Enhanced Volatility: ratio={:.4}, trend_change={:.4}, volume_weighted={:.4}, persistence={:.4}, score={:.4} → class={} ({})",
-        volatility_ratio, volatility_trend_change, volume_weighted_volatility_change, volatility_persistence, enhanced_volatility_score,
+        "🎯 Simple ATR Momentum: seq_atr={:.6}, hor_atr={:.6}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
+        baseline_atr, horizon_atr, atr_momentum, volume_conviction, volatility_score,
+        -extreme_threshold, -moderate_threshold, moderate_threshold, extreme_threshold,
         class, ["VeryLow", "Low", "Medium", "High", "VeryHigh"][class as usize]
     );
 
@@ -727,6 +726,160 @@ pub fn calibrate_volatility_bandwidth(
     );
 
     Ok(final_sensitivity)
+}
+
+/// Comprehensive volatility parameter calibration following sentiment success pattern
+///
+/// COMPREHENSIVE APPROACH: Tests multiple parameter combinations like sentiment's 360 tests:
+/// - **ATR Sensitivity**: How sensitive to ATR momentum changes (like sentiment's body_sensitivity)
+/// - **Volume Weight**: How much volume conviction affects classification
+/// - **Extreme Multiplier**: Boundary between moderate and extreme classes
+///
+/// This replaces the simple bandwidth calibration with comprehensive testing that
+/// mirrors the successful sentiment calibration approach.
+///
+/// ## Algorithm
+/// 1. Collect all ATR momentum and volume data for testing
+/// 2. Test different parameter combinations (sensitivity × volume_weight × extreme_multiplier)
+/// 3. Find optimal parameters that achieve balanced 20% per class distribution
+/// 4. Return best parameters with balance quality score
+pub fn calibrate_volatility_comprehensive(
+    ohlcv_data: &[MarketDataRow],
+    sequence_length: usize,
+    horizon_steps: usize,
+    target_balance: f64,
+) -> Result<(f64, f64, f64)> {
+    if ohlcv_data.len() < sequence_length + horizon_steps + 50 {
+        return Ok((0.02, 0.1, 2.0)); // Default parameters
+    }
+
+    // Collect all ATR momentum and volume data for testing
+    let mut test_data = Vec::new();
+
+    for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
+        let sequence_ohlcv = &ohlcv_data[i..i + sequence_length];
+        let horizon_ohlcv = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
+
+        if sequence_ohlcv.len() >= 3 && horizon_ohlcv.len() >= 3 {
+            let sequence_atr = calculate_simple_atr(sequence_ohlcv).unwrap_or(0.005);
+            let horizon_atr = calculate_simple_atr(horizon_ohlcv).unwrap_or(0.005);
+            let sequence_volume = calculate_average_volume(sequence_ohlcv);
+            let horizon_volume = calculate_average_volume(horizon_ohlcv);
+
+            let baseline_atr = sequence_atr.max(0.005);
+            if baseline_atr > 0.0 && sequence_volume > 0.0 {
+                let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
+                let volume_conviction = (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0);
+
+                if atr_momentum.is_finite() && volume_conviction.is_finite() {
+                    test_data.push((atr_momentum, volume_conviction));
+                }
+            }
+        }
+    }
+
+    if test_data.len() < 100 {
+        return Ok((0.02, 0.1, 2.0)); // Need sufficient data for calibration
+    }
+
+    // Test different parameter combinations to find optimal balance
+    let sensitivity_candidates = vec![
+        0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.08,
+    ];
+    let volume_weight_candidates = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
+    let extreme_multiplier_candidates = vec![1.5, 1.8, 2.0, 2.2, 2.5, 3.0];
+
+    let mut best_sensitivity = 0.02;
+    let mut best_volume_weight = 0.1;
+    let mut best_extreme_multiplier = 2.0;
+    let mut best_balance_score = f64::INFINITY;
+
+    log::info!(
+        "🔍 Testing {} parameter combinations for optimal volatility calibration...",
+        sensitivity_candidates.len()
+            * volume_weight_candidates.len()
+            * extreme_multiplier_candidates.len()
+    );
+
+    for &sensitivity in &sensitivity_candidates {
+        for &volume_weight in &volume_weight_candidates {
+            for &extreme_multiplier in &extreme_multiplier_candidates {
+                // Test this parameter combination
+                let balance_score = test_volatility_parameter_combination(
+                    &test_data,
+                    sensitivity,
+                    volume_weight,
+                    extreme_multiplier,
+                    target_balance,
+                );
+
+                if balance_score < best_balance_score {
+                    best_balance_score = balance_score;
+                    best_sensitivity = sensitivity;
+                    best_volume_weight = volume_weight;
+                    best_extreme_multiplier = extreme_multiplier;
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "🎯 Optimal volatility parameters: sensitivity={:.4}, volume_weight={:.3}, extreme_multiplier={:.2}, balance_score={:.4}",
+        best_sensitivity, best_volume_weight, best_extreme_multiplier, best_balance_score
+    );
+
+    Ok((
+        best_sensitivity,
+        best_volume_weight,
+        best_extreme_multiplier,
+    ))
+}
+
+/// Test a specific volatility parameter combination and return balance quality score
+fn test_volatility_parameter_combination(
+    test_data: &[(f64, f64)], // (atr_momentum, volume_conviction) pairs
+    sensitivity: f64,
+    volume_weight: f64,
+    extreme_multiplier: f64,
+    target_balance: f64,
+) -> f64 {
+    let mut class_counts = [0usize; 5];
+    let extreme_threshold = sensitivity * extreme_multiplier;
+
+    // Classify all test samples with these parameters
+    for &(atr_momentum, volume_conviction) in test_data {
+        let volatility_score = atr_momentum + (volume_conviction * volume_weight);
+
+        let class = if volatility_score <= -extreme_threshold {
+            0 // VeryLow
+        } else if volatility_score <= -sensitivity {
+            1 // Low
+        } else if volatility_score < sensitivity {
+            2 // Medium
+        } else if volatility_score < extreme_threshold {
+            3 // High
+        } else {
+            4 // VeryHigh
+        };
+
+        class_counts[class] += 1;
+    }
+
+    // Calculate balance quality score (lower is better)
+    let total_samples = test_data.len() as f64;
+    let mut balance_score = 0.0;
+
+    for count in &class_counts {
+        let percentage = (*count as f64) / total_samples;
+        let deviation = (percentage - target_balance).abs();
+        balance_score += deviation * deviation; // Squared deviation penalty
+    }
+
+    // Add penalty for empty classes
+    let empty_classes = class_counts.iter().filter(|&&count| count == 0).count();
+    balance_score += (empty_classes as f64) * 0.1; // 10% penalty per empty class
+
+    balance_score
 }
 
 /// Calculate simple ATR for sequence→horizon comparison
@@ -1496,6 +1649,19 @@ pub fn probabilities_to_volatility_changes(
 
     let reconstruction = reconstruct_volatility_legacy(probabilities, sequence_ohlcv, config)?;
     Ok(reconstruction.volatility_changes)
+}
+
+/// Calculate average volume for volume conviction factor
+///
+/// SIMPLE APPROACH: Returns average volume for volume conviction calculation
+/// Higher volume = higher conviction in volatility moves
+pub fn calculate_average_volume(candles: &[MarketDataRow]) -> f64 {
+    if candles.is_empty() {
+        return 1.0; // Neutral conviction if no data
+    }
+
+    // Calculate average volume
+    candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64
 }
 
 /// Get volatility regime class names in order

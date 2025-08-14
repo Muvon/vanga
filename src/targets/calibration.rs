@@ -58,6 +58,7 @@ pub struct PriceLevelParams {
 pub struct VolatilityParams {
     pub bandwidth: f64,
     pub extreme_multiplier: f64,
+    pub volume_weight: f64, // NEW: Volume weight for volatility score calculation
     pub horizon_decay: f64,
     pub min_volatility_baseline: f64, // NEW: Replaces hardcoded 0.005
     pub balance: ClassBalance,
@@ -504,6 +505,7 @@ impl ParameterCalibrator {
         let bandwidths = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0];
         let multipliers = vec![1.5, 2.0, 2.5, 3.0];
         let decay_factors = vec![0.85, 0.90, 0.95, 1.0];
+        let volume_weights = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3]; // NEW: Volume weight calibration
 
         // NEW: Grid search for previously hardcoded min_volatility_baseline
         let min_volatility_baselines = vec![0.001, 0.003, 0.005, 0.007, 0.01]; // Was hardcoded 0.005
@@ -511,27 +513,31 @@ impl ParameterCalibrator {
         for &bandwidth in &bandwidths {
             for &multiplier in &multipliers {
                 for &decay in &decay_factors {
-                    for &min_baseline in &min_volatility_baselines {
-                        let balance = self.evaluate_volatility_params(
-                            context,
-                            &VolatilityEvalParams {
-                                bandwidth,
-                                multiplier,
-                                decay,
-                            },
-                        )?;
+                    for &volume_weight in &volume_weights {
+                        for &min_baseline in &min_volatility_baselines {
+                            let balance = self.evaluate_volatility_params(
+                                context,
+                                &VolatilityEvalParams {
+                                    bandwidth,
+                                    multiplier,
+                                    decay,
+                                    volume_weight,
+                                },
+                            )?;
 
-                        if balance.composite_quality_score < best_score
-                            && balance.diversity_score >= self.min_diversity_threshold
-                        {
-                            best_score = balance.composite_quality_score;
-                            best_params = VolatilityParams {
-                                bandwidth,
-                                extreme_multiplier: multiplier,
-                                horizon_decay: decay,
-                                min_volatility_baseline: min_baseline,
-                                balance,
-                            };
+                            if balance.composite_quality_score < best_score
+                                && balance.diversity_score >= self.min_diversity_threshold
+                            {
+                                best_score = balance.composite_quality_score;
+                                best_params = VolatilityParams {
+                                    bandwidth,
+                                    extreme_multiplier: multiplier,
+                                    volume_weight,
+                                    horizon_decay: decay,
+                                    min_volatility_baseline: min_baseline,
+                                    balance,
+                                };
+                            }
                         }
                     }
                 }
@@ -539,8 +545,8 @@ impl ParameterCalibrator {
         }
 
         log::info!(
-            "🎯 Calibrated Volatility Parameters: bandwidth={:.2}, extreme_mult={:.1}, decay={:.2}, min_baseline={:.4}",
-            best_params.bandwidth, best_params.extreme_multiplier, best_params.horizon_decay, best_params.min_volatility_baseline
+            "🎯 Calibrated Volatility Parameters: bandwidth={:.2}, extreme_mult={:.1}, volume_weight={:.3}, decay={:.2}, min_baseline={:.4}",
+            best_params.bandwidth, best_params.extreme_multiplier, best_params.volume_weight, best_params.horizon_decay, best_params.min_volatility_baseline
         );
 
         Ok(best_params)
@@ -864,31 +870,33 @@ impl ParameterCalibrator {
         self.calculate_balance(class_counts.as_ref(), total)
     }
 
-    /// Evaluate volatility parameters using proper ATR classification
+    /// Evaluate volatility parameters using simplified ATR momentum classification
     fn evaluate_volatility_params(
         &self,
         context: &EvaluationContext,
         params: &VolatilityEvalParams,
     ) -> Result<ClassBalance> {
-        use crate::targets::volatility::{
-            classify_volatility_log_ratio, get_horizon_weighted_atr_baseline,
-            get_sequence_atr_baseline, LogVolatilityThresholds,
-        };
+        use crate::config::model::TargetsConfig;
+        use crate::targets::adaptive_parameters::VolatilityAdaptiveParams;
+        use crate::targets::volatility::classify_volatility_with_distribution_analysis;
 
         let mut class_counts = [0usize; 5];
 
-        // Create thresholds using same logic as volatility.rs
-        let half_bandwidth = params.bandwidth / 2.0;
-        let extreme_bandwidth = params.bandwidth * params.multiplier;
-
-        let thresholds = LogVolatilityThresholds {
-            very_low_max: -extreme_bandwidth,
-            low_max: -half_bandwidth,
-            medium_max: half_bandwidth,
-            high_max: extreme_bandwidth,
+        // Create adaptive parameters for the new simplified approach
+        let adaptive_params = VolatilityAdaptiveParams {
+            bandwidth_size: params.bandwidth,
+            extreme_multiplier: params.multiplier,
+            volume_weight: params.volume_weight, // Use the calibrated volume weight
+            atr_distribution_stats: Default::default(),
+            cv_adjustment_factor: 1.0,
+            horizon_decay_factor: params.decay,
+            min_baseline_atr: 0.005,
+            achieved_balance: Default::default(),
         };
 
-        // Process each sample using proper ATR calculation
+        let targets_config = TargetsConfig::default(); // Placeholder, not used in new approach
+
+        // Process each sample using the new simplified classification
         for &seq_idx in context.sample_indices {
             let sequence_end_idx = seq_idx + context.sequence_length;
             let target_end_idx = sequence_end_idx + context.horizon_steps;
@@ -898,23 +906,15 @@ impl ParameterCalibrator {
                 let horizon_candles = &context.ohlcv_data[sequence_end_idx..target_end_idx];
 
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-                    // Calculate sequence ATR (baseline - no weighting)
-                    if let Ok(seq_atr) = get_sequence_atr_baseline(sequence_candles, 0.005) {
-                        // Calculate horizon ATR with decay weighting
-                        let hor_atr = if (params.decay - 1.0).abs() < f64::EPSILON {
-                            // Use uniform weighting for decay_factor = 1.0
-                            get_sequence_atr_baseline(horizon_candles, 0.005)?
-                        } else {
-                            // Use weighted calculation
-                            get_horizon_weighted_atr_baseline(horizon_candles, params.decay)?
-                        };
-
-                        if seq_atr > 0.0 && hor_atr > 0.0 {
-                            let class =
-                                classify_volatility_log_ratio(seq_atr, hor_atr, &thresholds);
-                            if (0..5).contains(&class) {
-                                class_counts[class as usize] += 1;
-                            }
+                    // Use the new simplified classification approach
+                    if let Ok(class) = classify_volatility_with_distribution_analysis(
+                        sequence_candles,
+                        horizon_candles,
+                        &targets_config,
+                        &adaptive_params,
+                    ) {
+                        if (0..5).contains(&class) {
+                            class_counts[class as usize] += 1;
                         }
                     }
                 }
@@ -1207,6 +1207,7 @@ struct VolatilityEvalParams {
     bandwidth: f64,
     multiplier: f64,
     decay: f64,
+    volume_weight: f64, // NEW: Volume weight parameter
 }
 
 /// Parameters for sentiment evaluation

@@ -124,6 +124,9 @@ pub struct VolatilityAdaptiveParams {
     /// Extreme multiplier for VeryLow/VeryHigh vs Low/High boundaries
     pub extreme_multiplier: f64,
 
+    /// Volume confirmation weight in volatility score (following sentiment pattern)
+    pub volume_weight: f64,
+
     /// ATR distribution characteristics
     pub atr_distribution_stats: AtrDistributionStats,
 
@@ -157,6 +160,7 @@ impl Default for VolatilityAdaptiveParams {
         Self {
             bandwidth_size: 0.4,
             extreme_multiplier: 2.0,
+            volume_weight: 0.1, // Default volume weight following sentiment pattern
             atr_distribution_stats: AtrDistributionStats::default(),
             cv_adjustment_factor: 1.0,
             horizon_decay_factor: 1.0, // Uniform weighting as default fallback
@@ -471,6 +475,7 @@ impl AdaptiveParameterCalibrator {
                     best_params = VolatilityAdaptiveParams {
                         bandwidth_size: bandwidth,
                         extreme_multiplier,
+                        volume_weight: 0.1, // TODO: This should be calibrated, but kept as default for legacy compatibility
                         horizon_decay_factor: 1.0, // Default uniform weighting for old calibration
                         atr_distribution_stats: AtrDistributionStats::default(),
                         cv_adjustment_factor: 1.0,
@@ -1265,6 +1270,7 @@ impl AdaptiveParameterCalibrator {
                         best_params = VolatilityAdaptiveParams {
                             bandwidth_size: bandwidth,
                             extreme_multiplier: extreme_mult,
+                            volume_weight: 0.1, // TODO: This should be calibrated, but kept as default for legacy compatibility
                             horizon_decay_factor: horizon_decay,
                             atr_distribution_stats: AtrDistributionStats {
                                 mean: atr_stats.mean,
