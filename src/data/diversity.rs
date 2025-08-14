@@ -143,17 +143,26 @@ impl DiversitySelector {
     }
 
     /// Extract lightweight features for fast diversity calculation
+    /// For normalized sequences, we can use a subset of the sequence directly
     fn extract_lightweight_features(&self, data: &Array2<f64>) -> Result<Vec<f64>> {
-        let num_features = data.ncols();
+        let (seq_len, num_features) = data.dim();
+
+        // For normalized sequences, we can sample key points from the sequence
+        // This is much more effective than statistical moments which become meaningless
         let mut features = Vec::new();
 
-        // Only calculate essential statistics (much faster than full diversity metrics)
-        for feature_idx in 0..num_features.min(5) {
-            // Only first 5 features (OHLCV)
-            let column = data.column(feature_idx);
-            let mean = column.mean().unwrap_or(0.0);
-            let std = column.std(0.0);
-            features.extend_from_slice(&[mean, std]);
+        // Sample key points from the sequence (beginning, middle, end)
+        let sample_indices = if seq_len >= 3 {
+            vec![0, seq_len / 2, seq_len - 1]
+        } else {
+            (0..seq_len).collect()
+        };
+
+        // Extract values at key time points for first 5 features (OHLCV)
+        for &time_idx in &sample_indices {
+            for feature_idx in 0..num_features.min(5) {
+                features.push(data[[time_idx, feature_idx]]);
+            }
         }
 
         Ok(features)
@@ -273,7 +282,7 @@ impl DiversitySelector {
         })
     }
 
-    /// Calculate feature space diversity using statistical measures
+    /// Calculate feature space diversity using cosine distance between normalized sequences
     fn calculate_feature_diversity(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -283,10 +292,7 @@ impl DiversitySelector {
         let target_sequence = &all_sequences[sequence_idx];
         let target_data = &target_sequence.sequence_data;
 
-        // Calculate statistical features for the target sequence
-        let target_stats = self.calculate_sequence_statistics(target_data)?;
-
-        // Calculate average distance to other sequences in the same class
+        // Calculate average cosine distance to other sequences in the same class
         let mut total_distance = 0.0;
         let mut count = 0;
 
@@ -296,10 +302,10 @@ impl DiversitySelector {
             }
 
             let other_sequence = &all_sequences[other_idx];
-            let other_stats = self.calculate_sequence_statistics(&other_sequence.sequence_data)?;
+            let other_data = &other_sequence.sequence_data;
 
-            // Euclidean distance in statistical feature space
-            let distance = self.euclidean_distance(&target_stats, &other_stats);
+            // Direct cosine distance between full sequences (perfect for normalized data)
+            let distance = self.calculate_cosine_distance(target_data, other_data)?;
             total_distance += distance;
             count += 1;
         }
@@ -310,8 +316,8 @@ impl DiversitySelector {
 
         let avg_distance = total_distance / count as f64;
 
-        // Normalize to 0-1 range (higher distance = higher diversity)
-        let normalized_diversity = (avg_distance / (avg_distance + 1.0)).min(1.0);
+        // Cosine distance is already in 0-1 range, but normalize for consistency
+        let normalized_diversity = avg_distance.min(1.0).max(0.0);
 
         Ok(normalized_diversity)
     }
@@ -359,7 +365,7 @@ impl DiversitySelector {
         Ok(temporal_diversity)
     }
 
-    /// Calculate market condition diversity
+    /// Calculate market condition diversity using cosine distance
     fn calculate_market_diversity(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -369,11 +375,9 @@ impl DiversitySelector {
         let target_sequence = &all_sequences[sequence_idx];
         let target_data = &target_sequence.sequence_data;
 
-        // Extract market condition features (assuming OHLCV structure)
-        let target_conditions = self.extract_market_conditions(target_data)?;
-
-        // Compare with other sequences in the same class
-        let mut condition_distances = Vec::new();
+        // Calculate average cosine distance to other sequences in market condition space
+        let mut total_distance = 0.0;
+        let mut count = 0;
 
         for &other_idx in class_indices {
             if other_idx == sequence_idx {
@@ -381,22 +385,20 @@ impl DiversitySelector {
             }
 
             let other_sequence = &all_sequences[other_idx];
-            let other_conditions = self.extract_market_conditions(&other_sequence.sequence_data)?;
+            let other_data = &other_sequence.sequence_data;
 
-            let distance = self.market_condition_distance(&target_conditions, &other_conditions);
-            condition_distances.push(distance);
+            // Use cosine distance for market condition comparison
+            let distance = self.calculate_cosine_distance(target_data, other_data)?;
+            total_distance += distance;
+            count += 1;
         }
 
-        if condition_distances.is_empty() {
-            return Ok(1.0);
+        if count == 0 {
+            return Ok(0.5); // Default diversity
         }
 
-        // Average distance to other market conditions
-        let avg_distance =
-            condition_distances.iter().sum::<f64>() / condition_distances.len() as f64;
-
-        // Normalize to 0-1 range
-        let normalized_diversity = (avg_distance / (avg_distance + 1.0)).min(1.0);
+        let avg_distance = total_distance / count as f64;
+        let normalized_diversity = avg_distance.min(1.0).max(0.0);
 
         Ok(normalized_diversity)
     }
@@ -472,7 +474,52 @@ impl DiversitySelector {
         Ok(Array1::from_vec(stats))
     }
 
+    /// Calculate cosine distance between two normalized sequences
+    /// Perfect for normalized data - measures pattern similarity regardless of magnitude
+    pub fn calculate_cosine_distance(
+        &self,
+        seq_a: &Array2<f64>,
+        seq_b: &Array2<f64>,
+    ) -> Result<f64> {
+        // Ensure sequences have the same shape
+        if seq_a.shape() != seq_b.shape() {
+            return Err(VangaError::DataError(
+                "Sequences must have the same shape for cosine distance calculation".to_string(),
+            ));
+        }
+
+        // Flatten sequences to 1D for dot product calculation
+        let flat_a: Vec<f64> = seq_a.iter().cloned().collect();
+        let flat_b: Vec<f64> = seq_b.iter().cloned().collect();
+
+        // Calculate dot product
+        let dot_product: f64 = flat_a
+            .iter()
+            .zip(flat_b.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f64>();
+
+        // Calculate norms (magnitudes)
+        let norm_a: f64 = flat_a.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
+        let norm_b: f64 = flat_b.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
+
+        // Handle edge case where one sequence has zero norm
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return Ok(1.0); // Maximum distance for zero vectors
+        }
+
+        // Calculate cosine similarity
+        let cosine_similarity = dot_product / (norm_a * norm_b);
+
+        // Convert to cosine distance (1 - similarity)
+        // Clamp to [0, 1] range to handle floating point precision issues
+        let cosine_distance = (1.0 - cosine_similarity).max(0.0).min(1.0);
+
+        Ok(cosine_distance)
+    }
+
     /// Calculate Euclidean distance between two statistical feature vectors
+    /// DEPRECATED: Use calculate_cosine_distance for normalized sequences
     pub fn euclidean_distance(&self, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
         if a.len() != b.len() {
             return 0.0;
@@ -543,11 +590,6 @@ impl DiversitySelector {
         ]);
 
         Ok(Array1::from_vec(conditions))
-    }
-
-    /// Calculate distance between market condition vectors
-    fn market_condition_distance(&self, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
-        self.euclidean_distance(a, b)
     }
 
     /// Calculate linear slope for trend analysis

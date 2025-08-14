@@ -5,7 +5,7 @@ mod balance_critical_test;
 mod balance_test;
 pub mod diversity; // NEW: Advanced diversity-based selection
 #[cfg(test)]
-mod diversity_test; // NEW: Comprehensive diversity tests
+mod diversity_test; // Cosine distance diversity tests
 pub mod loader;
 pub mod preprocessor;
 pub mod schema;
