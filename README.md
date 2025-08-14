@@ -37,18 +37,21 @@ VANGA now features **trading-aware ordinal loss** for 5-class predictions, **ada
 - ✅ **Multi-Target Coordination** - Separate calibration for each target type
 
 ### 🧠 **Modular LSTM Architecture**
+- ✅ **Modular Design** - Separate modules: `config`, `core`, `training`, `inference`, `loss`
 - ✅ **Unified Training Pipeline** - Single `train()` method handles all scenarios via configuration
 - ✅ **Orthogonal Weight Initialization** - Proper LSTM weight initialization for stable training
 - ✅ **Variational Dropout** - Advanced regularization with recurrent dropout support
 - ✅ **Gradient Clipping** - Intelligent gradient norm clipping prevents exploding gradients
 - ✅ **Centralized Diagnostics** - Comprehensive training and validation diagnostics
+- ✅ **Backward Compatibility** - `lstm_simple.rs` provides compatibility layer for existing code
 
 ### 🎯 **Multi-Target Prediction System**
 - ✅ **5 Target Types** - Price Levels, Direction, Volatility, Volume, Sentiment
 - ✅ **Individual Model Architecture** - Separate LSTM model per target×horizon combination
-- ✅ **Sequence-Based Processing** - Each sequence normalized independently
+- ✅ **Adaptive Calibration** - Dynamic parameter optimization for balanced 20% per class distribution
+- ✅ **Sequence-Based Processing** - Each sequence normalized independently for symbol-agnostic operation
 - ✅ **Chronological Integrity** - Time-series order preserved, no shuffling
-- ✅ **Adaptive Parameters** - Target-specific calibrated thresholds
+- ✅ **Multi-Model Coordination** - `MultiTargetLSTMModel` wrapper manages all individual models
 
 ### 📈 **Performance Improvements**
 - ✅ **Trading-Aware Loss** - Ordinal loss system optimized for trading profitability
@@ -537,13 +540,16 @@ vanga/
 │   │   ├── registry.rs    # Target type registry (NEW)
 │   │   └── sequence_reconstruction.rs # Sequence reconstruction targets
 │   ├── config/        # Configuration management
-│   │   ├── training.rs    # TrainingConfig with 9 optimizers
+│   │   ├── training.rs    # TrainingConfig with 11 optimizers (including FracAdam/FracNAdam)
 │   │   ├── features.rs    # Feature configurations
 │   │   ├── model.rs       # Model architecture configurations
 │   │   ├── prediction.rs  # Prediction configurations
 │   │   └── trading.rs     # Trading configurations
-│   ├── optimization/  # Auto-optimization system
+│   ├── optimization/  # Advanced optimizers and auto-optimization
 │   │   ├── mod.rs         # Optimization orchestration
+│   │   ├── frac_adam.rs   # Fractional Adam optimizer (NEW)
+│   │   ├── frac_nadam.rs  # Fractional NAdam optimizer (NEW)
+│   │   ├── fractional.rs  # Fractional derivative computation (NEW)
 │   │   ├── feature_selection.rs # Feature selection algorithms
 │   │   ├── hyperparameter.rs # Hyperparameter optimization
 │   │   ├── objective.rs   # Optimization objectives
@@ -552,22 +558,27 @@ vanga/
 │   │   ├── mod.rs         # Output orchestration
 │   │   ├── formatter.rs   # Prediction output formatting
 │   │   ├── multi_target_parser.rs # Multi-target output parsing
-│   │   ├── adaptive_orders.rs # Adaptive trading orders
-│   │   └── adaptive_signal.rs # Adaptive trading signals
+│   │   ├── structures.rs  # Prediction result types
+│   │   ├── metadata.rs    # Prediction metadata
+│   │   ├── post_processor.rs # Post-processing utilities
+│   │   └── trading_orders.rs # Trading order generation
 │   ├── realtime/      # Real-time streaming prediction
 │   │   ├── mod.rs         # Real-time orchestration
+│   │   ├── predictor.rs   # Real-time prediction engine
 │   │   ├── stream.rs      # Data streaming utilities
-│   │   └── predictor.rs   # Real-time prediction engine
+│   │   └── watcher.rs     # Market data watcher
 │   ├── tests/         # Integration tests
 │   └── utils/         # Utilities and error handling
 │       ├── error.rs       # VangaError types and handling
 │       ├── metrics.rs     # Evaluation metrics
+│       ├── diagnostics.rs # Training diagnostics
 │       ├── device.rs      # Device management (CPU/GPU/Metal)
 │       ├── model_path.rs  # Model path utilities
 │       ├── sequence_utils.rs # Sequence generation utilities
 │       ├── file_discovery.rs # File discovery and resolution
 │       ├── parser.rs      # Output parsing utilities
 │       ├── market_data.rs # Market data utilities
+│       ├── feature_window.rs # Feature window utilities
 │       └── backtest_reporter.rs # Backtesting reporting
 ├── models/            # Trained model storage
 ├── data/              # Input data directory

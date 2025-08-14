@@ -1,6 +1,6 @@
 # VANGA Quick Start Guide
 
-Get up and running with VANGA's **trading-aware ordinal loss** cryptocurrency forecasting system in minutes.
+Get up and running with VANGA's **unified training pipeline** cryptocurrency forecasting system in minutes.
 
 ## 🚀 **Installation & Setup**
 
@@ -27,7 +27,7 @@ cargo check --message-format=short  # Fast compilation check
 head -5 data/BTCUSDT_1h.csv
 ```
 
-## 🎯 **Quick Training with Trading-Aware Ordinal Loss (5 Minutes)**
+## 🎯 **Quick Training with Unified Pipeline (5 Minutes)**
 
 ### **Step 1: Basic Training with Ordinal Loss**
 ```bash

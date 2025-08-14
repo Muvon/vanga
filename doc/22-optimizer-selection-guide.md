@@ -1,8 +1,8 @@
-# VANGA Optimizer Selection Guide for Cryptocurrency Trading with Ordinal Loss
+# VANGA Optimizer Selection Guide for Cryptocurrency Trading
 
-## 🎯 **RECOMMENDED DEFAULT: AdamW for Trading-Aware Ordinal Loss**
+## 🎯 **RECOMMENDED DEFAULT: AdamW for Cryptocurrency Trading**
 
-For **99% of cryptocurrency trading scenarios** with ordinal loss, use **AdamW** with these settings:
+For **99% of cryptocurrency trading scenarios**, use **AdamW** with these settings:
 
 ```toml
 [training]
@@ -12,8 +12,8 @@ warmup_epochs = 5
 loss_function = "OrdinalLoss"  # Trading-aware ordinal loss
 ```
 
-**Why AdamW for Crypto Trading with Ordinal Loss:**
-- ✅ **Optimizes trading profitability** with ordinal loss function
+**Why AdamW for Crypto Trading:**
+- ✅ **Optimizes trading performance** with balanced classification
 - ✅ **Handles volatility spikes** better than other optimizers
 - ✅ **Weight decay prevents overfitting** on noisy crypto data
 - ✅ **Adaptive learning rates** adjust to market regime changes

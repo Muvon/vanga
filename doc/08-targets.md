@@ -1,8 +1,8 @@
 # Multi-Target Prediction System with Adaptive Calibration
 
-The VANGA LSTM cryptocurrency forecasting system implements a comprehensive **5-target × 5-class prediction framework** with **adaptive target calibration** and **trading-aware ordinal loss** designed specifically for cryptocurrency market analysis.
+The VANGA LSTM cryptocurrency forecasting system implements a comprehensive **5-target × 5-class prediction framework** with **adaptive target calibration** and **sequence reconstruction** designed specifically for cryptocurrency market analysis.
 
-**Status**: ✅ **Complete Implementation** - All target types functional with adaptive calibration and ordinal loss
+**Status**: ✅ **Complete Implementation** - All target types functional with adaptive calibration and sequence reconstruction
 
 ## Architecture Overview
 

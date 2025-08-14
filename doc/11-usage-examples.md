@@ -1,6 +1,6 @@
 # VANGA Usage Examples
 
-Comprehensive usage examples for VANGA's **trading-aware ordinal loss** cryptocurrency forecasting system with current CLI interface and configuration system.
+Comprehensive usage examples for VANGA's **unified training pipeline** cryptocurrency forecasting system with current CLI interface and configuration system.
 
 ## 🚀 **Current System Overview**
 
@@ -8,16 +8,16 @@ Comprehensive usage examples for VANGA's **trading-aware ordinal loss** cryptocu
 All operations use the `cargo run --` command structure:
 
 ```bash
-# Training with ordinal loss
+# Training with unified pipeline
 cargo run -- train --symbol SYMBOL --data PATH [OPTIONS]
 
-# Prediction with ordinal classes
+# Prediction with 5-class output
 cargo run -- predict --symbol SYMBOL --input PATH [OPTIONS]
 
-# Backtesting with trading metrics
+# Backtesting with performance metrics
 cargo run -- backtest --symbol SYMBOL --data PATH [OPTIONS]
 
-# Real-time streaming with ordinal predictions
+# Real-time streaming with predictions
 cargo run -- stream --symbol SYMBOL --data-path PATH [OPTIONS]
 ```
 

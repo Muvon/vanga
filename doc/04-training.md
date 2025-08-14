@@ -1,15 +1,14 @@
-# LSTM Training Guide - Trading-Aware Ordinal Loss System
+# LSTM Training Guide - Unified Training Pipeline
 
-This guide covers VANGA's **trading-aware ordinal loss training system** with adaptive target calibration, orthogonal weight initialization, and **11 advanced optimizers**.
+This guide covers VANGA's **unified training pipeline** with adaptive target calibration, orthogonal weight initialization, and **11 advanced optimizers including fractional memory optimizers**.
 
-## 🎯 Trading-Aware Ordinal Loss Features
+## 🎯 Unified Training Pipeline Features
 
-### ✅ **5-Class Ordinal Classification**
-- **Trading-Optimized Classes**: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
-- **Ordinal Relationships**: Preserves natural ordering between price movement classes
-- **Directional Penalties**: Wrong directional calls penalized more than magnitude errors
-- **Profitability Focus**: Loss function designed for trading success, not just accuracy
+### ✅ **5-Class Classification System**
+- **Optimized Classes**: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up
 - **Balanced Distribution**: Adaptive calibration ensures 20% per class
+- **Symbol-Agnostic**: Percentage-based thresholds work across all trading pairs
+- **Multi-Target Support**: Separate classification for each target type
 
 ### ✅ **Adaptive Target Calibration (NEW)**
 - **Dynamic Parameter Optimization**: Finds optimal thresholds for balanced classification
@@ -28,14 +27,14 @@ This guide covers VANGA's **trading-aware ordinal loss training system** with ad
 - **Linear Warmup Support**: Gradual LR increase prevents early training instability
 - **35% better performance** compared to basic SGD on crypto datasets
 
-### ✅ **Modular LSTM Architecture with Ordinal Loss**
-- **Unified Training Method**: Single `train()` method in `src/model/lstm/training.rs` with ordinal loss
+### ✅ **Modular LSTM Architecture with Unified Training**
+- **Unified Training Method**: Single `train()` method in `src/model/lstm/training.rs` handles all scenarios
 - **Modular Structure**: LSTM implementation with focused modules:
   - `src/model/lstm/config.rs` - LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
   - `src/model/lstm/core.rs` - Model lifecycle, initialization, Xavier initialization
-  - `src/model/lstm/training.rs` - **Unified training with ordinal loss and adaptive calibration**
+  - `src/model/lstm/training.rs` - **Unified training with all optimizers and adaptive calibration**
   - `src/model/lstm/inference.rs` - Prediction pipeline and forward pass
-  - `src/model/lstm/loss.rs` - **Trading-aware ordinal loss, validation metrics**
+  - `src/model/lstm/loss.rs` - **Loss calculation, validation metrics, gradient clipping**
   - `src/model/lstm/seeded_weights.rs` - Orthogonal weight initialization for recurrent layers
 - **Backward Compatibility**: All existing APIs preserved through `src/model/lstm_simple.rs` compatibility layer
 - **Enhanced Loss Functions**: Tensor broadcasting fixes and proper class weighting in `src/model/lstm/loss.rs`

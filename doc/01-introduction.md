@@ -2,7 +2,7 @@
 
 ## Introduction
 
-VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system built in Rust with **modular architecture**, **trading-aware ordinal loss**, and **11 advanced optimizers**. It combines advanced neural networks with comprehensive technical analysis and **adaptive target calibration** to deliver professional-grade cryptocurrency market predictions optimized for trading profitability.
+VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system built in Rust with **modular architecture**, **fractional memory optimizers**, and **11 advanced optimizers**. It combines advanced neural networks with comprehensive technical analysis and **adaptive target calibration** to deliver professional-grade cryptocurrency market predictions optimized for trading profitability.
 
 ## 🚀 **NEW: Trading-Aware Ordinal Loss & Adaptive Calibration**
 
@@ -21,12 +21,13 @@ VANGA is a **production-ready** LSTM-based cryptocurrency forecasting system bui
 - **Multi-Target Coordination**: Separate calibration for each target type
 
 ### 🏗️ **Modular LSTM Architecture**
-- **Core Modules**: `config`, `core`, `training`, `inference`, `loss`, `seeded_weights`
+- **Core Modules**: `config`, `core`, `training`, `inference`, `loss`, `seeded_weights`, `window_aware_lr`
 - **Unified Training**: Single configurable training method handles all scenarios
 - **Orthogonal Initialization**: Proper LSTM weight initialization for stable training
 - **Variational Dropout**: Advanced regularization with recurrent dropout support
+- **Gradient Clipping**: Intelligent gradient norm clipping prevents exploding gradients
 - **Backward Compatibility**: 100% API compatibility through `lstm_simple.rs` re-exports
-- **Testing Architecture**: All tests in separate `*_test.rs` files
+- **Testing Architecture**: All tests in separate `*_test.rs` files for clean organization
 
 ### 🤖 **11 Advanced Optimizers with Fractional Memory**
 - **AdamW**: Best overall performance (0.0234 avg validation loss, 98% success rate) - **RECOMMENDED**

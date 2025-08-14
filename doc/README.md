@@ -1,20 +1,20 @@
 # VANGA - Modular LSTM Cryptocurrency Forecasting System
 
-## 📚 **Complete Documentation Index** *(Updated: August 14, 2024)*
+## 📚 **Complete Documentation Index** *(Updated: August 14, 2025)*
 
 ### **🚀 Getting Started** *(Current)*
-1. **[Introduction](01-introduction.md)** ✅ - System overview, modular architecture, and trading-aware ordinal loss
+1. **[Introduction](01-introduction.md)** ✅ - System overview, modular LSTM architecture, and fractional optimizers
 2. **[Installation](02-installation.md)** ✅ - Setup, dependencies, and build instructions
 3. **[Data Preparation](03-data-preparation.md)** ✅ - Data format, preprocessing, and validation
-4. **[Training](04-training.md)** ✅ - Unified training method with ordinal loss and adaptive calibration
+4. **[Training](04-training.md)** ✅ - Unified training method with modular LSTM and 11 optimizers
 5. **[Predictions](05-predictions.md)** ✅ - Prediction pipeline with modular architecture integration
 
 ### **🔧 Core Technical Reference** *(Current)*
 6. **[Technical Indicators](06-technical-indicators.md)** ✅ - 50+ indicators with modular integration
-7. **[System Architecture](07-architecture.md)** ✅ - Complete modular LSTM architecture with ordinal loss
-8. **[Multi-Target System](08-targets.md)** ✅ - 5-target system with adaptive calibration
+7. **[System Architecture](07-architecture.md)** ✅ - Complete modular LSTM architecture with fractional optimizers
+8. **[Multi-Target System](08-targets.md)** ✅ - 5-target system with adaptive calibration and sequence reconstruction
 9. **[Evaluation](09-evaluation.md)** ✅ - Model performance evaluation and trading-aware metrics
-10. **[Technical Implementation](10-technical-implementation.md)** ✅ - Modular architecture with ordinal loss specifications
+10. **[Technical Implementation](10-technical-implementation.md)** ✅ - Modular architecture with unified training pipeline
 
 ### **✅ Usage Guides** *(Current)*
 11. **[Usage Examples](11-usage-examples.md)** ✅ - Comprehensive usage patterns with adaptive calibration
@@ -22,9 +22,9 @@
 13. **[Usage Guide](13-usage-guide.md)** ✅ - Training workflows with adaptive calibration
 
 ### **⚙️ Configuration & Optimization** *(Current)*
-14. **[Configuration Reference](20-configuration.md)** ✅ - Complete parameter documentation with ordinal loss
+14. **[Configuration Reference](20-configuration.md)** ✅ - Complete parameter documentation with modular LSTM
 15. **[Learning Rate Optimization](21-learning-rate-optimization.md)** ✅ - Modern optimizers and adaptive scheduling
-16. **[Optimizer Selection Guide](22-optimizer-selection-guide.md)** ✅ - 11 optimizers with fractional memory support
+16. **[Optimizer Selection Guide](22-optimizer-selection-guide.md)** ✅ - 11 optimizers with fractional memory support (FracAdam/FracNAdam)
 17. **[Optimizer Performance Analysis](23-optimizer-performance-analysis.md)** ✅ - Detailed performance benchmarks
 
 ### **🧠 Advanced Features** *(Current)*
@@ -159,4 +159,4 @@ The VANGA documentation is being updated to reflect the **trading-aware ordinal 
 
 ---
 
-*Last Updated: August 14, 2024 - Documentation update in progress for ordinal loss and adaptive calibration*
+*Last Updated: August 14, 2025 - Documentation updated for modular LSTM architecture and fractional optimizers*

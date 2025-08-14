@@ -1,8 +1,8 @@
 # VANGA LSTM Technical Implementation Guide
 
-## 🔧 **Current: Modular Architecture with Trading-Aware Ordinal Loss**
+## 🔧 **Current: Modular Architecture with Unified Training Pipeline**
 
-This document provides detailed technical specifications for VANGA's **modular LSTM architecture** with **trading-aware ordinal loss** and **11 advanced optimizers**.
+This document provides detailed technical specifications for VANGA's **modular LSTM architecture** with **unified training pipeline** and **11 advanced optimizers including fractional memory optimizers**.
 
 ---
 
@@ -13,9 +13,9 @@ This document provides detailed technical specifications for VANGA's **modular L
 src/model/lstm/
 ├── config.rs      # LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
 ├── core.rs        # Model lifecycle, initialization, persistence, Xavier initialization
-├── training.rs    # Unified training method with ordinal loss and adaptive calibration
+├── training.rs    # Unified training method with all optimizers and adaptive calibration
 ├── inference.rs   # Prediction pipeline and forward pass
-├── loss.rs        # Trading-aware ordinal loss, validation metrics, gradient utilities
+├── loss.rs        # Loss calculation, validation metrics, gradient utilities
 ├── seeded_weights.rs # Reproducible weight initialization with orthogonal recurrent weights
 ├── window_aware_lr.rs # Window-aware learning rate scheduling
 ├── schedule_benchmark.rs # Learning rate schedule benchmarking
@@ -42,7 +42,7 @@ pub use crate::model::lstm::*;
 
 ---
 
-## 🎯 **Trading-Aware Ordinal Loss Implementation**
+## 🎯 **Unified Training Pipeline Implementation**
 
 ### **Core Training Method** (`src/model/lstm/training.rs`)
 

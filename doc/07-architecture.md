@@ -2,21 +2,21 @@
 
 ## Overview
 
-VANGA is a production-ready LSTM-based cryptocurrency forecasting system featuring **modular architecture**, **trading-aware ordinal loss**, and **11 advanced optimizers**. The system combines advanced deep learning with professional-grade technical indicators and **adaptive target calibration** for superior market predictions optimized for trading profitability.
+VANGA is a production-ready LSTM-based cryptocurrency forecasting system featuring **modular architecture**, **fractional memory optimizers**, and **11 advanced optimizers**. The system combines advanced deep learning with professional-grade technical indicators and **adaptive target calibration** for superior market predictions optimized for trading profitability.
 
-## 🏗️ **NEW: Modular LSTM Architecture with Trading-Aware Ordinal Loss**
+## 🏗️ **Modular LSTM Architecture with Fractional Optimizers**
 
 ### **Core Module Structure**
 
-The LSTM implementation features focused, maintainable modules with trading-aware ordinal loss:
+The LSTM implementation features focused, maintainable modules with fractional memory optimizers:
 
 ```rust
 src/model/lstm/
 ├── config.rs      # LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
 ├── core.rs        # Model lifecycle, initialization, persistence, Xavier initialization
-├── training.rs    # Unified training method with ordinal loss and adaptive calibration
+├── training.rs    # Unified training method with fractional optimizers and adaptive calibration
 ├── inference.rs   # Prediction pipeline and forward pass
-├── loss.rs        # Trading-aware ordinal loss, validation metrics, gradient utilities
+├── loss.rs        # Loss calculation, validation metrics, gradient utilities
 ├── seeded_weights.rs # Reproducible weight initialization with orthogonal recurrent weights
 ├── window_aware_lr.rs # Window-aware learning rate scheduling
 ├── schedule_benchmark.rs # Learning rate schedule benchmarking
@@ -61,10 +61,10 @@ impl LSTMModel {
 }
 ```
 
-#### **`training.rs` - Trading-Aware Training System**
+#### **`training.rs` - Unified Training System**
 ```rust
 impl LSTMModel {
-    /// THE main training method - handles ordinal loss and adaptive calibration
+    /// THE main training method - handles all optimizers and adaptive calibration
     pub async fn train(
         &mut self,
         sequences: &Array3<f64>,
@@ -85,16 +85,16 @@ impl LSTMModel {
 }
 ```
 
-#### **`loss.rs` - Trading-Aware Ordinal Loss**
+#### **`loss.rs` - Loss Calculation & Metrics**
 ```rust
-// Trading-aware ordinal loss for 5-class predictions
-pub fn calculate_ordinal_loss(
+// Loss calculation with class weighting for 5-class predictions
+pub fn calculate_weighted_soft_crossentropy_loss(
     predictions: &Tensor,
     targets: &Tensor,
     class_weights: Option<&Tensor>,
 ) -> Result<Tensor>
 
-// Categorical validation metrics for trading performance
+// Categorical validation metrics for performance evaluation
 pub async fn calculate_categorical_validation_metrics(
     &mut self,
     predictions: &Tensor,
