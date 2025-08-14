@@ -112,7 +112,7 @@ impl FractionalDerivative {
             // MEMORY FIX: Clone gradient only once and manage memory properly
             // Detach from computation graph to prevent holding references
             let detached_gradient = gradient.detach();
-            
+
             // Add new gradient to front
             history.push_front(detached_gradient);
 
@@ -276,10 +276,7 @@ impl FractionalDerivative {
 
     /// Get total memory usage estimate (in number of tensor elements)
     pub fn memory_usage(&self) -> usize {
-        self.gradient_history
-            .iter()
-            .map(|h| h.len())
-            .sum()
+        self.gradient_history.iter().map(|h| h.len()).sum()
     }
 
     /// Resize for different number of parameters

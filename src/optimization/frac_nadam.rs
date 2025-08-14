@@ -337,7 +337,7 @@ impl Optimizer for FracNAdam {
             if self.second_moments.contains_key(&i) {
                 self.second_moments.remove(&i);
             }
-            
+
             // Store updated moments (detached from computation graph)
             self.first_moments.insert(i, first_moment.detach());
             self.second_moments.insert(i, second_moment.detach());

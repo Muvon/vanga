@@ -266,7 +266,7 @@ impl MixtureOfHeadAttention {
         if training {
             self.step_count += 1;
         }
-        
+
         // Validate input dimensions
         self.validate_input_dimensions(input)?;
 
@@ -312,13 +312,13 @@ impl MixtureOfHeadAttention {
                 // Circular buffer: overwrite oldest entry and clear old memory
                 // Clone the new scores to ensure we don't hold references
                 let new_scores = avg_routing_scores;
-                
+
                 // Clear the old entry to ensure memory is freed
                 self.routing_history[self.history_index].clear();
                 self.routing_history[self.history_index] = new_scores;
                 self.history_index = (self.history_index + 1) % self.max_history_size;
             }
-            
+
             // Periodically compact memory to reduce fragmentation
             if self.step_count % 1000 == 0 {
                 self.routing_history.shrink_to_fit();
