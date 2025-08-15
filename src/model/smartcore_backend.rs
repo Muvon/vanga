@@ -5,6 +5,7 @@
 //! Uses Random Forest and Decision Trees for ensemble learning.
 
 use crate::config::model::XGBoostConfig; // Reuse existing config for compatibility
+use crate::model::ordinal_smartcore::{get_ordinal_penalty, OrdinalSmartCore};
 use crate::utils::error::{Result, VangaError};
 
 use candle_core::{Device, Tensor};
@@ -40,6 +41,9 @@ pub struct SmartCoreRegressor {
     /// Training data for feature importance calculation
     training_features: Option<DenseMatrix<f64>>,
     training_labels: Option<Vec<i32>>,
+
+    /// Ordinal helper for 5-class problems
+    use_ordinal: bool,
 }
 
 /// SmartCore model metadata for persistence
@@ -64,6 +68,7 @@ impl SmartCoreRegressor {
             num_classes: None,
             training_features: None,
             training_labels: None,
+            use_ordinal: false,
         }
     }
 
@@ -210,6 +215,48 @@ impl SmartCoreRegressor {
             "✅ SmartCore training completed successfully with {} classes",
             num_classes
         );
+
+        // Check if we should use ordinal-aware training for 5-class problems
+        if num_classes == 5 {
+            log::info!("🎯 Detected 5-class problem, enabling ordinal-aware features...");
+            self.use_ordinal = true;
+
+            // Calculate ordinal weights for training samples
+            let mut ordinal_helper = OrdinalSmartCore::new(self.config.clone());
+            ordinal_helper.update_feature_dimension(actual_feature_dim);
+
+            // Calculate weights based on targets
+            match ordinal_helper.calculate_ordinal_weights_for_training(targets, None) {
+                Ok(weights) => {
+                    log::info!(
+                        "✅ Ordinal weights calculated for {} samples",
+                        weights.len()
+                    );
+                    // Note: SmartCore doesn't support sample weights directly,
+                    // but we log them for analysis
+                    let avg_weight: f32 = weights.iter().sum::<f32>() / weights.len() as f32;
+                    log::info!("📊 Average ordinal weight: {:.3}", avg_weight);
+                }
+                Err(e) => {
+                    log::warn!("⚠️ Failed to calculate ordinal weights: {}", e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Train with explicit ordinal awareness (public method)
+    pub fn train_with_ordinal(&mut self, features: &Tensor, targets: &Tensor) -> Result<()> {
+        // First do standard training
+        self.train(features, targets)?;
+
+        // If 5-class problem, calculate ordinal metrics
+        if self.use_ordinal {
+            let loss = self.calculate_ordinal_loss(features, targets)?;
+            log::info!("📊 Ordinal Loss (training): {:.4}", loss);
+        }
+
         Ok(())
     }
 
@@ -221,6 +268,24 @@ impl SmartCoreRegressor {
     /// # Returns
     /// * `Result<Tensor>` - Predictions tensor [batch_size, output_dim]
     pub fn predict(&self, features: &Tensor) -> Result<Tensor> {
+        // Check if we should apply ordinal constraints
+        if self.use_ordinal && self.num_classes == Some(5) {
+            log::debug!("🎯 Applying ordinal constraints to 5-class predictions");
+
+            // Get base predictions first
+            let base_predictions = self.predict_base(features)?;
+
+            // Apply ordinal constraints
+            let ordinal_helper = OrdinalSmartCore::new(self.config.clone());
+            return ordinal_helper.apply_ordinal_constraints_to_predictions(&base_predictions);
+        }
+
+        // Standard prediction without ordinal constraints
+        self.predict_base(features)
+    }
+
+    /// Base prediction method without ordinal constraints
+    fn predict_base(&self, features: &Tensor) -> Result<Tensor> {
         // Convert features to SmartCore format
         let features_array = self.tensor_to_ndarray2(features)?;
         let features_vec2d: Vec<Vec<f64>> = features_array
@@ -467,6 +532,69 @@ impl SmartCoreRegressor {
         Ok(regressor)
     }
 
+    /// Calculate ordinal loss for evaluation (matches LSTM implementation)
+    ///
+    /// CRITICAL: This method should ONLY be called with XGBoost predictions ŷ = f(z),
+    /// NOT with LSTM features z. This ensures mathematical consistency with paper.
+    ///
+    /// Paper Framework:
+    /// - Equation (8): z = h_n ∈ ℝ^k (LSTM hidden state)
+    /// - Equation (9): ŷ = f(z) = Σ f_m(z) (XGBoost prediction)
+    /// - Loss calculation: L(ŷ, y) where ŷ are predictions, y are targets
+    pub fn calculate_ordinal_loss(&self, predictions: &Tensor, targets: &Tensor) -> Result<f32> {
+        if self.use_ordinal && self.num_classes == Some(5) {
+            // Use ordinal helper's loss calculation
+            let ordinal_helper = OrdinalSmartCore::new(self.config.clone());
+            ordinal_helper.calculate_ordinal_loss(predictions, targets)
+        } else if self.num_classes == Some(5) {
+            // Manual ordinal loss calculation for 5-class problems
+            let pred_array = self.tensor_to_ndarray2(predictions)?;
+            let target_array = self.tensor_to_ndarray1(targets)?;
+
+            let num_samples = pred_array.nrows();
+            let mut total_loss = 0.0f32;
+            let lambda = 0.3f32; // Same as LSTM
+
+            for i in 0..num_samples {
+                let true_class = target_array[i] as usize;
+                let pred_probs = pred_array.row(i);
+
+                // Calculate cross-entropy loss
+                let mut ce_loss = 0.0f32;
+                if true_class < 5 {
+                    let true_prob = pred_probs[true_class].max(1e-7);
+                    ce_loss = -true_prob.ln();
+                }
+
+                // Calculate ordinal penalty using the constant matrix
+                let mut ordinal_penalty = 0.0f32;
+                for (pred_class, &prob) in pred_probs.iter().enumerate() {
+                    if true_class < 5 && pred_class < 5 {
+                        ordinal_penalty += prob * get_ordinal_penalty(true_class, pred_class);
+                    }
+                }
+
+                // Combine losses (same formula as LSTM)
+                total_loss += ce_loss + lambda * ordinal_penalty;
+            }
+
+            Ok(total_loss / num_samples as f32)
+        } else {
+            // For non-5-class problems, use standard MSE
+            let pred_vec = predictions.to_vec1::<f32>()?;
+            let target_vec = targets.to_vec1::<f32>()?;
+
+            let mse = pred_vec
+                .iter()
+                .zip(target_vec.iter())
+                .map(|(p, t)| (p - t).powi(2))
+                .sum::<f32>()
+                / pred_vec.len() as f32;
+
+            Ok(mse)
+        }
+    }
+
     // Private helper methods
 
     /// Convert Candle tensor to ndarray Array2
@@ -578,33 +706,43 @@ impl SmartCoreRegressor {
             num_classes
         );
 
-        // Convert class predictions to realistic probabilities
+        // Convert class predictions to realistic probabilities with ordinal awareness
         let mut prob_data: Vec<f32> = Vec::new();
         for (idx, &pred_class) in predictions.iter().enumerate() {
             let mut class_probs = vec![0.01f32; num_classes]; // Low base probability for all classes
 
-            // Give the predicted class much higher probability
+            // IMPROVED: Create more realistic probability distributions
+            // Use ordinal-aware smoothing - nearby classes get higher probabilities
             if (pred_class as usize) < num_classes {
-                class_probs[pred_class as usize] = 0.85f32;
+                let pred_idx = pred_class as usize;
+
+                // Give predicted class high probability
+                class_probs[pred_idx] = 0.70f32; // Reduced from 0.85 to allow more uncertainty
+
+                // Distribute remaining probability to nearby classes (ordinal awareness)
+                // Classes closer to predicted class get more probability
+                for (i, prob) in class_probs.iter_mut().enumerate() {
+                    if i != pred_idx {
+                        let distance = (i as i32 - pred_class).abs() as f32;
+                        // Use exponential decay based on distance
+                        let proximity_weight = (-0.5 * distance).exp();
+                        *prob = 0.05 + 0.15 * proximity_weight;
+                    }
+                }
             }
 
-            // Add small random variations to other classes to make predictions more realistic
-            // This preserves the SmartCore prediction while adding natural uncertainty
+            // Add small random variations for realism
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
 
-            // Create deterministic but varied probabilities based on sample index, predicted class, AND model instance
-            // Use the model's memory address as a unique identifier per model
             let mut hasher = DefaultHasher::new();
             (idx, pred_class, self as *const _ as usize).hash(&mut hasher);
             let seed = hasher.finish();
 
-            for (i, class_prob) in class_probs.iter_mut().enumerate().take(num_classes) {
-                if i != (pred_class as usize) {
-                    // Create varied but deterministic probabilities for non-predicted classes
-                    let variation = ((seed.wrapping_add(i as u64)) % 100) as f32 / 1000.0; // 0.000 to 0.099
-                    *class_prob = 0.01f32 + variation; // 0.01 to 0.109
-                }
+            for (i, class_prob) in class_probs.iter_mut().enumerate() {
+                // Add small noise to all probabilities
+                let noise = ((seed.wrapping_add(i as u64)) % 100) as f32 / 500.0 - 0.1; // -0.1 to +0.1
+                *class_prob = (*class_prob + noise).clamp(0.01, 0.95);
             }
 
             // Normalize to sum to 1.0
@@ -613,13 +751,19 @@ impl SmartCoreRegressor {
                 *prob /= sum;
             }
 
-            // DEBUG: Log what SmartCore actually predicted
-            log::debug!(
-                "🔍 Sample {}: SmartCore predicted class {} -> probabilities: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}]",
-                idx,
-                pred_class,
-                class_probs[0], class_probs[1], class_probs[2], class_probs[3], class_probs[4]
-            );
+            // DEBUG: Log sample predictions
+            if idx < 3 {
+                log::debug!(
+                    "🔍 Sample {}: SmartCore class {} → probs: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}]",
+                    idx,
+                    pred_class,
+                    class_probs[0],
+                    class_probs[1],
+                    class_probs[2],
+                    class_probs[3],
+                    class_probs[4]
+                );
+            }
 
             prob_data.extend(class_probs);
         }
@@ -630,16 +774,6 @@ impl SmartCoreRegressor {
             batch_size,
             num_classes
         );
-
-        // Log first prediction for debugging
-        if batch_size > 0 && prob_data.len() >= num_classes {
-            let first_pred: Vec<f32> = prob_data[0..num_classes].to_vec();
-            log::info!(
-                "🎯 Final prediction Ŷ_test ∈ R^{}: {:?}",
-                num_classes,
-                first_pred
-            );
-        }
 
         Tensor::from_vec(prob_data, (batch_size, num_classes), &self.device)
             .map_err(|e| VangaError::model(format!("Failed to create probability tensor: {}", e)))

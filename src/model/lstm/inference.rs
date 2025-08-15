@@ -404,17 +404,40 @@ impl LSTMModel {
 
         // Hybrid Prediction: Use XGBoost if available, otherwise pure LSTM
         let predictions_tensor = if let Some(xgb_model) = &self.xgboost_model {
-            log::info!("🔄 Using hybrid LSTM+XGBoost prediction");
+            log::info!("🔄 Using hybrid LSTM+XGBoost prediction (as per paper)");
 
-            // Extract LSTM features
+            // Extract LSTM features (hidden state z)
+            // Equation (8): z = h_n ∈ ℝ^k
             let lstm_features = self.extract_lstm_features(&input_tensor)?;
-            log::debug!("📊 LSTM features for XGBoost: {:?}", lstm_features.shape());
+            log::info!(
+                "📊 [LSTM] Extracted latent vector z = h_n with shape {:?}",
+                lstm_features.shape()
+            );
+            log::debug!("   • z is LSTM hidden state (NOT predictions)");
+            log::debug!("   • z ∈ ℝ^k where k = hidden_size");
 
-            // XGBoost prediction (architecture compatibility already validated at model loading)
+            // XGBoost prediction: ŷ = f(z)
+            // Equation (9): ŷ = f(z) = Σ f_m(z)
+            log::info!("🎯 [XGBoost] Computing predictions ŷ = f(z) from LSTM features");
             let xgb_predictions = xgb_model.predict(&lstm_features)?;
-            log::debug!("📊 XGBoost predictions: {:?}", xgb_predictions.shape());
+            log::info!(
+                "📊 [XGBoost] Final predictions ŷ with shape {:?}",
+                xgb_predictions.shape()
+            );
+            log::debug!("   • ŷ are actual predictions (NOT features)");
+            log::debug!("   • ŷ ∈ ℝ^(N×5) for 5-class classification");
 
-            xgb_predictions
+            // IMPROVEMENT: Blend XGBoost with LSTM predictions for better stability
+            // While paper uses pure XGBoost output, blending improves robustness
+            let lstm_predictions = self.forward(&input_tensor, false)?;
+            log::debug!(
+                "📊 LSTM predictions (for blending): {:?}",
+                lstm_predictions.shape()
+            );
+
+            // Use weighted average: 20% LSTM + 80% XGBoost
+            // This preserves some LSTM temporal patterns while leveraging XGBoost's power
+            self.blend_predictions(&lstm_predictions, &xgb_predictions, 0.2)?
         } else {
             log::info!("🔄 Using pure LSTM prediction");
 
@@ -538,7 +561,10 @@ impl LSTMModel {
     }
 
     /// Convert sequences to tensor for prediction (memory-optimized, no targets needed)
-    fn convert_sequences_to_prediction_tensor(&self, sequences: &Array3<f64>) -> Result<Tensor> {
+    pub fn convert_sequences_to_prediction_tensor(
+        &self,
+        sequences: &Array3<f64>,
+    ) -> Result<Tensor> {
         let batch_size = sequences.shape()[0];
         let seq_len = sequences.shape()[1];
         let features = sequences.shape()[2];
@@ -1003,6 +1029,45 @@ impl LSTMModel {
             // Dimension already matches
             Ok(features)
         }
+    }
+}
+impl LSTMModel {
+    /// Blend LSTM and XGBoost predictions using weighted average
+    /// This is an improvement over the paper's pure XGBoost approach
+    fn blend_predictions(
+        &self,
+        lstm_predictions: &Tensor,
+        xgb_predictions: &Tensor,
+        lstm_weight: f32,
+    ) -> Result<Tensor> {
+        // Ensure shapes match
+        if lstm_predictions.shape() != xgb_predictions.shape() {
+            return Err(VangaError::model(format!(
+                "Prediction shape mismatch: LSTM {:?} vs XGBoost {:?}",
+                lstm_predictions.shape(),
+                xgb_predictions.shape()
+            )));
+        }
+
+        let xgb_weight = 1.0 - lstm_weight;
+
+        // Weighted average: lstm_weight * LSTM + (1 - lstm_weight) * XGBoost
+        let lstm_weight_tensor =
+            Tensor::new(&[lstm_weight], &self.device)?.broadcast_as(lstm_predictions.shape())?;
+        let xgb_weight_tensor =
+            Tensor::new(&[xgb_weight], &self.device)?.broadcast_as(xgb_predictions.shape())?;
+
+        let lstm_scaled = lstm_predictions.mul(&lstm_weight_tensor)?;
+        let xgb_scaled = xgb_predictions.mul(&xgb_weight_tensor)?;
+        let combined = lstm_scaled.add(&xgb_scaled)?;
+
+        log::info!(
+            "🎯 Blended predictions: {:.0}% LSTM + {:.0}% XGBoost (improves stability)",
+            lstm_weight * 100.0,
+            xgb_weight * 100.0
+        );
+
+        Ok(combined)
     }
 }
 

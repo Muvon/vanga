@@ -6,7 +6,9 @@
 use crate::config::model::NUM_CLASSES;
 use crate::config::prediction::{OutputConfig, OutputFormat};
 use crate::data::structures::MarketDataRow;
-use crate::output::confidence_calculator::{ConfidenceCalculator, ConfidenceConfig, EnhancedPositionSizer};
+use crate::output::confidence_calculator::{
+    ConfidenceCalculator, ConfidenceConfig, EnhancedPositionSizer,
+};
 use crate::output::multi_target_parser::{DirectionOutput, MultiTargetParser, VolatilityOutput};
 use crate::output::structures::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
@@ -556,8 +558,10 @@ impl OutputFormatter {
                 && result.volatility.is_some()
             {
                 // Calculate enhanced confidence BEFORE order generation
-                let enhanced_confidence = self.confidence_calculator.calculate_overall_confidence(&result);
-                
+                let enhanced_confidence = self
+                    .confidence_calculator
+                    .calculate_overall_confidence(&result);
+
                 // Log confidence details for debugging
                 log::info!(
                     "🎯 Enhanced Confidence: {:.2}% (Base: {:.2}%, Agreement Factor: {:.2}x)",
@@ -565,7 +569,7 @@ impl OutputFormatter {
                     base_confidence * 100.0,
                     enhanced_confidence / base_confidence.max(0.01)
                 );
-                
+
                 // Clone the predictions to avoid borrow checker issues
                 let price_levels = result.price_levels.clone().unwrap();
                 let direction = result.direction.clone().unwrap();
@@ -618,9 +622,13 @@ impl OutputFormatter {
                 let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
                 // Calculate dynamic position sizes using enhanced confidence
-                let entry_sizes = self.position_sizer.calculate_entry_sizes(&result, enhanced_confidence)?;
-                let exit_sizes = self.position_sizer.calculate_exit_sizes(&result, enhanced_confidence);
-                
+                let entry_sizes = self
+                    .position_sizer
+                    .calculate_entry_sizes(&result, enhanced_confidence)?;
+                let exit_sizes = self
+                    .position_sizer
+                    .calculate_exit_sizes(&result, enhanced_confidence);
+
                 log::info!(
                     "🎯 Dynamic Position Sizing: Entry=[{:.1}%, {:.1}%, {:.1}%], Exit=[{:.1}%, {:.1}%, {:.1}%]",
                     entry_sizes[0] * 100.0, entry_sizes[1] * 100.0, entry_sizes[2] * 100.0,
@@ -661,7 +669,7 @@ impl OutputFormatter {
                 };
 
                 result = result.with_orders(orders);
-                
+
                 // Apply the enhanced confidence to the prediction result
                 result = result.with_confidence(enhanced_confidence);
             } else {

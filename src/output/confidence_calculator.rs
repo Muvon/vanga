@@ -34,14 +34,14 @@ pub struct ConfidenceConfig {
 impl Default for ConfidenceConfig {
     fn default() -> Self {
         Self {
-            price_level_weight: 0.25,    // 25% - Show levels, comes after direction importance
-            direction_weight: 0.35,      // 30% - Confirms trend - most important
-            volatility_weight: 0.1,     // 15% - Risk management
-            sentiment_weight: 0.15,      // 15% - Market psychology
-            volume_weight: 0.15,         // 15% - Confirmation
+            price_level_weight: 0.25, // 25% - Show levels, comes after direction importance
+            direction_weight: 0.35,   // 30% - Confirms trend - most important
+            volatility_weight: 0.1,   // 15% - Risk management
+            sentiment_weight: 0.15,   // 15% - Market psychology
+            volume_weight: 0.15,      // 15% - Confirmation
             min_probability_threshold: 0.25, // 25% minimum for confidence
-            agreement_bonus: 1.5,        // 50% bonus for agreement
-            disagreement_penalty: 0.7,   // 30% penalty for disagreement
+            agreement_bonus: 1.5,     // 50% bonus for agreement
+            disagreement_penalty: 0.7, // 30% penalty for disagreement
         }
     }
 }
@@ -202,11 +202,13 @@ impl ConfidenceCalculator {
     /// Calculate confidence for sentiment predictions
     fn calculate_sentiment_confidence(&self, sentiment: &SentimentPrediction) -> f64 {
         // Get sentiment probabilities
-        let probs = [sentiment.very_bearish_probability,
+        let probs = [
+            sentiment.very_bearish_probability,
             sentiment.bearish_probability,
             sentiment.neutral_probability,
             sentiment.bullish_probability,
-            sentiment.very_bullish_probability];
+            sentiment.very_bullish_probability,
+        ];
 
         // Find max probability
         let max_prob = probs.iter().fold(0.0_f64, |a, &b| a.max(b));
@@ -226,11 +228,13 @@ impl ConfidenceCalculator {
     /// Calculate confidence for volume predictions
     fn calculate_volume_confidence(&self, volume: &VolumePrediction) -> f64 {
         // Get volume probabilities
-        let probs = [volume.very_low_probability,
+        let probs = [
+            volume.very_low_probability,
             volume.low_probability,
             volume.medium_probability,
             volume.high_probability,
-            volume.very_high_probability];
+            volume.very_high_probability,
+        ];
 
         // Find max probability
         let max_prob = probs.iter().fold(0.0_f64, |a, &b| a.max(b));
@@ -254,7 +258,8 @@ impl ConfidenceCalculator {
         if let (Some(ref price_levels), Some(ref direction)) =
             (&prediction.price_levels, &prediction.direction)
         {
-            let price_direction_agreement = self.check_price_direction_agreement(price_levels, direction);
+            let price_direction_agreement =
+                self.check_price_direction_agreement(price_levels, direction);
             agreement_scores.push(price_direction_agreement);
         }
 
@@ -270,7 +275,8 @@ impl ConfidenceCalculator {
         if let (Some(ref sentiment), Some(ref direction)) =
             (&prediction.sentiment, &prediction.direction)
         {
-            let sentiment_agreement = self.check_sentiment_direction_agreement(sentiment, direction);
+            let sentiment_agreement =
+                self.check_sentiment_direction_agreement(sentiment, direction);
             agreement_scores.push(sentiment_agreement);
         }
 
@@ -285,8 +291,9 @@ impl ConfidenceCalculator {
         if agreement_scores.is_empty() {
             1.0 // Neutral if no comparisons possible
         } else {
-            let avg_agreement: f64 = agreement_scores.iter().sum::<f64>() / agreement_scores.len() as f64;
-            
+            let avg_agreement: f64 =
+                agreement_scores.iter().sum::<f64>() / agreement_scores.len() as f64;
+
             // Apply bonus/penalty based on agreement level
             if avg_agreement > 0.7 {
                 self.config.agreement_bonus.min(avg_agreement * 1.5)
@@ -387,7 +394,8 @@ impl ConfidenceCalculator {
     ) -> f64 {
         // High volume should confirm strong directional moves
         let high_volume = volume.high_probability + volume.very_high_probability;
-        let strong_direction = direction.pump_probability + direction.dump_probability
+        let strong_direction = direction.pump_probability
+            + direction.dump_probability
             + (direction.up_probability_aggregated - 0.5).abs()
             + (direction.down_probability_aggregated - 0.5).abs();
 
@@ -433,7 +441,10 @@ impl ConfidenceCalculator {
     }
 
     /// Calculate entropy from bins
-    fn calculate_entropy_from_bins(&self, bins: &HashMap<String, crate::output::prediction_types::PriceBin>) -> f64 {
+    fn calculate_entropy_from_bins(
+        &self,
+        bins: &HashMap<String, crate::output::prediction_types::PriceBin>,
+    ) -> f64 {
         let probs: Vec<f64> = bins.values().map(|bin| bin.probability).collect();
         self.calculate_entropy(&probs)
     }
@@ -458,7 +469,7 @@ impl ConfidenceCalculator {
         // Adjust for volatility regime
         let volatility_multiplier = if let Some(ref vol) = prediction.volatility {
             match vol.regime.as_str() {
-                "VERY_LOW" => 1.2,  // Can take larger position in calm markets
+                "VERY_LOW" => 1.2, // Can take larger position in calm markets
                 "LOW" => 1.1,
                 "MEDIUM" => 1.0,
                 "HIGH" => 0.8,      // Reduce position in volatile markets
@@ -485,7 +496,11 @@ impl ConfidenceCalculator {
         };
 
         // Combine all multipliers
-        f64::clamp(base_multiplier * volatility_multiplier * rr_multiplier, 0.25, 2.0)
+        f64::clamp(
+            base_multiplier * volatility_multiplier * rr_multiplier,
+            0.25,
+            2.0,
+        )
     }
 
     /// Calculate individual order level confidence based on price probability
@@ -546,8 +561,8 @@ impl EnhancedPositionSizer {
     pub fn new(confidence_config: ConfidenceConfig) -> Self {
         Self {
             confidence_calc: ConfidenceCalculator::new(confidence_config),
-            max_position_size: 1.0,  // 100% of capital
-            min_position_size: 0.1,  // 10% minimum
+            max_position_size: 1.0, // 100% of capital
+            min_position_size: 0.1, // 10% minimum
         }
     }
 
@@ -597,7 +612,11 @@ impl EnhancedPositionSizer {
 
                 // Normalize probabilities
                 let total_prob = moderate_down_prob + strong_down_prob + neutral_prob;
-                let norm_factor = if total_prob > 0.0 { 1.0 / total_prob } else { 1.0 };
+                let norm_factor = if total_prob > 0.0 {
+                    1.0 / total_prob
+                } else {
+                    1.0
+                };
 
                 Ok([
                     base_size * moderate_down_prob * norm_factor * 1.2, // Entry 1: Most likely
@@ -624,7 +643,11 @@ impl EnhancedPositionSizer {
 
                 // Normalize probabilities
                 let total_prob = moderate_up_prob + strong_up_prob + neutral_prob;
-                let norm_factor = if total_prob > 0.0 { 1.0 / total_prob } else { 1.0 };
+                let norm_factor = if total_prob > 0.0 {
+                    1.0 / total_prob
+                } else {
+                    1.0
+                };
 
                 Ok([
                     base_size * moderate_up_prob * norm_factor * 1.2, // Entry 1: Most likely
@@ -662,7 +685,7 @@ impl EnhancedPositionSizer {
         } else {
             1.0
         };
-        
+
         // Base exit sizes on confidence level
         let base_sizes = if overall_confidence > 0.7 {
             // High confidence: hold longer for bigger moves
@@ -674,7 +697,7 @@ impl EnhancedPositionSizer {
             // Low confidence: exit quickly
             [0.5, 0.3, 0.2] // 50%, 30%, 20%
         };
-        
+
         // Apply volatility adjustment
         [
             f64::min(base_sizes[0] * volatility_adjustment, 0.6),

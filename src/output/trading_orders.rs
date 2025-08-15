@@ -34,7 +34,7 @@ pub struct TradingOrders {
 
     /// Confidence-based position sizing enabled
     pub dynamic_sizing: bool,
-    
+
     /// Optional note for additional information (e.g., confidence warnings)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -300,6 +300,7 @@ impl TradingOrders {
     }
 
     /// Generate adaptive long orders using price level probabilities with enhanced confidence
+    #[allow(clippy::too_many_arguments)]
     fn generate_adaptive_long_orders(
         current_price: f64,
         atr_distance: f64,
@@ -360,11 +361,15 @@ impl TradingOrders {
             let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.2);
             let strong_down_prob = strong_down_bin.map(|bin| bin.probability).unwrap_or(0.1);
             let neutral_prob = neutral_bin.map(|bin| bin.probability).unwrap_or(0.2);
-            
+
             // Calculate total probability mass for normalization
             let total_entry_prob = moderate_down_prob + strong_down_prob + neutral_prob;
-            let norm_factor = if total_entry_prob > 0.0 { 1.0 / total_entry_prob } else { 1.0 };
-            
+            let norm_factor = if total_entry_prob > 0.0 {
+                1.0 / total_entry_prob
+            } else {
+                1.0
+            };
+
             // Weight by probability and adjust for confidence
             let size_1 = (moderate_down_prob * norm_factor * 1.2).min(0.5);
             let size_2 = (neutral_prob * norm_factor).min(0.3);
@@ -376,7 +381,7 @@ impl TradingOrders {
         let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.2);
         let strong_down_prob = strong_down_bin.map(|bin| bin.probability).unwrap_or(0.1);
         let neutral_prob = neutral_bin.map(|bin| bin.probability).unwrap_or(0.2);
-        
+
         let entry_1_confidence = (moderate_down_prob * 2.0).min(0.9); // Scale up for confidence
         let entry_2_confidence = (neutral_prob * 1.5).min(0.7);
         let entry_3_confidence = (strong_down_prob * 1.0).min(0.5);
@@ -441,14 +446,14 @@ impl TradingOrders {
         } else {
             // Fallback to probability-based sizing
             let moderate_up_prob = moderate_up_bin.map(|bin| bin.probability).unwrap_or(0.25);
-            
+
             // Dynamic exit sizing based on probability distribution
             let size_1 = if moderate_up_prob > 0.3 {
                 0.3 // Take 30% profit early if high probability
             } else {
                 0.4 // Take 40% profit if lower probability
             };
-            
+
             let size_2 = 0.4; // Always 40% at middle target
             let size_3 = 1.0 - size_1 - size_2; // Remainder
             (size_1, size_2, size_3)
@@ -457,7 +462,7 @@ impl TradingOrders {
         // Calculate confidence for each exit level
         let moderate_up_prob = moderate_up_bin.map(|bin| bin.probability).unwrap_or(0.25);
         let strong_up_prob = strong_up_bin.map(|bin| bin.probability).unwrap_or(0.15);
-        
+
         let exit_1_confidence = (moderate_up_prob * 3.0).min(0.9); // High confidence for likely targets
         let exit_2_confidence = ((moderate_up_prob + strong_up_prob) * 1.5).min(0.7);
         let exit_3_confidence = (strong_up_prob * 2.0).min(0.5);
@@ -515,18 +520,18 @@ impl TradingOrders {
 
         // ENHANCED STOP CONFIDENCE: Based on volatility and risk management
         let base_stop_confidence = match volatility_pred.regime.as_str() {
-            "VERY_LOW" | "LOW" => 0.95,     // High confidence in calm markets
-            "MEDIUM" => 0.85,                // Good confidence
-            "HIGH" => 0.75,                  // Lower confidence in volatile markets
-            "VERY_HIGH" => 0.65,             // Lowest confidence in extreme volatility
+            "VERY_LOW" | "LOW" => 0.95, // High confidence in calm markets
+            "MEDIUM" => 0.85,           // Good confidence
+            "HIGH" => 0.75,             // Lower confidence in volatile markets
+            "VERY_HIGH" => 0.65,        // Lowest confidence in extreme volatility
             _ => 0.8,
         };
 
         // Adjust stop sizes based on volatility regime
         let (stop_1_size, stop_2_size, stop_3_size) = match volatility_pred.regime.as_str() {
-            "VERY_LOW" | "LOW" => (0.5, 0.3, 0.2),    // Tighter stops in calm markets
-            "MEDIUM" => (0.4, 0.4, 0.2),              // Balanced stops
-            "HIGH" | "VERY_HIGH" => (0.3, 0.4, 0.3),  // Wider distribution in volatile markets
+            "VERY_LOW" | "LOW" => (0.5, 0.3, 0.2), // Tighter stops in calm markets
+            "MEDIUM" => (0.4, 0.4, 0.2),           // Balanced stops
+            "HIGH" | "VERY_HIGH" => (0.3, 0.4, 0.3), // Wider distribution in volatile markets
             _ => (0.4, 0.4, 0.2),
         };
 

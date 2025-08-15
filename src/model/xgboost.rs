@@ -77,6 +77,11 @@ impl XGBoostRegressor {
         self.backend.get_config()
     }
 
+    /// Get access to the SmartCore backend for advanced operations
+    pub fn get_backend(&self) -> Option<&SmartCoreRegressor> {
+        Some(&self.backend)
+    }
+
     /// Extract feature names from trained XGBoost model
     pub fn extract_feature_names(&mut self) -> Result<Vec<String>> {
         let feature_dim = self.backend.get_config().feature_dim;

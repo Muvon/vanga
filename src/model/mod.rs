@@ -10,6 +10,7 @@ pub mod attention_viz;
 pub mod lstm;
 pub mod lstm_simple;
 pub mod multi_target;
+pub mod ordinal_smartcore;
 pub mod smartcore_backend;
 pub mod tft;
 pub mod xgboost;
