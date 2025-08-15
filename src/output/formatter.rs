@@ -6,6 +6,7 @@
 use crate::config::model::NUM_CLASSES;
 use crate::config::prediction::{OutputConfig, OutputFormat};
 use crate::data::structures::MarketDataRow;
+use crate::output::confidence_calculator::{ConfidenceCalculator, ConfidenceConfig, EnhancedPositionSizer};
 use crate::output::multi_target_parser::{DirectionOutput, MultiTargetParser, VolatilityOutput};
 use crate::output::structures::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, VolatilityPrediction,
@@ -37,11 +38,16 @@ pub struct OutputFormatter {
     sequence_length: Option<usize>,
     /// Calibrated target parameters for consistent reconstruction
     calibrated_parameters: Option<crate::targets::calibration::CalibratedParameters>,
+    /// Enhanced confidence calculator for multi-target agreement
+    confidence_calculator: ConfidenceCalculator,
+    /// Enhanced position sizer for dynamic sizing
+    position_sizer: EnhancedPositionSizer,
 }
 
 impl OutputFormatter {
     /// Create new formatter with configuration
     pub fn new(config: OutputConfig) -> Self {
+        let confidence_config = ConfidenceConfig::default();
         Self {
             config,
             parser: Some(MultiTargetParser::new()), // Always initialize parser - all targets enabled with NUM_CLASSES=5
@@ -51,6 +57,8 @@ impl OutputFormatter {
             feature_count: None,
             sequence_length: None,
             calibrated_parameters: None,
+            confidence_calculator: ConfidenceCalculator::new(confidence_config.clone()),
+            position_sizer: EnhancedPositionSizer::new(confidence_config),
         }
     }
 
@@ -547,6 +555,17 @@ impl OutputFormatter {
                 && result.direction.is_some()
                 && result.volatility.is_some()
             {
+                // Calculate enhanced confidence BEFORE order generation
+                let enhanced_confidence = self.confidence_calculator.calculate_overall_confidence(&result);
+                
+                // Log confidence details for debugging
+                log::info!(
+                    "🎯 Enhanced Confidence: {:.2}% (Base: {:.2}%, Agreement Factor: {:.2}x)",
+                    enhanced_confidence * 100.0,
+                    base_confidence * 100.0,
+                    enhanced_confidence / base_confidence.max(0.01)
+                );
+                
                 // Clone the predictions to avoid borrow checker issues
                 let price_levels = result.price_levels.clone().unwrap();
                 let direction = result.direction.clone().unwrap();
@@ -589,7 +608,7 @@ impl OutputFormatter {
                 // Get bandwidth_size from training config
                 let bandwidth_size = self.bandwidth_size.unwrap_or(1.0);
 
-                // Generate sequence-aware orders - OHLCV data is REQUIRED!
+                // Generate sequence-aware orders with enhanced confidence
                 let ohlcv_data = self.sequence_ohlcv.as_ref()
                     .ok_or_else(|| VangaError::PredictionError(
                         "FATAL: No OHLCV sequence data available for order generation. This should have been set during formatter initialization.".to_string()
@@ -597,6 +616,16 @@ impl OutputFormatter {
 
                 // Extract close prices for order generation (backward compatibility)
                 let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
+
+                // Calculate dynamic position sizes using enhanced confidence
+                let entry_sizes = self.position_sizer.calculate_entry_sizes(&result, enhanced_confidence)?;
+                let exit_sizes = self.position_sizer.calculate_exit_sizes(&result, enhanced_confidence);
+                
+                log::info!(
+                    "🎯 Dynamic Position Sizing: Entry=[{:.1}%, {:.1}%, {:.1}%], Exit=[{:.1}%, {:.1}%, {:.1}%]",
+                    entry_sizes[0] * 100.0, entry_sizes[1] * 100.0, entry_sizes[2] * 100.0,
+                    exit_sizes[0] * 100.0, exit_sizes[1] * 100.0, exit_sizes[2] * 100.0
+                );
 
                 let order_config = crate::output::structures::OrderConfig::default();
 
@@ -609,6 +638,9 @@ impl OutputFormatter {
                     config: &order_config,
                     sequence_prices: &sequence_prices,
                     bandwidth_size,
+                    dynamic_entry_sizes: Some(entry_sizes),
+                    dynamic_exit_sizes: Some(exit_sizes),
+                    overall_confidence: Some(enhanced_confidence),
                 };
 
                 let orders = match crate::output::structures::TradingOrders::generate(config) {
@@ -629,10 +661,13 @@ impl OutputFormatter {
                 };
 
                 result = result.with_orders(orders);
+                
+                // Apply the enhanced confidence to the prediction result
+                result = result.with_confidence(enhanced_confidence);
+            } else {
+                // No orders generated, just apply base confidence
+                result = result.with_confidence(base_confidence);
             }
-
-            // Apply the calculated confidence to the prediction result
-            result = result.with_confidence(base_confidence);
 
             results.push(result);
         }

@@ -591,6 +591,9 @@ impl ObjectiveFunction {
                 config: &order_config,
                 sequence_prices,
                 bandwidth_size,
+                dynamic_entry_sizes: None,
+                dynamic_exit_sizes: None,
+                overall_confidence: None,
             };
 
             match TradingOrders::generate(config) {

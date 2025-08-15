@@ -34,6 +34,10 @@ pub struct TradingOrders {
 
     /// Confidence-based position sizing enabled
     pub dynamic_sizing: bool,
+    
+    /// Optional note for additional information (e.g., confidence warnings)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Individual order level with dynamic sizing
@@ -113,6 +117,7 @@ impl Default for TradingOrders {
             risk_reward_ratio: 0.0,
             atr_multiplier: 0.0,
             dynamic_sizing: false,
+            note: None,
         }
     }
 }
@@ -128,6 +133,12 @@ pub struct SequenceAwareOrderConfig<'a> {
     pub config: &'a OrderConfig,
     pub sequence_prices: &'a [f64],
     pub bandwidth_size: f64,
+    /// Optional dynamic entry sizes from enhanced confidence calculator
+    pub dynamic_entry_sizes: Option<[f64; 3]>,
+    /// Optional dynamic exit sizes from enhanced confidence calculator
+    pub dynamic_exit_sizes: Option<[f64; 3]>,
+    /// Overall confidence from enhanced calculator
+    pub overall_confidence: Option<f64>,
 }
 
 impl TradingOrders {
@@ -181,11 +192,11 @@ impl TradingOrders {
         if !has_sufficient_confidence || !has_acceptable_risk_reward {
             return Ok(Self::empty(
                 config.direction_pred,
-                &format!(
+                Some(format!(
                     "Insufficient confidence for trading. Max probability: {:.1}% (need >25%), R/R: {:.2} (need >0.5)",
                     max_prob * 100.0,
                     config.direction_pred.risk_reward_ratio
-                ),
+                )),
             ));
         }
 
@@ -222,7 +233,7 @@ impl TradingOrders {
         // 🎯 ADAPTIVE ORDER GENERATION: Use price level probabilities instead of sequence ranges
         let (mut entry_levels, mut exit_levels, mut stop_levels) = if direction == "LONG" {
             // Check if this is a breakout signal based on pump probability (adaptive threshold)
-            let is_breakout = config.direction_pred.pump_probability > 0.25; // Use same threshold as AdaptiveTradingSignal
+            let is_breakout = config.direction_pred.pump_probability > 0.25;
             Self::generate_adaptive_long_orders(
                 config.current_price,
                 atr_distance,
@@ -231,6 +242,8 @@ impl TradingOrders {
                 config.volatility_pred,
                 config.config,
                 is_breakout,
+                config.dynamic_entry_sizes,
+                config.dynamic_exit_sizes,
             )
         } else {
             // Check if this is a breakout signal based on dump probability (adaptive threshold)
@@ -282,10 +295,11 @@ impl TradingOrders {
             risk_reward_ratio,
             atr_multiplier,
             dynamic_sizing: config.config.aggressive_sizing,
+            note: None,
         })
     }
 
-    /// Generate adaptive long orders using price level probabilities
+    /// Generate adaptive long orders using price level probabilities with enhanced confidence
     fn generate_adaptive_long_orders(
         current_price: f64,
         atr_distance: f64,
@@ -294,13 +308,15 @@ impl TradingOrders {
         volatility_pred: &VolatilityPrediction,
         config: &OrderConfig,
         is_breakout: bool,
+        dynamic_entry_sizes: Option<[f64; 3]>,
+        dynamic_exit_sizes: Option<[f64; 3]>,
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
-        // 🎯 SIMPLE ADAPTIVE LOGIC: Use sequence bandwidth for realistic ranges
+        // 🎯 ENHANCED CONFIDENCE-BASED SIZING
+        // Use probability distributions for intelligent position sizing
         let sequence_bandwidth_pct = direction_pred.sequence_bandwidth_percent;
         let expected_upside = direction_pred.expected_upside_percent;
 
         // ENTRY LOGIC: For LONG positions, use DOWNSIDE ranges (below current price)
-        // This ensures we buy at lower prices than current market price
         let moderate_down_bin = price_levels.bins.get("moderate_down");
         let strong_down_bin = price_levels.bins.get("strong_down");
         let neutral_bin = price_levels.bins.get("neutral");
@@ -321,105 +337,163 @@ impl TradingOrders {
             );
         }
 
-        // Use reconstructed downside ranges for LONG entries (buy below current price)
+        // Use reconstructed downside ranges for LONG entries
         let entry_1_pct = moderate_down_bin
-            .map(|bin| bin.range[0].min(-0.1)) // Use lower bound, ensure it's negative
-            .unwrap_or(-sequence_bandwidth_pct * 0.2); // Fallback: 20% of bandwidth below
+            .map(|bin| bin.range[0].min(-0.1))
+            .unwrap_or(-sequence_bandwidth_pct * 0.2);
 
         let entry_2_pct = moderate_down_bin
-            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0) // Use middle of moderate_down range
-            .unwrap_or(-sequence_bandwidth_pct * 0.4); // Fallback: 40% of bandwidth below
+            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0)
+            .unwrap_or(-sequence_bandwidth_pct * 0.4);
 
         let entry_3_pct = strong_down_bin
-            .map(|bin| bin.range[1].min(-0.2)) // Use upper bound of strong_down, ensure it's negative
-            .unwrap_or(-sequence_bandwidth_pct * 0.6); // Fallback: 60% of bandwidth below
+            .map(|bin| bin.range[1].min(-0.2))
+            .unwrap_or(-sequence_bandwidth_pct * 0.6);
 
-        // POSITION SIZING: Use probabilities from downside bins for LONG entries
-        let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.3);
-        let strong_down_prob = strong_down_bin.map(|bin| bin.probability).unwrap_or(0.2);
+        // ENHANCED POSITION SIZING: Use dynamic sizes if available, otherwise calculate from probabilities
+        let (entry_1_size, entry_2_size, entry_3_size) = if let Some(sizes) = dynamic_entry_sizes {
+            // Use enhanced confidence-based sizes
+            log::info!("📊 Using ENHANCED dynamic entry sizes from confidence calculator");
+            (sizes[0], sizes[1], sizes[2])
+        } else {
+            // Fallback to probability-weighted distribution
+            let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.2);
+            let strong_down_prob = strong_down_bin.map(|bin| bin.probability).unwrap_or(0.1);
+            let neutral_prob = neutral_bin.map(|bin| bin.probability).unwrap_or(0.2);
+            
+            // Calculate total probability mass for normalization
+            let total_entry_prob = moderate_down_prob + strong_down_prob + neutral_prob;
+            let norm_factor = if total_entry_prob > 0.0 { 1.0 / total_entry_prob } else { 1.0 };
+            
+            // Weight by probability and adjust for confidence
+            let size_1 = (moderate_down_prob * norm_factor * 1.2).min(0.5);
+            let size_2 = (neutral_prob * norm_factor).min(0.3);
+            let size_3 = (1.0 - size_1 - size_2).max(0.2);
+            (size_1, size_2, size_3)
+        };
+
+        // Calculate confidence for each entry level based on probability
+        let moderate_down_prob = moderate_down_bin.map(|bin| bin.probability).unwrap_or(0.2);
+        let strong_down_prob = strong_down_bin.map(|bin| bin.probability).unwrap_or(0.1);
+        let neutral_prob = neutral_bin.map(|bin| bin.probability).unwrap_or(0.2);
+        
+        let entry_1_confidence = (moderate_down_prob * 2.0).min(0.9); // Scale up for confidence
+        let entry_2_confidence = (neutral_prob * 1.5).min(0.7);
+        let entry_3_confidence = (strong_down_prob * 1.0).min(0.5);
 
         log::info!(
-            "📊 LONG Entry Logic: Using DOWNSIDE ranges for entries (buy below current price {:.2})",
-            current_price
-        );
-        log::debug!(
-            "💰 LONG Entry Percentages (RECONSTRUCTED): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
-            entry_1_pct,
-            entry_2_pct,
-            entry_3_pct
+            "📊 ENHANCED LONG Entry Sizing: Level1={:.1}% (conf={:.1}), Level2={:.1}% (conf={:.1}), Level3={:.1}% (conf={:.1})",
+            entry_1_size * 100.0, entry_1_confidence,
+            entry_2_size * 100.0, entry_2_confidence,
+            entry_3_size * 100.0, entry_3_confidence
         );
 
         let entry_levels = [
             OrderLevel {
                 price: current_price * (1.0 + entry_1_pct / 100.0),
-                quantity_percentage: moderate_down_prob.min(0.4), // Cap at 40%
+                quantity_percentage: entry_1_size,
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: moderate_down_prob,
+                confidence: entry_1_confidence,
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_2_pct / 100.0),
-                quantity_percentage: moderate_down_prob.min(0.3), // Cap at 30%
+                quantity_percentage: entry_2_size,
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: moderate_down_prob,
+                confidence: entry_2_confidence,
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_3_pct / 100.0),
-                quantity_percentage: (1.0 - moderate_down_prob - moderate_down_prob).max(0.3), // Remainder, min 30%
+                quantity_percentage: entry_3_size,
                 atr_distance,
                 order_type: if is_breakout {
                     "STOP_LIMIT".to_string()
                 } else {
                     "LIMIT".to_string()
                 },
-                confidence: strong_down_prob,
+                confidence: entry_3_confidence,
             },
         ];
 
         // EXIT LOGIC: For LONG positions, use UPSIDE ranges (above current price)
-        // This ensures we sell at higher prices than current market price
         let moderate_up_bin = price_levels.bins.get("moderate_up");
         let strong_up_bin = price_levels.bins.get("strong_up");
 
-        // Use reconstructed upside ranges for LONG exits (sell above current price)
+        // Use reconstructed upside ranges for LONG exits
         let exit_1_pct = moderate_up_bin
-            .map(|bin| bin.range[0].max(0.1)) // Use lower bound of moderate_up, ensure it's positive
-            .unwrap_or(expected_upside * 0.5); // Fallback: 50% of expected upside
+            .map(|bin| bin.range[0].max(0.1))
+            .unwrap_or(expected_upside * 0.5);
 
         let exit_2_pct = moderate_up_bin
-            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0) // Use middle of moderate_up range
-            .unwrap_or(expected_upside * 0.8); // Fallback: 80% of expected upside
+            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0)
+            .unwrap_or(expected_upside * 0.8);
 
         let exit_3_pct = strong_up_bin
-            .map(|bin| bin.range[0].max(0.2)) // Use lower bound of strong_up, ensure it's positive
-            .unwrap_or(expected_upside); // Fallback: Full expected upside
+            .map(|bin| bin.range[0].max(0.2))
+            .unwrap_or(expected_upside);
+
+        // ENHANCED EXIT SIZING: Use dynamic sizes if available
+        let (exit_1_size, exit_2_size, exit_3_size) = if let Some(sizes) = dynamic_exit_sizes {
+            // Use enhanced confidence-based exit sizes
+            log::info!("📊 Using ENHANCED dynamic exit sizes from confidence calculator");
+            (sizes[0], sizes[1], sizes[2])
+        } else {
+            // Fallback to probability-based sizing
+            let moderate_up_prob = moderate_up_bin.map(|bin| bin.probability).unwrap_or(0.25);
+            
+            // Dynamic exit sizing based on probability distribution
+            let size_1 = if moderate_up_prob > 0.3 {
+                0.3 // Take 30% profit early if high probability
+            } else {
+                0.4 // Take 40% profit if lower probability
+            };
+            
+            let size_2 = 0.4; // Always 40% at middle target
+            let size_3 = 1.0 - size_1 - size_2; // Remainder
+            (size_1, size_2, size_3)
+        };
+
+        // Calculate confidence for each exit level
+        let moderate_up_prob = moderate_up_bin.map(|bin| bin.probability).unwrap_or(0.25);
+        let strong_up_prob = strong_up_bin.map(|bin| bin.probability).unwrap_or(0.15);
+        
+        let exit_1_confidence = (moderate_up_prob * 3.0).min(0.9); // High confidence for likely targets
+        let exit_2_confidence = ((moderate_up_prob + strong_up_prob) * 1.5).min(0.7);
+        let exit_3_confidence = (strong_up_prob * 2.0).min(0.5);
+
+        log::info!(
+            "📊 ENHANCED LONG Exit Sizing: Level1={:.1}% (conf={:.1}), Level2={:.1}% (conf={:.1}), Level3={:.1}% (conf={:.1})",
+            exit_1_size * 100.0, exit_1_confidence,
+            exit_2_size * 100.0, exit_2_confidence,
+            exit_3_size * 100.0, exit_3_confidence
+        );
 
         let exit_levels = [
             OrderLevel {
                 price: current_price * (1.0 + exit_1_pct / 100.0),
-                quantity_percentage: 0.4,
+                quantity_percentage: exit_1_size,
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: 0.8,
+                confidence: exit_1_confidence,
             },
             OrderLevel {
                 price: current_price * (1.0 + exit_2_pct / 100.0),
-                quantity_percentage: 0.4,
+                quantity_percentage: exit_2_size,
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: 0.6,
+                confidence: exit_2_confidence,
             },
             OrderLevel {
                 price: current_price * (1.0 + exit_3_pct / 100.0),
-                quantity_percentage: 0.2,
+                quantity_percentage: exit_3_size,
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: 0.4,
+                confidence: exit_3_confidence,
             },
         ];
 
-        // STOP LOGIC: ENFORCE RISK-REWARD RATIO MATHEMATICALLY
+        // STOP LOGIC: ENFORCE RISK-REWARD RATIO WITH INTELLIGENT CONFIDENCE
         let avg_entry_price =
             (entry_levels[0].price + entry_levels[1].price + entry_levels[2].price) / 3.0;
         let avg_exit_price =
@@ -427,7 +501,7 @@ impl TradingOrders {
 
         // Calculate required stop distance to maintain min_risk_reward
         let expected_profit = avg_exit_price - avg_entry_price;
-        let max_allowed_loss = expected_profit / config.min_risk_reward; // Enforce 4:1 ratio
+        let max_allowed_loss = expected_profit / config.min_risk_reward;
 
         // Use volatility recommendation but cap by risk-reward requirement
         let volatility_stop_distance =
@@ -439,27 +513,51 @@ impl TradingOrders {
         let stop_price_2 = avg_entry_price - required_stop_distance * 1.1; // 10% wider
         let stop_price_3 = avg_entry_price - required_stop_distance * 1.2; // 20% wider
 
+        // ENHANCED STOP CONFIDENCE: Based on volatility and risk management
+        let base_stop_confidence = match volatility_pred.regime.as_str() {
+            "VERY_LOW" | "LOW" => 0.95,     // High confidence in calm markets
+            "MEDIUM" => 0.85,                // Good confidence
+            "HIGH" => 0.75,                  // Lower confidence in volatile markets
+            "VERY_HIGH" => 0.65,             // Lowest confidence in extreme volatility
+            _ => 0.8,
+        };
+
+        // Adjust stop sizes based on volatility regime
+        let (stop_1_size, stop_2_size, stop_3_size) = match volatility_pred.regime.as_str() {
+            "VERY_LOW" | "LOW" => (0.5, 0.3, 0.2),    // Tighter stops in calm markets
+            "MEDIUM" => (0.4, 0.4, 0.2),              // Balanced stops
+            "HIGH" | "VERY_HIGH" => (0.3, 0.4, 0.3),  // Wider distribution in volatile markets
+            _ => (0.4, 0.4, 0.2),
+        };
+
+        log::info!(
+            "📊 ENHANCED Stop Sizing: Level1={:.1}% (conf={:.1}), Level2={:.1}% (conf={:.1}), Level3={:.1}% (conf={:.1})",
+            stop_1_size * 100.0, base_stop_confidence,
+            stop_2_size * 100.0, base_stop_confidence * 0.9,
+            stop_3_size * 100.0, base_stop_confidence * 0.8
+        );
+
         let stop_levels = [
             OrderLevel {
                 price: stop_price_1,
-                quantity_percentage: 0.4,
+                quantity_percentage: stop_1_size,
                 atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
-                confidence: 0.9,
+                confidence: base_stop_confidence,
             },
             OrderLevel {
                 price: stop_price_2,
-                quantity_percentage: 0.4,
+                quantity_percentage: stop_2_size,
                 atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
-                confidence: 0.8,
+                confidence: base_stop_confidence * 0.9,
             },
             OrderLevel {
                 price: stop_price_3,
-                quantity_percentage: 0.2,
+                quantity_percentage: stop_3_size,
                 atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
-                confidence: 0.7,
+                confidence: base_stop_confidence * 0.8,
             },
         ];
 
@@ -677,7 +775,7 @@ impl TradingOrders {
     }
 
     /// Create empty orders when no trading signals are available
-    pub fn empty(direction_pred: &DirectionPrediction, reason: &str) -> Self {
+    pub fn empty(direction_pred: &DirectionPrediction, note: Option<String>) -> Self {
         let empty_level = OrderLevel {
             price: 0.0,
             quantity_percentage: 0.0,
@@ -693,7 +791,7 @@ impl TradingOrders {
         };
 
         TradingOrders {
-            direction: format!("{} ({})", direction, reason),
+            direction: direction.to_string(),
             entry_levels: [
                 empty_level.clone(),
                 empty_level.clone(),
@@ -709,6 +807,7 @@ impl TradingOrders {
             risk_reward_ratio: 0.0,
             atr_multiplier: 0.0,
             dynamic_sizing: false,
+            note,
         }
     }
 
