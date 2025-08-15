@@ -396,6 +396,174 @@ impl LSTMModel {
         Ok(())
     }
 
+    /// Calculate categorical validation metrics from predictions directly (NEW METHOD)
+    pub async fn calculate_categorical_validation_metrics_from_predictions(
+        &self,
+        predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+        data_type: Option<&str>,
+    ) -> Result<()> {
+        // Convert predictions and targets to categorical classes (SAME logic as original method)
+        let mut all_predictions = Vec::new();
+        let mut all_targets = Vec::new();
+
+        for (pred_row, target_row) in predictions.outer_iter().zip(targets.outer_iter()) {
+            // Get predicted class (argmax) - SAME logic as original method
+            let predicted_class = pred_row
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| {
+                    // Validate predicted class against expected target type (SAME logic)
+                    if let Some((_, target_type)) = &self.target_context {
+                        let max_valid_class = self.get_target_size(*target_type, &crate::config::TrainingConfig::default()) - 1;
+                        if idx > max_valid_class {
+                            log::debug!(
+                                "⚠️ Model predicted class {} for {:?}, but max valid is {}. Using max valid class.",
+                                idx, target_type, max_valid_class
+                            );
+                            max_valid_class as i32
+                        } else {
+                            idx as i32
+                        }
+                    } else {
+                        idx as i32
+                    }
+                })
+                .unwrap_or(0);
+
+            // Get true class from target - SAME logic as original method
+            let true_class = if target_row.len() == 1 {
+                target_row[0] as i32
+            } else {
+                // Multi-value, assume one-hot
+                target_row
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(idx, _)| idx as i32)
+                    .unwrap_or(0)
+            };
+
+            all_predictions.push(predicted_class);
+            all_targets.push(true_class);
+        }
+
+        // Call same metrics calculation method
+        self.calculate_and_log_metrics_from_classes(&all_predictions, &all_targets, data_type)
+            .await
+    }
+
+    /// Calculate and log metrics from class predictions (EXTRACTED from original method)
+    async fn calculate_and_log_metrics_from_classes(
+        &self,
+        all_predictions: &[i32],
+        all_targets: &[i32],
+        data_type: Option<&str>,
+    ) -> Result<()> {
+        // Determine data type for proper labeling
+        let is_test_evaluation = if let Some(dtype) = data_type {
+            dtype.contains("test") || dtype.contains("Test")
+        } else {
+            false
+        };
+
+        // Calculate categorical metrics (SAME as original method)
+        let accuracy = self.calculate_accuracy(all_predictions, all_targets);
+        let (precision, recall, f1) =
+            self.calculate_precision_recall_f1(all_predictions, all_targets);
+        let class_distribution = self.analyze_prediction_distribution(all_predictions, all_targets);
+
+        // DEBUG: Log first few predictions to verify they're changing between epochs
+        if log::log_enabled!(log::Level::Debug) && !all_predictions.is_empty() {
+            let sample_size = std::cmp::min(10, all_predictions.len());
+            log::debug!(
+                "🔍 Sample predictions (first {}): {:?}",
+                sample_size,
+                &all_predictions[..sample_size]
+            );
+            log::debug!(
+                "🔍 Sample targets (first {}): {:?}",
+                sample_size,
+                &all_targets[..sample_size]
+            );
+        }
+
+        // Calculate additional distance-based metrics for categorical data
+        // Convert predictions and targets to Array2<f64> for MSE/MAPE calculation
+        let pred_array = Array2::from_shape_vec(
+            (all_predictions.len(), 1),
+            all_predictions.iter().map(|&x| x as f64).collect(),
+        )
+        .unwrap_or_else(|_| Array2::zeros((0, 1)));
+
+        let target_array = Array2::from_shape_vec(
+            (all_targets.len(), 1),
+            all_targets.iter().map(|&x| x as f64).collect(),
+        )
+        .unwrap_or_else(|_| Array2::zeros((0, 1)));
+
+        let mse = if !pred_array.is_empty() && !target_array.is_empty() {
+            self.calculate_mse_loss(&pred_array, &target_array)
+        } else {
+            f64::INFINITY
+        };
+
+        let categorical_mape = if !pred_array.is_empty() && !target_array.is_empty() {
+            self.calculate_categorical_mape(&pred_array, &target_array)
+        } else {
+            f64::INFINITY
+        };
+
+        // Calculate quality metric for crypto winning percentage
+        let quality = if !all_predictions.is_empty() && !all_targets.is_empty() {
+            self.calculate_quality_metric(all_predictions, all_targets)
+        } else {
+            0.0
+        };
+
+        // Calculate error metric (percentage of predictions with distance > 2)
+        let error_percentage = if !all_predictions.is_empty() && !all_targets.is_empty() {
+            self.calculate_error_metric(all_predictions, all_targets)
+        } else {
+            0.0
+        };
+
+        // Log comprehensive categorical metrics with target-type aware interpretation
+        let target_type_name = if let Some((_, target_type)) = &self.target_context {
+            match target_type {
+                TargetType::PriceLevel => "PriceLevel",
+                TargetType::Direction => "Direction",
+                TargetType::Volatility => "Volatility",
+                TargetType::Sentiment => "Sentiment",
+                TargetType::Volume => "Volume",
+            }
+        } else {
+            "Unknown"
+        };
+
+        // Target-type aware metric interpretation (reuse existing target context)
+        let metric_label = if is_test_evaluation {
+            "Test"
+        } else {
+            data_type.unwrap_or("Validation")
+        };
+
+        log::info!(
+            "📊 Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, Quality: {:.1}%, Error: {:.1}%, MSE: {:.3}, MAPE: {:.2}%",
+            target_type_name, metric_label, accuracy, precision, recall, f1, quality, error_percentage, mse, categorical_mape
+        );
+
+        log::debug!(
+            "📈 Class Distribution [{}]: Pred: {:?}, True: {:?}",
+            target_type_name,
+            class_distribution.0,
+            class_distribution.1
+        );
+
+        Ok(())
+    }
+
     /// Set target context for this individual model
     /// This allows proper target type detection without assumptions based on output_size
     pub fn set_target_context(
@@ -561,14 +729,12 @@ impl LSTMModel {
         batch_size: usize,
         epoch: usize,
         _config: &crate::config::TrainingConfig,
+        data_type: Option<&str>, // NEW: "validation", "test", or None for auto-detection
     ) -> Result<()> {
         // Only calculate detailed metrics every 5 epochs to avoid overhead
         if epoch < 1 || epoch % 5 != 0 {
             return Ok(());
         }
-
-        // Check if this is test data evaluation (when called with epoch=10 for final metrics)
-        let is_test_evaluation = val_sequences.shape()[0] == self.stored_test_sequences.shape()[0];
 
         let total_val_samples = val_sequences.shape()[0];
         let mut all_predictions = Vec::new();
@@ -749,99 +915,9 @@ impl LSTMModel {
             }
         }
 
-        // Calculate categorical metrics
-        let accuracy = self.calculate_accuracy(&all_predictions, &all_targets);
-        let (precision, recall, f1) =
-            self.calculate_precision_recall_f1(&all_predictions, &all_targets);
-        let class_distribution =
-            self.analyze_prediction_distribution(&all_predictions, &all_targets);
-
-        // DEBUG: Log first few predictions to verify they're changing between epochs
-        if log::log_enabled!(log::Level::Debug) && !all_predictions.is_empty() {
-            let sample_size = std::cmp::min(10, all_predictions.len());
-            log::debug!(
-                "🔍 Sample predictions (first {}): {:?}",
-                sample_size,
-                &all_predictions[..sample_size]
-            );
-            log::debug!(
-                "🔍 Sample targets (first {}): {:?}",
-                sample_size,
-                &all_targets[..sample_size]
-            );
-        }
-
-        // Calculate additional distance-based metrics for categorical data
-        // Convert predictions and targets to Array2<f64> for MSE/MAPE calculation
-        let pred_array = Array2::from_shape_vec(
-            (all_predictions.len(), 1),
-            all_predictions.iter().map(|&x| x as f64).collect(),
-        )
-        .unwrap_or_else(|_| Array2::zeros((0, 1)));
-
-        let target_array = Array2::from_shape_vec(
-            (all_targets.len(), 1),
-            all_targets.iter().map(|&x| x as f64).collect(),
-        )
-        .unwrap_or_else(|_| Array2::zeros((0, 1)));
-
-        let mse = if !pred_array.is_empty() && !target_array.is_empty() {
-            self.calculate_mse_loss(&pred_array, &target_array)
-        } else {
-            f64::INFINITY
-        };
-
-        let categorical_mape = if !pred_array.is_empty() && !target_array.is_empty() {
-            self.calculate_categorical_mape(&pred_array, &target_array)
-        } else {
-            f64::INFINITY
-        };
-
-        // Calculate quality metric for crypto winning percentage
-        let quality = if !all_predictions.is_empty() && !all_targets.is_empty() {
-            self.calculate_quality_metric(&all_predictions, &all_targets)
-        } else {
-            0.0
-        };
-
-        // Calculate error metric (percentage of predictions with distance > 2)
-        let error_percentage = if !all_predictions.is_empty() && !all_targets.is_empty() {
-            self.calculate_error_metric(&all_predictions, &all_targets)
-        } else {
-            0.0
-        };
-
-        // Log comprehensive categorical metrics with target-type aware interpretation
-        let target_type_name = if let Some((_, target_type)) = &self.target_context {
-            match target_type {
-                TargetType::PriceLevel => "PriceLevel",
-                TargetType::Direction => "Direction",
-                TargetType::Volatility => "Volatility",
-                TargetType::Sentiment => "Sentiment",
-                TargetType::Volume => "Volume",
-            }
-        } else {
-            "Unknown"
-        };
-
-        // Target-type aware metric interpretation (reuse existing target context)
-        let metric_label = if is_test_evaluation {
-            "Test"
-        } else {
-            "Validation"
-        };
-
-        log::info!(
-            "📊 Metrics [{}] [{}]: Accuracy: {:.3}, Precision: {:.3}, Recall: {:.3}, F1: {:.3}, Quality: {:.1}%, Error: {:.1}%, MSE: {:.3}, MAPE: {:.2}%",
-            target_type_name, metric_label, accuracy, precision, recall, f1, quality, error_percentage, mse, categorical_mape
-        );
-
-        log::debug!(
-            "📈 Class Distribution [{}]: Pred: {:?}, True: {:?}",
-            target_type_name,
-            class_distribution.0,
-            class_distribution.1
-        );
+        // Call new method to calculate and log metrics
+        self.calculate_and_log_metrics_from_classes(&all_predictions, &all_targets, data_type)
+            .await?;
 
         Ok(())
     }

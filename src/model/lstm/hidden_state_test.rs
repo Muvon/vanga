@@ -29,6 +29,7 @@ async fn test_validation_metrics_method_signature() {
             32,
             1, // epoch 1, should return early
             &training_config,
+            None, // data_type
         )
         .await;
 

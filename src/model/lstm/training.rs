@@ -1278,7 +1278,7 @@ impl LSTMModel {
                         | TargetType::Sentiment
                         | TargetType::Volume => {
                             self.calculate_categorical_validation_metrics(
-                                val_seq, val_tgt, batch_size, epoch, config,
+                                val_seq, val_tgt, batch_size, epoch, config, None,
                             )
                             .await?;
                         }
@@ -1626,6 +1626,7 @@ impl LSTMModel {
                                     64, // batch_size (not used in the method)
                                     10, // epoch = 10 to force calculation (10 % 10 == 0)
                                     config,
+                                    Some("validation"), // NEW: Explicitly mark as validation
                                 )
                                 .await;
                         } else {
@@ -1650,6 +1651,7 @@ impl LSTMModel {
                                     64,
                                     10, // Force calculation
                                     config,
+                                    Some("test"), // NEW: Explicitly mark as test
                                 )
                                 .await;
                         } else {
@@ -2449,7 +2451,113 @@ impl LSTMModel {
             log::error!("❌ XGBoost model not found after training");
         }
 
+        // NEW: Evaluate hybrid model (LSTM+XGBoost) performance vs LSTM-only
+        self.evaluate_hybrid_model_performance().await?;
+
         log::info!("✅ XGBoost hybrid training completed successfully");
+        Ok(())
+    }
+
+    /// Evaluate hybrid model (LSTM+XGBoost) performance and compare with LSTM-only
+    async fn evaluate_hybrid_model_performance(&mut self) -> Result<()> {
+        log::info!("🔍 Evaluating hybrid model (LSTM+XGBoost) performance...");
+
+        if self.xgboost_model.is_none() {
+            log::warn!("⚠️ XGBoost model not available for hybrid evaluation");
+            return Ok(());
+        }
+
+        // Evaluate on validation data if available
+        if let (Some(stored_val_seq), Some(stored_val_tgt)) =
+            (&self.stored_val_sequences, &self.stored_val_targets)
+        {
+            log::info!(
+                "📊 Evaluating hybrid model on validation data ({} samples)...",
+                stored_val_seq.shape()[0]
+            );
+
+            // Clone data to avoid borrowing issues
+            let val_seq_clone = stored_val_seq.clone();
+            let val_tgt_clone = stored_val_tgt.clone();
+
+            // Get LSTM-only predictions (current predict() method)
+            let lstm_only_predictions = self.predict_lstm_only(&val_seq_clone).await?;
+
+            // Get hybrid predictions (LSTM+XGBoost via predict() method which should use XGBoost when available)
+            let hybrid_predictions = self.predict(&val_seq_clone).await?;
+
+            // Calculate and log both sets of metrics
+            self.log_comparison_metrics(
+                "Validation",
+                &lstm_only_predictions,
+                &hybrid_predictions,
+                &val_tgt_clone,
+            )
+            .await?;
+        }
+
+        // Evaluate on test data if available
+        if self.stored_test_sequences.shape()[0] > 0 {
+            log::info!(
+                "📊 Evaluating hybrid model on test data ({} samples)...",
+                self.stored_test_sequences.shape()[0]
+            );
+
+            // Clone data to avoid borrowing issues
+            let test_seq_clone = self.stored_test_sequences.clone();
+            let test_tgt_clone = self.stored_test_targets.clone();
+
+            // Get LSTM-only predictions
+            let lstm_only_predictions = self.predict_lstm_only(&test_seq_clone).await?;
+
+            // Get hybrid predictions
+            let hybrid_predictions = self.predict(&test_seq_clone).await?;
+
+            // Calculate and log both sets of metrics
+            self.log_comparison_metrics(
+                "Test",
+                &lstm_only_predictions,
+                &hybrid_predictions,
+                &test_tgt_clone,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Predict using LSTM-only (bypass XGBoost for comparison)
+    async fn predict_lstm_only(&mut self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
+        // Temporarily disable XGBoost for pure LSTM prediction
+        let xgb_backup = self.xgboost_model.take();
+        let result = self.predict(sequences).await;
+        self.xgboost_model = xgb_backup; // Restore XGBoost model
+        result
+    }
+
+    /// Log comparison metrics by calling the new extracted method
+    async fn log_comparison_metrics(
+        &mut self,
+        data_type: &str,
+        lstm_only_predictions: &Array2<f64>,
+        hybrid_predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+    ) -> Result<()> {
+        // Use the new method that takes predictions directly
+        self.calculate_categorical_validation_metrics_from_predictions(
+            lstm_only_predictions,
+            targets,
+            Some(&format!("LSTM-only {}", data_type)),
+        )
+        .await?;
+
+        self.calculate_categorical_validation_metrics_from_predictions(
+            hybrid_predictions,
+            targets,
+            Some(&format!("Hybrid {}", data_type)),
+        )
+        .await?;
+
         Ok(())
     }
 
