@@ -388,6 +388,7 @@ impl TargetGenerator {
     /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
     /// target generation between training and prediction. When None, uses calibration/base config.
     /// Only generates enabled targets for performance optimization.
+    /// CRITICAL: Requires calibrated adaptive parameters - no defaults allowed!
     pub async fn generate_all_targets_with_adaptive_params(
         &self,
         df: &DataFrame,
@@ -404,33 +405,30 @@ impl TargetGenerator {
             sequence_indices.len()
         );
 
-        // Create default parameters for cases where adaptive_params is None
-        let default_direction =
-            crate::targets::adaptive_parameters::DirectionAdaptiveParams::default();
-        let default_price_level =
-            crate::targets::adaptive_parameters::PriceLevelAdaptiveParams::default();
-        let default_volatility =
-            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
-        let default_sentiment =
-            crate::targets::adaptive_parameters::SentimentAdaptiveParams::default();
-        let default_volume = crate::targets::adaptive_parameters::VolumeAdaptiveParams::default();
+        // CRITICAL FIX: Require adaptive parameters - no defaults allowed during training!
+        let adaptive_params = adaptive_params.ok_or_else(|| {
+            crate::utils::VangaError::ConfigError(
+                "FATAL: Adaptive parameters are REQUIRED for target generation. \
+                 Calibration must be performed before generating targets. \
+                 This ensures consistent classification between training and prediction."
+                    .to_string(),
+            )
+        })?;
 
-        // Get adaptive parameters or defaults
-        let direction_adaptive_params = adaptive_params
-            .map(|p| &p.direction)
-            .unwrap_or(&default_direction);
-        let price_level_adaptive_params = adaptive_params
-            .map(|p| &p.price_levels)
-            .unwrap_or(&default_price_level);
-        let volatility_adaptive_params = adaptive_params
-            .map(|p| &p.volatility)
-            .unwrap_or(&default_volatility);
-        let sentiment_adaptive_params = adaptive_params
-            .map(|p| &p.sentiment)
-            .unwrap_or(&default_sentiment);
-        let volume_adaptive_params = adaptive_params
-            .map(|p| &p.volume)
-            .unwrap_or(&default_volume);
+        // Extract calibrated parameters - no defaults!
+        let direction_adaptive_params = &adaptive_params.direction;
+        let price_level_adaptive_params = &adaptive_params.price_levels;
+        let volatility_adaptive_params = &adaptive_params.volatility;
+        let sentiment_adaptive_params = &adaptive_params.sentiment;
+        let volume_adaptive_params = &adaptive_params.volume;
+
+        log::debug!(
+            "✅ Using calibrated adaptive parameters: direction_sensitivity={:.4}, \
+             price_bandwidth={:.4}, volatility_bandwidth={:.4}",
+            direction_adaptive_params.base_sensitivity,
+            price_level_adaptive_params.bandwidth_size,
+            volatility_adaptive_params.bandwidth_size
+        );
 
         // CONDITIONAL GENERATION: Only generate enabled targets
         if self.config.price_level.enabled {

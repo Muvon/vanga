@@ -10,7 +10,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::volatility::*;
-    use crate::config::model::TargetsConfig;
+
     use crate::data::structures::MarketDataRow;
     use approx::assert_relative_eq;
 
@@ -521,13 +521,20 @@ mod tests {
             (1120.0, 1200.0, 1000.0, 1160.0, 700.0), // Sustained high vol/volume
         ]);
 
-        let default_params =
-            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
+        let test_params = crate::targets::adaptive_parameters::VolatilityAdaptiveParams {
+            bandwidth_size: 0.4,
+            extreme_multiplier: 2.0,
+            volume_weight: 0.1,
+            atr_distribution_stats: crate::targets::volatility::AtrDistributionStats::default(),
+            cv_adjustment_factor: 1.0,
+            horizon_decay_factor: 1.0,
+            min_baseline_atr: 0.005,
+            achieved_balance: crate::targets::calibration::ClassBalance::default(),
+        };
         let class = classify_volatility_with_distribution_analysis(
             &normal_sequence,
             &high_vol_horizon,
-            &targets_config,
-            &default_params,
+            &test_params,
         )
         .unwrap();
 
@@ -557,8 +564,7 @@ mod tests {
         let low_vol_class = classify_volatility_with_distribution_analysis(
             &normal_sequence,
             &low_vol_horizon,
-            &targets_config,
-            &default_params,
+            &test_params,
         )
         .unwrap();
 
@@ -578,8 +584,7 @@ mod tests {
         let decreasing_class = classify_volatility_with_distribution_analysis(
             &normal_sequence,
             &decreasing_vol_horizon,
-            &targets_config,
-            &default_params,
+            &test_params,
         )
         .unwrap();
 
@@ -593,10 +598,9 @@ mod tests {
         let single_candle = create_test_candles(vec![(1000.0, 1020.0, 980.0, 1010.0, 100.0)]);
 
         let edge_class = classify_volatility_with_distribution_analysis(
-            &single_candle,
-            &high_vol_horizon,
-            &targets_config,
-            &default_params,
+            &normal_sequence,
+            &single_candle, // Use single_candle for edge case test
+            &test_params,
         )
         .unwrap();
 
@@ -843,13 +847,20 @@ mod tests {
         };
 
         // Test without horizon weighting (uniform)
-        let default_params =
-            crate::targets::adaptive_parameters::VolatilityAdaptiveParams::default();
+        let test_params = crate::targets::adaptive_parameters::VolatilityAdaptiveParams {
+            bandwidth_size: 0.4,
+            extreme_multiplier: 2.0,
+            volume_weight: 0.1,
+            atr_distribution_stats: crate::targets::volatility::AtrDistributionStats::default(),
+            cv_adjustment_factor: 1.0,
+            horizon_decay_factor: 1.0,
+            min_baseline_atr: 0.005,
+            achieved_balance: crate::targets::calibration::ClassBalance::default(),
+        };
         let uniform_class = classify_volatility_with_distribution_analysis(
             &sequence_candles,
             &horizon_candles,
-            &targets_config,
-            &default_params,
+            &test_params,
         )
         .unwrap();
 
@@ -862,12 +873,12 @@ mod tests {
             cv_adjustment_factor: 1.0,
             min_baseline_atr: 0.005, // Add missing field with default value
             achieved_balance: Default::default(),
+            volume_weight: 0.1,
         };
 
         let weighted_class = classify_volatility_with_distribution_analysis(
             &sequence_candles,
             &horizon_candles,
-            &targets_config,
             &adaptive_params,
         )
         .unwrap();

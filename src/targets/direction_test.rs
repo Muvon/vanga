@@ -10,7 +10,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::direction::*;
-    use crate::config::model::TargetsConfig;
+
     use approx::assert_relative_eq;
 
     /// Test linear regression slope calculation with known data and volatility normalization

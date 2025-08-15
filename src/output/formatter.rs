@@ -15,7 +15,7 @@ use crate::targets::PreparedTargets;
 use crate::targets::direction::reconstruct_direction;
 use crate::targets::reconstruct_price_levels;
 use crate::targets::sentiment::reconstruct_sentiment;
-use crate::targets::volatility::reconstruct_volatility_legacy;
+use crate::targets::volatility::reconstruct_volatility;
 use crate::targets::volume::reconstruct_volume;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
@@ -65,14 +65,6 @@ impl OutputFormatter {
     pub fn with_metadata(mut self, feature_count: usize, sequence_length: usize) -> Self {
         self.feature_count = Some(feature_count);
         self.sequence_length = Some(sequence_length);
-        self
-    }
-
-    /// Set training configuration for enhanced reconstruction
-    pub fn with_training_config(mut self, config: crate::config::model::TargetsConfig) -> Self {
-        // Store training config parameters for reconstruction methods
-        self.bandwidth_size = Some(config.base_sensitivity);
-        self.percentiles = Some([0.1, 0.9]); // Default percentiles used in training
         self
     }
 
@@ -672,31 +664,19 @@ impl OutputFormatter {
             )
         })?;
 
-        // Use adaptive parameters if available, otherwise fallback to bandwidth_size
-        let targets_config = if let Some(ref adaptive_params) = self.adaptive_parameters {
-            // Use calibrated adaptive parameters for price level reconstruction
-            Some(crate::config::model::TargetsConfig {
-                base_sensitivity: adaptive_params.price_levels.bandwidth_size,
-                extreme_multiplier: 2.0, // Price levels don't use extreme_multiplier
-                ..Default::default()
-            })
-        } else if self.bandwidth_size.is_some() {
-            // Fallback to bandwidth_size if no adaptive parameters
-            Some(crate::config::model::TargetsConfig {
-                base_sensitivity: self.bandwidth_size.unwrap_or(1.0),
-                extreme_multiplier: 2.0, // Default value
-                ..Default::default()
-            })
+        // Use adaptive parameters if available, otherwise return error
+        let reconstruction = if let Some(ref adaptive_params) = self.adaptive_parameters {
+            reconstruct_price_levels(
+                probabilities,
+                sequence_ohlcv,
+                current_price,
+                &adaptive_params.price_levels,
+            )?
         } else {
-            None
+            return Err(VangaError::ConfigError(
+                "Adaptive parameters required for price level reconstruction".to_string(),
+            ));
         };
-
-        let reconstruction = reconstruct_price_levels(
-            probabilities,
-            sequence_ohlcv,
-            current_price,
-            targets_config.as_ref(),
-        )?;
 
         // Create bins using reconstruction results
         let mut bins = HashMap::new();
@@ -761,28 +741,17 @@ impl OutputFormatter {
                 input.pump_probability,
             ];
 
-            // Use adaptive parameters if available, otherwise create default config
-            let targets_config = if let Some(ref adaptive_params) = self.adaptive_parameters {
-                // Use calibrated adaptive parameters for direction reconstruction
-                Some(crate::config::model::TargetsConfig {
-                    base_sensitivity: adaptive_params.direction.base_sensitivity,
-                    extreme_multiplier: adaptive_params.direction.extreme_multiplier,
-                    momentum_weighting: adaptive_params.direction.momentum_weighting,
-                    ..Default::default()
-                })
-            } else if self.bandwidth_size.is_some() {
-                // Fallback to bandwidth_size if no adaptive parameters
-                Some(crate::config::model::TargetsConfig {
-                    base_sensitivity: self.bandwidth_size.unwrap_or(0.4), // Direction default
-                    extreme_multiplier: 2.0,                              // Default value
-                    ..Default::default()
-                })
+            // Use enhanced reconstruction from direction module with adaptive parameters
+            let reconstruction_result = if let Some(ref adaptive_params) = self.adaptive_parameters
+            {
+                reconstruct_direction(&probabilities, ohlcv_data, &adaptive_params.direction)
             } else {
-                None
+                Err(VangaError::ConfigError(
+                    "Adaptive parameters required for direction reconstruction".to_string(),
+                ))
             };
 
-            // Use enhanced reconstruction from direction module with proper adaptive parameters
-            match reconstruct_direction(&probabilities, ohlcv_data, targets_config.as_ref()) {
+            match reconstruction_result {
                 Ok(reconstruction) => {
                     // Update existing fields with reconstruction results
                     prediction.breakout_probability = reconstruction.breakout_probability;
@@ -899,14 +868,12 @@ impl OutputFormatter {
             // Use enhanced reconstruction from volatility module with adaptive parameters
             let volatility_result = if let Some(ref adaptive_params) = self.adaptive_parameters {
                 // Use calibrated adaptive parameters for volatility reconstruction
-                crate::targets::volatility::reconstruct_volatility(
-                    &probabilities,
-                    ohlcv_data,
-                    &adaptive_params.volatility,
-                )
+                reconstruct_volatility(&probabilities, ohlcv_data, &adaptive_params.volatility)
             } else {
-                // Fallback to legacy reconstruction with defaults
-                reconstruct_volatility_legacy(&probabilities, ohlcv_data, None)
+                // Adaptive parameters are required for reconstruction
+                Err(VangaError::ConfigError(
+                    "Adaptive parameters required for volatility reconstruction - model needs recalibration".to_string()
+                ))
             };
 
             match volatility_result {

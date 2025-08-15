@@ -428,8 +428,9 @@ impl ModelTrainer {
             direction: crate::targets::adaptive_parameters::DirectionAdaptiveParams {
                 base_sensitivity: calibrated_params.direction.sensitivity,
                 extreme_multiplier: calibrated_params.direction.extreme_multiplier,
-                momentum_weighting: 1.2,
-                trend_consistency_factor: 1.0,
+                min_base_threshold: calibrated_params.direction.min_base_threshold,
+                min_extreme_threshold: calibrated_params.direction.min_extreme_threshold,
+                base_multiplier: calibrated_params.direction.base_multiplier,
                 achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
                     class_percentages: calibrated_params.direction.balance.class_percentages,
                     balance_score: calibrated_params.direction.balance.balance_score,
@@ -454,6 +455,7 @@ impl ModelTrainer {
                 adaptive_percentiles: calibrated_params.price_levels.percentiles,
                 volatility_adjustment: 1.0,
                 neutral_band_factor: calibrated_params.price_levels.neutral_band,
+                fallback_percentiles: calibrated_params.price_levels.fallback_percentiles,
                 achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
                     class_percentages: calibrated_params.price_levels.balance.class_percentages,
                     balance_score: calibrated_params.price_levels.balance.balance_score,

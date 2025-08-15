@@ -525,7 +525,7 @@ impl DataPipeline {
                             validation_ratio,
                             config.training.test_split,
                             &[*target_type],
-                            &[horizon.clone()],
+                            std::slice::from_ref(horizon),
                         )?;
 
                     // Extract training indices for this specific target from the balanced dataset

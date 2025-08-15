@@ -1058,24 +1058,29 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
             if backtest {
                 if batch && symbols.is_some() {
                     // Batch backtesting for multiple symbols
-                    let symbols = symbols.unwrap();
-                    log::info!("📊 Running batch backtesting for {} symbols", symbols.len());
+                    if let Some(symbols) = symbols {
+                        log::info!("📊 Running batch backtesting for {} symbols", symbols.len());
 
-                    match vanga::api::run_batch_backtest(&symbols, &test_data, train_split).await {
-                        Ok(results) => {
-                            vanga::utils::backtest_reporter::print_backtest_results(&results);
+                        match vanga::api::run_batch_backtest(&symbols, &test_data, train_split)
+                            .await
+                        {
+                            Ok(results) => {
+                                vanga::utils::backtest_reporter::print_backtest_results(&results);
 
-                            // Save results to file
-                            let output_dir = std::path::Path::new("backtest_results");
-                            if let Err(e) = vanga::utils::backtest_reporter::save_backtest_report(
-                                &results, output_dir, "json",
-                            ) {
-                                log::warn!("Failed to save backtest report: {}", e);
+                                // Save results to file
+                                let output_dir = std::path::Path::new("backtest_results");
+                                if let Err(e) =
+                                    vanga::utils::backtest_reporter::save_backtest_report(
+                                        &results, output_dir, "json",
+                                    )
+                                {
+                                    log::warn!("Failed to save backtest report: {}", e);
+                                }
                             }
-                        }
-                        Err(e) => {
-                            log::error!("❌ Batch backtesting failed: {}", e);
-                            return Err(e);
+                            Err(e) => {
+                                log::error!("❌ Batch backtesting failed: {}", e);
+                                return Err(e);
+                            }
                         }
                     }
                 } else if symbol.is_some() {

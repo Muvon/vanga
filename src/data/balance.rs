@@ -132,7 +132,7 @@ impl SequenceBalancer {
 
     /// UNIFIED METHOD: Select balanced sequences for any target/horizon combination
     /// This replaces both balance_sequences_for_window and the logic in extract_target_specific_balanced_datasets
-    pub fn select_balanced_sequences_unified(
+    pub fn balance_sequences_for_window(
         &self,
         all_sequences: &[SequenceWithTargets],
         target_type: TargetType,
@@ -473,26 +473,6 @@ impl SequenceBalancer {
         Ok((selected_indices.selected_indices, distributions))
     }
 
-    /// Balance sequences for a specific window, target type, and horizon
-    /// DEPRECATED: Use select_balanced_sequences_unified instead
-    pub fn balance_sequences_for_window(
-        &self,
-        all_sequences: &[SequenceWithTargets],
-        validation_indices: &[usize],
-        window_range: (usize, usize),
-        target_type: TargetType,
-        horizon: &str,
-    ) -> Result<BalancedSelection> {
-        // Use unified method
-        self.select_balanced_sequences_unified(
-            all_sequences,
-            target_type,
-            horizon,
-            validation_indices,
-            Some(window_range),
-        )
-    }
-
     /// Extract globally balanced dataset from FULL available data
     /// Uses ALL data (total - test_split) to find optimal balance across all targets
     pub fn extract_globally_balanced_dataset(
@@ -674,7 +654,7 @@ impl SequenceBalancer {
                 );
 
                 // Use unified selection method
-                let selection_result = self.select_balanced_sequences_unified(
+                let selection_result = self.balance_sequences_for_window(
                     all_sequences,
                     *target_type,
                     horizon,

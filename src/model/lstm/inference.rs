@@ -652,9 +652,8 @@ impl LSTMModel {
         };
 
         // Choose dropout method based on configuration
-        let dropped_tensor = if dropout_config.variational && sequence_context.is_some() {
+        let dropped_tensor = if let Some(sequence_id) = sequence_context {
             // Use variational dropout with sequence context
-            let sequence_id = sequence_context.unwrap();
             log::debug!(
                 "🔧 Applying variational dropout with rate {:.3} to tensor shape {:?} [sequence: {}]",
                 dropout_rate,

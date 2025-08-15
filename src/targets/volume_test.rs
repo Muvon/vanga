@@ -1,4 +1,3 @@
-use crate::config::model::TargetsConfig;
 use crate::targets::volume::*;
 
 #[test]

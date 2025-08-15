@@ -335,13 +335,13 @@ impl ParameterCalibrator {
         let mut best_params = DirectionParams::default();
         let mut best_score = f64::INFINITY;
 
-        let sensitivities = vec![0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
-        let multipliers = vec![1.5, 2.0, 2.5, 3.0];
+        let sensitivities = vec![0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]; // More granular options
+        let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0]; // More options
 
-        // NEW: Grid search for previously hardcoded parameters
-        let min_base_thresholds = vec![0.005, 0.01, 0.015, 0.02]; // Was hardcoded 0.01
-        let min_extreme_thresholds = vec![0.02, 0.03, 0.04, 0.05]; // Was hardcoded 0.03
-        let base_multipliers = vec![10.0, 15.0, 20.0, 25.0, 30.0]; // Was hardcoded 20.0
+        // NEW: Grid search for previously hardcoded parameters - BETTER RANGES
+        let min_base_thresholds = vec![0.001, 0.003, 0.005, 0.01, 0.015]; // More granular
+        let min_extreme_thresholds = vec![0.005, 0.01, 0.015, 0.02, 0.03]; // More granular
+        let base_multipliers = vec![2.0, 5.0, 10.0, 15.0, 20.0, 30.0]; // Better range
 
         for &sensitivity in &sensitivities {
             for &multiplier in &multipliers {
@@ -735,9 +735,19 @@ impl ParameterCalibrator {
         sequence_prices: &[f64],
         horizon_prices: &[f64],
     ) -> Result<(f64, f64, f64)> {
-        // Same logic as in direction.rs
-        let sequence_momentum = self.calculate_raw_linear_slope(sequence_prices)?;
-        let horizon_momentum = self.calculate_raw_linear_slope(horizon_prices)?;
+        // Same logic as in direction.rs - USE PERCENTAGE CHANGE, NOT RAW SLOPE
+        if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
+            return Ok((0.0, 0.0, 0.0));
+        }
+
+        let seq_start = sequence_prices[0];
+        let seq_end = sequence_prices[sequence_prices.len() - 1];
+        let sequence_momentum = (seq_end - seq_start) / seq_start;
+
+        let hor_start = horizon_prices[0];
+        let hor_end = horizon_prices[horizon_prices.len() - 1];
+        let horizon_momentum = (hor_end - hor_start) / hor_start;
+
         let momentum_change = horizon_momentum - sequence_momentum;
         Ok((sequence_momentum, horizon_momentum, momentum_change))
     }
@@ -876,7 +886,6 @@ impl ParameterCalibrator {
         context: &EvaluationContext,
         params: &VolatilityEvalParams,
     ) -> Result<ClassBalance> {
-        use crate::config::model::TargetsConfig;
         use crate::targets::adaptive_parameters::VolatilityAdaptiveParams;
         use crate::targets::volatility::classify_volatility_with_distribution_analysis;
 
@@ -894,8 +903,6 @@ impl ParameterCalibrator {
             achieved_balance: Default::default(),
         };
 
-        let targets_config = TargetsConfig::default(); // Placeholder, not used in new approach
-
         // Process each sample using the new simplified classification
         for &seq_idx in context.sample_indices {
             let sequence_end_idx = seq_idx + context.sequence_length;
@@ -910,7 +917,6 @@ impl ParameterCalibrator {
                     if let Ok(class) = classify_volatility_with_distribution_analysis(
                         sequence_candles,
                         horizon_candles,
-                        &targets_config,
                         &adaptive_params,
                     ) {
                         if (0..5).contains(&class) {
@@ -951,13 +957,22 @@ impl ParameterCalibrator {
                 let horizon_data = &context.ohlcv_data[sequence_end_idx..target_end_idx];
 
                 if sequence_data.len() >= 2 && horizon_data.len() >= 2 {
-                    let default_params =
-                        crate::targets::adaptive_parameters::SentimentAdaptiveParams::default();
+                    // Create initial params for evaluation (not defaults, just starting values)
+                    let initial_params =
+                        crate::targets::adaptive_parameters::SentimentAdaptiveParams {
+                            body_sensitivity: 0.05,
+                            volume_weight: 0.2,
+                            consistency_factor: 1.0,
+                            extreme_multiplier: 2.0,
+                            horizon_decay_factor: 1.0,
+                            min_baseline_strength: 0.1,
+                            achieved_balance: ClassBalance::default(),
+                        };
                     match classify_sentiment(
                         sequence_data,
                         horizon_data,
                         &config,
-                        &default_params, // Use default parameters for basic calibration
+                        &initial_params, // Use initial parameters for calibration
                     ) {
                         Ok(class) => {
                             if (0..5).contains(&class) {

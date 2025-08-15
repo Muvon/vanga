@@ -518,18 +518,6 @@ impl DiversitySelector {
         Ok(cosine_distance)
     }
 
-    /// Calculate Euclidean distance between two statistical feature vectors
-    /// DEPRECATED: Use calculate_cosine_distance for normalized sequences
-    pub fn euclidean_distance(&self, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
-        if a.len() != b.len() {
-            return 0.0;
-        }
-
-        let sum_squared_diff: f64 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum();
-
-        sum_squared_diff.sqrt()
-    }
-
     /// Extract market condition features from sequence data
     pub fn extract_market_conditions(&self, data: &Array2<f64>) -> Result<Array1<f64>> {
         let (seq_len, num_features) = data.dim();

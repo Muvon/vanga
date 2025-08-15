@@ -3,35 +3,6 @@ use serde::{Deserialize, Serialize};
 /// Unified number of classes for all target types in the 5-class system
 pub const NUM_CLASSES: usize = 5;
 
-/// **DEPRECATED**: Legacy targets config for backward compatibility
-/// This is kept only for compatibility with existing code that hasn't been migrated yet.
-/// New code should use the boolean flags in `crate::config::training::TargetsConfig`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TargetsConfig {
-    /// Base sensitivity for all targets (auto-scaled by sequence volatility)
-    pub base_sensitivity: f64,
-
-    /// Target class balance (0.2 = 20% per class for 5-class system)
-    pub balance_target: f64,
-
-    /// Momentum weighting factor for recent data (1.0 = equal, >1.0 = more recent weight)
-    pub momentum_weighting: f64,
-
-    /// Multiplier for extreme class boundaries
-    pub extreme_multiplier: f64,
-}
-
-impl Default for TargetsConfig {
-    fn default() -> Self {
-        Self {
-            base_sensitivity: 0.02,
-            balance_target: 0.2,
-            momentum_weighting: 1.2,
-            extreme_multiplier: 2.0,
-        }
-    }
-}
-
 /// TFT Variable Selection configuration for model config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TFTVariableSelectionConfig {

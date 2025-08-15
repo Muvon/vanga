@@ -11,11 +11,11 @@
 //! - The verbose parameter conversion in trainer.rs should be removed
 //! - Tests should be migrated to calibration_test.rs
 
-use crate::config::model::TargetsConfig;
+use crate::config::model::NUM_CLASSES;
 use crate::data::structures::MarketDataRow;
 use crate::targets::interface::AdaptiveParameters;
 use crate::targets::volatility::{calculate_atr_distribution_stats, AtrDistributionStats};
-use crate::utils::error::Result;
+use crate::utils::error::{Result, VangaError};
 use polars::frame::DataFrame;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub use crate::targets::calibration::{
 };
 
 // Legacy AdaptiveTargetParameters structure
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveTargetParameters {
     pub direction: DirectionAdaptiveParams,
     pub price_levels: PriceLevelAdaptiveParams,
@@ -45,22 +45,14 @@ pub struct AdaptiveTargetParameters {
 pub struct DirectionAdaptiveParams {
     pub base_sensitivity: f64,
     pub extreme_multiplier: f64,
-    pub momentum_weighting: f64,
-    pub trend_consistency_factor: f64,
+    pub min_base_threshold: f64,    // NEW: Replaces hardcoded 0.01
+    pub min_extreme_threshold: f64, // NEW: Replaces hardcoded 0.03
+    pub base_multiplier: f64,       // NEW: Replaces hardcoded 20.0
     pub achieved_balance: ClassDistributionBalance,
 }
 
-impl Default for DirectionAdaptiveParams {
-    fn default() -> Self {
-        Self {
-            base_sensitivity: 0.02,
-            extreme_multiplier: 2.0,
-            momentum_weighting: 1.2,
-            trend_consistency_factor: 1.0,
-            achieved_balance: ClassDistributionBalance::default(),
-        }
-    }
-}
+// Default implementation removed - adaptive parameters MUST be calibrated
+// impl Default for DirectionAdaptiveParams removed to enforce calibration
 
 impl AdaptiveParameters for DirectionAdaptiveParams {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -89,6 +81,9 @@ pub struct PriceLevelAdaptiveParams {
     /// 0.3 = 30% of percentile range becomes neutral zone (centered)
     pub neutral_band_factor: f64,
 
+    /// Fallback percentiles when sequence is too short [lower, upper]
+    pub fallback_percentiles: [f64; 2],
+
     /// Distribution balance achieved with these parameters
     pub achieved_balance: ClassDistributionBalance,
 }
@@ -103,17 +98,8 @@ impl AdaptiveParameters for PriceLevelAdaptiveParams {
     }
 }
 
-impl Default for PriceLevelAdaptiveParams {
-    fn default() -> Self {
-        Self {
-            bandwidth_size: 1.0,
-            adaptive_percentiles: [0.1, 0.9],
-            volatility_adjustment: 1.0,
-            neutral_band_factor: 0.4, // 40% of percentile range becomes neutral zone
-            achieved_balance: ClassDistributionBalance::default(),
-        }
-    }
-}
+// Default implementation removed - adaptive parameters MUST be calibrated
+// impl Default for PriceLevelAdaptiveParams removed to enforce calibration
 
 /// Adaptive parameters for volatility targets (ATR distribution-based classification)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,20 +141,8 @@ impl AdaptiveParameters for VolatilityAdaptiveParams {
     }
 }
 
-impl Default for VolatilityAdaptiveParams {
-    fn default() -> Self {
-        Self {
-            bandwidth_size: 0.4,
-            extreme_multiplier: 2.0,
-            volume_weight: 0.1, // Default volume weight following sentiment pattern
-            atr_distribution_stats: AtrDistributionStats::default(),
-            cv_adjustment_factor: 1.0,
-            horizon_decay_factor: 1.0, // Uniform weighting as default fallback
-            min_baseline_atr: 0.005,   // 0.5% minimum volatility baseline
-            achieved_balance: ClassDistributionBalance::default(),
-        }
-    }
-}
+// Default implementation removed - adaptive parameters MUST be calibrated
+// impl Default for VolatilityAdaptiveParams removed to enforce calibration
 
 /// Sentiment adaptive parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,19 +181,8 @@ impl AdaptiveParameters for SentimentAdaptiveParams {
     }
 }
 
-impl Default for SentimentAdaptiveParams {
-    fn default() -> Self {
-        Self {
-            body_sensitivity: 0.05, // Lower default for new body conviction approach
-            volume_weight: 0.2,     // Reduced volume dependency
-            consistency_factor: 1.0,
-            extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier, // Consistent with other target types
-            horizon_decay_factor: 1.0, // Uniform weighting as default fallback
-            min_baseline_strength: 0.1, // 10% minimum bullish strength baseline
-            achieved_balance: ClassDistributionBalance::default(),
-        }
-    }
-}
+// Default implementation removed - adaptive parameters MUST be calibrated
+// impl Default for SentimentAdaptiveParams removed to enforce calibration
 
 /// Volume adaptive parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,14 +210,64 @@ impl AdaptiveParameters for VolumeAdaptiveParams {
     }
 }
 
-impl Default for VolumeAdaptiveParams {
-    fn default() -> Self {
-        Self {
-            bandwidth_size: 0.4,
-            extreme_multiplier: 2.0,
-            smoothing_periods: 3,
-            achieved_balance: ClassDistributionBalance::default(),
-        }
+// Default implementation removed - adaptive parameters MUST be calibrated
+// impl Default for VolumeAdaptiveParams removed to enforce calibration
+
+/// Create initial parameters for calibration purposes ONLY
+/// These are NOT defaults - they are starting points for optimization
+fn create_initial_price_level_params() -> PriceLevelAdaptiveParams {
+    PriceLevelAdaptiveParams {
+        bandwidth_size: 1.0,
+        adaptive_percentiles: [0.1, 0.9],
+        volatility_adjustment: 1.0,
+        neutral_band_factor: 0.4,
+        fallback_percentiles: [0.1, 0.9],
+        achieved_balance: ClassDistributionBalance::default(),
+    }
+}
+
+fn create_initial_volatility_params() -> VolatilityAdaptiveParams {
+    VolatilityAdaptiveParams {
+        bandwidth_size: 0.4,
+        extreme_multiplier: 2.0,
+        volume_weight: 0.1,
+        atr_distribution_stats: AtrDistributionStats::default(),
+        cv_adjustment_factor: 1.0,
+        horizon_decay_factor: 1.0,
+        min_baseline_atr: 0.005,
+        achieved_balance: ClassDistributionBalance::default(),
+    }
+}
+
+fn create_initial_direction_params() -> DirectionAdaptiveParams {
+    DirectionAdaptiveParams {
+        base_sensitivity: 0.1, // Better default based on testing
+        extreme_multiplier: 2.0,
+        min_base_threshold: 0.005,   // Better default based on testing
+        min_extreme_threshold: 0.01, // Better default based on testing
+        base_multiplier: 5.0,        // Better default based on testing
+        achieved_balance: ClassDistributionBalance::default(),
+    }
+}
+
+fn create_initial_sentiment_params() -> SentimentAdaptiveParams {
+    SentimentAdaptiveParams {
+        body_sensitivity: 0.05,
+        volume_weight: 0.2,
+        consistency_factor: 1.0,
+        extreme_multiplier: 2.0,
+        horizon_decay_factor: 1.0,
+        min_baseline_strength: 0.1,
+        achieved_balance: ClassDistributionBalance::default(),
+    }
+}
+
+fn create_initial_volume_params() -> VolumeAdaptiveParams {
+    VolumeAdaptiveParams {
+        bandwidth_size: 0.4,
+        extreme_multiplier: 2.0,
+        smoothing_periods: 3,
+        achieved_balance: ClassDistributionBalance::default(),
     }
 }
 
@@ -263,9 +276,6 @@ impl Default for VolumeAdaptiveParams {
 
 /// Adaptive parameter calibration orchestrator
 pub struct AdaptiveParameterCalibrator {
-    /// Base configuration for calibration
-    base_config: TargetsConfig,
-
     /// Optimization settings
     max_iterations: usize,
     tolerance: f64,
@@ -280,20 +290,20 @@ struct PriceLevelEvaluationParams {
     neutral_band_factor: f64,
 }
 
+impl Default for AdaptiveParameterCalibrator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdaptiveParameterCalibrator {
-    /// Create new calibrator with configuration
-    pub fn new(base_config: TargetsConfig) -> Self {
+    /// Create new calibrator with default settings
+    pub fn new() -> Self {
         Self {
-            target_balance: base_config.balance_target,
-            base_config,
+            target_balance: 1.0 / NUM_CLASSES as f64, // 0.2 for 5-class system
             max_iterations: 50,
             tolerance: 0.01, // 1% tolerance for balance optimization
         }
-    }
-
-    /// Get the base configuration
-    pub fn get_base_config(&self) -> &TargetsConfig {
-        &self.base_config
     }
 
     /// Calibrate price level parameters specifically
@@ -316,7 +326,7 @@ impl AdaptiveParameterCalibrator {
             [0.25, 0.75],
         ];
 
-        let mut best_params = PriceLevelAdaptiveParams::default();
+        let mut best_params = create_initial_price_level_params();
         let mut best_balance_score = f64::INFINITY;
 
         for &bandwidth in &bandwidth_candidates {
@@ -364,6 +374,7 @@ impl AdaptiveParameterCalibrator {
                         adaptive_percentiles: percentiles,
                         volatility_adjustment: 1.0, // Default adjustment
                         neutral_band_factor: 0.4,   // Default neutral band factor
+                        fallback_percentiles: [0.1, 0.9], // Default fallback
                         achieved_balance: balance,
                     };
                 }
@@ -431,14 +442,17 @@ impl AdaptiveParameterCalibrator {
 
         if sequence_atr_values.is_empty() {
             log::warn!("No valid ATR values found, using defaults");
-            return Ok(VolatilityAdaptiveParams::default());
+            return Err(VangaError::ConfigError(
+                "Insufficient data for volatility calibration - need more historical data"
+                    .to_string(),
+            ));
         }
 
         // Grid search for optimal volatility parameters
         let bandwidth_candidates = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0];
         let extreme_multiplier_candidates = vec![1.5, 2.0, 2.5, 3.0];
 
-        let mut best_params = VolatilityAdaptiveParams::default();
+        let mut best_params = create_initial_volatility_params();
         let mut best_balance_score = f64::INFINITY;
 
         for &bandwidth in &bandwidth_candidates {
@@ -667,7 +681,10 @@ impl AdaptiveParameterCalibrator {
 
         if close_prices.len() < sequence_length + horizon_steps + 10 {
             log::warn!("Insufficient data for direction calibration, using defaults");
-            return Ok(DirectionAdaptiveParams::default());
+            return Err(VangaError::ConfigError(
+                "Insufficient data for direction calibration - need more historical data"
+                    .to_string(),
+            ));
         }
 
         // Step 2: Sample momentum changes for distribution analysis
@@ -714,7 +731,10 @@ impl AdaptiveParameterCalibrator {
 
         if momentum_changes.is_empty() {
             log::warn!("No valid momentum changes found, using defaults");
-            return Ok(DirectionAdaptiveParams::default());
+            return Err(VangaError::ConfigError(
+                "Insufficient data for direction calibration - need more historical data"
+                    .to_string(),
+            ));
         }
 
         log::debug!(
@@ -734,7 +754,7 @@ impl AdaptiveParameterCalibrator {
 
         let extreme_multiplier_candidates = vec![1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0];
 
-        let mut best_params = DirectionAdaptiveParams::default();
+        let mut best_params = create_initial_direction_params();
         let mut best_balance_score = f64::INFINITY;
 
         for &sensitivity in &sensitivity_candidates {
@@ -774,8 +794,9 @@ impl AdaptiveParameterCalibrator {
                     best_params = DirectionAdaptiveParams {
                         base_sensitivity: sensitivity,
                         extreme_multiplier: extreme_mult,
-                        momentum_weighting: self.base_config.momentum_weighting,
-                        trend_consistency_factor: mean_trend_consistency,
+                        min_base_threshold: 0.005, // Better default minimum base threshold
+                        min_extreme_threshold: 0.01, // Better default minimum extreme threshold
+                        base_multiplier: 5.0,      // Better default base multiplier
                         achieved_balance: balance,
                     };
                 }
@@ -924,7 +945,10 @@ impl AdaptiveParameterCalibrator {
 
         if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
             log::warn!("Insufficient data for price level calibration, using defaults");
-            return Ok(PriceLevelAdaptiveParams::default());
+            return Err(VangaError::ConfigError(
+                "Insufficient data for price level calibration - need more historical data"
+                    .to_string(),
+            ));
         }
 
         // Step 1: Sample exponentially-weighted close data and price ranges for analysis
@@ -990,7 +1014,10 @@ impl AdaptiveParameterCalibrator {
 
         if sequence_ranges.is_empty() {
             log::warn!("No valid price level data found, using defaults");
-            return Ok(PriceLevelAdaptiveParams::default());
+            return Err(VangaError::ConfigError(
+                "Insufficient data for price level calibration - need more historical data"
+                    .to_string(),
+            ));
         }
 
         log::debug!(
@@ -1014,7 +1041,7 @@ impl AdaptiveParameterCalibrator {
         ];
         let neutral_band_candidates = vec![0.2, 0.3, 0.4, 0.5, 0.6]; // 20%-60% neutral zone
 
-        let mut best_params = PriceLevelAdaptiveParams::default();
+        let mut best_params = create_initial_price_level_params();
         let mut best_balance_score = f64::INFINITY;
 
         for &bandwidth in &bandwidth_candidates {
@@ -1064,6 +1091,7 @@ impl AdaptiveParameterCalibrator {
                             adaptive_percentiles: percentiles,
                             volatility_adjustment: mean_volatility / 0.02, // Normalize to 2% baseline
                             neutral_band_factor: neutral_factor,
+                            fallback_percentiles: [0.1, 0.9], // Default fallback
                             achieved_balance: balance,
                         };
                     }
@@ -1176,7 +1204,10 @@ impl AdaptiveParameterCalibrator {
 
         if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
             log::warn!("Insufficient data for volatility calibration, using defaults");
-            return Ok(VolatilityAdaptiveParams::default());
+            return Err(VangaError::ConfigError(
+                "Insufficient data for volatility calibration - need more historical data"
+                    .to_string(),
+            ));
         }
 
         // Step 1: Pre-calculate sequence and horizon candle pairs for grid search
@@ -1202,7 +1233,10 @@ impl AdaptiveParameterCalibrator {
 
         if candle_pairs.is_empty() {
             log::warn!("No valid candle pairs found, using defaults");
-            return Ok(VolatilityAdaptiveParams::default());
+            return Err(VangaError::ConfigError(
+                "Insufficient data for volatility calibration - need more historical data"
+                    .to_string(),
+            ));
         }
 
         log::debug!(
@@ -1227,7 +1261,7 @@ impl AdaptiveParameterCalibrator {
         let extreme_multiplier_candidates = vec![1.5, 2.0, 2.5, 3.0];
         let horizon_decay_candidates = vec![0.85, 0.90, 0.95, 1.0]; // 1.0 = uniform (current behavior)
 
-        let mut best_params = VolatilityAdaptiveParams::default();
+        let mut best_params = create_initial_volatility_params();
         let mut best_balance_score = f64::INFINITY;
         let mut total_combinations = 0;
 
@@ -1375,22 +1409,11 @@ impl AdaptiveParameterCalibrator {
         horizon_decay_factor: f64,
     ) -> Result<ClassDistributionBalance> {
         use crate::targets::volatility::{
-            classify_volatility_log_ratio, get_horizon_weighted_atr_baseline,
-            get_sequence_atr_baseline, LogVolatilityThresholds,
+            classify_volatility_with_distribution_analysis, get_horizon_weighted_atr_baseline,
+            get_sequence_atr_baseline,
         };
 
         let mut class_counts = [0usize; 5];
-
-        // Create thresholds using same logic as volatility.rs
-        let half_bandwidth = bandwidth_size / 2.0;
-        let extreme_bandwidth = bandwidth_size * extreme_multiplier;
-
-        let thresholds = LogVolatilityThresholds {
-            very_low_max: -extreme_bandwidth,
-            low_max: -half_bandwidth,
-            medium_max: half_bandwidth,
-            high_max: extreme_bandwidth,
-        };
 
         // Classify each candle pair using the specified decay factor
         for (sequence_candles, horizon_candles) in candle_pairs {
@@ -1406,9 +1429,34 @@ impl AdaptiveParameterCalibrator {
                 };
 
                 if seq_atr > 0.0 && hor_atr > 0.0 {
-                    let class = classify_volatility_log_ratio(seq_atr, hor_atr, &thresholds);
-                    if (0..5).contains(&class) {
-                        class_counts[class as usize] += 1;
+                    // Use the SAME classification method that will be used in production
+                    // Create adaptive params for this calibration test
+                    let test_params = crate::targets::adaptive_parameters::VolatilityAdaptiveParams {
+                        bandwidth_size,
+                        extreme_multiplier,
+                        volume_weight: 1.0,
+                        atr_distribution_stats: crate::targets::volatility::AtrDistributionStats {
+                            mean: seq_atr,
+                            std_dev: seq_atr * 0.1,
+                            median: seq_atr,
+                            percentile_25: seq_atr * 0.8,
+                            percentile_75: seq_atr * 1.2,
+                            coefficient_of_variation: 0.1,
+                        },
+                        cv_adjustment_factor: 1.0,
+                        horizon_decay_factor,
+                        min_baseline_atr: 0.001,
+                        achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance::default(),
+                    };
+
+                    if let Ok(class) = classify_volatility_with_distribution_analysis(
+                        sequence_candles,
+                        horizon_candles,
+                        &test_params,
+                    ) {
+                        if (0..5).contains(&class) {
+                            class_counts[class as usize] += 1;
+                        }
                     }
                 }
             }
@@ -1605,7 +1653,7 @@ impl AdaptiveParameterCalibrator {
     ) -> Result<SentimentAdaptiveParams> {
         log::info!("🎯 Calibrating sentiment parameters for balanced distribution");
 
-        let mut best_params = SentimentAdaptiveParams::default();
+        let mut best_params = create_initial_sentiment_params();
         let mut best_balance_score = f64::INFINITY;
 
         // Grid search for optimal sentiment parameters (optimized for new body conviction approach)
@@ -1622,8 +1670,7 @@ impl AdaptiveParameterCalibrator {
                             body_sensitivity,
                             volume_weight,
                             consistency_factor,
-                            extreme_multiplier: DirectionAdaptiveParams::default()
-                                .extreme_multiplier,
+                            extreme_multiplier: 2.0, // Use hardcoded value for initial params
                             horizon_decay_factor,
                             min_baseline_strength: 0.1, // Add missing field with default value
                             achieved_balance: ClassDistributionBalance::default(),
@@ -1676,7 +1723,7 @@ impl AdaptiveParameterCalibrator {
     ) -> Result<VolumeAdaptiveParams> {
         log::info!("🎯 Calibrating volume parameters for balanced distribution");
 
-        let mut best_params = VolumeAdaptiveParams::default();
+        let mut best_params = create_initial_volume_params();
         let mut best_balance_score = f64::INFINITY;
 
         // Grid search for optimal volume parameters
@@ -1866,8 +1913,8 @@ impl AdaptiveParameterCalibrator {
             body_sensitivity: calibrated_sensitivity,
             volume_weight: 0.1,
             consistency_factor: 0.8,
-            extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier,
-            horizon_decay_factor: 1.0,  // Add missing field
+            extreme_multiplier: 2.0, // Use hardcoded value for initial params
+            horizon_decay_factor: 1.0, // Add missing field
             min_baseline_strength: 0.1, // Add missing field with default value
             achieved_balance: balance,
         };
@@ -1903,7 +1950,7 @@ impl AdaptiveParameterCalibrator {
     ) -> Result<VolumeAdaptiveParams> {
         log::debug!("🎯 Starting volume parameter calibration from OHLCV...");
 
-        let mut best_params = VolumeAdaptiveParams::default();
+        let mut best_params = create_initial_volume_params();
         let mut best_balance_score = f64::INFINITY;
 
         // Grid search for optimal volume parameters
@@ -2000,7 +2047,7 @@ impl AdaptiveParameterCalibrator {
             body_sensitivity,
             volume_weight,
             consistency_factor,
-            extreme_multiplier: DirectionAdaptiveParams::default().extreme_multiplier,
+            extreme_multiplier: 2.0, // Use hardcoded value for initial params
             horizon_decay_factor,
             min_baseline_strength: 0.1, // Add missing field with default value
             achieved_balance: ClassDistributionBalance::default(),

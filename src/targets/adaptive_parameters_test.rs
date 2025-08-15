@@ -6,7 +6,6 @@
 //! - Target generation consistency between training and prediction
 //! - Cross-target parameter coordination
 
-use crate::config::model::TargetsConfig;
 use crate::data::structures::MarketDataRow;
 use crate::model::lstm::config::{LSTMConfig, ModelState};
 use crate::model::lstm::core::LSTMModel;

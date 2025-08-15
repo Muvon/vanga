@@ -47,7 +47,6 @@
 //! - **+ Volatility**: Range breakout + high volatility = significant move
 //! - **Training**: Provides "where" while others provide "how" and "risk"
 
-use crate::config::model::TargetsConfig;
 use crate::data::structures::MarketDataRow;
 use crate::targets::sequence_reconstruction::{SequenceAnalyzer, SequenceReconstructionConfig};
 use crate::utils::error::Result;
@@ -122,6 +121,24 @@ pub fn generate_price_level_targets(
     sequence_indices: &[usize],
     sequence_length: usize,
 ) -> Result<HashMap<String, Vec<i32>>> {
+    generate_price_level_targets_with_fallback(
+        df,
+        horizons,
+        config,
+        sequence_indices,
+        sequence_length,
+        None,
+    )
+}
+
+pub fn generate_price_level_targets_with_fallback(
+    df: &DataFrame,
+    horizons: &[String],
+    config: &PriceLevelConfig,
+    sequence_indices: &[usize],
+    sequence_length: usize,
+    fallback_percentiles: Option<[f64; 2]>,
+) -> Result<HashMap<String, Vec<i32>>> {
     config.validate()?;
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
@@ -143,8 +160,12 @@ pub fn generate_price_level_targets(
                 // TODO: Make these configurable parameters in future config refactoring
                 let momentum_factor = Some(1.2); // Slight bias toward recent data
 
-                let target_class =
-                    classify_price_level(sequence_ohlcv, horizon_ohlcv, momentum_factor)?;
+                let target_class = classify_price_level_with_fallback(
+                    sequence_ohlcv,
+                    horizon_ohlcv,
+                    momentum_factor,
+                    fallback_percentiles,
+                )?;
                 horizon_targets[seq_position] = target_class;
             }
         }
@@ -455,6 +476,15 @@ pub fn classify_price_level(
     horizon_ohlcv: &[MarketDataRow],
     momentum_factor: Option<f64>,
 ) -> Result<i32> {
+    classify_price_level_with_fallback(sequence_ohlcv, horizon_ohlcv, momentum_factor, None)
+}
+
+pub fn classify_price_level_with_fallback(
+    sequence_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
+    momentum_factor: Option<f64>,
+    fallback_percentiles: Option<[f64; 2]>,
+) -> Result<i32> {
     if sequence_ohlcv.is_empty() {
         return Ok(2); // Default to neutral class
     }
@@ -465,8 +495,9 @@ pub fn classify_price_level(
     // 2. Calculate horizon exponentially-weighted close
     let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
-    // 3. Use adaptive percentiles based on sequence data
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, None)?;
+    // 3. Use adaptive percentiles based on sequence data with calibrated fallback
+    let percentiles =
+        calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, fallback_percentiles)?;
     let base_bandwidth_size = 1.0;
 
     // 4. Calculate adaptive bandwidth if enabled
@@ -619,7 +650,14 @@ pub fn generate_price_level_targets_with_adaptive_params(
         config.bandwidth_size,
         config.neutral_band_factor
     );
-    generate_price_level_targets(df, horizons, &config, sequence_indices, sequence_length)
+    generate_price_level_targets_with_fallback(
+        df,
+        horizons,
+        &config,
+        sequence_indices,
+        sequence_length,
+        Some(adaptive_params.fallback_percentiles),
+    )
 }
 
 // ============================================================================
@@ -666,7 +704,7 @@ pub fn reconstruct_price_levels(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
     current_price: f64,
-    config: Option<&TargetsConfig>,
+    adaptive_params: &crate::targets::adaptive_parameters::PriceLevelAdaptiveParams,
 ) -> Result<PriceLevelReconstruction> {
     // Validate inputs
     if probabilities.len() != 5 {
@@ -687,9 +725,9 @@ pub fn reconstruct_price_levels(
         ));
     }
 
-    // Use same adaptive percentiles as training for consistency
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, None)?;
-    let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
+    // Use calibrated adaptive parameters
+    let percentiles = adaptive_params.adaptive_percentiles;
+    let bandwidth_size = adaptive_params.bandwidth_size;
 
     // Calculate adaptive bandwidth (same logic as training)
     let final_bandwidth_size = calculate_adaptive_bandwidth(
@@ -778,78 +816,4 @@ pub fn reconstruct_price_levels(
         sequence_max: boundaries.sequence_max,
         bandwidth: boundaries.bandwidth,
     })
-}
-
-/// Convert class probabilities to expected price targets
-///
-/// This method calculates the expected price for each class based on
-/// the same mathematical logic used in training target generation.
-///
-/// # Arguments
-/// * `probabilities` - 5-element array of class probabilities
-/// * `sequence_ohlcv` - OHLCV data for boundary calculation
-/// * `config` - Optional configuration
-///
-/// # Returns
-/// * `Vec<f64>` - Expected price for each class [strong_down, moderate_down, neutral, moderate_up, strong_up]
-pub fn probabilities_to_price_targets(
-    probabilities: &[f64],
-    sequence_ohlcv: &[MarketDataRow],
-    config: Option<&TargetsConfig>,
-) -> Result<Vec<f64>> {
-    if probabilities.len() != 5 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Expected 5 class probabilities for price level reconstruction".to_string(),
-        ));
-    }
-
-    // Use same adaptive percentiles as training for consistency
-    let percentiles = calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, None)?;
-    let bandwidth_size = config.map(|c| c.base_sensitivity).unwrap_or(1.0);
-    let final_bandwidth_size = calculate_adaptive_bandwidth(sequence_ohlcv, bandwidth_size, None)?;
-
-    let reconstruction_config = SequenceReconstructionConfig {
-        percentiles,
-        bandwidth_size: final_bandwidth_size,
-        neutral_band_factor: 0.4, // Default neutral band factor (will be calibrated)
-    };
-    let analyzer = SequenceAnalyzer::new(reconstruction_config);
-    let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
-
-    // Calculate representative price for each class (midpoint of boundaries)
-    let class_prices = vec![
-        boundaries.boundaries[0] - boundaries.bandwidth / 2.0, // Strong Down: below boundary_1
-        (boundaries.boundaries[0] + boundaries.boundaries[1]) / 2.0, // Moderate Down: between boundary_1 and boundary_2
-        (boundaries.boundaries[1] + boundaries.boundaries[2]) / 2.0, // Neutral: between boundary_2 and boundary_3
-        (boundaries.boundaries[2] + boundaries.boundaries[3]) / 2.0, // Moderate Up: between boundary_3 and boundary_4
-        boundaries.boundaries[3] + boundaries.bandwidth / 2.0,       // Strong Up: above boundary_4
-    ];
-
-    Ok(class_prices)
-}
-
-/// Calculate percentage changes from current price for each class
-///
-/// # Arguments
-/// * `probabilities` - 5-element array of class probabilities
-/// * `sequence_ohlcv` - OHLCV data for boundary calculation
-/// * `current_price` - Current price for percentage calculation
-/// * `config` - Optional configuration
-///
-/// # Returns
-/// * `Vec<f64>` - Percentage change for each class
-pub fn probabilities_to_percentage_changes(
-    probabilities: &[f64],
-    sequence_ohlcv: &[MarketDataRow],
-    current_price: f64,
-    config: Option<&TargetsConfig>,
-) -> Result<Vec<f64>> {
-    let class_prices = probabilities_to_price_targets(probabilities, sequence_ohlcv, config)?;
-
-    let percentage_changes: Vec<f64> = class_prices
-        .iter()
-        .map(|&price| ((price - current_price) / current_price) * 100.0)
-        .collect();
-
-    Ok(percentage_changes)
 }

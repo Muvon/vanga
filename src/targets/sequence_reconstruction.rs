@@ -131,18 +131,6 @@ impl SequenceAnalyzer {
         Self { config }
     }
 
-    /// Create from model configuration (for consistency with training)
-    pub fn from_model_config(model_config: &crate::config::model::TargetsConfig) -> Self {
-        let config = SequenceReconstructionConfig {
-            percentiles: [0.1, 0.9], // Default percentiles for 5-class system
-            bandwidth_size: model_config.base_sensitivity, // Use base_sensitivity as bandwidth
-            neutral_band_factor: 0.4, // Default neutral band factor
-        };
-        Self::new(config)
-    }
-
-    /// Create with adaptive percentiles calculated from sequence data
-    ///
     /// This method ensures training-prediction consistency by using the same
     /// adaptive percentile calculation logic for both target generation and
     /// prediction reconstruction.

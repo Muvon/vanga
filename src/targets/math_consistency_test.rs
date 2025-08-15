@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::config::model::TargetsConfig;
+
     use crate::data::structures::MarketDataRow;
     use crate::targets::direction::calculate_raw_linear_slope;
     use crate::targets::volatility::{

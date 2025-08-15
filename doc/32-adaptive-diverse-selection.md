@@ -86,7 +86,7 @@ pub fn select_diverse_sequences(
 ```rust
 /// UNIFIED METHOD: Select balanced sequences for any target/horizon combination
 /// This replaces multiple different selection methods with one optimized approach
-pub fn select_balanced_sequences_unified(
+pub fn balance_sequences_for_window(
     &self,
     all_sequences: &[SequenceWithTargets],
     target_type: TargetType,
@@ -153,7 +153,7 @@ pub struct SequenceBalancer {
 ```
 
 **Key Methods:**
-- `select_balanced_sequences_unified()`: Single method for all selection scenarios
+- `balance_sequences_for_window()`: Single method for all selection scenarios
 - `create_diverse_splits()`: Comprehensive train/val/test splitting
 - `create_diverse_target_splits()`: Per-target diverse splitting
 - `create_diverse_class_splits()`: Per-class temporal stratification
@@ -232,7 +232,7 @@ fn create_diverse_class_splits(
 ### Basic Training Data Selection
 ```rust
 let balancer = SequenceBalancer::new(BalanceConfig::default());
-let selected = balancer.select_balanced_sequences_unified(
+let selected = balancer.balance_sequences_for_window(
     &all_sequences,
     TargetType::PriceLevel,
     "1h",

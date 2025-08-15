@@ -235,24 +235,32 @@ impl Predictor {
         // Pass metadata to formatter for accurate PredictionResult creation
         formatter = formatter.with_metadata(input_feature_count, sequence_length);
 
-        // The new approach relies entirely on adaptive parameters instead of config-based parameters
-        // Pass adaptive target parameters to formatter for consistent reconstruction
-        if let Some(adaptive_params) = model.get_adaptive_target_parameters() {
-            formatter = formatter.with_adaptive_parameters(adaptive_params.clone());
-            log::info!(
-                "✅ Using adaptive target parameters for consistent prediction reconstruction"
-            );
-            log::debug!(
-                "🎯 Adaptive parameters: direction_sensitivity={:.3}, price_bandwidth={:.3}, volatility_bandwidth={:.3}",
-                adaptive_params.direction.base_sensitivity,
-                adaptive_params.price_levels.bandwidth_size,
-                adaptive_params.volatility.bandwidth_size
-            );
-        } else {
-            log::warn!(
-                "⚠️  No adaptive target parameters found - using default reconstruction parameters"
-            );
-        }
+        // CRITICAL: Adaptive parameters are REQUIRED for consistent prediction reconstruction
+        // These parameters were calibrated during training to achieve balanced classification
+        let adaptive_params = model.get_adaptive_target_parameters().ok_or_else(|| {
+            VangaError::PredictionError(
+                "FATAL: No adaptive target parameters found in model. \
+                 The model must have calibrated parameters from training for consistent prediction. \
+                 This model may have been trained with an older version. \
+                 Please retrain the model with the current version to ensure proper calibration."
+                    .to_string(),
+            )
+        })?;
+
+        formatter = formatter.with_adaptive_parameters(adaptive_params.clone());
+        log::info!(
+            "✅ Using calibrated adaptive target parameters for consistent prediction reconstruction"
+        );
+        log::debug!(
+            "🎯 Adaptive parameters loaded from model: \
+             direction_sensitivity={:.4}, price_bandwidth={:.4}, volatility_bandwidth={:.4}, \
+             sentiment_sensitivity={:.4}, volume_baseline={:.4}",
+            adaptive_params.direction.base_sensitivity,
+            adaptive_params.price_levels.bandwidth_size,
+            adaptive_params.volatility.bandwidth_size,
+            adaptive_params.sentiment.body_sensitivity,
+            adaptive_params.volume.bandwidth_size
+        );
 
         // Determine horizons to process based on configuration
         let horizons_to_process = if self.config.all_horizons {

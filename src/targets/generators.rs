@@ -8,7 +8,7 @@ use crate::targets::adaptive_parameters::{
     VolatilityAdaptiveParams, VolumeAdaptiveParams,
 };
 use crate::targets::interface::{AdaptiveParameters, TargetGenerator};
-use crate::utils::error::Result;
+use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use std::collections::HashMap;
 
@@ -42,16 +42,20 @@ impl TargetGenerator for PriceLevelTargetGenerator {
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
-        let params =
-            adaptive_params.and_then(|p| p.as_any().downcast_ref::<PriceLevelAdaptiveParams>());
-        let default_params = PriceLevelAdaptiveParams::default();
-        let final_params = params.unwrap_or(&default_params);
+        let params = adaptive_params
+            .and_then(|p| p.as_any().downcast_ref::<PriceLevelAdaptiveParams>())
+            .ok_or_else(|| {
+                VangaError::ConfigError(
+                    "PriceLevelAdaptiveParams required but not provided - calibration needed"
+                        .to_string(),
+                )
+            })?;
         crate::targets::generate_price_level_targets_with_adaptive_params(
             df,
             horizons,
             sequence_indices,
             sequence_length,
-            final_params,
+            params,
         )
     }
 
@@ -79,10 +83,8 @@ impl TargetGenerator for PriceLevelTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create default config for calibration
-        let default_config = crate::config::model::TargetsConfig::default();
-        let calibrator =
-            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
+        // Create calibrator with default settings
+        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new();
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -121,16 +123,20 @@ impl TargetGenerator for DirectionTargetGenerator {
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
-        let params =
-            adaptive_params.and_then(|p| p.as_any().downcast_ref::<DirectionAdaptiveParams>());
-        let default_params = DirectionAdaptiveParams::default();
-        let final_params = params.unwrap_or(&default_params);
+        let params = adaptive_params
+            .and_then(|p| p.as_any().downcast_ref::<DirectionAdaptiveParams>())
+            .ok_or_else(|| {
+                VangaError::ConfigError(
+                    "DirectionAdaptiveParams required but not provided - calibration needed"
+                        .to_string(),
+                )
+            })?;
         crate::targets::generate_direction_targets_with_adaptive_params(
             df,
             horizons,
             sequence_indices,
             sequence_length,
-            final_params,
+            params,
         )
     }
 
@@ -157,10 +163,8 @@ impl TargetGenerator for DirectionTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create default config for calibration
-        let default_config = crate::config::model::TargetsConfig::default();
-        let calibrator =
-            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
+        // Create calibrator with default settings
+        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new();
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -199,16 +203,20 @@ impl TargetGenerator for VolatilityTargetGenerator {
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
-        let params =
-            adaptive_params.and_then(|p| p.as_any().downcast_ref::<VolatilityAdaptiveParams>());
-        let default_params = VolatilityAdaptiveParams::default();
-        let final_params = params.unwrap_or(&default_params);
+        let params = adaptive_params
+            .and_then(|p| p.as_any().downcast_ref::<VolatilityAdaptiveParams>())
+            .ok_or_else(|| {
+                VangaError::ConfigError(
+                    "VolatilityAdaptiveParams required but not provided - calibration needed"
+                        .to_string(),
+                )
+            })?;
         crate::targets::generate_volatility_targets_with_adaptive_params(
             df,
             horizons,
             sequence_indices,
             sequence_length,
-            final_params,
+            params,
         )
     }
 
@@ -235,10 +243,8 @@ impl TargetGenerator for VolatilityTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create default config for calibration
-        let default_config = crate::config::model::TargetsConfig::default();
-        let calibrator =
-            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
+        // Create calibrator with default settings
+        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new();
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -283,16 +289,20 @@ impl TargetGenerator for SentimentTargetGenerator {
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
-        let params =
-            adaptive_params.and_then(|p| p.as_any().downcast_ref::<SentimentAdaptiveParams>());
-        let default_params = SentimentAdaptiveParams::default();
-        let final_params = params.unwrap_or(&default_params);
+        let params = adaptive_params
+            .and_then(|p| p.as_any().downcast_ref::<SentimentAdaptiveParams>())
+            .ok_or_else(|| {
+                VangaError::ConfigError(
+                    "SentimentAdaptiveParams required but not provided - calibration needed"
+                        .to_string(),
+                )
+            })?;
         crate::targets::generate_sentiment_targets_with_adaptive_params(
             df,
             horizons,
             sequence_indices,
             sequence_length,
-            final_params,
+            params,
         )
     }
 
@@ -319,10 +329,8 @@ impl TargetGenerator for SentimentTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create default config for calibration
-        let default_config = crate::config::model::TargetsConfig::default();
-        let calibrator =
-            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
+        // Create calibrator with default settings
+        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new();
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
@@ -361,16 +369,20 @@ impl TargetGenerator for VolumeTargetGenerator {
         sequence_length: usize,
         adaptive_params: Option<&dyn AdaptiveParameters>,
     ) -> Result<HashMap<String, Vec<i32>>> {
-        let params =
-            adaptive_params.and_then(|p| p.as_any().downcast_ref::<VolumeAdaptiveParams>());
-        let default_params = VolumeAdaptiveParams::default();
-        let final_params = params.unwrap_or(&default_params);
+        let params = adaptive_params
+            .and_then(|p| p.as_any().downcast_ref::<VolumeAdaptiveParams>())
+            .ok_or_else(|| {
+                VangaError::ConfigError(
+                    "VolumeAdaptiveParams required but not provided - calibration needed"
+                        .to_string(),
+                )
+            })?;
         crate::targets::generate_volume_targets_with_adaptive_params(
             df,
             horizons,
             sequence_indices,
             sequence_length,
-            final_params,
+            params,
         )
     }
 
@@ -397,10 +409,8 @@ impl TargetGenerator for VolumeTargetGenerator {
             max_horizon_steps,
         )?;
 
-        // Create default config for calibration
-        let default_config = crate::config::model::TargetsConfig::default();
-        let calibrator =
-            crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new(default_config);
+        // Create calibrator with default settings
+        let calibrator = crate::targets::adaptive_parameters::AdaptiveParameterCalibrator::new();
 
         // Use async runtime to call the calibration
         let runtime = tokio::runtime::Runtime::new()?;
