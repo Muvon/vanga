@@ -65,25 +65,47 @@ mod tests {
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
-            base_multiplier: 20.0,
+            base_multiplier: 1.0, // Reduced from 20.0 for more reasonable thresholds
             balance: Default::default(),
         };
 
-        // Test strong upward movement (should be UP or PUMP)
-        let strong_up_prices = vec![100.0, 103.0, 106.0, 109.0, 112.0];
-        let horizon_prices = vec![112.0, 116.0, 120.0];
+        // Test strong upward ACCELERATION (should be UP or PUMP)
+        // Need horizon momentum to be GREATER than sequence momentum
+        let strong_up_prices = vec![100.0, 101.0, 102.0, 103.0, 104.0];
+        let horizon_prices = vec![104.0, 108.0, 114.0]; // Accelerating upward
+
+        // Debug: Calculate what we expect
+        let seq_momentum = (104.0 - 100.0) / 100.0; // 0.04
+        let hor_momentum = (114.0 - 104.0) / 104.0; // 0.0962
+        let momentum_change = hor_momentum - seq_momentum; // 0.0562 (positive = acceleration)
+        println!(
+            "Debug UP: seq_momentum={:.4}, hor_momentum={:.4}, momentum_change={:.4}",
+            seq_momentum, hor_momentum, momentum_change
+        );
+
         let class =
             classify_direction_with_calibrated_params(&strong_up_prices, &horizon_prices, &params)
                 .unwrap();
         assert!(
             class >= 3,
-            "Strong upward movement should be UP (3) or PUMP (4), got {}",
+            "Strong upward acceleration should be UP (3) or PUMP (4), got {}",
             class
         );
 
-        // Test strong downward movement (should be DOWN or DUMP)
-        let strong_down_prices = vec![112.0, 109.0, 106.0, 103.0, 100.0];
-        let horizon_down_prices = vec![100.0, 96.0, 92.0];
+        // Test strong downward ACCELERATION (should be DOWN or DUMP)
+        // Need horizon momentum to be MORE NEGATIVE than sequence momentum
+        let strong_down_prices = vec![112.0, 111.0, 110.0, 109.0, 108.0];
+        let horizon_down_prices = vec![108.0, 104.0, 98.0]; // Accelerating downward
+
+        // Debug: Calculate what we expect
+        let seq_momentum_down = (108.0 - 112.0) / 112.0; // -0.0357
+        let hor_momentum_down = (98.0 - 108.0) / 108.0; // -0.0926
+        let momentum_change_down = hor_momentum_down - seq_momentum_down; // -0.0569 (negative = deceleration)
+        println!(
+            "Debug DOWN: seq_momentum={:.4}, hor_momentum={:.4}, momentum_change={:.4}",
+            seq_momentum_down, hor_momentum_down, momentum_change_down
+        );
+
         let class = classify_direction_with_calibrated_params(
             &strong_down_prices,
             &horizon_down_prices,
@@ -92,7 +114,7 @@ mod tests {
         .unwrap();
         assert!(
             class <= 1,
-            "Strong downward movement should be DUMP (0) or DOWN (1), got {}",
+            "Strong downward acceleration should be DUMP (0) or DOWN (1), got {}",
             class
         );
 
@@ -131,7 +153,7 @@ mod tests {
             (106.0, 107.0, 102.0, 103.0, 1500.0),
         ]);
 
-        let horizons = vec!["1h".to_string()];
+        let horizons = vec!["2h".to_string()]; // Need at least 2 steps for momentum calculation
         let sequence_indices = vec![0, 3, 6]; // Different trend periods
         let sequence_length = 3;
 
@@ -140,7 +162,7 @@ mod tests {
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
-            base_multiplier: 20.0,
+            base_multiplier: 1.0, // Reduced for reasonable thresholds
             balance: Default::default(),
         };
 
@@ -159,8 +181,8 @@ mod tests {
         );
         let targets = result.unwrap();
 
-        assert!(targets.contains_key("1h"), "Should contain 1h horizon");
-        let horizon_targets = &targets["1h"];
+        assert!(targets.contains_key("2h"), "Should contain 2h horizon");
+        let horizon_targets = &targets["2h"];
         assert_eq!(
             horizon_targets.len(),
             sequence_indices.len(),

@@ -579,12 +579,15 @@ pub fn reconstruct_volume(
         ));
     }
 
-    // Convert calibrated parameters to log thresholds
-    let bandwidth = calibrated_params.bandwidth;
-    let extreme_multiplier = calibrated_params.extreme_multiplier;
+    // Convert calibrated parameters to log thresholds with minimum thresholds applied
+    let base_threshold = calibrated_params
+        .bandwidth
+        .max(calibrated_params.min_base_threshold);
+    let extreme_threshold = (calibrated_params.extreme_multiplier * calibrated_params.bandwidth)
+        .max(calibrated_params.min_extreme_threshold);
 
-    let half_bandwidth = bandwidth / 2.0;
-    let extreme_bandwidth = bandwidth * extreme_multiplier;
+    let half_bandwidth = base_threshold / 2.0;
+    let extreme_bandwidth = extreme_threshold;
 
     // Convert log thresholds to ratio boundaries
     let ratio_boundaries = [

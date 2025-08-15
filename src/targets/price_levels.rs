@@ -122,13 +122,12 @@ pub fn generate_price_level_targets_with_calibrated_params(
     calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
     log::info!(
-        "🎯 Using calibrated price levels parameters: bandwidth={:.6}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, fallback=[{:.2}, {:.2}]",
+        "🎯 Using calibrated price levels parameters: bandwidth={:.6}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, momentum_factor={:.2}",
         calibrated_params.bandwidth,
         calibrated_params.percentiles[0],
         calibrated_params.percentiles[1],
         calibrated_params.neutral_band_factor,
-        calibrated_params.fallback_percentiles[0],
-        calibrated_params.fallback_percentiles[1]
+        calibrated_params.momentum_factor
     );
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
@@ -448,7 +447,7 @@ pub fn classify_price_level_with_calibrated_params(
     // 3. Use adaptive percentiles from calibrated params
     let percentiles = calculate_adaptive_percentiles_from_sequence(
         sequence_ohlcv,
-        Some(calibrated_params.fallback_percentiles),
+        Some(calibrated_params.percentiles), // Use calibrated percentiles as fallback
     )?;
     let base_bandwidth_size = 1.0;
 
@@ -647,20 +646,23 @@ pub fn reconstruct_price_levels(
         ));
     }
 
-    // Use calibrated parameters
-    let percentiles = calibrated_params.percentiles;
+    // Use calibrated parameters to calculate adaptive percentiles (same as classification)
+    let adaptive_percentiles = calculate_adaptive_percentiles_from_sequence(
+        sequence_ohlcv,
+        Some(calibrated_params.percentiles), // Use calibrated percentiles as fallback
+    )?;
     let bandwidth_size = calibrated_params.bandwidth;
 
     // Calculate adaptive bandwidth (same logic as training)
     let final_bandwidth_size = calculate_adaptive_bandwidth(
         sequence_ohlcv,
         bandwidth_size,
-        None, // No momentum factor needed with exponential weighting
+        Some(calibrated_params.momentum_factor), // Use calibrated momentum factor
     )?;
 
     // Use centralized sequence reconstruction logic (same as training)
     let reconstruction_config = SequenceReconstructionConfig {
-        percentiles,
+        percentiles: adaptive_percentiles, // Use calculated adaptive percentiles
         bandwidth_size: final_bandwidth_size,
         neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
     };

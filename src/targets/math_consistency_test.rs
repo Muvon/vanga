@@ -162,8 +162,8 @@ mod tests {
                     balance: Default::default(),
                 };
                 let class = classify_volatility_with_calibrated_params(
-                    &target_sequence,
-                    &sequence,
+                    &sequence,        // sequence_candles first
+                    &target_sequence, // horizon_candles second
                     &params,
                 )
                 .unwrap();

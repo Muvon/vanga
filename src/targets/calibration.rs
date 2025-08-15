@@ -47,10 +47,9 @@ pub struct DirectionParams {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PriceLevelParams {
     pub bandwidth: f64,
-    pub percentiles: [f64; 2],
+    pub percentiles: [f64; 2], // Base percentiles for adaptive calculation
     pub neutral_band_factor: f64, // Replaces hardcoded 0.4 (was called neutral_band)
-    pub fallback_percentiles: [f64; 2], // NEW: Replaces hardcoded [0.1, 0.9]
-    pub momentum_factor: f64,     // NEW: Replaces hardcoded 1.2
+    pub momentum_factor: f64,  // NEW: Replaces hardcoded 1.2
     pub balance: ClassBalance,
 }
 
@@ -448,44 +447,35 @@ impl ParameterCalibrator {
         let mut best_score = f64::INFINITY;
 
         let bandwidths = vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-        let percentile_pairs = vec![[0.2, 0.8], [0.25, 0.75], [0.3, 0.7]];
-        let neutral_band_factors = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]; // Renamed and expanded range
-        let momentum_factors = vec![1.0, 1.1, 1.2, 1.3, 1.5]; // NEW: Calibrate momentum factor
-
-        // NEW: Grid search for previously hardcoded fallback_percentiles
-        let fallback_percentile_pairs = vec![
-            [0.05, 0.95], // More extreme fallback
-            [0.1, 0.9],   // Standard fallback (was hardcoded)
-            [0.15, 0.85], // More conservative fallback
-        ];
+        let percentile_pairs = vec![[0.05, 0.95], [0.1, 0.9], [0.15, 0.85]]; // Base percentiles for adaptive calculation
+        let neutral_band_factors = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]; // Neutral zone size
+        let momentum_factors = vec![1.0, 1.1, 1.2, 1.3, 1.5]; // Momentum weighting for bandwidth
 
         for &bandwidth in &bandwidths {
             for &percentiles in &percentile_pairs {
                 for &neutral_band_factor in &neutral_band_factors {
-                    for &fallback_percentiles in &fallback_percentile_pairs {
-                        for &momentum_factor in &momentum_factors {
-                            let balance = self.evaluate_price_level_params(
-                                context,
-                                &PriceLevelEvalParams {
-                                    bandwidth,
-                                    percentiles,
-                                    neutral_band: neutral_band_factor, // Using neutral_band_factor
-                                },
-                            )?;
+                    for &momentum_factor in &momentum_factors {
+                        let balance = self.evaluate_price_level_params(
+                            context,
+                            &PriceLevelEvalParams {
+                                bandwidth,
+                                percentiles,
+                                neutral_band: neutral_band_factor,
+                                momentum_factor,
+                            },
+                        )?;
 
-                            if balance.composite_quality_score < best_score
-                                && balance.diversity_score >= self.min_diversity_threshold
-                            {
-                                best_score = balance.composite_quality_score;
-                                best_params = PriceLevelParams {
-                                    bandwidth,
-                                    percentiles,
-                                    neutral_band_factor,
-                                    fallback_percentiles,
-                                    momentum_factor,
-                                    balance,
-                                };
-                            }
+                        if balance.composite_quality_score < best_score
+                            && balance.diversity_score >= self.min_diversity_threshold
+                        {
+                            best_score = balance.composite_quality_score;
+                            best_params = PriceLevelParams {
+                                bandwidth,
+                                percentiles,
+                                neutral_band_factor,
+                                momentum_factor,
+                                balance,
+                            };
                         }
                     }
                 }
@@ -493,9 +483,10 @@ impl ParameterCalibrator {
         }
 
         log::info!(
-            "🎯 Calibrated Price Level Parameters: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, fallback=[{:.2}, {:.2}], momentum_factor={:.2}",
-            best_params.bandwidth, best_params.percentiles[0], best_params.percentiles[1],
-            best_params.neutral_band_factor, best_params.fallback_percentiles[0], best_params.fallback_percentiles[1],
+            "🎯 Calibrated Price Level Parameters: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, momentum_factor={:.2}",
+            best_params.bandwidth,
+            best_params.percentiles[0], best_params.percentiles[1],
+            best_params.neutral_band_factor,
             best_params.momentum_factor
         );
 
@@ -859,10 +850,26 @@ impl ParameterCalibrator {
                     let target_weighted_price =
                         get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
-                    // Use sequence reconstruction for consistent classification
+                    // FIXED: Use the same logic as actual classification with calibrated parameters
+                    // 1. Calculate adaptive percentiles with base percentiles as fallback
+                    use crate::targets::price_levels::calculate_adaptive_percentiles_from_sequence;
+                    let adaptive_percentiles = calculate_adaptive_percentiles_from_sequence(
+                        sequence_ohlcv,
+                        Some(params.percentiles), // Use calibrated percentiles as fallback
+                    )?;
+
+                    // 2. Calculate adaptive bandwidth with momentum factor
+                    use crate::targets::price_levels::calculate_adaptive_bandwidth;
+                    let final_bandwidth_size = calculate_adaptive_bandwidth(
+                        sequence_ohlcv,
+                        params.bandwidth,
+                        Some(params.momentum_factor),
+                    )?;
+
+                    // 3. Use sequence reconstruction with calibrated parameters (same as actual classification)
                     let reconstruction_config = SequenceReconstructionConfig {
-                        percentiles: params.percentiles,
-                        bandwidth_size: params.bandwidth,
+                        percentiles: adaptive_percentiles, // Use calculated adaptive percentiles
+                        bandwidth_size: final_bandwidth_size, // Use calculated adaptive bandwidth
                         neutral_band_factor: params.neutral_band,
                     };
                     let analyzer = SequenceAnalyzer::new(reconstruction_config);
@@ -1219,8 +1226,9 @@ struct EvaluationContext<'a> {
 /// Parameters for price level evaluation
 struct PriceLevelEvalParams {
     bandwidth: f64,
-    percentiles: [f64; 2],
+    percentiles: [f64; 2], // Base percentiles for adaptive calculation
     neutral_band: f64,
+    momentum_factor: f64, // Momentum factor for bandwidth adjustment
 }
 
 /// Parameters for volatility evaluation

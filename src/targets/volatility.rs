@@ -1419,7 +1419,10 @@ pub fn reconstruct_volatility(
     }
 
     // Calculate sequence ATR baseline (same as training)
-    let sequence_atr = calculate_simple_atr(sequence_ohlcv)?;
+    let sequence_atr = calculate_simple_atr_with_params(
+        sequence_ohlcv,
+        calibrated_params.min_volatility_baseline,
+    )?;
     let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline); // Same minimum as training
 
     if baseline_atr <= 0.0 {
@@ -1508,7 +1511,7 @@ pub fn reconstruct_volatility(
 /// Higher volume = higher conviction in volatility moves
 pub fn calculate_average_volume(candles: &[MarketDataRow]) -> f64 {
     if candles.is_empty() {
-        return 1.0; // Neutral conviction if no data
+        return 0.0; // No volume if no data
     }
 
     // Calculate average volume

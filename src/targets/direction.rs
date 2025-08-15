@@ -133,6 +133,12 @@ pub fn generate_direction_targets_with_calibrated_params(
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
 
+        log::debug!(
+            "Processing horizon {} with {} steps",
+            horizon,
+            horizon_steps
+        );
+
         for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
             let sequence_end_idx = seq_idx + sequence_length;
             let target_end_idx = sequence_end_idx + horizon_steps;
@@ -144,6 +150,16 @@ pub fn generate_direction_targets_with_calibrated_params(
 
                 // Get HORIZON sequence prices (from sequence end to target horizon)
                 let horizon_prices = &close_prices[sequence_end_idx..target_end_idx];
+
+                log::debug!(
+                    "Sequence {}: seq_idx={}, seq_end={}, target_end={}, seq_len={}, hor_len={}",
+                    seq_position,
+                    seq_idx,
+                    sequence_end_idx,
+                    target_end_idx,
+                    sequence_prices.len(),
+                    horizon_prices.len()
+                );
 
                 // Only classify if we have enough horizon data for momentum calculation
                 if horizon_prices.len() >= 2 {
@@ -286,6 +302,12 @@ fn calculate_sequence_trend_consistency(prices: &[f64]) -> Result<f64> {
 
     // Calculate momentum between consecutive segments
     let segment_size = (prices.len() / 3).max(2);
+
+    // Ensure we have enough data for the calculation
+    if prices.len() < segment_size * 2 {
+        return Ok(0.01); // Return minimum consistency for insufficient data
+    }
+
     for i in 0..(prices.len() - segment_size * 2) {
         let seg1_start = prices[i];
         let seg1_end = prices[i + segment_size];
@@ -498,9 +520,9 @@ pub fn reconstruct_direction(
     let base_threshold = trend_consistency * calibrated_params.sensitivity * base_multiplier;
     let extreme_threshold = base_threshold * extreme_multiplier;
 
-    // Apply same minimum thresholds as training
-    let min_base = 0.01; // 1% minimum momentum change
-    let min_extreme = 0.03; // 3% minimum for extreme changes
+    // Apply same minimum thresholds as training (from calibrated parameters)
+    let min_base = calibrated_params.min_base_threshold;
+    let min_extreme = calibrated_params.min_extreme_threshold;
     let final_base_threshold = base_threshold.max(min_base);
     let final_extreme_threshold = extreme_threshold.max(min_extreme);
 
