@@ -168,6 +168,111 @@ pub struct ParameterCalibrator {
 }
 
 impl ParameterCalibrator {
+    /// Generate diverse calibration sample indices using sequence generation logic + diversity selection
+    fn generate_diverse_calibration_indices(
+        &self,
+        total_data_length: usize,
+        sequence_length: usize,
+        horizon_steps: usize,
+        sample_size: Option<usize>,
+        sequence_overlap: f64,
+    ) -> Result<Vec<usize>> {
+        use crate::utils::sequence_utils::{calculate_sequence_indices, calculate_step_size};
+
+        // Step 1: Generate ALL possible sequence indices using same logic as training
+        // Use the SAME overlap as configured for training
+        let step_size = calculate_step_size(sequence_overlap, sequence_length);
+
+        let all_possible_indices = calculate_sequence_indices(
+            total_data_length,
+            sequence_length,
+            step_size,
+            horizon_steps,
+        )?;
+
+        // Step 2: Determine target sample size - 50% of available, min 1000, max 20000
+        let max_available = all_possible_indices.len();
+        let target_samples = sample_size.unwrap_or_else(|| (max_available / 2).clamp(1000, 20000));
+
+        log::info!(
+            "🎯 Calibration sampling: {} total possible sequences, targeting {} diverse samples ({:.1}% coverage, overlap={:.1}%)",
+            max_available,
+            target_samples,
+            (target_samples as f64 / max_available as f64) * 100.0,
+            sequence_overlap * 100.0
+        );
+
+        // Step 3: If we need fewer samples than available, use diversity selection
+        if target_samples >= max_available {
+            log::info!(
+                "✅ Using all {} available sequences for calibration",
+                max_available
+            );
+            return Ok(all_possible_indices);
+        }
+
+        // Step 4: Use temporal stratification for diversity (reuse existing logic)
+        let selected_indices =
+            self.select_diverse_temporal_samples(&all_possible_indices, target_samples)?;
+
+        log::info!(
+            "✅ Selected {} diverse samples from {} available using temporal stratification",
+            selected_indices.len(),
+            max_available
+        );
+
+        Ok(selected_indices)
+    }
+
+    /// Select diverse samples using temporal stratification (reuse DiversitySelector logic)
+    fn select_diverse_temporal_samples(
+        &self,
+        all_indices: &[usize],
+        target_count: usize,
+    ) -> Result<Vec<usize>> {
+        use rand::seq::SliceRandom;
+
+        // Sort by temporal position for temporal diversity
+        let mut temporal_sorted: Vec<usize> = all_indices.to_vec();
+        temporal_sorted.sort_unstable();
+
+        // Divide into temporal buckets and select from each (same as DiversitySelector)
+        let num_buckets = (target_count / 10).clamp(5, 20); // 5-20 buckets for good coverage
+        let bucket_size = temporal_sorted.len() / num_buckets;
+        let sequences_per_bucket = target_count / num_buckets;
+        let remainder = target_count % num_buckets;
+
+        let mut selected = Vec::new();
+        let mut rng = rand::rng();
+
+        for bucket_idx in 0..num_buckets {
+            let start = bucket_idx * bucket_size;
+            let end = if bucket_idx == num_buckets - 1 {
+                temporal_sorted.len() // Last bucket gets remainder
+            } else {
+                (bucket_idx + 1) * bucket_size
+            };
+
+            let mut bucket_sequences: Vec<usize> = temporal_sorted[start..end].to_vec();
+
+            // Shuffle and select from this temporal bucket
+            bucket_sequences.shuffle(&mut rng);
+
+            let take_count = if bucket_idx < remainder {
+                sequences_per_bucket + 1
+            } else {
+                sequences_per_bucket
+            };
+
+            selected.extend(bucket_sequences.into_iter().take(take_count));
+        }
+
+        // Ensure we have exactly the right count
+        selected.truncate(target_count);
+
+        Ok(selected)
+    }
+
     /// Create new calibrator with configuration
     pub fn new() -> Self {
         Self {
@@ -247,20 +352,19 @@ impl ParameterCalibrator {
         sequence_length: usize,
         horizon_steps: usize,
         sample_size: Option<usize>,
+        sequence_overlap: f64,
     ) -> Result<CalibratedParameters> {
         let start_time = std::time::Instant::now();
 
-        // Determine sample size for calibration
-        let samples_to_use = sample_size.unwrap_or_else(|| {
-            std::cmp::min(
-                1000,
-                ohlcv_data
-                    .len()
-                    .saturating_sub(sequence_length + horizon_steps),
-            )
-        });
-
-        let sample_indices: Vec<usize> = (0..samples_to_use).collect();
+        // Generate diverse sample indices using same logic as sequence generation
+        let sample_indices = self.generate_diverse_calibration_indices(
+            ohlcv_data.len(),
+            sequence_length,
+            horizon_steps,
+            sample_size,
+            sequence_overlap,
+        )?;
+        let samples_to_use = sample_indices.len();
 
         log::info!(
             "🎯 Starting parameter calibration for {} samples (min_diversity_threshold: {:.2})",

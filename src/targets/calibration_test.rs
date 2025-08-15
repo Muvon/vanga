@@ -10,7 +10,7 @@ async fn test_parameter_calibrator_basic() {
     // Create minimal test data
     let test_data = create_test_ohlcv_data(100);
 
-    let result = calibrator.calibrate(&test_data, 20, 5, Some(50)).await;
+    let result = calibrator.calibrate(&test_data, 20, 5, Some(50), 0.8).await;
 
     assert!(result.is_ok());
     let params = result.unwrap();
@@ -37,7 +37,7 @@ async fn test_calibration_with_insufficient_data() {
     // Create insufficient test data
     let test_data = create_test_ohlcv_data(10);
 
-    let result = calibrator.calibrate(&test_data, 20, 5, Some(50)).await;
+    let result = calibrator.calibrate(&test_data, 20, 5, Some(50), 0.8).await;
 
     // Should still work but with default parameters
     assert!(result.is_ok());

@@ -418,7 +418,8 @@ impl ModelTrainer {
                 &ohlcv_data,
                 sequence_length,
                 horizon_steps,
-                Some(1000), // Use first 1000 samples for calibration
+                Some(1000), // Will be replaced with 50% diverse sampling
+                self.config.data.sequence_overlap,
             )
             .await?;
 
