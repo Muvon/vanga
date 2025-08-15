@@ -886,21 +886,18 @@ impl ParameterCalibrator {
         context: &EvaluationContext,
         params: &VolatilityEvalParams,
     ) -> Result<ClassBalance> {
-        use crate::targets::adaptive_parameters::VolatilityAdaptiveParams;
         use crate::targets::volatility::classify_volatility_with_distribution_analysis;
 
         let mut class_counts = [0usize; 5];
 
-        // Create adaptive parameters for the new simplified approach
-        let adaptive_params = VolatilityAdaptiveParams {
-            bandwidth_size: params.bandwidth,
+        // Create calibrated parameters for the new simplified approach
+        let calibrated_params = crate::targets::calibration::VolatilityParams {
+            bandwidth: params.bandwidth,
             extreme_multiplier: params.multiplier,
             volume_weight: params.volume_weight, // Use the calibrated volume weight
-            atr_distribution_stats: Default::default(),
-            cv_adjustment_factor: 1.0,
-            horizon_decay_factor: params.decay,
-            min_baseline_atr: 0.005,
-            achieved_balance: Default::default(),
+            horizon_decay: params.decay,         // Use the passed decay parameter
+            min_volatility_baseline: 0.005,      // Default value
+            balance: Default::default(),
         };
 
         // Process each sample using the new simplified classification
@@ -917,7 +914,7 @@ impl ParameterCalibrator {
                     if let Ok(class) = classify_volatility_with_distribution_analysis(
                         sequence_candles,
                         horizon_candles,
-                        &adaptive_params,
+                        &calibrated_params,
                     ) {
                         if (0..5).contains(&class) {
                             class_counts[class as usize] += 1;
@@ -958,16 +955,13 @@ impl ParameterCalibrator {
 
                 if sequence_data.len() >= 2 && horizon_data.len() >= 2 {
                     // Create initial params for evaluation (not defaults, just starting values)
-                    let initial_params =
-                        crate::targets::adaptive_parameters::SentimentAdaptiveParams {
-                            body_sensitivity: 0.05,
-                            volume_weight: 0.2,
-                            consistency_factor: 1.0,
-                            extreme_multiplier: 2.0,
-                            horizon_decay_factor: 1.0,
-                            min_baseline_strength: 0.1,
-                            achieved_balance: ClassBalance::default(),
-                        };
+                    let initial_params = crate::targets::calibration::SentimentParams {
+                        body_sensitivity: 0.05,
+                        volume_weight: 0.2,
+                        consistency_factor: 1.0,
+                        extreme_multiplier: 2.0,
+                        balance: ClassBalance::default(),
+                    };
                     match classify_sentiment(
                         sequence_data,
                         horizon_data,

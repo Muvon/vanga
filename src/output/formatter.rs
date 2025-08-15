@@ -35,8 +35,8 @@ pub struct OutputFormatter {
     feature_count: Option<usize>,
     /// Sequence length used for prediction
     sequence_length: Option<usize>,
-    /// Adaptive target parameters for consistent reconstruction
-    adaptive_parameters: Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    /// Calibrated target parameters for consistent reconstruction
+    calibrated_parameters: Option<crate::targets::calibration::CalibratedParameters>,
 }
 
 impl OutputFormatter {
@@ -50,7 +50,7 @@ impl OutputFormatter {
             percentiles: None,
             feature_count: None,
             sequence_length: None,
-            adaptive_parameters: None,
+            calibrated_parameters: None,
         }
     }
 
@@ -68,15 +68,15 @@ impl OutputFormatter {
         self
     }
 
-    /// Set adaptive target parameters for consistent reconstruction
-    pub fn with_adaptive_parameters(
+    /// Set calibrated target parameters for consistent reconstruction
+    pub fn with_calibrated_parameters(
         mut self,
-        params: crate::targets::adaptive_parameters::AdaptiveTargetParameters,
+        params: crate::targets::calibration::CalibratedParameters,
     ) -> Self {
-        // Override training config with calibrated adaptive parameters for better accuracy
-        self.bandwidth_size = Some(params.price_levels.bandwidth_size);
-        self.percentiles = Some(params.price_levels.adaptive_percentiles);
-        self.adaptive_parameters = Some(params);
+        // Override training config with calibrated parameters for better accuracy
+        self.bandwidth_size = Some(params.price_levels.bandwidth);
+        self.percentiles = Some(params.price_levels.percentiles);
+        self.calibrated_parameters = Some(params);
         self
     }
 
@@ -664,13 +664,13 @@ impl OutputFormatter {
             )
         })?;
 
-        // Use adaptive parameters if available, otherwise return error
-        let reconstruction = if let Some(ref adaptive_params) = self.adaptive_parameters {
+        // Use calibrated parameters if available, otherwise return error
+        let reconstruction = if let Some(ref calibrated_params) = self.calibrated_parameters {
             reconstruct_price_levels(
                 probabilities,
                 sequence_ohlcv,
                 current_price,
-                &adaptive_params.price_levels,
+                &calibrated_params.price_levels,
             )?
         } else {
             return Err(VangaError::ConfigError(
@@ -741,15 +741,15 @@ impl OutputFormatter {
                 input.pump_probability,
             ];
 
-            // Use enhanced reconstruction from direction module with adaptive parameters
-            let reconstruction_result = if let Some(ref adaptive_params) = self.adaptive_parameters
-            {
-                reconstruct_direction(&probabilities, ohlcv_data, &adaptive_params.direction)
-            } else {
-                Err(VangaError::ConfigError(
-                    "Adaptive parameters required for direction reconstruction".to_string(),
-                ))
-            };
+            // Use enhanced reconstruction from direction module with calibrated parameters
+            let reconstruction_result =
+                if let Some(ref calibrated_params) = self.calibrated_parameters {
+                    reconstruct_direction(&probabilities, ohlcv_data, &calibrated_params.direction)
+                } else {
+                    Err(VangaError::ConfigError(
+                        "Adaptive parameters required for direction reconstruction".to_string(),
+                    ))
+                };
 
             match reconstruction_result {
                 Ok(reconstruction) => {
@@ -865,14 +865,15 @@ impl OutputFormatter {
                 volatility_output.very_high_probability,
             ];
 
-            // Use enhanced reconstruction from volatility module with adaptive parameters
-            let volatility_result = if let Some(ref adaptive_params) = self.adaptive_parameters {
-                // Use calibrated adaptive parameters for volatility reconstruction
-                reconstruct_volatility(&probabilities, ohlcv_data, &adaptive_params.volatility)
+            // Use enhanced reconstruction from volatility module with calibrated parameters
+            let volatility_result = if let Some(ref calibrated_params) = self.calibrated_parameters
+            {
+                // Use calibrated parameters for volatility reconstruction
+                reconstruct_volatility(&probabilities, ohlcv_data, &calibrated_params.volatility)
             } else {
-                // Adaptive parameters are required for reconstruction
+                // Calibrated parameters are required for reconstruction
                 Err(VangaError::ConfigError(
-                    "Adaptive parameters required for volatility reconstruction - model needs recalibration".to_string()
+                    "Calibrated parameters required for volatility reconstruction - model needs recalibration".to_string()
                 ))
             };
 
@@ -942,45 +943,48 @@ impl OutputFormatter {
         // Set training horizon
         prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
 
-        // Enhanced reconstruction using adaptive parameters if available
-        if let (Some(adaptive_params), Some(sequence_ohlcv)) =
-            (&self.adaptive_parameters, &self.sequence_ohlcv)
-        {
-            // Prepare probabilities array for reconstruction
-            // Prepare probabilities array for reconstruction
-            let probabilities = vec![
-                sentiment_output.very_bearish_probability,
-                sentiment_output.bearish_probability,
-                sentiment_output.neutral_probability,
-                sentiment_output.bullish_probability,
-                sentiment_output.very_bullish_probability,
-            ];
+        // Enhanced reconstruction using calibrated parameters if available
+        if let Some(sequence_ohlcv) = &self.sequence_ohlcv {
+            if self.calibrated_parameters.is_some() {
+                // Prepare probabilities array for reconstruction
+                // Prepare probabilities array for reconstruction
+                let probabilities = vec![
+                    sentiment_output.very_bearish_probability,
+                    sentiment_output.bearish_probability,
+                    sentiment_output.neutral_probability,
+                    sentiment_output.bullish_probability,
+                    sentiment_output.very_bullish_probability,
+                ];
 
-            // Call reconstruction function with adaptive parameters
-            match reconstruct_sentiment(&probabilities, sequence_ohlcv, &adaptive_params.sentiment)
-            {
-                Ok(reconstruction) => {
-                    // Use reconstruction results to enhance prediction
-                    // The reconstruction provides richer information than basic probabilities
-                    log::debug!(
+                // Call reconstruction function with calibrated parameters
+                match reconstruct_sentiment(
+                    &probabilities,
+                    sequence_ohlcv,
+                    &self.calibrated_parameters.as_ref().unwrap().sentiment,
+                ) {
+                    Ok(reconstruction) => {
+                        // Use reconstruction results to enhance prediction
+                        // The reconstruction provides richer information than basic probabilities
+                        log::debug!(
                         "🎯 Sentiment reconstruction: expected={:.4}, confidence={:.3}, interpretation={}",
                         reconstruction.expected_sentiment,
                         reconstruction.confidence,
                         reconstruction.sentiment_interpretation
                     );
 
-                    // Update confidence with reconstruction confidence
-                    prediction.confidence = reconstruction.confidence;
-                }
-                Err(e) => {
-                    log::warn!("Failed to reconstruct sentiment: {}", e);
-                    // Fall back to basic prediction without reconstruction
+                        // Update confidence with reconstruction confidence
+                        prediction.confidence = reconstruction.confidence;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to reconstruct sentiment: {}", e);
+                        // Fall back to basic prediction without reconstruction
+                    }
                 }
             }
         } else {
             log::debug!(
-                "Sentiment reconstruction skipped: adaptive_parameters={}, sequence_ohlcv={}",
-                self.adaptive_parameters.is_some(),
+                "Sentiment reconstruction skipped: calibrated_parameters={}, sequence_ohlcv={}",
+                self.calibrated_parameters.is_some(),
                 self.sequence_ohlcv.is_some()
             );
         }
@@ -1005,69 +1009,58 @@ impl OutputFormatter {
         // Set training horizon
         prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
 
-        // Enhanced reconstruction using adaptive parameters if available
-        if let (Some(adaptive_params), Some(sequence_ohlcv)) =
-            (&self.adaptive_parameters, &self.sequence_ohlcv)
-        {
-            // Calculate sequence volume (average volume from OHLCV data)
-            let sequence_volume = if !sequence_ohlcv.is_empty() {
-                sequence_ohlcv
-                    .iter()
-                    .map(|candle| candle.volume)
-                    .sum::<f64>()
-                    / sequence_ohlcv.len() as f64
-            } else {
-                1000.0 // Default fallback
-            };
+        // Enhanced reconstruction using calibrated parameters if available
+        if let Some(sequence_ohlcv) = &self.sequence_ohlcv {
+            if self.calibrated_parameters.is_some() {
+                // Calculate sequence volume (average volume from OHLCV data)
+                let sequence_volume = if !sequence_ohlcv.is_empty() {
+                    sequence_ohlcv
+                        .iter()
+                        .map(|candle| candle.volume)
+                        .sum::<f64>()
+                        / sequence_ohlcv.len() as f64
+                } else {
+                    1000.0 // Default fallback
+                };
 
-            // Convert adaptive parameters to LogVolumeThresholds
-            // Using the same logic as calculate_log_volume_thresholds
-            let bandwidth_size = adaptive_params.volume.bandwidth_size;
-            let extreme_multiplier = adaptive_params.volume.extreme_multiplier;
+                // Prepare probabilities array for reconstruction
+                let probabilities = vec![
+                    volume_output.very_low_probability,
+                    volume_output.low_probability,
+                    volume_output.medium_probability,
+                    volume_output.high_probability,
+                    volume_output.very_high_probability,
+                ];
 
-            let half_bandwidth = bandwidth_size / 2.0;
-            let extreme_bandwidth = bandwidth_size * extreme_multiplier;
-
-            let thresholds = crate::targets::volume::LogVolumeThresholds {
-                very_low_max: -extreme_bandwidth, // Most negative in log space
-                low_max: -half_bandwidth,         // Negative side of medium
-                medium_max: half_bandwidth,       // Positive side of medium
-                high_max: extreme_bandwidth,      // Most positive before very high
-            };
-
-            // Prepare probabilities array for reconstruction
-            let probabilities = vec![
-                volume_output.very_low_probability,
-                volume_output.low_probability,
-                volume_output.medium_probability,
-                volume_output.high_probability,
-                volume_output.very_high_probability,
-            ];
-
-            // Call reconstruction function with adaptive parameters
-            match reconstruct_volume(&probabilities, sequence_volume, &thresholds) {
-                Ok(reconstruction) => {
-                    // Use reconstruction results to enhance prediction
-                    // The reconstruction provides richer information than basic probabilities
-                    log::debug!(
+                // Call reconstruction function with calibrated parameters
+                match reconstruct_volume(
+                    &probabilities,
+                    sequence_volume,
+                    &self.calibrated_parameters.as_ref().unwrap().volume,
+                ) {
+                    Ok(reconstruction) => {
+                        // Use reconstruction results to enhance prediction
+                        // The reconstruction provides richer information than basic probabilities
+                        log::debug!(
                         "🎯 Volume reconstruction: expected_ratio={:.4}, confidence={:.3}, interpretation={}",
                         reconstruction.expected_volume_ratio,
                         reconstruction.confidence,
                         reconstruction.volume_interpretation
                     );
 
-                    // Update confidence with reconstruction confidence
-                    prediction.confidence = reconstruction.confidence;
-                }
-                Err(e) => {
-                    log::warn!("Failed to reconstruct volume: {}", e);
-                    // Fall back to basic prediction without reconstruction
+                        // Update confidence with reconstruction confidence
+                        prediction.confidence = reconstruction.confidence;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to reconstruct volume: {}", e);
+                        // Fall back to basic prediction without reconstruction
+                    }
                 }
             }
         } else {
             log::debug!(
                 "Volume reconstruction skipped: adaptive_parameters={}, sequence_ohlcv={}",
-                self.adaptive_parameters.is_some(),
+                self.calibrated_parameters.is_some(),
                 self.sequence_ohlcv.is_some()
             );
         }

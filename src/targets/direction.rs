@@ -110,18 +110,18 @@ pub enum Direction {
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
 /// target generation between training and prediction. When None, performs calibration.
-pub fn generate_direction_targets_with_adaptive_params(
+pub fn generate_direction_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: &crate::targets::adaptive_parameters::DirectionAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::DirectionParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
 
     // Use pre-calibrated adaptive parameters
-    let calibrated_sensitivity = adaptive_params.base_sensitivity;
+    let calibrated_sensitivity = calibrated_params.sensitivity;
     log::info!(
         "🎯 Using pre-calibrated direction sensitivity: {:.6}",
         calibrated_sensitivity
@@ -148,10 +148,10 @@ pub fn generate_direction_targets_with_adaptive_params(
                 // Only classify if we have enough horizon data for momentum calculation
                 if horizon_prices.len() >= 2 {
                     // Use the adaptive parameters directly for classification
-                    let target_class = classify_direction_with_adaptive_params(
+                    let target_class = classify_direction_with_calibrated_params(
                         sequence_prices,
                         horizon_prices,
-                        adaptive_params,
+                        calibrated_params,
                     )?;
 
                     horizon_targets[seq_position] = target_class;
@@ -182,10 +182,10 @@ pub fn generate_direction_targets_with_adaptive_params(
 ///
 /// This function uses calibrated adaptive parameters directly without creating
 /// the old TargetsConfig structure.
-pub fn classify_direction_with_adaptive_params(
+pub fn classify_direction_with_calibrated_params(
     sequence_prices: &[f64],
     horizon_prices: &[f64],
-    adaptive_params: &crate::targets::adaptive_parameters::DirectionAdaptiveParams,
+    adaptive_params: &crate::targets::calibration::DirectionParams,
 ) -> Result<i32> {
     if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
         return Ok(2); // Default to SIDEWAYS for insufficient data
@@ -208,8 +208,8 @@ pub fn classify_direction_with_adaptive_params(
     let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
 
     // EXACT SAME LOGIC AS OLD WORKING VERSION:
-    // Use base_sensitivity from adaptive_params, but keep the same threshold calculation
-    let base_sensitivity = adaptive_params.base_sensitivity;
+    // Use base_sensitivity from calibrated_params, but keep the same threshold calculation
+    let base_sensitivity = adaptive_params.sensitivity;
     let base_multiplier = adaptive_params.base_multiplier;
     let extreme_multiplier = adaptive_params.extreme_multiplier;
 
@@ -427,7 +427,7 @@ pub struct DirectionReconstruction {
 pub fn reconstruct_direction(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
-    adaptive_params: &crate::targets::adaptive_parameters::DirectionAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::DirectionParams,
 ) -> Result<DirectionReconstruction> {
     // Validate inputs
     if probabilities.len() != 5 {
@@ -451,11 +451,11 @@ pub fn reconstruct_direction(
     // Calculate trend consistency (same as training)
     let trend_consistency = calculate_sequence_trend_consistency(&sequence_prices)?;
 
-    // Use calibrated adaptive parameters
-    let base_multiplier = adaptive_params.base_multiplier; // Use calibrated value, not hardcoded
-    let extreme_multiplier = adaptive_params.extreme_multiplier;
+    // Use calibrated parameters
+    let base_multiplier = calibrated_params.base_multiplier; // Use calibrated value, not hardcoded
+    let extreme_multiplier = calibrated_params.extreme_multiplier;
 
-    let base_threshold = trend_consistency * adaptive_params.base_sensitivity * base_multiplier;
+    let base_threshold = trend_consistency * calibrated_params.sensitivity * base_multiplier;
     let extreme_threshold = base_threshold * extreme_multiplier;
 
     // Apply same minimum thresholds as training

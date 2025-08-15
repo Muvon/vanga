@@ -1,266 +1,352 @@
-//! Comprehensive tests for direction classification to ensure mathematical correctness
+//! Direction target generation tests
 //!
-//! These tests validate:
-//! 1. Linear regression slope calculation accuracy
-//! 2. Trend acceleration calculation correctness
-//! 3. Threshold scaling appropriateness
-//! 4. Classification balance across different scenarios
-//! 5. Edge case handling
+//! Tests the actual direction classification functionality with real market scenarios
 
 #[cfg(test)]
 mod tests {
+    use super::super::calibration::DirectionParams;
     use super::super::direction::*;
+    use polars::prelude::*;
 
-    use approx::assert_relative_eq;
+    /// Create test DataFrame from OHLCV data
+    fn create_test_dataframe(ohlcv_data: Vec<(f64, f64, f64, f64, f64)>) -> DataFrame {
+        let timestamps: Vec<i64> = (0..ohlcv_data.len()).map(|i| i as i64 * 3600).collect();
+        let opens: Vec<f64> = ohlcv_data.iter().map(|(o, _, _, _, _)| *o).collect();
+        let highs: Vec<f64> = ohlcv_data.iter().map(|(_, h, _, _, _)| *h).collect();
+        let lows: Vec<f64> = ohlcv_data.iter().map(|(_, _, l, _, _)| *l).collect();
+        let closes: Vec<f64> = ohlcv_data.iter().map(|(_, _, _, c, _)| *c).collect();
+        let volumes: Vec<f64> = ohlcv_data.iter().map(|(_, _, _, _, v)| *v).collect();
 
-    /// Test linear regression slope calculation with known data and volatility normalization
-    #[test]
-    fn test_linear_trend_slope_calculation() {
-        // Test case 1: Perfect upward trend with volatility normalization
-        let upward_prices = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let slope = calculate_raw_linear_slope(&upward_prices).unwrap();
-        // With volatility normalization, slope should be normalized by price std dev
-        // Price mean = 3.0, std dev ≈ 1.58, raw slope = 1.0, normalized ≈ 1.0/1.58 ≈ 0.63
-        assert!(
-            slope > 0.5 && slope < 0.8,
-            "Normalized slope should be ~0.63, got {}",
-            slope
-        );
-
-        // Test case 2: Perfect downward trend with volatility normalization
-        let downward_prices = vec![5.0, 4.0, 3.0, 2.0, 1.0];
-        let slope = calculate_raw_linear_slope(&downward_prices).unwrap();
-        // Should be negative of upward case
-        assert!(
-            slope < -0.5 && slope > -0.8,
-            "Normalized slope should be ~-0.63, got {}",
-            slope
-        );
-
-        // Test case 3: Flat trend
-        let flat_prices = vec![3.0, 3.0, 3.0, 3.0, 3.0];
-        let slope = calculate_raw_linear_slope(&flat_prices).unwrap();
-        assert_relative_eq!(slope, 0.0, epsilon = 1e-10);
-
-        // Test case 4: Realistic crypto price trend (BTC-like) with volatility normalization
-        let btc_prices = vec![50000.0, 50100.0, 50050.0, 50200.0, 50150.0];
-        let slope = calculate_raw_linear_slope(&btc_prices).unwrap();
-        // Should be positive but normalized by price volatility
-        assert!(
-            slope > 0.0 && slope < 1.0,
-            "Normalized BTC slope should be small positive, got {}",
-            slope
-        );
-
-        // Test case 5: Edge case - insufficient data
-        let short_prices = vec![100.0];
-        let slope = calculate_raw_linear_slope(&short_prices).unwrap();
-        assert_eq!(slope, 0.0);
+        DataFrame::new(vec![
+            Series::new("timestamp", timestamps),
+            Series::new("open", opens),
+            Series::new("high", highs),
+            Series::new("low", lows),
+            Series::new("close", closes),
+            Series::new("volume", volumes),
+        ])
+        .unwrap()
     }
 
-    /// Test classification with controlled slope differences
     #[test]
-    fn test_classification_with_known_slopes() {
-        let targets_config = TargetsConfig {
-            base_sensitivity: 4.0, // Larger sensitivity for crypto slopes
-            balance_target: 0.2,
-            momentum_weighting: 1.2,
+    fn test_calculate_raw_linear_slope_basic() {
+        // Test clear upward trend
+        let upward_prices = vec![100.0, 102.0, 104.0, 106.0, 108.0];
+        let slope = calculate_raw_linear_slope(&upward_prices).unwrap();
+        assert!(
+            slope > 1.5,
+            "Strong upward trend should have slope > 1.5, got {}",
+            slope
+        );
+
+        // Test clear downward trend
+        let downward_prices = vec![108.0, 106.0, 104.0, 102.0, 100.0];
+        let slope = calculate_raw_linear_slope(&downward_prices).unwrap();
+        assert!(
+            slope < -1.5,
+            "Strong downward trend should have slope < -1.5, got {}",
+            slope
+        );
+
+        // Test sideways movement
+        let sideways_prices = vec![100.0, 100.1, 99.9, 100.2, 99.8];
+        let slope = calculate_raw_linear_slope(&sideways_prices).unwrap();
+        assert!(
+            slope.abs() < 0.5,
+            "Sideways movement should have small slope, got {}",
+            slope
+        );
+    }
+
+    #[test]
+    fn test_classify_direction_with_calibrated_params() {
+        let params = DirectionParams {
+            sensitivity: 1.0,
             extreme_multiplier: 2.0,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.03,
+            base_multiplier: 20.0,
+            balance: Default::default(),
         };
 
-        // Calculate expected thresholds - no slope_scale
-        let _half_sensitivity = 4.0 / 2.0; // 2.0 - for reference
-        let _extreme_sensitivity = 4.0 * 2.0; // 8.0 - for reference
+        // Test strong upward movement (should be UP or PUMP)
+        let strong_up_prices = vec![100.0, 103.0, 106.0, 109.0, 112.0];
+        let horizon_prices = vec![112.0, 116.0, 120.0];
+        let class =
+            classify_direction_with_calibrated_params(&strong_up_prices, &horizon_prices, &params)
+                .unwrap();
+        assert!(
+            class >= 3,
+            "Strong upward movement should be UP (3) or PUMP (4), got {}",
+            class
+        );
 
-        // Test case 1: Strong deceleration (DUMP)
-        let seq_prices = vec![100.0, 101.0, 102.0, 103.0, 104.0]; // slope ≈ 1.0
-        let hor_prices = vec![104.0, 103.5, 103.0, 102.5, 102.0]; // slope ≈ -0.5
-                                                                  // acceleration = -0.5 - 1.0 = -1.5 (between -2.0 and 2.0, so SIDEWAYS)
-        let class = classify_direction(&seq_prices, &hor_prices, &targets_config, None).unwrap();
-        assert_eq!(class, 2); // SIDEWAYS
+        // Test strong downward movement (should be DOWN or DUMP)
+        let strong_down_prices = vec![112.0, 109.0, 106.0, 103.0, 100.0];
+        let horizon_down_prices = vec![100.0, 96.0, 92.0];
+        let class = classify_direction_with_calibrated_params(
+            &strong_down_prices,
+            &horizon_down_prices,
+            &params,
+        )
+        .unwrap();
+        assert!(
+            class <= 1,
+            "Strong downward movement should be DUMP (0) or DOWN (1), got {}",
+            class
+        );
 
-        // Test case 2: Strong acceleration (PUMP)
-        let seq_prices2 = vec![100.0, 100.5, 101.0, 101.5, 102.0]; // slope ≈ 0.5
-        let hor_prices2 = vec![102.0, 103.0, 104.0, 105.0, 106.0]; // slope ≈ 1.0
-                                                                   // acceleration = 1.0 - 0.5 = 0.5 (between -2.0 and 2.0, so SIDEWAYS)
-        let class2 = classify_direction(&seq_prices2, &hor_prices2, &targets_config, None).unwrap();
-        assert_eq!(class2, 2); // SIDEWAYS
-
-        // Test case 3: Minimal change (SIDEWAYS)
-        let seq_prices3 = vec![100.0, 100.1, 100.2, 100.3, 100.4]; // slope ≈ 0.1
-        let hor_prices3 = vec![100.4, 100.5, 100.6, 100.7, 100.8]; // slope ≈ 0.1
-                                                                   // acceleration = 0.1 - 0.1 = 0.0 (within ±2.0)
-        let class3 = classify_direction(&seq_prices3, &hor_prices3, &targets_config, None).unwrap();
-        assert_eq!(class3, 2); // SIDEWAYS
+        // Test sideways movement (should be SIDEWAYS)
+        let sideways_prices = vec![100.0, 100.5, 99.5, 100.2, 99.8];
+        let horizon_sideways = vec![100.1, 99.9, 100.3];
+        let class =
+            classify_direction_with_calibrated_params(&sideways_prices, &horizon_sideways, &params)
+                .unwrap();
+        assert_eq!(
+            class, 2,
+            "Sideways movement should be SIDEWAYS (2), got {}",
+            class
+        );
     }
 
-    /// Test realistic crypto price scenarios
     #[test]
-    fn test_realistic_crypto_scenarios() {
-        // Create default targets config for testing
-        let targets_config = TargetsConfig::default();
+    fn test_generate_direction_targets_with_calibrated_params() {
+        // Create realistic market data with different trends
+        let df = create_test_dataframe(vec![
+            // Upward trend sequence
+            (100.0, 102.0, 99.0, 101.0, 1000.0),
+            (101.0, 104.0, 100.0, 103.0, 1100.0),
+            (103.0, 106.0, 102.0, 105.0, 1200.0),
+            (105.0, 108.0, 104.0, 107.0, 1300.0),
+            // Continuation upward
+            (107.0, 111.0, 106.0, 110.0, 1400.0),
+            (110.0, 114.0, 109.0, 113.0, 1500.0),
+            // Sideways movement
+            (113.0, 115.0, 111.0, 112.0, 1200.0),
+            (112.0, 114.0, 110.0, 113.0, 1100.0),
+            (113.0, 115.0, 111.0, 112.0, 1000.0),
+            // Downward trend
+            (112.0, 113.0, 108.0, 109.0, 1300.0),
+            (109.0, 110.0, 105.0, 106.0, 1400.0),
+            (106.0, 107.0, 102.0, 103.0, 1500.0),
+        ]);
 
-        // Scenario 1: BTC bull run acceleration
-        let btc_sequence = vec![45000.0, 46000.0, 47000.0, 48000.0, 49000.0]; // +1000/period
-        let btc_horizon = vec![49000.0, 52000.0, 55000.0, 58000.0, 61000.0]; // +3000/period (strong acceleration)
-        let class = classify_direction(&btc_sequence, &btc_horizon, &targets_config, None).unwrap();
-        println!("BTC bull acceleration: class = {}", class);
-        // Should be UP or PUMP (3 or 4) with stronger acceleration
-        assert!(class >= 2); // At least SIDEWAYS, likely higher
+        let horizons = vec!["1h".to_string()];
+        let sequence_indices = vec![0, 3, 6]; // Different trend periods
+        let sequence_length = 3;
 
-        // Scenario 2: ETH bear market deceleration
-        let eth_sequence = vec![3000.0, 2800.0, 2600.0, 2400.0, 2200.0]; // -200/period
-        let eth_horizon = vec![2200.0, 2150.0, 2100.0, 2050.0, 2000.0]; // -50/period
-        let class2 =
-            classify_direction(&eth_sequence, &eth_horizon, &targets_config, None).unwrap();
-        println!("ETH bear deceleration: class = {}", class2);
-        // Should be UP (trend becoming less bearish = acceleration)
-        assert!(class2 >= 2);
+        let params = DirectionParams {
+            sensitivity: 0.8,
+            extreme_multiplier: 2.0,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.03,
+            base_multiplier: 20.0,
+            balance: Default::default(),
+        };
 
-        // Scenario 3: Sideways consolidation
-        let alt_sequence = vec![100.0, 101.0, 99.0, 102.0, 98.0]; // choppy, ~0 slope
-        let alt_horizon = vec![98.0, 99.0, 101.0, 100.0, 102.0]; // choppy, ~0 slope
-        let class3 =
-            classify_direction(&alt_sequence, &alt_horizon, &targets_config, None).unwrap();
-        println!("Sideways consolidation: class = {}", class3);
-        // Should be SIDEWAYS (2) or close to it
-        assert!((1..=3).contains(&class3)); // Allow some variation
+        let result = generate_direction_targets_with_calibrated_params(
+            &df,
+            &horizons,
+            &sequence_indices,
+            sequence_length,
+            &params,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Direction target generation should succeed: {:?}",
+            result.err()
+        );
+        let targets = result.unwrap();
+
+        assert!(targets.contains_key("1h"), "Should contain 1h horizon");
+        let horizon_targets = &targets["1h"];
+        assert_eq!(
+            horizon_targets.len(),
+            sequence_indices.len(),
+            "Should have targets for all sequences"
+        );
+
+        // Verify all targets are valid direction classes (0-4)
+        for (i, &target) in horizon_targets.iter().enumerate() {
+            assert!(
+                target >= 0 && target <= 4,
+                "Direction target {} should be 0-4 (DUMP to PUMP), got {} at sequence {}",
+                i,
+                target,
+                sequence_indices[i]
+            );
+        }
+
+        println!("Generated direction targets: {:?}", horizon_targets);
     }
 
-    /// Test edge cases and error handling
+    #[test]
+    fn test_direction_class_names() {
+        let class_names = get_direction_class_names();
+        assert_eq!(class_names.len(), 5, "Should have 5 direction classes");
+        assert_eq!(class_names[0], "DUMP", "Class 0 should be DUMP");
+        assert_eq!(class_names[1], "DOWN", "Class 1 should be DOWN");
+        assert_eq!(class_names[2], "SIDEWAYS", "Class 2 should be SIDEWAYS");
+        assert_eq!(class_names[3], "UP", "Class 3 should be UP");
+        assert_eq!(class_names[4], "PUMP", "Class 4 should be PUMP");
+    }
+
+    #[test]
+    fn test_sensitivity_parameter_effect() {
+        let base_prices = vec![100.0, 101.0, 102.0, 103.0, 104.0];
+        let horizon_prices = vec![104.0, 105.0, 106.0];
+
+        // Low sensitivity - should classify more as sideways
+        let low_sensitivity_params = DirectionParams {
+            sensitivity: 0.1,
+            extreme_multiplier: 2.0,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.03,
+            base_multiplier: 20.0,
+            balance: Default::default(),
+        };
+
+        // High sensitivity - should classify more as directional
+        let high_sensitivity_params = DirectionParams {
+            sensitivity: 2.0,
+            extreme_multiplier: 2.0,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.03,
+            base_multiplier: 20.0,
+            balance: Default::default(),
+        };
+
+        let low_class = classify_direction_with_calibrated_params(
+            &base_prices,
+            &horizon_prices,
+            &low_sensitivity_params,
+        )
+        .unwrap();
+
+        let high_class = classify_direction_with_calibrated_params(
+            &base_prices,
+            &horizon_prices,
+            &high_sensitivity_params,
+        )
+        .unwrap();
+
+        println!(
+            "Low sensitivity class: {}, High sensitivity class: {}",
+            low_class, high_class
+        );
+
+        // With moderate upward trend, low sensitivity might classify as sideways,
+        // while high sensitivity should classify as upward
+        if low_class == 2 {
+            // SIDEWAYS
+            assert!(
+                high_class >= 2,
+                "High sensitivity should not classify lower than low sensitivity"
+            );
+        }
+    }
+
     #[test]
     fn test_edge_cases() {
-        // Create default targets config for testing
-        let targets_config = TargetsConfig::default();
+        let params = DirectionParams {
+            sensitivity: 1.0,
+            extreme_multiplier: 2.0,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.03,
+            base_multiplier: 20.0,
+            balance: Default::default(),
+        };
 
-        // Test case 1: Insufficient sequence data
-        let short_seq = vec![100.0];
-        let normal_hor = vec![100.0, 101.0, 102.0];
-        let class = classify_direction(&short_seq, &normal_hor, &targets_config, None).unwrap();
-        assert_eq!(class, 2); // Should default to SIDEWAYS
+        // Test with minimal data
+        let minimal_prices = vec![100.0, 100.0];
+        let minimal_horizon = vec![100.0];
+        let result =
+            classify_direction_with_calibrated_params(&minimal_prices, &minimal_horizon, &params);
+        assert!(result.is_ok(), "Should handle minimal data gracefully");
 
-        // Test case 2: Insufficient horizon data
-        let normal_seq = vec![100.0, 101.0, 102.0];
-        let short_hor = vec![102.0];
-        let class2 = classify_direction(&normal_seq, &short_hor, &targets_config, None).unwrap();
-        assert_eq!(class2, 2); // Should default to SIDEWAYS
+        // Test with identical prices (no movement)
+        let flat_prices = vec![100.0, 100.0, 100.0, 100.0];
+        let flat_horizon = vec![100.0, 100.0];
+        let class = classify_direction_with_calibrated_params(&flat_prices, &flat_horizon, &params)
+            .unwrap();
+        assert_eq!(class, 2, "No movement should be classified as SIDEWAYS");
 
-        // Test case 3: No config provided
-        let seq = vec![100.0, 101.0, 102.0];
-        let hor = vec![102.0, 103.0, 104.0];
-        let class3 = classify_direction(&seq, &hor, &targets_config, None).unwrap();
-        // Should use default values and work
-        assert!((0..=4).contains(&class3));
-    }
-
-    /// Test classification balance with synthetic data
-    #[test]
-    fn test_classification_balance() {
-        // Create default targets config for testing
-        let targets_config = TargetsConfig::default();
-
-        let mut class_counts = [0; 5];
-        let test_cases = 1000;
-
-        // Generate synthetic test cases with controlled slope differences
-        for i in 0..test_cases {
-            let base_slope = (i as f64 / test_cases as f64 - 0.5) * 0.1; // -0.05 to +0.05
-
-            // Create sequence with base slope
-            let seq_prices: Vec<f64> = (0..5)
-                .map(|j| 1000.0 + base_slope * j as f64 * 1000.0)
-                .collect();
-
-            // Create horizon with modified slope for more variation
-            let slope_change = (i as f64 / test_cases as f64 - 0.5) * 0.2; // -0.1 to +0.1
-            let horizon_slope = base_slope + slope_change;
-            let hor_prices: Vec<f64> = (0..5)
-                .map(|j| seq_prices[4] + horizon_slope * j as f64 * 1000.0)
-                .collect();
-
-            let class =
-                classify_direction(&seq_prices, &hor_prices, &targets_config, None).unwrap();
-            class_counts[class as usize] += 1;
-        }
-
-        // Print distribution for analysis
-        println!(
-            "Classification distribution over {} synthetic cases:",
-            test_cases
-        );
-        let class_names = ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"];
-        for (i, &count) in class_counts.iter().enumerate() {
-            let percentage = (count as f64 / test_cases as f64) * 100.0;
-            println!("  {}: {} ({:.1}%)", class_names[i], count, percentage);
-        }
-
-        // Verify at least 3 classes are represented
-        let non_empty_classes = class_counts.iter().filter(|&&c| c > 0).count();
-        assert!(
-            non_empty_classes >= 3,
-            "Should have at least 3 non-empty classes, got {}",
-            non_empty_classes
-        );
-
-        // Verify reasonable distribution (no class should dominate > 80%)
-        for (i, &count) in class_counts.iter().enumerate() {
-            let percentage = (count as f64 / test_cases as f64) * 100.0;
-            assert!(
-                percentage < 80.0,
-                "Class {} ({}) dominates with {:.1}%",
-                i,
-                class_names[i],
-                percentage
-            );
-        }
-
-        // SIDEWAYS should be reasonably represented (but not necessarily most common for trend acceleration)
-        assert!(
-            class_counts[2] > 50,
-            "SIDEWAYS class should have reasonable representation"
-        ); // At least 5%
+        // Test with extreme volatility but no trend
+        let volatile_prices = vec![100.0, 110.0, 90.0, 105.0, 95.0];
+        let volatile_horizon = vec![100.0, 90.0, 110.0];
+        let result =
+            classify_direction_with_calibrated_params(&volatile_prices, &volatile_horizon, &params);
+        assert!(result.is_ok(), "Should handle volatile but trendless data");
     }
 
     #[test]
-    fn test_slope_scale_impact() {
-        // Create default targets config for testing
-        let targets_config = TargetsConfig::default();
+    fn test_reconstruct_direction() {
+        use crate::data::structures::MarketDataRow;
 
-        // Test with realistic crypto price movements
-        let test_cases = [
-            // (sequence_prices, horizon_prices, expected_behavior)
-            (
-                vec![50000.0, 50100.0, 50200.0, 50300.0, 50400.0], // +100/period
-                vec![50400.0, 50500.0, 50600.0, 50700.0, 50800.0], // +100/period (continuation)
-                "Should be SIDEWAYS",
-            ),
-            (
-                vec![50000.0, 50100.0, 50200.0, 50300.0, 50400.0], // +100/period
-                vec![50400.0, 50600.0, 50800.0, 51000.0, 51200.0], // +200/period (acceleration)
-                "Should be UP or PUMP",
-            ),
-            (
-                vec![50000.0, 49800.0, 49600.0, 49400.0, 49200.0], // -200/period
-                vec![49200.0, 49150.0, 49100.0, 49050.0, 49000.0], // -50/period (deceleration)
-                "Should be UP (less bearish)",
-            ),
+        // Create test market data
+        let sequence_ohlcv = vec![
+            MarketDataRow {
+                timestamp: 0,
+                open: 100.0,
+                high: 102.0,
+                low: 98.0,
+                close: 101.0,
+                volume: 1000.0,
+            },
+            MarketDataRow {
+                timestamp: 1,
+                open: 101.0,
+                high: 103.0,
+                low: 99.0,
+                close: 102.0,
+                volume: 1100.0,
+            },
+            MarketDataRow {
+                timestamp: 2,
+                open: 102.0,
+                high: 104.0,
+                low: 100.0,
+                close: 103.0,
+                volume: 1200.0,
+            },
         ];
 
-        for (i, (seq_prices, hor_prices, expected)) in test_cases.iter().enumerate() {
-            let class = classify_direction(seq_prices, hor_prices, &targets_config, None).unwrap();
-            println!("Test case {}: {} -> class = {}", i + 1, expected, class);
+        let params = DirectionParams {
+            sensitivity: 1.0,
+            extreme_multiplier: 2.0,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.03,
+            base_multiplier: 20.0,
+            balance: Default::default(),
+        };
 
-            // Calculate actual slopes for debugging
-            let seq_slope = calculate_raw_linear_slope(seq_prices).unwrap();
-            let hor_slope = calculate_raw_linear_slope(hor_prices).unwrap();
-            let acceleration = hor_slope - seq_slope;
+        // Test reconstruction with clear up probabilities
+        let clear_up_probs = vec![0.05, 0.05, 0.1, 0.3, 0.5]; // Strong UP signal
+        let reconstruction =
+            reconstruct_direction(&clear_up_probs, &sequence_ohlcv, &params).unwrap();
 
-            println!(
-                "  Seq slope: {:.6}, Hor slope: {:.6}, Acceleration: {:.6}",
-                seq_slope, hor_slope, acceleration
-            );
-        }
+        assert_eq!(
+            reconstruction.most_likely_class, 4,
+            "Should predict PUMP class"
+        );
+        assert!(
+            reconstruction.confidence > 0.4,
+            "Should have high confidence"
+        );
+        assert!(
+            reconstruction.expected_momentum_change > 0.0,
+            "Should have positive momentum"
+        );
+
+        // Test reconstruction with unclear probabilities
+        let unclear_probs = vec![0.2, 0.2, 0.2, 0.2, 0.2]; // Equal probabilities
+        let reconstruction =
+            reconstruct_direction(&unclear_probs, &sequence_ohlcv, &params).unwrap();
+
+        assert!(
+            reconstruction.confidence < 0.3,
+            "Should have low confidence for unclear signal"
+        );
     }
 }
-
-// Internal functions are tested through the public API

@@ -113,10 +113,10 @@ fn test_balanced_selection_basic() {
     let result = balancer
         .balance_sequences_for_window(
             &sequences,
-            &[],       // No validation indices
-            (0, 1500), // All sequences in range
             TargetType::PriceLevel,
             "1h",
+            &[],             // No validation indices
+            Some((0, 1500)), // All sequences in range
         )
         .unwrap();
 
@@ -211,7 +211,13 @@ fn test_overlap_constraints() {
     let balancer = SequenceBalancer::new(config);
 
     let result = balancer
-        .balance_sequences_for_window(&sequences, &[], (0, 1000), TargetType::PriceLevel, "1h")
+        .balance_sequences_for_window(
+            &sequences,
+            TargetType::PriceLevel,
+            "1h",
+            &[],
+            Some((0, 1000)),
+        )
         .unwrap();
 
     // Should select sequences with limited overlap (or relaxed if needed)
@@ -323,10 +329,10 @@ fn test_window_range_filtering() {
     let result = balancer
         .balance_sequences_for_window(
             &sequences,
-            &[],
-            (500, 1000), // Only sequences 5-9 should be in range
             TargetType::PriceLevel,
             "1h",
+            &[],
+            Some((500, 1000)), // Only sequences 5-9 should be in range
         )
         .unwrap();
 

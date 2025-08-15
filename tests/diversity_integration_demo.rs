@@ -119,10 +119,10 @@ mod tests {
 
         let result = balancer.balance_sequences_for_window(
             &sequences,
-            &validation_indices,
-            window_range,
             TargetType::PriceLevel,
             "1h",
+            &validation_indices,
+            Some(window_range),
         );
 
         match result {

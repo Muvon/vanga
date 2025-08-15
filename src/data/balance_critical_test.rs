@@ -62,10 +62,10 @@ fn test_perfect_balance_mandatory() {
     // Try to select 50 sequences (10 per class for perfect 20% balance)
     let result = balancer.balance_sequences_for_window(
         &sequences,
-        &[],       // No validation sequences to exclude
-        (0, 1000), // Wide window range
         TargetType::PriceLevel,
         "1h",
+        &[],             // No validation sequences to exclude
+        Some((0, 1000)), // Wide window range
     );
 
     match result {
@@ -142,7 +142,13 @@ fn test_overlap_configuration_respected() {
     let balancer = SequenceBalancer::new(config);
 
     let result = balancer
-        .balance_sequences_for_window(&sequences, &[], (0, 200), TargetType::PriceLevel, "1h")
+        .balance_sequences_for_window(
+            &sequences,
+            TargetType::PriceLevel,
+            "1h",
+            &[],
+            Some((0, 200)),
+        )
         .expect("Should succeed");
 
     println!("Average overlap: {:.1}%", result.avg_overlap * 100.0);
@@ -192,10 +198,10 @@ fn test_insufficient_sequences_for_balance() {
     // This should FAIL with a clear error
     let result = balancer.balance_sequences_for_window(
         &sequences,
-        &[],
-        (0, 100),
         TargetType::PriceLevel,
         "1h",
+        &[],
+        Some((0, 100)),
     );
 
     assert!(
@@ -272,10 +278,10 @@ fn test_overlap_enables_balance_for_rare_classes() {
     // Try to select 50 sequences (10 per class)
     let result = balancer.balance_sequences_for_window(
         &sequences,
-        &[],
-        (0, 1000),
         TargetType::PriceLevel,
         "1h",
+        &[],
+        Some((0, 1000)),
     );
 
     match result {
@@ -343,10 +349,10 @@ fn test_missing_classes_fatal_error() {
     // This should FAIL with missing classes error
     let result = balancer.balance_sequences_for_window(
         &sequences,
-        &[],
-        (0, 100000),
         TargetType::PriceLevel,
         "16h",
+        &[],
+        Some((0, 100000)),
     );
 
     match result {

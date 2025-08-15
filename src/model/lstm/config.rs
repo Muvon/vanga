@@ -154,11 +154,10 @@ pub struct LSTMModel {
     /// None = random initialization, Some(0) = random, Some(>0) = reproducible
     pub seed: Option<u64>,
 
-    /// Adaptive target parameters for consistent prediction
+    /// Calibrated target parameters for consistent prediction
     /// These parameters are calibrated during training to achieve balanced
     /// class distributions and must be reused during prediction for consistency
-    pub adaptive_target_parameters:
-        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    pub calibrated_parameters: Option<crate::targets::calibration::CalibratedParameters>,
 
     /// Preserved optimizer state for incremental/window training
     /// Maintains momentum/velocity across training windows while allowing LR updates
@@ -173,11 +172,10 @@ pub struct ModelState {
     pub print_every: usize,
     pub clip_gradient: Option<f64>,
 
-    /// Adaptive target parameters for consistent prediction
+    /// Calibrated target parameters for consistent prediction
     /// These parameters are calibrated during training to achieve balanced
     /// class distributions and must be reused during prediction for consistency
-    pub adaptive_target_parameters:
-        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    pub calibrated_parameters: Option<crate::targets::calibration::CalibratedParameters>,
 }
 
 // Optimizer wrapper for concrete type handling with Candle

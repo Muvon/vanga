@@ -422,148 +422,6 @@ impl ModelTrainer {
             )
             .await?;
 
-        // TODO: Remove this verbose conversion once all code uses new calibration format
-        // Convert to legacy format for compatibility (temporary)
-        let adaptive_params = crate::targets::adaptive_parameters::AdaptiveTargetParameters {
-            direction: crate::targets::adaptive_parameters::DirectionAdaptiveParams {
-                base_sensitivity: calibrated_params.direction.sensitivity,
-                extreme_multiplier: calibrated_params.direction.extreme_multiplier,
-                min_base_threshold: calibrated_params.direction.min_base_threshold,
-                min_extreme_threshold: calibrated_params.direction.min_extreme_threshold,
-                base_multiplier: calibrated_params.direction.base_multiplier,
-                achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
-                    class_percentages: calibrated_params.direction.balance.class_percentages,
-                    balance_score: calibrated_params.direction.balance.balance_score,
-                    imbalance_ratio: calibrated_params.direction.balance.imbalance_ratio,
-                    total_samples: calibrated_params.direction.balance.total_samples,
-                    target_balance: calibrated_params.direction.balance.target_balance,
-                    diversity_score: calibrated_params.direction.balance.diversity_score,
-                    temporal_spread: calibrated_params.direction.balance.temporal_spread,
-                    feature_diversity: calibrated_params.direction.balance.feature_diversity,
-                    market_condition_diversity: calibrated_params
-                        .direction
-                        .balance
-                        .market_condition_diversity,
-                    composite_quality_score: calibrated_params
-                        .direction
-                        .balance
-                        .composite_quality_score,
-                },
-            },
-            price_levels: crate::targets::adaptive_parameters::PriceLevelAdaptiveParams {
-                bandwidth_size: calibrated_params.price_levels.bandwidth,
-                adaptive_percentiles: calibrated_params.price_levels.percentiles,
-                volatility_adjustment: 1.0,
-                neutral_band_factor: calibrated_params.price_levels.neutral_band,
-                fallback_percentiles: calibrated_params.price_levels.fallback_percentiles,
-                achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
-                    class_percentages: calibrated_params.price_levels.balance.class_percentages,
-                    balance_score: calibrated_params.price_levels.balance.balance_score,
-                    imbalance_ratio: calibrated_params.price_levels.balance.imbalance_ratio,
-                    total_samples: calibrated_params.price_levels.balance.total_samples,
-                    target_balance: calibrated_params.price_levels.balance.target_balance,
-                    diversity_score: calibrated_params.price_levels.balance.diversity_score,
-                    temporal_spread: calibrated_params.price_levels.balance.temporal_spread,
-                    feature_diversity: calibrated_params.price_levels.balance.feature_diversity,
-                    market_condition_diversity: calibrated_params
-                        .price_levels
-                        .balance
-                        .market_condition_diversity,
-                    composite_quality_score: calibrated_params
-                        .price_levels
-                        .balance
-                        .composite_quality_score,
-                },
-            },
-            volatility: crate::targets::adaptive_parameters::VolatilityAdaptiveParams {
-                bandwidth_size: calibrated_params.volatility.bandwidth,
-                extreme_multiplier: calibrated_params.volatility.extreme_multiplier,
-                volume_weight: calibrated_params.volatility.volume_weight, // Use calibrated volume weight
-                atr_distribution_stats: Default::default(),
-                cv_adjustment_factor: 1.0,
-                horizon_decay_factor: calibrated_params.volatility.horizon_decay,
-                min_baseline_atr: calibrated_params.volatility.min_volatility_baseline, // Use calibrated baseline
-                achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
-                    class_percentages: calibrated_params.volatility.balance.class_percentages,
-                    balance_score: calibrated_params.volatility.balance.balance_score,
-                    imbalance_ratio: calibrated_params.volatility.balance.imbalance_ratio,
-                    total_samples: calibrated_params.volatility.balance.total_samples,
-                    target_balance: calibrated_params.volatility.balance.target_balance,
-                    diversity_score: calibrated_params.volatility.balance.diversity_score,
-                    temporal_spread: calibrated_params.volatility.balance.temporal_spread,
-                    feature_diversity: calibrated_params.volatility.balance.feature_diversity,
-                    market_condition_diversity: calibrated_params
-                        .volatility
-                        .balance
-                        .market_condition_diversity,
-                    composite_quality_score: calibrated_params
-                        .volatility
-                        .balance
-                        .composite_quality_score,
-                },
-            },
-            sentiment: crate::targets::adaptive_parameters::SentimentAdaptiveParams {
-                body_sensitivity: calibrated_params.sentiment.body_sensitivity,
-                volume_weight: calibrated_params.sentiment.volume_weight,
-                consistency_factor: calibrated_params.sentiment.consistency_factor,
-                extreme_multiplier: calibrated_params.sentiment.extreme_multiplier,
-                horizon_decay_factor: 1.0,
-                min_baseline_strength: 0.1, // Add missing field with default value
-                achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
-                    class_percentages: calibrated_params.sentiment.balance.class_percentages,
-                    balance_score: calibrated_params.sentiment.balance.balance_score,
-                    imbalance_ratio: calibrated_params.sentiment.balance.imbalance_ratio,
-                    total_samples: calibrated_params.sentiment.balance.total_samples,
-                    target_balance: calibrated_params.sentiment.balance.target_balance,
-                    diversity_score: calibrated_params.sentiment.balance.diversity_score,
-                    temporal_spread: calibrated_params.sentiment.balance.temporal_spread,
-                    feature_diversity: calibrated_params.sentiment.balance.feature_diversity,
-                    market_condition_diversity: calibrated_params
-                        .sentiment
-                        .balance
-                        .market_condition_diversity,
-                    composite_quality_score: calibrated_params
-                        .sentiment
-                        .balance
-                        .composite_quality_score,
-                },
-            },
-            volume: crate::targets::adaptive_parameters::VolumeAdaptiveParams {
-                bandwidth_size: calibrated_params.volume.bandwidth,
-                extreme_multiplier: calibrated_params.volume.extreme_multiplier,
-                smoothing_periods: calibrated_params.volume.smoothing_periods,
-                achieved_balance: crate::targets::adaptive_parameters::ClassDistributionBalance {
-                    class_percentages: calibrated_params.volume.balance.class_percentages,
-                    balance_score: calibrated_params.volume.balance.balance_score,
-                    imbalance_ratio: calibrated_params.volume.balance.imbalance_ratio,
-                    total_samples: calibrated_params.volume.balance.total_samples,
-                    target_balance: calibrated_params.volume.balance.target_balance,
-                    diversity_score: calibrated_params.volume.balance.diversity_score,
-                    temporal_spread: calibrated_params.volume.balance.temporal_spread,
-                    feature_diversity: calibrated_params.volume.balance.feature_diversity,
-                    market_condition_diversity: calibrated_params
-                        .volume
-                        .balance
-                        .market_condition_diversity,
-                    composite_quality_score: calibrated_params
-                        .volume
-                        .balance
-                        .composite_quality_score,
-                },
-            },
-            calibration_info: crate::targets::adaptive_parameters::CalibrationMetadata {
-                data_length: ohlcv_data.len(),
-                sequence_length: 96,
-                horizon_steps: 24,
-                calibration_samples: calibrated_params.metadata.calibration_samples,
-                calibration_iterations: 100,
-                optimization_time_ms: calibrated_params.metadata.optimization_time_ms,
-                target_balance: calibrated_params.metadata.target_balance,
-                overall_balance_score: calibrated_params.metadata.overall_balance_score,
-                calibration_success: calibrated_params.metadata.calibration_success,
-            },
-        };
-
         log::info!("✅ Parameters calibrated successfully");
 
         // Load and prepare target-specific training data with calibrated parameters
@@ -572,10 +430,10 @@ impl ModelTrainer {
             self.config.data_path.display()
         );
         let target_windows = data_pipeline
-            .prepare_training_data_with_adaptive_params(
+            .prepare_training_data_with_calibrated_params(
                 &self.config.data_path,
                 &self.config,
-                Some(&adaptive_params),
+                Some(&calibrated_params),
             )
             .await?;
 
@@ -835,14 +693,15 @@ impl ModelTrainer {
                 .train_data
                 .sequences
                 .shape()[2], // input_size
+            Some(calibrated_params.clone()), // Calibrated parameters for reconstruction
         )?;
 
         // Set complete training config on model before saving
         final_model.set_training_config(self.config.clone());
 
-        // CRITICAL: Set adaptive target parameters for consistent prediction reconstruction
-        final_model.set_adaptive_target_parameters(adaptive_params);
-        log::info!("✅ Adaptive target parameters stored with model for consistent prediction reconstruction");
+        // CRITICAL: Set calibrated target parameters for consistent prediction reconstruction
+        final_model.set_calibrated_parameters(calibrated_params);
+        log::info!("✅ Calibrated target parameters stored with model for consistent prediction reconstruction");
 
         // Enable final test evaluation with target-specific balanced test data
         // Each target now has its own balanced test split for proper evaluation

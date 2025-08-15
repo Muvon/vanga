@@ -40,7 +40,6 @@
 //! - Adjusts to market volatility and sentiment consistency
 //! - No hardcoded thresholds - fully adaptive system
 
-use crate::targets::adaptive_parameters::SentimentAdaptiveParams;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -89,30 +88,30 @@ impl Default for SentimentConfig {
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
 /// target generation between training and prediction. When None, uses base config.
-pub fn generate_sentiment_targets_with_adaptive_params(
+pub fn generate_sentiment_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: &SentimentAdaptiveParams, // Now mandatory
+    calibrated_params: &crate::targets::calibration::SentimentParams, // Now mandatory
 ) -> Result<HashMap<String, Vec<i32>>> {
     // Use pre-calibrated parameters (always available)
     log::info!(
         "🎯 Using calibrated sentiment parameters: body_sensitivity={:.6}, volume_weight={:.3}, consistency_factor={:.3}",
-        adaptive_params.body_sensitivity,
-        adaptive_params.volume_weight,
-        adaptive_params.consistency_factor
+        calibrated_params.body_sensitivity,
+        calibrated_params.volume_weight,
+        calibrated_params.consistency_factor
     );
 
     let config = SentimentConfig {
-        body_sensitivity: adaptive_params.body_sensitivity,
-        volume_weight: adaptive_params.volume_weight,
-        consistency_factor: adaptive_params.consistency_factor,
+        body_sensitivity: calibrated_params.body_sensitivity,
+        volume_weight: calibrated_params.volume_weight,
+        consistency_factor: calibrated_params.consistency_factor,
     };
 
     log::info!(
         "🎯 Sentiment targets using calibrated sensitivity: {:.6}",
-        adaptive_params.body_sensitivity
+        calibrated_params.body_sensitivity
     );
 
     let ohlcv_data = extract_ohlcv_data(df)?;
@@ -133,7 +132,7 @@ pub fn generate_sentiment_targets_with_adaptive_params(
             let sequence_data = &ohlcv_data[seq_start..seq_end];
             let horizon_data = &ohlcv_data[seq_end..horizon_end];
 
-            match classify_sentiment(sequence_data, horizon_data, &config, adaptive_params) {
+            match classify_sentiment(sequence_data, horizon_data, &config, calibrated_params) {
                 Ok(class) => horizon_targets.push(class),
                 Err(e) => {
                     log::warn!(
@@ -175,7 +174,7 @@ pub fn classify_sentiment(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
     _config: &SentimentConfig, // Kept for API compatibility
-    adaptive_params: &SentimentAdaptiveParams,
+    adaptive_params: &crate::targets::calibration::SentimentParams,
 ) -> Result<i32> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
         return Err(VangaError::DataError(
@@ -680,7 +679,7 @@ pub struct SentimentReconstruction {
 pub fn reconstruct_sentiment(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
-    adaptive_params: &crate::targets::adaptive_parameters::SentimentAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::SentimentParams,
 ) -> Result<SentimentReconstruction> {
     if probabilities.len() != 5 {
         return Err(VangaError::DataError(
@@ -697,9 +696,10 @@ pub fn reconstruct_sentiment(
     // Calculate sequence baseline price (same as training)
     let sequence_price = calculate_bullish_strength(sequence_ohlcv); // Now returns avg close
 
-    // Use adaptive parameters for threshold calculation (same as training)
-    let moderate_threshold = adaptive_params.body_sensitivity;
-    let extreme_threshold = adaptive_params.body_sensitivity * adaptive_params.extreme_multiplier;
+    // Use calibrated parameters for threshold calculation (same as training)
+    let moderate_threshold = calibrated_params.body_sensitivity;
+    let extreme_threshold =
+        calibrated_params.body_sensitivity * calibrated_params.extreme_multiplier;
 
     // Define momentum ranges for each class (reverse of classification logic)
     let momentum_ranges = [

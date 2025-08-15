@@ -9,7 +9,7 @@
 use crate::data::structures::MarketDataRow;
 use crate::model::lstm::config::{LSTMConfig, ModelState};
 use crate::model::lstm::core::LSTMModel;
-use crate::targets::adaptive_parameters::*;
+use crate::targets::calibration::*;
 use crate::targets::unified_calibrator::*;
 use crate::targets::*;
 use crate::utils::error::Result;

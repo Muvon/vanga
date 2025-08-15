@@ -634,16 +634,16 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
 /// target generation between training and prediction. When None, uses base config.
-pub fn generate_price_level_targets_with_adaptive_params(
+pub fn generate_price_level_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: &crate::targets::adaptive_parameters::PriceLevelAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let config = PriceLevelConfig {
-        bandwidth_size: adaptive_params.bandwidth_size,
-        neutral_band_factor: adaptive_params.neutral_band_factor,
+        bandwidth_size: calibrated_params.bandwidth,
+        neutral_band_factor: calibrated_params.neutral_band,
     };
     log::info!(
         "🎯 Using pre-calibrated price level parameters: bandwidth={:.4}, neutral_band={:.2}",
@@ -656,7 +656,7 @@ pub fn generate_price_level_targets_with_adaptive_params(
         &config,
         sequence_indices,
         sequence_length,
-        Some(adaptive_params.fallback_percentiles),
+        Some(calibrated_params.fallback_percentiles),
     )
 }
 
@@ -704,7 +704,7 @@ pub fn reconstruct_price_levels(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
     current_price: f64,
-    adaptive_params: &crate::targets::adaptive_parameters::PriceLevelAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<PriceLevelReconstruction> {
     // Validate inputs
     if probabilities.len() != 5 {
@@ -725,9 +725,9 @@ pub fn reconstruct_price_levels(
         ));
     }
 
-    // Use calibrated adaptive parameters
-    let percentiles = adaptive_params.adaptive_percentiles;
-    let bandwidth_size = adaptive_params.bandwidth_size;
+    // Use calibrated parameters
+    let percentiles = calibrated_params.percentiles;
+    let bandwidth_size = calibrated_params.bandwidth;
 
     // Calculate adaptive bandwidth (same logic as training)
     let final_bandwidth_size = calculate_adaptive_bandwidth(

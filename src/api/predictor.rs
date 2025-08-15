@@ -73,13 +73,13 @@ impl<'a> ModelWrapper<'a> {
         matches!(self, ModelWrapper::MultiTarget(_))
     }
 
-    /// Get adaptive target parameters if available
-    pub fn get_adaptive_target_parameters(
+    /// Get calibrated target parameters if available
+    pub fn get_calibrated_parameters(
         &self,
-    ) -> Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters> {
+    ) -> Option<&crate::targets::calibration::CalibratedParameters> {
         match self {
-            ModelWrapper::Single(model) => model.adaptive_target_parameters.as_ref(),
-            ModelWrapper::MultiTarget(model) => model.get_adaptive_target_parameters(),
+            ModelWrapper::Single(model) => model.calibrated_parameters.as_ref(),
+            ModelWrapper::MultiTarget(model) => model.get_calibrated_parameters(),
         }
     }
 }
@@ -237,7 +237,7 @@ impl Predictor {
 
         // CRITICAL: Adaptive parameters are REQUIRED for consistent prediction reconstruction
         // These parameters were calibrated during training to achieve balanced classification
-        let adaptive_params = model.get_adaptive_target_parameters().ok_or_else(|| {
+        let calibrated_params = model.get_calibrated_parameters().ok_or_else(|| {
             VangaError::PredictionError(
                 "FATAL: No adaptive target parameters found in model. \
                  The model must have calibrated parameters from training for consistent prediction. \
@@ -247,19 +247,19 @@ impl Predictor {
             )
         })?;
 
-        formatter = formatter.with_adaptive_parameters(adaptive_params.clone());
+        formatter = formatter.with_calibrated_parameters(calibrated_params.clone());
         log::info!(
-            "✅ Using calibrated adaptive target parameters for consistent prediction reconstruction"
+            "✅ Using calibrated target parameters for consistent prediction reconstruction"
         );
         log::debug!(
-            "🎯 Adaptive parameters loaded from model: \
+            "🎯 Calibrated parameters loaded from model: \
              direction_sensitivity={:.4}, price_bandwidth={:.4}, volatility_bandwidth={:.4}, \
              sentiment_sensitivity={:.4}, volume_baseline={:.4}",
-            adaptive_params.direction.base_sensitivity,
-            adaptive_params.price_levels.bandwidth_size,
-            adaptive_params.volatility.bandwidth_size,
-            adaptive_params.sentiment.body_sensitivity,
-            adaptive_params.volume.bandwidth_size
+            calibrated_params.direction.sensitivity,
+            calibrated_params.price_levels.bandwidth,
+            calibrated_params.volatility.bandwidth,
+            calibrated_params.sentiment.body_sensitivity,
+            calibrated_params.volume.bandwidth
         );
 
         // Determine horizons to process based on configuration

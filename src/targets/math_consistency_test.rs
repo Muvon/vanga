@@ -7,10 +7,10 @@
 mod tests {
 
     use crate::data::structures::MarketDataRow;
+    use crate::targets::calibration::VolatilityParams;
     use crate::targets::direction::calculate_raw_linear_slope;
     use crate::targets::volatility::{
-        calculate_log_volatility_thresholds, classify_volatility_log_ratio,
-        get_sequence_atr_baseline,
+        classify_volatility_with_distribution_analysis, get_sequence_atr_baseline,
     };
 
     /// Helper function to create test market data
@@ -133,13 +133,6 @@ mod tests {
             ];
 
             let train_atr = get_sequence_atr_baseline(&sequence, 0.005).unwrap();
-            let targets_config = TargetsConfig {
-                base_sensitivity: 0.4,
-                balance_target: 0.2,
-                momentum_weighting: 1.2,
-                extreme_multiplier: 2.0,
-            };
-            let thresholds = calculate_log_volatility_thresholds(&targets_config).unwrap();
 
             for (target_vol, vol_desc, expected_range) in volatility_tests {
                 let target_sequence = create_test_candles(vec![
@@ -160,7 +153,20 @@ mod tests {
                 ]);
 
                 let target_atr = get_sequence_atr_baseline(&target_sequence, 0.005).unwrap();
-                let class = classify_volatility_log_ratio(train_atr, target_atr, &thresholds);
+                let params = VolatilityParams {
+                    bandwidth: 0.4,
+                    extreme_multiplier: 1.2,
+                    volume_weight: 0.5,
+                    horizon_decay: 0.95,
+                    min_volatility_baseline: 0.005,
+                    balance: Default::default(),
+                };
+                let class = classify_volatility_with_distribution_analysis(
+                    &target_sequence,
+                    &sequence,
+                    &params,
+                )
+                .unwrap();
 
                 println!(
                     "{} - {}: train_atr={:.6}, target_atr={:.6}, class={}",

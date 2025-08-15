@@ -113,24 +113,24 @@ use std::collections::HashMap;
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
 /// target generation between training and prediction. When None, performs calibration.
-pub fn generate_volatility_targets_with_adaptive_params(
+pub fn generate_volatility_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::VolatilityParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
 
     // Use pre-calibrated adaptive parameters
-    let calibrated_bandwidth = adaptive_params.bandwidth_size;
+    let calibrated_bandwidth = calibrated_params.bandwidth;
     log::info!(
         "🎯 Using pre-calibrated volatility bandwidth: {:.6}",
         calibrated_bandwidth
     );
 
-    let extreme_multiplier = adaptive_params.extreme_multiplier;
+    let extreme_multiplier = calibrated_params.extreme_multiplier;
 
     log::info!(
         "🎯 Volatility targets using bandwidth: {:.6}, extreme_multiplier: {:.2}",
@@ -160,7 +160,7 @@ pub fn generate_volatility_targets_with_adaptive_params(
                     let volatility_class = classify_volatility_with_distribution_analysis(
                         sequence_candles,
                         horizon_candles,
-                        adaptive_params,
+                        calibrated_params,
                     )?;
 
                     horizon_targets[seq_position] = volatility_class;
@@ -564,20 +564,24 @@ pub struct LogVolatilityThresholds {
 pub fn classify_volatility_with_distribution_analysis(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
-    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::VolatilityParams,
 ) -> Result<i32> {
     if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
         return Ok(2); // Default to Medium for insufficient data
     }
 
     // Calculate ATR for both periods (same as before)
-    let sequence_atr =
-        calculate_simple_atr_with_params(sequence_candles, adaptive_params.min_baseline_atr)?;
-    let horizon_atr =
-        calculate_simple_atr_with_params(horizon_candles, adaptive_params.min_baseline_atr)?;
+    let sequence_atr = calculate_simple_atr_with_params(
+        sequence_candles,
+        calibrated_params.min_volatility_baseline,
+    )?;
+    let horizon_atr = calculate_simple_atr_with_params(
+        horizon_candles,
+        calibrated_params.min_volatility_baseline,
+    )?;
 
     // Ensure minimum baseline to avoid division by zero
-    let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr);
+    let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline);
 
     // SIMPLE FEATURE 1: ATR momentum (identical to price momentum formula)
     let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
@@ -592,11 +596,11 @@ pub fn classify_volatility_with_distribution_analysis(
     };
 
     // Combine ATR momentum with volume conviction (momentum is primary signal)
-    let volatility_score = atr_momentum + (volume_conviction * adaptive_params.volume_weight);
+    let volatility_score = atr_momentum + (volume_conviction * calibrated_params.volume_weight);
 
     // Use adaptive thresholds for classification (same structure as sentiment)
-    let moderate_threshold = adaptive_params.bandwidth_size; // Now represents ATR momentum threshold
-    let extreme_threshold = adaptive_params.bandwidth_size * adaptive_params.extreme_multiplier;
+    let moderate_threshold = calibrated_params.bandwidth; // Now represents ATR momentum threshold
+    let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
 
     // Classify based on combined volatility score
     let class = if volatility_score <= -extreme_threshold {
@@ -1198,14 +1202,16 @@ fn calculate_atr_consistency(atr_values: &[f64]) -> f64 {
 /// * `Vec<f64>` - Enhanced score midpoints for each class [VeryLow, Low, Medium, High, VeryHigh]
 fn calculate_enhanced_score_midpoints(
     sequence_ohlcv: &[MarketDataRow],
-    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::VolatilityParams,
     moderate_threshold: f64,
     extreme_threshold: f64,
 ) -> Result<Vec<f64>> {
     // Calculate sequence-based features (available during prediction)
-    let sequence_atr =
-        calculate_simple_atr_with_params(sequence_ohlcv, adaptive_params.min_baseline_atr)?;
-    let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr);
+    let sequence_atr = calculate_simple_atr_with_params(
+        sequence_ohlcv,
+        calibrated_params.min_volatility_baseline,
+    )?;
+    let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline);
 
     // Calculate sequence-only features for neutral approximation
     let sequence_trend = calculate_sequence_volatility_trend(sequence_ohlcv)?;
@@ -1383,7 +1389,7 @@ pub struct VolatilityReconstruction {
 pub fn reconstruct_volatility(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
-    adaptive_params: &crate::targets::adaptive_parameters::VolatilityAdaptiveParams,
+    calibrated_params: &crate::targets::calibration::VolatilityParams,
 ) -> Result<VolatilityReconstruction> {
     // Validate inputs
     if probabilities.len() != 5 {
@@ -1400,7 +1406,7 @@ pub fn reconstruct_volatility(
 
     // Calculate sequence ATR baseline (same as training)
     let sequence_atr = calculate_simple_atr(sequence_ohlcv)?;
-    let baseline_atr = sequence_atr.max(adaptive_params.min_baseline_atr); // Same minimum as training
+    let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline); // Same minimum as training
 
     if baseline_atr <= 0.0 {
         return Err(crate::utils::error::VangaError::DataError(
@@ -1408,15 +1414,15 @@ pub fn reconstruct_volatility(
         ));
     }
 
-    // Use adaptive parameters for threshold calculation (same as training)
-    let moderate_threshold = adaptive_params.bandwidth_size;
-    let extreme_threshold = adaptive_params.bandwidth_size * adaptive_params.extreme_multiplier;
+    // Use calibrated parameters for threshold calculation (same as training)
+    let moderate_threshold = calibrated_params.bandwidth;
+    let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
 
     // Calculate enhanced score midpoints for each class using same logic as training
     // These represent the enhanced scores that would classify to each class
     let enhanced_score_midpoints = calculate_enhanced_score_midpoints(
         sequence_ohlcv,
-        adaptive_params,
+        calibrated_params,
         moderate_threshold,
         extreme_threshold,
     )?;

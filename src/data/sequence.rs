@@ -29,7 +29,7 @@ impl SequenceGenerator {
         data_config: &crate::config::training::DataConfig,
         feature_config: &crate::config::FeatureConfig,
     ) -> Result<PreparedData> {
-        self.generate_training_sequences_with_adaptive_params(
+        self.generate_training_sequences_with_calibrated_params(
             df,
             horizons,
             training_config,
@@ -40,14 +40,14 @@ impl SequenceGenerator {
         .await
     }
 
-    pub async fn generate_training_sequences_with_adaptive_params(
+    pub async fn generate_training_sequences_with_calibrated_params(
         &self,
         df: DataFrame, // RAW data with features, NOT pre-normalized
         horizons: &[String],
         training_config: &crate::config::training::TrainingConfig,
         data_config: &crate::config::training::DataConfig,
         feature_config: &crate::config::FeatureConfig,
-        adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+        calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
     ) -> Result<PreparedData> {
         log::info!(
             "Generating training sequences for LSTM with {} horizons...",
@@ -106,7 +106,7 @@ impl SequenceGenerator {
                 &df,
                 data_config,
                 training_config,
-                adaptive_params,
+                calibrated_params,
             )
             .await?;
 
@@ -512,7 +512,7 @@ impl SequenceGenerator {
         df: &DataFrame,
         data_config: &crate::config::training::DataConfig,
         training_config: &crate::config::training::TrainingConfig,
-        adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+        calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
     ) -> Result<(
         Array3<f64>,
         crate::targets::PreparedTargets,
@@ -631,11 +631,11 @@ impl SequenceGenerator {
 
         let target_generator = crate::targets::TargetGenerator::new(target_config);
         let targets = target_generator
-            .generate_all_targets_with_adaptive_params(
+            .generate_all_targets_with_calibrated_params(
                 df,
                 &sequence_indices,
                 sequence_length,
-                adaptive_params,
+                calibrated_params,
             )
             .await?;
 

@@ -54,16 +54,16 @@ impl DataPipeline {
         data_path: P,
         config: &crate::config::TrainingConfig,
     ) -> Result<TargetSpecificWindows> {
-        self.prepare_training_data_with_adaptive_params(data_path, config, None)
+        self.prepare_training_data_with_calibrated_params(data_path, config, None)
             .await
     }
 
-    /// Load and preprocess data for training with pre-calibrated adaptive parameters
-    pub async fn prepare_training_data_with_adaptive_params<P: AsRef<Path>>(
+    /// Load and preprocess data for training with pre-calibrated parameters
+    pub async fn prepare_training_data_with_calibrated_params<P: AsRef<Path>>(
         &self,
         data_path: P,
         config: &crate::config::TrainingConfig,
-        adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+        calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
     ) -> Result<TargetSpecificWindows> {
         // Load raw data
         let raw_data = self.loader.load_csv(data_path).await?;
@@ -79,7 +79,7 @@ impl DataPipeline {
 
         // Use target-specific balanced approach
         let target_windows = self
-            .create_target_specific_balanced_windows(processed_data, config, adaptive_params)
+            .create_target_specific_balanced_windows(processed_data, config, calibrated_params)
             .await?;
 
         log::info!(
@@ -343,7 +343,7 @@ impl DataPipeline {
         &self,
         raw_processed_data: polars::prelude::DataFrame,
         config: &crate::config::TrainingConfig,
-        adaptive_params: Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+        calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
     ) -> Result<TargetSpecificWindows> {
         let total_samples = raw_processed_data.height();
 
@@ -367,13 +367,13 @@ impl DataPipeline {
         let training_df = raw_processed_data.clone(); // Use ALL data, not sliced
         let all_sequences_data = self
             .sequence_generator
-            .generate_training_sequences_with_adaptive_params(
+            .generate_training_sequences_with_calibrated_params(
                 training_df,
                 &config.horizons,
                 config,
                 &config.data,
                 &config.features,
-                adaptive_params,
+                calibrated_params,
             )
             .await?;
 

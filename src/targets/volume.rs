@@ -40,7 +40,6 @@
 //! - Adjusts to volume volatility and market conditions
 //! - Uses same pattern as volatility target for consistency
 
-use crate::targets::adaptive_parameters::VolumeAdaptiveParams;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -93,32 +92,32 @@ pub struct VolumeDistributionStats {
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
 /// target generation between training and prediction. When None, uses base config.
-pub fn generate_volume_targets_with_adaptive_params(
+pub fn generate_volume_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    adaptive_params: &VolumeAdaptiveParams, // Now mandatory
+    calibrated_params: &crate::targets::calibration::VolumeParams, // Now mandatory
 ) -> Result<HashMap<String, Vec<i32>>> {
     let volume_data = extract_volume_data(df)?;
 
     // Use pre-calibrated parameters (always available)
     log::info!(
         "🎯 Using calibrated volume parameters: bandwidth={:.4}, extreme_multiplier={:.2}, smoothing={}",
-        adaptive_params.bandwidth_size,
-        adaptive_params.extreme_multiplier,
-        adaptive_params.smoothing_periods
+        calibrated_params.bandwidth,
+        calibrated_params.extreme_multiplier,
+        calibrated_params.smoothing_periods
     );
 
     let config = VolumeConfig {
-        bandwidth_size: adaptive_params.bandwidth_size,
-        extreme_multiplier: adaptive_params.extreme_multiplier,
-        smoothing_periods: adaptive_params.smoothing_periods,
+        bandwidth_size: calibrated_params.bandwidth,
+        extreme_multiplier: calibrated_params.extreme_multiplier,
+        smoothing_periods: calibrated_params.smoothing_periods,
     };
 
     log::info!(
         "🎯 Volume targets using calibrated bandwidth: {:.6}",
-        adaptive_params.bandwidth_size
+        calibrated_params.bandwidth
     );
 
     let mut targets = HashMap::new();
@@ -537,7 +536,7 @@ pub struct VolumeReconstruction {
 pub fn reconstruct_volume(
     probabilities: &[f64],
     sequence_volume: f64,
-    thresholds: &LogVolumeThresholds,
+    calibrated_params: &crate::targets::calibration::VolumeParams,
 ) -> Result<VolumeReconstruction> {
     if probabilities.len() != 5 {
         return Err(VangaError::DataError(
@@ -545,12 +544,19 @@ pub fn reconstruct_volume(
         ));
     }
 
-    // Convert log thresholds to ratio ranges
+    // Convert calibrated parameters to log thresholds
+    let bandwidth = calibrated_params.bandwidth;
+    let extreme_multiplier = calibrated_params.extreme_multiplier;
+
+    let half_bandwidth = bandwidth / 2.0;
+    let extreme_bandwidth = bandwidth * extreme_multiplier;
+
+    // Convert log thresholds to ratio boundaries
     let ratio_boundaries = [
-        thresholds.very_low_max.exp(), // Very Low upper bound
-        thresholds.low_max.exp(),      // Low upper bound
-        thresholds.medium_max.exp(),   // Medium upper bound
-        thresholds.high_max.exp(),     // High upper bound
+        (-extreme_bandwidth).exp(), // Very Low upper bound
+        (-half_bandwidth).exp(),    // Low upper bound
+        half_bandwidth.exp(),       // Medium upper bound
+        extreme_bandwidth.exp(),    // High upper bound
     ];
 
     // Define volume ratio ranges for each class

@@ -3,7 +3,7 @@
 
 use crate::config::ModelConfig;
 use crate::model::lstm_simple::LSTMModel;
-use crate::targets::TargetType;
+use crate::targets::{calibration::CalibratedParameters, TargetType};
 use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3, Axis};
 use serde::{Deserialize, Serialize};
@@ -50,9 +50,8 @@ pub struct MultiTargetLSTMModel {
     training_config: Option<crate::config::TrainingConfig>,
     /// Feature configuration used during training (kept for backward compatibility)
     feature_config: Option<crate::config::FeatureConfig>,
-    /// Adaptive target parameters for consistent prediction reconstruction
-    adaptive_target_parameters:
-        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    /// Calibrated target parameters for consistent prediction reconstruction
+    calibrated_parameters: Option<crate::targets::calibration::CalibratedParameters>,
 }
 
 /// Serializable state for multi-target model persistence
@@ -70,10 +69,9 @@ struct MultiTargetModelState {
     /// Feature configuration used during training (kept for backward compatibility)
     #[serde(default)]
     feature_config: Option<crate::config::FeatureConfig>,
-    /// Adaptive target parameters for consistent prediction reconstruction
+    /// Calibrated target parameters for consistent prediction reconstruction
     #[serde(default)]
-    adaptive_target_parameters:
-        Option<crate::targets::adaptive_parameters::AdaptiveTargetParameters>,
+    calibrated_parameters: Option<crate::targets::calibration::CalibratedParameters>,
 }
 
 impl MultiTargetLSTMModel {
@@ -263,7 +261,7 @@ impl MultiTargetLSTMModel {
             trained_horizons,
             training_config: None, // Will be set during training
             feature_config: None,  // Will be set during training
-            adaptive_target_parameters: None,
+            calibrated_parameters: None,
         })
     }
 
@@ -637,7 +635,7 @@ impl MultiTargetLSTMModel {
             trained_horizons: Some(self.trained_horizons.clone()),
             training_config: self.training_config.clone(),
             feature_config: self.feature_config.clone(),
-            adaptive_target_parameters: self.adaptive_target_parameters.clone(),
+            calibrated_parameters: self.calibrated_parameters.clone(),
         };
 
         let metadata_path = base_path.with_extension("meta");
@@ -736,7 +734,7 @@ impl MultiTargetLSTMModel {
             trained_horizons,
             training_config: state.training_config,
             feature_config: state.feature_config,
-            adaptive_target_parameters: state.adaptive_target_parameters,
+            calibrated_parameters: state.calibrated_parameters,
         })
     }
 
@@ -780,31 +778,31 @@ impl MultiTargetLSTMModel {
         self.training_config = Some(config);
     }
 
-    /// Set adaptive target parameters for all models
-    pub fn set_adaptive_target_parameters(
+    /// Set calibrated target parameters for all models
+    pub fn set_calibrated_parameters(
         &mut self,
-        params: crate::targets::adaptive_parameters::AdaptiveTargetParameters,
+        params: crate::targets::calibration::CalibratedParameters,
     ) {
         // Store in the MultiTargetLSTMModel itself for persistence
-        self.adaptive_target_parameters = Some(params.clone());
+        self.calibrated_parameters = Some(params.clone());
 
         // Also set on individual models for backward compatibility
         for model in &mut self.models {
-            model.adaptive_target_parameters = Some(params.clone());
+            model.calibrated_parameters = Some(params.clone());
         }
     }
 
-    /// Get adaptive target parameters from the MultiTargetLSTMModel or fallback to first model
-    pub fn get_adaptive_target_parameters(
+    /// Get calibrated target parameters from the MultiTargetLSTMModel or fallback to first model
+    pub fn get_calibrated_parameters(
         &self,
-    ) -> Option<&crate::targets::adaptive_parameters::AdaptiveTargetParameters> {
+    ) -> Option<&crate::targets::calibration::CalibratedParameters> {
         // Prioritize the MultiTargetLSTMModel's own field
-        if let Some(ref params) = self.adaptive_target_parameters {
+        if let Some(ref params) = self.calibrated_parameters {
             return Some(params);
         }
 
         // Fallback to first model for backward compatibility
-        self.models.first()?.adaptive_target_parameters.as_ref()
+        self.models.first()?.calibrated_parameters.as_ref()
     }
 
     /// Check if all models are trained (have networks)
@@ -830,6 +828,7 @@ impl MultiTargetLSTMModel {
         target_names: Vec<String>,     // ["price_level_12h", "direction_12h", "volatility_12h"]
         trained_horizons: Vec<String>, // ["12h", "12h", "12h"]
         input_size: usize,             // Feature count (same for all models)
+        calibrated_parameters: Option<CalibratedParameters>, // Calibrated parameters for reconstruction
     ) -> Result<Self> {
         let num_targets = models.len();
 
@@ -855,7 +854,7 @@ impl MultiTargetLSTMModel {
             trained_horizons,
             feature_config: None,
             training_config: None,
-            adaptive_target_parameters: None,
+            calibrated_parameters,
         })
     }
 }

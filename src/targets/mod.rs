@@ -14,58 +14,51 @@
 //! - **UnifiedTargetCalibrator**: Orchestrates system-wide parameter optimization
 //! - **Model Integration**: Parameters are saved/loaded with the model for consistency
 
-pub mod adaptive_parameters;
-pub mod calibration; // New clean calibration module
+pub mod calibration;
 pub mod direction;
-pub mod generators;
 pub mod interface;
 pub mod price_levels;
-pub mod registry;
 pub mod sentiment;
 pub mod sequence_reconstruction;
 pub mod volatility;
 pub mod volume;
 
 #[cfg(test)]
-mod direction_test;
-#[cfg(test)]
 mod math_consistency_test;
 #[cfg(test)]
 mod price_level_test;
+
+#[cfg(test)]
+mod direction_test;
 #[cfg(test)]
 mod volatility_test;
 #[cfg(test)]
 mod volume_test;
 
-use crate::targets::adaptive_parameters::AdaptiveTargetParameters;
-use crate::targets::interface::AdaptiveParameters;
-use crate::targets::registry::TargetRegistry;
+use crate::targets::calibration::CalibratedParameters;
 use crate::utils::error::Result;
 use polars::prelude::*;
-use rayon::prelude::*; // RESTORED: Parallel execution support
 use std::collections::HashMap;
 
-// Re-export configurations and adaptive parameters
-pub use adaptive_parameters::{
-    calculate_class_distribution_balance, AdaptiveParameterCalibrator, CalibrationMetadata,
-    ClassDistributionBalance, DirectionAdaptiveParams, PriceLevelAdaptiveParams,
-    SentimentAdaptiveParams, VolatilityAdaptiveParams, VolumeAdaptiveParams,
+// Re-export configurations and calibrated parameters
+pub use calibration::{
+    DirectionParams, PriceLevelParams, SentimentParams, VolatilityParams, VolumeParams,
 };
-pub use direction::{generate_direction_targets_with_adaptive_params, Direction};
+use direction::generate_direction_targets_with_calibrated_params;
 pub use price_levels::{
-    generate_price_level_targets, generate_price_level_targets_with_adaptive_params,
+    generate_price_level_targets, generate_price_level_targets_with_calibrated_params,
     get_horizon_exponential_weighted_close, get_sequence_exponential_weighted_close,
     reconstruct_price_levels, PriceLevelConfig,
 };
 pub use sentiment::{
-    generate_sentiment_targets_with_adaptive_params, get_sentiment_class_names, SentimentConfig,
+    generate_sentiment_targets_with_calibrated_params, get_sentiment_class_names, SentimentConfig,
 };
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
 };
-pub use volatility::generate_volatility_targets_with_adaptive_params;
+use volatility::generate_volatility_targets_with_calibrated_params;
 pub use volume::{
-    generate_volume_targets_with_adaptive_params, get_volume_class_names, VolumeConfig,
+    generate_volume_targets_with_calibrated_params, get_volume_class_names, VolumeConfig,
 };
 
 /// Comprehensive target configuration
@@ -292,16 +285,12 @@ pub struct ClassDistribution {
 /// Target generation orchestrator
 pub struct TargetGenerator {
     config: MultiTargetConfig,
-    registry: TargetRegistry, // NEW: Add registry for trait-based approach
 }
 
 impl TargetGenerator {
     /// Create new target generator with configuration
     pub fn new(config: MultiTargetConfig) -> Self {
-        Self {
-            config,
-            registry: TargetRegistry::new(), // NEW: Initialize registry
-        }
+        Self { config }
     }
 
     /// Create target generator with default configuration
@@ -375,7 +364,7 @@ impl TargetGenerator {
         sequence_indices: &[usize],
         sequence_length: usize,
     ) -> Result<PreparedTargets> {
-        self.generate_all_targets_with_adaptive_params(
+        self.generate_all_targets_with_calibrated_params(
             df,
             sequence_indices,
             sequence_length,
@@ -389,12 +378,12 @@ impl TargetGenerator {
     /// target generation between training and prediction. When None, uses calibration/base config.
     /// Only generates enabled targets for performance optimization.
     /// CRITICAL: Requires calibrated adaptive parameters - no defaults allowed!
-    pub async fn generate_all_targets_with_adaptive_params(
+    pub async fn generate_all_targets_with_calibrated_params(
         &self,
         df: &DataFrame,
         sequence_indices: &[usize],
         sequence_length: usize,
-        adaptive_params: Option<&AdaptiveTargetParameters>,
+        calibrated_params: Option<&CalibratedParameters>,
     ) -> Result<PreparedTargets> {
         // FIXED: Data length should be the number of sequences, not original data length
         let data_length = sequence_indices.len();
@@ -405,10 +394,10 @@ impl TargetGenerator {
             sequence_indices.len()
         );
 
-        // CRITICAL FIX: Require adaptive parameters - no defaults allowed during training!
-        let adaptive_params = adaptive_params.ok_or_else(|| {
+        // CRITICAL FIX: Require calibrated parameters - no defaults allowed during training!
+        let calibrated_params = calibrated_params.ok_or_else(|| {
             crate::utils::VangaError::ConfigError(
-                "FATAL: Adaptive parameters are REQUIRED for target generation. \
+                "FATAL: Calibrated parameters are REQUIRED for target generation. \
                  Calibration must be performed before generating targets. \
                  This ensures consistent classification between training and prediction."
                     .to_string(),
@@ -416,77 +405,77 @@ impl TargetGenerator {
         })?;
 
         // Extract calibrated parameters - no defaults!
-        let direction_adaptive_params = &adaptive_params.direction;
-        let price_level_adaptive_params = &adaptive_params.price_levels;
-        let volatility_adaptive_params = &adaptive_params.volatility;
-        let sentiment_adaptive_params = &adaptive_params.sentiment;
-        let volume_adaptive_params = &adaptive_params.volume;
+        let direction_params = &calibrated_params.direction;
+        let price_level_params = &calibrated_params.price_levels;
+        let volatility_params = &calibrated_params.volatility;
+        let sentiment_params = &calibrated_params.sentiment;
+        let volume_params = &calibrated_params.volume;
 
         log::debug!(
-            "✅ Using calibrated adaptive parameters: direction_sensitivity={:.4}, \
+            "✅ Using calibrated parameters: direction_sensitivity={:.4}, \
              price_bandwidth={:.4}, volatility_bandwidth={:.4}",
-            direction_adaptive_params.base_sensitivity,
-            price_level_adaptive_params.bandwidth_size,
-            volatility_adaptive_params.bandwidth_size
+            direction_params.sensitivity,
+            price_level_params.bandwidth,
+            volatility_params.bandwidth
         );
 
         // CONDITIONAL GENERATION: Only generate enabled targets
         if self.config.price_level.enabled {
             log::debug!("🏷️ Generating price level targets");
-            let price_targets = generate_price_level_targets_with_adaptive_params(
+            let price_targets = generate_price_level_targets_with_calibrated_params(
                 df,
                 &self.config.horizons,
                 sequence_indices,
                 sequence_length,
-                price_level_adaptive_params,
+                price_level_params,
             )?;
             prepared_targets.price_levels = price_targets;
         }
 
         if self.config.direction.enabled {
             log::debug!("🧭 Generating direction targets");
-            let direction_targets = generate_direction_targets_with_adaptive_params(
+            let direction_targets = generate_direction_targets_with_calibrated_params(
                 df,
                 &self.config.horizons,
                 sequence_indices,
                 sequence_length,
-                direction_adaptive_params,
+                direction_params,
             )?;
             prepared_targets.direction = direction_targets;
         }
 
         if self.config.volatility.enabled {
             log::debug!("📊 Generating volatility targets");
-            let volatility_targets = generate_volatility_targets_with_adaptive_params(
+            let volatility_targets = generate_volatility_targets_with_calibrated_params(
                 df,
                 &self.config.horizons,
                 sequence_indices,
                 sequence_length,
-                volatility_adaptive_params,
+                volatility_params,
             )?;
             prepared_targets.volatility = volatility_targets;
         }
 
         if self.config.sentiment.enabled {
             log::debug!("💭 Generating sentiment targets");
-            let sentiment_targets = generate_sentiment_targets_with_adaptive_params(
+            let sentiment_targets = generate_sentiment_targets_with_calibrated_params(
                 df,
                 &self.config.horizons,
                 sequence_indices,
                 sequence_length,
-                sentiment_adaptive_params,
+                sentiment_params,
             )?;
             prepared_targets.sentiment = sentiment_targets;
         }
 
         if self.config.volume.enabled {
             log::debug!("📈 Generating volume targets");
-            let volume_targets = generate_volume_targets_with_adaptive_params(
+            let volume_targets = generate_volume_targets_with_calibrated_params(
                 df,
                 &self.config.horizons,
                 sequence_indices,
                 sequence_length,
-                volume_adaptive_params,
+                volume_params,
             )?;
             prepared_targets.volume = volume_targets;
         }
@@ -505,130 +494,6 @@ impl TargetGenerator {
         );
 
         Ok(prepared_targets)
-    }
-    pub async fn generate_all_targets_trait_based(
-        &self,
-        df: &DataFrame,
-        sequence_indices: &[usize],
-        sequence_length: usize,
-        adaptive_params: Option<&AdaptiveTargetParameters>,
-    ) -> Result<PreparedTargets> {
-        let data_length = sequence_indices.len();
-        let mut prepared_targets = PreparedTargets::new(data_length);
-
-        // Get enabled target generators from registry
-        let enabled_generators = self.registry.get_enabled_generators(&self.config);
-
-        log::info!(
-            "🎯 Generating targets using {} enabled generators: [{}]",
-            enabled_generators.len(),
-            enabled_generators
-                .iter()
-                .map(|g| g.target_name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-
-        // Generate all targets in parallel using trait interface
-        // RESTORED: Parallel execution using rayon to match original performance
-        let target_results: Result<Vec<_>> = enabled_generators
-            .par_iter()
-            .map(|generator| {
-                let adaptive_param =
-                    self.get_adaptive_param_for_target(generator.target_type(), adaptive_params);
-
-                let result = generator.generate_targets(
-                    df,
-                    &self.config.horizons,
-                    sequence_indices,
-                    sequence_length,
-                    adaptive_param,
-                )?;
-
-                Ok((generator.target_type(), result))
-            })
-            .collect();
-
-        let target_results = target_results?;
-
-        // Process results and merge into prepared_targets
-        for (target_type, result) in target_results {
-            self.merge_target_results(&mut prepared_targets, target_type, &result)?;
-        }
-
-        // Validate final results
-        prepared_targets.validate()?;
-
-        log::info!(
-            "✅ Trait-based target generation completed: {} sequences across {} horizons",
-            data_length,
-            self.config.horizons.len()
-        );
-
-        Ok(prepared_targets)
-    }
-
-    /// Get adaptive parameter for specific target type
-    fn get_adaptive_param_for_target<'a>(
-        &self,
-        target_type: &str,
-        adaptive_params: Option<&'a AdaptiveTargetParameters>,
-    ) -> Option<&'a dyn AdaptiveParameters> {
-        adaptive_params.and_then(|params| match target_type {
-            "price_levels" => Some(&params.price_levels as &dyn AdaptiveParameters),
-            "direction" => Some(&params.direction as &dyn AdaptiveParameters),
-            "volatility" => Some(&params.volatility as &dyn AdaptiveParameters),
-            "sentiment" => Some(&params.sentiment as &dyn AdaptiveParameters),
-            "volume" => Some(&params.volume as &dyn AdaptiveParameters),
-            _ => None,
-        })
-    }
-
-    /// Merge target results into prepared targets structure
-    fn merge_target_results(
-        &self,
-        prepared_targets: &mut PreparedTargets,
-        target_type: &str,
-        target_map: &HashMap<String, Vec<i32>>,
-    ) -> Result<()> {
-        for (horizon, targets) in target_map {
-            match target_type {
-                "price_levels" => {
-                    prepared_targets
-                        .price_levels
-                        .insert(horizon.clone(), targets.clone());
-                }
-                "direction" => {
-                    prepared_targets
-                        .direction
-                        .insert(horizon.clone(), targets.clone());
-                }
-                "volatility" => {
-                    prepared_targets
-                        .volatility
-                        .insert(horizon.clone(), targets.clone());
-                }
-                "sentiment" => {
-                    prepared_targets
-                        .sentiment
-                        .insert(horizon.clone(), targets.clone());
-                }
-                "volume" => {
-                    prepared_targets
-                        .volume
-                        .insert(horizon.clone(), targets.clone());
-                }
-                _ => {
-                    log::warn!("Unknown target type: {}", target_type);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Get target registry (for testing and extensibility)
-    pub fn get_registry(&self) -> &TargetRegistry {
-        &self.registry
     }
 }
 
