@@ -742,11 +742,23 @@ impl ParameterCalibrator {
 
         let seq_start = sequence_prices[0];
         let seq_end = sequence_prices[sequence_prices.len() - 1];
-        let sequence_momentum = (seq_end - seq_start) / seq_start;
+
+        // Avoid division by zero - use epsilon check
+        let sequence_momentum = if seq_start.abs() < 1e-10 {
+            0.0
+        } else {
+            (seq_end - seq_start) / seq_start
+        };
 
         let hor_start = horizon_prices[0];
         let hor_end = horizon_prices[horizon_prices.len() - 1];
-        let horizon_momentum = (hor_end - hor_start) / hor_start;
+
+        // Avoid division by zero - use epsilon check
+        let horizon_momentum = if hor_start.abs() < 1e-10 {
+            0.0
+        } else {
+            (hor_end - hor_start) / hor_start
+        };
 
         let momentum_change = horizon_momentum - sequence_momentum;
         Ok((sequence_momentum, horizon_momentum, momentum_change))
@@ -758,20 +770,24 @@ impl ParameterCalibrator {
             return Ok(0.01); // Minimum consistency for short sequences
         }
 
-        // Calculate momentum changes between consecutive periods
         let mut momentum_changes = Vec::new();
-        let window_size = 3; // Use 3-period windows for momentum calculation
 
-        for i in 0..(sequence_prices.len() - window_size) {
-            let window1 = &sequence_prices[i..i + window_size];
-            let window2 = &sequence_prices[i + 1..i + 1 + window_size];
+        // Calculate momentum between consecutive segments - MUST MATCH direction.rs EXACTLY
+        let segment_size = (sequence_prices.len() / 3).max(2);
+        for i in 0..(sequence_prices.len() - segment_size * 2) {
+            let seg1_start = sequence_prices[i];
+            let seg1_end = sequence_prices[i + segment_size];
+            let seg2_start = seg1_end;
+            let seg2_end = sequence_prices[i + segment_size * 2];
 
-            let momentum1 = self.calculate_raw_linear_slope(window1)?;
-            let momentum2 = self.calculate_raw_linear_slope(window2)?;
-            let momentum_change = (momentum2 - momentum1).abs();
+            if seg1_start != 0.0 && seg2_start != 0.0 {
+                let seg1_momentum = (seg1_end - seg1_start) / seg1_start;
+                let seg2_momentum = (seg2_end - seg2_start) / seg2_start;
+                let momentum_change = seg2_momentum - seg1_momentum;
 
-            if momentum_change.is_finite() {
-                momentum_changes.push(momentum_change);
+                if momentum_change.is_finite() {
+                    momentum_changes.push(momentum_change);
+                }
             }
         }
 
@@ -779,7 +795,7 @@ impl ParameterCalibrator {
             return Ok(0.01);
         }
 
-        // Calculate standard deviation of momentum changes (consistency measure)
+        // Calculate standard deviation of momentum changes (trend consistency)
         let mean = momentum_changes.iter().sum::<f64>() / momentum_changes.len() as f64;
         let variance = momentum_changes
             .iter()
@@ -789,35 +805,6 @@ impl ParameterCalibrator {
         let std_dev = variance.sqrt();
 
         Ok(std_dev.max(0.005)) // Minimum consistency threshold
-    }
-
-    /// Calculate raw linear slope (helper for calibration)
-    fn calculate_raw_linear_slope(&self, prices: &[f64]) -> Result<f64> {
-        if prices.len() < 2 {
-            return Ok(0.0);
-        }
-
-        let n = prices.len() as f64;
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-        let mut sum_xy = 0.0;
-        let mut sum_x2 = 0.0;
-
-        for (i, &price) in prices.iter().enumerate() {
-            let x = i as f64;
-            sum_x += x;
-            sum_y += price;
-            sum_xy += x * price;
-            sum_x2 += x * x;
-        }
-
-        let denominator = n * sum_x2 - sum_x * sum_x;
-        if denominator.abs() < 1e-10 {
-            return Ok(0.0);
-        }
-
-        let slope = (n * sum_xy - sum_x * sum_y) / denominator;
-        Ok(slope)
     }
 
     /// Evaluate price level parameters using proper exponentially-weighted logic

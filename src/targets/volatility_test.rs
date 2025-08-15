@@ -281,7 +281,7 @@ mod tests {
         // Verify all targets are valid volatility classes (0-4)
         for (i, &target) in horizon_targets.iter().enumerate() {
             assert!(
-                target >= 0 && target <= 4,
+                (0..=4).contains(&target),
                 "Volatility target {} should be 0-4 (VeryLow to VeryHigh), got {} at sequence {}",
                 i,
                 target,
@@ -385,8 +385,8 @@ mod tests {
         );
 
         // Both should be valid classes
-        assert!(low_bandwidth_class >= 0 && low_bandwidth_class <= 4);
-        assert!(high_bandwidth_class >= 0 && high_bandwidth_class <= 4);
+        assert!((0..=4).contains(&low_bandwidth_class));
+        assert!((0..=4).contains(&high_bandwidth_class));
     }
 
     #[test]

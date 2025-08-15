@@ -106,12 +106,12 @@ mod tests {
                 .unwrap();
 
         assert!(
-            low_class >= 0 && low_class <= 4,
+            (0..=4).contains(&low_class),
             "Low volume class should be 0-4, got {}",
             low_class
         );
         assert!(
-            high_class >= 0 && high_class <= 4,
+            (0..=4).contains(&high_class),
             "High volume class should be 0-4, got {}",
             high_class
         );
@@ -206,7 +206,7 @@ mod tests {
             very_high_class,
         ] {
             assert!(
-                class >= 0 && class <= 4,
+                (0..=4).contains(&class),
                 "Volume class should be 0-4, got {}",
                 class
             );
@@ -277,7 +277,7 @@ mod tests {
         // Verify all targets are valid volume classes (0-4)
         for (i, &target) in horizon_targets.iter().enumerate() {
             assert!(
-                target >= 0 && target <= 4,
+                (0..=4).contains(&target),
                 "Volume target {} should be 0-4 (VERY_LOW to VERY_HIGH), got {} at sequence {}",
                 i,
                 target,
@@ -351,8 +351,8 @@ mod tests {
         );
 
         // Both should be valid classes
-        assert!(small_class >= 0 && small_class <= 4);
-        assert!(large_class >= 0 && large_class <= 4);
+        assert!((0..=4).contains(&small_class));
+        assert!((0..=4).contains(&large_class));
 
         // Small bandwidth might be more sensitive to the volume increase
         // (though this depends on the specific thresholds)

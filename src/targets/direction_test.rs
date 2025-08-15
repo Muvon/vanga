@@ -170,7 +170,7 @@ mod tests {
         // Verify all targets are valid direction classes (0-4)
         for (i, &target) in horizon_targets.iter().enumerate() {
             assert!(
-                target >= 0 && target <= 4,
+                (0..=4).contains(&target),
                 "Direction target {} should be 0-4 (DUMP to PUMP), got {} at sequence {}",
                 i,
                 target,

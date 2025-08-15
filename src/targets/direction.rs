@@ -185,53 +185,52 @@ pub fn generate_direction_targets_with_calibrated_params(
 pub fn classify_direction_with_calibrated_params(
     sequence_prices: &[f64],
     horizon_prices: &[f64],
-    adaptive_params: &crate::targets::calibration::DirectionParams,
+    calibrated_params: &crate::targets::calibration::DirectionParams,
 ) -> Result<i32> {
     if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
         return Ok(2); // Default to SIDEWAYS for insufficient data
     }
 
-    // Calculate sequence momentum (baseline) - USE PERCENTAGE CHANGE (same as old working version)
-    let seq_start = sequence_prices[0];
-    let seq_end = sequence_prices[sequence_prices.len() - 1];
-    let sequence_momentum = (seq_end - seq_start) / seq_start;
+    // Step 1: Calculate momentum change between sequence and horizon
+    let (sequence_momentum, horizon_momentum, momentum_change) =
+        calculate_directional_momentum_change(sequence_prices, horizon_prices)?;
 
-    // Calculate horizon momentum (target period) - USE PERCENTAGE CHANGE (same as old working version)
-    let hor_start = horizon_prices[0];
-    let hor_end = horizon_prices[horizon_prices.len() - 1];
-    let horizon_momentum = (hor_end - hor_start) / hor_start;
-
-    // Calculate momentum change (key directional signal) - same as old working version
-    let momentum_change = horizon_momentum - sequence_momentum;
-
-    // Calculate trend consistency for adaptive thresholds - same as old working version
+    // Step 2: Calculate sequence trend consistency for adaptive thresholds
     let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
 
-    // EXACT SAME LOGIC AS OLD WORKING VERSION:
-    // Use base_sensitivity from calibrated_params, but keep the same threshold calculation
-    let base_sensitivity = adaptive_params.sensitivity;
-    let base_multiplier = adaptive_params.base_multiplier;
-    let extreme_multiplier = adaptive_params.extreme_multiplier;
+    // Step 3: Set adaptive thresholds based on trend consistency
+    // Use calibrated parameters
+    let base_multiplier = calibrated_params.base_multiplier;
+    let extreme_multiplier = calibrated_params.extreme_multiplier;
 
-    let base_threshold = trend_consistency * base_sensitivity * base_multiplier;
+    let base_threshold = trend_consistency * calibrated_params.sensitivity * base_multiplier;
     let extreme_threshold = base_threshold * extreme_multiplier;
 
-    // Use calibrated minimum thresholds (same as old working version)
-    let final_base_threshold = base_threshold.max(adaptive_params.min_base_threshold);
-    let final_extreme_threshold = extreme_threshold.max(adaptive_params.min_extreme_threshold);
+    // Use calibrated minimum thresholds
+    let min_base = calibrated_params.min_base_threshold;
+    let min_extreme = calibrated_params.min_extreme_threshold;
 
-    // Classify based on momentum change magnitude and direction
+    let final_base_threshold = base_threshold.max(min_base);
+    let final_extreme_threshold = extreme_threshold.max(min_extreme);
+
+    // Step 4: Classify based on momentum change magnitude and direction
     let class = if momentum_change <= -final_extreme_threshold {
-        0 // DUMP: Strong negative momentum change
+        0 // DUMP: Strong momentum reversal (positive to negative or strong weakening)
     } else if momentum_change <= -final_base_threshold {
-        1 // DOWN: Moderate negative momentum change
+        1 // DOWN: Moderate momentum weakening
     } else if momentum_change.abs() <= final_base_threshold {
-        2 // SIDEWAYS: Minimal momentum change (key condition!)
+        2 // SIDEWAYS: Momentum continuation
     } else if momentum_change <= final_extreme_threshold {
-        3 // UP: Moderate positive momentum change
+        3 // UP: Moderate momentum strengthening
     } else {
-        4 // PUMP: Strong positive momentum change
+        4 // PUMP: Strong momentum acceleration (negative to positive or strong strengthening)
     };
+
+    log::debug!(
+        "🎯 Momentum Direction: seq_momentum={:.6}, hor_momentum={:.6}, momentum_change={:.6}, consistency={:.6}, base_thresh={:.6}, extreme_thresh={:.6} → class={} ({})",
+        sequence_momentum, horizon_momentum, momentum_change, trend_consistency, final_base_threshold, final_extreme_threshold, class,
+        ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"][class as usize]
+    );
 
     Ok(class)
 }
@@ -318,6 +317,47 @@ fn calculate_sequence_trend_consistency(prices: &[f64]) -> Result<f64> {
     let std_dev = variance.sqrt();
 
     Ok(std_dev.max(0.005)) // Minimum consistency threshold
+}
+
+/// Calculate directional momentum change between sequence and horizon
+///
+/// Direction classification should detect TREND CHANGES and MOMENTUM SHIFTS,
+/// not just movement magnitude. This function analyzes how the directional
+/// momentum changes from the sequence period to the horizon period.
+fn calculate_directional_momentum_change(
+    sequence_prices: &[f64],
+    horizon_prices: &[f64],
+) -> Result<(f64, f64, f64)> {
+    if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
+        return Ok((0.0, 0.0, 0.0));
+    }
+
+    // Calculate sequence momentum (trend strength and direction)
+    let seq_start = sequence_prices[0];
+    let seq_end = sequence_prices[sequence_prices.len() - 1];
+
+    // Avoid division by zero - use small epsilon if needed
+    let sequence_momentum = if seq_start.abs() < 1e-10 {
+        0.0 // No momentum if starting from near-zero
+    } else {
+        (seq_end - seq_start) / seq_start
+    };
+
+    // Calculate horizon momentum (trend strength and direction)
+    let hor_start = horizon_prices[0]; // This is same as seq_end
+    let hor_end = horizon_prices[horizon_prices.len() - 1];
+
+    // Avoid division by zero - use small epsilon if needed
+    let horizon_momentum = if hor_start.abs() < 1e-10 {
+        0.0 // No momentum if starting from near-zero
+    } else {
+        (hor_end - hor_start) / hor_start
+    };
+
+    // Calculate momentum change (this is the key directional signal)
+    let momentum_change = horizon_momentum - sequence_momentum;
+
+    Ok((sequence_momentum, horizon_momentum, momentum_change))
 }
 
 /// Classify direction using momentum change analysis
