@@ -147,9 +147,28 @@ fn extract_f64_value(
         polars::prelude::AnyValue::Float32(f) => Ok(f as f64),
         polars::prelude::AnyValue::Int64(i) => Ok(i as f64),
         polars::prelude::AnyValue::Int32(i) => Ok(i as f64),
+        polars::prelude::AnyValue::Int16(i) => Ok(i as f64),
+        polars::prelude::AnyValue::Int8(i) => Ok(i as f64),
+        polars::prelude::AnyValue::UInt64(i) => Ok(i as f64),
+        polars::prelude::AnyValue::UInt32(i) => Ok(i as f64),
+        polars::prelude::AnyValue::UInt16(i) => Ok(i as f64),
+        polars::prelude::AnyValue::UInt8(i) => Ok(i as f64),
+        polars::prelude::AnyValue::Null => Err(crate::utils::error::VangaError::DataError(format!(
+            "NULL value in {} column at row {} (CSV row {}). Check your data file for missing values.",
+            column_name, row, row + 1
+        ))),
+        polars::prelude::AnyValue::Utf8(s) => {
+            // Try to parse string as number
+            s.parse::<f64>().map_err(|_| {
+                crate::utils::error::VangaError::DataError(format!(
+                    "Cannot parse {} value '{}' as number at row {} (CSV row {})",
+                    column_name, s, row, row + 1
+                ))
+            })
+        }
         _ => Err(crate::utils::error::VangaError::DataError(format!(
-            "Unsupported {} type at row {}: {:?}",
-            column_name, row, value
+            "Unsupported {} type at row {} (CSV row {}): {:?}",
+            column_name, row, row + 1, value
         ))),
     }
 }

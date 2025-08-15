@@ -38,14 +38,35 @@ impl DataLoader {
                     )));
                 }
 
-                // Load CSV with validation
-                let df = polars::prelude::CsvReader::from_path(path)
+                // Load CSV with validation - Read as strings then cast to Float64
+                let mut df = polars::prelude::CsvReader::from_path(path)
                     .map_err(|e| {
                         VangaError::DataError(format!("Failed to create CSV reader: {}", e))
                     })?
                     .has_header(true)
+                    .infer_schema(Some(0)) // Read all columns as strings
                     .finish()
                     .map_err(|e| VangaError::DataError(format!("Failed to read CSV: {}", e)))?;
+
+                // Cast all columns except timestamp to Float64
+                let column_names: Vec<String> = df
+                    .get_column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                for col_name in column_names {
+                    // Skip timestamp column
+                    if col_name.to_lowercase() == "timestamp" {
+                        continue;
+                    }
+
+                    // Try to cast to Float64 - if it fails, leave as is
+                    if let Ok(col) = df.column(&col_name) {
+                        if let Ok(casted) = col.cast(&DataType::Float64) {
+                            let _ = df.replace(&col_name, casted);
+                        }
+                    }
+                }
 
                 log::debug!("Loaded {} rows from {}", df.height(), path.display());
                 Ok(df)
@@ -96,26 +117,42 @@ impl DataLoader {
             )));
         }
 
+        // Read CSV - Simple solution: read everything as strings first, then cast numeric columns to Float64
         log::info!("📂 Loading CSV file: {}", path.display());
 
-        // Read CSV with all columns as strings first to avoid schema inference issues
-        let df = {
-            // Use ignore_errors and infer_schema_length to handle problematic values
-            polars::prelude::CsvReader::from_path(path)
-                .map_err(|e| VangaError::DataError(format!(
-                    "❌ Failed to create CSV reader for file: {}\n🔍 Error: {}\n💡 Check if the file is a valid CSV format.",
-                    path.display(), e
-                )))?
-                .with_ignore_errors(true) // Ignore parsing errors and treat as null
-                .finish()
-                .map_err(|e| VangaError::DataError(format!(
-                    "❌ Failed to read CSV file: {}\n🔍 Error: {}\n💡 Check if the file contains valid CSV data with proper headers.",
-                    path.display(), e
-                )))?
-        };
+        // Read CSV with no schema inference (all columns as strings)
+        let mut df = CsvReader::from_path(path)
+            .map_err(|e| VangaError::DataError(format!(
+                "❌ Failed to create CSV reader for file: {}\n🔍 Error: {}\n💡 Check if the file is a valid CSV format.",
+                path.display(), e
+            )))?
+            .has_header(true)
+            .infer_schema(Some(0))  // This makes all columns read as strings
+            .finish()
+            .map_err(|e| VangaError::DataError(format!(
+                "❌ Failed to read CSV file: {}\n🔍 Error: {}\n💡 Check if the file contains valid CSV data with proper headers.",
+                path.display(), e
+            )))?;
 
-        // Fix data types for custom feature columns (ensure they're Float64)
-        let df = self.fix_custom_feature_types(df)?;
+        // Now cast all columns except timestamp to Float64
+        let column_names: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for col_name in column_names {
+            // Skip timestamp column
+            if col_name.to_lowercase() == "timestamp" {
+                continue;
+            }
+
+            // Try to cast to Float64 - if it fails, leave as is (might be a string column)
+            if let Ok(col) = df.column(&col_name) {
+                if let Ok(casted) = col.cast(&DataType::Float64) {
+                    let _ = df.replace(&col_name, casted);
+                }
+            }
+        }
 
         // Validate required columns
         self.validate_required_columns(&df)?;
@@ -431,50 +468,6 @@ impl DataLoader {
         }
 
         Ok((train_df, val_df, test_df))
-    }
-
-    /// Fix data types for all columns since they were read as Utf8
-    fn fix_custom_feature_types(&self, df: DataFrame) -> Result<DataFrame> {
-        // Get column names before moving df
-        let column_names: Vec<String> = df
-            .get_column_names()
-            .iter()
-            .map(|&name| name.to_string())
-            .collect();
-
-        let mut lazy_df = df.lazy();
-
-        // Convert each column to its appropriate type
-        for column in column_names {
-            match column.as_str() {
-                "timestamp" => {
-                    // Keep timestamp as Utf8 for now
-                    log::debug!("Keeping timestamp column as Utf8");
-                }
-                "open" | "high" | "low" | "close" | "volume" => {
-                    // Convert standard OHLCV columns to Float64
-                    log::debug!(
-                        "Converting standard column '{}' from Utf8 to Float64",
-                        column
-                    );
-                    lazy_df =
-                        lazy_df.with_columns([col(&column).cast(DataType::Float64).alias(&column)]);
-                }
-                _ => {
-                    // Convert custom feature columns to Float64
-                    log::debug!(
-                        "Converting custom feature column '{}' from Utf8 to Float64",
-                        column
-                    );
-                    lazy_df =
-                        lazy_df.with_columns([col(&column).cast(DataType::Float64).alias(&column)]);
-                }
-            }
-        }
-
-        lazy_df
-            .collect()
-            .map_err(|e| VangaError::DataError(format!("Failed to fix column types: {}", e)))
     }
 }
 

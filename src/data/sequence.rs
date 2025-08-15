@@ -790,9 +790,36 @@ impl SequenceGenerator {
                 polars::prelude::AnyValue::Float64(f) => f,
                 polars::prelude::AnyValue::Float32(f) => f as f64,
                 polars::prelude::AnyValue::Int64(i) => i as f64,
+                polars::prelude::AnyValue::Int32(i) => i as f64,
+                polars::prelude::AnyValue::Int16(i) => i as f64,
+                polars::prelude::AnyValue::Int8(i) => i as f64,
+                polars::prelude::AnyValue::UInt64(i) => i as f64,
+                polars::prelude::AnyValue::UInt32(i) => i as f64,
+                polars::prelude::AnyValue::UInt16(i) => i as f64,
+                polars::prelude::AnyValue::UInt8(i) => i as f64,
+                polars::prelude::AnyValue::Null => {
+                    return Err(VangaError::DataError(format!(
+                    "NULL volume at row {} (CSV row {}). Check your data file for missing values.",
+                    i,
+                    i + 1
+                )))
+                }
+                polars::prelude::AnyValue::Utf8(s) => {
+                    // Try to parse string as number
+                    s.parse::<f64>().map_err(|_| {
+                        VangaError::DataError(format!(
+                            "Cannot parse volume '{}' as number at row {} (CSV row {})",
+                            s,
+                            i,
+                            i + 1
+                        ))
+                    })?
+                }
                 _ => {
                     return Err(VangaError::DataError(format!(
-                        "Unsupported volume type: {:?}",
+                        "Unsupported volume type at row {} (CSV row {}): {:?}",
+                        i,
+                        i + 1,
                         volume
                     )))
                 }

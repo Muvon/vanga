@@ -1,42 +1,19 @@
-use thiserror::Error;
+use std::fmt;
 
 pub type Result<T> = std::result::Result<T, VangaError>;
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum VangaError {
-    #[error("Configuration error: {0}")]
     ConfigError(String),
-
-    #[error("Data error: {0}")]
     DataError(String),
-
-    #[error("Data validation error: {0}")]
-    DataValidation(#[from] crate::data::DataValidationError),
-
-    #[error("Model error: {0}")]
+    DataValidation(crate::data::DataValidationError),
     ModelError(String),
-
-    #[error("Training error: {0}")]
     TrainingError(String),
-
-    #[error("Prediction error: {0}")]
     PredictionError(String),
-
-    #[error("Feature engineering error: {0}")]
     FeatureError(String),
-
-    #[error("IO error: {0}")]
     IoError(String),
-
-    #[error("Serialization error: {0}")]
     SerializationError(String),
-
-    #[error("Polars error: {0}")]
-    PolarsError(#[from] polars::error::PolarsError),
-
-    #[error("Optimization error: {0}")]
+    PolarsError(polars::error::PolarsError),
     OptimizationError(String),
-
-    #[error("Invalid parameter: {parameter} = {value}, reason: {reason}")]
     InvalidParameter {
         parameter: String,
         value: String,
@@ -44,10 +21,82 @@ pub enum VangaError {
     },
 }
 
+// Custom Display implementation to handle DataValidation errors specially
+impl fmt::Display for VangaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VangaError::DataValidation(crate::data::DataValidationError::InvalidData {
+                issue,
+                ..
+            }) => {
+                // For InvalidData errors, show just the formatted issue message
+                write!(f, "Error: {}", issue)
+            }
+            _ => {
+                // For all other errors, use standard formatting
+                match self {
+                    VangaError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
+                    VangaError::DataError(msg) => write!(f, "Data error: {}", msg),
+                    VangaError::ModelError(msg) => write!(f, "Model error: {}", msg),
+                    VangaError::TrainingError(msg) => write!(f, "Training error: {}", msg),
+                    VangaError::PredictionError(msg) => write!(f, "Prediction error: {}", msg),
+                    VangaError::FeatureError(msg) => {
+                        write!(f, "Feature engineering error: {}", msg)
+                    }
+                    VangaError::IoError(msg) => write!(f, "IO error: {}", msg),
+                    VangaError::SerializationError(msg) => {
+                        write!(f, "Serialization error: {}", msg)
+                    }
+                    VangaError::PolarsError(err) => write!(f, "Polars error: {}", err),
+                    VangaError::OptimizationError(msg) => write!(f, "Optimization error: {}", msg),
+                    VangaError::InvalidParameter {
+                        parameter,
+                        value,
+                        reason,
+                    } => {
+                        write!(
+                            f,
+                            "Invalid parameter: {} = {}, reason: {}",
+                            parameter, value, reason
+                        )
+                    }
+                    VangaError::DataValidation(err) => {
+                        // For other DataValidation errors, use their Display implementation
+                        write!(f, "Data validation error: {}", err)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Implement std::error::Error trait manually
+impl std::error::Error for VangaError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            VangaError::DataValidation(err) => Some(err),
+            VangaError::PolarsError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
 // Add From implementations for common error types
 impl From<std::io::Error> for VangaError {
     fn from(err: std::io::Error) -> Self {
         VangaError::IoError(err.to_string())
+    }
+}
+
+impl From<crate::data::DataValidationError> for VangaError {
+    fn from(err: crate::data::DataValidationError) -> Self {
+        VangaError::DataValidation(err)
+    }
+}
+
+impl From<polars::error::PolarsError> for VangaError {
+    fn from(err: polars::error::PolarsError) -> Self {
+        VangaError::PolarsError(err)
     }
 }
 
