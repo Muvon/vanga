@@ -157,7 +157,7 @@ pub fn generate_volatility_targets_with_calibrated_params(
                 // Only classify if we have sufficient data for ATR calculation
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
                     // Use enhanced classification with calibrated adaptive parameters
-                    let volatility_class = classify_volatility_with_distribution_analysis(
+                    let volatility_class = classify_volatility_with_calibrated_params(
                         sequence_candles,
                         horizon_candles,
                         calibrated_params,
@@ -460,10 +460,11 @@ pub fn get_sequence_atr_baseline(
 pub fn get_horizon_weighted_atr_baseline(
     horizon_candles: &[MarketDataRow],
     decay_factor: f64,
+    min_volatility_baseline: f64,
 ) -> Result<f64> {
     // Fallback to uniform weighting for insufficient data or uniform decay factor
     if horizon_candles.len() < 2 || (decay_factor - 1.0).abs() < f64::EPSILON {
-        return get_sequence_atr_baseline(horizon_candles, 0.005);
+        return get_sequence_atr_baseline(horizon_candles, min_volatility_baseline);
     }
 
     let mut weighted_true_ranges = Vec::new();
@@ -495,7 +496,7 @@ pub fn get_horizon_weighted_atr_baseline(
 
     // Fallback to uniform calculation if no valid true ranges
     if weighted_true_ranges.is_empty() || total_weight == 0.0 {
-        return get_sequence_atr_baseline(horizon_candles, 0.005);
+        return get_sequence_atr_baseline(horizon_candles, min_volatility_baseline);
     }
 
     // Calculate weighted average ATR
@@ -510,7 +511,7 @@ pub fn get_horizon_weighted_atr_baseline(
         total_weight
     );
 
-    Ok(weighted_atr.max(0.005)) // Ensure minimum 0.5% volatility baseline
+    Ok(weighted_atr.max(min_volatility_baseline)) // Use calibrated minimum volatility baseline
 }
 
 /// Logarithmic volatility thresholds for regime classification
@@ -561,7 +562,7 @@ pub struct LogVolatilityThresholds {
 /// - **ML Learning**: Simple features are easier for LSTM to learn patterns from
 /// - **Research-Based**: ATR momentum is a proven volatility measurement technique
 /// - **Volume Integration**: High volume volatility changes are more meaningful
-pub fn classify_volatility_with_distribution_analysis(
+pub fn classify_volatility_with_calibrated_params(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::VolatilityParams,
@@ -641,6 +642,7 @@ pub fn classify_volatility_with_distribution_analysis(
 /// - `sequence_length`: Length of input sequences
 /// - `horizon_steps`: Number of steps in prediction horizon
 /// - `target_balance`: Target percentage for each class (e.g., 0.2 for 20%)
+/// - `min_baseline`: Minimum volatility baseline to test during calibration
 ///
 /// ## Returns
 /// Calibrated base_sensitivity parameter for balanced volatility classification
@@ -649,6 +651,7 @@ pub fn calibrate_volatility_bandwidth(
     sequence_length: usize,
     horizon_steps: usize,
     target_balance: f64,
+    min_baseline: f64,
 ) -> Result<f64> {
     if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
         return Ok(0.3); // Default threshold for ratio-based approach
@@ -662,11 +665,14 @@ pub fn calibrate_volatility_bandwidth(
         let horizon_candles = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
         if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-            let sequence_atr = calculate_simple_atr(sequence_candles).unwrap_or(0.01);
-            let horizon_atr = calculate_simple_atr(horizon_candles).unwrap_or(0.01);
+            // Use the min_baseline parameter passed for calibration testing
+            let sequence_atr = calculate_simple_atr_with_params(sequence_candles, min_baseline)
+                .unwrap_or(min_baseline);
+            let horizon_atr = calculate_simple_atr_with_params(horizon_candles, min_baseline)
+                .unwrap_or(min_baseline);
 
-            // Calculate ratio with default minimum baseline (will be replaced by adaptive params)
-            let baseline_atr = sequence_atr.max(0.005);
+            // Calculate ratio with the test baseline
+            let baseline_atr = sequence_atr.max(min_baseline);
             let volatility_ratio = horizon_atr / baseline_atr;
 
             if volatility_ratio.is_finite() && volatility_ratio > 0.0 {
@@ -727,13 +733,14 @@ pub fn calibrate_volatility_bandwidth(
 /// - **ATR Sensitivity**: How sensitive to ATR momentum changes (like sentiment's body_sensitivity)
 /// - **Volume Weight**: How much volume conviction affects classification
 /// - **Extreme Multiplier**: Boundary between moderate and extreme classes
+/// - **Min Baseline**: Minimum volatility baseline for stability
 ///
 /// This replaces the simple bandwidth calibration with comprehensive testing that
 /// mirrors the successful sentiment calibration approach.
 ///
 /// ## Algorithm
 /// 1. Collect all ATR momentum and volume data for testing
-/// 2. Test different parameter combinations (sensitivity × volume_weight × extreme_multiplier)
+/// 2. Test different parameter combinations (sensitivity × volume_weight × extreme_multiplier × min_baseline)
 /// 3. Find optimal parameters that achieve balanced 20% per class distribution
 /// 4. Return best parameters with balance quality score
 pub fn calibrate_volatility_comprehensive(
@@ -741,6 +748,7 @@ pub fn calibrate_volatility_comprehensive(
     sequence_length: usize,
     horizon_steps: usize,
     target_balance: f64,
+    min_baseline: f64,
 ) -> Result<(f64, f64, f64)> {
     if ohlcv_data.len() < sequence_length + horizon_steps + 50 {
         return Ok((0.02, 0.1, 2.0)); // Default parameters
@@ -754,12 +762,15 @@ pub fn calibrate_volatility_comprehensive(
         let horizon_ohlcv = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
         if sequence_ohlcv.len() >= 3 && horizon_ohlcv.len() >= 3 {
-            let sequence_atr = calculate_simple_atr(sequence_ohlcv).unwrap_or(0.005);
-            let horizon_atr = calculate_simple_atr(horizon_ohlcv).unwrap_or(0.005);
+            // Use the min_baseline parameter for calibration testing
+            let sequence_atr = calculate_simple_atr_with_params(sequence_ohlcv, min_baseline)
+                .unwrap_or(min_baseline);
+            let horizon_atr = calculate_simple_atr_with_params(horizon_ohlcv, min_baseline)
+                .unwrap_or(min_baseline);
             let sequence_volume = calculate_average_volume(sequence_ohlcv);
             let horizon_volume = calculate_average_volume(horizon_ohlcv);
 
-            let baseline_atr = sequence_atr.max(0.005);
+            let baseline_atr = sequence_atr.max(min_baseline);
             if baseline_atr > 0.0 && sequence_volume > 0.0 {
                 let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
                 let volume_conviction = (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0);
@@ -997,8 +1008,10 @@ pub fn calculate_volume_weighted_volatility_change(
         return Ok(1.0); // Neutral change for insufficient data
     }
 
-    let sequence_vw_atr = calculate_volume_weighted_atr(sequence_candles)?;
-    let horizon_vw_atr = calculate_volume_weighted_atr(horizon_candles)?;
+    // Use a default min_baseline for these helper functions
+    let min_baseline = 0.005;
+    let sequence_vw_atr = calculate_volume_weighted_atr(sequence_candles, min_baseline)?;
+    let horizon_vw_atr = calculate_volume_weighted_atr(horizon_candles, min_baseline)?;
 
     if sequence_vw_atr <= 0.0 {
         return Ok(1.0);
@@ -1133,10 +1146,10 @@ fn calculate_atr_trend_slope(atr_values: &[f64]) -> Result<f64> {
     Ok(slope)
 }
 
-/// Helper: Calculate volume-weighted ATR
-fn calculate_volume_weighted_atr(candles: &[MarketDataRow]) -> Result<f64> {
+/// Helper: Calculate volume-weighted ATR with configurable minimum baseline
+fn calculate_volume_weighted_atr(candles: &[MarketDataRow], min_baseline: f64) -> Result<f64> {
     if candles.len() < 2 {
-        return Ok(0.005); // Default minimum
+        return Ok(min_baseline); // Use calibrated minimum
     }
 
     let mut weighted_sum = 0.0;
@@ -1161,10 +1174,10 @@ fn calculate_volume_weighted_atr(candles: &[MarketDataRow]) -> Result<f64> {
     }
 
     if total_weight <= 0.0 {
-        return calculate_simple_atr(candles);
+        return calculate_simple_atr_with_params(candles, min_baseline);
     }
 
-    Ok((weighted_sum / total_weight).max(0.005))
+    Ok((weighted_sum / total_weight).max(min_baseline))
 }
 
 /// Helper: Calculate ATR consistency (lower = more consistent)
@@ -1215,7 +1228,8 @@ fn calculate_enhanced_score_midpoints(
 
     // Calculate sequence-only features for neutral approximation
     let sequence_trend = calculate_sequence_volatility_trend(sequence_ohlcv)?;
-    let sequence_volume_weighted = calculate_volume_weighted_atr(sequence_ohlcv)?;
+    let sequence_volume_weighted =
+        calculate_volume_weighted_atr(sequence_ohlcv, calibrated_params.min_volatility_baseline)?;
     let sequence_persistence = calculate_sequence_volatility_persistence(sequence_ohlcv)?;
 
     // Calculate actual enhanced score boundaries (same as classify_enhanced_volatility_score)

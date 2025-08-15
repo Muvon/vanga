@@ -103,17 +103,6 @@ pub fn generate_sentiment_targets_with_calibrated_params(
         calibrated_params.consistency_factor
     );
 
-    let config = SentimentConfig {
-        body_sensitivity: calibrated_params.body_sensitivity,
-        volume_weight: calibrated_params.volume_weight,
-        consistency_factor: calibrated_params.consistency_factor,
-    };
-
-    log::info!(
-        "🎯 Sentiment targets using calibrated sensitivity: {:.6}",
-        calibrated_params.body_sensitivity
-    );
-
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
 
@@ -132,7 +121,11 @@ pub fn generate_sentiment_targets_with_calibrated_params(
             let sequence_data = &ohlcv_data[seq_start..seq_end];
             let horizon_data = &ohlcv_data[seq_end..horizon_end];
 
-            match classify_sentiment(sequence_data, horizon_data, &config, calibrated_params) {
+            match classify_sentiment_with_calibrated_params(
+                sequence_data,
+                horizon_data,
+                calibrated_params,
+            ) {
                 Ok(class) => horizon_targets.push(class),
                 Err(e) => {
                     log::warn!(
@@ -170,11 +163,10 @@ pub fn generate_sentiment_targets_with_calibrated_params(
 /// - **Strong Signal**: Direct momentum values with clear positive/negative meaning
 /// - **Volume Conviction**: Higher volume amplifies momentum signals
 /// - **ML Friendly**: Unbounded numerical range perfect for LSTM learning
-pub fn classify_sentiment(
+pub fn classify_sentiment_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
-    _config: &SentimentConfig, // Kept for API compatibility
-    adaptive_params: &crate::targets::calibration::SentimentParams,
+    calibrated_params: &crate::targets::calibration::SentimentParams,
 ) -> Result<i32> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
         return Err(VangaError::DataError(
@@ -205,11 +197,12 @@ pub fn classify_sentiment(
     };
 
     // Combine momentum with volume conviction (momentum is primary signal)
-    let sentiment_score = price_momentum + (volume_conviction * adaptive_params.volume_weight);
+    let sentiment_score = price_momentum + (volume_conviction * calibrated_params.volume_weight);
 
     // Use adaptive thresholds for classification (same structure as before)
-    let moderate_threshold = adaptive_params.body_sensitivity; // Now represents momentum threshold
-    let extreme_threshold = adaptive_params.body_sensitivity * adaptive_params.extreme_multiplier;
+    let moderate_threshold = calibrated_params.body_sensitivity; // Now represents momentum threshold
+    let extreme_threshold =
+        calibrated_params.body_sensitivity * calibrated_params.extreme_multiplier;
 
     // Classify based on combined sentiment score
     let class = if sentiment_score <= -extreme_threshold {
@@ -237,7 +230,7 @@ pub fn classify_sentiment(
 /// Calculate average close price for momentum calculation
 ///
 /// SIMPLE APPROACH: Returns average close price for momentum calculation
-/// Used in classify_sentiment for sequence vs horizon comparison
+/// Used in classify_sentiment_with_calibrated_params for sequence vs horizon comparison
 pub fn calculate_bullish_strength(candles: &[MarketDataRow]) -> f64 {
     if candles.is_empty() {
         return 0.0; // Neutral if no data

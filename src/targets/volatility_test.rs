@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_volatility_with_distribution_analysis() {
+    fn test_classify_volatility_with_calibrated_params() {
         let params = VolatilityParams {
             bandwidth: 0.4,
             extreme_multiplier: 2.0,
@@ -170,7 +170,7 @@ mod tests {
             (100.4, 100.6, 100.2, 100.5, 1400.0),
         ]);
 
-        let low_class = classify_volatility_with_distribution_analysis(
+        let low_class = classify_volatility_with_calibrated_params(
             &low_vol_sequence,
             &low_vol_horizon,
             &params,
@@ -190,7 +190,7 @@ mod tests {
             (108.0, 118.0, 98.0, 110.0, 1400.0),
         ]);
 
-        let high_class = classify_volatility_with_distribution_analysis(
+        let high_class = classify_volatility_with_calibrated_params(
             &high_vol_sequence,
             &high_vol_horizon,
             &params,
@@ -365,14 +365,14 @@ mod tests {
             balance: Default::default(),
         };
 
-        let low_bandwidth_class = classify_volatility_with_distribution_analysis(
+        let low_bandwidth_class = classify_volatility_with_calibrated_params(
             &sequence_candles,
             &horizon_candles,
             &low_bandwidth_params,
         )
         .unwrap();
 
-        let high_bandwidth_class = classify_volatility_with_distribution_analysis(
+        let high_bandwidth_class = classify_volatility_with_calibrated_params(
             &sequence_candles,
             &horizon_candles,
             &high_bandwidth_params,
@@ -404,7 +404,7 @@ mod tests {
         let minimal_sequence = create_test_candles(vec![(100.0, 100.0, 100.0, 100.0, 1000.0)]);
         let minimal_horizon = create_test_candles(vec![(100.0, 100.0, 100.0, 100.0, 1000.0)]);
 
-        let result = classify_volatility_with_distribution_analysis(
+        let result = classify_volatility_with_calibrated_params(
             &minimal_sequence,
             &minimal_horizon,
             &params,
@@ -422,7 +422,7 @@ mod tests {
             (100.0, 100.0, 100.0, 100.0, 1000.0),
         ]);
 
-        let class = classify_volatility_with_distribution_analysis(
+        let class = classify_volatility_with_calibrated_params(
             &zero_vol_sequence,
             &zero_vol_horizon,
             &params,

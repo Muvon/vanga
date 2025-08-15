@@ -248,6 +248,8 @@ mod tests {
             bandwidth: 0.8,
             extreme_multiplier: 2.0,
             smoothing_periods: 3,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.02,
             balance: Default::default(),
         };
 
@@ -423,6 +425,8 @@ mod tests {
             bandwidth: 0.8,
             extreme_multiplier: 2.0,
             smoothing_periods: 3,
+            min_base_threshold: 0.01,
+            min_extreme_threshold: 0.02,
             balance: Default::default(),
         };
 

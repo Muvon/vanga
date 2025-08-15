@@ -48,8 +48,9 @@ pub struct DirectionParams {
 pub struct PriceLevelParams {
     pub bandwidth: f64,
     pub percentiles: [f64; 2],
-    pub neutral_band: f64,
+    pub neutral_band_factor: f64, // Replaces hardcoded 0.4 (was called neutral_band)
     pub fallback_percentiles: [f64; 2], // NEW: Replaces hardcoded [0.1, 0.9]
+    pub momentum_factor: f64,     // NEW: Replaces hardcoded 1.2
     pub balance: ClassBalance,
 }
 
@@ -71,6 +72,8 @@ pub struct SentimentParams {
     pub volume_weight: f64,
     pub consistency_factor: f64,
     pub extreme_multiplier: f64, // Add this field for consistency with other targets
+    pub min_base_threshold: f64, // NEW: Minimum base threshold for consistency
+    pub min_extreme_threshold: f64, // NEW: Minimum extreme threshold for consistency
     pub balance: ClassBalance,
 }
 
@@ -80,6 +83,8 @@ pub struct VolumeParams {
     pub bandwidth: f64,
     pub extreme_multiplier: f64,
     pub smoothing_periods: usize,
+    pub min_base_threshold: f64, // NEW: Minimum base threshold for consistency
+    pub min_extreme_threshold: f64, // NEW: Minimum extreme threshold for consistency
     pub balance: ClassBalance,
 }
 
@@ -444,7 +449,8 @@ impl ParameterCalibrator {
 
         let bandwidths = vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
         let percentile_pairs = vec![[0.2, 0.8], [0.25, 0.75], [0.3, 0.7]];
-        let neutral_bands = vec![0.2, 0.3, 0.4];
+        let neutral_band_factors = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]; // Renamed and expanded range
+        let momentum_factors = vec![1.0, 1.1, 1.2, 1.3, 1.5]; // NEW: Calibrate momentum factor
 
         // NEW: Grid search for previously hardcoded fallback_percentiles
         let fallback_percentile_pairs = vec![
@@ -455,28 +461,31 @@ impl ParameterCalibrator {
 
         for &bandwidth in &bandwidths {
             for &percentiles in &percentile_pairs {
-                for &neutral_band in &neutral_bands {
+                for &neutral_band_factor in &neutral_band_factors {
                     for &fallback_percentiles in &fallback_percentile_pairs {
-                        let balance = self.evaluate_price_level_params(
-                            context,
-                            &PriceLevelEvalParams {
-                                bandwidth,
-                                percentiles,
-                                neutral_band,
-                            },
-                        )?;
+                        for &momentum_factor in &momentum_factors {
+                            let balance = self.evaluate_price_level_params(
+                                context,
+                                &PriceLevelEvalParams {
+                                    bandwidth,
+                                    percentiles,
+                                    neutral_band: neutral_band_factor, // Using neutral_band_factor
+                                },
+                            )?;
 
-                        if balance.composite_quality_score < best_score
-                            && balance.diversity_score >= self.min_diversity_threshold
-                        {
-                            best_score = balance.composite_quality_score;
-                            best_params = PriceLevelParams {
-                                bandwidth,
-                                percentiles,
-                                neutral_band,
-                                fallback_percentiles,
-                                balance,
-                            };
+                            if balance.composite_quality_score < best_score
+                                && balance.diversity_score >= self.min_diversity_threshold
+                            {
+                                best_score = balance.composite_quality_score;
+                                best_params = PriceLevelParams {
+                                    bandwidth,
+                                    percentiles,
+                                    neutral_band_factor,
+                                    fallback_percentiles,
+                                    momentum_factor,
+                                    balance,
+                                };
+                            }
                         }
                     }
                 }
@@ -484,9 +493,10 @@ impl ParameterCalibrator {
         }
 
         log::info!(
-            "🎯 Calibrated Price Level Parameters: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], neutral_band={:.2}, fallback=[{:.2}, {:.2}]",
+            "🎯 Calibrated Price Level Parameters: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, fallback=[{:.2}, {:.2}], momentum_factor={:.2}",
             best_params.bandwidth, best_params.percentiles[0], best_params.percentiles[1],
-            best_params.neutral_band, best_params.fallback_percentiles[0], best_params.fallback_percentiles[1]
+            best_params.neutral_band_factor, best_params.fallback_percentiles[0], best_params.fallback_percentiles[1],
+            best_params.momentum_factor
         );
 
         Ok(best_params)
@@ -522,6 +532,7 @@ impl ParameterCalibrator {
                                     multiplier,
                                     decay,
                                     volume_weight,
+                                    min_baseline,
                                 },
                             )?;
 
@@ -587,9 +598,13 @@ impl ParameterCalibrator {
             },
         )?;
 
+        // Add minimum thresholds similar to direction target for consistency
+        let min_base_threshold = optimal_sensitivity * 0.1; // 10% of sensitivity as minimum
+        let min_extreme_threshold = optimal_sensitivity * optimal_extreme_multiplier * 0.1;
+
         log::info!(
-            "🎯 Comprehensive sentiment calibration complete: sensitivity={:.4}, volume_weight={:.3}, extreme_multiplier={:.2}",
-            optimal_sensitivity, optimal_volume_weight, optimal_extreme_multiplier
+            "🎯 Comprehensive sentiment calibration complete: sensitivity={:.4}, volume_weight={:.3}, extreme_multiplier={:.2}, min_base={:.4}, min_extreme={:.4}",
+            optimal_sensitivity, optimal_volume_weight, optimal_extreme_multiplier, min_base_threshold, min_extreme_threshold
         );
 
         Ok(SentimentParams {
@@ -597,6 +612,8 @@ impl ParameterCalibrator {
             volume_weight: optimal_volume_weight, // Now optimized!
             consistency_factor: 0.8,
             extreme_multiplier: optimal_extreme_multiplier, // Now optimized! No more magic numbers!
+            min_base_threshold,                             // NEW: Added for consistency
+            min_extreme_threshold,                          // NEW: Added for consistency
             balance,
         })
     }
@@ -632,12 +649,20 @@ impl ParameterCalibrator {
                             bandwidth,
                             extreme_multiplier: multiplier,
                             smoothing_periods: smoothing,
+                            min_base_threshold: bandwidth * 0.1, // 10% of bandwidth as minimum
+                            min_extreme_threshold: bandwidth * multiplier * 0.1, // For consistency
                             balance,
                         };
                     }
                 }
             }
         }
+
+        log::info!(
+            "🎯 Calibrated Volume Parameters: bandwidth={:.2}, extreme_mult={:.1}, smoothing={}, min_base={:.4}, min_extreme={:.4}",
+            best_params.bandwidth, best_params.extreme_multiplier, best_params.smoothing_periods,
+            best_params.min_base_threshold, best_params.min_extreme_threshold
+        );
 
         Ok(best_params)
     }
@@ -873,7 +898,7 @@ impl ParameterCalibrator {
         context: &EvaluationContext,
         params: &VolatilityEvalParams,
     ) -> Result<ClassBalance> {
-        use crate::targets::volatility::classify_volatility_with_distribution_analysis;
+        use crate::targets::volatility::classify_volatility_with_calibrated_params;
 
         let mut class_counts = [0usize; 5];
 
@@ -883,7 +908,7 @@ impl ParameterCalibrator {
             extreme_multiplier: params.multiplier,
             volume_weight: params.volume_weight, // Use the calibrated volume weight
             horizon_decay: params.decay,         // Use the passed decay parameter
-            min_volatility_baseline: 0.005,      // Default value
+            min_volatility_baseline: params.min_baseline, // Use the calibrated min baseline
             balance: Default::default(),
         };
 
@@ -898,7 +923,7 @@ impl ParameterCalibrator {
 
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
                     // Use the new simplified classification approach
-                    if let Ok(class) = classify_volatility_with_distribution_analysis(
+                    if let Ok(class) = classify_volatility_with_calibrated_params(
                         sequence_candles,
                         horizon_candles,
                         &calibrated_params,
@@ -921,16 +946,15 @@ impl ParameterCalibrator {
         context: &EvaluationContext,
         params: &SentimentEvalParams,
     ) -> Result<ClassBalance> {
-        use crate::targets::sentiment::{classify_sentiment, SentimentConfig};
+        use crate::targets::sentiment::{
+            classify_sentiment_with_calibrated_params, get_optimal_extreme_multiplier,
+        };
 
         let mut class_counts = [0usize; 5];
         let sample_limit = context.sample_indices.len().min(500); // Limit for performance
 
-        let config = SentimentConfig {
-            body_sensitivity: params.sensitivity,
-            volume_weight: params.volume_weight,
-            consistency_factor: params.consistency_factor,
-        };
+        // Get the extreme_multiplier that was found during calibration
+        let extreme_multiplier = get_optimal_extreme_multiplier();
 
         for &seq_idx in context.sample_indices.iter().take(sample_limit) {
             let sequence_end_idx = seq_idx + context.sequence_length;
@@ -941,19 +965,20 @@ impl ParameterCalibrator {
                 let horizon_data = &context.ohlcv_data[sequence_end_idx..target_end_idx];
 
                 if sequence_data.len() >= 2 && horizon_data.len() >= 2 {
-                    // Create initial params for evaluation (not defaults, just starting values)
-                    let initial_params = crate::targets::calibration::SentimentParams {
-                        body_sensitivity: 0.05,
-                        volume_weight: 0.2,
-                        consistency_factor: 1.0,
-                        extreme_multiplier: 2.0,
+                    // Use the params being evaluated with the calibrated extreme_multiplier
+                    let eval_params = crate::targets::calibration::SentimentParams {
+                        body_sensitivity: params.sensitivity,
+                        volume_weight: params.volume_weight,
+                        consistency_factor: params.consistency_factor,
+                        extreme_multiplier, // Use the calibrated extreme_multiplier
+                        min_base_threshold: params.sensitivity * 0.1, // 10% of sensitivity as minimum
+                        min_extreme_threshold: params.sensitivity * extreme_multiplier * 0.1,
                         balance: ClassBalance::default(),
                     };
-                    match classify_sentiment(
+                    match classify_sentiment_with_calibrated_params(
                         sequence_data,
                         horizon_data,
-                        &config,
-                        &initial_params, // Use initial parameters for calibration
+                        &eval_params,
                     ) {
                         Ok(class) => {
                             if (0..5).contains(&class) {
@@ -1204,6 +1229,7 @@ struct VolatilityEvalParams {
     multiplier: f64,
     decay: f64,
     volume_weight: f64, // NEW: Volume weight parameter
+    min_baseline: f64,  // NEW: Minimum volatility baseline parameter
 }
 
 /// Parameters for sentiment evaluation

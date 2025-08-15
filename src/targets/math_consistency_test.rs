@@ -10,7 +10,7 @@ mod tests {
     use crate::targets::calibration::VolatilityParams;
     use crate::targets::direction::calculate_raw_linear_slope;
     use crate::targets::volatility::{
-        classify_volatility_with_distribution_analysis, get_sequence_atr_baseline,
+        classify_volatility_with_calibrated_params, get_sequence_atr_baseline,
     };
 
     /// Helper function to create test market data
@@ -161,7 +161,7 @@ mod tests {
                     min_volatility_baseline: 0.005,
                     balance: Default::default(),
                 };
-                let class = classify_volatility_with_distribution_analysis(
+                let class = classify_volatility_with_calibrated_params(
                     &target_sequence,
                     &sequence,
                     &params,

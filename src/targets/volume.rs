@@ -40,6 +40,7 @@
 //! - Adjusts to volume volatility and market conditions
 //! - Uses same pattern as volatility target for consistency
 
+use crate::data::structures::MarketDataRow;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -160,6 +161,40 @@ pub fn generate_volume_targets_with_calibrated_params(
     }
 
     Ok(targets)
+}
+
+/// Classify volume regime using calibrated parameters (consistent API)
+pub fn classify_volume_with_calibrated_params(
+    sequence_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
+    calibrated_params: &crate::targets::calibration::VolumeParams,
+) -> Result<i32> {
+    // Extract volume data from OHLCV
+    let sequence_volumes: Vec<f64> = sequence_ohlcv.iter().map(|row| row.volume).collect();
+    let horizon_volumes: Vec<f64> = horizon_ohlcv.iter().map(|row| row.volume).collect();
+
+    // Create thresholds from calibrated params with minimum thresholds applied
+    let base_threshold = calibrated_params
+        .bandwidth
+        .max(calibrated_params.min_base_threshold);
+    let extreme_threshold = (calibrated_params.extreme_multiplier * calibrated_params.bandwidth)
+        .max(calibrated_params.min_extreme_threshold);
+
+    let thresholds = LogVolumeThresholds {
+        very_low_max: (1.0 - extreme_threshold).ln(),
+        low_max: (1.0 - base_threshold).ln(),
+        medium_max: (1.0 + base_threshold).ln(),
+        high_max: (1.0 + extreme_threshold).ln(),
+    };
+
+    // Create config from calibrated params
+    let config = VolumeConfig {
+        bandwidth_size: calibrated_params.bandwidth,
+        extreme_multiplier: calibrated_params.extreme_multiplier,
+        smoothing_periods: calibrated_params.smoothing_periods,
+    };
+
+    classify_volume_regime(&sequence_volumes, &horizon_volumes, &thresholds, &config)
 }
 
 /// Classify volume regime using logarithmic ratio analysis

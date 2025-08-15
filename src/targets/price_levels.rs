@@ -114,32 +114,22 @@ impl PriceLevelConfig {
 }
 
 /// Generate price level targets using PriceLevelConfig
-pub fn generate_price_level_targets(
+pub fn generate_price_level_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
-    config: &PriceLevelConfig,
     sequence_indices: &[usize],
     sequence_length: usize,
+    calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<HashMap<String, Vec<i32>>> {
-    generate_price_level_targets_with_fallback(
-        df,
-        horizons,
-        config,
-        sequence_indices,
-        sequence_length,
-        None,
-    )
-}
-
-pub fn generate_price_level_targets_with_fallback(
-    df: &DataFrame,
-    horizons: &[String],
-    config: &PriceLevelConfig,
-    sequence_indices: &[usize],
-    sequence_length: usize,
-    fallback_percentiles: Option<[f64; 2]>,
-) -> Result<HashMap<String, Vec<i32>>> {
-    config.validate()?;
+    log::info!(
+        "🎯 Using calibrated price levels parameters: bandwidth={:.6}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, fallback=[{:.2}, {:.2}]",
+        calibrated_params.bandwidth,
+        calibrated_params.percentiles[0],
+        calibrated_params.percentiles[1],
+        calibrated_params.neutral_band_factor,
+        calibrated_params.fallback_percentiles[0],
+        calibrated_params.fallback_percentiles[1]
+    );
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
 
@@ -156,15 +146,11 @@ pub fn generate_price_level_targets_with_fallback(
                 let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
                 let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                // Use enhanced classification with momentum weighting and adaptive bandwidth
-                // TODO: Make these configurable parameters in future config refactoring
-                let momentum_factor = Some(1.2); // Slight bias toward recent data
-
-                let target_class = classify_price_level_with_fallback(
+                // Use enhanced classification with calibrated parameters
+                let target_class = classify_price_level_with_calibrated_params(
                     sequence_ohlcv,
                     horizon_ohlcv,
-                    momentum_factor,
-                    fallback_percentiles,
+                    calibrated_params,
                 )?;
                 horizon_targets[seq_position] = target_class;
             }
@@ -444,72 +430,38 @@ pub fn calculate_adaptive_bandwidth(
     Ok(adaptive_bandwidth)
 }
 
-/// **UPDATED**: Classify price level using exponentially-weighted close and adaptive thresholds
-///
-/// # 🚀 ENHANCED CLASSIFICATION WITH ADAPTIVE FEATURES
-///
-/// **Mathematical Enhancements**:
-/// 1. **Exponentially-Weighted Close**: Recent data gets more influence in price calculation
-/// 2. **Adaptive Bandwidth**: Automatically adjusts to sequence volatility characteristics
-/// 3. **Volatility Normalization**: Consistent behavior across different market regimes
-/// 4. **Backward Compatibility**: Falls back to standard method when enhancements disabled
-///
-/// **Key Improvements**:
-/// - **Better Trend Capture**: Momentum weighting captures evolving price trends
-/// - **Volatility Adaptation**: Bandwidth scales with market volatility automatically
-/// - **Balanced Distribution**: Maintains ~20% per class across market conditions
-/// - **Mathematical Consistency**: Stable performance across different assets and timeframes
-///
-/// **Configuration Parameters**:
-/// - `momentum_factor`: No longer used - exponential weighting is built-in
-/// - `base_sensitivity`: Base bandwidth multiplier (auto-scaled by volatility)
-///
-/// # Arguments
-/// * `sequence_ohlcv` - Input sequence OHLCV data
-/// * `horizon_ohlcv` - Horizon period OHLCV data
-/// * `momentum_factor` - Optional momentum weighting (1.0 = standard, >1.0 = recent bias)
-///
-/// # Returns
-/// * `Result<i32>` - Enhanced classification [0-4] with adaptive features
-pub fn classify_price_level(
+pub fn classify_price_level_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
-    momentum_factor: Option<f64>,
-) -> Result<i32> {
-    classify_price_level_with_fallback(sequence_ohlcv, horizon_ohlcv, momentum_factor, None)
-}
-
-pub fn classify_price_level_with_fallback(
-    sequence_ohlcv: &[MarketDataRow],
-    horizon_ohlcv: &[MarketDataRow],
-    momentum_factor: Option<f64>,
-    fallback_percentiles: Option<[f64; 2]>,
+    calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<i32> {
     if sequence_ohlcv.is_empty() {
         return Ok(2); // Default to neutral class
     }
 
-    // 1. Calculate sequence exponentially-weighted close (momentum factor no longer used)
+    // 1. Calculate sequence exponentially-weighted close
     let seq_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
 
     // 2. Calculate horizon exponentially-weighted close
     let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
-    // 3. Use adaptive percentiles based on sequence data with calibrated fallback
-    let percentiles =
-        calculate_adaptive_percentiles_from_sequence(sequence_ohlcv, fallback_percentiles)?;
+    // 3. Use adaptive percentiles from calibrated params
+    let percentiles = calculate_adaptive_percentiles_from_sequence(
+        sequence_ohlcv,
+        Some(calibrated_params.fallback_percentiles),
+    )?;
     let base_bandwidth_size = 1.0;
 
-    // 4. Calculate adaptive bandwidth if enabled
-    // // ALWAYS  adaptive no need to have complexity
+    // 4. Calculate adaptive bandwidth with momentum factor from calibrated params
+    let momentum_factor = Some(calibrated_params.momentum_factor);
     let final_bandwidth_size =
         calculate_adaptive_bandwidth(sequence_ohlcv, base_bandwidth_size, momentum_factor)?;
 
-    // 5. Use enhanced sequence reconstruction with adaptive parameters
+    // 5. Use enhanced sequence reconstruction with calibrated parameters
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size: final_bandwidth_size,
-        neutral_band_factor: 0.4, // Default neutral band factor (will be calibrated)
+        neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
 
@@ -630,36 +582,6 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
     Ok(())
 }
 
-/// Generate price level targets with optional adaptive parameters
-///
-/// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
-/// target generation between training and prediction. When None, uses base config.
-pub fn generate_price_level_targets_with_calibrated_params(
-    df: &DataFrame,
-    horizons: &[String],
-    sequence_indices: &[usize],
-    sequence_length: usize,
-    calibrated_params: &crate::targets::calibration::PriceLevelParams,
-) -> Result<HashMap<String, Vec<i32>>> {
-    let config = PriceLevelConfig {
-        bandwidth_size: calibrated_params.bandwidth,
-        neutral_band_factor: calibrated_params.neutral_band,
-    };
-    log::info!(
-        "🎯 Using pre-calibrated price level parameters: bandwidth={:.4}, neutral_band={:.2}",
-        config.bandwidth_size,
-        config.neutral_band_factor
-    );
-    generate_price_level_targets_with_fallback(
-        df,
-        horizons,
-        &config,
-        sequence_indices,
-        sequence_length,
-        Some(calibrated_params.fallback_percentiles),
-    )
-}
-
 // ============================================================================
 // PREDICTION RECONSTRUCTION METHODS
 // ============================================================================
@@ -740,7 +662,7 @@ pub fn reconstruct_price_levels(
     let reconstruction_config = SequenceReconstructionConfig {
         percentiles,
         bandwidth_size: final_bandwidth_size,
-        neutral_band_factor: 0.4, // Default neutral band factor (will be calibrated)
+        neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
