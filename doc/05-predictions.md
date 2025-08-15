@@ -648,7 +648,7 @@ impl MultiTargetLSTMModel {
         // 2. Load individual target models
         let mut models = HashMap::new();
         for target_name in &metadata.target_names {
-            let model_path = base_path.join(format!("{}.bin", target_name));
+            let model_path = base_path.join(format!("{}", target_name));
             let model = LSTMModel::load(&model_path)?;
             models.insert(target_name.clone(), model);
         }

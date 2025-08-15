@@ -648,7 +648,7 @@ impl MultiTargetLSTMModel {
 
         // Save each individual model
         for (i, model) in self.models.iter().enumerate() {
-            let model_path = format!("{}_{}.bin", base_path.to_string_lossy(), i);
+            let model_path = format!("{}_{}", base_path.to_string_lossy(), i);
             model.save(&model_path)?;
             log::debug!("Saved model {} to: {}", i + 1, model_path);
         }

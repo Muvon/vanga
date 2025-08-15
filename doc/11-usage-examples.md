@@ -730,7 +730,7 @@ SYMBOLS=("BTCUSDT" "ETHUSDT" "ADAUSDT")
 
 # Train models if they don't exist
 for symbol in "${SYMBOLS[@]}"; do
-    if [ ! -f "$MODELS_DIR/${symbol}_model.bin" ]; then
+    if [ ! -f "$MODELS_DIR/${symbol}_model" ]; then
         echo "Training model for $symbol..."
         $VANGA_BIN train --symbol $symbol --data "$DATA_DIR/${symbol}_historical.csv"
     fi

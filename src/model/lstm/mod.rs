@@ -269,7 +269,7 @@ mod tests {
 
         // Create a temporary directory for the test
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let model_path = temp_dir.path().join("test_model.bin");
+        let model_path = temp_dir.path().join("test_model");
 
         // Step 1: Create and train a model
         let config = LSTMConfig {

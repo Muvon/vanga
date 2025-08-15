@@ -446,10 +446,17 @@ impl ParameterCalibrator {
         let mut best_params = PriceLevelParams::default();
         let mut best_score = f64::INFINITY;
 
-        let bandwidths = vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-        let percentile_pairs = vec![[0.05, 0.95], [0.1, 0.9], [0.15, 0.85]]; // Base percentiles for adaptive calculation
-        let neutral_band_factors = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]; // Neutral zone size
-        let momentum_factors = vec![1.0, 1.1, 1.2, 1.3, 1.5]; // Momentum weighting for bandwidth
+        let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let percentile_pairs = vec![
+            [0.05, 0.95],
+            [0.1, 0.9],
+            [0.15, 0.85],
+            [0.2, 0.8],
+            [0.25, 0.75],
+            [0.3, 0.7],
+        ]; // Base percentiles for adaptive calculation
+        let neutral_band_factors = vec![0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]; // Neutral zone size
+        let momentum_factors = vec![1.0, 1.1, 1.2, 1.3, 1.5, 2.0, 2.5, 3.0]; // Momentum weighting for bandwidth
 
         for &bandwidth in &bandwidths {
             for &percentiles in &percentile_pairs {
@@ -616,9 +623,9 @@ impl ParameterCalibrator {
         let mut best_params = VolumeParams::default();
         let mut best_score = f64::INFINITY;
 
-        let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6];
-        let multipliers = vec![1.5, 2.0, 2.5];
-        let smoothing_values = vec![1, 3, 5, 7];
+        let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
+        let smoothing_values = vec![1, 3, 5, 7, 9, 11, 15];
 
         for &bandwidth in &bandwidths {
             for &multiplier in &multipliers {
