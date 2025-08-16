@@ -1,6 +1,6 @@
 # Linear Bias Correction Configuration
 # Based on "Seeing Beyond Noise: Improving Cryptocurrency Forecasting with Linear Bias Correction"
-# Adapted for 5-class classification system
+# Adapted for 5-class classification system with TRAINING INTEGRATION
 
 [bias_correction]
 # Enable/disable bias correction system
@@ -27,28 +27,34 @@ min_samples = 100
 # This scales the overall prediction confidence after class-specific corrections
 confidence_adjustment = 1.0
 
-
 # Print detailed bias correction info during training
 # true = show detailed class-by-class breakdown
 # false = show concise single-line summary (recommended for cleaner logs)
 print_info = false
+# NEW: Training Integration Parameters (FULLY ADAPTIVE)
+# Ramp-up epochs for gradual integration into training
+# The correction strength gradually increases from 0 to adaptive maximum over these epochs
+# This prevents shocking the model with sudden corrections
+ramp_up_epochs = 10
+
+# Recalibration frequency (epochs between recalibration during training)
+# 0 = no recalibration during training (only initial calibration)
+# 5 = recalibrate every 5 epochs with recent validation data
+# Recommended: 5 for adaptive correction that evolves with the model
+recalibration_frequency = 5
+
+# NOTE: Correction strength is now FULLY ADAPTIVE based on:
+# - Actual class imbalance in predictions vs targets
+# - Validation accuracy (less correction if already accurate)
+# - Ordinal relationship preservation (conservative for monotonic classes)
+# No manual tuning required!
 
 # Advanced Configuration (Optional)
+# Advanced Configuration (Optional)
 [bias_correction.advanced]
-# Recalibration frequency (epochs between bias correction updates during training)
-# 0 = only calibrate once at the end of training
-# >0 = recalibrate every N epochs (useful for long training runs)
-recalibration_frequency = 0
-
 # Confidence bounds for extreme prediction filtering
 # Predictions with confidence outside these bounds may be flagged
 confidence_bounds = [0.1, 0.9]
-
-# Class balance target (future enhancement)
-# Target distribution for class balance optimization
-# [0.2, 0.2, 0.2, 0.2, 0.2] = perfectly balanced classes
-target_class_distribution = [0.2, 0.2, 0.2, 0.2, 0.2]
-
 # Logging configuration
 [bias_correction.logging]
 # Enable detailed bias correction logging

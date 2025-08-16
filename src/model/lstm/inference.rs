@@ -556,14 +556,19 @@ impl LSTMModel {
         // Convert back to ndarray
         let mut predictions_array = self.tensor_to_array2(&predictions_probs)?;
 
-        // Apply bias correction using LinearBiasCorrector
+        // Apply bias correction using LinearBiasCorrector with proper tensor method
         if let Some(ref corrector) = self.bias_corrector {
             if corrector.is_calibrated {
                 log::info!(
                     "🔧 Applying LinearBiasCorrector to {} predictions",
                     predictions_array.nrows()
                 );
-                predictions_array = corrector.apply_correction(&predictions_array)?;
+
+                // Convert back to tensor for proper bias correction
+                let predictions_tensor = self.array2_to_tensor(&predictions_array)?;
+                let corrected_tensor = corrector.apply_correction_tensor(&predictions_tensor)?;
+                predictions_array = self.tensor_to_array2(&corrected_tensor)?;
+
                 log::info!("✅ Bias correction applied successfully");
             } else {
                 log::debug!("ℹ️ LinearBiasCorrector not calibrated - skipping correction");
@@ -703,6 +708,19 @@ impl LSTMModel {
 
         Array2::from_shape_vec((rows, cols), data_f64)
             .map_err(|e| VangaError::ModelError(format!("Failed to create Array2: {}", e)))
+    }
+
+    /// Convert ndarray Array2 to Candle tensor - helper method
+    fn array2_to_tensor(&self, array: &Array2<f64>) -> Result<Tensor> {
+        let (rows, cols) = array.dim();
+
+        // Convert f64 to f32 and flatten
+        let data_f32: Vec<f32> = array.iter().map(|&x| x as f32).collect();
+
+        // Create tensor
+        Tensor::from_vec(data_f32, (rows, cols), &self.device).map_err(|e| {
+            VangaError::ModelError(format!("Failed to create tensor from Array2: {}", e))
+        })
     }
 
     /// Apply dropout with sequence context for variational dropout

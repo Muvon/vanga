@@ -1056,8 +1056,44 @@ impl LSTMModel {
                 // This prevents hidden state contamination between batches
                 let predictions = self.forward(&input_tensor, true)?;
 
-                // Calculate loss using ordinal regression for ordered 5-class targets
-                let base_loss = self.calculate_loss(&predictions, &target_tensor, config, false)?;
+                // NEW: Apply bias correction during training if calibrated
+                // CRITICAL: Apply to LOGITS, not probabilities, to work with ordinal loss
+                let predictions_for_loss = if epoch > 5 && self.bias_corrector.is_some() {
+                    let corrector = self.bias_corrector.as_ref().unwrap();
+                    if corrector.is_calibrated && corrector.config.enabled {
+                        // Apply bias correction to RAW LOGITS (before softmax)
+                        // This preserves gradient flow and works correctly with ordinal loss
+                        let corrected =
+                            corrector.apply_correction_to_logits(&predictions, epoch)?;
+
+                        // Log correction impact periodically
+                        if epoch % 10 == 0 && batch_idx == 0 {
+                            // For monitoring, we need to compare probabilities
+                            let original_probs = candle_nn::ops::softmax(&predictions, 1)?;
+                            let corrected_probs = candle_nn::ops::softmax(&corrected, 1)?;
+
+                            if let Ok(kl_div) = corrector
+                                .calculate_correction_impact(&original_probs, &corrected_probs)
+                            {
+                                log::info!(
+                                    "📊 Bias correction impact at epoch {} (KL divergence): {:.6}",
+                                    epoch + 1,
+                                    kl_div
+                                );
+                            }
+                        }
+
+                        corrected
+                    } else {
+                        predictions.clone()
+                    }
+                } else {
+                    predictions.clone()
+                };
+
+                // Calculate loss using potentially corrected predictions
+                let base_loss =
+                    self.calculate_loss(&predictions_for_loss, &target_tensor, config, false)?;
 
                 // Get loss value for reporting BEFORE gradient clipping (to avoid move issues)
                 let batch_loss_value = base_loss.to_scalar::<f32>().map_err(|e| {
@@ -1402,6 +1438,101 @@ impl LSTMModel {
                         }
                     } else {
                         log::info!("ℹ️ No bias corrector available - bias correction disabled");
+                    }
+                }
+                // Progressive bias correction recalibration during training
+                if epoch > 0 && self.bias_corrector.is_some() {
+                    let recalib_freq = self
+                        .bias_corrector
+                        .as_ref()
+                        .unwrap()
+                        .config
+                        .recalibration_frequency;
+                    if recalib_freq > 0
+                        && epoch % recalib_freq == 0
+                        && !all_val_predictions.is_empty()
+                    {
+                        // Recalibrate bias correction with recent validation data
+                        if let Some(ref mut corrector) = self.bias_corrector {
+                            let total_val_predictions = ndarray::concatenate(
+                                ndarray::Axis(0),
+                                &all_val_predictions
+                                    .iter()
+                                    .map(|arr| arr.view())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|e| {
+                                VangaError::ModelError(format!(
+                                    "Failed to concatenate validation predictions for recalibration: {}",
+                                    e
+                                ))
+                            })?;
+
+                            let total_val_targets = ndarray::concatenate(
+                                ndarray::Axis(0),
+                                &all_val_targets
+                                    .iter()
+                                    .map(|arr| arr.view())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|e| {
+                                VangaError::ModelError(format!(
+                                    "Failed to concatenate validation targets for recalibration: {}",
+                                    e
+                                ))
+                            })?;
+
+                            // Ensure proper shape for bias correction
+                            if total_val_predictions.shape()[1] == 5 {
+                                let val_targets_for_bias = if total_val_targets.shape()[1] == 1 {
+                                    // Convert class indices to one-hot
+                                    let num_samples = total_val_targets.shape()[0];
+                                    let mut one_hot =
+                                        ndarray::Array2::<f64>::zeros((num_samples, 5));
+                                    for (i, class_idx) in total_val_targets.iter().enumerate() {
+                                        let class_index = (*class_idx as usize).min(4);
+                                        one_hot[[i, class_index]] = 1.0;
+                                    }
+                                    one_hot
+                                } else {
+                                    total_val_targets.clone()
+                                };
+
+                                // Recalibrate
+                                corrector.calibrate_from_validation(
+                                    &total_val_predictions,
+                                    &val_targets_for_bias,
+                                )?;
+
+                                if corrector.is_calibrated {
+                                    log::info!(
+                                        "🔄 Bias correction recalibrated at epoch {} with factors: {:?}",
+                                        epoch + 1, corrector.class_bias_factors
+                                    );
+
+                                    // Calculate and log class distribution improvement
+                                    if let Some(stats) = &corrector.validation_stats {
+                                        let pred_variance: f64 = stats
+                                            .class_frequencies_predicted
+                                            .iter()
+                                            .map(|&f| (f - 0.2).powi(2))
+                                            .sum::<f64>()
+                                            / 5.0;
+                                        let actual_variance: f64 = stats
+                                            .class_frequencies_actual
+                                            .iter()
+                                            .map(|&f| (f - 0.2).powi(2))
+                                            .sum::<f64>()
+                                            / 5.0;
+
+                                        log::info!(
+                                            "📊 Class distribution variance - Predicted: {:.6}, Actual: {:.6}",
+                                            pred_variance, actual_variance
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
