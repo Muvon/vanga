@@ -1167,6 +1167,10 @@ impl LSTMModel {
                 let num_complete_val_batches = total_val_samples / batch_size;
                 let val_samples_used = num_complete_val_batches * batch_size;
 
+                // Collect all validation predictions and targets for bias correction
+                let mut all_val_predictions = Vec::new();
+                let mut all_val_targets = Vec::new();
+
                 // CRITICAL ISSUE FOUND: Training uses SHUFFLED data, validation uses SEQUENTIAL data
                 // This creates a fundamental distribution mismatch that causes divergence!
                 //
@@ -1232,6 +1236,38 @@ impl LSTMModel {
                     // This was the main bug - dropout was being applied during validation
                     let predictions = self.forward(&input_tensor, false)?;
 
+                    // CRITICAL FIX: Apply softmax to convert logits to probabilities for bias correction
+                    // The output layer produces raw logits, but bias correction expects probabilities
+                    let predictions_probs = candle_nn::ops::softmax(&predictions, 1)?;
+
+                    // Store predictions and targets for bias correction calibration
+                    let predictions_data: Vec<f32> = predictions_probs
+                        .flatten_all()
+                        .map_err(|e| {
+                            VangaError::ModelError(format!("Failed to flatten predictions: {}", e))
+                        })?
+                        .to_vec1()
+                        .map_err(|e| {
+                            VangaError::ModelError(format!(
+                                "Failed to convert predictions to vec: {}",
+                                e
+                            ))
+                        })?;
+
+                    let pred_shape = predictions_probs.shape();
+                    let predictions_f64: Vec<f64> =
+                        predictions_data.iter().map(|&x| x as f64).collect();
+                    let predictions_array = ndarray::Array2::from_shape_vec(
+                        (pred_shape.dims()[0], pred_shape.dims()[1]),
+                        predictions_f64,
+                    )
+                    .map_err(|e| {
+                        VangaError::ModelError(format!("Failed to create predictions array: {}", e))
+                    })?;
+
+                    all_val_predictions.push(predictions_array);
+                    all_val_targets.push(batch_targets.clone());
+
                     // Calculate validation loss using ordinal regression (same as training)
                     // CRITICAL: Both training and validation use same ordinal loss for comparability
                     // This ensures consistent loss calculation between training and validation
@@ -1268,6 +1304,106 @@ impl LSTMModel {
                     "🔍 VAL E{} SUMMARY: total_weighted_loss={:.6}, samples_used={}, avg_loss={:.6}",
                     epoch + 1, epoch_val_loss, val_samples_used, avg_val_loss
                 );
+
+                // Calibrate bias correction from all validation predictions
+                if !all_val_predictions.is_empty() {
+                    // Concatenate all validation predictions and targets
+                    let total_val_predictions = ndarray::concatenate(
+                        ndarray::Axis(0),
+                        &all_val_predictions
+                            .iter()
+                            .map(|arr| arr.view())
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|e| {
+                        VangaError::ModelError(format!(
+                            "Failed to concatenate validation predictions: {}",
+                            e
+                        ))
+                    })?;
+
+                    let total_val_targets = ndarray::concatenate(
+                        ndarray::Axis(0),
+                        &all_val_targets
+                            .iter()
+                            .map(|arr| arr.view())
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|e| {
+                        VangaError::ModelError(format!(
+                            "Failed to concatenate validation targets: {}",
+                            e
+                        ))
+                    })?;
+
+                    // Calibrate bias correction using LinearBiasCorrector
+                    if let Some(ref mut corrector) = self.bias_corrector {
+                        // Only log if print_info is true
+                        if corrector.config.print_info {
+                            log::info!("🎯 Starting bias correction calibration...");
+                        }
+
+                        // Ensure predictions are 5-class format
+                        if total_val_predictions.shape()[1] != 5 {
+                            log::warn!(
+                                "⚠️ Unexpected prediction shape for bias correction: [{}, {}], expected [*, 5]",
+                                total_val_predictions.shape()[0],
+                                total_val_predictions.shape()[1]
+                            );
+                            // Skip bias correction if predictions are not 5-class
+                            log::warn!(
+                                "⚠️ Skipping bias correction calibration due to shape mismatch"
+                            );
+                        } else {
+                            // Convert single-column class indices to one-hot encoding if needed
+                            let val_targets_for_bias = if total_val_targets.shape()[1] == 1 {
+                                // Single column class indices - convert to one-hot
+                                let num_samples = total_val_targets.shape()[0];
+                                let mut one_hot = ndarray::Array2::<f64>::zeros((num_samples, 5));
+
+                                for (i, class_idx) in total_val_targets.iter().enumerate() {
+                                    let class_index = (*class_idx as usize).min(4); // Ensure within bounds
+                                    one_hot[[i, class_index]] = 1.0;
+                                }
+
+                                log::debug!(
+                                    "📊 Converted class indices to one-hot: [{}, 1] -> [{}, 5]",
+                                    num_samples,
+                                    num_samples
+                                );
+                                one_hot
+                            } else if total_val_targets.shape()[1] == 5 {
+                                // Already one-hot encoded
+                                log::debug!(
+                                    "📊 Targets already in one-hot format: [{}, 5]",
+                                    total_val_targets.shape()[0]
+                                );
+                                total_val_targets.clone()
+                            } else {
+                                // Multi-target case (15 columns) - extract first 5 columns for first target
+                                log::debug!(
+                                    "📊 Extracting first target from multi-target: [{}, {}] -> [{}, 5]",
+                                    total_val_targets.shape()[0],
+                                    total_val_targets.shape()[1],
+                                    total_val_targets.shape()[0]
+                                );
+                                total_val_targets.slice(s![.., 0..5]).to_owned()
+                            };
+
+                            corrector.calibrate_from_validation(
+                                &total_val_predictions,
+                                &val_targets_for_bias,
+                            )?;
+                        }
+
+                        // Only log if print_info is true
+                        if corrector.config.print_info {
+                            log::info!("✅ Bias correction setup completed");
+                        }
+                    } else {
+                        log::info!("ℹ️ No bias corrector available - bias correction disabled");
+                    }
+                }
 
                 // Calculate categorical metrics for all categorical targets
                 if let Some((_, target_type)) = &self.target_context {
@@ -1529,8 +1665,21 @@ impl LSTMModel {
                     } else {
                         "🚨"
                     };
+
+                    // Get bias correction info if available
+                    let bias_info = if let Some(ref corrector) = self.bias_corrector {
+                        if corrector.is_calibrated {
+                            let avg_bias = corrector.class_bias_factors.iter().sum::<f64>() / 5.0;
+                            format!(", Bias: {:.2}", avg_bias)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+
                     log::info!(
-                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}, Grad: {:.2e}{}{}, Early Stop: {}/{}{}",
+                        "Epoch {}/{}: Train Loss = {:.6}, Val Loss = {:.6} (Ratio: {:.2}x {}), LR: {:.6}, Grad: {:.2e}{}{}, Early Stop: {}/{}{}{}",
                         epoch + 1,
                         self.training_config.epochs,
                         avg_train_loss,
@@ -1543,7 +1692,8 @@ impl LSTMModel {
                         schedule_status,
                         early_stopping_counter,
                         early_stopping_patience,
-                        target_info
+                        bias_info,
+                        target_info,
                     );
 
                     // Log overfitting warnings only when necessary
@@ -2805,5 +2955,100 @@ impl LSTMModel {
                 Ok(grad_norm)
             }
         }
+    }
+
+    /// Simple bias correction calibration - calculate correction factors from validation data
+    pub fn calibrate_simple_bias_correction(
+        &mut self,
+        val_predictions: &Array2<f64>,
+        val_targets: &Array2<f64>,
+    ) -> Result<()> {
+        if val_predictions.nrows() < self.bias_correction_config.min_samples {
+            log::debug!(
+                "🔧 Skipping bias correction: insufficient validation samples ({} < {})",
+                val_predictions.nrows(),
+                self.bias_correction_config.min_samples
+            );
+            return Ok(());
+        }
+
+        if !self.bias_correction_config.enabled {
+            log::debug!("🔧 Bias correction disabled in configuration");
+            return Ok(());
+        }
+
+        log::info!(
+            "🎯 Calibrating simple bias correction from {} validation samples",
+            val_predictions.nrows()
+        );
+
+        // Validate input dimensions
+        let num_classes = val_predictions.ncols();
+        let target_classes = val_targets.ncols();
+
+        if num_classes != 5 {
+            log::error!("❌ Expected 5 classes in predictions, got {}", num_classes);
+            return Err(VangaError::ModelError(format!(
+                "Simple bias correction requires 5-class predictions, got {}",
+                num_classes
+            )));
+        }
+
+        if target_classes != 5 {
+            log::error!("❌ Expected 5 classes in targets, got {}", target_classes);
+            return Err(VangaError::ModelError(format!(
+                "Simple bias correction requires 5-class targets, got {}",
+                target_classes
+            )));
+        }
+
+        if val_predictions.nrows() != val_targets.nrows() {
+            log::error!(
+                "❌ Predictions and targets have different number of samples: {} vs {}",
+                val_predictions.nrows(),
+                val_targets.nrows()
+            );
+            return Err(VangaError::ModelError(
+                "Predictions and targets must have same number of samples".to_string(),
+            ));
+        }
+
+        let mut predicted_frequencies = [0.0; 5];
+        let mut actual_frequencies = [0.0; 5];
+
+        // Calculate class frequencies
+        for class_idx in 0..5 {
+            predicted_frequencies[class_idx] =
+                val_predictions.column(class_idx).mean().unwrap_or(0.0);
+            actual_frequencies[class_idx] = val_targets.column(class_idx).mean().unwrap_or(0.0);
+        }
+
+        // Calculate correction factors with bounds from config
+        let mut correction_factors = [1.0; 5];
+        for class_idx in 0..5 {
+            if predicted_frequencies[class_idx] > 0.001 {
+                let raw_factor = actual_frequencies[class_idx] / predicted_frequencies[class_idx];
+                // Apply smoothing if we already have factors
+                let smoothed_factor = if self.bias_correction_factors.is_some() {
+                    let existing_factor = self.bias_correction_factors.unwrap()[class_idx];
+                    existing_factor * (1.0 - self.bias_correction_config.smoothing_factor)
+                        + raw_factor * self.bias_correction_config.smoothing_factor
+                } else {
+                    raw_factor
+                };
+                // Apply bounds from config
+                correction_factors[class_idx] = smoothed_factor
+                    .max(self.bias_correction_config.correction_bounds[0])
+                    .min(self.bias_correction_config.correction_bounds[1]);
+            }
+        }
+
+        self.bias_correction_factors = Some(correction_factors);
+
+        log::info!("✅ Bias correction factors: {:?}", correction_factors);
+        log::debug!("   Predicted frequencies: {:?}", predicted_frequencies);
+        log::debug!("   Actual frequencies: {:?}", actual_frequencies);
+
+        Ok(())
     }
 }

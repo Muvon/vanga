@@ -1,0 +1,581 @@
+use crate::utils::error::Result;
+use ndarray::{Array2, Axis};
+use serde::{Deserialize, Serialize};
+
+/// Configuration for bias correction system
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BiasCorrection {
+    /// Enable/disable bias correction
+    pub enabled: bool,
+    /// Smoothing factor for bias factor calculation (0.0 = no smoothing, 1.0 = maximum smoothing)
+    pub smoothing_factor: f64,
+    /// Minimum and maximum allowed bias correction factors
+    pub correction_bounds: [f64; 2],
+    /// Minimum samples required for reliable bias correction
+    pub min_samples: usize,
+    /// Confidence adjustment factor
+    pub confidence_adjustment: f64,
+
+    /// Print detailed bias correction info (false = concise single-line summary)
+    #[serde(default = "default_print_info")]
+    pub print_info: bool,
+}
+
+fn default_print_info() -> bool {
+    false
+}
+
+impl Default for BiasCorrection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            smoothing_factor: 0.1,
+            correction_bounds: [0.5, 2.0], // Prevent extreme corrections
+            min_samples: 100,
+            confidence_adjustment: 1.0,
+            print_info: false, // Default to concise logging
+        }
+    }
+}
+
+/// Statistics for validation period used in bias correction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationStats {
+    pub total_samples: usize,
+    pub class_frequencies_predicted: [f64; 5],
+    pub class_frequencies_actual: [f64; 5],
+    pub overall_accuracy: f64,
+    pub confidence_distribution: [f64; 5], // Confidence quartiles
+}
+
+/// Linear bias correction system adapted for 5-class classification
+///
+/// Based on the paper "Seeing Beyond Noise: Improving Cryptocurrency Forecasting with Linear Bias Correction"
+/// but adapted from regression to classification by correcting class probability distributions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinearBiasCorrector {
+    /// Configuration for bias correction
+    pub config: BiasCorrection,
+    /// Bias correction factors for each class (0-4)
+    pub class_bias_factors: [f64; 5],
+    /// Overall confidence scaling factor
+    pub confidence_scaling: f64,
+    /// Validation statistics used for correction calculation
+    pub validation_stats: Option<ValidationStats>,
+    /// Whether the corrector has been calibrated
+    pub is_calibrated: bool,
+}
+
+impl Default for LinearBiasCorrector {
+    fn default() -> Self {
+        Self {
+            config: BiasCorrection::default(),
+            class_bias_factors: [1.0; 5], // No correction initially
+            confidence_scaling: 1.0,
+            validation_stats: None,
+            is_calibrated: false,
+        }
+    }
+}
+
+impl LinearBiasCorrector {
+    /// Create new bias corrector with configuration
+    pub fn new(config: BiasCorrection) -> Self {
+        Self {
+            config,
+            class_bias_factors: [1.0; 5],
+            confidence_scaling: 1.0,
+            validation_stats: None,
+            is_calibrated: false,
+        }
+    }
+
+    /// Calculate bias correction factors from validation data
+    ///
+    /// This implements the core logic from the paper, adapted for classification:
+    /// Original: V_corrected = V_predicted * (M_actual / M_predicted)
+    /// Our adaptation: P_corrected[class] = P_predicted[class] * (freq_actual[class] / freq_predicted[class])
+    pub fn calibrate_from_validation(
+        &mut self,
+        validation_predictions: &Array2<f64>, // [samples, 5_classes]
+        validation_targets: &Array2<f64>,     // [samples, 5_classes] (one-hot or soft labels)
+    ) -> Result<()> {
+        if !self.config.enabled {
+            log::info!("🔧 Bias correction disabled, skipping calibration");
+            return Ok(());
+        }
+
+        let num_samples = validation_predictions.nrows();
+        if num_samples < self.config.min_samples {
+            log::warn!(
+                "⚠️ Insufficient validation samples for bias correction: {} < {}",
+                num_samples,
+                self.config.min_samples
+            );
+            return Ok(());
+        }
+
+        // Only log if print_info is true
+        if self.config.print_info {
+            log::info!(
+                "🎯 Calibrating bias correction from {} validation samples",
+                num_samples
+            );
+        }
+
+        // Validate input dimensions
+        let num_classes = validation_predictions.ncols();
+        let target_classes = validation_targets.ncols();
+
+        if num_classes != 5 {
+            log::error!("❌ Expected 5 classes in predictions, got {}", num_classes);
+            return Err(crate::utils::error::VangaError::ModelError(format!(
+                "Bias correction requires 5-class predictions, got {}",
+                num_classes
+            )));
+        }
+
+        if target_classes != 5 {
+            log::error!("❌ Expected 5 classes in targets, got {}", target_classes);
+            return Err(crate::utils::error::VangaError::ModelError(format!(
+                "Bias correction requires 5-class targets, got {}",
+                target_classes
+            )));
+        }
+
+        if validation_predictions.nrows() != validation_targets.nrows() {
+            log::error!(
+                "❌ Predictions and targets have different number of samples: {} vs {}",
+                validation_predictions.nrows(),
+                validation_targets.nrows()
+            );
+            return Err(crate::utils::error::VangaError::ModelError(
+                "Predictions and targets must have same number of samples".to_string(),
+            ));
+        }
+
+        // VALIDATION: Check if predictions are proper probabilities (sum to ~1.0)
+        // This helps catch issues where raw logits are passed instead of probabilities
+        let mut sample_check_count = 0;
+        let max_samples_to_check = std::cmp::min(10, validation_predictions.nrows());
+        for row_idx in 0..max_samples_to_check {
+            let row_sum: f64 = (0..5)
+                .map(|col| validation_predictions[[row_idx, col]])
+                .sum();
+
+            if (row_sum - 1.0).abs() > 0.1 {
+                sample_check_count += 1;
+            }
+        }
+
+        if sample_check_count > max_samples_to_check / 2 {
+            log::warn!(
+                "⚠️ Predictions don't appear to be probabilities! Sample sums: {:?}",
+                (0..std::cmp::min(3, validation_predictions.nrows()))
+                    .map(|i| (0..5).map(|j| validation_predictions[[i, j]]).sum::<f64>())
+                    .collect::<Vec<f64>>()
+            );
+            log::warn!("⚠️ Ensure softmax is applied to convert logits to probabilities before bias correction");
+        }
+
+        // Calculate predicted class frequencies (average probability per class)
+        let mut predicted_frequencies = [0.0; 5];
+        let mut actual_frequencies = [0.0; 5];
+
+        for class_idx in 0..5 {
+            // Predicted frequency = average predicted probability for this class
+            predicted_frequencies[class_idx] = validation_predictions
+                .column(class_idx)
+                .mean()
+                .unwrap_or(0.0);
+
+            // Actual frequency = average actual probability/label for this class
+            actual_frequencies[class_idx] =
+                validation_targets.column(class_idx).mean().unwrap_or(0.0);
+        }
+
+        // Debug: Check if frequencies sum to ~1.0 (they should for proper probabilities)
+        let predicted_sum: f64 = predicted_frequencies.iter().sum();
+        let actual_sum: f64 = actual_frequencies.iter().sum();
+
+        if self.config.print_info {
+            log::debug!(
+                "📊 Frequency sums - Predicted: {:.4}, Actual: {:.4} (should be ~1.0)",
+                predicted_sum,
+                actual_sum
+            );
+        }
+
+        // Warn if predicted frequencies don't sum to ~1.0
+        if (predicted_sum - 1.0).abs() > 0.1 {
+            log::warn!(
+                "⚠️ Predicted frequencies sum to {:.4} instead of ~1.0. Likely receiving logits instead of probabilities!",
+                predicted_sum
+            );
+        }
+
+        // Calculate bias correction factors with bounds checking
+        for class_idx in 0..5 {
+            let predicted_freq = predicted_frequencies[class_idx];
+            let actual_freq = actual_frequencies[class_idx];
+
+            let raw_factor = if predicted_freq > 1e-6 {
+                actual_freq / predicted_freq
+            } else {
+                1.0 // No correction if no predictions for this class
+            };
+
+            // Apply smoothing and bounds
+            let smoothed_factor = if self.is_calibrated {
+                // Smooth with previous factor
+                self.class_bias_factors[class_idx] * (1.0 - self.config.smoothing_factor)
+                    + raw_factor * self.config.smoothing_factor
+            } else {
+                raw_factor
+            };
+
+            // Apply bounds to prevent extreme corrections
+            self.class_bias_factors[class_idx] = smoothed_factor
+                .max(self.config.correction_bounds[0])
+                .min(self.config.correction_bounds[1]);
+        }
+
+        // Calculate overall confidence scaling
+        let predicted_confidence = self.calculate_average_confidence(validation_predictions)?;
+        let actual_confidence = self.calculate_average_confidence(validation_targets)?;
+
+        self.confidence_scaling = if predicted_confidence > 1e-6 {
+            (actual_confidence / predicted_confidence) * self.config.confidence_adjustment
+        } else {
+            self.config.confidence_adjustment
+        };
+
+        // Store validation statistics
+        let overall_accuracy =
+            self.calculate_accuracy(validation_predictions, validation_targets)?;
+        let confidence_distribution =
+            self.calculate_confidence_distribution(validation_predictions)?;
+
+        self.validation_stats = Some(ValidationStats {
+            total_samples: num_samples,
+            class_frequencies_predicted: predicted_frequencies,
+            class_frequencies_actual: actual_frequencies,
+            overall_accuracy,
+            confidence_distribution,
+        });
+
+        self.is_calibrated = true;
+
+        // Log calibration results based on print_info setting
+        if self.config.print_info {
+            // Detailed logging when print_info is true
+            log::info!("✅ Bias correction calibrated successfully");
+            log::info!("📊 Class bias factors: {:?}", self.class_bias_factors);
+            log::info!("🎯 Confidence scaling: {:.4}", self.confidence_scaling);
+            log::info!("📈 Validation accuracy: {:.4}", overall_accuracy);
+            log::info!(
+                "🔧 Configuration: enabled={}, smoothing={:.3}",
+                self.config.enabled,
+                self.config.smoothing_factor
+            );
+            log::info!(
+                "📏 Correction bounds: [{:.2}, {:.2}]",
+                self.config.correction_bounds[0],
+                self.config.correction_bounds[1]
+            );
+
+            for (class_idx, (pred_freq, actual_freq)) in predicted_frequencies
+                .iter()
+                .zip(actual_frequencies.iter())
+                .enumerate()
+            {
+                log::info!(
+                    "   📊 Class {}: predicted={:.4}, actual={:.4}, factor={:.4}",
+                    class_idx,
+                    pred_freq,
+                    actual_freq,
+                    self.class_bias_factors[class_idx]
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply bias correction to raw model predictions
+    ///
+    /// This is the main correction method that applies the calibrated bias factors
+    /// to improve prediction accuracy and class balance
+    pub fn apply_correction(&self, raw_predictions: &Array2<f64>) -> Result<Array2<f64>> {
+        if !self.config.enabled || !self.is_calibrated {
+            return Ok(raw_predictions.clone());
+        }
+
+        // Validate input dimensions
+        let num_classes = raw_predictions.ncols();
+        if num_classes != 5 {
+            log::error!(
+                "❌ Expected 5 classes in predictions for bias correction, got {}",
+                num_classes
+            );
+            return Err(crate::utils::error::VangaError::ModelError(format!(
+                "Bias correction requires 5-class predictions, got {}",
+                num_classes
+            )));
+        }
+
+        let mut corrected = raw_predictions.clone();
+        let num_samples = corrected.nrows();
+
+        // Apply class-specific bias correction factors
+        for (class_idx, &factor) in self.class_bias_factors.iter().enumerate() {
+            corrected.column_mut(class_idx).mapv_inplace(|x| x * factor);
+        }
+
+        // Apply confidence scaling
+        if (self.confidence_scaling - 1.0).abs() > 1e-6 {
+            corrected.mapv_inplace(|x| x * self.confidence_scaling);
+        }
+
+        // Renormalize probabilities to ensure they sum to 1.0
+        self.renormalize_probabilities(&mut corrected)?;
+
+        log::debug!(
+            "🔧 Applied bias correction to {} samples with factors: {:?}",
+            num_samples,
+            self.class_bias_factors
+        );
+
+        Ok(corrected)
+    }
+
+    /// Renormalize probability distributions to sum to 1.0
+    fn renormalize_probabilities(&self, predictions: &mut Array2<f64>) -> Result<()> {
+        for mut row in predictions.axis_iter_mut(Axis(0)) {
+            let sum: f64 = row.sum();
+            if sum > 1e-10 {
+                row /= sum;
+            } else {
+                // If all probabilities are near zero, set to uniform distribution
+                row.fill(0.2); // 1/5 for each class
+            }
+        }
+        Ok(())
+    }
+
+    /// Calculate average confidence (maximum probability per sample)
+    fn calculate_average_confidence(&self, predictions: &Array2<f64>) -> Result<f64> {
+        let confidences: Vec<f64> = predictions
+            .axis_iter(Axis(0))
+            .map(|row| {
+                row.iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+            .collect();
+
+        Ok(confidences.iter().sum::<f64>() / confidences.len() as f64)
+    }
+
+    /// Calculate accuracy between predictions and targets
+    fn calculate_accuracy(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> Result<f64> {
+        let mut correct = 0;
+        let total = predictions.nrows();
+
+        for (pred_row, target_row) in predictions
+            .axis_iter(Axis(0))
+            .zip(targets.axis_iter(Axis(0)))
+        {
+            let pred_class = pred_row
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            let target_class = target_row
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            if pred_class == target_class {
+                correct += 1;
+            }
+        }
+
+        Ok(correct as f64 / total as f64)
+    }
+
+    /// Calculate confidence distribution (quartiles)
+    fn calculate_confidence_distribution(&self, predictions: &Array2<f64>) -> Result<[f64; 5]> {
+        let mut confidences: Vec<f64> = predictions
+            .axis_iter(Axis(0))
+            .map(|row| {
+                row.iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+            .collect();
+
+        confidences.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let len = confidences.len();
+        if len == 0 {
+            return Ok([0.0; 5]);
+        }
+
+        Ok([
+            confidences[0],           // Min
+            confidences[len / 4],     // Q1
+            confidences[len / 2],     // Median
+            confidences[3 * len / 4], // Q3
+            confidences[len - 1],     // Max
+        ])
+    }
+
+    /// Get correction effectiveness metrics
+    pub fn get_correction_metrics(&self) -> Option<CorrectionMetrics> {
+        if !self.is_calibrated {
+            return None;
+        }
+
+        let stats = self.validation_stats.as_ref()?;
+
+        // Calculate class balance improvement
+        let pred_imbalance = self.calculate_imbalance(&stats.class_frequencies_predicted);
+        let actual_imbalance = self.calculate_imbalance(&stats.class_frequencies_actual);
+        let balance_improvement = pred_imbalance - actual_imbalance;
+
+        // Calculate correction strength (average deviation from 1.0)
+        let correction_strength = self
+            .class_bias_factors
+            .iter()
+            .map(|&f| (f - 1.0).abs())
+            .sum::<f64>()
+            / 5.0;
+
+        Some(CorrectionMetrics {
+            is_calibrated: self.is_calibrated,
+            total_samples: stats.total_samples,
+            validation_accuracy: stats.overall_accuracy,
+            class_bias_factors: self.class_bias_factors,
+            confidence_scaling: self.confidence_scaling,
+            balance_improvement,
+            correction_strength,
+            predicted_imbalance: pred_imbalance,
+            actual_imbalance,
+        })
+    }
+
+    /// Calculate class imbalance (standard deviation of frequencies)
+    fn calculate_imbalance(&self, frequencies: &[f64; 5]) -> f64 {
+        let mean = frequencies.iter().sum::<f64>() / 5.0;
+        let variance = frequencies.iter().map(|&f| (f - mean).powi(2)).sum::<f64>() / 5.0;
+        variance.sqrt()
+    }
+
+    /// Reset calibration (useful for retraining)
+    pub fn reset_calibration(&mut self) {
+        self.class_bias_factors = [1.0; 5];
+        self.confidence_scaling = 1.0;
+        self.validation_stats = None;
+        self.is_calibrated = false;
+        log::info!("🔄 Bias correction calibration reset");
+    }
+
+    /// Check if bias correction is enabled and calibrated
+    pub fn is_active(&self) -> bool {
+        self.config.enabled && self.is_calibrated
+    }
+}
+
+/// Metrics for evaluating bias correction effectiveness
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionMetrics {
+    pub is_calibrated: bool,
+    pub total_samples: usize,
+    pub validation_accuracy: f64,
+    pub class_bias_factors: [f64; 5],
+    pub confidence_scaling: f64,
+    pub balance_improvement: f64,
+    pub correction_strength: f64,
+    pub predicted_imbalance: f64,
+    pub actual_imbalance: f64,
+}
+
+impl CorrectionMetrics {
+    /// Get a summary string of correction effectiveness
+    pub fn summary(&self) -> String {
+        format!(
+            "Bias Correction: calibrated={}, samples={}, accuracy={:.4}, balance_improvement={:.4}, strength={:.4}",
+            self.is_calibrated,
+            self.total_samples,
+            self.validation_accuracy,
+            self.balance_improvement,
+            self.correction_strength
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::Array2;
+
+    #[test]
+    fn test_bias_corrector_creation() {
+        let config = BiasCorrection::default();
+        let corrector = LinearBiasCorrector::new(config);
+
+        assert!(!corrector.is_calibrated);
+        assert_eq!(corrector.class_bias_factors, [1.0; 5]);
+        assert_eq!(corrector.confidence_scaling, 1.0);
+    }
+
+    #[test]
+    fn test_probability_renormalization() {
+        let config = BiasCorrection::default();
+        let corrector = LinearBiasCorrector::new(config);
+
+        let mut predictions = Array2::from_shape_vec(
+            (2, 5),
+            vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.2, 0.4, 0.6, 0.8, 1.0],
+        )
+        .unwrap();
+
+        corrector
+            .renormalize_probabilities(&mut predictions)
+            .unwrap();
+
+        // Check that each row sums to approximately 1.0
+        for row in predictions.axis_iter(Axis(0)) {
+            let sum: f64 = row.sum();
+            assert!((sum - 1.0).abs() < 1e-10, "Row sum: {}", sum);
+        }
+    }
+
+    #[test]
+    fn test_disabled_correction() {
+        let config = BiasCorrection {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let corrector = LinearBiasCorrector::new(config);
+
+        let predictions = Array2::from_shape_vec(
+            (2, 5),
+            vec![0.2, 0.2, 0.2, 0.2, 0.2, 0.1, 0.1, 0.1, 0.1, 0.6],
+        )
+        .unwrap();
+
+        let corrected = corrector.apply_correction(&predictions).unwrap();
+
+        // Should return unchanged predictions when disabled
+        assert_eq!(predictions, corrected);
+    }
+}

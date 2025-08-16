@@ -1,0 +1,80 @@
+# Linear Bias Correction Configuration
+# Based on "Seeing Beyond Noise: Improving Cryptocurrency Forecasting with Linear Bias Correction"
+# Adapted for 5-class classification system
+
+[bias_correction]
+# Enable/disable bias correction system
+enabled = true
+
+# Smoothing factor for bias factor calculation
+# 0.0 = no smoothing (use raw calculated factors)
+# 1.0 = maximum smoothing (heavily weight previous factors)
+# Recommended: 0.1 for stable but responsive correction
+smoothing_factor = 0.1
+
+# Bounds for correction factors to prevent extreme adjustments
+# [min_factor, max_factor] - factors outside this range will be clamped
+# Recommended: [0.5, 2.0] allows significant but not extreme corrections
+correction_bounds = [0.5, 2.0]
+
+# Minimum validation samples required for reliable bias correction
+# Below this threshold, bias correction will be skipped
+# Recommended: 100+ samples for stable statistics
+min_samples = 100
+
+# Overall confidence adjustment factor
+# 1.0 = no adjustment, >1.0 = increase confidence, <1.0 = decrease confidence
+# This scales the overall prediction confidence after class-specific corrections
+confidence_adjustment = 1.0
+
+
+# Print detailed bias correction info during training
+# true = show detailed class-by-class breakdown
+# false = show concise single-line summary (recommended for cleaner logs)
+print_info = false
+
+# Advanced Configuration (Optional)
+[bias_correction.advanced]
+# Recalibration frequency (epochs between bias correction updates during training)
+# 0 = only calibrate once at the end of training
+# >0 = recalibrate every N epochs (useful for long training runs)
+recalibration_frequency = 0
+
+# Confidence bounds for extreme prediction filtering
+# Predictions with confidence outside these bounds may be flagged
+confidence_bounds = [0.1, 0.9]
+
+# Class balance target (future enhancement)
+# Target distribution for class balance optimization
+# [0.2, 0.2, 0.2, 0.2, 0.2] = perfectly balanced classes
+target_class_distribution = [0.2, 0.2, 0.2, 0.2, 0.2]
+
+# Logging configuration
+[bias_correction.logging]
+# Enable detailed bias correction logging
+detailed_logging = true
+
+# Log correction metrics every N applications
+metrics_logging_frequency = 100
+
+# Log class distribution changes
+log_distribution_changes = true
+
+# Examples of different bias correction strategies
+[bias_correction.strategies.conservative]
+enabled = true
+smoothing_factor = 0.2
+correction_bounds = [0.7, 1.4]
+confidence_adjustment = 0.95
+
+[bias_correction.strategies.aggressive]
+enabled = true
+smoothing_factor = 0.05
+correction_bounds = [0.3, 3.0]
+confidence_adjustment = 1.1
+
+[bias_correction.strategies.balanced]
+enabled = true
+smoothing_factor = 0.1
+correction_bounds = [0.5, 2.0]
+confidence_adjustment = 1.0

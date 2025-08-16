@@ -549,15 +549,83 @@ impl LSTMModel {
             }
         };
 
+        // CRITICAL FIX: Apply softmax to convert logits to probabilities before bias correction
+        // The output layer produces raw logits, but bias correction expects probabilities
+        let predictions_probs = candle_nn::ops::softmax(&final_predictions_tensor, 1)?;
+
         // Convert back to ndarray
-        let predictions = self.tensor_to_array2(&final_predictions_tensor)?;
+        let mut predictions_array = self.tensor_to_array2(&predictions_probs)?;
+
+        // Apply bias correction using LinearBiasCorrector
+        if let Some(ref corrector) = self.bias_corrector {
+            if corrector.is_calibrated {
+                log::info!(
+                    "🔧 Applying LinearBiasCorrector to {} predictions",
+                    predictions_array.nrows()
+                );
+                predictions_array = corrector.apply_correction(&predictions_array)?;
+                log::info!("✅ Bias correction applied successfully");
+            } else {
+                log::debug!("ℹ️ LinearBiasCorrector not calibrated - skipping correction");
+            }
+        } else if let Some(correction_factors) = &self.bias_correction_factors {
+            // Fallback to simple bias correction for backward compatibility
+            log::info!(
+                "🔧 Applying simple bias correction with factors: {:?}",
+                correction_factors
+            );
+            self.apply_simple_bias_correction(&mut predictions_array, correction_factors)?;
+            log::info!("✅ Simple bias correction applied successfully");
+        } else {
+            log::debug!("ℹ️ No bias correction available");
+        }
 
         // Explicit memory cleanup for prediction tensors
         drop(input_tensor);
         // Note: predictions_tensor and final_predictions_tensor are dropped automatically
 
-        log::info!("Generated {} predictions", predictions.nrows());
-        Ok(predictions)
+        log::info!("Generated {} predictions", predictions_array.nrows());
+        Ok(predictions_array)
+    }
+
+    /// Apply simple bias correction to predictions
+    pub fn apply_simple_bias_correction(
+        &self,
+        predictions: &mut Array2<f64>,
+        correction_factors: &[f64; 5],
+    ) -> Result<()> {
+        // Validate input dimensions
+        let num_classes = predictions.ncols();
+        if num_classes != 5 {
+            log::error!(
+                "❌ Expected 5 classes in predictions for simple bias correction, got {}",
+                num_classes
+            );
+            return Err(crate::utils::error::VangaError::ModelError(format!(
+                "Simple bias correction requires 5-class predictions, got {}",
+                num_classes
+            )));
+        }
+
+        // Apply correction factors to each class
+        for (class_idx, &factor) in correction_factors.iter().enumerate() {
+            predictions
+                .column_mut(class_idx)
+                .mapv_inplace(|x| x * factor);
+        }
+
+        // Renormalize probabilities to sum to 1.0
+        for mut row in predictions.axis_iter_mut(ndarray::Axis(0)) {
+            let sum: f64 = row.sum();
+            if sum > 1e-10 {
+                row /= sum;
+            } else {
+                // If all probabilities are near zero, set to uniform distribution
+                row.fill(0.2); // 1/5 for each class
+            }
+        }
+
+        Ok(())
     }
 
     /// Convert sequences to tensor for prediction (memory-optimized, no targets needed)

@@ -162,6 +162,16 @@ pub struct LSTMModel {
     /// Preserved optimizer state for incremental/window training
     /// Maintains momentum/velocity across training windows while allowing LR updates
     pub optimizer: Option<OptimizerWrapper>,
+
+    /// Simple bias correction factors [class0, class1, class2, class3, class4]
+    /// Calculated during validation, applied during prediction
+    pub bias_correction_factors: Option<[f64; 5]>,
+
+    /// Bias correction configuration
+    pub bias_correction_config: crate::model::bias_correction::BiasCorrection,
+
+    /// Full linear bias corrector (replaces simple factors)
+    pub bias_corrector: Option<crate::model::bias_correction::LinearBiasCorrector>,
 }
 
 /// Serializable model state for persistence - Enhanced with adaptive parameters

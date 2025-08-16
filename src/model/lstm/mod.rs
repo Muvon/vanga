@@ -543,6 +543,7 @@ mod tests {
                 moh: None,
             },
             xgboost: crate::config::model::XGBoostConfig::default(),
+            bias_correction: crate::model::bias_correction::BiasCorrection::default(),
             quantile_outputs: None,
         };
 
@@ -606,6 +607,7 @@ mod tests {
             },
             quantile_outputs: None,
             xgboost: crate::config::model::XGBoostConfig::default(),
+            bias_correction: crate::model::bias_correction::BiasCorrection::default(),
         };
 
         let input_size = 4;
@@ -705,6 +707,7 @@ mod tests {
             },
             quantile_outputs: None,
             xgboost: crate::config::model::XGBoostConfig::default(),
+            bias_correction: crate::model::bias_correction::BiasCorrection::default(),
         };
 
         // Test bidirectional LSTM
@@ -760,6 +763,7 @@ mod tests {
             },
             quantile_outputs: None,
             xgboost: crate::config::model::XGBoostConfig::default(),
+            bias_correction: crate::model::bias_correction::BiasCorrection::default(),
         };
 
         // Create a simple test to verify the config is valid

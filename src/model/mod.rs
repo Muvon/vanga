@@ -6,6 +6,9 @@ pub mod attention_moh_test;
 pub mod attention_moh_wrapper;
 pub mod attention_optimizer;
 pub mod attention_viz;
+pub mod bias_correction;
+#[cfg(test)]
+pub mod bias_correction_integration_test;
 
 pub mod lstm;
 pub mod lstm_simple;
@@ -28,6 +31,7 @@ pub use attention_optimizer::{
     OptimizedAttention, OptimizedAttentionConfig, OptimizedAttentionFactory,
 };
 pub use attention_viz::{AttentionAnalysis, AttentionVisualizationConfig, AttentionVisualizer};
+pub use bias_correction::{BiasCorrection, LinearBiasCorrector};
 pub use lstm::{LSTMConfig, LSTMModel}; // Use new modular LSTM
 pub use lstm_simple::*; // Backward compatibility
 pub use multi_target::MultiTargetLSTMModel;

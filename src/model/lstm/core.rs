@@ -26,6 +26,17 @@ fn format_number(n: usize) -> String {
 impl LSTMModel {
     /// Create a new LSTM model - EXACT same logic as original
     pub fn new(config: LSTMConfig) -> Result<Self> {
+        Self::new_with_bias_config(
+            config,
+            crate::model::bias_correction::BiasCorrection::default(),
+        )
+    }
+
+    /// Create a new LSTM model with bias correction configuration
+    pub fn new_with_bias_config(
+        config: LSTMConfig,
+        bias_correction_config: crate::model::bias_correction::BiasCorrection,
+    ) -> Result<Self> {
         let training_config = TrainingConfig {
             epochs: 1, // Placeholder - will be set by configure_training()
             print_every: 10,
@@ -60,12 +71,20 @@ impl LSTMModel {
             seed: None,                 // No seed by default (random initialization)
             calibrated_parameters: None, // No calibrated parameters initially
             optimizer: None,            // No optimizer initially (created during training)
+            bias_correction_factors: None, // No bias correction initially
+            bias_correction_config: bias_correction_config.clone(), // Use provided bias correction config
+            bias_corrector: Some(crate::model::bias_correction::LinearBiasCorrector::new(
+                bias_correction_config,
+            )), // Initialize full corrector
         })
     }
 
     /// Create a new LSTM model with specified seed for reproducible training
     pub fn new_with_seed(config: LSTMConfig, seed: Option<u64>) -> Result<Self> {
-        let mut model = Self::new(config)?;
+        let mut model = Self::new_with_bias_config(
+            config,
+            crate::model::bias_correction::BiasCorrection::default(),
+        )?;
         model.seed = seed;
 
         if let Some(seed_value) = seed {
@@ -82,6 +101,27 @@ impl LSTMModel {
             log::info!(
                 "🎲 Created LSTMModel without seed: Random weight initialization will be used"
             );
+        }
+
+        Ok(model)
+    }
+
+    /// Create a new LSTM model with seed and bias correction configuration
+    pub fn new_with_seed_and_bias(
+        config: LSTMConfig,
+        seed: Option<u64>,
+        bias_correction_config: crate::model::bias_correction::BiasCorrection,
+    ) -> Result<Self> {
+        let mut model = Self::new_with_bias_config(config, bias_correction_config)?;
+        model.seed = seed;
+
+        if let Some(seed_value) = seed {
+            log::debug!(
+                "🎲 Created LSTMModel with seed: {} and bias config",
+                seed_value
+            );
+        } else {
+            log::debug!("🎲 Created LSTMModel without seed but with bias config");
         }
 
         Ok(model)
@@ -206,7 +246,8 @@ impl LSTMModel {
         // Validate the configuration
         lstm_config.validate()?;
 
-        let mut model = Self::new(lstm_config)?;
+        let mut model =
+            Self::new_with_bias_config(lstm_config, model_config.bias_correction.clone())?;
 
         // Configure attention if enabled
         model.configure_attention(&model_config.attention, None)?;
@@ -342,7 +383,8 @@ impl LSTMModel {
         // Validate the configuration
         lstm_config.validate()?;
 
-        let mut model = Self::new_with_seed(lstm_config, seed)?;
+        let mut model =
+            Self::new_with_seed_and_bias(lstm_config, seed, model_config.bias_correction.clone())?;
 
         // Configure attention if enabled
         model.configure_attention(&model_config.attention, None)?;
