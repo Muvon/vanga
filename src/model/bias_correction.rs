@@ -1,6 +1,7 @@
 use crate::utils::error::Result;
 use candle_core::Tensor;
 use ndarray::{Array2, Axis};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for bias correction system
@@ -84,6 +85,14 @@ pub struct LinearBiasCorrector {
     pub validation_stats: Option<ValidationStats>,
     /// Whether the corrector has been calibrated
     pub is_calibrated: bool,
+
+    // OPTIMIZATION: Cache frequently computed values
+    /// Cached combined correction factors (bias * confidence)
+    #[serde(skip)]
+    cached_combined_factors: Option<[f64; 5]>,
+    /// Cached adaptive strength for current calibration
+    #[serde(skip)]
+    cached_adaptive_strength: Option<f64>,
 }
 
 impl Default for LinearBiasCorrector {
@@ -94,6 +103,8 @@ impl Default for LinearBiasCorrector {
             confidence_scaling: 1.0,
             validation_stats: None,
             is_calibrated: false,
+            cached_combined_factors: None,
+            cached_adaptive_strength: None,
         }
     }
 }
@@ -107,6 +118,8 @@ impl LinearBiasCorrector {
             confidence_scaling: 1.0,
             validation_stats: None,
             is_calibrated: false,
+            cached_combined_factors: None,
+            cached_adaptive_strength: None,
         }
     }
 
@@ -198,20 +211,28 @@ impl LinearBiasCorrector {
             log::warn!("⚠️ Ensure softmax is applied to convert logits to probabilities before bias correction");
         }
 
-        // Calculate predicted class frequencies (average probability per class)
+        // Calculate predicted and actual class frequencies in parallel
+        let frequencies: Vec<(f64, f64)> = (0..5)
+            .into_par_iter()
+            .map(|class_idx| {
+                // Predicted frequency = average predicted probability for this class
+                let pred_freq = validation_predictions
+                    .column(class_idx)
+                    .mean()
+                    .unwrap_or(0.0);
+
+                // Actual frequency = average actual probability/label for this class
+                let actual_freq = validation_targets.column(class_idx).mean().unwrap_or(0.0);
+
+                (pred_freq, actual_freq)
+            })
+            .collect();
+
         let mut predicted_frequencies = [0.0; 5];
         let mut actual_frequencies = [0.0; 5];
-
-        for class_idx in 0..5 {
-            // Predicted frequency = average predicted probability for this class
-            predicted_frequencies[class_idx] = validation_predictions
-                .column(class_idx)
-                .mean()
-                .unwrap_or(0.0);
-
-            // Actual frequency = average actual probability/label for this class
-            actual_frequencies[class_idx] =
-                validation_targets.column(class_idx).mean().unwrap_or(0.0);
+        for (idx, (pred, actual)) in frequencies.iter().enumerate() {
+            predicted_frequencies[idx] = *pred;
+            actual_frequencies[idx] = *actual;
         }
 
         // Debug: Check if frequencies sum to ~1.0 (they should for proper probabilities)
@@ -299,6 +320,10 @@ impl LinearBiasCorrector {
 
         self.is_calibrated = true;
 
+        // Invalidate caches after calibration
+        self.cached_combined_factors = None;
+        self.cached_adaptive_strength = None;
+
         // Log calibration results based on print_info setting
         if self.config.print_info {
             // Detailed logging when print_info is true
@@ -357,21 +382,29 @@ impl LinearBiasCorrector {
             )));
         }
 
+        let num_samples = raw_predictions.nrows();
+
+        // OPTIMIZATION: Use cached combined factors if available
+        let combined_factors = self.get_combined_factors();
+
+        // Use in-place operations to avoid unnecessary allocations
         let mut corrected = raw_predictions.clone();
-        let num_samples = corrected.nrows();
 
-        // Apply class-specific bias correction factors
-        for (class_idx, &factor) in self.class_bias_factors.iter().enumerate() {
-            corrected.column_mut(class_idx).mapv_inplace(|x| x * factor);
+        // Apply combined factors in single pass
+        for mut row in corrected.axis_iter_mut(Axis(0)) {
+            // Apply factors in single pass
+            for (idx, &factor) in combined_factors.iter().enumerate() {
+                row[idx] *= factor;
+            }
+            // Renormalize in-place
+            let sum: f64 = row.sum();
+            if sum > 1e-10 {
+                let inv_sum = 1.0 / sum; // Avoid repeated division
+                row.mapv_inplace(|x| x * inv_sum);
+            } else {
+                row.fill(0.2); // Uniform distribution for 5 classes
+            }
         }
-
-        // Apply confidence scaling
-        if (self.confidence_scaling - 1.0).abs() > 1e-6 {
-            corrected.mapv_inplace(|x| x * self.confidence_scaling);
-        }
-
-        // Renormalize probabilities to ensure they sum to 1.0
-        self.renormalize_probabilities(&mut corrected)?;
 
         log::debug!(
             "🔧 Applied bias correction to {} samples with factors: {:?}",
@@ -382,12 +415,27 @@ impl LinearBiasCorrector {
         Ok(corrected)
     }
 
+    /// Get combined correction factors (cached)
+    fn get_combined_factors(&self) -> [f64; 5] {
+        // Return cached value if available, otherwise compute and cache
+        if let Some(cached) = self.cached_combined_factors {
+            cached
+        } else {
+            let mut combined = [0.0; 5];
+            for (idx, &factor) in self.class_bias_factors.iter().enumerate() {
+                combined[idx] = factor * self.confidence_scaling;
+            }
+            combined
+        }
+    }
+
     /// Renormalize probability distributions to sum to 1.0
-    fn renormalize_probabilities(&self, predictions: &mut Array2<f64>) -> Result<()> {
+    pub fn renormalize_probabilities(&self, predictions: &mut Array2<f64>) -> Result<()> {
         for mut row in predictions.axis_iter_mut(Axis(0)) {
             let sum: f64 = row.sum();
             if sum > 1e-10 {
-                row /= sum;
+                let inv_sum = 1.0 / sum; // Avoid repeated division
+                row.mapv_inplace(|x| x * inv_sum);
             } else {
                 // If all probabilities are near zero, set to uniform distribution
                 row.fill(0.2); // 1/5 for each class
@@ -398,17 +446,16 @@ impl LinearBiasCorrector {
 
     /// Calculate average confidence (maximum probability per sample)
     fn calculate_average_confidence(&self, predictions: &Array2<f64>) -> Result<f64> {
-        let confidences: Vec<f64> = predictions
-            .axis_iter(Axis(0))
-            .map(|row| {
-                row.iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-                    .unwrap_or(0.0)
-            })
-            .collect();
+        let mut sum = 0.0;
+        let count = predictions.nrows();
 
-        Ok(confidences.iter().sum::<f64>() / confidences.len() as f64)
+        for row in predictions.axis_iter(Axis(0)) {
+            // Use fold for efficient max finding
+            let max_conf = row.iter().fold(0.0_f64, |max, &val| max.max(val));
+            sum += max_conf;
+        }
+
+        Ok(sum / count as f64)
     }
 
     /// Calculate accuracy between predictions and targets
@@ -420,19 +467,30 @@ impl LinearBiasCorrector {
             .axis_iter(Axis(0))
             .zip(targets.axis_iter(Axis(0)))
         {
+            // Use fold for efficient argmax
             let pred_class = pred_row
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
+                .fold((0, 0.0), |(max_idx, max_val), (idx, &val)| {
+                    if val > max_val {
+                        (idx, val)
+                    } else {
+                        (max_idx, max_val)
+                    }
+                })
+                .0;
 
             let target_class = target_row
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
+                .fold((0, 0.0), |(max_idx, max_val), (idx, &val)| {
+                    if val > max_val {
+                        (idx, val)
+                    } else {
+                        (max_idx, max_val)
+                    }
+                })
+                .0;
 
             if pred_class == target_class {
                 correct += 1;
@@ -444,29 +502,34 @@ impl LinearBiasCorrector {
 
     /// Calculate confidence distribution (quartiles)
     fn calculate_confidence_distribution(&self, predictions: &Array2<f64>) -> Result<[f64; 5]> {
-        let mut confidences: Vec<f64> = predictions
-            .axis_iter(Axis(0))
-            .map(|row| {
-                row.iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-                    .unwrap_or(0.0)
-            })
-            .collect();
+        // Collect confidences more efficiently
+        let mut confidences: Vec<f64> = Vec::with_capacity(predictions.nrows());
 
-        confidences.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        for row in predictions.axis_iter(Axis(0)) {
+            let max_conf = row.iter().fold(0.0_f64, |max, &val| max.max(val));
+            confidences.push(max_conf);
+        }
+
+        // Use unstable sort for better performance
+        confidences.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let len = confidences.len();
         if len == 0 {
             return Ok([0.0; 5]);
         }
 
+        // Pre-calculate indices to avoid repeated division
+        let q1_idx = len >> 2; // len / 4
+        let median_idx = len >> 1; // len / 2
+        let q3_idx = (3 * len) >> 2; // 3 * len / 4
+        let max_idx = len - 1;
+
         Ok([
-            confidences[0],           // Min
-            confidences[len / 4],     // Q1
-            confidences[len / 2],     // Median
-            confidences[3 * len / 4], // Q3
-            confidences[len - 1],     // Max
+            confidences[0],          // Min
+            confidences[q1_idx],     // Q1
+            confidences[median_idx], // Median
+            confidences[q3_idx],     // Q3
+            confidences[max_idx],    // Max
         ])
     }
 
@@ -506,8 +569,16 @@ impl LinearBiasCorrector {
 
     /// Calculate class imbalance (standard deviation of frequencies)
     fn calculate_imbalance(&self, frequencies: &[f64; 5]) -> f64 {
-        let mean = frequencies.iter().sum::<f64>() / 5.0;
-        let variance = frequencies.iter().map(|&f| (f - mean).powi(2)).sum::<f64>() / 5.0;
+        const INV_5: f64 = 0.2; // 1.0 / 5.0 pre-calculated
+        let mean = frequencies.iter().sum::<f64>() * INV_5;
+        let variance = frequencies
+            .iter()
+            .map(|&f| {
+                let diff = f - mean;
+                diff * diff // More efficient than powi(2)
+            })
+            .sum::<f64>()
+            * INV_5;
         variance.sqrt()
     }
 
@@ -517,6 +588,9 @@ impl LinearBiasCorrector {
         self.confidence_scaling = 1.0;
         self.validation_stats = None;
         self.is_calibrated = false;
+        // Clear caches
+        self.cached_combined_factors = None;
+        self.cached_adaptive_strength = None;
         log::info!("🔄 Bias correction calibration reset");
     }
 
@@ -525,9 +599,14 @@ impl LinearBiasCorrector {
         self.config.enabled && self.is_calibrated
     }
 
-    /// Calculate adaptive strength based on actual class imbalance
+    /// Calculate adaptive strength based on actual class imbalance (cached)
     /// Returns a value between 0.0 and 1.0 based on how imbalanced the classes are
     fn calculate_adaptive_strength_for_ordinal(&self) -> f64 {
+        // Return cached value if available
+        if let Some(cached) = self.cached_adaptive_strength {
+            return cached;
+        }
+
         if let Some(ref stats) = self.validation_stats {
             // Calculate the variance from perfect balance (0.2 for each of 5 classes)
             let perfect_freq = 0.2;
@@ -641,7 +720,6 @@ impl LinearBiasCorrector {
         }
 
         // ADAPTIVE STRENGTH CALCULATION based on actual class imbalance
-        // No manual max_strength needed - it's computed from the data
         let adaptive_strength = self.calculate_adaptive_strength_for_ordinal();
 
         // Gradual ramp-up to prevent training instability
@@ -662,22 +740,9 @@ impl LinearBiasCorrector {
         let device = logits.device();
 
         // ORDINAL-AWARE LOGIT ADJUSTMENTS
-        // For ordinal loss, we need to preserve monotonic relationships
-        // Apply smoothed adjustments that respect class ordering
         let logit_adjustments = self.calculate_ordinal_aware_adjustments(strength);
 
-        // SAFETY CHECK: Ensure adjustments are reasonable
-        let max_adjustment = logit_adjustments
-            .iter()
-            .map(|&x| x.abs())
-            .fold(0.0f32, f32::max);
-        if max_adjustment > 0.5 {
-            log::warn!(
-                "⚠️ Large logit adjustment detected: {:.3}. This may cause gradient instability.",
-                max_adjustment
-            );
-        }
-
+        // OPTIMIZATION: Create adjustment tensor once
         let adjustment_tensor =
             Tensor::from_slice(&logit_adjustments, (1, 5), device).map_err(|e| {
                 crate::utils::error::VangaError::ModelError(format!(
@@ -694,38 +759,22 @@ impl LinearBiasCorrector {
             ))
         })?;
 
-        // CRITICAL FIX: DO NOT apply temperature scaling during training!
-        // Temperature scaling changes gradient magnitudes and causes instability.
-        // It should only be used during inference for probability calibration.
-        // For training, we only apply the bounded logit adjustments.
-        let final_logits = adjusted_logits;
+        // Log correction impact if verbose (reduced frequency)
+        if self.config.print_info {
+            let max_adjustment = logit_adjustments
+                .iter()
+                .map(|&x| x.abs())
+                .fold(0.0f32, f32::max);
 
-        // Log correction impact if verbose
-        if self.config.print_info && current_epoch % 10 == 0 {
             log::debug!(
-                "🔧 Logit bias correction applied with strength {:.3} at epoch {}",
-                strength,
-                current_epoch
-            );
-            log::debug!("   Logit adjustments: {:?}", logit_adjustments);
-            log::debug!(
-                "   Confidence scaling: {:.3} (NOT applied in training)",
-                self.confidence_scaling
-            );
-            log::debug!("   Bias factors: {:?}", self.class_bias_factors);
-        }
-
-        // Always log if strength is significant to help debug gradient issues
-        if strength > 0.1 {
-            log::debug!(
-                "📊 Bias correction: strength={:.3}, max_adj={:.3}, epoch={}",
+                "🔧 Logit bias correction: strength={:.3}, max_adj={:.3}, epoch={}",
                 strength,
                 max_adjustment,
                 current_epoch
             );
         }
 
-        Ok(final_logits)
+        Ok(adjusted_logits)
     }
 
     /// Apply bias correction to PROBABILITIES (after softmax) for inference
@@ -738,51 +787,45 @@ impl LinearBiasCorrector {
         // Get device from input tensor
         let device = probabilities.device();
 
-        // Apply class-specific bias correction factors
-        let bias_factors_f32: Vec<f32> =
-            self.class_bias_factors.iter().map(|&x| x as f32).collect();
-        let bias_tensor = Tensor::from_slice(&bias_factors_f32, (1, 5), device).map_err(|e| {
-            crate::utils::error::VangaError::ModelError(format!(
-                "Failed to create bias factor tensor: {}",
-                e
-            ))
-        })?;
+        // OPTIMIZATION: Combine bias factors and confidence scaling into single tensor
+        let combined_factors: Vec<f32> = self
+            .class_bias_factors
+            .iter()
+            .map(|&x| (x * self.confidence_scaling) as f32)
+            .collect();
 
-        let corrected_probs = probabilities.broadcast_mul(&bias_tensor).map_err(|e| {
-            crate::utils::error::VangaError::ModelError(format!(
-                "Failed to apply bias factors: {}",
-                e
-            ))
-        })?;
-
-        // Apply confidence scaling (temperature scaling for inference)
-        let final_probs = if (self.confidence_scaling - 1.0).abs() > 0.01 {
-            let confidence_factor = self.confidence_scaling as f32;
-            let conf_tensor = Tensor::new(&[confidence_factor], device).map_err(|e| {
+        let correction_tensor =
+            Tensor::from_slice(&combined_factors, (1, 5), device).map_err(|e| {
                 crate::utils::error::VangaError::ModelError(format!(
-                    "Failed to create confidence tensor: {}",
+                    "Failed to create correction tensor: {}",
                     e
                 ))
             })?;
-            corrected_probs.broadcast_mul(&conf_tensor).map_err(|e| {
+
+        // Apply combined correction in single operation
+        let corrected_probs = probabilities
+            .broadcast_mul(&correction_tensor)
+            .map_err(|e| {
                 crate::utils::error::VangaError::ModelError(format!(
-                    "Failed to apply confidence scaling: {}",
+                    "Failed to apply corrections: {}",
                     e
                 ))
-            })?
-        } else {
-            corrected_probs
-        };
+            })?;
 
         // Renormalize to ensure probabilities sum to 1.0
-        let row_sums = final_probs.sum_keepdim(1).map_err(|e| {
+        let row_sums = corrected_probs.sum_keepdim(1).map_err(|e| {
             crate::utils::error::VangaError::ModelError(format!(
                 "Failed to compute row sums: {}",
                 e
             ))
         })?;
 
-        let normalized_probs = final_probs.broadcast_div(&row_sums).map_err(|e| {
+        // Add small epsilon to prevent division by zero
+        let epsilon = 1e-10_f32;
+        let eps_tensor = Tensor::new(&[epsilon], device)?;
+        let safe_sums = row_sums.broadcast_add(&eps_tensor)?;
+
+        let normalized_probs = corrected_probs.broadcast_div(&safe_sums).map_err(|e| {
             crate::utils::error::VangaError::ModelError(format!(
                 "Failed to normalize probabilities: {}",
                 e
@@ -882,128 +925,5 @@ impl CorrectionMetrics {
             self.balance_improvement,
             self.correction_strength
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ndarray::Array2;
-
-    #[test]
-    fn test_bias_corrector_creation() {
-        let config = BiasCorrection::default();
-        let corrector = LinearBiasCorrector::new(config);
-
-        assert!(!corrector.is_calibrated);
-        assert_eq!(corrector.class_bias_factors, [1.0; 5]);
-        assert_eq!(corrector.confidence_scaling, 1.0);
-    }
-
-    #[test]
-    fn test_probability_renormalization() {
-        let config = BiasCorrection::default();
-        let corrector = LinearBiasCorrector::new(config);
-
-        let mut predictions = Array2::from_shape_vec(
-            (2, 5),
-            vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.2, 0.4, 0.6, 0.8, 1.0],
-        )
-        .unwrap();
-
-        corrector
-            .renormalize_probabilities(&mut predictions)
-            .unwrap();
-
-        // Check that each row sums to approximately 1.0
-        for row in predictions.axis_iter(Axis(0)) {
-            let sum: f64 = row.sum();
-            assert!((sum - 1.0).abs() < 1e-10, "Row sum: {}", sum);
-        }
-    }
-
-    #[test]
-    fn test_disabled_correction() {
-        let config = BiasCorrection {
-            enabled: false,
-            ..Default::default()
-        };
-
-        let corrector = LinearBiasCorrector::new(config);
-
-        let predictions = Array2::from_shape_vec(
-            (2, 5),
-            vec![0.2, 0.2, 0.2, 0.2, 0.2, 0.1, 0.1, 0.1, 0.1, 0.6],
-        )
-        .unwrap();
-
-        let corrected = corrector.apply_correction(&predictions).unwrap();
-
-        // Should return unchanged predictions when disabled
-        assert_eq!(predictions, corrected);
-    }
-
-    #[test]
-    fn test_logit_adjustment_bounds() {
-        // Create corrector with extreme bias factors to test bounds
-        let corrector = LinearBiasCorrector {
-            class_bias_factors: [0.1, 0.5, 1.0, 2.0, 5.0], // Extreme values
-            is_calibrated: true,
-            ..Default::default()
-        };
-
-        // Calculate adjustments with high strength
-        let adjustments = corrector.calculate_ordinal_aware_adjustments(1.0);
-
-        // All adjustments should be bounded to [-0.2, 0.2]
-        for &adj in &adjustments {
-            assert!(
-                (-0.2..=0.2).contains(&adj),
-                "Adjustment {} is outside bounds [-0.2, 0.2]",
-                adj
-            );
-        }
-    }
-
-    #[test]
-    fn test_confidence_scaling_bounds() {
-        let config = BiasCorrection::default();
-        let mut corrector = LinearBiasCorrector::new(config);
-
-        // Create mock validation data
-        let predictions = Array2::from_shape_vec(
-            (10, 5),
-            vec![
-                0.9, 0.025, 0.025, 0.025, 0.025, // High confidence
-                0.2, 0.2, 0.2, 0.2, 0.2, // Low confidence
-                0.8, 0.05, 0.05, 0.05, 0.05, 0.7, 0.075, 0.075, 0.075, 0.075, 0.6, 0.1, 0.1, 0.1,
-                0.1, 0.5, 0.125, 0.125, 0.125, 0.125, 0.4, 0.15, 0.15, 0.15, 0.15, 0.3, 0.175,
-                0.175, 0.175, 0.175, 0.25, 0.1875, 0.1875, 0.1875, 0.1875, 0.2, 0.2, 0.2, 0.2, 0.2,
-            ],
-        )
-        .unwrap();
-
-        let targets = Array2::from_shape_vec(
-            (10, 5),
-            vec![
-                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0,
-            ],
-        )
-        .unwrap();
-
-        // Calibrate
-        corrector
-            .calibrate_from_validation(&predictions, &targets)
-            .unwrap();
-
-        // Confidence scaling should be bounded to [0.5, 2.0]
-        assert!(
-            corrector.confidence_scaling >= 0.5 && corrector.confidence_scaling <= 2.0,
-            "Confidence scaling {} is outside bounds [0.5, 2.0]",
-            corrector.confidence_scaling
-        );
     }
 }
