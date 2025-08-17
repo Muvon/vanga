@@ -3,7 +3,6 @@
 use crate::data::balance::*;
 use crate::targets::{PreparedTargets, TargetType};
 use ndarray::{Array2, Array3};
-use std::collections::HashMap;
 
 #[test]
 fn test_sequence_overlap_calculation() {
@@ -13,7 +12,7 @@ fn test_sequence_overlap_calculation() {
         start_idx: 0,
         end_idx: 100,
         sequence_data: Array2::zeros((100, 10)),
-        targets: HashMap::new(),
+        targets: Vec::new(),
     };
 
     let seq2 = SequenceWithTargets {
@@ -21,7 +20,7 @@ fn test_sequence_overlap_calculation() {
         start_idx: 100,
         end_idx: 200,
         sequence_data: Array2::zeros((100, 10)),
-        targets: HashMap::new(),
+        targets: Vec::new(),
     };
 
     assert_eq!(seq1.overlap_ratio(&seq2), 0.0);
@@ -32,7 +31,7 @@ fn test_sequence_overlap_calculation() {
         start_idx: 50,
         end_idx: 150,
         sequence_data: Array2::zeros((100, 10)),
-        targets: HashMap::new(),
+        targets: Vec::new(),
     };
 
     assert_eq!(seq1.overlap_ratio(&seq3), 0.5);
@@ -44,7 +43,7 @@ fn test_sequence_overlap_calculation() {
         start_idx: 0,
         end_idx: 100,
         sequence_data: Array2::zeros((100, 10)),
-        targets: HashMap::new(),
+        targets: Vec::new(),
     };
 
     assert_eq!(seq1.overlap_ratio(&seq4), 1.0);
@@ -57,7 +56,7 @@ fn test_sequence_range_check() {
         start_idx: 100,
         end_idx: 200,
         sequence_data: Array2::zeros((100, 10)),
-        targets: HashMap::new(),
+        targets: Vec::new(),
     };
 
     // Test overlapping ranges
@@ -88,8 +87,12 @@ fn test_balanced_selection_basic() {
             2
         };
 
-        let mut targets = HashMap::new();
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
+        let targets = vec![TargetData {
+            target_type: TargetType::PriceLevel,
+            horizon: "1h".to_string(),
+            class,
+            strength: 0.5,
+        }];
 
         sequences.push(SequenceWithTargets {
             sequence_idx: i,
@@ -138,12 +141,27 @@ fn test_validation_selection() {
     let mut sequences = Vec::new();
 
     for i in 0..100 {
-        let mut targets = HashMap::new();
-
         // Create different distributions for different targets
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), (i % 5) as i32);
-        targets.insert((TargetType::Direction, "1h".to_string()), (i % 3) as i32);
-        targets.insert((TargetType::Volatility, "1h".to_string()), (i % 4) as i32);
+        let targets = vec![
+            TargetData {
+                target_type: TargetType::PriceLevel,
+                horizon: "1h".to_string(),
+                class: (i % 5) as i32,
+                strength: 0.5,
+            },
+            TargetData {
+                target_type: TargetType::Direction,
+                horizon: "1h".to_string(),
+                class: (i % 3) as i32,
+                strength: 0.5,
+            },
+            TargetData {
+                target_type: TargetType::Volatility,
+                horizon: "1h".to_string(),
+                class: (i % 4) as i32,
+                strength: 0.5,
+            },
+        ];
 
         sequences.push(SequenceWithTargets {
             sequence_idx: i,
@@ -189,8 +207,12 @@ fn test_overlap_constraints() {
     let mut sequences = Vec::new();
 
     for i in 0..10 {
-        let mut targets = HashMap::new();
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), 0); // All same class
+        let targets = vec![TargetData {
+            target_type: TargetType::PriceLevel,
+            horizon: "1h".to_string(),
+            class: 0,
+            strength: 0.5,
+        }]; // All same class
 
         sequences.push(SequenceWithTargets {
             sequence_idx: i,
@@ -281,22 +303,16 @@ async fn test_create_sequences_with_targets() {
     assert_eq!(result[0].start_idx, 0);
     assert_eq!(result[0].end_idx, 10);
     assert_eq!(
-        result[0]
-            .targets
-            .get(&(TargetType::PriceLevel, "1h".to_string())),
-        Some(&0)
+        result[0].get_target_class(TargetType::PriceLevel, "1h"),
+        Some(0)
     );
     assert_eq!(
-        result[0]
-            .targets
-            .get(&(TargetType::Direction, "1h".to_string())),
-        Some(&1)
+        result[0].get_target_class(TargetType::Direction, "1h"),
+        Some(1)
     );
     assert_eq!(
-        result[0]
-            .targets
-            .get(&(TargetType::Volatility, "1h".to_string())),
-        Some(&2)
+        result[0].get_target_class(TargetType::Volatility, "1h"),
+        Some(2)
     );
 
     // Check overlap between sequences
@@ -310,8 +326,12 @@ fn test_window_range_filtering() {
 
     // Create sequences across different ranges
     for i in 0..20 {
-        let mut targets = HashMap::new();
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), (i % 3) as i32);
+        let targets = vec![TargetData {
+            target_type: TargetType::PriceLevel,
+            horizon: "1h".to_string(),
+            class: (i % 3) as i32,
+            strength: 0.5,
+        }];
 
         sequences.push(SequenceWithTargets {
             sequence_idx: i,

@@ -40,6 +40,9 @@ use crate::utils::error::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
 
+// Type alias to reduce complexity across all target generation functions
+pub type TargetResult = (HashMap<String, Vec<i32>>, HashMap<String, Vec<f64>>);
+
 // Re-export configurations and calibrated parameters
 pub use calibration::{
     DirectionParams, PriceLevelParams, SentimentParams, VolatilityParams, VolumeParams,
@@ -119,7 +122,7 @@ impl MultiTargetConfig {
     }
 }
 
-/// Container for all prepared targets
+/// Container for all prepared targets with both class and strength values
 #[derive(Debug, Clone)]
 pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,
@@ -127,6 +130,12 @@ pub struct PreparedTargets {
     pub volatility: HashMap<String, Vec<i32>>,
     pub sentiment: HashMap<String, Vec<i32>>,
     pub volume: HashMap<String, Vec<i32>>,
+    // NEW: Strength values for each target type
+    pub price_levels_strength: HashMap<String, Vec<f64>>,
+    pub direction_strength: HashMap<String, Vec<f64>>,
+    pub volatility_strength: HashMap<String, Vec<f64>>,
+    pub sentiment_strength: HashMap<String, Vec<f64>>,
+    pub volume_strength: HashMap<String, Vec<f64>>,
     pub target_names: Vec<String>, // ADDED: Avoid redundant TargetGenerator creation
     pub data_length: usize,
     pub valid_indices: Vec<usize>,
@@ -141,6 +150,12 @@ impl PreparedTargets {
             volatility: HashMap::new(),
             sentiment: HashMap::new(),
             volume: HashMap::new(),
+            // Initialize strength containers
+            price_levels_strength: HashMap::new(),
+            direction_strength: HashMap::new(),
+            volatility_strength: HashMap::new(),
+            sentiment_strength: HashMap::new(),
+            volume_strength: HashMap::new(),
             target_names: Vec::new(), // Initialize empty target names
             data_length,
             valid_indices: Vec::new(),
@@ -155,6 +170,17 @@ impl PreparedTargets {
             TargetType::Volatility => self.volatility.get(horizon),
             TargetType::Sentiment => self.sentiment.get(horizon),
             TargetType::Volume => self.volume.get(horizon),
+        }
+    }
+
+    /// Get strength values for a specific horizon and target type
+    pub fn get_strengths(&self, horizon: &str, target_type: TargetType) -> Option<&Vec<f64>> {
+        match target_type {
+            TargetType::PriceLevel => self.price_levels_strength.get(horizon),
+            TargetType::Direction => self.direction_strength.get(horizon),
+            TargetType::Volatility => self.volatility_strength.get(horizon),
+            TargetType::Sentiment => self.sentiment_strength.get(horizon),
+            TargetType::Volume => self.volume_strength.get(horizon),
         }
     }
 
@@ -421,62 +447,72 @@ impl TargetGenerator {
         // CONDITIONAL GENERATION: Only generate enabled targets
         if self.config.price_level.enabled {
             log::debug!("🏷️ Generating price level targets");
-            let price_targets = generate_price_level_targets_with_calibrated_params(
-                df,
-                &self.config.horizons,
-                sequence_indices,
-                sequence_length,
-                price_level_params,
-            )?;
+            let (price_targets, price_strengths) =
+                generate_price_level_targets_with_calibrated_params(
+                    df,
+                    &self.config.horizons,
+                    sequence_indices,
+                    sequence_length,
+                    price_level_params,
+                )?;
             prepared_targets.price_levels = price_targets;
+            prepared_targets.price_levels_strength = price_strengths;
         }
 
         if self.config.direction.enabled {
             log::debug!("🧭 Generating direction targets");
-            let direction_targets = generate_direction_targets_with_calibrated_params(
-                df,
-                &self.config.horizons,
-                sequence_indices,
-                sequence_length,
-                direction_params,
-            )?;
+            let (direction_targets, direction_strengths) =
+                generate_direction_targets_with_calibrated_params(
+                    df,
+                    &self.config.horizons,
+                    sequence_indices,
+                    sequence_length,
+                    direction_params,
+                )?;
             prepared_targets.direction = direction_targets;
+            prepared_targets.direction_strength = direction_strengths;
         }
 
         if self.config.volatility.enabled {
             log::debug!("📊 Generating volatility targets");
-            let volatility_targets = generate_volatility_targets_with_calibrated_params(
-                df,
-                &self.config.horizons,
-                sequence_indices,
-                sequence_length,
-                volatility_params,
-            )?;
+            let (volatility_targets, volatility_strengths) =
+                generate_volatility_targets_with_calibrated_params(
+                    df,
+                    &self.config.horizons,
+                    sequence_indices,
+                    sequence_length,
+                    volatility_params,
+                )?;
             prepared_targets.volatility = volatility_targets;
+            prepared_targets.volatility_strength = volatility_strengths;
         }
 
         if self.config.sentiment.enabled {
             log::debug!("💭 Generating sentiment targets");
-            let sentiment_targets = generate_sentiment_targets_with_calibrated_params(
-                df,
-                &self.config.horizons,
-                sequence_indices,
-                sequence_length,
-                sentiment_params,
-            )?;
+            let (sentiment_targets, sentiment_strengths) =
+                generate_sentiment_targets_with_calibrated_params(
+                    df,
+                    &self.config.horizons,
+                    sequence_indices,
+                    sequence_length,
+                    sentiment_params,
+                )?;
             prepared_targets.sentiment = sentiment_targets;
+            prepared_targets.sentiment_strength = sentiment_strengths;
         }
 
         if self.config.volume.enabled {
             log::debug!("📈 Generating volume targets");
-            let volume_targets = generate_volume_targets_with_calibrated_params(
-                df,
-                &self.config.horizons,
-                sequence_indices,
-                sequence_length,
-                volume_params,
-            )?;
+            let (volume_targets, volume_strengths) =
+                generate_volume_targets_with_calibrated_params(
+                    df,
+                    &self.config.horizons,
+                    sequence_indices,
+                    sequence_length,
+                    volume_params,
+                )?;
             prepared_targets.volume = volume_targets;
+            prepared_targets.volume_strength = volume_strengths;
         }
 
         // Set target names for enabled targets only

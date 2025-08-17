@@ -41,6 +41,7 @@
 //! - Uses same pattern as volatility target for consistency
 
 use crate::data::structures::MarketDataRow;
+use crate::targets::TargetResult;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,7 @@ pub struct VolumeDistributionStats {
 /// Generate volume targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
+/// Generate volume targets with calibrated parameters - returns both class and strength
 /// target generation between training and prediction. When None, uses base config.
 pub fn generate_volume_targets_with_calibrated_params(
     df: &DataFrame,
@@ -99,7 +101,7 @@ pub fn generate_volume_targets_with_calibrated_params(
     sequence_indices: &[usize],
     sequence_length: usize,
     calibrated_params: &crate::targets::calibration::VolumeParams, // Now mandatory
-) -> Result<HashMap<String, Vec<i32>>> {
+) -> Result<TargetResult> {
     let volume_data = extract_volume_data(df)?;
 
     // Use pre-calibrated parameters (always available)
@@ -122,6 +124,7 @@ pub fn generate_volume_targets_with_calibrated_params(
     );
 
     let mut targets = HashMap::new();
+    let mut strengths = HashMap::new();
 
     // Calculate logarithmic volume thresholds
     let thresholds = calculate_log_volume_thresholds(&config)?;
@@ -129,6 +132,7 @@ pub fn generate_volume_targets_with_calibrated_params(
     for horizon in horizons {
         let horizon_steps = parse_horizon_steps(horizon)?;
         let mut horizon_targets = Vec::new();
+        let mut horizon_strengths = Vec::new();
 
         for &seq_start in sequence_indices {
             let seq_end = seq_start + sequence_length;
@@ -141,8 +145,17 @@ pub fn generate_volume_targets_with_calibrated_params(
             let sequence_volumes = &volume_data[seq_start..seq_end];
             let horizon_volumes = &volume_data[seq_end..horizon_end];
 
-            match classify_volume_regime(sequence_volumes, horizon_volumes, &thresholds, &config) {
-                Ok(class) => horizon_targets.push(class),
+            // Use the strength-returning version of classify_volume_regime
+            match classify_volume_regime_with_strength(
+                sequence_volumes,
+                horizon_volumes,
+                &thresholds,
+                &config,
+            ) {
+                Ok((class, strength)) => {
+                    horizon_targets.push(class);
+                    horizon_strengths.push(strength);
+                }
                 Err(e) => {
                     log::warn!(
                         "Failed to classify volume for sequence {}: {}",
@@ -157,10 +170,11 @@ pub fn generate_volume_targets_with_calibrated_params(
         if !horizon_targets.is_empty() {
             log_volume_distribution(&horizon_targets, horizon);
             targets.insert(horizon.clone(), horizon_targets);
+            strengths.insert(horizon.clone(), horizon_strengths);
         }
     }
 
-    Ok(targets)
+    Ok((targets, strengths))
 }
 
 /// Classify volume regime using calibrated parameters (consistent API)
@@ -168,7 +182,7 @@ pub fn classify_volume_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::VolumeParams,
-) -> Result<i32> {
+) -> Result<(i32, f64)> {
     // Extract volume data from OHLCV
     let sequence_volumes: Vec<f64> = sequence_ohlcv.iter().map(|row| row.volume).collect();
     let horizon_volumes: Vec<f64> = horizon_ohlcv.iter().map(|row| row.volume).collect();
@@ -194,16 +208,16 @@ pub fn classify_volume_with_calibrated_params(
         smoothing_periods: calibrated_params.smoothing_periods,
     };
 
-    classify_volume_regime(&sequence_volumes, &horizon_volumes, &thresholds, &config)
+    classify_volume_regime_with_strength(&sequence_volumes, &horizon_volumes, &thresholds, &config)
 }
 
-/// Classify volume regime using logarithmic ratio analysis
-pub fn classify_volume_regime(
+/// Classify volume regime using logarithmic ratio analysis with strength calculation
+pub fn classify_volume_regime_with_strength(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
     thresholds: &LogVolumeThresholds,
     config: &VolumeConfig,
-) -> Result<i32> {
+) -> Result<(i32, f64)> {
     if sequence_volumes.is_empty() || horizon_volumes.is_empty() {
         return Err(VangaError::DataError(
             "Empty volume data for analysis".to_string(),
@@ -217,7 +231,7 @@ pub fn classify_volume_regime(
 
     // Handle edge cases
     if sequence_avg_volume <= 0.0 || horizon_avg_volume <= 0.0 {
-        return Ok(2); // Default to medium for invalid volume values
+        return Ok((2, 0.5)); // Default to medium with neutral strength for invalid volume values
     }
 
     // Calculate volume ratio and log transformation
@@ -227,13 +241,82 @@ pub fn classify_volume_regime(
     // Classify using logarithmic thresholds
     let class = classify_volume_log_ratio(log_volume_ratio, thresholds);
 
+    // Calculate classification strength
+    let strength = calculate_volume_strength(log_volume_ratio, thresholds, class);
+
     log::debug!(
-        "🎯 Volume Analysis: seq_vol={:.2}, hor_vol={:.2}, ratio={:.3}, log_ratio={:.4} → class={} ({})",
+        "🎯 Volume Analysis: seq_vol={:.2}, hor_vol={:.2}, ratio={:.3}, log_ratio={:.4} → class={} ({}) strength={:.3}",
         sequence_avg_volume, horizon_avg_volume, volume_ratio, log_volume_ratio, class,
-        ["VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"][class as usize]
+        ["VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"][class as usize], strength
     );
 
+    Ok((class, strength))
+}
+
+/// Classify volume regime using logarithmic ratio analysis (legacy function for compatibility)
+pub fn classify_volume_regime(
+    sequence_volumes: &[f64],
+    horizon_volumes: &[f64],
+    thresholds: &LogVolumeThresholds,
+    config: &VolumeConfig,
+) -> Result<i32> {
+    let (class, _strength) = classify_volume_regime_with_strength(
+        sequence_volumes,
+        horizon_volumes,
+        thresholds,
+        config,
+    )?;
     Ok(class)
+}
+
+/// Calculate classification strength for volume based on distance from boundaries
+///
+/// Strength represents how confident/strong the classification is:
+/// - 1.0 = Very strong (deep in the center of the class range)
+/// - 0.5 = Moderate (near class boundaries)
+/// - 0.0 = Very weak (just barely in the class)
+fn calculate_volume_strength(log_ratio: f64, thresholds: &LogVolumeThresholds, class: i32) -> f64 {
+    match class {
+        0 => {
+            // Very Low: log_ratio <= very_low_max
+            // The more negative beyond very_low_max, the stronger
+            let distance_beyond = (thresholds.very_low_max - log_ratio).max(0.0);
+            let max_distance = (thresholds.very_low_max - thresholds.low_max).abs(); // Use range as reference
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        1 => {
+            // Low: very_low_max < log_ratio <= low_max
+            let range_center = (thresholds.very_low_max + thresholds.low_max) / 2.0;
+            let range_half_width = (thresholds.low_max - thresholds.very_low_max) / 2.0;
+            let distance_from_center = (log_ratio - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        2 => {
+            // Medium: low_max < log_ratio <= medium_max
+            // Closer to zero (ln(1.0) = 0) = stronger medium signal
+            let distance_from_zero = log_ratio.abs();
+            let max_distance = thresholds.medium_max.abs(); // Distance to boundary
+            let strength = 1.0 - (distance_from_zero / max_distance).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        3 => {
+            // High: medium_max < log_ratio <= high_max
+            let range_center = (thresholds.medium_max + thresholds.high_max) / 2.0;
+            let range_half_width = (thresholds.high_max - thresholds.medium_max) / 2.0;
+            let distance_from_center = (log_ratio - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        4 => {
+            // Very High: log_ratio > high_max
+            // The more positive beyond high_max, the stronger
+            let distance_beyond = (log_ratio - thresholds.high_max).max(0.0);
+            let max_distance = (thresholds.high_max - thresholds.medium_max).abs(); // Use range as reference
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        _ => 0.5, // Default neutral strength
+    }
 }
 
 /// Calculate logarithmic volume thresholds for regime classification

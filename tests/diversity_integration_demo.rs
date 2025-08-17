@@ -6,8 +6,7 @@
 #[cfg(test)]
 mod tests {
     use ndarray::Array2;
-    use std::collections::HashMap;
-    use vanga::data::balance::{BalanceConfig, SequenceBalancer, SequenceWithTargets};
+    use vanga::data::balance::{BalanceConfig, SequenceBalancer, SequenceWithTargets, TargetData};
     use vanga::data::diversity::{DiversityConfig, DiversitySelector};
     use vanga::targets::TargetType;
 
@@ -60,16 +59,32 @@ mod tests {
             let sequence_array = Array2::from_shape_vec((60, 5), sequence_data).unwrap();
 
             // Create targets - distribute across classes but make class 0 overloaded
-            let mut targets = HashMap::new();
             let target_class = if i < count * 6 / 10 {
                 0i32
             } else {
                 ((i % 4) + 1) as i32
             }; // 60% in class 0, others distributed
 
-            targets.insert((TargetType::PriceLevel, "1h".to_string()), target_class);
-            targets.insert((TargetType::Direction, "1h".to_string()), target_class);
-            targets.insert((TargetType::Volatility, "1h".to_string()), target_class);
+            let targets = vec![
+                TargetData {
+                    target_type: TargetType::PriceLevel,
+                    horizon: "1h".to_string(),
+                    class: target_class,
+                    strength: 0.8, // Default strength
+                },
+                TargetData {
+                    target_type: TargetType::Direction,
+                    horizon: "1h".to_string(),
+                    class: target_class,
+                    strength: 0.8,
+                },
+                TargetData {
+                    target_type: TargetType::Volatility,
+                    horizon: "1h".to_string(),
+                    class: target_class,
+                    strength: 0.8,
+                },
+            ];
 
             sequences.push(SequenceWithTargets {
                 sequence_idx: i,

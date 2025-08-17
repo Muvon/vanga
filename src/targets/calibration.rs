@@ -1041,7 +1041,7 @@ impl ParameterCalibrator {
 
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
                     // Use the new simplified classification approach
-                    if let Ok(class) = classify_volatility_with_calibrated_params(
+                    if let Ok((class, _strength)) = classify_volatility_with_calibrated_params(
                         sequence_candles,
                         horizon_candles,
                         &calibrated_params,
@@ -1098,7 +1098,7 @@ impl ParameterCalibrator {
                         horizon_data,
                         &eval_params,
                     ) {
-                        Ok(class) => {
+                        Ok((class, _strength)) => {
                             if (0..5).contains(&class) {
                                 class_counts[class as usize] += 1;
                             }

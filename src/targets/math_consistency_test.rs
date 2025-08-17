@@ -161,7 +161,7 @@ mod tests {
                     min_volatility_baseline: 0.005,
                     balance: Default::default(),
                 };
-                let class = classify_volatility_with_calibrated_params(
+                let (class, _) = classify_volatility_with_calibrated_params(
                     &sequence,        // sequence_candles first
                     &target_sequence, // horizon_candles second
                     &params,

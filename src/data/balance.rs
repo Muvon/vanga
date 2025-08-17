@@ -8,6 +8,19 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::{Array2, Array3};
 use std::collections::HashMap;
 
+/// Target data containing both class and strength for diversity-based selection
+#[derive(Debug, Clone)]
+pub struct TargetData {
+    /// Target type (PriceLevel, Direction, Volatility, etc.)
+    pub target_type: TargetType,
+    /// Horizon string (e.g., "1h", "4h", "1d")
+    pub horizon: String,
+    /// Classification result (0-4 for 5-class system)
+    pub class: i32,
+    /// Classification strength (0.0-1.0, where 1.0 = very strong, 0.5 = neutral, 0.0 = very weak)
+    pub strength: f64,
+}
+
 // Import the new diversity selector
 use super::diversity::{DiversityConfig, DiversitySelector};
 
@@ -53,11 +66,44 @@ pub struct SequenceWithTargets {
     pub end_idx: usize,
     /// The actual sequence data [sequence_length, features]
     pub sequence_data: Array2<f64>,
-    /// Targets for all target types and horizons: (target_type, horizon) -> class
-    pub targets: HashMap<(TargetType, String), i32>,
+    /// Targets with both class and strength for diversity-based selection
+    pub targets: Vec<TargetData>,
 }
 
 impl SequenceWithTargets {
+    /// Get target class for a specific target type and horizon
+    pub fn get_target_class(&self, target_type: TargetType, horizon: &str) -> Option<i32> {
+        self.targets
+            .iter()
+            .find(|t| t.target_type == target_type && t.horizon == horizon)
+            .map(|t| t.class)
+    }
+
+    /// Get target strength for a specific target type and horizon
+    pub fn get_target_strength(&self, target_type: TargetType, horizon: &str) -> Option<f64> {
+        self.targets
+            .iter()
+            .find(|t| t.target_type == target_type && t.horizon == horizon)
+            .map(|t| t.strength)
+    }
+
+    /// Get complete target data for a specific target type and horizon
+    pub fn get_target_data(&self, target_type: TargetType, horizon: &str) -> Option<&TargetData> {
+        self.targets
+            .iter()
+            .find(|t| t.target_type == target_type && t.horizon == horizon)
+    }
+
+    /// Add target data to this sequence
+    pub fn add_target(&mut self, target_data: TargetData) {
+        // Remove existing target with same type and horizon if it exists
+        self.targets.retain(|t| {
+            !(t.target_type == target_data.target_type && t.horizon == target_data.horizon)
+        });
+        // Add the new target data
+        self.targets.push(target_data);
+    }
+
     /// Calculate overlap ratio with another sequence
     pub fn overlap_ratio(&self, other: &SequenceWithTargets) -> f64 {
         let overlap_start = self.start_idx.max(other.start_idx);
@@ -167,10 +213,7 @@ impl SequenceBalancer {
         // Group sequences by class
         let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
         for &seq_idx in &available_sequences {
-            if let Some(&class) = all_sequences[seq_idx]
-                .targets
-                .get(&(target_type, horizon.to_string()))
-            {
+            if let Some(class) = all_sequences[seq_idx].get_target_class(target_type, horizon) {
                 class_sequences.entry(class).or_default().push(seq_idx);
             }
         }
@@ -505,7 +548,7 @@ impl SequenceBalancer {
 
                 // Group sequences by class for this target
                 for (idx, seq) in all_sequences.iter().enumerate() {
-                    if let Some(&class) = seq.targets.get(&target_key) {
+                    if let Some(class) = seq.get_target_class(*target_type, horizon) {
                         class_sequences.entry(class).or_default().push(idx);
                     }
                 }
@@ -802,12 +845,12 @@ impl SequenceBalancer {
         target_type: TargetType,
         horizon: &str,
     ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
-        let target_key = (target_type, horizon.to_string());
+        let _target_key = (target_type, horizon.to_string());
 
         // Group sequences by class for balanced splitting
         let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
         for &idx in balanced_indices {
-            if let Some(&class) = all_sequences[idx].targets.get(&target_key) {
+            if let Some(class) = all_sequences[idx].get_target_class(target_type, horizon) {
                 class_sequences.entry(class).or_default().push(idx);
             }
         }
@@ -980,7 +1023,7 @@ impl SequenceBalancer {
                 }
             }
 
-            if let Some(&class) = seq.targets.get(&(*target_type, horizon.to_string())) {
+            if let Some(class) = seq.get_target_class(*target_type, horizon) {
                 class_sequences.entry(class).or_default().push(idx);
             }
         }
@@ -1228,7 +1271,7 @@ impl SequenceBalancer {
         let mut class_counts: HashMap<i32, usize> = HashMap::new();
 
         for seq in all_sequences {
-            if let Some(&class) = seq.targets.get(&(*target_type, horizon.to_string())) {
+            if let Some(class) = seq.get_target_class(*target_type, horizon) {
                 *class_counts.entry(class).or_insert(0) += 1;
             }
         }
@@ -1258,10 +1301,7 @@ impl SequenceBalancer {
         let mut distribution = HashMap::new();
 
         for &idx in selected_indices {
-            if let Some(&class) = all_sequences[idx]
-                .targets
-                .get(&(*target_type, horizon.to_string()))
-            {
+            if let Some(class) = all_sequences[idx].get_target_class(*target_type, horizon) {
                 *distribution.entry(class).or_insert(0) += 1;
             }
         }
@@ -1314,57 +1354,92 @@ pub async fn create_sequences_with_targets(
     let mut sequences_with_targets = Vec::new();
 
     for (seq_idx, (start_idx, end_idx)) in sequence_indices.iter().enumerate() {
-        let mut target_map = HashMap::new();
+        let mut target_data_vec = Vec::new();
 
         // Collect targets for all types and horizons
         for horizon in targets.get_horizons() {
             // Price levels
             if let Some(price_targets) = targets.price_levels.get(&horizon) {
                 if seq_idx < price_targets.len() {
-                    target_map.insert(
-                        (TargetType::PriceLevel, horizon.clone()),
-                        price_targets[seq_idx],
-                    );
+                    let strength = targets
+                        .get_strengths(&horizon, TargetType::PriceLevel)
+                        .and_then(|strengths| strengths.get(seq_idx))
+                        .copied()
+                        .unwrap_or(0.5);
+                    target_data_vec.push(TargetData {
+                        target_type: TargetType::PriceLevel,
+                        horizon: horizon.clone(),
+                        class: price_targets[seq_idx],
+                        strength,
+                    });
                 }
             }
 
             // Directions
             if let Some(direction_targets) = targets.direction.get(&horizon) {
                 if seq_idx < direction_targets.len() {
-                    target_map.insert(
-                        (TargetType::Direction, horizon.clone()),
-                        direction_targets[seq_idx],
-                    );
+                    let strength = targets
+                        .get_strengths(&horizon, TargetType::Direction)
+                        .and_then(|strengths| strengths.get(seq_idx))
+                        .copied()
+                        .unwrap_or(0.5);
+                    target_data_vec.push(TargetData {
+                        target_type: TargetType::Direction,
+                        horizon: horizon.clone(),
+                        class: direction_targets[seq_idx],
+                        strength,
+                    });
                 }
             }
 
             // Volatility
             if let Some(volatility_targets) = targets.volatility.get(&horizon) {
                 if seq_idx < volatility_targets.len() {
-                    target_map.insert(
-                        (TargetType::Volatility, horizon.clone()),
-                        volatility_targets[seq_idx],
-                    );
+                    let strength = targets
+                        .get_strengths(&horizon, TargetType::Volatility)
+                        .and_then(|strengths| strengths.get(seq_idx))
+                        .copied()
+                        .unwrap_or(0.5);
+                    target_data_vec.push(TargetData {
+                        target_type: TargetType::Volatility,
+                        horizon: horizon.clone(),
+                        class: volatility_targets[seq_idx],
+                        strength,
+                    });
                 }
             }
 
-            // Sentiment - MISSING TARGET POPULATION
+            // Sentiment
             if let Some(sentiment_targets) = targets.sentiment.get(&horizon) {
                 if seq_idx < sentiment_targets.len() {
-                    target_map.insert(
-                        (TargetType::Sentiment, horizon.clone()),
-                        sentiment_targets[seq_idx],
-                    );
+                    let strength = targets
+                        .get_strengths(&horizon, TargetType::Sentiment)
+                        .and_then(|strengths| strengths.get(seq_idx))
+                        .copied()
+                        .unwrap_or(0.5);
+                    target_data_vec.push(TargetData {
+                        target_type: TargetType::Sentiment,
+                        horizon: horizon.clone(),
+                        class: sentiment_targets[seq_idx],
+                        strength,
+                    });
                 }
             }
 
-            // Volume - MISSING TARGET POPULATION
+            // Volume
             if let Some(volume_targets) = targets.volume.get(&horizon) {
                 if seq_idx < volume_targets.len() {
-                    target_map.insert(
-                        (TargetType::Volume, horizon.clone()),
-                        volume_targets[seq_idx],
-                    );
+                    let strength = targets
+                        .get_strengths(&horizon, TargetType::Volume)
+                        .and_then(|strengths| strengths.get(seq_idx))
+                        .copied()
+                        .unwrap_or(0.5);
+                    target_data_vec.push(TargetData {
+                        target_type: TargetType::Volume,
+                        horizon: horizon.clone(),
+                        class: volume_targets[seq_idx],
+                        strength,
+                    });
                 }
             }
         }
@@ -1377,7 +1452,7 @@ pub async fn create_sequences_with_targets(
             start_idx: *start_idx,
             end_idx: *end_idx,
             sequence_data,
-            targets: target_map,
+            targets: target_data_vec,
         });
     }
 

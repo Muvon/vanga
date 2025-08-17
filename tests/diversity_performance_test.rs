@@ -6,9 +6,8 @@
 #[cfg(test)]
 mod tests {
     use ndarray::Array2;
-    use std::collections::HashMap;
     use std::time::Instant;
-    use vanga::data::balance::SequenceWithTargets;
+    use vanga::data::balance::{SequenceWithTargets, TargetData};
     use vanga::data::diversity::{DiversityConfig, DiversitySelector};
     use vanga::targets::TargetType;
 
@@ -35,8 +34,12 @@ mod tests {
             let sequence_array = Array2::from_shape_vec((60, 5), sequence_data).unwrap();
 
             // All sequences belong to class 0 (overloaded class scenario)
-            let mut targets = HashMap::new();
-            targets.insert((TargetType::PriceLevel, "6h".to_string()), 0i32);
+            let targets = vec![TargetData {
+                target_type: TargetType::PriceLevel,
+                horizon: "6h".to_string(),
+                class: 0i32,
+                strength: 0.8,
+            }];
 
             sequences.push(SequenceWithTargets {
                 sequence_idx: i,
