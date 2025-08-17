@@ -367,3 +367,66 @@ async fn test_accuracy_calculation() {
     // Expected accuracy: 2/3 = 0.6667
     assert!((accuracy - 2.0 / 3.0).abs() < 1e-10);
 }
+
+#[test]
+fn test_logit_adjustment_bounds() {
+    // Create corrector with extreme bias factors to test bounds
+    let corrector = LinearBiasCorrector {
+        class_bias_factors: [0.1, 0.5, 1.0, 2.0, 5.0], // Extreme values
+        is_calibrated: true,
+        ..Default::default()
+    };
+
+    // Calculate adjustments with high strength
+    let adjustments = corrector.calculate_ordinal_aware_adjustments(1.0);
+
+    // All adjustments should be bounded to [-0.2, 0.2]
+    for &adj in &adjustments {
+        assert!(
+            (-0.2..=0.2).contains(&adj),
+            "Adjustment {} is outside bounds [-0.2, 0.2]",
+            adj
+        );
+    }
+}
+
+#[test]
+fn test_confidence_scaling_bounds() {
+    let config = BiasCorrection::default();
+    let mut corrector = LinearBiasCorrector::new(config);
+
+    // Create mock validation data
+    let predictions = Array2::from_shape_vec(
+        (10, 5),
+        vec![
+            0.9, 0.025, 0.025, 0.025, 0.025, // High confidence
+            0.2, 0.2, 0.2, 0.2, 0.2, // Low confidence
+            0.8, 0.05, 0.05, 0.05, 0.05, 0.7, 0.075, 0.075, 0.075, 0.075, 0.6, 0.1, 0.1, 0.1, 0.1,
+            0.5, 0.125, 0.125, 0.125, 0.125, 0.4, 0.15, 0.15, 0.15, 0.15, 0.3, 0.175, 0.175, 0.175,
+            0.175, 0.25, 0.1875, 0.1875, 0.1875, 0.1875, 0.2, 0.2, 0.2, 0.2, 0.2,
+        ],
+    )
+    .unwrap();
+
+    let targets = Array2::from_shape_vec(
+        (10, 5),
+        vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+    )
+    .unwrap();
+
+    // Calibrate
+    corrector
+        .calibrate_from_validation(&predictions, &targets)
+        .unwrap();
+
+    // Confidence scaling should be bounded to [0.5, 2.0]
+    assert!(
+        corrector.confidence_scaling >= 0.5 && corrector.confidence_scaling <= 2.0,
+        "Confidence scaling {} is outside bounds [0.5, 2.0]",
+        corrector.confidence_scaling
+    );
+}
