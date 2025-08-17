@@ -170,7 +170,7 @@ mod tests {
             (100.4, 100.6, 100.2, 100.5, 1400.0),
         ]);
 
-        let low_class = classify_volatility_with_calibrated_params(
+        let (low_class, _) = classify_volatility_with_calibrated_params(
             &low_vol_sequence,
             &low_vol_horizon,
             &params,
@@ -190,7 +190,7 @@ mod tests {
             (108.0, 118.0, 98.0, 110.0, 1400.0),
         ]);
 
-        let high_class = classify_volatility_with_calibrated_params(
+        let (high_class, _) = classify_volatility_with_calibrated_params(
             &high_vol_sequence,
             &high_vol_horizon,
             &params,
@@ -268,7 +268,7 @@ mod tests {
             "Volatility target generation should succeed: {:?}",
             result.err()
         );
-        let targets = result.unwrap();
+        let (targets, _strengths) = result.unwrap();
 
         assert!(targets.contains_key("2h"), "Should contain 2h horizon");
         let horizon_targets = &targets["2h"];
@@ -363,14 +363,14 @@ mod tests {
             balance: Default::default(),
         };
 
-        let low_bandwidth_class = classify_volatility_with_calibrated_params(
+        let (low_bandwidth_class, _) = classify_volatility_with_calibrated_params(
             &sequence_candles,
             &horizon_candles,
             &low_bandwidth_params,
         )
         .unwrap();
 
-        let high_bandwidth_class = classify_volatility_with_calibrated_params(
+        let (high_bandwidth_class, _) = classify_volatility_with_calibrated_params(
             &sequence_candles,
             &horizon_candles,
             &high_bandwidth_params,
@@ -420,7 +420,7 @@ mod tests {
             (100.0, 100.0, 100.0, 100.0, 1000.0),
         ]);
 
-        let class = classify_volatility_with_calibrated_params(
+        let (class, _) = classify_volatility_with_calibrated_params(
             &zero_vol_sequence,
             &zero_vol_horizon,
             &params,

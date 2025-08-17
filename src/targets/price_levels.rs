@@ -49,6 +49,7 @@
 
 use crate::data::structures::MarketDataRow;
 use crate::targets::sequence_reconstruction::{SequenceAnalyzer, SequenceReconstructionConfig};
+use crate::targets::TargetResult;
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_ohlcv_data;
 use crate::utils::parser::parse_horizon_to_steps;
@@ -113,14 +114,14 @@ impl PriceLevelConfig {
     }
 }
 
-/// Generate price level targets using PriceLevelConfig
+/// Generate price level targets using PriceLevelConfig - returns both class and strength
 pub fn generate_price_level_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
     calibrated_params: &crate::targets::calibration::PriceLevelParams,
-) -> Result<HashMap<String, Vec<i32>>> {
+) -> Result<TargetResult> {
     log::info!(
         "🎯 Using calibrated price levels parameters: bandwidth={:.6}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, momentum_factor={:.2}",
         calibrated_params.bandwidth,
@@ -131,10 +132,12 @@ pub fn generate_price_level_targets_with_calibrated_params(
     );
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
+    let mut strengths = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
+        let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 
         for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
             let sequence_end_idx = seq_idx + sequence_length;
@@ -145,13 +148,14 @@ pub fn generate_price_level_targets_with_calibrated_params(
                 let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
                 let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                // Use enhanced classification with calibrated parameters
-                let target_class = classify_price_level_with_calibrated_params(
+                // Use enhanced classification with calibrated parameters - capture both class and strength
+                let (target_class, strength) = classify_price_level_with_calibrated_params(
                     sequence_ohlcv,
                     horizon_ohlcv,
                     calibrated_params,
                 )?;
                 horizon_targets[seq_position] = target_class;
+                horizon_strengths[seq_position] = strength;
             }
         }
 
@@ -166,9 +170,10 @@ pub fn generate_price_level_targets_with_calibrated_params(
         }
 
         targets.insert(horizon.clone(), horizon_targets);
+        strengths.insert(horizon.clone(), horizon_strengths);
     }
 
-    Ok(targets)
+    Ok((targets, strengths))
 }
 
 /// Get exponentially-weighted close price from OHLCV data (replaces VWAP)
@@ -433,9 +438,9 @@ pub fn classify_price_level_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::PriceLevelParams,
-) -> Result<i32> {
+) -> Result<(i32, f64)> {
     if sequence_ohlcv.is_empty() {
-        return Ok(2); // Default to neutral class
+        return Ok((2, 0.5)); // Default to neutral class with neutral strength
     }
 
     // 1. Calculate sequence exponentially-weighted close
@@ -469,11 +474,12 @@ pub fn classify_price_level_with_calibrated_params(
 
     // 7. Handle edge case: flat sequence
     if boundaries.bandwidth == 0.0 {
-        return Ok(if hor_exponential_weighted >= boundaries.sequence_min {
+        let class = if hor_exponential_weighted >= boundaries.sequence_min {
             3
         } else {
             2
-        });
+        };
+        return Ok((class, 0.3)); // Low strength for edge case
     }
 
     // 8. Enhanced debug logging
@@ -487,12 +493,81 @@ pub fn classify_price_level_with_calibrated_params(
     // 9. Use centralized classification logic
     let class = boundaries.classify_price(hor_exponential_weighted);
 
+    // 10. Calculate classification strength based on position within the range
+    let strength = calculate_price_level_strength(hor_exponential_weighted, &boundaries, class);
+
     log::debug!(
-        "🎯 Price Level Result: target={:.6} → class={} (adaptive_range: [{:.6}, {:.6}], adaptive_bandwidth: {:.6})",
-        hor_exponential_weighted, class, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
+        "🎯 Price Level Result: target={:.6} → class={} strength={:.3} (adaptive_range: [{:.6}, {:.6}], adaptive_bandwidth: {:.6})",
+        hor_exponential_weighted, class, strength, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
     );
 
-    Ok(class)
+    Ok((class, strength))
+}
+
+/// Calculate classification strength for price levels based on position within boundaries
+///
+/// Strength represents how confident/strong the classification is:
+/// - 1.0 = Very strong (deep in the center of the class range)
+/// - 0.5 = Moderate (near class boundaries)
+/// - 0.0 = Very weak (just barely in the class)
+fn calculate_price_level_strength(
+    target_price: f64,
+    boundaries: &crate::targets::sequence_reconstruction::SequenceBoundaries,
+    class: i32,
+) -> f64 {
+    match class {
+        0 => {
+            // Strong Down: target_price < boundaries[0]
+            // The further below boundary[0], the stronger
+            let distance_below = (boundaries.boundaries[0] - target_price).max(0.0);
+            let max_distance = boundaries.bandwidth; // Use bandwidth as reference
+            (distance_below / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        1 => {
+            // Moderate Down: boundaries[0] <= target_price < boundaries[1]
+            let range_center = (boundaries.boundaries[0] + boundaries.boundaries[1]) / 2.0;
+            let range_half_width = (boundaries.boundaries[1] - boundaries.boundaries[0]) / 2.0;
+            if range_half_width > 0.0 {
+                let distance_from_center = (target_price - range_center).abs();
+                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+                strength.max(0.1) // At least 0.1 strength
+            } else {
+                0.5 // Default for zero-width range
+            }
+        }
+        2 => {
+            // Neutral: boundaries[1] <= target_price < boundaries[2]
+            let range_center = (boundaries.boundaries[1] + boundaries.boundaries[2]) / 2.0;
+            let range_half_width = (boundaries.boundaries[2] - boundaries.boundaries[1]) / 2.0;
+            if range_half_width > 0.0 {
+                let distance_from_center = (target_price - range_center).abs();
+                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+                strength.max(0.1) // At least 0.1 strength
+            } else {
+                0.5 // Default for zero-width range
+            }
+        }
+        3 => {
+            // Moderate Up: boundaries[2] <= target_price < boundaries[3]
+            let range_center = (boundaries.boundaries[2] + boundaries.boundaries[3]) / 2.0;
+            let range_half_width = (boundaries.boundaries[3] - boundaries.boundaries[2]) / 2.0;
+            if range_half_width > 0.0 {
+                let distance_from_center = (target_price - range_center).abs();
+                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+                strength.max(0.1) // At least 0.1 strength
+            } else {
+                0.5 // Default for zero-width range
+            }
+        }
+        4 => {
+            // Strong Up: target_price >= boundaries[3]
+            // The further above boundary[3], the stronger
+            let distance_above = (target_price - boundaries.boundaries[3]).max(0.0);
+            let max_distance = boundaries.bandwidth; // Use bandwidth as reference
+            (distance_above / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        _ => 0.5, // Default neutral strength
+    }
 }
 
 /// Analyze class distribution and log insights for debugging

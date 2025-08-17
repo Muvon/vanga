@@ -3,7 +3,6 @@
 use crate::data::balance::*;
 use crate::targets::TargetType;
 use ndarray::Array2;
-use std::collections::HashMap;
 
 #[test]
 fn test_perfect_balance_mandatory() {
@@ -38,8 +37,12 @@ fn test_perfect_balance_mandatory() {
             4
         }; // 1 sequence
 
-        let mut targets = HashMap::new();
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
+        let targets = vec![TargetData {
+            target_type: TargetType::PriceLevel,
+            horizon: "1h".to_string(),
+            class,
+            strength: 0.5,
+        }];
 
         sequences.push(SequenceWithTargets {
             sequence_idx: i,
@@ -120,8 +123,12 @@ fn test_overlap_configuration_respected() {
     // Create 20 sequences with multiple classes but heavy overlap
     for i in 0..20 {
         let class = (i % 5) as i32; // Distribute across all 5 classes, cast to i32
-        let mut targets = HashMap::new();
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
+        let targets = vec![TargetData {
+            target_type: TargetType::PriceLevel,
+            horizon: "1h".to_string(),
+            class,
+            strength: 0.5,
+        }];
 
         sequences.push(SequenceWithTargets {
             sequence_idx: i,
@@ -180,8 +187,12 @@ fn test_insufficient_sequences_for_balance() {
 
     // Only 3 sequences total, but need 5 classes
     for i in 0..3 {
-        let mut targets = HashMap::new();
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), i as i32);
+        let targets = vec![TargetData {
+            target_type: TargetType::PriceLevel,
+            horizon: "1h".to_string(),
+            class: i as i32,
+            strength: 0.5,
+        }];
 
         sequences.push(SequenceWithTargets {
             sequence_idx: i,
@@ -245,8 +256,12 @@ fn test_overlap_enables_balance_for_rare_classes() {
             4
         };
 
-        let mut targets = HashMap::new();
-        targets.insert((TargetType::PriceLevel, "1h".to_string()), class);
+        let targets = vec![TargetData {
+            target_type: TargetType::PriceLevel,
+            horizon: "1h".to_string(),
+            class,
+            strength: 0.5,
+        }];
 
         // Create overlapping sequences for rare classes
         let start_idx = if class >= 3 {
@@ -324,8 +339,12 @@ fn test_missing_classes_fatal_error() {
 
     for (class, count) in class_data {
         for _ in 0..count {
-            let mut targets = HashMap::new();
-            targets.insert((TargetType::PriceLevel, "16h".to_string()), class);
+            let targets = vec![TargetData {
+                target_type: TargetType::PriceLevel,
+                horizon: "16h".to_string(),
+                class,
+                strength: 0.5,
+            }];
 
             sequences.push(SequenceWithTargets {
                 sequence_idx: seq_idx,

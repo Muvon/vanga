@@ -712,10 +712,19 @@ impl LSTMModel {
             batch_size
         );
 
-        // Calculate and log samples that will actually be used (complete batches only)
-        let num_complete_train_batches = total_train_samples / batch_size;
-        let train_samples_used = num_complete_train_batches * batch_size;
-        let train_samples_dropped = total_train_samples - train_samples_used;
+        // Calculate and log samples that will actually be used
+        // FIXED: When batch_size > total_samples, use all samples as single batch
+        let (num_complete_train_batches, train_samples_used, train_samples_dropped) =
+            if batch_size >= total_train_samples {
+                // Use all samples as single batch
+                (1, total_train_samples, 0)
+            } else {
+                // Use complete batches only
+                let num_complete = total_train_samples / batch_size;
+                let samples_used = num_complete * batch_size;
+                let samples_dropped = total_train_samples - samples_used;
+                (num_complete, samples_used, samples_dropped)
+            };
 
         if train_samples_dropped > 0 {
             log::info!(

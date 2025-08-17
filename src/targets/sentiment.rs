@@ -40,13 +40,12 @@
 //! - Adjusts to market volatility and sentiment consistency
 //! - No hardcoded thresholds - fully adaptive system
 
+use crate::data::structures::MarketDataRow;
+use crate::targets::TargetResult;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-// Use the main MarketDataRow from data::structures
-use crate::data::structures::MarketDataRow;
 
 /// Sentiment analysis metrics
 #[derive(Debug, Clone)]
@@ -87,6 +86,7 @@ impl Default for SentimentConfig {
 /// Generate sentiment targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
+/// Generate sentiment targets with calibrated parameters - returns both class and strength
 /// target generation between training and prediction. When None, uses base config.
 pub fn generate_sentiment_targets_with_calibrated_params(
     df: &DataFrame,
@@ -94,7 +94,7 @@ pub fn generate_sentiment_targets_with_calibrated_params(
     sequence_indices: &[usize],
     sequence_length: usize,
     calibrated_params: &crate::targets::calibration::SentimentParams, // Now mandatory
-) -> Result<HashMap<String, Vec<i32>>> {
+) -> Result<TargetResult> {
     // Use pre-calibrated parameters (always available)
     log::info!(
         "🎯 Using calibrated sentiment parameters: body_sensitivity={:.6}, volume_weight={:.3}, consistency_factor={:.3}",
@@ -105,10 +105,12 @@ pub fn generate_sentiment_targets_with_calibrated_params(
 
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
+    let mut strengths = HashMap::new();
 
     for horizon in horizons {
         let horizon_steps = parse_horizon_steps(horizon)?;
         let mut horizon_targets = Vec::new();
+        let mut horizon_strengths = Vec::new();
 
         for &seq_start in sequence_indices {
             let seq_end = seq_start + sequence_length;
@@ -126,7 +128,10 @@ pub fn generate_sentiment_targets_with_calibrated_params(
                 horizon_data,
                 calibrated_params,
             ) {
-                Ok(class) => horizon_targets.push(class),
+                Ok((class, strength)) => {
+                    horizon_targets.push(class);
+                    horizon_strengths.push(strength);
+                }
                 Err(e) => {
                     log::warn!(
                         "Failed to classify sentiment for sequence {}: {}",
@@ -141,10 +146,11 @@ pub fn generate_sentiment_targets_with_calibrated_params(
         if !horizon_targets.is_empty() {
             log_sentiment_distribution(&horizon_targets, horizon);
             targets.insert(horizon.clone(), horizon_targets);
+            strengths.insert(horizon.clone(), horizon_strengths);
         }
     }
 
-    Ok(targets)
+    Ok((targets, strengths))
 }
 
 /// Classify sentiment using simple price-volume momentum for strong ML signals
@@ -167,7 +173,7 @@ pub fn classify_sentiment_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::SentimentParams,
-) -> Result<i32> {
+) -> Result<(i32, f64)> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
         return Err(VangaError::DataError(
             "Empty sequence or horizon OHLCV data for sentiment analysis".to_string(),
@@ -217,14 +223,76 @@ pub fn classify_sentiment_with_calibrated_params(
         4 // Strong Greed: Large positive momentum
     };
 
-    log::debug!(
-        "🎯 Simple Momentum: seq_price={:.4}, hor_price={:.4}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
-        sequence_price, horizon_price, price_momentum, volume_conviction, sentiment_score,
-        -extreme_threshold, -moderate_threshold, moderate_threshold, extreme_threshold,
-        class, ["STRONG_PANIC", "MODERATE_PANIC", "NEUTRAL", "MODERATE_GREED", "STRONG_GREED"][class as usize]
+    // Calculate classification strength based on distance from boundaries
+    let strength = calculate_sentiment_strength(
+        sentiment_score,
+        moderate_threshold,
+        extreme_threshold,
+        class,
     );
 
-    Ok(class)
+    log::debug!(
+        "🎯 Simple Momentum: seq_price={:.4}, hor_price={:.4}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({}) strength={:.3}",
+        sequence_price, horizon_price, price_momentum, volume_conviction, sentiment_score,
+        -extreme_threshold, -moderate_threshold, moderate_threshold, extreme_threshold,
+        class, ["STRONG_PANIC", "MODERATE_PANIC", "NEUTRAL", "MODERATE_GREED", "STRONG_GREED"][class as usize], strength
+    );
+
+    Ok((class, strength))
+}
+
+/// Calculate classification strength for sentiment based on distance from boundaries
+///
+/// Strength represents how confident/strong the classification is:
+/// - 1.0 = Very strong (deep in the center of the class range)
+/// - 0.5 = Moderate (near class boundaries)
+/// - 0.0 = Very weak (just barely in the class)
+fn calculate_sentiment_strength(
+    sentiment_score: f64,
+    moderate_threshold: f64,
+    extreme_threshold: f64,
+    class: i32,
+) -> f64 {
+    match class {
+        0 => {
+            // Strong Panic: sentiment_score <= -extreme_threshold
+            // The more negative beyond extreme, the stronger
+            let distance_beyond = (-sentiment_score - extreme_threshold).max(0.0);
+            let max_distance = extreme_threshold; // Reasonable max distance
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        1 => {
+            // Moderate Panic: -extreme_threshold < sentiment_score <= -moderate_threshold
+            let range_center = -(extreme_threshold + moderate_threshold) / 2.0;
+            let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
+            let distance_from_center = (sentiment_score - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        2 => {
+            // Neutral: -moderate_threshold < sentiment_score < moderate_threshold
+            // Closer to zero = stronger neutral signal
+            let distance_from_zero = sentiment_score.abs();
+            let strength = 1.0 - (distance_from_zero / moderate_threshold).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        3 => {
+            // Moderate Greed: moderate_threshold <= sentiment_score < extreme_threshold
+            let range_center = (moderate_threshold + extreme_threshold) / 2.0;
+            let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
+            let distance_from_center = (sentiment_score - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        4 => {
+            // Strong Greed: sentiment_score >= extreme_threshold
+            // The more positive beyond extreme, the stronger
+            let distance_beyond = (sentiment_score - extreme_threshold).max(0.0);
+            let max_distance = extreme_threshold; // Reasonable max distance
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        _ => 0.5, // Default neutral strength
+    }
 }
 
 /// Calculate average close price for momentum calculation

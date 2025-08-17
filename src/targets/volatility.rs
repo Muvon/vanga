@@ -102,6 +102,7 @@
 //! enabling comprehensive market regime analysis for position sizing and risk management.
 
 use crate::data::structures::MarketDataRow;
+use crate::targets::TargetResult;
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_ohlcv_data;
 use crate::utils::parser::parse_horizon_to_steps;
@@ -112,6 +113,7 @@ use std::collections::HashMap;
 /// Generate volatility targets with optional adaptive parameters
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
+/// Generate volatility targets with calibrated parameters - returns both class and strength
 /// target generation between training and prediction. When None, performs calibration.
 pub fn generate_volatility_targets_with_calibrated_params(
     df: &DataFrame,
@@ -119,9 +121,10 @@ pub fn generate_volatility_targets_with_calibrated_params(
     sequence_indices: &[usize],
     sequence_length: usize,
     calibrated_params: &crate::targets::calibration::VolatilityParams,
-) -> Result<HashMap<String, Vec<i32>>> {
+) -> Result<TargetResult> {
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
+    let mut strengths = HashMap::new();
 
     // Use pre-calibrated adaptive parameters
     let calibrated_bandwidth = calibrated_params.bandwidth;
@@ -141,6 +144,7 @@ pub fn generate_volatility_targets_with_calibrated_params(
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
+        let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 
         for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
             let sequence_end_idx = seq_idx + sequence_length;
@@ -156,23 +160,25 @@ pub fn generate_volatility_targets_with_calibrated_params(
 
                 // Only classify if we have sufficient data for ATR calculation
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-                    // Use enhanced classification with calibrated adaptive parameters
-                    let volatility_class = classify_volatility_with_calibrated_params(
+                    // Use enhanced classification with calibrated adaptive parameters - capture both class and strength
+                    let (volatility_class, strength) = classify_volatility_with_calibrated_params(
                         sequence_candles,
                         horizon_candles,
                         calibrated_params,
                     )?;
 
                     horizon_targets[seq_position] = volatility_class;
+                    horizon_strengths[seq_position] = strength;
                 }
             }
         }
 
         log_volatility_distribution(&horizon_targets, horizon);
         targets.insert(horizon.clone(), horizon_targets);
+        strengths.insert(horizon.clone(), horizon_strengths);
     }
 
-    Ok(targets)
+    Ok((targets, strengths))
 }
 
 /// Calculate rolling ATR series for distribution analysis
@@ -566,9 +572,9 @@ pub fn classify_volatility_with_calibrated_params(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::VolatilityParams,
-) -> Result<i32> {
+) -> Result<(i32, f64)> {
     if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
-        return Ok(2); // Default to Medium for insufficient data
+        return Ok((2, 0.5)); // Default to Medium with neutral strength for insufficient data
     }
 
     // Calculate ATR for both periods (same as before)
@@ -616,14 +622,22 @@ pub fn classify_volatility_with_calibrated_params(
         4 // VeryHigh: Large ATR increase
     };
 
-    log::debug!(
-        "🎯 Simple ATR Momentum: seq_atr={:.6}, hor_atr={:.6}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({})",
-        baseline_atr, horizon_atr, atr_momentum, volume_conviction, volatility_score,
-        -extreme_threshold, -moderate_threshold, moderate_threshold, extreme_threshold,
-        class, ["VeryLow", "Low", "Medium", "High", "VeryHigh"][class as usize]
+    // Calculate classification strength based on distance from boundaries
+    let strength = calculate_volatility_strength(
+        volatility_score,
+        moderate_threshold,
+        extreme_threshold,
+        class,
     );
 
-    Ok(class)
+    log::debug!(
+        "🎯 Simple ATR Momentum: seq_atr={:.6}, hor_atr={:.6}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({}) strength={:.3}",
+        baseline_atr, horizon_atr, atr_momentum, volume_conviction, volatility_score,
+        -extreme_threshold, -moderate_threshold, moderate_threshold, extreme_threshold,
+        class, ["VeryLow", "Low", "Medium", "High", "VeryHigh"][class as usize], strength
+    );
+
+    Ok((class, strength))
 }
 
 /// Calibrate volatility thresholds for balanced class distribution using ATR ratios
@@ -645,6 +659,60 @@ pub fn classify_volatility_with_calibrated_params(
 /// - `min_baseline`: Minimum volatility baseline to test during calibration
 ///
 /// ## Returns
+/// Calculate classification strength for volatility based on distance from boundaries
+///
+/// Strength represents how confident/strong the classification is:
+/// - 1.0 = Very strong (deep in the center of the class range)
+/// - 0.5 = Moderate (near class boundaries)
+/// - 0.0 = Very weak (just barely in the class)
+fn calculate_volatility_strength(
+    volatility_score: f64,
+    moderate_threshold: f64,
+    extreme_threshold: f64,
+    class: i32,
+) -> f64 {
+    match class {
+        0 => {
+            // VeryLow: volatility_score <= -extreme_threshold
+            // The more negative beyond extreme, the stronger
+            let distance_beyond = (-volatility_score - extreme_threshold).max(0.0);
+            let max_distance = extreme_threshold; // Reasonable max distance
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        1 => {
+            // Low: -extreme_threshold < volatility_score <= -moderate_threshold
+            let range_center = -(extreme_threshold + moderate_threshold) / 2.0;
+            let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
+            let distance_from_center = (volatility_score - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        2 => {
+            // Medium: -moderate_threshold < volatility_score < moderate_threshold
+            // Closer to zero = stronger medium signal
+            let distance_from_zero = volatility_score.abs();
+            let strength = 1.0 - (distance_from_zero / moderate_threshold).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        3 => {
+            // High: moderate_threshold <= volatility_score < extreme_threshold
+            let range_center = (moderate_threshold + extreme_threshold) / 2.0;
+            let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
+            let distance_from_center = (volatility_score - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        4 => {
+            // VeryHigh: volatility_score >= extreme_threshold
+            // The more positive beyond extreme, the stronger
+            let distance_beyond = (volatility_score - extreme_threshold).max(0.0);
+            let max_distance = extreme_threshold; // Reasonable max distance
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        _ => 0.5, // Default neutral strength
+    }
+}
+
 /// Calibrated base_sensitivity parameter for balanced volatility classification
 pub fn calibrate_volatility_bandwidth(
     ohlcv_data: &[MarketDataRow],

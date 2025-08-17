@@ -266,7 +266,7 @@ mod tests {
             "Volume target generation should succeed: {:?}",
             result.err()
         );
-        let targets = result.unwrap();
+        let (targets, _strengths) = result.unwrap();
 
         assert!(targets.contains_key("1h"), "Should contain 1h horizon");
         let horizon_targets = &targets["1h"];

@@ -83,7 +83,7 @@ mod tests {
             seq_momentum, hor_momentum, momentum_change
         );
 
-        let class =
+        let (class, _strength) =
             classify_direction_with_calibrated_params(&strong_up_prices, &horizon_prices, &params)
                 .unwrap();
         assert!(
@@ -106,7 +106,7 @@ mod tests {
             seq_momentum_down, hor_momentum_down, momentum_change_down
         );
 
-        let class = classify_direction_with_calibrated_params(
+        let (class, _strength) = classify_direction_with_calibrated_params(
             &strong_down_prices,
             &horizon_down_prices,
             &params,
@@ -121,7 +121,7 @@ mod tests {
         // Test sideways movement (should be SIDEWAYS)
         let sideways_prices = vec![100.0, 100.5, 99.5, 100.2, 99.8];
         let horizon_sideways = vec![100.1, 99.9, 100.3];
-        let class =
+        let (class, _strength) =
             classify_direction_with_calibrated_params(&sideways_prices, &horizon_sideways, &params)
                 .unwrap();
         assert_eq!(
@@ -179,7 +179,7 @@ mod tests {
             "Direction target generation should succeed: {:?}",
             result.err()
         );
-        let targets = result.unwrap();
+        let (targets, _strengths) = result.unwrap();
 
         assert!(targets.contains_key("2h"), "Should contain 2h horizon");
         let horizon_targets = &targets["2h"];
@@ -239,14 +239,14 @@ mod tests {
             balance: Default::default(),
         };
 
-        let low_class = classify_direction_with_calibrated_params(
+        let (low_class, _) = classify_direction_with_calibrated_params(
             &base_prices,
             &horizon_prices,
             &low_sensitivity_params,
         )
         .unwrap();
 
-        let high_class = classify_direction_with_calibrated_params(
+        let (high_class, _) = classify_direction_with_calibrated_params(
             &base_prices,
             &horizon_prices,
             &high_sensitivity_params,
@@ -290,8 +290,9 @@ mod tests {
         // Test with identical prices (no movement)
         let flat_prices = vec![100.0, 100.0, 100.0, 100.0];
         let flat_horizon = vec![100.0, 100.0];
-        let class = classify_direction_with_calibrated_params(&flat_prices, &flat_horizon, &params)
-            .unwrap();
+        let (class, _) =
+            classify_direction_with_calibrated_params(&flat_prices, &flat_horizon, &params)
+                .unwrap();
         assert_eq!(class, 2, "No movement should be classified as SIDEWAYS");
 
         // Test with extreme volatility but no trend

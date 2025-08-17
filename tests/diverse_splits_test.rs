@@ -6,9 +6,8 @@
 #[cfg(test)]
 mod tests {
     use ndarray::Array2;
-    use std::collections::HashMap;
     use std::time::Instant;
-    use vanga::data::balance::{BalanceConfig, SequenceBalancer, SequenceWithTargets};
+    use vanga::data::balance::{BalanceConfig, SequenceBalancer, SequenceWithTargets, TargetData};
     use vanga::targets::TargetType;
 
     /// Create test sequences for diverse splitting
@@ -45,7 +44,6 @@ mod tests {
             let sequence_array = Array2::from_shape_vec((60, 5), sequence_data).unwrap();
 
             // Distribute across classes with some imbalance
-            let mut targets = HashMap::new();
             let target_class = match i % 10 {
                 0..=3 => 0i32, // 40% class 0 (overloaded)
                 4..=5 => 1i32, // 20% class 1
@@ -55,7 +53,12 @@ mod tests {
                 _ => 0i32,
             };
 
-            targets.insert((TargetType::PriceLevel, "6h".to_string()), target_class);
+            let targets = vec![TargetData {
+                target_type: TargetType::PriceLevel,
+                horizon: "6h".to_string(),
+                class: target_class,
+                strength: 0.8,
+            }];
 
             sequences.push(SequenceWithTargets {
                 sequence_idx: i,
@@ -228,11 +231,12 @@ mod tests {
         ) -> bool {
             let mut class_counts = std::collections::HashMap::new();
             for &idx in indices {
-                if let Some(&class) = sequences[idx]
+                if let Some(target_data) = sequences[idx]
                     .targets
-                    .get(&(TargetType::PriceLevel, "6h".to_string()))
+                    .iter()
+                    .find(|t| t.target_type == TargetType::PriceLevel && t.horizon == "6h")
                 {
-                    *class_counts.entry(class).or_insert(0) += 1;
+                    *class_counts.entry(target_data.class).or_insert(0) += 1;
                 }
             }
 

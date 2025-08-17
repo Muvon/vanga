@@ -110,8 +110,14 @@ impl DiversitySelector {
             )));
         }
 
-        // FAST APPROACH: Use efficient diversity selection
-        let selected = self.select_diverse_fast(all_sequences, &available_indices, target_count)?;
+        // FAST APPROACH: Use efficient diversity selection with strength-based selection
+        let selected = self.select_diverse_fast_with_strength(
+            all_sequences,
+            &available_indices,
+            target_count,
+            target_type,
+            horizon,
+        )?;
 
         log::info!(
             "✅ FAST DIVERSITY SELECTION COMPLETE: Selected {} sequences",
@@ -121,7 +127,37 @@ impl DiversitySelector {
         Ok(selected)
     }
 
-    /// Fast diversity selection using clustering and stratified sampling
+    /// Fast diversity selection using clustering and stratified sampling with strength-based selection
+    fn select_diverse_fast_with_strength(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        available_indices: &[usize],
+        target_count: usize,
+        target_type: TargetType,
+        horizon: &str,
+    ) -> Result<Vec<usize>> {
+        // Step 1: Extract lightweight features for all sequences (O(n))
+        let mut sequence_features = Vec::new();
+        for &idx in available_indices {
+            let seq = &all_sequences[idx];
+            let features = self.extract_lightweight_features(&seq.sequence_data)?;
+            sequence_features.push((idx, features));
+        }
+
+        // Step 2: Diversity-based selection using temporal + strength-based spread
+        let selected = self.select_by_temporal_and_strength_spread(
+            &sequence_features,
+            target_count,
+            all_sequences,
+            target_type,
+            horizon,
+        )?;
+
+        Ok(selected)
+    }
+
+    /// Fast diversity selection using clustering and stratified sampling (legacy method)
+    #[allow(dead_code)]
     fn select_diverse_fast(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -168,7 +204,100 @@ impl DiversitySelector {
         Ok(features)
     }
 
-    /// Select sequences by maximizing spread in feature + temporal space
+    /// Select sequences by maximizing spread in temporal space and strength within buckets
+    fn select_by_temporal_and_strength_spread(
+        &self,
+        sequence_features: &[(usize, Vec<f64>)],
+        target_count: usize,
+        all_sequences: &[SequenceWithTargets],
+        target_type: TargetType,
+        horizon: &str,
+    ) -> Result<Vec<usize>> {
+        // Sort by temporal position for temporal diversity (KEEP EXISTING LOGIC)
+        let mut temporal_sorted: Vec<(usize, usize)> = sequence_features
+            .iter()
+            .map(|(idx, _)| (*idx, all_sequences[*idx].start_idx))
+            .collect();
+        temporal_sorted.sort_by_key(|(_, start_idx)| *start_idx);
+
+        // Divide into temporal buckets (KEEP EXISTING LOGIC)
+        let num_buckets = (target_count / 10).clamp(3, 10); // 3-10 buckets
+        let bucket_size = temporal_sorted.len() / num_buckets;
+        let sequences_per_bucket = target_count / num_buckets;
+        let remainder = target_count % num_buckets;
+
+        let mut selected = Vec::new();
+
+        for bucket_idx in 0..num_buckets {
+            let start = bucket_idx * bucket_size;
+            let end = if bucket_idx == num_buckets - 1 {
+                temporal_sorted.len() // Last bucket gets remainder
+            } else {
+                (bucket_idx + 1) * bucket_size
+            };
+
+            let bucket_sequences: Vec<usize> = temporal_sorted[start..end]
+                .iter()
+                .map(|(idx, _)| *idx)
+                .collect();
+
+            let take_count = if bucket_idx < remainder {
+                sequences_per_bucket + 1
+            } else {
+                sequences_per_bucket
+            };
+
+            // NEW: Instead of random selection, use strength-based selection within bucket
+            let bucket_selected = self.select_strongest_from_bucket(
+                &bucket_sequences,
+                take_count,
+                all_sequences,
+                target_type,
+                horizon,
+            )?;
+
+            selected.extend(bucket_selected);
+        }
+
+        // If we still need more sequences, add strongest from remaining
+        if selected.len() < target_count {
+            let remaining_needed = target_count - selected.len();
+            let remaining: Vec<usize> = sequence_features
+                .iter()
+                .map(|(idx, _)| *idx)
+                .filter(|idx| !selected.contains(idx))
+                .collect();
+
+            // NEW: Sort remaining by strength and take strongest
+            let remaining_with_strength = self.calculate_strengths_for_sequences(
+                &remaining,
+                all_sequences,
+                target_type,
+                horizon,
+            )?;
+
+            // Sort by strength (strongest first)
+            let mut remaining_sorted: Vec<(usize, f64)> = remaining_with_strength;
+            remaining_sorted
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            let strongest_remaining: Vec<usize> = remaining_sorted
+                .into_iter()
+                .take(remaining_needed)
+                .map(|(idx, _)| idx)
+                .collect();
+
+            selected.extend(strongest_remaining);
+        }
+
+        // Ensure we have exactly the right count
+        selected.truncate(target_count);
+
+        Ok(selected)
+    }
+
+    /// Select sequences by maximizing spread in feature + temporal space (legacy method)
+    #[allow(dead_code)]
     fn select_by_spread(
         &self,
         sequence_features: &[(usize, Vec<f64>)],
@@ -237,7 +366,100 @@ impl DiversitySelector {
         Ok(selected)
     }
 
-    /// Calculate comprehensive diversity metrics for a sequence
+    /// Select strongest sequences from a temporal bucket
+    fn select_strongest_from_bucket(
+        &self,
+        bucket_sequences: &[usize],
+        take_count: usize,
+        all_sequences: &[SequenceWithTargets],
+        target_type: TargetType,
+        horizon: &str,
+    ) -> Result<Vec<usize>> {
+        if bucket_sequences.len() <= take_count {
+            return Ok(bucket_sequences.to_vec());
+        }
+
+        // Calculate strengths for all sequences in the bucket
+        let sequences_with_strength = self.calculate_strengths_for_sequences(
+            bucket_sequences,
+            all_sequences,
+            target_type,
+            horizon,
+        )?;
+
+        // Sort by strength (strongest first)
+        let mut sorted_by_strength = sequences_with_strength;
+        sorted_by_strength
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Take the strongest sequences
+        let selected: Vec<usize> = sorted_by_strength
+            .into_iter()
+            .take(take_count)
+            .map(|(idx, _)| idx)
+            .collect();
+
+        log::debug!(
+            "🎯 STRENGTH-BASED SELECTION: Selected {} strongest from {} in bucket for {:?} {}",
+            selected.len(),
+            bucket_sequences.len(),
+            target_type,
+            horizon
+        );
+
+        Ok(selected)
+    }
+
+    /// Calculate classification strengths for a set of sequences
+    ///
+    /// This method extracts the strength value from each target's classification.
+    /// Strength represents how confident/strong the classification is:
+    /// - 1.0 = Very strong (deep in the center of the class range)
+    /// - 0.5 = Moderate (near class boundaries)
+    /// - 0.0 = Very weak (just barely in the class)
+    fn calculate_strengths_for_sequences(
+        &self,
+        sequence_indices: &[usize],
+        all_sequences: &[SequenceWithTargets],
+        target_type: TargetType,
+        horizon: &str,
+    ) -> Result<Vec<(usize, f64)>> {
+        let mut sequences_with_strength = Vec::new();
+
+        for &idx in sequence_indices {
+            let seq = &all_sequences[idx];
+
+            // Get the strength for the specific target type and horizon
+            let strength = self.get_target_strength(seq, target_type, horizon)?;
+
+            sequences_with_strength.push((idx, strength));
+        }
+
+        Ok(sequences_with_strength)
+    }
+
+    /// Extract strength value for a specific target type and horizon from a sequence
+    fn get_target_strength(
+        &self,
+        sequence: &SequenceWithTargets,
+        target_type: TargetType,
+        horizon: &str,
+    ) -> Result<f64> {
+        // Find the target data for the specified type and horizon using the new Vec<TargetData> structure
+        if let Some(strength) = sequence.get_target_strength(target_type, horizon) {
+            return Ok(strength);
+        }
+
+        // If no matching target found, return neutral strength
+        log::warn!(
+            "⚠️ No target found for {:?} {} in sequence at index {}, using neutral strength",
+            target_type,
+            horizon,
+            sequence.start_idx
+        );
+        Ok(0.5)
+    }
+
     pub fn calculate_sequence_diversity(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -413,19 +635,18 @@ impl DiversitySelector {
         horizon: &str,
     ) -> Result<f64> {
         let target_sequence = &all_sequences[sequence_idx];
-        let target_key = (target_type, horizon.to_string());
+        let _target_key = (target_type, horizon.to_string());
 
         // Get the target value for this sequence
         let target_value = target_sequence
-            .targets
-            .get(&target_key)
+            .get_target_class(target_type, horizon)
             .ok_or_else(|| VangaError::DataError("Target value not found".to_string()))?;
 
         // Calculate diversity based on class distribution within the class_indices
         let mut class_counts = HashMap::new();
         for &idx in class_indices {
             if let Some(seq) = all_sequences.get(idx) {
-                if let Some(&class_val) = seq.targets.get(&target_key) {
+                if let Some(class_val) = seq.get_target_class(target_type, horizon) {
                     *class_counts.entry(class_val).or_insert(0) += 1;
                 }
             }
@@ -433,7 +654,7 @@ impl DiversitySelector {
 
         // Calculate diversity based on how rare this target value is within the class
         let total_sequences = class_indices.len();
-        let same_target_count = class_counts.get(target_value).copied().unwrap_or(0);
+        let same_target_count = class_counts.get(&target_value).copied().unwrap_or(0);
 
         if total_sequences == 0 {
             return Ok(0.5); // Default diversity

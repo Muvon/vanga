@@ -90,6 +90,7 @@
 //! providing complementary information for comprehensive market analysis.
 
 use crate::data::structures::MarketDataRow;
+use crate::targets::TargetResult;
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_close_prices;
 use crate::utils::parser::parse_horizon_to_steps;
@@ -106,7 +107,7 @@ pub enum Direction {
     Pump = 4,     // Extreme up movement
 }
 
-/// Generate direction targets with optional adaptive parameters
+/// Generate direction targets with optional adaptive parameters - returns both class and strength
 ///
 /// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
 /// target generation between training and prediction. When None, performs calibration.
@@ -116,9 +117,10 @@ pub fn generate_direction_targets_with_calibrated_params(
     sequence_indices: &[usize],
     sequence_length: usize,
     calibrated_params: &crate::targets::calibration::DirectionParams,
-) -> Result<HashMap<String, Vec<i32>>> {
+) -> Result<TargetResult> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
+    let mut strengths = HashMap::new();
 
     // Use pre-calibrated adaptive parameters
     let calibrated_sensitivity = calibrated_params.sensitivity;
@@ -132,6 +134,7 @@ pub fn generate_direction_targets_with_calibrated_params(
     for horizon in horizons {
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
+        let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 
         log::debug!(
             "Processing horizon {} with {} steps",
@@ -163,23 +166,25 @@ pub fn generate_direction_targets_with_calibrated_params(
 
                 // Only classify if we have enough horizon data for momentum calculation
                 if horizon_prices.len() >= 2 {
-                    // Use the adaptive parameters directly for classification
-                    let target_class = classify_direction_with_calibrated_params(
+                    // Use the adaptive parameters directly for classification - capture both class and strength
+                    let (target_class, strength) = classify_direction_with_calibrated_params(
                         sequence_prices,
                         horizon_prices,
                         calibrated_params,
                     )?;
 
                     horizon_targets[seq_position] = target_class;
+                    horizon_strengths[seq_position] = strength;
                 }
             }
         }
 
         log_direction_distribution(&horizon_targets, horizon);
         targets.insert(horizon.clone(), horizon_targets);
+        strengths.insert(horizon.clone(), horizon_strengths);
     }
 
-    Ok(targets)
+    Ok((targets, strengths))
 }
 
 /// Classify direction using momentum change analysis
@@ -202,9 +207,9 @@ pub fn classify_direction_with_calibrated_params(
     sequence_prices: &[f64],
     horizon_prices: &[f64],
     calibrated_params: &crate::targets::calibration::DirectionParams,
-) -> Result<i32> {
+) -> Result<(i32, f64)> {
     if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
-        return Ok(2); // Default to SIDEWAYS for insufficient data
+        return Ok((2, 0.5)); // Default to SIDEWAYS with neutral strength for insufficient data
     }
 
     // Step 1: Calculate momentum change between sequence and horizon
@@ -242,13 +247,21 @@ pub fn classify_direction_with_calibrated_params(
         4 // PUMP: Strong momentum acceleration (negative to positive or strong strengthening)
     };
 
-    log::debug!(
-        "🎯 Momentum Direction: seq_momentum={:.6}, hor_momentum={:.6}, momentum_change={:.6}, consistency={:.6}, base_thresh={:.6}, extreme_thresh={:.6} → class={} ({})",
-        sequence_momentum, horizon_momentum, momentum_change, trend_consistency, final_base_threshold, final_extreme_threshold, class,
-        ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"][class as usize]
+    // Step 5: Calculate classification strength based on distance from boundaries
+    let strength = calculate_direction_strength(
+        momentum_change,
+        final_base_threshold,
+        final_extreme_threshold,
+        class,
     );
 
-    Ok(class)
+    log::debug!(
+        "🎯 Momentum Direction: seq_momentum={:.6}, hor_momentum={:.6}, momentum_change={:.6}, consistency={:.6}, base_thresh={:.6}, extreme_thresh={:.6} → class={} ({}) strength={:.3}",
+        sequence_momentum, horizon_momentum, momentum_change, trend_consistency, final_base_threshold, final_extreme_threshold, class,
+        ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"][class as usize], strength
+    );
+
+    Ok((class, strength))
 }
 
 /// Calculate raw linear regression slope without normalization
@@ -339,6 +352,60 @@ fn calculate_sequence_trend_consistency(prices: &[f64]) -> Result<f64> {
     let std_dev = variance.sqrt();
 
     Ok(std_dev.max(0.005)) // Minimum consistency threshold
+}
+
+/// Calculate classification strength for direction based on distance from boundaries
+///
+/// Strength represents how confident/strong the classification is:
+/// - 1.0 = Very strong (deep in the center of the class range)
+/// - 0.5 = Moderate (near class boundaries)
+/// - 0.0 = Very weak (just barely in the class)
+fn calculate_direction_strength(
+    momentum_change: f64,
+    base_threshold: f64,
+    extreme_threshold: f64,
+    class: i32,
+) -> f64 {
+    match class {
+        0 => {
+            // DUMP: momentum_change <= -extreme_threshold
+            // The more negative beyond extreme, the stronger
+            let distance_beyond = (-momentum_change - extreme_threshold).max(0.0);
+            let max_distance = extreme_threshold; // Reasonable max distance
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        1 => {
+            // DOWN: -extreme_threshold < momentum_change <= -base_threshold
+            let range_center = -(extreme_threshold + base_threshold) / 2.0;
+            let range_half_width = (extreme_threshold - base_threshold) / 2.0;
+            let distance_from_center = (momentum_change - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        2 => {
+            // SIDEWAYS: -base_threshold < momentum_change <= base_threshold
+            // Closer to zero = stronger sideways signal
+            let distance_from_zero = momentum_change.abs();
+            let strength = 1.0 - (distance_from_zero / base_threshold).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        3 => {
+            // UP: base_threshold < momentum_change <= extreme_threshold
+            let range_center = (base_threshold + extreme_threshold) / 2.0;
+            let range_half_width = (extreme_threshold - base_threshold) / 2.0;
+            let distance_from_center = (momentum_change - range_center).abs();
+            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+            strength.max(0.1) // At least 0.1 strength
+        }
+        4 => {
+            // PUMP: momentum_change > extreme_threshold
+            // The more positive beyond extreme, the stronger
+            let distance_beyond = (momentum_change - extreme_threshold).max(0.0);
+            let max_distance = extreme_threshold; // Reasonable max distance
+            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+        }
+        _ => 0.5, // Default neutral strength
+    }
 }
 
 /// Calculate directional momentum change between sequence and horizon

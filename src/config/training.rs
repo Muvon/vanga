@@ -515,6 +515,9 @@ impl TrainingParams {
         // Validate optimizer parameters
         self.validate_optimizer()?;
 
+        // Validate batch size parameters
+        self.validate_batch_size()?;
+
         // Validate early stopping parameters
         self.validate_early_stopping()?;
 
@@ -923,6 +926,50 @@ impl TrainingParams {
                     return Err(VangaError::ConfigError(format!(
                         "FracNAdam step_size must be positive, got: {}",
                         step_size
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate batch size configuration parameters
+    fn validate_batch_size(&self) -> Result<()> {
+        match &self.batch_size {
+            BatchSizeConfig::Fixed(size) => {
+                if *size == 0 {
+                    return Err(VangaError::ConfigError(
+                        "Fixed batch_size must be greater than 0".to_string(),
+                    ));
+                }
+                if *size > 1024 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Fixed batch_size {} is too large (max: 1024)",
+                        size
+                    )));
+                }
+            }
+            BatchSizeConfig::Auto { min_size, max_size } => {
+                if *min_size == 0 {
+                    return Err(VangaError::ConfigError(
+                        "Auto batch_size min_size must be greater than 0".to_string(),
+                    ));
+                }
+                if *max_size == 0 {
+                    return Err(VangaError::ConfigError(
+                        "Auto batch_size max_size must be greater than 0".to_string(),
+                    ));
+                }
+                if min_size >= max_size {
+                    return Err(VangaError::ConfigError(format!(
+                        "Auto batch_size min_size ({}) must be less than max_size ({})",
+                        min_size, max_size
+                    )));
+                }
+                if *max_size > 1024 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Auto batch_size max_size {} is too large (max: 1024)",
+                        max_size
                     )));
                 }
             }

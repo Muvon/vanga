@@ -577,7 +577,9 @@ impl DataPipeline {
                             std::collections::HashMap::new();
                         for &idx in &train_indices {
                             if let Some(seq) = all_sequences.get(idx) {
-                                if let Some(&target_value) = seq.targets.get(&target_key) {
+                                if let Some(target_value) =
+                                    seq.get_target_class(*target_type, horizon)
+                                {
                                     class_indices.entry(target_value).or_default().push(idx);
                                 }
                             }
@@ -914,33 +916,44 @@ impl DataPipeline {
                 let seq_with_targets = &all_sequences[orig_idx];
 
                 // Copy ONLY the target types that are present in indices_by_target
-                for ((target_type, horizon), &target_value) in &seq_with_targets.targets {
+                for target_data in &seq_with_targets.targets {
+                    let target_key = (target_data.target_type, target_data.horizon.clone());
                     // CRITICAL FIX: Only copy targets that are in indices_by_target
-                    if indices_by_target.contains_key(&(*target_type, horizon.clone())) {
-                        match target_type {
+                    if indices_by_target.contains_key(&target_key) {
+                        match target_data.target_type {
                             crate::targets::TargetType::PriceLevel => {
-                                if let Some(targets_vec) = targets.price_levels.get_mut(horizon) {
-                                    targets_vec[new_idx] = target_value;
+                                if let Some(targets_vec) =
+                                    targets.price_levels.get_mut(&target_data.horizon)
+                                {
+                                    targets_vec[new_idx] = target_data.class;
                                 }
                             }
                             crate::targets::TargetType::Direction => {
-                                if let Some(targets_vec) = targets.direction.get_mut(horizon) {
-                                    targets_vec[new_idx] = target_value;
+                                if let Some(targets_vec) =
+                                    targets.direction.get_mut(&target_data.horizon)
+                                {
+                                    targets_vec[new_idx] = target_data.class;
                                 }
                             }
                             crate::targets::TargetType::Volatility => {
-                                if let Some(targets_vec) = targets.volatility.get_mut(horizon) {
-                                    targets_vec[new_idx] = target_value;
+                                if let Some(targets_vec) =
+                                    targets.volatility.get_mut(&target_data.horizon)
+                                {
+                                    targets_vec[new_idx] = target_data.class;
                                 }
                             }
                             crate::targets::TargetType::Sentiment => {
-                                if let Some(targets_vec) = targets.sentiment.get_mut(horizon) {
-                                    targets_vec[new_idx] = target_value;
+                                if let Some(targets_vec) =
+                                    targets.sentiment.get_mut(&target_data.horizon)
+                                {
+                                    targets_vec[new_idx] = target_data.class;
                                 }
                             }
                             crate::targets::TargetType::Volume => {
-                                if let Some(targets_vec) = targets.volume.get_mut(horizon) {
-                                    targets_vec[new_idx] = target_value;
+                                if let Some(targets_vec) =
+                                    targets.volume.get_mut(&target_data.horizon)
+                                {
+                                    targets_vec[new_idx] = target_data.class;
                                 }
                             }
                         }
