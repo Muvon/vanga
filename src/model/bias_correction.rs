@@ -1,7 +1,6 @@
 use crate::utils::error::Result;
 use candle_core::Tensor;
 use ndarray::{Array2, Axis};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for bias correction system
@@ -48,11 +47,11 @@ impl Default for BiasCorrection {
     fn default() -> Self {
         Self {
             enabled: true,
-            smoothing_factor: 0.1,
-            correction_bounds: [0.5, 2.0], // Prevent extreme corrections
+            smoothing_factor: 0.3, // Increased from 0.1 for faster adaptation
+            correction_bounds: [0.5, 2.0], // Tighter bounds for ordinal classification
             min_samples: 100,
             confidence_adjustment: 1.0,
-            print_info: false, // Default to concise logging
+            print_info: false,
             ramp_up_epochs: default_ramp_up_epochs(),
             recalibration_frequency: default_recalibration_frequency(),
         }
@@ -125,9 +124,9 @@ impl LinearBiasCorrector {
 
     /// Calculate bias correction factors from validation data
     ///
-    /// This implements the core logic from the paper, adapted for classification:
-    /// Original: V_corrected = V_predicted * (M_actual / M_predicted)
-    /// Our adaptation: P_corrected[class] = P_predicted[class] * (freq_actual[class] / freq_predicted[class])
+    /// For balanced datasets, this focuses on correcting systematic prediction errors
+    /// by analyzing which classes are frequently misclassified and adjusting accordingly.
+    /// Works in harmony with ordinal loss to improve classification accuracy.
     pub fn calibrate_from_validation(
         &mut self,
         validation_predictions: &Array2<f64>, // [samples, 5_classes]
@@ -211,74 +210,144 @@ impl LinearBiasCorrector {
             log::warn!("⚠️ Ensure softmax is applied to convert logits to probabilities before bias correction");
         }
 
-        // Calculate predicted and actual class frequencies in parallel
-        let frequencies: Vec<(f64, f64)> = (0..5)
-            .into_par_iter()
-            .map(|class_idx| {
-                // Predicted frequency = average predicted probability for this class
-                let pred_freq = validation_predictions
-                    .column(class_idx)
-                    .mean()
-                    .unwrap_or(0.0);
+        // Calculate confusion matrix to identify systematic errors
+        // For each predicted class, track what the true class was
+        let mut confusion_matrix = [[0.0_f64; 5]; 5]; // [predicted][actual]
+        let mut class_correct_counts = [0.0_f64; 5]; // How many times each class was correctly predicted
+        let mut class_total_counts = [0.0_f64; 5]; // How many times each class appeared in targets
 
-                // Actual frequency = average actual probability/label for this class
-                let actual_freq = validation_targets.column(class_idx).mean().unwrap_or(0.0);
+        for i in 0..validation_predictions.nrows() {
+            // Get predicted class (argmax)
+            let pred_class = (0..5)
+                .max_by(|&a, &b| {
+                    validation_predictions[[i, a]]
+                        .partial_cmp(&validation_predictions[[i, b]])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0);
 
-                (pred_freq, actual_freq)
-            })
-            .collect();
+            // Get actual class (argmax)
+            let actual_class = (0..5)
+                .max_by(|&a, &b| {
+                    validation_targets[[i, a]]
+                        .partial_cmp(&validation_targets[[i, b]])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0);
 
-        let mut predicted_frequencies = [0.0; 5];
-        let mut actual_frequencies = [0.0; 5];
-        for (idx, (pred, actual)) in frequencies.iter().enumerate() {
-            predicted_frequencies[idx] = *pred;
-            actual_frequencies[idx] = *actual;
+            confusion_matrix[pred_class][actual_class] += 1.0;
+            class_total_counts[actual_class] += 1.0;
+
+            if pred_class == actual_class {
+                class_correct_counts[actual_class] += 1.0;
+            }
         }
 
-        // Debug: Check if frequencies sum to ~1.0 (they should for proper probabilities)
-        let predicted_sum: f64 = predicted_frequencies.iter().sum();
-        let actual_sum: f64 = actual_frequencies.iter().sum();
+        // Calculate per-class accuracy and systematic bias
+        let mut class_accuracies = [0.0_f64; 5];
+        let mut prediction_biases = [0.0_f64; 5]; // How often each class is over/under predicted
 
-        if self.config.print_info {
-            log::debug!(
-                "📊 Frequency sums - Predicted: {:.4}, Actual: {:.4} (should be ~1.0)",
-                predicted_sum,
-                actual_sum
-            );
-        }
-
-        // Warn if predicted frequencies don't sum to ~1.0
-        if (predicted_sum - 1.0).abs() > 0.1 {
-            log::warn!(
-                "⚠️ Predicted frequencies sum to {:.4} instead of ~1.0. Likely receiving logits instead of probabilities!",
-                predicted_sum
-            );
-        }
-
-        // Calculate bias correction factors with bounds checking
         for class_idx in 0..5 {
-            let predicted_freq = predicted_frequencies[class_idx];
-            let actual_freq = actual_frequencies[class_idx];
-
-            let raw_factor = if predicted_freq > 1e-6 {
-                actual_freq / predicted_freq
+            // Class accuracy: how often is this class correctly predicted when it appears
+            if class_total_counts[class_idx] > 0.0 {
+                class_accuracies[class_idx] =
+                    class_correct_counts[class_idx] / class_total_counts[class_idx];
             } else {
-                1.0 // No correction if no predictions for this class
+                class_accuracies[class_idx] = 1.0; // No samples, no correction needed
+            }
+
+            // Prediction bias: ratio of times predicted vs times it actually occurred
+            let times_predicted: f64 = confusion_matrix[class_idx].iter().sum();
+            let times_actual = class_total_counts[class_idx];
+
+            if times_actual > 0.0 {
+                prediction_biases[class_idx] = times_predicted / times_actual;
+            } else {
+                prediction_biases[class_idx] = 1.0;
+            }
+        }
+
+        // Calculate bias correction factors based on accuracy and prediction bias
+        // Classes with low accuracy need stronger correction
+        // Classes that are over-predicted need dampening, under-predicted need boosting
+        for class_idx in 0..5 {
+            // Check if class is already performing well
+            if class_accuracies[class_idx] > 0.75
+                && prediction_biases[class_idx] > 0.8
+                && prediction_biases[class_idx] < 1.25
+            {
+                // Already performing well, converge toward neutral
+                let raw_factor = 1.0;
+                // Apply fast convergence to 1.0 for well-performing classes
+                let smoothed_factor = if self.is_calibrated {
+                    self.class_bias_factors[class_idx] * 0.7 + raw_factor * 0.3
+                } else {
+                    raw_factor
+                };
+                self.class_bias_factors[class_idx] = smoothed_factor;
+                continue;
+            }
+
+            // Base factor: inverse of prediction bias with gentler correction
+            let bias_correction = if prediction_biases[class_idx] > 1e-6 {
+                // Gentler correction to avoid overshooting
+                let base_correction = 1.0 / prediction_biases[class_idx];
+                // Apply dampening based on how extreme the bias is
+                if base_correction > 2.0 {
+                    1.0 + (base_correction - 1.0).min(2.0) * 0.5 // Cap extreme corrections
+                } else if base_correction < 0.5 {
+                    1.0 - (1.0 - base_correction).min(0.5) * 0.5 // Cap extreme reductions
+                } else {
+                    base_correction
+                }
+            } else {
+                // Never predicted - needs boost but not extreme
+                1.5
             };
 
-            // Apply smoothing and bounds
+            // Accuracy-based adjustment: stronger correction for poorly predicted classes
+            let accuracy_factor = if class_accuracies[class_idx] < 0.5 {
+                // Poor accuracy: apply stronger correction
+                1.5
+            } else if class_accuracies[class_idx] < 0.7 {
+                // Moderate accuracy: normal correction
+                1.2
+            } else {
+                // Good accuracy: minimal correction
+                1.0
+            };
+
+            let raw_factor = bias_correction * accuracy_factor;
+
+            // Apply smoothing if already calibrated
+            // CRITICAL: Move factors toward 1.0 as accuracy improves
             let smoothed_factor = if self.is_calibrated {
-                // Smooth with previous factor
-                self.class_bias_factors[class_idx] * (1.0 - self.config.smoothing_factor)
-                    + raw_factor * self.config.smoothing_factor
+                // If accuracy is good, move toward neutral (1.0)
+                if class_accuracies[class_idx] > 0.7 {
+                    // Good accuracy: converge toward 1.0
+                    self.class_bias_factors[class_idx] * 0.8 + 1.0 * 0.2
+                } else if class_accuracies[class_idx] > 0.5 {
+                    // Moderate accuracy: gentle correction
+                    self.class_bias_factors[class_idx] * 0.7 + raw_factor * 0.3
+                } else {
+                    // Poor accuracy: apply stronger correction
+                    self.class_bias_factors[class_idx] * 0.5 + raw_factor * 0.5
+                }
             } else {
                 raw_factor
             };
 
-            // Apply bounds to prevent extreme corrections
-            self.class_bias_factors[class_idx] = smoothed_factor
-                .max(self.config.correction_bounds[0])
-                .min(self.config.correction_bounds[1]);
+            // Apply bounds from configuration
+            self.class_bias_factors[class_idx] = smoothed_factor.clamp(
+                self.config.correction_bounds[0],
+                self.config.correction_bounds[1],
+            );
+        }
+
+        if self.config.print_info {
+            log::info!("📊 Class Accuracies: {:?}", class_accuracies);
+            log::info!("📊 Prediction Biases: {:?}", prediction_biases);
+            log::info!("📊 Bias Correction Factors: {:?}", self.class_bias_factors);
         }
 
         // Calculate overall confidence scaling
@@ -307,13 +376,25 @@ impl LinearBiasCorrector {
         // Store validation statistics
         let overall_accuracy =
             self.calculate_accuracy(validation_predictions, validation_targets)?;
+
+        // Apply decay to prevent runaway bias factors
+        // If overall accuracy is improving, gently decay factors toward 1.0
+        if self.is_calibrated && overall_accuracy > 0.5 {
+            let decay_rate = 0.95; // 5% decay toward 1.0
+            for idx in 0..5 {
+                self.class_bias_factors[idx] =
+                    self.class_bias_factors[idx] * decay_rate + 1.0 * (1.0 - decay_rate);
+            }
+        }
+
         let confidence_distribution =
             self.calculate_confidence_distribution(validation_predictions)?;
 
+        // Store validation statistics with new accuracy-based metrics
         self.validation_stats = Some(ValidationStats {
             total_samples: num_samples,
-            class_frequencies_predicted: predicted_frequencies,
-            class_frequencies_actual: actual_frequencies,
+            class_frequencies_predicted: prediction_biases, // Now stores prediction biases
+            class_frequencies_actual: class_accuracies,     // Now stores per-class accuracies
             overall_accuracy,
             confidence_distribution,
         });
@@ -342,16 +423,14 @@ impl LinearBiasCorrector {
                 self.config.correction_bounds[1]
             );
 
-            for (class_idx, (pred_freq, actual_freq)) in predicted_frequencies
-                .iter()
-                .zip(actual_frequencies.iter())
-                .enumerate()
-            {
+            // Log per-class metrics
+            log::info!("📊 Per-class metrics:");
+            for class_idx in 0..5 {
                 log::info!(
-                    "   📊 Class {}: predicted={:.4}, actual={:.4}, factor={:.4}",
+                    "   Class {}: accuracy={:.3}, pred_bias={:.3}, correction={:.3}",
                     class_idx,
-                    pred_freq,
-                    actual_freq,
+                    class_accuracies[class_idx],
+                    prediction_biases[class_idx],
                     self.class_bias_factors[class_idx]
                 );
             }
@@ -599,8 +678,8 @@ impl LinearBiasCorrector {
         self.config.enabled && self.is_calibrated
     }
 
-    /// Calculate adaptive strength based on actual class imbalance (cached)
-    /// Returns a value between 0.0 and 1.0 based on how imbalanced the classes are
+    /// Calculate adaptive strength based on classification accuracy
+    /// For balanced datasets, focus on accuracy rather than class imbalance
     fn calculate_adaptive_strength_for_ordinal(&self) -> f64 {
         // Return cached value if available
         if let Some(cached) = self.cached_adaptive_strength {
@@ -608,48 +687,32 @@ impl LinearBiasCorrector {
         }
 
         if let Some(ref stats) = self.validation_stats {
-            // Calculate the variance from perfect balance (0.2 for each of 5 classes)
-            let perfect_freq = 0.2;
+            // For balanced datasets, strength should be based on accuracy issues
+            // not class imbalance
 
-            // Measure how far we are from perfect balance
-            let pred_imbalance: f64 = stats
-                .class_frequencies_predicted
-                .iter()
-                .map(|&f| (f - perfect_freq).abs())
-                .sum::<f64>()
-                / 5.0;
+            // Base strength on how far we are from perfect accuracy
+            let accuracy_gap = 1.0 - stats.overall_accuracy;
 
-            let actual_imbalance: f64 = stats
-                .class_frequencies_actual
-                .iter()
-                .map(|&f| (f - perfect_freq).abs())
-                .sum::<f64>()
-                / 5.0;
-
-            // The strength should be proportional to the imbalance
-            // But capped to prevent over-correction
-            // Max imbalance would be 0.16 (if one class has 100% and others 0%)
-            // We scale this to a 0-1 range with a conservative multiplier
-            let imbalance_factor = ((pred_imbalance + actual_imbalance) / 2.0) / 0.16;
-
-            // For ordinal loss, we need to be more conservative
-            // because aggressive corrections can break monotonic relationships
-            let ordinal_dampening = 0.4; // Maximum 40% correction strength
-
-            // Also consider the validation accuracy
-            // If accuracy is already good, reduce correction strength
-            let accuracy_factor = if stats.overall_accuracy > 0.6 {
-                0.5 // Reduce strength if accuracy is already decent
-            } else if stats.overall_accuracy < 0.3 {
-                1.2 // Increase strength if accuracy is poor
+            // Scale strength based on accuracy:
+            // - Low accuracy (< 40%): Strong correction needed (0.8-1.0)
+            // - Medium accuracy (40-70%): Moderate correction (0.4-0.7)
+            // - High accuracy (> 70%): Light correction (0.2-0.4)
+            let base_strength = if stats.overall_accuracy < 0.4 {
+                0.8 + (accuracy_gap * 0.2) // 0.8 to 1.0
+            } else if stats.overall_accuracy < 0.7 {
+                0.4 + (accuracy_gap * 0.3) // 0.4 to 0.7
             } else {
-                1.0
+                0.2 + (accuracy_gap * 0.2) // 0.2 to 0.4
             };
 
-            (imbalance_factor * ordinal_dampening * accuracy_factor).min(0.5)
+            // For ordinal classification, we still need some dampening
+            // but not as aggressive as before
+            let ordinal_dampening = 0.8; // Was 0.4, now allow 80% strength
+
+            (base_strength * ordinal_dampening).min(0.8) // Allow up to 80% strength
         } else {
-            // No stats available, use minimal correction
-            0.1
+            // No stats available, use moderate correction
+            0.3
         }
     }
 
@@ -697,13 +760,14 @@ impl LinearBiasCorrector {
             smoothed_adjustments[i] = sum / weight;
         }
 
-        // Apply strength with additional bounds to prevent gradient jumping
+        // Apply strength with bounds for gradient stability
         smoothed_adjustments
             .iter()
             .map(|&adj| {
                 let final_adj = adj * strength;
-                // CRITICAL: Bound final adjustments to prevent gradient instability
-                final_adj.clamp(-0.2, 0.2) as f32 // Max ±0.2 logit adjustment
+                // Ordinal-aware adjustment: smaller for adjacent classes
+                // For 5 classes with ordinal relationship, limit to ~1/5 of logit range
+                final_adj.clamp(-0.15, 0.15) as f32 // ~7.5% of typical logit range for gentle ordinal correction
             })
             .collect()
     }
