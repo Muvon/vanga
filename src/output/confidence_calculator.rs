@@ -35,13 +35,13 @@ impl Default for ConfidenceConfig {
     fn default() -> Self {
         Self {
             price_level_weight: 0.25, // 25% - Show levels, comes after direction importance
-            direction_weight: 0.35,   // 30% - Confirms trend - most important
-            volatility_weight: 0.1,   // 15% - Risk management
+            direction_weight: 0.35,   // 35% - Confirms trend - most important
+            volatility_weight: 0.1,   // 10% - Risk management
             sentiment_weight: 0.15,   // 15% - Market psychology
             volume_weight: 0.15,      // 15% - Confirmation
-            min_probability_threshold: 0.25, // 25% minimum for confidence
-            agreement_bonus: 1.5,     // 50% bonus for agreement
-            disagreement_penalty: 0.7, // 30% penalty for disagreement
+            min_probability_threshold: 0.15, // 15% minimum for confidence (was 0.25)
+            agreement_bonus: 1.2,     // 20% bonus for agreement (was 1.5)
+            disagreement_penalty: 0.85, // 15% penalty for disagreement (was 0.7)
         }
     }
 }
@@ -115,8 +115,9 @@ impl ConfidenceCalculator {
             base_confidence = self.apply_volatility_adjustment(base_confidence, volatility);
         }
 
-        // Clamp to valid range
-        base_confidence.clamp(0.1, 0.95)
+        // IMPROVED: More generous clamping to ensure reasonable minimum confidence
+        // Even poor predictions should have at least 25% confidence to avoid filtering
+        base_confidence.clamp(0.25, 0.95) // Was 0.1, now 0.25 minimum
     }
 
     /// Calculate confidence for price level predictions using probability distribution
@@ -132,15 +133,19 @@ impl ConfidenceCalculator {
         let entropy = self.calculate_entropy_from_bins(&price_levels.bins);
         let entropy_confidence = 1.0 - (entropy / 2.3); // log2(5) ≈ 2.3 for 5 classes
 
-        // Combine max probability with entropy confidence
+        // IMPROVED: More generous probability confidence calculation
         let prob_confidence = if max_prob > self.config.min_probability_threshold {
-            max_prob
+            // Scale from threshold to 1.0 more generously
+            0.5 + (max_prob - self.config.min_probability_threshold)
+                / (1.0 - self.config.min_probability_threshold)
+                * 0.5
         } else {
-            max_prob * 0.5 // Penalize low probability
+            // Still give reasonable confidence for lower probabilities
+            max_prob * 2.0 // Was 0.5, now 2.0 to be less punitive
         };
 
         // Weight between probability and entropy measures
-        (prob_confidence * 0.6 + entropy_confidence * 0.4).clamp(0.0, 1.0)
+        (prob_confidence * 0.6 + entropy_confidence * 0.4).clamp(0.2, 1.0) // Min 0.2 instead of 0.0
     }
 
     /// Calculate confidence for direction predictions
@@ -153,18 +158,22 @@ impl ConfidenceCalculator {
         // Find dominant direction
         let max_strength = up_strength.max(down_strength).max(sideways_strength);
 
-        // Calculate confidence based on dominance and risk-reward
+        // IMPROVED: More generous confidence calculation
         let dominance_confidence = if max_strength > self.config.min_probability_threshold {
-            max_strength
+            // Scale more generously
+            0.5 + (max_strength - self.config.min_probability_threshold)
+                / (1.0 - self.config.min_probability_threshold)
+                * 0.5
         } else {
-            max_strength * 0.5
+            // Still give reasonable confidence
+            max_strength * 2.0 // Was 0.5, now 2.0
         };
 
         // Factor in risk-reward ratio (higher R/R = more confidence)
-        let rr_confidence = (direction.risk_reward_ratio / 10.0).min(1.0); // Scale R/R to 0-1
+        let rr_confidence = (direction.risk_reward_ratio / 6.0).min(1.0); // Was /10.0, now /6.0 for better scaling
 
         // Combine factors
-        (dominance_confidence * 0.7 + rr_confidence * 0.3).clamp(0.0, 1.0)
+        (dominance_confidence * 0.7 + rr_confidence * 0.3).clamp(0.2, 1.0) // Min 0.2
     }
 
     /// Calculate confidence for volatility predictions
@@ -294,13 +303,14 @@ impl ConfidenceCalculator {
             let avg_agreement: f64 =
                 agreement_scores.iter().sum::<f64>() / agreement_scores.len() as f64;
 
-            // Apply bonus/penalty based on agreement level
+            // Apply bonus/penalty based on agreement level (IMPROVED: less punitive)
             if avg_agreement > 0.7 {
-                self.config.agreement_bonus.min(avg_agreement * 1.5)
+                self.config.agreement_bonus.min(avg_agreement * 1.2) // Was 1.5
             } else if avg_agreement < 0.3 {
-                self.config.disagreement_penalty.max(avg_agreement * 0.7)
+                self.config.disagreement_penalty.max(avg_agreement * 0.9) // Was 0.7, now 0.9 (less penalty)
             } else {
-                avg_agreement
+                // Slightly boost neutral agreement
+                (avg_agreement * 1.1).min(1.0) // Was just avg_agreement
             }
         }
     }
