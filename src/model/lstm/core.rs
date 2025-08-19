@@ -914,6 +914,58 @@ impl LSTMModel {
             );
         }
 
+        // CRITICAL: Verify weights are actually loaded by checking a sample tensor
+        // This helps detect if weights are being properly loaded from file
+        let all_vars = model.varmap.all_vars();
+        if !all_vars.is_empty() {
+            let first_var = &all_vars[0];
+            let tensor = first_var.as_tensor();
+
+            // Get tensor shape and a few sample values for verification
+            let shape = tensor.shape();
+            let dims = shape.dims();
+
+            // Try to get first few values as a sanity check
+            if let Ok(flattened) = tensor.flatten_all() {
+                if let Ok(values) = flattened.narrow(0, 0, dims.iter().product::<usize>().min(5)) {
+                    if let Ok(vec_values) = values.to_vec1::<f32>() {
+                        log::info!(
+                            "🔍 Sample tensor shape {:?}, first values: {:?}",
+                            dims,
+                            vec_values
+                        );
+                    }
+                }
+            }
+        }
+
+        // Calculate a simple checksum of all weights for consistency verification
+        let mut weight_sum = 0.0f32;
+        let mut weight_count = 0usize;
+        for var in model.varmap.all_vars() {
+            let tensor = var.as_tensor();
+            if let Ok(flattened) = tensor.flatten_all() {
+                if let Ok(vec_values) = flattened.to_vec1::<f32>() {
+                    weight_sum += vec_values.iter().sum::<f32>();
+                    weight_count += vec_values.len();
+                }
+            }
+        }
+
+        if weight_count > 0 {
+            let avg_weight = weight_sum / weight_count as f32;
+            log::info!(
+                "📊 Weight statistics: {} total weights, sum={:.6}, avg={:.6}",
+                weight_count,
+                weight_sum,
+                avg_weight
+            );
+            log::info!(
+                "🔑 Weight checksum (for consistency): {:.8}",
+                weight_sum.abs() // Use absolute value for consistent checksum
+            );
+        }
+
         model.trained = true;
 
         // Load XGBoost model if present (hybrid model persistence)
@@ -1106,6 +1158,27 @@ impl LSTMModel {
                 smartcore_meta_path
             );
             model.xgboost_model = None;
+        }
+
+        // Calculate weight checksum for verification
+        let mut weight_sum = 0.0f32;
+        let mut weight_count = 0usize;
+        for var in model.varmap.all_vars() {
+            let tensor = var.as_tensor();
+            if let Ok(flattened) = tensor.flatten_all() {
+                if let Ok(vec_values) = flattened.to_vec1::<f32>() {
+                    weight_sum += vec_values.iter().sum::<f32>();
+                    weight_count += vec_values.len();
+                }
+            }
+        }
+
+        if weight_count > 0 {
+            log::info!(
+                "🔑 Weight checksum: {:.8} ({} weights loaded)",
+                weight_sum.abs(),
+                weight_count
+            );
         }
 
         log::info!(

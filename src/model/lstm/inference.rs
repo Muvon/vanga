@@ -862,8 +862,10 @@ impl LSTMModel {
                 .zip(backward_lstm_layers.iter())
                 .enumerate()
             {
-                // Process forward direction
-                let forward_states = forward_layer.seq(&current_input)?;
+                // Process forward direction - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
+                let batch_size = current_input.dim(0)?;
+                let forward_zero_state = forward_layer.zero_state(batch_size)?;
+                let forward_states = forward_layer.seq_init(&current_input, &forward_zero_state)?;
                 if forward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
                         "Forward layer {} produced no states",
@@ -877,8 +879,10 @@ impl LSTMModel {
                 }
                 let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
 
-                // Process backward direction
-                let backward_states = backward_layer.seq(&current_input)?;
+                // Process backward direction - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
+                let backward_zero_state = backward_layer.zero_state(batch_size)?;
+                let backward_states =
+                    backward_layer.seq_init(&current_input, &backward_zero_state)?;
                 if backward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
                         "Backward layer {} produced no states",
@@ -926,8 +930,10 @@ impl LSTMModel {
         let mut final_hidden_states = Vec::new();
 
         for (layer_idx, lstm_layer) in forward_lstm_layers.iter().enumerate() {
-            // LSTM forward pass using seq method
-            let lstm_states = lstm_layer.seq(&current_input)?;
+            // LSTM forward pass - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
+            let batch_size = current_input.dim(0)?;
+            let zero_state = lstm_layer.zero_state(batch_size)?;
+            let lstm_states = lstm_layer.seq_init(&current_input, &zero_state)?;
 
             if lstm_states.is_empty() {
                 return Err(VangaError::ModelError(format!(
