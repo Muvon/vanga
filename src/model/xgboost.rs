@@ -43,12 +43,21 @@ impl XGBoostRegressor {
     /// # Arguments
     /// * `features` - LSTM feature tensor [batch_size, feature_dim]
     /// * `targets` - Target tensor [batch_size, num_classes] or [batch_size, 1]
+    /// * `val_features` - Optional validation features for accuracy calculation
+    /// * `val_targets` - Optional validation targets for accuracy calculation
     ///
     /// # Returns
     /// * `Result<()>` - Success or error
-    pub fn train(&mut self, features: &Tensor, targets: &Tensor) -> Result<()> {
+    pub fn train(
+        &mut self,
+        features: &Tensor,
+        targets: &Tensor,
+        val_features: Option<&Tensor>,
+        val_targets: Option<&Tensor>,
+    ) -> Result<()> {
         log::info!("🔄 Starting XGBoost training phase (SmartCore backend)...");
-        self.backend.train(features, targets)
+        self.backend
+            .train(features, targets, val_features, val_targets)
     }
 
     /// Make predictions using trained XGBoost model (now using SmartCore)

@@ -1370,6 +1370,9 @@ pub async fn train_xgboost_only_model(config: TrainingConfig) -> Result<MultiTar
         // Extract this target's sequences (already balanced!)
         let sequences = window.train_data.sequences.clone();
 
+        // Extract validation sequences if available
+        let val_sequences = window.val_data.sequences.clone();
+
         // Extract the target data for this specific target
         let target_names = &window.train_data.targets.target_names;
         let all_targets =
@@ -1389,11 +1392,28 @@ pub async fn train_xgboost_only_model(config: TrainingConfig) -> Result<MultiTar
         // Extract single target as 2D array (required by train_xgboost_phase)
         let single_target = all_targets.slice(ndarray::s![.., idx..idx + 1]).to_owned();
 
+        // Extract validation targets for this specific target
+        let val_target_names = &window.val_data.targets.target_names;
+        let all_val_targets =
+            extract_targets_for_multi_model(&window.val_data.targets, val_target_names)?;
+        let val_idx = val_target_names
+            .iter()
+            .position(|n| n == model_target_name)
+            .ok_or_else(|| {
+                VangaError::DataError(format!(
+                    "Validation target '{}' not found",
+                    model_target_name
+                ))
+            })?;
+        let single_val_target = all_val_targets
+            .slice(ndarray::s![.., val_idx..val_idx + 1])
+            .to_owned();
+
         log::info!(
-            "✅ Collected balanced data for {}: {} sequences, {} targets",
+            "✅ Collected balanced data for {}: {} train sequences, {} val sequences",
             model_target_name,
             sequences.shape()[0],
-            single_target.shape()[0]
+            val_sequences.shape()[0]
         );
 
         // Verify balance
@@ -1414,7 +1434,7 @@ pub async fn train_xgboost_only_model(config: TrainingConfig) -> Result<MultiTar
             );
         }
 
-        target_data_vec.push((sequences, single_target));
+        target_data_vec.push((sequences, single_target, val_sequences, single_val_target));
     }
 
     // Train XGBoost with each target's own balanced data

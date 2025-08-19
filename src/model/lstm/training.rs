@@ -1977,7 +1977,8 @@ impl LSTMModel {
         // Phase 2: XGBoost Training (NEW)
         if config.model.xgboost.enabled {
             log::info!("🔄 Starting XGBoost hybrid training phase...");
-            self.train_xgboost_phase(sequences, targets, config).await?;
+            self.train_xgboost_phase(sequences, targets, config, val_sequences, val_targets)
+                .await?;
         }
 
         // CRITICAL: Store optimizer state for next window/continuation
@@ -2675,7 +2676,17 @@ impl LSTMModel {
         sequences: &Array3<f64>,
         targets: &Array2<f64>,
         config: &crate::config::TrainingConfig,
+        val_sequences: Option<&Array3<f64>>,
+        val_targets: Option<&Array2<f64>>,
     ) -> Result<()> {
+        // Store validation data for evaluation if provided
+        if let Some(val_seq) = val_sequences {
+            self.stored_val_sequences = Some(val_seq.clone());
+        }
+        if let Some(val_tgt) = val_targets {
+            self.stored_val_targets = Some(val_tgt.clone());
+        }
+
         // Log target context if available
         let target_info = if let Some((ref target_name, ref target_type)) = self.target_context {
             format!(" for [{}] ({:?})", target_name, target_type)
@@ -2808,6 +2819,21 @@ impl LSTMModel {
         let mut xgb_regressor =
             crate::model::xgboost::XGBoostRegressor::new(xgb_config, self.device.clone());
 
+        // Generate validation LSTM features if validation data is available
+        let val_lstm_features = if let Some(val_seqs) = val_sequences {
+            log::info!("🎯 Generating validation LSTM features for XGBoost accuracy calculation");
+            Some(self.extract_all_lstm_features(val_seqs)?)
+        } else {
+            None
+        };
+
+        // Convert validation targets to tensor if available
+        let val_targets_tensor = if let Some(val_tgts) = val_targets {
+            Some(self.convert_targets_to_tensor(val_tgts)?)
+        } else {
+            None
+        };
+
         // Train XGBoost model on LSTM features as per paper
         // Equation (9): ŷ = f(z) = Σ f_m(z) where z is LSTM hidden state
         log::info!(
@@ -2818,7 +2844,14 @@ impl LSTMModel {
         log::info!("   • Target: True labels y (5-class categorical)");
         log::info!("   • Output: Predictions ŷ ∈ ℝ^(N×5)");
         log::info!("   • Ordinal-aware: Using trading penalty matrix for 5-class problems");
-        xgb_regressor.train(&lstm_features, &targets_tensor)?;
+
+        // Pass validation data to XGBoost for proper accuracy calculation
+        xgb_regressor.train(
+            &lstm_features,
+            &targets_tensor,
+            val_lstm_features.as_ref(),
+            val_targets_tensor.as_ref(),
+        )?;
 
         // CRITICAL FIX: Calculate ordinal loss on XGBoost PREDICTIONS, not LSTM features
         // Following paper equations: z = h_n (eq 8), ŷ = f(z) (eq 9), loss on ŷ

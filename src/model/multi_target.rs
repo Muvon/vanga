@@ -9,6 +9,9 @@ use ndarray::{Array2, Array3, Axis};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Type alias for XGBoost training data: (train_sequences, train_targets, val_sequences, val_targets)
+type XGBoostTrainingData = (Array3<f64>, Array2<f64>, Array3<f64>, Array2<f64>);
+
 /// Defines the context for a training session.
 pub enum TrainingContext<'a> {
     /// Standard training with an optional validation set.
@@ -834,7 +837,7 @@ impl MultiTargetLSTMModel {
     /// Now accepts per-target sequences and targets for proper balanced training
     pub async fn train_xgboost_only(
         &mut self,
-        target_data: Vec<(Array3<f64>, Array2<f64>)>, // Each target's own sequences and targets
+        target_data: Vec<XGBoostTrainingData>, // Each target's train and val data
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!("🌲 Starting XGBoost-only training phase");
@@ -853,16 +856,17 @@ impl MultiTargetLSTMModel {
         }
 
         // Train XGBoost for each individual LSTM model with its own data
-        for (i, (model, (sequences, targets))) in
+        for (i, (model, (sequences, targets, val_sequences, val_targets))) in
             self.models.iter_mut().zip(target_data.iter()).enumerate()
         {
             let target_name = &self.target_names[i];
             log::info!(
-                "🎯 Training XGBoost for target {}/{}: {} with {} balanced sequences",
+                "🎯 Training XGBoost for target {}/{}: {} with {} train / {} val sequences",
                 i + 1,
                 self.num_targets,
                 target_name,
-                sequences.shape()[0]
+                sequences.shape()[0],
+                val_sequences.shape()[0]
             );
 
             // Log class distribution for this target
@@ -871,16 +875,22 @@ impl MultiTargetLSTMModel {
                 let class = *val as i32;
                 *class_counts.entry(class).or_insert(0) += 1;
             }
-            log::info!("📊 Class distribution for {}:", target_name);
+            log::info!("📊 Training class distribution for {}:", target_name);
             for class in 0..5 {
                 let count = class_counts.get(&class).unwrap_or(&0);
                 let percentage = (*count as f64 / targets.len() as f64) * 100.0;
                 log::info!("   Class {}: {} samples ({:.1}%)", class, count, percentage);
             }
 
-            // Use the existing XGBoost training method from LSTMModel
+            // Use the existing XGBoost training method from LSTMModel with validation data
             model
-                .train_xgboost_phase(sequences, targets, config)
+                .train_xgboost_phase(
+                    sequences,
+                    targets,
+                    config,
+                    Some(val_sequences),
+                    Some(val_targets),
+                )
                 .await?;
 
             log::info!(

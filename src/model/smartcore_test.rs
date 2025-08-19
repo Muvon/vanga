@@ -60,7 +60,7 @@ async fn test_smartcore_training() -> Result<()> {
         Tensor::from_vec(targets_data, (batch_size, num_classes), &device)?.to_dtype(DType::F32)?;
 
     // Train the model
-    regressor.train(&features, &targets)?;
+    regressor.train(&features, &targets, None, None)?;
 
     // Verify training
     assert!(regressor.is_trained());
@@ -108,7 +108,7 @@ async fn test_xgboost_wrapper_with_smartcore() -> Result<()> {
         Tensor::from_vec(targets_data, (batch_size, num_classes), &device)?.to_dtype(DType::F32)?;
 
     // Train through XGBoost wrapper
-    xgb_regressor.train(&features, &targets)?;
+    xgb_regressor.train(&features, &targets, None, None)?;
 
     // Verify wrapper functionality
     assert!(xgb_regressor.is_trained());
@@ -171,7 +171,7 @@ async fn test_feature_importance() -> Result<()> {
         Tensor::from_vec(targets_data, (batch_size, num_classes), &device)?.to_dtype(DType::F32)?;
 
     // Train model
-    regressor.train(&features, &targets)?;
+    regressor.train(&features, &targets, None, None)?;
 
     // Check feature importance
     let importance = regressor.get_feature_importance().unwrap();
@@ -240,7 +240,7 @@ async fn test_model_persistence() -> Result<()> {
     let targets =
         Tensor::from_vec(targets_data, (batch_size, num_classes), &device)?.to_dtype(DType::F32)?;
 
-    regressor.train(&features, &targets)?;
+    regressor.train(&features, &targets, None, None)?;
 
     // Save model
     let temp_dir = tempdir()?;
@@ -321,12 +321,12 @@ async fn test_backend_compatibility() -> Result<()> {
 
     // Test SmartCore directly
     let mut smartcore_regressor = SmartCoreRegressor::new(config.clone(), device.clone());
-    smartcore_regressor.train(&features, &targets)?;
+    smartcore_regressor.train(&features, &targets, None, None)?;
     let smartcore_predictions = smartcore_regressor.predict(&features)?;
 
     // Test XGBoost wrapper (using SmartCore backend)
     let mut xgb_regressor = XGBoostRegressor::new(config, device);
-    xgb_regressor.train(&features, &targets)?;
+    xgb_regressor.train(&features, &targets, None, None)?;
     let xgb_predictions = xgb_regressor.predict(&features)?;
 
     // Both should produce same shape outputs
@@ -374,7 +374,7 @@ async fn test_smartcore_performance() -> Result<()> {
 
     // Time training
     let start = std::time::Instant::now();
-    regressor.train(&features, &targets)?;
+    regressor.train(&features, &targets, None, None)?;
     let training_time = start.elapsed();
 
     // Time prediction

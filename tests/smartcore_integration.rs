@@ -62,7 +62,7 @@ async fn test_hybrid_model_integration() -> Result<()> {
 
     // Phase 1: Train hybrid classifier on LSTM features
     println!("Phase 1: Training hybrid classifier on LSTM features...");
-    hybrid_classifier.train(&lstm_features, &price_targets)?;
+    hybrid_classifier.train(&lstm_features, &price_targets, None, None)?;
 
     // Verify training success
     assert!(hybrid_classifier.is_trained());
@@ -170,7 +170,7 @@ async fn test_multi_target_hybrid_model() -> Result<()> {
         Tensor::from_vec(price_targets_data, (batch_size, num_price_levels), &device)?
             .to_dtype(DType::F32)?;
 
-    price_classifier.train(&lstm_features, &price_targets)?;
+    price_classifier.train(&lstm_features, &price_targets, None, None)?;
     let price_predictions = price_classifier.predict(&lstm_features)?;
     assert_eq!(
         price_predictions.shape().dims(),
@@ -201,7 +201,7 @@ async fn test_multi_target_hybrid_model() -> Result<()> {
     )?
     .to_dtype(DType::F32)?;
 
-    direction_classifier.train(&lstm_features, &direction_targets)?;
+    direction_classifier.train(&lstm_features, &direction_targets, None, None)?;
     let direction_predictions = direction_classifier.predict(&lstm_features)?;
     assert_eq!(
         direction_predictions.shape().dims(),
@@ -260,7 +260,7 @@ async fn test_smartcore_data_patterns() -> Result<()> {
     let targets1 =
         Tensor::from_vec(targets_data, (batch_size, num_classes), &device)?.to_dtype(DType::F32)?;
 
-    regressor1.train(&features1, &targets1)?;
+    regressor1.train(&features1, &targets1, None, None)?;
     let predictions1 = regressor1.predict(&features1)?;
 
     // Should achieve high accuracy on linearly separable data
@@ -321,7 +321,7 @@ async fn test_smartcore_data_patterns() -> Result<()> {
     let targets2 = Tensor::from_vec(targets_data2, (batch_size, num_classes), &device)?
         .to_dtype(DType::F32)?;
 
-    regressor2.train(&features2, &targets2)?;
+    regressor2.train(&features2, &targets2, None, None)?;
     let predictions2 = regressor2.predict(&features2)?;
 
     // Non-linear pattern should still be learnable by Random Forest
@@ -392,7 +392,7 @@ async fn test_smartcore_robustness() -> Result<()> {
         Tensor::from_vec(targets_data, (batch_size, num_classes), &device)?.to_dtype(DType::F32)?;
 
     // Should handle small dataset gracefully
-    regressor.train(&features, &targets)?;
+    regressor.train(&features, &targets, None, None)?;
     let predictions = regressor.predict(&features)?;
     assert_eq!(predictions.shape().dims(), &[batch_size, num_classes]);
 
@@ -416,7 +416,7 @@ async fn test_smartcore_robustness() -> Result<()> {
     let mut single_class_regressor = SmartCoreRegressor::new(config, device.clone());
 
     // Should handle imbalanced dataset gracefully
-    single_class_regressor.train(&features, &single_class_targets)?;
+    single_class_regressor.train(&features, &single_class_targets, None, None)?;
     let single_class_predictions = single_class_regressor.predict(&features)?;
     assert_eq!(
         single_class_predictions.shape().dims(),

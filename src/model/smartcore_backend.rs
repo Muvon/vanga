@@ -87,13 +87,20 @@ impl SmartCoreRegressor {
 
     /// Train SmartCore model on LSTM features
     ///
-    /// # Arguments
-    /// * `features` - LSTM feature tensor [batch_size, feature_dim]
-    /// * `targets` - Target tensor [batch_size, num_classes] or [batch_size, 1]
+    /// * `features` - Training features tensor [batch_size, feature_dim]
+    /// * `targets` - Training targets tensor [batch_size, num_classes] or [batch_size, 1]
+    /// * `val_features` - Optional validation features for accuracy calculation
+    /// * `val_targets` - Optional validation targets for accuracy calculation
     ///
     /// # Returns
     /// * `Result<()>` - Success or error
-    pub fn train(&mut self, features: &Tensor, targets: &Tensor) -> Result<()> {
+    pub fn train(
+        &mut self,
+        features: &Tensor,
+        targets: &Tensor,
+        val_features: Option<&Tensor>,
+        val_targets: Option<&Tensor>,
+    ) -> Result<()> {
         log::info!("🔄 Starting SmartCore training phase...");
 
         // Convert Candle tensors to ndarray for SmartCore
@@ -228,8 +235,25 @@ impl SmartCoreRegressor {
             }
         }
 
-        // Test predictions to verify model is working
-        self.test_model_predictions(&x, &y)?;
+        // Test predictions to verify model is working - use validation data if available
+        if let (Some(val_features), Some(val_targets)) = (val_features, val_targets) {
+            log::info!("🎯 Using validation data for accuracy calculation");
+            let val_features_array = self.tensor_to_ndarray2(val_features)?;
+            let val_targets_array = self.tensor_to_ndarray1(val_targets)?;
+
+            // Convert validation features to SmartCore format (same as training data)
+            let val_features_vec2d: Vec<Vec<f64>> = val_features_array
+                .outer_iter()
+                .map(|row| row.iter().map(|&x| x as f64).collect())
+                .collect();
+            let val_x = DenseMatrix::from_2d_vec(&val_features_vec2d);
+            let val_y: Vec<i32> = val_targets_array.iter().map(|&x| x as i32).collect();
+
+            self.test_model_predictions(&val_x, &val_y)?;
+        } else {
+            log::warn!("⚠️ No validation data provided, using training data for accuracy (not recommended)");
+            self.test_model_predictions(&x, &y)?;
+        }
 
         // Calculate feature importance if enabled
         if self.config.save_feature_importance {
@@ -296,7 +320,7 @@ impl SmartCoreRegressor {
     /// Train with explicit ordinal awareness (public method)
     pub fn train_with_ordinal(&mut self, features: &Tensor, targets: &Tensor) -> Result<()> {
         // First do standard training
-        self.train(features, targets)?;
+        self.train(features, targets, None, None)?;
 
         // If 5-class problem, calculate ordinal metrics
         if self.use_ordinal {
@@ -898,11 +922,19 @@ impl SmartCoreRegressor {
 
     /// Test model predictions to verify it's working
     fn test_model_predictions(&self, x: &DenseMatrix<f64>, y: &[i32]) -> Result<()> {
-        // Use ALL validation data, not a subset!
-        let test_size = x.shape().0; // Use full validation set
+        // Use ALL provided data (validation or training)
+        let test_size = x.shape().0; // Use full dataset provided
+
+        // Determine if this is validation or training data based on context
+        let data_type = if test_size < 1000 {
+            "validation"
+        } else {
+            "training"
+        };
 
         log::info!(
-            "🔍 Validating model on FULL validation set: {} samples",
+            "🔍 Calculating accuracy on {} set: {} samples",
+            data_type,
             test_size
         );
 
@@ -956,7 +988,12 @@ impl SmartCoreRegressor {
         let accuracy = (correct as f32 / test_size as f32) * 100.0;
 
         log::info!(
-            "📊 Test accuracy on {} samples: {:.2}%",
+            "📊 {} accuracy on {} samples: {:.2}%",
+            if test_size < 1000 {
+                "Validation"
+            } else {
+                "Training"
+            },
             test_size,
             accuracy
         );
