@@ -17,6 +17,13 @@ pub async fn train_model(
     trainer.train().await
 }
 
+/// XGBoost-only training function using existing LSTM model
+pub async fn train_xgboost_only_model(
+    config: TrainingConfig,
+) -> Result<crate::model::multi_target::MultiTargetLSTMModel> {
+    trainer::train_xgboost_only_model(config).await
+}
+
 /// High-level prediction function for single-target models
 pub async fn predict_single(
     config: PredictionConfig,
