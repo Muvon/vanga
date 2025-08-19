@@ -244,20 +244,20 @@ impl TradingOrders {
                 is_breakout,
                 config.dynamic_entry_sizes,
                 config.dynamic_exit_sizes,
+                config.sequence_prices, // NEW: Add sequence_prices parameter
             )
         } else {
             // Check if this is a breakout signal based on dump probability (adaptive threshold)
             let is_breakout = config.direction_pred.dump_probability > 0.25; // Use same threshold as AdaptiveTradingSignal
-                                                                             // Extract actual price level ranges for order generation
-            let sequence_ranges = config.price_levels.extract_ranges_for_orders();
             Self::generate_sequence_aware_short_orders(
                 config.current_price,
                 atr_distance,
-                &sequence_ranges,
                 config.config,
                 is_breakout,
-                config.price_levels,    // NEW: Add price_levels parameter
-                config.volatility_pred, // NEW: Add volatility_pred parameter
+                config.price_levels,
+                config.volatility_pred,
+                config.sequence_prices,
+                config.direction_pred,
             )
         };
 
@@ -319,47 +319,70 @@ impl TradingOrders {
         is_breakout: bool,
         dynamic_entry_sizes: Option<[f64; 3]>,
         dynamic_exit_sizes: Option<[f64; 3]>,
+        sequence_prices: &[f64], // NEW: Actual price sequence for smart calculation
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
-        // 🎯 ENHANCED CONFIDENCE-BASED SIZING
-        // Use probability distributions for intelligent position sizing
-        let sequence_bandwidth_pct = direction_pred.sequence_bandwidth_percent;
-        let expected_upside = direction_pred.expected_upside_percent;
+        // 🎯 SMART ENTRY CALCULATION: Based on ACTUAL sequence volatility + momentum
+        // Calculate actual volatility from the sequence for realistic entry points
+        let sequence_volatility = if sequence_prices.len() >= 2 {
+            let returns: Vec<f64> = sequence_prices
+                .windows(2)
+                .map(|w| ((w[1] - w[0]) / w[0]) * 100.0)
+                .collect();
 
-        // ENTRY LOGIC: For LONG positions, use DOWNSIDE ranges (below current price)
+            if !returns.is_empty() {
+                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+                let variance =
+                    returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+                variance.sqrt()
+            } else {
+                volatility_pred.expected_range_percent // Use prediction if can't calculate
+            }
+        } else {
+            volatility_pred.expected_range_percent // Use prediction as fallback
+        };
+
+        // Combine actual and predicted volatility
+        let combined_volatility =
+            sequence_volatility * 0.7 + volatility_pred.expected_range_percent * 0.3;
+
+        // Base distance for entries
+        let base_distance = combined_volatility;
+
+        // 🎯 Use direction momentum to adjust entry aggressiveness
+        // Strong momentum = can enter closer to market (momentum will continue)
+        // Weak momentum = need better prices (wait for pullback)
+        let momentum_factor = if direction_pred.up_probability_aggregated > 0.6 {
+            0.8 // Strong bullish momentum - enter closer
+        } else if direction_pred.up_probability_aggregated > 0.4 {
+            1.0 // Moderate momentum - normal spacing
+        } else {
+            1.2 // Weak momentum - wait for better prices
+        };
+
+        log::info!(
+            "📊 LONG Data-Driven Entry: seq_vol={:.3}%, pred_vol={:.3}%, combined={:.3}%, momentum_factor={:.1}x",
+            sequence_volatility,
+            volatility_pred.expected_range_percent,
+            combined_volatility,
+            momentum_factor
+        );
+
+        // ENTRY LOGIC: For LONG positions, entries BELOW current price (buy low)
+        // Use actual volatility + momentum for realistic, fillable entry points
+        let entry_1_pct = -base_distance * 0.2 * momentum_factor; // Very close - high fill probability
+        let entry_2_pct = -base_distance * 0.5 * momentum_factor; // Medium distance
+        let entry_3_pct = -base_distance * 0.8 * momentum_factor; // Further for better price
+
+        log::info!(
+            "📍 LONG Entry Distances: {:.3}%, {:.3}%, {:.3}% BELOW current price (momentum-adjusted)",
+            entry_1_pct.abs(), entry_2_pct.abs(), entry_3_pct.abs()
+        );
+
+        // ENHANCED POSITION SIZING: Use dynamic sizes if available, otherwise calculate from probabilities
         let moderate_down_bin = price_levels.bins.get("moderate_down");
         let strong_down_bin = price_levels.bins.get("strong_down");
         let neutral_bin = price_levels.bins.get("neutral");
 
-        // Log the actual ranges for debugging
-        if let Some(neutral) = neutral_bin {
-            log::debug!(
-                "📊 Neutral range: [{:.2}%, {:.2}%] (should be centered around 0%)",
-                neutral.range[0],
-                neutral.range[1]
-            );
-        }
-        if let Some(moderate_down) = moderate_down_bin {
-            log::debug!(
-                "📊 Moderate down range: [{:.2}%, {:.2}%] (should be negative)",
-                moderate_down.range[0],
-                moderate_down.range[1]
-            );
-        }
-
-        // Use reconstructed downside ranges for LONG entries
-        let entry_1_pct = moderate_down_bin
-            .map(|bin| bin.range[0].min(-0.1))
-            .unwrap_or(-sequence_bandwidth_pct * 0.2);
-
-        let entry_2_pct = moderate_down_bin
-            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0)
-            .unwrap_or(-sequence_bandwidth_pct * 0.4);
-
-        let entry_3_pct = strong_down_bin
-            .map(|bin| bin.range[1].min(-0.2))
-            .unwrap_or(-sequence_bandwidth_pct * 0.6);
-
-        // ENHANCED POSITION SIZING: Use dynamic sizes if available, otherwise calculate from probabilities
         let (entry_1_size, entry_2_size, entry_3_size) = if let Some(sizes) = dynamic_entry_sizes {
             // Use enhanced confidence-based sizes
             log::info!("📊 Using ENHANCED dynamic entry sizes from confidence calculator");
@@ -429,22 +452,30 @@ impl TradingOrders {
             },
         ];
 
-        // EXIT LOGIC: For LONG positions, use UPSIDE ranges (above current price)
+        // 🎯 SMART EXIT: Based on MODEL PREDICTIONS for profit targets
+        // For LONG positions, use UPSIDE predictions (above current price)
         let moderate_up_bin = price_levels.bins.get("moderate_up");
         let strong_up_bin = price_levels.bins.get("strong_up");
 
-        // Use reconstructed upside ranges for LONG exits
+        // Use model's predicted upside targets
         let exit_1_pct = moderate_up_bin
-            .map(|bin| bin.range[0].max(0.1))
-            .unwrap_or(expected_upside * 0.5);
+            .map(|bin| bin.range[0].max(base_distance * 2.0))
+            .unwrap_or(base_distance * 2.0);
 
         let exit_2_pct = moderate_up_bin
-            .map(|bin| (bin.range[0] + bin.range[1]) / 2.0)
-            .unwrap_or(expected_upside * 0.8);
+            .map(|bin| ((bin.range[0] + bin.range[1]) / 2.0).max(exit_1_pct * 1.5))
+            .unwrap_or(exit_1_pct * 1.8);
 
         let exit_3_pct = strong_up_bin
-            .map(|bin| bin.range[0].max(0.2))
-            .unwrap_or(expected_upside);
+            .map(|bin| bin.range[0].max(exit_2_pct * 1.3))
+            .unwrap_or(exit_2_pct * 1.5);
+
+        log::info!(
+            "🎯 LONG Exit Targets (MODEL-based): {:.3}%, {:.3}%, {:.3}% ABOVE current price",
+            exit_1_pct,
+            exit_2_pct,
+            exit_3_pct
+        );
 
         // ENHANCED EXIT SIZING: Use dynamic sizes if available
         let (exit_1_size, exit_2_size, exit_3_size) = if let Some(sizes) = dynamic_exit_sizes {
@@ -600,97 +631,122 @@ impl TradingOrders {
     }
 
     /// Generate sequence-aware short orders using probability-based allocation (NO MAGIC NUMBERS)
+    #[allow(clippy::too_many_arguments)]
     fn generate_sequence_aware_short_orders(
         current_price: f64,
         atr_distance: f64,
-        sequence_ranges: &[[f64; 2]],
         config: &OrderConfig,
         is_breakout: bool,
-        price_levels: &PriceLevelPrediction, // NEW: Use for probability-based allocation
-        volatility_pred: &VolatilityPrediction, // NEW: Use for adaptive stop calculation
+        price_levels: &PriceLevelPrediction,
+        volatility_pred: &VolatilityPrediction,
+        sequence_prices: &[f64],
+        direction_pred: &DirectionPrediction,
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
         // DEBUG: Log the ranges being used
         log::debug!(
-            "🔍 SHORT Order Generation Debug: current_price={:.2}, ranges={:?}",
+            "🔍 SHORT Order Generation Debug: current_price={:.2}, sequence_len={}",
             current_price,
-            sequence_ranges
+            sequence_prices.len()
         );
 
         // CRITICAL FIX: Force correct SHORT order logic regardless of range issues
         // SHORT must enter ABOVE current price and exit BELOW current price
 
-        // Use sequence ranges for entry levels, but ensure they're positive (ABOVE current)
-        let moderate_up_range = &sequence_ranges[3]; // moderate_up
-        let strong_up_range = &sequence_ranges[4]; // strong_up
+        // 🎯 PROFESSIONAL GRID: Use ACTUAL prediction bins with their probabilities
 
-        log::debug!(
-            "📊 SHORT Entry Ranges: moderate_up={:?}, strong_up={:?}",
-            moderate_up_range,
-            strong_up_range
-        );
+        // Get the actual bins with ranges and probabilities
+        let moderate_up_bin = price_levels.bins.get("moderate_up");
+        let _strong_up_bin = price_levels.bins.get("strong_up");
+        let moderate_down_bin = price_levels.bins.get("moderate_down");
+        let strong_down_bin = price_levels.bins.get("strong_down");
+        let neutral_bin = price_levels.bins.get("neutral");
 
-        // 🎯 NEW: Use probability-based allocation instead of hardcoded portions
-        let (entry_portions, exit_portions) = price_levels.extract_probability_portions();
-        let (entry_positions, exit_positions) = price_levels.get_natural_price_positions();
+        // 🎯 SHORT ENTRIES: Use PROGRESSIVE upside ranges for DIFFERENT entry levels
+        let (entry_1_pct, entry_1_prob) = if let Some(bin) = neutral_bin {
+            (bin.range[1], bin.probability) // neutral upper = 0.909%
+        } else {
+            (0.2, 0.2)
+        };
 
+        let (entry_2_pct, entry_2_prob) = if let Some(bin) = moderate_up_bin {
+            ((bin.range[0] + bin.range[1]) / 2.0, bin.probability) // moderate_up CENTER = 1.465%
+        } else {
+            (direction_pred.expected_upside_percent, 0.2)
+        };
+
+        let (entry_3_pct, entry_3_prob) = if let Some(bin) = moderate_up_bin {
+            (bin.range[1], bin.probability) // moderate_up upper = 2.021%
+        } else {
+            (direction_pred.expected_upside_percent * 1.5, 0.15)
+        };
+
+        log::info!("📊 SMART SHORT ENTRIES using PROGRESSIVE ranges (ABOVE current price):");
         log::info!(
-            "📊 Probability-based allocation (breakout={}): Entry portions: [{:.3}, {:.3}, {:.3}], Exit portions: [{:.3}, {:.3}, {:.3}]",
-            is_breakout,
-            entry_portions[0], entry_portions[1], entry_portions[2],
-            exit_portions[0], exit_portions[1], exit_portions[2]
-        );
-
-        // Use natural price positions from prediction data
-        // SHORT ENTRY LOGIC: Entry prices are ABOVE current price (sell high)
-        // This is correct for short selling: sell at higher price, buy back at lower price
-        let entry_1_pct = entry_positions[0].max(0.5); // Ensure minimum above current
-        let entry_2_pct = entry_positions[1].max(entry_1_pct + 0.2);
-        let entry_3_pct = entry_positions[2].max(entry_2_pct + 0.2);
-
-        log::debug!(
-            "💰 SHORT Entry Percentages (ADAPTIVE): entry_1={:.2}%, entry_2={:.2}%, entry_3={:.2}%",
+            "📍 Entry 1: {:.3}% | Entry 2: {:.3}% | Entry 3: {:.3}% (DIFFERENT prices!)",
             entry_1_pct,
             entry_2_pct,
             entry_3_pct
         );
 
         log::info!(
-            "📊 SHORT Entry Logic: Selling ABOVE current price {:.2} (correct for short selling)",
+            "📊 SHORT Entry Logic: Catching bounces/resistance ABOVE current price {:.2}",
             current_price
         );
 
         let entry_levels = [
             OrderLevel {
                 price: current_price * (1.0 + entry_1_pct / 100.0),
-                quantity_percentage: entry_portions[0],
+                quantity_percentage: entry_1_prob, // Use actual probability for sizing
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: 0.8,
+                confidence: 0.9,
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_2_pct / 100.0),
-                quantity_percentage: entry_portions[1],
+                quantity_percentage: entry_2_prob, // Use actual probability for sizing
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.7,
             },
             OrderLevel {
                 price: current_price * (1.0 + entry_3_pct / 100.0),
-                quantity_percentage: entry_portions[2],
+                quantity_percentage: entry_3_prob, // Use actual probability for sizing
                 atr_distance,
                 order_type: if is_breakout {
-                    "STOP_LIMIT".to_string() // More aggressive for breakouts
+                    "STOP_LIMIT".to_string()
                 } else {
                     "LIMIT".to_string()
                 },
-                confidence: if is_breakout { 0.9 } else { 0.6 },
+                confidence: if is_breakout { 0.8 } else { 0.6 },
             },
         ];
 
-        // 🎯 NEW: Exit levels using probability-based allocation and natural positions
-        let exit_1_pct = exit_positions[0]; // moderate_down center
-        let exit_2_pct = exit_positions[1]; // strong_down upper
-        let exit_3_pct = exit_positions[2]; // strong_down center
+        // 🎯 SHORT EXITS: Use PROGRESSIVE downside ranges for DIFFERENT exit levels
+        let (exit_1_pct, exit_1_prob) = if let Some(bin) = moderate_down_bin {
+            (bin.range[1], bin.probability) // moderate_down upper = -0.195%
+        } else {
+            (-direction_pred.expected_downside_percent * 0.5, 0.2)
+        };
+
+        let (exit_2_pct, exit_2_prob) = if let Some(bin) = moderate_down_bin {
+            ((bin.range[0] + bin.range[1]) / 2.0, bin.probability) // moderate_down CENTER = -0.751%
+        } else {
+            (-direction_pred.expected_downside_percent, 0.2)
+        };
+
+        let (exit_3_pct, exit_3_prob) = if let Some(bin) = strong_down_bin {
+            (bin.range[1], bin.probability) // strong_down upper = -1.307%
+        } else {
+            (-direction_pred.expected_downside_percent * 1.5, 0.15)
+        };
+
+        log::info!("🎯 SHORT EXITS using PROGRESSIVE downside ranges (BELOW current price):");
+        log::info!(
+            "📍 Exit 1: {:.3}% | Exit 2: {:.3}% | Exit 3: {:.3}% (DIFFERENT prices!)",
+            exit_1_pct,
+            exit_2_pct,
+            exit_3_pct
+        );
 
         log::debug!(
             "📉 SHORT Exit Percentages (ADAPTIVE): exit_1={:.2}%, exit_2={:.2}%, exit_3={:.2}%",
@@ -702,49 +758,46 @@ impl TradingOrders {
         let exit_levels = [
             OrderLevel {
                 price: current_price * (1.0 + exit_1_pct / 100.0),
-                quantity_percentage: exit_portions[0],
+                quantity_percentage: exit_1_prob, // Use actual probability for sizing
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
                 price: current_price * (1.0 + exit_2_pct / 100.0),
-                quantity_percentage: exit_portions[1],
+                quantity_percentage: exit_2_prob, // Use actual probability for sizing
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.6,
             },
             OrderLevel {
                 price: current_price * (1.0 + exit_3_pct / 100.0),
-                quantity_percentage: exit_portions[2],
+                quantity_percentage: exit_3_prob, // Use actual probability for sizing
                 atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.4,
             },
         ];
 
-        // 🎯 NEW: Adaptive stop levels using volatility model data (NO HARDCODED VALUES)
-        // Extract volatility data from the prediction model
-        let recommended_stop_distance = volatility_pred.recommended_stop_distance_percent;
-        let expected_range = volatility_pred.expected_range_percent;
-        let regime_confidence = volatility_pred.confidence;
+        // 🎯 PROFESSIONAL STOP GRID: Use recommended stop distance
+        let recommended_stop = volatility_pred.recommended_stop_distance_percent;
+        let stop_distance = recommended_stop;
 
-        // Calculate adaptive buffer based on volatility regime confidence
-        // Lower confidence = higher uncertainty = wider buffer needed
-        let confidence_buffer = (1.0 - regime_confidence) * expected_range;
-        let adaptive_stop_distance = recommended_stop_distance + confidence_buffer;
+        // Position stops above entries using recommended stop distance
+        let stop_1_pct = entry_1_pct + stop_distance;
+        let stop_2_pct = entry_2_pct + stop_distance;
+        let stop_3_pct = entry_3_pct + stop_distance;
 
         log::info!(
-            "🎯 Adaptive Stop Calculation: base={:.3}% + buffer={:.3}% = total={:.3}%",
-            recommended_stop_distance,
-            confidence_buffer,
-            adaptive_stop_distance
+            "🛑 SHORT STOPS: Using recommended stop distance {:.3}%",
+            stop_distance
         );
-
-        // Position stops at adaptive distance above each entry
-        let stop_1_pct = entry_1_pct + adaptive_stop_distance;
-        let stop_2_pct = entry_2_pct + adaptive_stop_distance;
-        let stop_3_pct = entry_3_pct + adaptive_stop_distance;
+        log::info!(
+            "📍 Stop levels: {:.3}%, {:.3}%, {:.3}% above entries",
+            stop_1_pct,
+            stop_2_pct,
+            stop_3_pct
+        );
 
         log::debug!(
             "🛑 SHORT Stop Percentages (VOLATILITY-ADAPTIVE): stop_1={:.2}%, stop_2={:.2}%, stop_3={:.2}%",
@@ -754,22 +807,22 @@ impl TradingOrders {
         // Use same probability-based portions for stops as entries (risk consistency)
         let stop_levels = [
             OrderLevel {
-                price: current_price * (1.0 + (stop_1_pct * config.hunt_protection) / 100.0),
-                quantity_percentage: entry_portions[0], // Same as entry allocation
+                price: current_price * (1.0 + stop_1_pct / 100.0), // Convert percentage to multiplier
+                quantity_percentage: entry_1_prob,                 // Same as entry allocation
                 atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.9,
             },
             OrderLevel {
-                price: current_price * (1.0 + (stop_2_pct * config.hunt_protection) / 100.0),
-                quantity_percentage: entry_portions[1], // Same as entry allocation
+                price: current_price * (1.0 + stop_2_pct / 100.0),
+                quantity_percentage: entry_2_prob, // Same as entry allocation
                 atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
-                price: current_price * (1.0 + (stop_3_pct * config.hunt_protection) / 100.0),
-                quantity_percentage: entry_portions[2], // Same as entry allocation
+                price: current_price * (1.0 + stop_3_pct / 100.0),
+                quantity_percentage: entry_3_prob, // Same as entry allocation
                 atr_distance: atr_distance * config.hunt_protection,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.7,

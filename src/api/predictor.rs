@@ -387,9 +387,13 @@ impl Predictor {
             if let Some(last_row) = ohlc_data.last() {
                 let current_price = last_row.close;
                 if current_price > 0.0 {
-                    log::debug!(
-                        "Extracted current price from OHLC data: {:.2}",
+                    log::info!(
+                        "💰 Extracted current price from LAST row of OHLC sequence: {:.2}",
                         current_price
+                    );
+                    log::debug!(
+                        "   OHLC sequence has {} rows, using close price from last row",
+                        ohlc_data.len()
                     );
                     return Ok(current_price);
                 }
