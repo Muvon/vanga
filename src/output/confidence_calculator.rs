@@ -34,14 +34,18 @@ pub struct ConfidenceConfig {
 impl Default for ConfidenceConfig {
     fn default() -> Self {
         Self {
-            price_level_weight: 0.25, // 25% - Show levels, comes after direction importance
-            direction_weight: 0.35,   // 35% - Confirms trend - most important
-            volatility_weight: 0.1,   // 10% - Risk management
-            sentiment_weight: 0.15,   // 15% - Market psychology
-            volume_weight: 0.15,      // 15% - Confirmation
-            min_probability_threshold: 0.15, // 15% minimum for confidence (was 0.25)
-            agreement_bonus: 1.2,     // 20% bonus for agreement (was 1.5)
-            disagreement_penalty: 0.85, // 15% penalty for disagreement (was 0.7)
+            // CRYPTO-OPTIMIZED WEIGHTS:
+            // Direction + Price Level = 55% (core trading signal)
+            // Volume + Sentiment = 30% (confirmation signals)
+            // Volatility = 15% (risk adjustment)
+            price_level_weight: 0.20, // 20% - Entry/exit zones (works WITH direction)
+            direction_weight: 0.35,   // 35% - Primary trend signal (MOST IMPORTANT)
+            volatility_weight: 0.15,  // 15% - Risk sizing (MORE important in crypto)
+            sentiment_weight: 0.15,   // 15% - Market psychology confirmation
+            volume_weight: 0.15,      // 15% - Move validation (critical for crypto)
+            min_probability_threshold: 0.15, // 15% minimum for confidence
+            agreement_bonus: 1.3,     // 30% bonus when models agree (crypto moves fast)
+            disagreement_penalty: 0.8, // 20% penalty (less harsh for volatile crypto)
         }
     }
 }
@@ -59,65 +63,131 @@ impl ConfidenceCalculator {
 
     /// Calculate enhanced confidence score using all available targets
     pub fn calculate_overall_confidence(&self, prediction: &PredictionResult) -> f64 {
-        let mut weighted_scores = Vec::new();
-        let mut weights = Vec::new();
+        // CRYPTO-OPTIMIZED CONFIDENCE CALCULATION
+        // Core principle: Direction + Price Level are PRIMARY signals
+        // Volume + Sentiment are CONFIRMATION signals
+        // Volatility is RISK ADJUSTMENT
 
-        // Calculate individual target confidence scores
-        if let Some(ref price_levels) = prediction.price_levels {
-            let score = self.calculate_price_level_confidence(price_levels);
-            weighted_scores.push(score);
-            weights.push(self.config.price_level_weight);
-        }
+        let mut core_confidence = 0.0;
+        let mut confirmation_confidence = 0.0;
+        let mut risk_adjustment = 1.0;
+
+        // 1. CORE SIGNALS (Direction + Price Level) - These MUST agree for high confidence
+        let mut has_core_signals = false;
 
         if let Some(ref direction) = prediction.direction {
-            let score = self.calculate_direction_confidence(direction);
-            weighted_scores.push(score);
-            weights.push(self.config.direction_weight);
+            let dir_score = self.calculate_direction_confidence(direction);
+
+            if let Some(ref price_levels) = prediction.price_levels {
+                has_core_signals = true;
+                let price_score = self.calculate_price_level_confidence(price_levels);
+
+                // Check if direction and price level agree
+                let core_agreement = self.check_price_direction_agreement(price_levels, direction);
+
+                // Core confidence: weighted average with agreement boost
+                core_confidence =
+                    (dir_score * 0.65 + price_score * 0.35) * (0.8 + core_agreement * 0.4);
+
+                // CRYPTO INSIGHT: Strong directional moves need price level confirmation
+                if direction.pump_probability > 0.3 || direction.dump_probability > 0.3 {
+                    // For pump/dump scenarios, price levels are MORE important
+                    core_confidence =
+                        (dir_score * 0.5 + price_score * 0.5) * (0.7 + core_agreement * 0.5);
+                }
+            } else {
+                // Only direction available
+                core_confidence = dir_score * 0.7; // Reduce confidence without price levels
+            }
         }
 
-        if let Some(ref volatility) = prediction.volatility {
-            let score = self.calculate_volatility_confidence(volatility);
-            weighted_scores.push(score);
-            weights.push(self.config.volatility_weight);
+        // 2. CONFIRMATION SIGNALS (Volume + Sentiment)
+        let mut confirmation_count = 0;
+
+        if let Some(ref volume) = prediction.volume {
+            let vol_score = self.calculate_volume_confidence(volume);
+
+            // CRYPTO INSIGHT: High volume is CRITICAL for breakouts
+            if let Some(ref direction) = prediction.direction {
+                let vol_confirmation = self.check_volume_confirmation(volume, direction);
+                confirmation_confidence += vol_score * (0.8 + vol_confirmation * 0.4);
+                confirmation_count += 1;
+
+                // Boost confidence for high volume on strong moves
+                if (volume.high_probability + volume.very_high_probability) > 0.5
+                    && (direction.pump_probability > 0.2 || direction.dump_probability > 0.2)
+                {
+                    confirmation_confidence *= 1.3; // 30% boost for volume-confirmed breakouts
+                }
+            } else {
+                confirmation_confidence += vol_score;
+                confirmation_count += 1;
+            }
         }
 
         if let Some(ref sentiment) = prediction.sentiment {
-            let score = self.calculate_sentiment_confidence(sentiment);
-            weighted_scores.push(score);
-            weights.push(self.config.sentiment_weight);
+            let sent_score = self.calculate_sentiment_confidence(sentiment);
+
+            // CRYPTO INSIGHT: Extreme sentiment often precedes reversals
+            let extreme_sentiment =
+                sentiment.very_bullish_probability + sentiment.very_bearish_probability;
+            if extreme_sentiment > 0.6 {
+                // Extreme sentiment: be cautious (potential reversal)
+                confirmation_confidence += sent_score * 0.7;
+            } else {
+                confirmation_confidence += sent_score;
+            }
+            confirmation_count += 1;
         }
 
-        if let Some(ref volume) = prediction.volume {
-            let score = self.calculate_volume_confidence(volume);
-            weighted_scores.push(score);
-            weights.push(self.config.volume_weight);
+        // Average confirmation signals
+        if confirmation_count > 0 {
+            confirmation_confidence /= confirmation_count as f64;
         }
 
-        // Calculate base weighted average
-        let total_weight: f64 = weights.iter().sum();
-        let mut base_confidence = if total_weight > 0.0 {
-            weighted_scores
-                .iter()
-                .zip(weights.iter())
-                .map(|(score, weight)| score * weight)
-                .sum::<f64>()
-                / total_weight
+        // 3. RISK ADJUSTMENT (Volatility)
+        if let Some(ref volatility) = prediction.volatility {
+            // CRYPTO-SPECIFIC: Medium-High volatility is NORMAL and tradeable
+            risk_adjustment = match volatility.regime.as_str() {
+                "VERY_LOW" => 0.85,  // Too quiet = less opportunity
+                "LOW" => 0.95,       // Slightly below normal
+                "MEDIUM" => 1.0,     // Perfect for crypto trading
+                "HIGH" => 0.95,      // Normal for crypto, slight caution
+                "VERY_HIGH" => 0.75, // Extreme = reduce confidence
+                _ => 1.0,
+            };
+
+            // CRYPTO INSIGHT: Adjust for expected volatility vs actual
+            if volatility.expected_range_percent > 10.0 && volatility.regime == "MEDIUM" {
+                risk_adjustment *= 1.1; // Boost for healthy volatility
+            }
+        }
+
+        // 4. COMBINE ALL FACTORS (Crypto-optimized formula)
+        let mut final_confidence = if has_core_signals {
+            // When we have core signals, they dominate
+            let base = core_confidence * 0.7 + confirmation_confidence * 0.3;
+            base * risk_adjustment
         } else {
-            0.5 // Default neutral confidence
+            // Without core signals, rely more on confirmations
+            confirmation_confidence * 0.6 * risk_adjustment
         };
 
-        // Apply agreement/disagreement adjustments
-        let agreement_factor = self.calculate_target_agreement(prediction);
-        base_confidence *= agreement_factor;
+        // 5. CRYPTO-SPECIFIC ADJUSTMENTS
 
-        // Apply risk adjustments based on volatility
-        if let Some(ref volatility) = prediction.volatility {
-            base_confidence = self.apply_volatility_adjustment(base_confidence, volatility);
+        // Check for confluence (multiple models strongly agreeing)
+        let agreement_factor = self.calculate_target_agreement(prediction);
+        if agreement_factor > 1.1 {
+            // Strong agreement = confidence boost
+            final_confidence *= agreement_factor;
+        } else if agreement_factor < 0.9 {
+            // Disagreement = reduce but don't kill confidence (crypto is noisy)
+            final_confidence *= 0.8 + agreement_factor * 0.2;
         }
 
-        // IMPROVED: More generous clamping to ensure reasonable minimum confidence
-        // Even poor predictions should have at least 25% confidence to avoid filtering
-        base_confidence.clamp(0.25, 0.95) // Was 0.1, now 0.25 minimum
+        // CRYPTO REALITY: Even "weak" signals can be profitable in trending markets
+        // So we use a higher minimum (0.3) and lower maximum (0.9) for realistic expectations
+        final_confidence.clamp(0.3, 0.9)
     }
 
     /// Calculate confidence for price level predictions using probability distribution
@@ -174,38 +244,6 @@ impl ConfidenceCalculator {
 
         // Combine factors
         (dominance_confidence * 0.7 + rr_confidence * 0.3).clamp(0.2, 1.0) // Min 0.2
-    }
-
-    /// Calculate confidence for volatility predictions
-    fn calculate_volatility_confidence(&self, volatility: &VolatilityPrediction) -> f64 {
-        // Get regime probabilities
-        let probs = vec![
-            volatility.very_low_probability,
-            volatility.low_probability,
-            volatility.medium_probability,
-            volatility.high_probability,
-            volatility.very_high_probability,
-        ];
-
-        // Find max probability
-        let max_prob = probs.iter().fold(0.0_f64, |a, &b| a.max(b));
-
-        // Calculate entropy for uncertainty
-        let entropy = self.calculate_entropy(&probs);
-        let entropy_confidence = 1.0 - (entropy / 2.3);
-
-        // Volatility-specific: Medium volatility is actually good for trading
-        let regime_quality = match volatility.regime.as_str() {
-            "VERY_LOW" => 0.6,  // Too quiet, less opportunities
-            "LOW" => 0.8,       // Good for trading
-            "MEDIUM" => 1.0,    // Ideal for trading
-            "HIGH" => 0.7,      // Risky but tradeable
-            "VERY_HIGH" => 0.4, // Too risky
-            _ => 0.5,
-        };
-
-        // Combine factors
-        (max_prob * 0.4 + entropy_confidence * 0.3 + regime_quality * 0.3).clamp(0.0, 1.0)
     }
 
     /// Calculate confidence for sentiment predictions
@@ -420,25 +458,6 @@ impl ConfidenceCalculator {
         (strong_confirmation * 0.7 + weak_confirmation * 0.3).clamp(0.0, 1.0)
     }
 
-    /// Apply volatility-based risk adjustment to confidence
-    fn apply_volatility_adjustment(
-        &self,
-        confidence: f64,
-        volatility: &VolatilityPrediction,
-    ) -> f64 {
-        // Adjust confidence based on volatility regime
-        let adjustment = match volatility.regime.as_str() {
-            "VERY_LOW" => 0.9,  // Slightly reduce - might be too quiet
-            "LOW" => 1.0,       // Ideal for trading
-            "MEDIUM" => 1.0,    // Ideal for trading
-            "HIGH" => 0.85,     // Reduce due to risk
-            "VERY_HIGH" => 0.7, // Significantly reduce due to extreme risk
-            _ => 1.0,
-        };
-
-        confidence * adjustment
-    }
-
     /// Calculate entropy from probability distribution
     fn calculate_entropy(&self, probabilities: &[f64]) -> f64 {
         let mut entropy = 0.0;
@@ -459,58 +478,199 @@ impl ConfidenceCalculator {
         self.calculate_entropy(&probs)
     }
 
+    /// CRYPTO-SPECIFIC: Calculate breakout confidence for aggressive entries
+    pub fn calculate_breakout_confidence(&self, prediction: &PredictionResult) -> f64 {
+        let mut breakout_score = 0.0;
+        let mut signal_count = 0;
+
+        // 1. Check for pump/dump signals (primary breakout indicator)
+        if let Some(ref direction) = prediction.direction {
+            let pump_dump_strength = direction.pump_probability.max(direction.dump_probability);
+            if pump_dump_strength > 0.3 {
+                breakout_score += pump_dump_strength * 1.5; // Weight heavily
+                signal_count += 1;
+            }
+        }
+
+        // 2. Check for volume surge (confirms breakout)
+        if let Some(ref volume) = prediction.volume {
+            let high_volume = volume.high_probability + volume.very_high_probability;
+            if high_volume > 0.5 {
+                breakout_score += high_volume;
+                signal_count += 1;
+            }
+        }
+
+        // 3. Check for extreme price levels (breakout targets)
+        if let Some(ref price_levels) = prediction.price_levels {
+            let extreme_moves = price_levels
+                .bins
+                .get("strong_up")
+                .map(|b| b.probability)
+                .unwrap_or(0.0)
+                + price_levels
+                    .bins
+                    .get("strong_down")
+                    .map(|b| b.probability)
+                    .unwrap_or(0.0);
+
+            if extreme_moves > 0.4 {
+                breakout_score += extreme_moves * 0.8;
+                signal_count += 1;
+            }
+        }
+
+        // 4. Check for sentiment extremes (fuel for breakouts)
+        if let Some(ref sentiment) = prediction.sentiment {
+            let extreme_sentiment =
+                sentiment.very_bullish_probability + sentiment.very_bearish_probability;
+            if extreme_sentiment > 0.4 {
+                breakout_score += extreme_sentiment * 0.6;
+                signal_count += 1;
+            }
+        }
+
+        // Calculate final breakout confidence
+        if signal_count > 0 {
+            let avg_score = breakout_score / signal_count as f64;
+            // Boost if multiple signals confirm
+            let multi_signal_boost = 1.0 + (signal_count as f64 - 1.0) * 0.15;
+            (avg_score * multi_signal_boost).min(1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// CRYPTO-SPECIFIC: Calculate scalping confidence for quick trades
+    pub fn calculate_scalping_confidence(&self, prediction: &PredictionResult) -> f64 {
+        let mut scalp_score = 0.0;
+
+        // 1. Need medium volatility (not too high, not too low)
+        if let Some(ref volatility) = prediction.volatility {
+            scalp_score += match volatility.regime.as_str() {
+                "LOW" => 0.7,
+                "MEDIUM" => 1.0, // Perfect for scalping
+                "HIGH" => 0.6,   // Too risky
+                _ => 0.3,
+            };
+        }
+
+        // 2. Need clear short-term direction
+        if let Some(ref direction) = prediction.direction {
+            let directional_clarity = (direction.up_probability_aggregated - 0.5).abs() * 2.0;
+            scalp_score += directional_clarity * 0.8;
+        }
+
+        // 3. Prefer neutral price levels (range-bound)
+        if let Some(ref price_levels) = prediction.price_levels {
+            let neutral_prob = price_levels
+                .bins
+                .get("neutral")
+                .map(|b| b.probability)
+                .unwrap_or(0.0);
+            scalp_score += neutral_prob * 0.6;
+        }
+
+        // Average and scale
+        (scalp_score / 2.4).min(1.0)
+    }
+
     /// Calculate position size multiplier based on confidence and agreement
     pub fn calculate_position_size_multiplier(
         &self,
         overall_confidence: f64,
         prediction: &PredictionResult,
     ) -> f64 {
-        // Base multiplier from confidence
-        let base_multiplier = if overall_confidence > 0.8 {
-            1.5 // High confidence: 150% position
-        } else if overall_confidence > 0.6 {
-            1.0 // Medium confidence: 100% position
-        } else if overall_confidence > 0.4 {
-            0.75 // Low confidence: 75% position
+        // CRYPTO-OPTIMIZED POSITION SIZING
+        // Key insight: Crypto rewards aggressive sizing on HIGH confidence
+        // but requires conservative sizing on uncertainty
+
+        // 1. BASE SIZING FROM CONFIDENCE
+        let base_multiplier = if overall_confidence > 0.75 {
+            2.0 // VERY HIGH confidence: 200% (use leverage)
+        } else if overall_confidence > 0.65 {
+            1.5 // HIGH confidence: 150% position
+        } else if overall_confidence > 0.55 {
+            1.2 // GOOD confidence: 120% position
+        } else if overall_confidence > 0.45 {
+            1.0 // MODERATE confidence: 100% position
+        } else if overall_confidence > 0.35 {
+            0.75 // LOW confidence: 75% position
         } else {
-            0.5 // Very low confidence: 50% position
+            0.5 // VERY LOW confidence: 50% position
         };
 
-        // Adjust for volatility regime
+        // 2. VOLATILITY-BASED ADJUSTMENT (Crypto-specific)
         let volatility_multiplier = if let Some(ref vol) = prediction.volatility {
             match vol.regime.as_str() {
-                "VERY_LOW" => 1.2, // Can take larger position in calm markets
-                "LOW" => 1.1,
-                "MEDIUM" => 1.0,
-                "HIGH" => 0.8,      // Reduce position in volatile markets
-                "VERY_HIGH" => 0.5, // Significantly reduce in extreme volatility
+                "VERY_LOW" => 1.3,  // Can size up in calm markets
+                "LOW" => 1.2,       // Slightly larger positions OK
+                "MEDIUM" => 1.0,    // Standard sizing
+                "HIGH" => 0.8,      // Reduce in high volatility
+                "VERY_HIGH" => 0.5, // Half position in extreme volatility
                 _ => 1.0,
             }
         } else {
             1.0
         };
 
-        // Adjust for risk-reward ratio
+        // 3. RISK-REWARD ADJUSTMENT (Crypto loves high R:R)
         let rr_multiplier = if let Some(ref dir) = prediction.direction {
-            if dir.risk_reward_ratio > 8.0 {
-                1.2 // Excellent R/R
+            if dir.risk_reward_ratio > 10.0 {
+                1.5 // EXCEPTIONAL R:R (10:1+) = size up
+            } else if dir.risk_reward_ratio > 6.0 {
+                1.2 // EXCELLENT R:R (6:1+) = moderate size up
             } else if dir.risk_reward_ratio > 4.0 {
-                1.0 // Good R/R
+                1.0 // GOOD R:R (4:1+) = standard
             } else if dir.risk_reward_ratio > 2.0 {
-                0.8 // Acceptable R/R
+                0.8 // ACCEPTABLE R:R (2:1+) = reduce
             } else {
-                0.5 // Poor R/R
+                0.5 // POOR R:R (<2:1) = minimize
             }
         } else {
             1.0
         };
 
-        // Combine all multipliers
-        f64::clamp(
-            base_multiplier * volatility_multiplier * rr_multiplier,
-            0.25,
-            2.0,
-        )
+        // 4. PUMP/DUMP DETECTION (Crypto-specific aggressive sizing)
+        let momentum_multiplier = if let Some(ref dir) = prediction.direction {
+            if dir.pump_probability > 0.4 || dir.dump_probability > 0.4 {
+                // Strong pump/dump signal with good confidence
+                if overall_confidence > 0.6 {
+                    1.3 // Size up for momentum trades
+                } else {
+                    0.7 // But be careful if confidence is low
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
+        // 5. VOLUME CONFIRMATION (Critical for crypto)
+        let volume_multiplier = if let Some(ref vol) = prediction.volume {
+            let high_volume = vol.high_probability + vol.very_high_probability;
+            if high_volume > 0.6 {
+                1.2 // High volume confirms the move
+            } else if high_volume < 0.2 {
+                0.8 // Low volume = be cautious
+            } else {
+                1.0
+            }
+        } else {
+            0.9 // No volume data = slight reduction
+        };
+
+        // COMBINE ALL MULTIPLIERS
+        let final_multiplier = base_multiplier
+            * volatility_multiplier
+            * rr_multiplier
+            * momentum_multiplier
+            * volume_multiplier;
+
+        // CRYPTO REALITY: Cap at 3x for risk management (even with leverage)
+        // Minimum 0.25x to always have some position
+        f64::clamp(final_multiplier, 0.25, 3.0)
     }
 
     /// Calculate individual order level confidence based on price probability
