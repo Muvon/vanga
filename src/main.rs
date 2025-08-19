@@ -20,6 +20,7 @@ struct TrainParams {
     tft: bool,
     batch: bool,
     lr: Option<f64>,
+    xgboost_only: bool,
 }
 
 /// Prediction command parameters
@@ -101,6 +102,13 @@ enum Commands {
             help = "Override learning rate from config file (e.g., 0.001, 1e-5, 0.0001)"
         )]
         lr: Option<f64>,
+
+        /// Train only XGBoost using existing LSTM model (requires existing model)
+        #[arg(
+            long,
+            help = "Train only XGBoost using existing LSTM model. Requires existing model in models/{symbol}/ directory."
+        )]
+        xgboost_only: bool,
     },
 
     /// Make predictions using trained model
@@ -278,6 +286,7 @@ async fn main() -> Result<()> {
             tft,
             batch,
             lr,
+            xgboost_only,
         } => {
             let params = TrainParams {
                 symbol,
@@ -291,6 +300,7 @@ async fn main() -> Result<()> {
                 tft,
                 batch,
                 lr,
+                xgboost_only,
             };
             handle_train_command(params).await
         }
@@ -423,8 +433,16 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 
             monitor.checkpoint(&format!("Config prepared for {}", symbol));
 
-            // Train the model
-            match api::train_model(symbol_config.clone()).await {
+            // Train the model - choose training mode based on xgboost_only flag
+            let training_result = if params.xgboost_only {
+                log::info!("🌲 XGBoost-only training mode for {}", symbol);
+                api::train_xgboost_only_model(symbol_config.clone()).await
+            } else {
+                log::info!("🔄 Full LSTM + XGBoost training mode for {}", symbol);
+                api::train_model(symbol_config.clone()).await
+            };
+
+            match training_result {
                 Ok(model) => {
                     monitor.checkpoint(&format!("Model trained for {}", symbol));
                     log::info!("✅ Successfully trained model for {}", symbol);
@@ -549,8 +567,16 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
 
         monitor.checkpoint("Configuration prepared");
 
-        // Train the model
-        let mut model = api::train_model(config.clone()).await?;
+        // Train the model - choose training mode based on xgboost_only flag
+        let training_result = if params.xgboost_only {
+            log::info!("🌲 XGBoost-only training mode for {}", symbol);
+            api::train_xgboost_only_model(config.clone()).await
+        } else {
+            log::info!("🔄 Full LSTM + XGBoost training mode for {}", symbol);
+            api::train_model(config.clone()).await
+        };
+
+        let mut model = training_result?;
         monitor.checkpoint("Model training completed");
 
         // Set complete training configuration in model metadata for prediction use

@@ -2667,7 +2667,10 @@ impl LSTMModel {
     /// * `sequences` - Training sequences [batch_size, seq_len, features]
     /// * `targets` - Training targets [batch_size, output_size]
     /// * `config` - Training configuration with XGBoost settings
-    async fn train_xgboost_phase(
+    ///   Train XGBoost phase with enhanced logging for XGBoost-only mode.
+    ///
+    ///   This method can be called independently for XGBoost-only training.
+    pub async fn train_xgboost_phase(
         &mut self,
         sequences: &Array3<f64>,
         targets: &Array2<f64>,

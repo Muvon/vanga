@@ -822,6 +822,51 @@ impl MultiTargetLSTMModel {
     /// COMBINE MODELS: Create MultiTargetLSTMModel from multiple pre-trained LSTM models
     /// PURPOSE: Fixes critical bug where only first target was kept
     /// ARCHITECTURE: Vec<LSTMModel> → MultiTargetLSTMModel wrapper (all targets preserved)
+    /// Get current model metrics for comparison
+    pub fn get_current_metrics(&self) -> Option<std::collections::HashMap<String, f64>> {
+        // For now, return None as metrics collection needs to be implemented
+        // This would typically collect metrics from individual LSTM models
+        log::debug!("📊 Collecting current model metrics (placeholder implementation)");
+        None
+    }
+
+    /// Train only XGBoost component using existing LSTM features
+    pub async fn train_xgboost_only(
+        &mut self,
+        sequences: &Array3<f64>,
+        targets: &Array2<f64>,
+        config: &crate::config::TrainingConfig,
+    ) -> Result<()> {
+        log::info!("🌲 Starting XGBoost-only training phase");
+        log::info!(
+            "📊 Processing {} sequences with {} targets",
+            sequences.shape()[0],
+            self.num_targets
+        );
+
+        // Train XGBoost for each individual LSTM model
+        for (i, model) in self.models.iter_mut().enumerate() {
+            let target_name = &self.target_names[i];
+            log::info!("🎯 Training XGBoost for target: {}", target_name);
+
+            // Extract single target data for this model
+            let single_target = targets.slice(ndarray::s![.., i..i + 1]).to_owned();
+
+            // Use the existing XGBoost training method from LSTMModel
+            model
+                .train_xgboost_phase(sequences, &single_target, config)
+                .await?;
+
+            log::info!("✅ XGBoost training completed for target: {}", target_name);
+        }
+
+        log::info!(
+            "🎉 XGBoost-only training completed for all {} targets",
+            self.num_targets
+        );
+        Ok(())
+    }
+
     /// USAGE: Called after training all targets separately to combine into final model
     pub fn from_trained_models(
         models: Vec<LSTMModel>,        // Pre-trained LSTM models (one per target)
