@@ -831,37 +831,68 @@ impl MultiTargetLSTMModel {
     }
 
     /// Train only XGBoost component using existing LSTM features
+    /// Now accepts per-target sequences and targets for proper balanced training
     pub async fn train_xgboost_only(
         &mut self,
-        sequences: &Array3<f64>,
-        targets: &Array2<f64>,
+        target_data: Vec<(Array3<f64>, Array2<f64>)>, // Each target's own sequences and targets
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
         log::info!("🌲 Starting XGBoost-only training phase");
         log::info!(
-            "📊 Processing {} sequences with {} targets",
-            sequences.shape()[0],
+            "📊 Training {} individual XGBoost models with their own balanced data",
             self.num_targets
         );
 
-        // Train XGBoost for each individual LSTM model
-        for (i, model) in self.models.iter_mut().enumerate() {
-            let target_name = &self.target_names[i];
-            log::info!("🎯 Training XGBoost for target: {}", target_name);
+        // Validate input
+        if target_data.len() != self.models.len() {
+            return Err(crate::utils::VangaError::DataError(format!(
+                "Mismatch: {} models but {} data sets provided",
+                self.models.len(),
+                target_data.len()
+            )));
+        }
 
-            // Extract single target data for this model
-            let single_target = targets.slice(ndarray::s![.., i..i + 1]).to_owned();
+        // Train XGBoost for each individual LSTM model with its own data
+        for (i, (model, (sequences, targets))) in
+            self.models.iter_mut().zip(target_data.iter()).enumerate()
+        {
+            let target_name = &self.target_names[i];
+            log::info!(
+                "🎯 Training XGBoost for target {}/{}: {} with {} balanced sequences",
+                i + 1,
+                self.num_targets,
+                target_name,
+                sequences.shape()[0]
+            );
+
+            // Log class distribution for this target
+            let mut class_counts = std::collections::HashMap::new();
+            for val in targets.iter() {
+                let class = *val as i32;
+                *class_counts.entry(class).or_insert(0) += 1;
+            }
+            log::info!("📊 Class distribution for {}:", target_name);
+            for class in 0..5 {
+                let count = class_counts.get(&class).unwrap_or(&0);
+                let percentage = (*count as f64 / targets.len() as f64) * 100.0;
+                log::info!("   Class {}: {} samples ({:.1}%)", class, count, percentage);
+            }
 
             // Use the existing XGBoost training method from LSTMModel
             model
-                .train_xgboost_phase(sequences, &single_target, config)
+                .train_xgboost_phase(sequences, targets, config)
                 .await?;
 
-            log::info!("✅ XGBoost training completed for target: {}", target_name);
+            log::info!(
+                "✅ XGBoost training completed for target {}/{}: {}",
+                i + 1,
+                self.num_targets,
+                target_name
+            );
         }
 
         log::info!(
-            "🎉 XGBoost-only training completed for all {} targets",
+            "🎉 XGBoost-only training completed for all {} targets with balanced data",
             self.num_targets
         );
         Ok(())

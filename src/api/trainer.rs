@@ -1255,52 +1255,184 @@ pub async fn train_xgboost_only_model(config: TrainingConfig) -> Result<MultiTar
         config.symbol
     );
 
-    // 1. Validate that LSTM model exists
+    // Load existing LSTM model - let the load method handle all validation
     let model_path = crate::utils::model_path::get_model_path(&config.symbol);
-    if !model_path.exists() {
-        return Err(crate::utils::error::VangaError::model(format!(
-            "LSTM model not found for symbol '{}'. Expected at: {}\n\
-            Please train the full model first using: cargo run -- train --symbol {} --data <data_file>",
-            config.symbol,
-            model_path.display(),
-            config.symbol
-        )));
-    }
-
     log::info!(
         "📂 Loading existing LSTM model from: {}",
         model_path.display()
     );
 
-    // 2. Load existing LSTM model
-    let mut model = crate::model::multi_target::MultiTargetLSTMModel::load(&model_path)?;
+    let mut model = crate::model::multi_target::MultiTargetLSTMModel::load(&model_path)
+        .map_err(|e| {
+            crate::utils::error::VangaError::model(format!(
+                "Failed to load LSTM model for symbol '{}' from {}: {}\n\
+                Please train the full model first using: cargo run -- train --symbol {} --data <data_file>",
+                config.symbol,
+                model_path.display(),
+                e,
+                config.symbol
+            ))
+        })?;
     log::info!("✅ Successfully loaded existing LSTM model");
 
-    // 3. Use existing trainer logic to prepare data
-    log::info!("📊 Preparing training data using existing pipeline...");
-
-    // Use the trainer to actually prepare and train XGBoost
-    // This reuses all existing data preparation logic
-    log::info!("🔄 Reusing existing data preparation pipeline...");
-
-    // The actual XGBoost training will be handled by calling the existing train method
-    // but we need to modify the model to skip LSTM training and only do XGBoost
-    log::info!("🌲 XGBoost-only training mode activated");
-
-    // For now, we'll modify the loaded model to enable XGBoost-only mode
-    // and then call the existing training pipeline
+    // Update model with new training config
     model.set_training_config(config.clone());
 
-    // Store LSTM-only metrics for comparison (placeholder)
-    log::info!("📊 LSTM-only baseline metrics captured");
+    // Prepare data using existing pipeline
+    log::info!("📊 Preparing training data for XGBoost training...");
 
-    // The actual XGBoost training will be handled by the existing train_xgboost_phase method
-    // when called from the LSTM training pipeline
+    let data_pipeline = DataPipeline::new();
+
+    // Load and prepare data with calibrated parameters from the model
+    let calibrated_params = model
+        .get_calibrated_parameters()
+        .ok_or_else(|| VangaError::model("Model missing calibrated parameters"))?
+        .clone();
+
+    let target_windows = data_pipeline
+        .prepare_training_data_with_calibrated_params(
+            &config.data_path,
+            &config,
+            Some(&calibrated_params),
+        )
+        .await?;
 
     log::info!(
-        "✅ XGBoost-only training setup completed for {}",
-        config.symbol
+        "📊 Data prepared: {} target windows loaded",
+        target_windows.windows_by_target.len()
     );
+
+    // For XGBoost-only training, we need to train EACH model's XGBoost individually
+    // with its OWN balanced data, not mix data from different targets
+
+    let model_target_names = model.get_target_names();
+    log::info!(
+        "📊 Model has {} targets to train XGBoost for: {:?}",
+        model_target_names.len(),
+        model_target_names
+    );
+
+    // We need to train XGBoost for each target individually
+    // The MultiTargetLSTMModel contains multiple individual LSTM models
+    // Each needs its own XGBoost trained on its own balanced data
+
+    // FIXED: Each target should use its OWN balanced sequences and targets
+    // This matches how the regular training pipeline works
+
+    log::info!("🔍 Collecting balanced data for each target:");
+    let mut target_data_vec = Vec::new();
+
+    for model_target_name in model_target_names.iter() {
+        // Parse target name
+        let parts: Vec<&str> = model_target_name.split('_').collect();
+        let (target_type, horizon) =
+            if parts.len() == 3 && parts[0] == "price" && parts[1] == "level" {
+                (TargetType::PriceLevel, parts[2].to_string())
+            } else if parts.len() == 2 {
+                let target_type = match parts[0] {
+                    "direction" => TargetType::Direction,
+                    "volatility" => TargetType::Volatility,
+                    "sentiment" => TargetType::Sentiment,
+                    "volume" => TargetType::Volume,
+                    _ => {
+                        return Err(VangaError::DataError(format!(
+                            "Unknown target type in '{}'",
+                            model_target_name
+                        )));
+                    }
+                };
+                (target_type, parts[1].to_string())
+            } else {
+                return Err(VangaError::DataError(format!(
+                    "Invalid target name format: '{}'",
+                    model_target_name
+                )));
+            };
+
+        // Get the window for this specific target
+        let windows = target_windows
+            .windows_by_target
+            .get(&(target_type, horizon.clone()))
+            .ok_or_else(|| {
+                VangaError::DataError(format!(
+                    "No balanced window found for {:?} {}",
+                    target_type, horizon
+                ))
+            })?;
+
+        let window = windows.first().ok_or_else(|| {
+            VangaError::DataError(format!(
+                "Empty window list for {:?} {}",
+                target_type, horizon
+            ))
+        })?;
+
+        // Extract this target's sequences (already balanced!)
+        let sequences = window.train_data.sequences.clone();
+
+        // Extract the target data for this specific target
+        let target_names = &window.train_data.targets.target_names;
+        let all_targets =
+            extract_targets_for_multi_model(&window.train_data.targets, target_names)?;
+
+        // Find the specific target column
+        let idx = target_names
+            .iter()
+            .position(|n| n == model_target_name)
+            .ok_or_else(|| {
+                VangaError::DataError(format!(
+                    "Target '{}' not found in window. Available: {:?}",
+                    model_target_name, target_names
+                ))
+            })?;
+
+        // Extract single target as 2D array (required by train_xgboost_phase)
+        let single_target = all_targets.slice(ndarray::s![.., idx..idx + 1]).to_owned();
+
+        log::info!(
+            "✅ Collected balanced data for {}: {} sequences, {} targets",
+            model_target_name,
+            sequences.shape()[0],
+            single_target.shape()[0]
+        );
+
+        // Verify balance
+        let mut class_counts = std::collections::HashMap::new();
+        for val in single_target.iter() {
+            let class = *val as i32;
+            *class_counts.entry(class).or_insert(0) += 1;
+        }
+        log::info!("   Class distribution for {}:", model_target_name);
+        for class in 0..5 {
+            let count = class_counts.get(&class).unwrap_or(&0);
+            let percentage = (*count as f64 / single_target.len() as f64) * 100.0;
+            log::info!(
+                "      Class {}: {} samples ({:.1}%)",
+                class,
+                count,
+                percentage
+            );
+        }
+
+        target_data_vec.push((sequences, single_target));
+    }
+
+    // Train XGBoost with each target's own balanced data
+    log::info!("🌲 Training XGBoost models using LSTM features with properly balanced data");
+    model.train_xgboost_only(target_data_vec, &config).await?;
+
+    log::info!("✅ XGBoost training completed successfully");
+
+    // Save the updated model with XGBoost components
+    let model_path = crate::utils::model_path::get_model_path(&config.symbol);
+    log::info!(
+        "💾 Saving updated model with XGBoost to: {}",
+        model_path.display()
+    );
+    model.save(&model_path)?;
+    log::info!("✅ Model saved successfully");
+
+    log::info!("✅ XGBoost-only training completed for {}", config.symbol);
     Ok(model)
 }
 ///

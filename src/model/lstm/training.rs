@@ -2676,13 +2676,30 @@ impl LSTMModel {
         targets: &Array2<f64>,
         config: &crate::config::TrainingConfig,
     ) -> Result<()> {
-        log::info!("🌲 Phase 2: XGBoost training on LSTM features (as per paper)");
+        // Log target context if available
+        let target_info = if let Some((ref target_name, ref target_type)) = self.target_context {
+            format!(" for [{}] ({:?})", target_name, target_type)
+        } else {
+            String::new()
+        };
+
+        log::info!(
+            "🌲 Phase 2: XGBoost training on LSTM features{}",
+            target_info
+        );
         log::info!("📄 Following paper: XGBoost learns f(z) where z = LSTM hidden state");
 
         // Extract LSTM features for all training sequences
         // As per equation (8): z = h_n ∈ ℝ^k where k is hidden size
+        let target_label = if let Some((ref name, _)) = self.target_context {
+            format!(" [{}]", name)
+        } else {
+            String::new()
+        };
+
         log::info!(
-            "🔍 [LSTM] Extracting latent vectors z = h_n from {} sequences (per equation 8)",
+            "🔍{} Extracting latent vectors z = h_n from {} sequences (per equation 8)",
+            target_label,
             sequences.shape()[0]
         );
         log::debug!("   • Input sequences shape: {:?}", sequences.shape());
@@ -2696,6 +2713,57 @@ impl LSTMModel {
             "📊 [LSTM] Latent vectors extracted: z ∈ ℝ^{:?}",
             lstm_features.shape()
         );
+
+        // Add diagnostic for LSTM features
+        log::info!("🔍 LSTM Feature Statistics:");
+        if let Ok(mean) = lstm_features.mean(candle_core::D::Minus1) {
+            if let Ok(mean_val) = mean.mean_all() {
+                // Handle both F32 and F64 dtypes
+                let mean_value = match lstm_features.dtype() {
+                    candle_core::DType::F32 => mean_val.to_scalar::<f32>()? as f64,
+                    candle_core::DType::F64 => mean_val.to_scalar::<f64>()?,
+                    _ => {
+                        log::warn!("Unexpected dtype for LSTM features");
+                        0.0
+                    }
+                };
+                log::info!("  Mean: {:.6}", mean_value);
+            }
+        }
+
+        // Check feature variance - convert to appropriate type
+        let features_array = match lstm_features.dtype() {
+            candle_core::DType::F32 => {
+                let f32_array = lstm_features.to_vec2::<f32>()?;
+                f32_array
+                    .iter()
+                    .map(|row| row.iter().map(|&x| x as f64).collect())
+                    .collect::<Vec<Vec<f64>>>()
+            }
+            candle_core::DType::F64 => lstm_features.to_vec2::<f64>()?,
+            _ => {
+                log::warn!("Unexpected dtype for LSTM features, skipping variance check");
+                vec![]
+            }
+        };
+
+        if !features_array.is_empty() {
+            let mut zero_variance_count = 0;
+            for col_idx in 0..features_array[0].len() {
+                let col_values: Vec<f64> = features_array.iter().map(|row| row[col_idx]).collect();
+                let variance = statistical_variance(&col_values);
+                if variance < 1e-10 {
+                    zero_variance_count += 1;
+                }
+            }
+            if zero_variance_count > 0 {
+                log::warn!(
+                    "⚠️ {} out of {} LSTM features have near-zero variance!",
+                    zero_variance_count,
+                    features_array[0].len()
+                );
+            }
+        }
         log::debug!("   • z = h_n (final LSTM hidden state)");
         log::debug!("   • Architecture: {:?}", self.architecture);
         log::debug!("   • These are features, NOT predictions");
@@ -2730,13 +2798,22 @@ impl LSTMModel {
             );
         }
 
+        // Check if XGBoost model already exists and warn
+        if self.xgboost_model.is_some() {
+            log::warn!("⚠️ Existing XGBoost model will be replaced with new training");
+            self.xgboost_model = None; // Clear old model
+        }
+
         // Create XGBoost regressor
         let mut xgb_regressor =
             crate::model::xgboost::XGBoostRegressor::new(xgb_config, self.device.clone());
 
         // Train XGBoost model on LSTM features as per paper
         // Equation (9): ŷ = f(z) = Σ f_m(z) where z is LSTM hidden state
-        log::info!("🎯 [XGBoost] Training regression model: ŷ = f(z)");
+        log::info!(
+            "🎯 [XGBoost{}] Training regression model: ŷ = f(z)",
+            target_label
+        );
         log::info!("   • Input: LSTM latent vectors z ∈ ℝ^k (features)");
         log::info!("   • Target: True labels y (5-class categorical)");
         log::info!("   • Output: Predictions ŷ ∈ ℝ^(N×5)");
@@ -2824,7 +2901,10 @@ impl LSTMModel {
         // NEW: Evaluate hybrid model (LSTM+XGBoost) performance vs LSTM-only
         self.evaluate_hybrid_model_performance().await?;
 
-        log::info!("✅ XGBoost hybrid training completed successfully");
+        log::info!(
+            "✅ XGBoost hybrid training completed successfully{}",
+            target_label
+        );
         Ok(())
     }
 
@@ -3203,4 +3283,14 @@ impl LSTMModel {
 
         Ok(())
     }
+}
+
+/// Helper function to calculate statistical variance
+fn statistical_variance(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    variance
 }

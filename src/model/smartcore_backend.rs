@@ -161,6 +161,22 @@ impl SmartCoreRegressor {
         log::info!("  ├─ Features: {}", actual_feature_dim);
         log::info!("  └─ Classes: {}", num_classes);
 
+        // Add data diagnostics before training
+        log::info!("📊 Training Data Analysis:");
+        let mut class_counts = std::collections::HashMap::new();
+        for &label in y.iter() {
+            *class_counts.entry(label).or_insert(0) += 1;
+        }
+        for class in 0..num_classes {
+            let count = class_counts.get(&(class as i32)).unwrap_or(&0);
+            log::info!(
+                "  Class {}: {} samples ({:.1}%)",
+                class,
+                count,
+                (*count as f32 / y.len() as f32) * 100.0
+            );
+        }
+
         let rf_params = smartcore::ensemble::random_forest_classifier::RandomForestClassifierParameters::default()
             .with_n_trees(self.config.n_estimators as u16)
             .with_max_depth(self.config.max_depth as u16);
@@ -882,7 +898,13 @@ impl SmartCoreRegressor {
 
     /// Test model predictions to verify it's working
     fn test_model_predictions(&self, x: &DenseMatrix<f64>, y: &[i32]) -> Result<()> {
-        let test_size = std::cmp::min(10, x.shape().0);
+        // Use ALL validation data, not a subset!
+        let test_size = x.shape().0; // Use full validation set
+
+        log::info!(
+            "🔍 Validating model on FULL validation set: {} samples",
+            test_size
+        );
 
         // Create test subset manually
         let mut test_data = Vec::new();
@@ -938,6 +960,32 @@ impl SmartCoreRegressor {
             test_size,
             accuracy
         );
+
+        // Add class distribution analysis
+        let mut pred_distribution = std::collections::HashMap::new();
+        let mut true_distribution = std::collections::HashMap::new();
+
+        for pred in predictions.iter() {
+            *pred_distribution.entry(*pred).or_insert(0) += 1;
+        }
+
+        for true_val in y.iter().take(test_size) {
+            *true_distribution.entry(*true_val).or_insert(0) += 1;
+        }
+
+        log::info!("📊 Prediction Distribution:");
+        for class in 0..5 {
+            let pred_count = pred_distribution.get(&class).unwrap_or(&0);
+            let true_count = true_distribution.get(&class).unwrap_or(&0);
+            log::info!(
+                "  Class {}: Predicted {} ({:.1}%), Actual {} ({:.1}%)",
+                class,
+                pred_count,
+                (*pred_count as f32 / test_size as f32) * 100.0,
+                true_count,
+                (*true_count as f32 / test_size as f32) * 100.0
+            );
+        }
 
         Ok(())
     }
