@@ -574,8 +574,16 @@ impl TradingOrders {
             )
         };
 
-        // Validate and optimize risk-reward ratio (configurable minimum for crypto)
-        let min_risk_reward = 4.0; // TODO: Move to config - 4:1 minimum as requested
+        // Calculate dynamic risk-reward ratio based on prediction confidence
+        // Formula: risk_reward = 1 / confidence (with practical bounds)
+        let overall_confidence = consensus.calculate_overall_confidence();
+        let min_risk_reward = (1.0_f64 / overall_confidence.max(0.1)).clamp(2.0, 10.0);
+
+        log::info!(
+            "🎯 Dynamic R:R: confidence={:.3} → required_rr={:.2} (was hardcoded 4.0)",
+            overall_confidence,
+            min_risk_reward
+        );
         let risk_reward_ratio = Self::validate_and_optimize_risk_reward(
             &mut entry_levels,
             &mut exit_levels,
