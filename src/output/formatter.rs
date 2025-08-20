@@ -575,97 +575,55 @@ impl OutputFormatter {
                 let direction = result.direction.clone().unwrap();
                 let volatility = result.volatility.clone().unwrap();
 
-                // Calculate ATR from OHLCV sequence data
-                let atr_value = if let Some(ohlcv_data) = &self.sequence_ohlcv {
-                    if ohlcv_data.len() >= 2 {
-                        // Calculate true range for each period
-                        let mut true_ranges = Vec::new();
-                        for i in 1..ohlcv_data.len() {
-                            let current = &ohlcv_data[i];
-                            let previous = &ohlcv_data[i - 1];
+                // Check if we have sentiment and volume for SMART generation
+                let use_smart_generation = result.sentiment.is_some() && result.volume.is_some();
 
-                            // True Range = max(high - low, |high - prev_close|, |low - prev_close|)
-                            let tr = (current.high - current.low)
-                                .max((current.high - previous.close).abs())
-                                .max((current.low - previous.close).abs());
+                let orders = if use_smart_generation {
+                    // Use SMART order generation with all 5 models
+                    let sentiment = result.sentiment.clone().unwrap();
+                    let volume = result.volume.clone().unwrap();
 
-                            // Convert to percentage
-                            let tr_pct = (tr / current.close) * 100.0;
-                            true_ranges.push(tr_pct);
+                    log::info!("🎯 Using SMART order generation with all 5 models");
+
+                    match crate::output::trading_orders::TradingOrders::generate_smart(
+                        current_price,
+                        &price_levels,
+                        &direction,
+                        &volatility,
+                        &sentiment,
+                        &volume,
+                        &crate::output::structures::OrderConfig::default(),
+                    ) {
+                        Ok(smart_orders) => {
+                            log::info!(
+                                "✅ Generated SMART {} orders with R:R={:.2}",
+                                smart_orders.direction,
+                                smart_orders.risk_reward_ratio
+                            );
+                            smart_orders
                         }
-
-                        // Average True Range as percentage
-                        let atr_pct = if !true_ranges.is_empty() {
-                            true_ranges.iter().sum::<f64>() / true_ranges.len() as f64
-                        } else {
-                            2.0
-                        };
-
-                        atr_pct.min(10.0) // Cap at 10% for sanity
-                    } else {
-                        2.0 // 2% fallback ATR
+                        Err(e) => {
+                            log::error!("❌ Failed to generate SMART orders: {}", e);
+                            // Fallback to legacy generation
+                            self.generate_legacy_orders(
+                                current_price,
+                                &price_levels,
+                                &direction,
+                                &volatility,
+                                enhanced_confidence,
+                            )?
+                        }
                     }
                 } else {
-                    2.0 // 2% fallback ATR
-                };
-
-                // Get bandwidth_size from training config
-                let bandwidth_size = self.bandwidth_size.unwrap_or(1.0);
-
-                // Generate sequence-aware orders with enhanced confidence
-                let ohlcv_data = self.sequence_ohlcv.as_ref()
-                    .ok_or_else(|| VangaError::PredictionError(
-                        "FATAL: No OHLCV sequence data available for order generation. This should have been set during formatter initialization.".to_string()
-                    ))?;
-
-                // Extract close prices for order generation (backward compatibility)
-                let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
-
-                // Calculate dynamic position sizes using enhanced confidence
-                let entry_sizes = self
-                    .position_sizer
-                    .calculate_entry_sizes(&result, enhanced_confidence)?;
-                let exit_sizes = self
-                    .position_sizer
-                    .calculate_exit_sizes(&result, enhanced_confidence);
-
-                log::info!(
-                    "🎯 Dynamic Position Sizing: Entry=[{:.1}%, {:.1}%, {:.1}%], Exit=[{:.1}%, {:.1}%, {:.1}%]",
-                    entry_sizes[0] * 100.0, entry_sizes[1] * 100.0, entry_sizes[2] * 100.0,
-                    exit_sizes[0] * 100.0, exit_sizes[1] * 100.0, exit_sizes[2] * 100.0
-                );
-
-                let order_config = crate::output::structures::OrderConfig::default();
-
-                let config = crate::output::structures::SequenceAwareOrderConfig {
-                    current_price,
-                    direction_pred: &direction,
-                    volatility_pred: &volatility,
-                    price_levels: &price_levels,
-                    atr_value,
-                    config: &order_config,
-                    sequence_prices: &sequence_prices,
-                    bandwidth_size,
-                    dynamic_entry_sizes: Some(entry_sizes),
-                    dynamic_exit_sizes: Some(exit_sizes),
-                    overall_confidence: Some(enhanced_confidence),
-                };
-
-                let orders = match crate::output::structures::TradingOrders::generate(config) {
-                    Ok(orders) => {
-                        log::info!(
-                            "✅ Generated {} trading orders with {:.1}% directional edge",
-                            orders.direction,
-                            (direction.up_probability_aggregated
-                                - direction.down_probability_aggregated)
-                                * 100.0
-                        );
-                        orders
-                    }
-                    Err(e) => {
-                        log::error!("❌ Failed to generate sequence-aware orders: {}", e);
-                        return Err(e);
-                    }
+                    // Use legacy order generation (backward compatibility)
+                    log::info!("📊 Using legacy order generation (sentiment/volume not available)");
+                    self.generate_legacy_orders(
+                        current_price,
+                        &price_levels,
+                        &direction,
+                        &volatility,
+                        enhanced_confidence,
+                    )?
                 };
 
                 result = result.with_orders(orders);
@@ -681,6 +639,138 @@ impl OutputFormatter {
         }
 
         Ok(results)
+    }
+
+    /// Generate legacy orders for backward compatibility
+    fn generate_legacy_orders(
+        &self,
+        current_price: f64,
+        price_levels: &PriceLevelPrediction,
+        direction: &DirectionPrediction,
+        volatility: &VolatilityPrediction,
+        enhanced_confidence: f64,
+    ) -> Result<crate::output::structures::TradingOrders> {
+        // Calculate ATR from OHLCV sequence data
+        let atr_value = if let Some(ohlcv_data) = &self.sequence_ohlcv {
+            if ohlcv_data.len() >= 2 {
+                // Calculate true range for each period
+                let mut true_ranges = Vec::new();
+                for i in 1..ohlcv_data.len() {
+                    let current = &ohlcv_data[i];
+                    let previous = &ohlcv_data[i - 1];
+
+                    // True Range = max(high - low, |high - prev_close|, |low - prev_close|)
+                    let tr = (current.high - current.low)
+                        .max((current.high - previous.close).abs())
+                        .max((current.low - previous.close).abs());
+
+                    // Convert to percentage
+                    let tr_pct = (tr / current.close) * 100.0;
+                    true_ranges.push(tr_pct);
+                }
+
+                // Average True Range as percentage
+                let atr_pct = if !true_ranges.is_empty() {
+                    true_ranges.iter().sum::<f64>() / true_ranges.len() as f64
+                } else {
+                    2.0
+                };
+
+                atr_pct.min(10.0) // Cap at 10% for sanity
+            } else {
+                2.0 // 2% fallback ATR
+            }
+        } else {
+            2.0 // 2% fallback ATR
+        };
+
+        // Get bandwidth_size from training config
+        let bandwidth_size = self.bandwidth_size.unwrap_or(1.0);
+
+        // Generate sequence-aware orders with enhanced confidence
+        let ohlcv_data = self.sequence_ohlcv.as_ref()
+            .ok_or_else(|| VangaError::PredictionError(
+                "FATAL: No OHLCV sequence data available for order generation. This should have been set during formatter initialization.".to_string()
+            ))?;
+
+        // Extract close prices for order generation (backward compatibility)
+        let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
+
+        // Calculate dynamic position sizes using enhanced confidence
+        let entry_sizes = self.position_sizer.calculate_entry_sizes(
+            &PredictionResult {
+                symbol: String::new(),
+                timestamp: String::new(),
+                horizon: String::new(),
+                current_price,
+                current_vwap_price: 0.0,
+                price_levels: Some(price_levels.clone()),
+                direction: Some(direction.clone()),
+                volatility: Some(volatility.clone()),
+                sentiment: None,
+                volume: None,
+                orders: crate::output::structures::TradingOrders::default(),
+                confidence: enhanced_confidence,
+                metadata: crate::output::metadata::PredictionMetadata::default(),
+            },
+            enhanced_confidence,
+        )?;
+        let exit_sizes = self.position_sizer.calculate_exit_sizes(
+            &PredictionResult {
+                symbol: String::new(),
+                timestamp: String::new(),
+                horizon: String::new(),
+                current_price,
+                current_vwap_price: 0.0,
+                price_levels: Some(price_levels.clone()),
+                direction: Some(direction.clone()),
+                volatility: Some(volatility.clone()),
+                sentiment: None,
+                volume: None,
+                orders: crate::output::structures::TradingOrders::default(),
+                confidence: enhanced_confidence,
+                metadata: crate::output::metadata::PredictionMetadata::default(),
+            },
+            enhanced_confidence,
+        );
+
+        log::info!(
+            "🎯 Dynamic Position Sizing: Entry=[{:.1}%, {:.1}%, {:.1}%], Exit=[{:.1}%, {:.1}%, {:.1}%]",
+            entry_sizes[0] * 100.0, entry_sizes[1] * 100.0, entry_sizes[2] * 100.0,
+            exit_sizes[0] * 100.0, exit_sizes[1] * 100.0, exit_sizes[2] * 100.0
+        );
+
+        let order_config = crate::output::structures::OrderConfig::default();
+
+        let config = crate::output::structures::SequenceAwareOrderConfig {
+            current_price,
+            direction_pred: direction,
+            volatility_pred: volatility,
+            price_levels,
+            atr_value,
+            config: &order_config,
+            sequence_prices: &sequence_prices,
+            bandwidth_size,
+            dynamic_entry_sizes: Some(entry_sizes),
+            dynamic_exit_sizes: Some(exit_sizes),
+            overall_confidence: Some(enhanced_confidence),
+        };
+
+        match crate::output::structures::TradingOrders::generate(config) {
+            Ok(orders) => {
+                log::info!(
+                    "✅ Generated {} trading orders with {:.1}% directional edge",
+                    orders.direction,
+                    (direction.up_probability_aggregated - direction.down_probability_aggregated)
+                        * 100.0
+                );
+                Ok(orders)
+            }
+            Err(e) => {
+                log::error!("❌ Failed to generate sequence-aware orders: {}", e);
+                Err(e)
+            }
+        }
     }
 
     /// Create price level prediction from 5-class probabilities using enhanced reconstruction

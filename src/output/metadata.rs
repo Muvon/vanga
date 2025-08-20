@@ -53,3 +53,19 @@ pub struct DataQuality {
     /// Market condition assessment
     pub market_condition: String, // "NORMAL", "VOLATILE", "TRENDING"
 }
+
+impl Default for PredictionMetadata {
+    fn default() -> Self {
+        Self {
+            model_version: "1.0.0".to_string(),
+            generated_at: Utc::now(),
+            feature_count: 0,
+            sequence_length: 0,
+            data_quality: DataQuality {
+                completeness: 1.0,
+                freshness_hours: 0.0,
+                market_condition: "NORMAL".to_string(),
+            },
+        }
+    }
+}

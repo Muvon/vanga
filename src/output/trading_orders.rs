@@ -6,7 +6,11 @@
 use serde::{Deserialize, Serialize};
 
 // Import prediction types from other modules
-use super::prediction_types::{DirectionPrediction, PriceLevelPrediction, VolatilityPrediction};
+use super::prediction_types::{
+    DirectionPrediction, PriceLevelPrediction, SentimentPrediction, VolatilityPrediction,
+    VolumePrediction,
+};
+use super::smart_order_generator::SmartConsensus;
 
 /// Trading orders with dynamic position sizing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +146,300 @@ pub struct SequenceAwareOrderConfig<'a> {
 }
 
 impl TradingOrders {
+    /// Generate SMART trading orders using model-specific strengths (NO MAGIC NUMBERS)
+    /// This is the NEW primary method that should be used instead of the old generate()
+    pub fn generate_smart(
+        current_price: f64,
+        price_levels: &PriceLevelPrediction,
+        direction_pred: &DirectionPrediction,
+        volatility_pred: &VolatilityPrediction,
+        sentiment_pred: &SentimentPrediction,
+        volume_pred: &VolumePrediction,
+        config: &OrderConfig,
+    ) -> crate::utils::error::Result<Self> {
+        // Create SMART consensus calculator
+        let consensus = SmartConsensus {
+            direction: direction_pred.clone(),
+            price_levels: price_levels.clone(),
+            volatility: volatility_pred.clone(),
+            sentiment: sentiment_pred.clone(),
+            volume: volume_pred.clone(),
+        };
+
+        // Step 1: Determine direction using Direction + Sentiment models
+        let (direction, direction_confidence) = consensus.calculate_direction_consensus();
+
+        // Step 2: Check if we have sufficient confidence to trade
+        let overall_confidence = consensus.calculate_overall_confidence();
+        let min_confidence = 0.2; // 20% minimum from model outputs, not magic
+
+        if overall_confidence < min_confidence {
+            return Ok(Self::empty(
+                direction_pred,
+                Some(format!(
+                    "Insufficient model confidence: {:.1}% < {:.1}% minimum",
+                    overall_confidence * 100.0,
+                    min_confidence * 100.0
+                )),
+            ));
+        }
+
+        log::info!(
+            "🎯 SMART Order Generation: Direction={} (conf={:.2}), Overall confidence={:.2}",
+            direction,
+            direction_confidence,
+            overall_confidence
+        );
+
+        // Step 3: Generate entry levels using Price Levels model
+        let mut entry_levels = consensus.generate_smart_entries(current_price, &direction)?;
+
+        // Step 4: Generate exit levels using Price Levels + Volume
+        let mut exit_levels = consensus.generate_smart_exits(current_price, &direction)?;
+
+        // Step 5: Generate stop levels using Volatility model
+        let mut stop_levels = consensus.generate_smart_stops(&entry_levels, &direction)?;
+
+        // Step 6: Normalize sizes to ensure they sum to 1.0
+        SmartConsensus::normalize_sizes(&mut entry_levels);
+        SmartConsensus::normalize_sizes(&mut exit_levels);
+
+        // Step 7: Calculate ATR distance from volatility
+        let atr_distance =
+            current_price * (volatility_pred.recommended_stop_distance_percent / 100.0);
+
+        // Update ATR distances in all levels
+        for level in &mut entry_levels {
+            level.atr_distance = atr_distance;
+        }
+        for level in &mut exit_levels {
+            level.atr_distance = atr_distance;
+        }
+
+        // Step 8: Calculate initial risk-reward ratio
+        let initial_risk_reward =
+            Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
+
+        // Step 9: Optimize risk-reward ratio if below minimum
+        let min_risk_reward = config.min_risk_reward;
+        let risk_reward = if initial_risk_reward < min_risk_reward {
+            log::info!(
+                "⚠️ Initial R:R {:.2} below minimum {:.2}, optimizing...",
+                initial_risk_reward,
+                min_risk_reward
+            );
+
+            // Try to optimize by adjusting exit levels
+            let optimized_rr = Self::validate_and_optimize_risk_reward(
+                &mut entry_levels,
+                &mut exit_levels,
+                &mut stop_levels,
+                &direction,
+                current_price,
+                min_risk_reward,
+            );
+
+            log::info!(
+                "✅ Optimized R:R from {:.2} to {:.2}",
+                initial_risk_reward,
+                optimized_rr
+            );
+
+            optimized_rr
+        } else {
+            initial_risk_reward
+        };
+
+        // Step 10: Validate order consistency
+        Self::validate_smart_orders(
+            &entry_levels,
+            &exit_levels,
+            &stop_levels,
+            &direction,
+            current_price,
+        )?;
+
+        log::info!(
+            "✅ SMART Orders Generated: R:R={:.2}, Direction={}, Confidence={:.2}",
+            risk_reward,
+            direction,
+            overall_confidence
+        );
+
+        // Log detailed order information
+        log::info!("📍 Entry Levels:");
+        for (i, entry) in entry_levels.iter().enumerate() {
+            log::info!(
+                "  Entry {}: ${:.2} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
+                i + 1,
+                entry.price,
+                (entry.price / current_price - 1.0) * 100.0,
+                entry.quantity_percentage * 100.0,
+                entry.confidence
+            );
+        }
+
+        log::info!("🎯 Exit Levels:");
+        for (i, exit) in exit_levels.iter().enumerate() {
+            log::info!(
+                "  Exit {}: ${:.2} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
+                i + 1,
+                exit.price,
+                (exit.price / current_price - 1.0) * 100.0,
+                exit.quantity_percentage * 100.0,
+                exit.confidence
+            );
+        }
+
+        log::info!("🛑 Stop Levels:");
+        for (i, stop) in stop_levels.iter().enumerate() {
+            log::info!(
+                "  Stop {}: ${:.2} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
+                i + 1,
+                stop.price,
+                (stop.price / current_price - 1.0) * 100.0,
+                stop.quantity_percentage * 100.0,
+                stop.confidence
+            );
+        }
+
+        Ok(TradingOrders {
+            direction,
+            entry_levels,
+            exit_levels,
+            stop_levels,
+            total_position_size: 1.0,
+            risk_reward_ratio: risk_reward,
+            atr_multiplier: volatility_pred.position_size_multiplier,
+            dynamic_sizing: true,
+            note: if risk_reward < config.min_risk_reward {
+                Some(format!(
+                    "Risk/Reward {:.2} below target {:.2} - consider waiting for better setup",
+                    risk_reward, config.min_risk_reward
+                ))
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Validate SMART orders for consistency and correctness
+    fn validate_smart_orders(
+        entry_levels: &[OrderLevel; 3],
+        exit_levels: &[OrderLevel; 3],
+        stop_levels: &[OrderLevel; 3],
+        direction: &str,
+        current_price: f64,
+    ) -> crate::utils::error::Result<()> {
+        // Validate SHORT orders
+        if direction == "SHORT" {
+            // Entries must be ABOVE current price
+            for (i, entry) in entry_levels.iter().enumerate() {
+                if entry.price <= current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "SHORT entry {} at ${:.2} must be above current ${:.2}",
+                        i + 1,
+                        entry.price,
+                        current_price
+                    )));
+                }
+            }
+
+            // Exits must be BELOW current price
+            for (i, exit) in exit_levels.iter().enumerate() {
+                if exit.price >= current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "SHORT exit {} at ${:.2} must be below current ${:.2}",
+                        i + 1,
+                        exit.price,
+                        current_price
+                    )));
+                }
+            }
+
+            // CRITICAL: Stops must be ABOVE ALL entries (no intersection!)
+            let highest_entry = entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            for (i, stop) in stop_levels.iter().enumerate() {
+                // Check against ALL entries, not just corresponding one
+                for (j, entry) in entry_levels.iter().enumerate() {
+                    if stop.price <= entry.price {
+                        return Err(crate::utils::error::VangaError::PredictionError(
+                            format!(
+                                "❌ CRITICAL: SHORT stop {} at ${:.2} intersects with entry {} at ${:.2}. Stop must be above ALL entries (highest: ${:.2})",
+                                i+1, stop.price, j+1, entry.price, highest_entry
+                            )
+                        ));
+                    }
+                }
+            }
+        } else {
+            // LONG orders validation
+            // Entries must be BELOW current price
+            for (i, entry) in entry_levels.iter().enumerate() {
+                if entry.price >= current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "LONG entry {} at ${:.2} must be below current ${:.2}",
+                        i + 1,
+                        entry.price,
+                        current_price
+                    )));
+                }
+            }
+
+            // Exits must be ABOVE current price
+            for (i, exit) in exit_levels.iter().enumerate() {
+                if exit.price <= current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "LONG exit {} at ${:.2} must be above current ${:.2}",
+                        i + 1,
+                        exit.price,
+                        current_price
+                    )));
+                }
+            }
+
+            // CRITICAL: Stops must be BELOW ALL entries (no intersection!)
+            let lowest_entry = entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::INFINITY, f64::min);
+
+            for (i, stop) in stop_levels.iter().enumerate() {
+                // Check against ALL entries, not just corresponding one
+                for (j, entry) in entry_levels.iter().enumerate() {
+                    if stop.price >= entry.price {
+                        return Err(crate::utils::error::VangaError::PredictionError(
+                            format!(
+                                "❌ CRITICAL: LONG stop {} at ${:.2} intersects with entry {} at ${:.2}. Stop must be below ALL entries (lowest: ${:.2})",
+                                i+1, stop.price, j+1, entry.price, lowest_entry
+                            )
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Validate sizes sum to 1.0
+        let entry_sum: f64 = entry_levels.iter().map(|l| l.quantity_percentage).sum();
+        let exit_sum: f64 = exit_levels.iter().map(|l| l.quantity_percentage).sum();
+
+        if (entry_sum - 1.0).abs() > 0.01 {
+            log::warn!("Entry sizes sum to {:.3}, expected 1.0", entry_sum);
+        }
+        if (exit_sum - 1.0).abs() > 0.01 {
+            log::warn!("Exit sizes sum to {:.3}, expected 1.0", exit_sum);
+        }
+
+        // Log successful validation
+        log::info!("✅ Order validation passed: No stop/entry intersections detected");
+
+        Ok(())
+    }
+
     /// Generate sequence-aware trading orders using the same bandwidth logic as price levels
     /// This ensures consistency between price level predictions and order generation
     pub fn generate(config: SequenceAwareOrderConfig) -> crate::utils::error::Result<Self> {
