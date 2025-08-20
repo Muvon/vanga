@@ -185,9 +185,9 @@ impl ConfidenceCalculator {
             final_confidence *= 0.8 + agreement_factor * 0.2;
         }
 
-        // CRYPTO REALITY: Even "weak" signals can be profitable in trending markets
-        // So we use a higher minimum (0.3) and lower maximum (0.9) for realistic expectations
-        final_confidence.clamp(0.3, 0.9)
+        // Allow natural confidence expression - no artificial clamping
+        // Only apply safety bounds to prevent extreme values
+        final_confidence.clamp(0.05, 0.95)
     }
 
     /// Calculate confidence for price level predictions using probability distribution
@@ -214,8 +214,8 @@ impl ConfidenceCalculator {
             max_prob * 2.0 // Was 0.5, now 2.0 to be less punitive
         };
 
-        // Weight between probability and entropy measures
-        (prob_confidence * 0.6 + entropy_confidence * 0.4).clamp(0.2, 1.0) // Min 0.2 instead of 0.0
+        // Weight between probability and entropy measures - allow natural expression
+        (prob_confidence * 0.6 + entropy_confidence * 0.4).clamp(0.05, 1.0)
     }
 
     /// Calculate confidence for direction predictions

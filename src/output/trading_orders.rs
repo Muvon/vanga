@@ -87,10 +87,10 @@ impl Default for OrderConfig {
     fn default() -> Self {
         Self {
             base_atr_multiplier: 2.0, // Crypto-aggressive spacing
-            min_risk_reward: 4.0,     // Minimum 4:1 for crypto
-            max_risk_reward: 12.0,    // Maximum 12:1 for high conviction
-            aggressive_sizing: true,  // Enable dynamic sizing
-            hunt_protection: 1.5,     // 50% extra distance for stops
+            min_risk_reward: 2.0, // Dynamic minimum (will be overridden by confidence calculation)
+            max_risk_reward: 12.0, // Maximum 12:1 for high conviction
+            aggressive_sizing: true, // Enable dynamic sizing
+            hunt_protection: 1.5, // 50% extra distance for stops
         }
     }
 }
@@ -170,7 +170,6 @@ impl TradingOrders {
         volatility_pred: &VolatilityPrediction,
         sentiment_pred: &SentimentPrediction,
         volume_pred: &VolumePrediction,
-        config: &OrderConfig,
     ) -> crate::utils::error::Result<Self> {
         // Create SMART consensus calculator
         let consensus = SmartConsensus {
@@ -235,8 +234,9 @@ impl TradingOrders {
         let initial_risk_reward =
             Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
-        // Step 9: Optimize risk-reward ratio if below minimum
-        let min_risk_reward = config.min_risk_reward;
+        // Step 9: Calculate dynamic risk-reward requirement based on confidence
+        let overall_confidence = consensus.calculate_overall_confidence();
+        let min_risk_reward = (1.0_f64 / overall_confidence.max(0.1)).clamp(2.0, 10.0);
         let risk_reward = if initial_risk_reward < min_risk_reward {
             log::info!(
                 "⚠️ Initial R:R {:.2} below minimum {:.2}, optimizing...",
@@ -327,10 +327,10 @@ impl TradingOrders {
             risk_reward_ratio: risk_reward,
             atr_multiplier: volatility_pred.position_size_multiplier,
             dynamic_sizing: true,
-            note: if risk_reward < config.min_risk_reward {
+            note: if risk_reward < min_risk_reward {
                 Some(format!(
                     "Risk/Reward {:.2} below target {:.2} - consider waiting for better setup",
-                    risk_reward, config.min_risk_reward
+                    risk_reward, min_risk_reward
                 ))
             } else {
                 None
@@ -576,7 +576,19 @@ impl TradingOrders {
 
         // Calculate dynamic risk-reward ratio based on prediction confidence
         // Formula: risk_reward = 1 / confidence (with practical bounds)
-        let overall_confidence = consensus.calculate_overall_confidence();
+        // Use available predictions to calculate confidence
+        let overall_confidence = if let Some(confidence) = config.overall_confidence {
+            confidence
+        } else {
+            // Fallback: calculate from available predictions
+            let direction_conf = config.direction_pred.confidence;
+            let price_conf = config.price_levels.confidence;
+            let volatility_conf = config.volatility_pred.regime_confidence;
+
+            // Weighted average of available confidences
+            (direction_conf * 0.4 + price_conf * 0.4 + volatility_conf * 0.2).clamp(0.05, 0.95)
+        };
+
         let min_risk_reward = (1.0_f64 / overall_confidence.max(0.1)).clamp(2.0, 10.0);
 
         log::info!(
@@ -864,9 +876,18 @@ impl TradingOrders {
         let avg_exit_price =
             (exit_levels[0].price + exit_levels[1].price + exit_levels[2].price) / 3.0;
 
-        // Calculate required stop distance to maintain min_risk_reward
+        // Calculate required stop distance to maintain dynamic risk-reward based on confidence
+        let direction_conf = direction_pred.confidence;
+        let price_conf = price_levels.confidence;
+        let volatility_conf = volatility_pred.regime_confidence;
+
+        // Calculate overall confidence from available predictions
+        let overall_confidence =
+            (direction_conf * 0.4 + price_conf * 0.4 + volatility_conf * 0.2).clamp(0.05, 0.95);
+        let min_risk_reward = (1.0_f64 / overall_confidence.max(0.1)).clamp(2.0, 10.0);
+
         let expected_profit = avg_exit_price - avg_entry_price;
-        let max_allowed_loss = expected_profit / config.min_risk_reward;
+        let max_allowed_loss = expected_profit / min_risk_reward;
 
         // Use volatility recommendation but cap by risk-reward requirement
         let volatility_stop_distance =
@@ -932,7 +953,7 @@ impl TradingOrders {
         log::info!(
             "🎯 LONG Orders: Avg Entry={:.2} | Avg Exit={:.2} | Avg Stop={:.2} | R:R={:.2} (min={:.1})",
             avg_entry_price, avg_exit_price, (stop_price_1 + stop_price_2 + stop_price_3) / 3.0,
-            actual_risk_reward, config.min_risk_reward
+            actual_risk_reward, min_risk_reward
         );
 
         // Ensure stops are below entries

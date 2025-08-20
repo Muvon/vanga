@@ -592,7 +592,6 @@ impl OutputFormatter {
                         &volatility,
                         &sentiment,
                         &volume,
-                        &crate::output::structures::OrderConfig::default(),
                     ) {
                         Ok(smart_orders) => {
                             log::info!(

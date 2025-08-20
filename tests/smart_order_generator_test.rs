@@ -152,8 +152,6 @@ fn test_smart_order_generation_no_magic_numbers() {
     let sentiment = create_test_sentiment();
     let volume = create_test_volume();
 
-    let config = OrderConfig::default();
-
     // Generate SMART orders
     let orders = TradingOrders::generate_smart(
         current_price,
@@ -162,7 +160,6 @@ fn test_smart_order_generation_no_magic_numbers() {
         &volatility,
         &sentiment,
         &volume,
-        &config,
     )
     .unwrap();
 
@@ -207,8 +204,6 @@ fn test_short_order_validation() {
     let sentiment = create_test_sentiment();
     let volume = create_test_volume();
 
-    let config = OrderConfig::default();
-
     // Generate SHORT orders (direction shows down probability > up)
     let orders = TradingOrders::generate_smart(
         current_price,
@@ -217,7 +212,6 @@ fn test_short_order_validation() {
         &volatility,
         &sentiment,
         &volume,
-        &config,
     )
     .unwrap();
 
@@ -290,8 +284,6 @@ fn test_long_order_validation() {
     let sentiment = create_test_sentiment();
     let volume = create_test_volume();
 
-    let config = OrderConfig::default();
-
     // Generate LONG orders
     let orders = TradingOrders::generate_smart(
         current_price,
@@ -300,7 +292,6 @@ fn test_long_order_validation() {
         &volatility,
         &sentiment,
         &volume,
-        &config,
     )
     .unwrap();
 
