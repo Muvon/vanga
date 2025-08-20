@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use vanga::output::prediction_types::*;
 use vanga::output::smart_order_generator::SmartConsensus;
 use vanga::output::trading_orders::TradingOrders;
-use vanga::output::{OrderConfig, PriceBin};
+use vanga::output::PriceBin;
 
 /// Create test price levels with realistic bins
 fn create_test_price_levels() -> PriceLevelPrediction {
@@ -612,4 +612,171 @@ fn test_no_stop_entry_intersection_critical() {
             lowest_entry
         );
     }
+}
+#[test]
+fn test_atr_distance_semantic_correctness() {
+    // Test that ATR distance now represents actual percentage distance from current price
+    let current_price = 116227.05;
+
+    let price_levels = create_test_price_levels();
+    let direction = create_test_direction();
+    let volatility = create_test_volatility();
+    let sentiment = create_test_sentiment();
+    let volume = create_test_volume();
+
+    // Generate orders
+    let orders = TradingOrders::generate_smart(
+        current_price,
+        &price_levels,
+        &direction,
+        &volatility,
+        &sentiment,
+        &volume,
+    )
+    .unwrap();
+
+    // Verify ATR distance is semantically correct for all levels (with reasonable tolerance)
+    for (i, entry) in orders.entry_levels.iter().enumerate() {
+        let expected_atr_distance = ((entry.price - current_price).abs() / current_price) * 100.0;
+        println!(
+            "Entry {}: price={:.2}, atr_distance={:.6}%, expected={:.6}%",
+            i + 1,
+            entry.price,
+            entry.atr_distance,
+            expected_atr_distance
+        );
+
+        // Main validation: ATR distance should be positive and reasonable
+        assert!(
+            entry.atr_distance > 0.0,
+            "Entry {} ATR distance should be positive",
+            i + 1
+        );
+        assert!(
+            entry.atr_distance < 10.0,
+            "Entry {} ATR distance should be reasonable (<10%)",
+            i + 1
+        );
+
+        // The ATR distance should be close to the expected value (allowing for calculation differences)
+        let difference = (entry.atr_distance - expected_atr_distance).abs();
+        assert!(
+            difference < 0.15, // 0.15% tolerance for calculation differences
+            "Entry {} ATR distance {:.6}% should be close to actual distance {:.6}% (diff: {:.6}%)",
+            i + 1,
+            entry.atr_distance,
+            expected_atr_distance,
+            difference
+        );
+    }
+
+    for (i, exit) in orders.exit_levels.iter().enumerate() {
+        let expected_atr_distance = ((exit.price - current_price).abs() / current_price) * 100.0;
+        println!(
+            "Exit {}: price={:.2}, atr_distance={:.6}%, expected={:.6}%",
+            i + 1,
+            exit.price,
+            exit.atr_distance,
+            expected_atr_distance
+        );
+
+        // Main validation: ATR distance should be positive and reasonable
+        assert!(
+            exit.atr_distance > 0.0,
+            "Exit {} ATR distance should be positive",
+            i + 1
+        );
+        assert!(
+            exit.atr_distance < 20.0,
+            "Exit {} ATR distance should be reasonable (<20%)",
+            i + 1
+        );
+
+        // The ATR distance should be close to the expected value
+        let difference = (exit.atr_distance - expected_atr_distance).abs();
+        assert!(
+            difference < 0.15, // 0.15% tolerance
+            "Exit {} ATR distance {:.6}% should be close to actual distance {:.6}% (diff: {:.6}%)",
+            i + 1,
+            exit.atr_distance,
+            expected_atr_distance,
+            difference
+        );
+    }
+
+    for (i, stop) in orders.stop_levels.iter().enumerate() {
+        let expected_atr_distance = ((stop.price - current_price).abs() / current_price) * 100.0;
+        println!(
+            "Stop {}: price={:.2}, atr_distance={:.6}%, expected={:.6}%",
+            i + 1,
+            stop.price,
+            stop.atr_distance,
+            expected_atr_distance
+        );
+
+        // Main validation: ATR distance should be positive and reasonable
+        assert!(
+            stop.atr_distance > 0.0,
+            "Stop {} ATR distance should be positive",
+            i + 1
+        );
+        assert!(
+            stop.atr_distance < 10.0,
+            "Stop {} ATR distance should be reasonable (<10%)",
+            i + 1
+        );
+
+        // The ATR distance should be close to the expected value
+        let difference = (stop.atr_distance - expected_atr_distance).abs();
+        assert!(
+            difference < 0.15, // 0.15% tolerance
+            "Stop {} ATR distance {:.6}% should be close to actual distance {:.6}% (diff: {:.6}%)",
+            i + 1,
+            stop.atr_distance,
+            expected_atr_distance,
+            difference
+        );
+    }
+
+    // Verify ATR distances are different for different price levels (no more duplication)
+    if orders.entry_levels.len() >= 2 {
+        assert_ne!(
+            orders.entry_levels[0].atr_distance, orders.entry_levels[1].atr_distance,
+            "Entry levels at different prices should have different ATR distances"
+        );
+    }
+
+    if orders.exit_levels.len() >= 2 {
+        assert_ne!(
+            orders.exit_levels[0].atr_distance, orders.exit_levels[1].atr_distance,
+            "Exit levels at different prices should have different ATR distances"
+        );
+    }
+
+    if orders.stop_levels.len() >= 2 {
+        assert_ne!(
+            orders.stop_levels[0].atr_distance, orders.stop_levels[1].atr_distance,
+            "Stop levels at different prices should have different ATR distances"
+        );
+    }
+
+    println!("✅ ATR Distance Validation:");
+    println!(
+        "Entry ATR distances: {:.3}%, {:.3}%, {:.3}%",
+        orders.entry_levels[0].atr_distance,
+        orders.entry_levels[1].atr_distance,
+        orders.entry_levels[2].atr_distance
+    );
+    println!(
+        "Exit ATR distances: {:.3}%, {:.3}%, {:.3}%",
+        orders.exit_levels[0].atr_distance,
+        orders.exit_levels[1].atr_distance,
+        orders.exit_levels[2].atr_distance
+    );
+    println!(
+        "Stop ATR distances: {:.3}%, {:.3}%, {:.3}%",
+        orders.stop_levels[0].atr_distance,
+        orders.stop_levels[1].atr_distance,
+        orders.stop_levels[2].atr_distance
+    );
 }

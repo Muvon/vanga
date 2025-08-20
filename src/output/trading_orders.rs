@@ -218,16 +218,13 @@ impl TradingOrders {
         SmartConsensus::normalize_sizes(&mut entry_levels);
         SmartConsensus::normalize_sizes(&mut exit_levels);
 
-        // Step 7: Calculate ATR distance from volatility
-        let atr_distance =
-            current_price * (volatility_pred.recommended_stop_distance_percent / 100.0);
-
-        // Update ATR distances in all levels
+        // Step 7: Calculate ATR distance as percentage from current price for each level
+        // This makes ATR distance semantically correct and consistent with smart_order_generator.rs
         for level in &mut entry_levels {
-            level.atr_distance = atr_distance;
+            level.atr_distance = ((level.price - current_price).abs() / current_price) * 100.0;
         }
         for level in &mut exit_levels {
-            level.atr_distance = atr_distance;
+            level.atr_distance = ((level.price - current_price).abs() / current_price) * 100.0;
         }
 
         // Step 8: Calculate initial risk-reward ratio
@@ -537,11 +534,8 @@ impl TradingOrders {
         let atr_multiplier = config.config.base_atr_multiplier * volatility_factor.clamp(0.5, 3.0); // Cap between 0.5x-3.0x
 
         // ATR distance: use base calculation with market adjustment
-        let base_atr_pct = config
-            .volatility_pred
-            .recommended_stop_distance_percent
-            .max(1.0); // Minimum 1%
-        let atr_distance = config.current_price * (base_atr_pct / 100.0);
+        // Remove unused atr_distance calculation since we now calculate per-level
+        // let atr_distance = config.current_price * (base_atr_pct / 100.0);
 
         // 🎯 ADAPTIVE ORDER GENERATION: Use price level probabilities instead of sequence ranges
         let (mut entry_levels, mut exit_levels, mut stop_levels) = if direction == "LONG" {
@@ -549,7 +543,6 @@ impl TradingOrders {
             let is_breakout = config.direction_pred.pump_probability > 0.25;
             Self::generate_adaptive_long_orders(
                 config.current_price,
-                atr_distance,
                 config.price_levels,
                 config.direction_pred,
                 config.volatility_pred,
@@ -564,7 +557,6 @@ impl TradingOrders {
             let is_breakout = config.direction_pred.dump_probability > 0.25; // Use same threshold as AdaptiveTradingSignal
             Self::generate_sequence_aware_short_orders(
                 config.current_price,
-                atr_distance,
                 config.config,
                 is_breakout,
                 config.price_levels,
@@ -644,11 +636,10 @@ impl TradingOrders {
     #[allow(clippy::too_many_arguments)]
     fn generate_adaptive_long_orders(
         current_price: f64,
-        atr_distance: f64,
         price_levels: &PriceLevelPrediction,
         direction_pred: &DirectionPrediction,
         volatility_pred: &VolatilityPrediction,
-        config: &OrderConfig,
+        _config: &OrderConfig,
         is_breakout: bool,
         dynamic_entry_sizes: Option<[f64; 3]>,
         dynamic_exit_sizes: Option<[f64; 3]>,
@@ -757,25 +748,29 @@ impl TradingOrders {
             entry_3_size * 100.0, entry_3_confidence
         );
 
+        let entry_1_price = current_price * (1.0 + entry_1_pct / 100.0);
+        let entry_2_price = current_price * (1.0 + entry_2_pct / 100.0);
+        let entry_3_price = current_price * (1.0 + entry_3_pct / 100.0);
+
         let entry_levels = [
             OrderLevel {
-                price: current_price * (1.0 + entry_1_pct / 100.0),
+                price: entry_1_price,
                 quantity_percentage: entry_1_size,
-                atr_distance,
+                atr_distance: ((entry_1_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: entry_1_confidence,
             },
             OrderLevel {
-                price: current_price * (1.0 + entry_2_pct / 100.0),
+                price: entry_2_price,
                 quantity_percentage: entry_2_size,
-                atr_distance,
+                atr_distance: ((entry_2_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: entry_2_confidence,
             },
             OrderLevel {
-                price: current_price * (1.0 + entry_3_pct / 100.0),
+                price: entry_3_price,
                 quantity_percentage: entry_3_size,
-                atr_distance,
+                atr_distance: ((entry_3_price - current_price).abs() / current_price) * 100.0,
                 order_type: if is_breakout {
                     "STOP_LIMIT".to_string()
                 } else {
@@ -846,25 +841,29 @@ impl TradingOrders {
             exit_3_size * 100.0, exit_3_confidence
         );
 
+        let exit_1_price = current_price * (1.0 + exit_1_pct / 100.0);
+        let exit_2_price = current_price * (1.0 + exit_2_pct / 100.0);
+        let exit_3_price = current_price * (1.0 + exit_3_pct / 100.0);
+
         let exit_levels = [
             OrderLevel {
-                price: current_price * (1.0 + exit_1_pct / 100.0),
+                price: exit_1_price,
                 quantity_percentage: exit_1_size,
-                atr_distance,
+                atr_distance: ((exit_1_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: exit_1_confidence,
             },
             OrderLevel {
-                price: current_price * (1.0 + exit_2_pct / 100.0),
+                price: exit_2_price,
                 quantity_percentage: exit_2_size,
-                atr_distance,
+                atr_distance: ((exit_2_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: exit_2_confidence,
             },
             OrderLevel {
-                price: current_price * (1.0 + exit_3_pct / 100.0),
+                price: exit_3_price,
                 quantity_percentage: exit_3_size,
-                atr_distance,
+                atr_distance: ((exit_3_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: exit_3_confidence,
             },
@@ -927,21 +926,21 @@ impl TradingOrders {
             OrderLevel {
                 price: stop_price_1,
                 quantity_percentage: stop_1_size,
-                atr_distance: atr_distance * config.hunt_protection,
+                atr_distance: ((stop_price_1 - current_price).abs() / current_price) * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: base_stop_confidence,
             },
             OrderLevel {
                 price: stop_price_2,
                 quantity_percentage: stop_2_size,
-                atr_distance: atr_distance * config.hunt_protection,
+                atr_distance: ((stop_price_2 - current_price).abs() / current_price) * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: base_stop_confidence * 0.9,
             },
             OrderLevel {
                 price: stop_price_3,
                 quantity_percentage: stop_3_size,
-                atr_distance: atr_distance * config.hunt_protection,
+                atr_distance: ((stop_price_3 - current_price).abs() / current_price) * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: base_stop_confidence * 0.8,
             },
@@ -976,8 +975,7 @@ impl TradingOrders {
     #[allow(clippy::too_many_arguments)]
     fn generate_sequence_aware_short_orders(
         current_price: f64,
-        atr_distance: f64,
-        config: &OrderConfig,
+        _config: &OrderConfig,
         is_breakout: bool,
         price_levels: &PriceLevelPrediction,
         volatility_pred: &VolatilityPrediction,
@@ -1035,25 +1033,29 @@ impl TradingOrders {
             current_price
         );
 
+        let entry_1_price = current_price * (1.0 + entry_1_pct / 100.0);
+        let entry_2_price = current_price * (1.0 + entry_2_pct / 100.0);
+        let entry_3_price = current_price * (1.0 + entry_3_pct / 100.0);
+
         let entry_levels = [
             OrderLevel {
-                price: current_price * (1.0 + entry_1_pct / 100.0),
+                price: entry_1_price,
                 quantity_percentage: entry_1_prob, // Use actual probability for sizing
-                atr_distance,
+                atr_distance: ((entry_1_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.9,
             },
             OrderLevel {
-                price: current_price * (1.0 + entry_2_pct / 100.0),
+                price: entry_2_price,
                 quantity_percentage: entry_2_prob, // Use actual probability for sizing
-                atr_distance,
+                atr_distance: ((entry_2_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.7,
             },
             OrderLevel {
-                price: current_price * (1.0 + entry_3_pct / 100.0),
+                price: entry_3_price,
                 quantity_percentage: entry_3_prob, // Use actual probability for sizing
-                atr_distance,
+                atr_distance: ((entry_3_price - current_price).abs() / current_price) * 100.0,
                 order_type: if is_breakout {
                     "STOP_LIMIT".to_string()
                 } else {
@@ -1097,25 +1099,29 @@ impl TradingOrders {
             exit_3_pct
         );
 
+        let exit_1_price = current_price * (1.0 + exit_1_pct / 100.0);
+        let exit_2_price = current_price * (1.0 + exit_2_pct / 100.0);
+        let exit_3_price = current_price * (1.0 + exit_3_pct / 100.0);
+
         let exit_levels = [
             OrderLevel {
-                price: current_price * (1.0 + exit_1_pct / 100.0),
+                price: exit_1_price,
                 quantity_percentage: exit_1_prob, // Use actual probability for sizing
-                atr_distance,
+                atr_distance: ((exit_1_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
-                price: current_price * (1.0 + exit_2_pct / 100.0),
+                price: exit_2_price,
                 quantity_percentage: exit_2_prob, // Use actual probability for sizing
-                atr_distance,
+                atr_distance: ((exit_2_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.6,
             },
             OrderLevel {
-                price: current_price * (1.0 + exit_3_pct / 100.0),
+                price: exit_3_price,
                 quantity_percentage: exit_3_prob, // Use actual probability for sizing
-                atr_distance,
+                atr_distance: ((exit_3_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: 0.4,
             },
@@ -1151,21 +1157,27 @@ impl TradingOrders {
             OrderLevel {
                 price: current_price * (1.0 + stop_1_pct / 100.0), // Convert percentage to multiplier
                 quantity_percentage: entry_1_prob,                 // Same as entry allocation
-                atr_distance: atr_distance * config.hunt_protection,
+                atr_distance: ((current_price * (1.0 + stop_1_pct / 100.0) - current_price).abs()
+                    / current_price)
+                    * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.9,
             },
             OrderLevel {
                 price: current_price * (1.0 + stop_2_pct / 100.0),
                 quantity_percentage: entry_2_prob, // Same as entry allocation
-                atr_distance: atr_distance * config.hunt_protection,
+                atr_distance: ((current_price * (1.0 + stop_2_pct / 100.0) - current_price).abs()
+                    / current_price)
+                    * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
                 price: current_price * (1.0 + stop_3_pct / 100.0),
                 quantity_percentage: entry_3_prob, // Same as entry allocation
-                atr_distance: atr_distance * config.hunt_protection,
+                atr_distance: ((current_price * (1.0 + stop_3_pct / 100.0) - current_price).abs()
+                    / current_price)
+                    * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.7,
             },
