@@ -10,6 +10,7 @@ use super::prediction_types::{
     DirectionPrediction, PriceLevelPrediction, SentimentPrediction, VolatilityPrediction,
     VolumePrediction,
 };
+use super::sequence_statistics::SequenceStatistics;
 use super::smart_order_generator::SmartConsensus;
 
 /// Trading orders with dynamic position sizing
@@ -143,6 +144,20 @@ pub struct SequenceAwareOrderConfig<'a> {
     pub dynamic_exit_sizes: Option<[f64; 3]>,
     /// Overall confidence from enhanced calculator
     pub overall_confidence: Option<f64>,
+}
+
+/// Configuration for sequence-aware order generation with statistics
+#[derive(Debug, Clone)]
+pub struct SequenceAwareConfig<'a> {
+    pub current_price: f64,
+    pub direction_pred: &'a DirectionPrediction,
+    pub price_levels: &'a PriceLevelPrediction,
+    pub volatility_pred: &'a VolatilityPrediction,
+    pub sentiment_pred: &'a SentimentPrediction,
+    pub volume_pred: &'a VolumePrediction,
+    pub sequence_prices: &'a [f64],
+    pub sequence_volumes: Option<&'a [f64]>,
+    pub horizon_hours: f64,
 }
 
 impl TradingOrders {
@@ -1485,5 +1500,96 @@ impl TradingOrders {
         } else {
             levels.iter().map(|l| l.price).sum::<f64>() / 3.0
         }
+    }
+
+    /// Generate trading orders with sequence statistics for fully adaptive behavior
+    pub fn generate_with_sequence_stats(
+        config: SequenceAwareConfig,
+    ) -> crate::utils::error::Result<Self> {
+        // Calculate sequence statistics from raw data
+        let sequence_stats = SequenceStatistics::from_prices(
+            config.sequence_prices,
+            config.horizon_hours,
+            config.sequence_volumes,
+        )?;
+
+        log::info!(
+            "📊 Sequence Statistics: mean_return={:.3}%, std={:.3}%, hurst={:.2}, kelly={:.2}",
+            sequence_stats.mean_return * 100.0,
+            sequence_stats.std_return * 100.0,
+            sequence_stats.hurst_exponent,
+            sequence_stats.kelly_fraction
+        );
+
+        // Create SmartConsensus from predictions
+        let consensus = SmartConsensus {
+            direction: config.direction_pred.clone(),
+            price_levels: config.price_levels.clone(),
+            volatility: config.volatility_pred.clone(),
+            sentiment: config.sentiment_pred.clone(),
+            volume: config.volume_pred.clone(),
+        };
+
+        // Get direction consensus
+        let (direction, _direction_confidence) = consensus.calculate_direction_consensus();
+
+        // Generate sequence-aware orders
+        let mut entry_levels = consensus.generate_sequence_aware_entries(
+            config.current_price,
+            &direction,
+            &sequence_stats,
+        )?;
+
+        let mut exit_levels = consensus.generate_sequence_aware_exits(
+            config.current_price,
+            &direction,
+            &sequence_stats,
+        )?;
+
+        let mut stop_levels =
+            consensus.generate_sequence_aware_stops(&entry_levels, &direction, &sequence_stats)?;
+
+        // Normalize sizes
+        SmartConsensus::normalize_sizes(&mut entry_levels);
+        SmartConsensus::normalize_sizes(&mut exit_levels);
+
+        // Calculate adaptive risk-reward requirement
+        let required_rr = consensus.calculate_adaptive_risk_reward_requirement(&sequence_stats);
+
+        // Optimize if needed
+        let final_rr = consensus.optimize_with_sequence_stats(
+            &mut entry_levels,
+            &mut exit_levels,
+            &mut stop_levels,
+            &direction,
+            &sequence_stats,
+        );
+
+        // Create note about sequence-aware generation
+        let note = if final_rr < required_rr {
+            Some(format!(
+                "Sequence-aware optimization achieved R:R {:.2} (adaptive requirement: {:.2}). Hurst={:.2}, Kelly={:.2}",
+                final_rr, required_rr, sequence_stats.hurst_exponent, sequence_stats.kelly_fraction
+            ))
+        } else {
+            Some(format!(
+                "Sequence-aware orders generated with R:R {:.2} (exceeds adaptive requirement {:.2}). Market is {}",
+                final_rr,
+                required_rr,
+                if sequence_stats.hurst_exponent > 0.5 { "trending" } else { "mean-reverting" }
+            ))
+        };
+
+        Ok(Self {
+            direction: direction.clone(),
+            entry_levels,
+            exit_levels,
+            stop_levels,
+            total_position_size: 1.0,
+            risk_reward_ratio: final_rr,
+            atr_multiplier: 2.0,
+            dynamic_sizing: true,
+            note,
+        })
     }
 }

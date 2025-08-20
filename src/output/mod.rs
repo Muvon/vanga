@@ -9,6 +9,7 @@ pub mod metadata;
 pub mod multi_target_parser;
 pub mod post_processor;
 pub mod prediction_types;
+pub mod sequence_statistics;
 pub mod smart_order_generator;
 pub mod structures;
 pub mod trading_orders;
@@ -22,5 +23,6 @@ pub use prediction_types::{
     DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, SentimentPrediction,
     VolatilityPrediction, VolumePrediction,
 };
+pub use sequence_statistics::SequenceStatistics;
 pub use smart_order_generator::SmartConsensus;
 pub use trading_orders::{OrderConfig, OrderLevel, SequenceAwareOrderConfig, TradingOrders};
