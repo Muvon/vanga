@@ -449,30 +449,22 @@ pub fn classify_price_level_with_calibrated_params(
     // 2. Calculate horizon exponentially-weighted close
     let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
-    // 3. Use adaptive percentiles from calibrated params
-    let percentiles = calculate_adaptive_percentiles_from_sequence(
-        sequence_ohlcv,
-        Some(calibrated_params.percentiles), // Use calibrated percentiles as fallback
-    )?;
-    let base_bandwidth_size = 1.0;
+    // 3. FIXED: Use EXACT calibrated parameters - NO adaptive overrides!
+    let exact_percentiles = calibrated_params.percentiles; // Use calibrated percentiles exactly
+    let exact_bandwidth = calibrated_params.bandwidth; // Use calibrated bandwidth exactly
 
-    // 4. Calculate adaptive bandwidth with momentum factor from calibrated params
-    let momentum_factor = Some(calibrated_params.momentum_factor);
-    let final_bandwidth_size =
-        calculate_adaptive_bandwidth(sequence_ohlcv, base_bandwidth_size, momentum_factor)?;
-
-    // 5. Use enhanced sequence reconstruction with calibrated parameters
+    // 4. Use enhanced sequence reconstruction with EXACT calibrated parameters
     let reconstruction_config = SequenceReconstructionConfig {
-        percentiles,
-        bandwidth_size: final_bandwidth_size,
+        percentiles: exact_percentiles,
+        bandwidth_size: exact_bandwidth,
         neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
 
-    // 6. Calculate boundaries using centralized logic
+    // 5. Calculate boundaries using centralized logic
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
 
-    // 7. Handle edge case: flat sequence
+    // 6. Handle edge case: flat sequence
     if boundaries.bandwidth == 0.0 {
         let class = if hor_exponential_weighted >= boundaries.sequence_min {
             3
@@ -482,22 +474,24 @@ pub fn classify_price_level_with_calibrated_params(
         return Ok((class, 0.3)); // Low strength for edge case
     }
 
-    // 8. Enhanced debug logging
+    // 7. Enhanced debug logging
     log::debug!(
-        "🚀 Price Level with Exponential Weighting: seq_exponential={:.6}, hor_exponential={:.6}, final_bandwidth={:.3}",
+        "🚀 Price Level with EXACT Calibrated Params: seq_exponential={:.6}, hor_exponential={:.6}, exact_bandwidth={:.3}, exact_percentiles=[{:.2}, {:.2}]",
         seq_exponential_weighted,
         hor_exponential_weighted,
-        final_bandwidth_size
+        exact_bandwidth,
+        exact_percentiles[0],
+        exact_percentiles[1]
     );
 
-    // 9. Use centralized classification logic
+    // 8. Use centralized classification logic
     let class = boundaries.classify_price(hor_exponential_weighted);
 
-    // 10. Calculate classification strength based on position within the range
+    // 9. Calculate classification strength based on position within the range
     let strength = calculate_price_level_strength(hor_exponential_weighted, &boundaries, class);
 
     log::debug!(
-        "🎯 Price Level Result: target={:.6} → class={} strength={:.3} (adaptive_range: [{:.6}, {:.6}], adaptive_bandwidth: {:.6})",
+        "🎯 Price Level Result: target={:.6} → class={} strength={:.3} (exact_range: [{:.6}, {:.6}], exact_bandwidth: {:.6})",
         hor_exponential_weighted, class, strength, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
     );
 

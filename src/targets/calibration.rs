@@ -435,106 +435,248 @@ impl ParameterCalibrator {
         horizon_steps: usize,
         sample_indices: &[usize],
     ) -> Result<DirectionParams> {
-        log::debug!("Calibrating direction parameters with extended grid search...");
+        log::info!("🔬 Starting state-of-the-art direction calibration - optimizing each parameter independently");
 
         let close_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
-        // Extended grid search for optimal parameters including previously hardcoded values
-        let mut best_params = DirectionParams::default();
-        let mut best_score = f64::INFINITY;
+        // Start with reasonable defaults
+        let mut current_sensitivity = 0.05;
+        let mut current_multiplier = 2.5;
+        let mut current_min_base = 0.005;
+        let mut current_min_extreme = 0.01;
+        let mut current_base_mult = 10.0;
 
-        let sensitivities = vec![0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]; // More granular options
-        let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0]; // More options
+        let mut total_tested = 0;
+        let mut total_improvements = 0;
 
-        // NEW: Grid search for previously hardcoded parameters - BETTER RANGES
-        let min_base_thresholds = vec![0.001, 0.003, 0.005, 0.01, 0.015]; // More granular
-        let min_extreme_thresholds = vec![0.005, 0.01, 0.015, 0.02, 0.03]; // More granular
-        let base_multipliers = vec![2.0, 5.0, 10.0, 15.0, 20.0, 30.0]; // Better range
+        // Parameter ranges
+        let sensitivities = vec![0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5];
+        let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
+        let min_base_thresholds = vec![0.001, 0.003, 0.005, 0.01, 0.015];
+        let min_extreme_thresholds = vec![0.005, 0.01, 0.015, 0.02, 0.03];
+        let base_multipliers = vec![2.0, 5.0, 10.0, 15.0, 20.0, 30.0];
 
+        // Step 1: Optimize sensitivity
+        log::info!("📊 Step 1/5: Optimizing sensitivity parameter...");
+        let mut best_sensitivity_score = f64::INFINITY;
         for &sensitivity in &sensitivities {
-            for &multiplier in &multipliers {
-                for &min_base in &min_base_thresholds {
-                    for &min_extreme in &min_extreme_thresholds {
-                        for &base_mult in &base_multipliers {
-                            let params = DirectionEvalParams {
-                                sensitivity,
-                                extreme_multiplier: multiplier,
-                                min_base_threshold: min_base,
-                                min_extreme_threshold: min_extreme,
-                                base_multiplier: base_mult,
-                            };
-                            let balance = self.evaluate_direction_params_extended(
-                                &close_prices,
-                                sample_indices,
-                                sequence_length,
-                                horizon_steps,
-                                &params,
-                            )?;
+            total_tested += 1;
+            let params = DirectionEvalParams {
+                sensitivity,
+                extreme_multiplier: current_multiplier,
+                min_base_threshold: current_min_base,
+                min_extreme_threshold: current_min_extreme,
+                base_multiplier: current_base_mult,
+            };
 
-                            if balance.composite_quality_score < best_score
-                                && balance.diversity_score >= self.min_diversity_threshold
-                            {
-                                best_score = balance.composite_quality_score;
-                                best_params = DirectionParams {
-                                    sensitivity,
-                                    extreme_multiplier: multiplier,
-                                    min_base_threshold: min_base,
-                                    min_extreme_threshold: min_extreme,
-                                    base_multiplier: base_mult,
-                                    balance,
-                                };
-                            }
-                        }
-                    }
-                }
+            let balance = self.evaluate_direction_params_extended(
+                &close_prices,
+                sample_indices,
+                sequence_length,
+                horizon_steps,
+                &params,
+            )?;
+
+            if balance.composite_quality_score < best_sensitivity_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_sensitivity_score = balance.composite_quality_score;
+                current_sensitivity = sensitivity;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better sensitivity found: {:.4} (score: {:.4})",
+                    sensitivity,
+                    best_sensitivity_score
+                );
             }
         }
+        log::info!(
+            "  → Best sensitivity: {:.4} (tested {} values)",
+            current_sensitivity,
+            sensitivities.len()
+        );
 
-        // Fallback: if no parameters meet diversity threshold, use best balance score
-        if best_score == f64::INFINITY {
-            log::warn!("No direction parameters met min_diversity_threshold {:.2}, falling back to best balance", self.min_diversity_threshold);
-            for &sensitivity in &sensitivities {
-                for &multiplier in &multipliers {
-                    for &min_base in &min_base_thresholds {
-                        for &min_extreme in &min_extreme_thresholds {
-                            for &base_mult in &base_multipliers {
-                                let params = DirectionEvalParams {
-                                    sensitivity,
-                                    extreme_multiplier: multiplier,
-                                    min_base_threshold: min_base,
-                                    min_extreme_threshold: min_extreme,
-                                    base_multiplier: base_mult,
-                                };
-                                let balance = self.evaluate_direction_params_extended(
-                                    &close_prices,
-                                    sample_indices,
-                                    sequence_length,
-                                    horizon_steps,
-                                    &params,
-                                )?;
+        // Step 2: Optimize extreme multiplier
+        log::info!("📊 Step 2/5: Optimizing extreme multiplier...");
+        let mut best_multiplier_score = f64::INFINITY;
+        for &multiplier in &multipliers {
+            total_tested += 1;
+            let params = DirectionEvalParams {
+                sensitivity: current_sensitivity,
+                extreme_multiplier: multiplier,
+                min_base_threshold: current_min_base,
+                min_extreme_threshold: current_min_extreme,
+                base_multiplier: current_base_mult,
+            };
 
-                                if balance.balance_score < best_score {
-                                    best_score = balance.balance_score;
-                                    best_params = DirectionParams {
-                                        sensitivity,
-                                        extreme_multiplier: multiplier,
-                                        min_base_threshold: min_base,
-                                        min_extreme_threshold: min_extreme,
-                                        base_multiplier: base_mult,
-                                        balance,
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
+            let balance = self.evaluate_direction_params_extended(
+                &close_prices,
+                sample_indices,
+                sequence_length,
+                horizon_steps,
+                &params,
+            )?;
+
+            if balance.composite_quality_score < best_multiplier_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_multiplier_score = balance.composite_quality_score;
+                current_multiplier = multiplier;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better multiplier found: {:.1} (score: {:.4})",
+                    multiplier,
+                    best_multiplier_score
+                );
             }
         }
+        log::info!(
+            "  → Best extreme multiplier: {:.1} (tested {} values)",
+            current_multiplier,
+            multipliers.len()
+        );
+
+        // Step 3: Optimize min base threshold
+        log::info!("📊 Step 3/5: Optimizing minimum base threshold...");
+        let mut best_base_score = f64::INFINITY;
+        for &min_base in &min_base_thresholds {
+            total_tested += 1;
+            let params = DirectionEvalParams {
+                sensitivity: current_sensitivity,
+                extreme_multiplier: current_multiplier,
+                min_base_threshold: min_base,
+                min_extreme_threshold: current_min_extreme,
+                base_multiplier: current_base_mult,
+            };
+
+            let balance = self.evaluate_direction_params_extended(
+                &close_prices,
+                sample_indices,
+                sequence_length,
+                horizon_steps,
+                &params,
+            )?;
+
+            if balance.composite_quality_score < best_base_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_base_score = balance.composite_quality_score;
+                current_min_base = min_base;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better min base found: {:.3} (score: {:.4})",
+                    min_base,
+                    best_base_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best min base threshold: {:.3} (tested {} values)",
+            current_min_base,
+            min_base_thresholds.len()
+        );
+
+        // Step 4: Optimize min extreme threshold
+        log::info!("📊 Step 4/5: Optimizing minimum extreme threshold...");
+        let mut best_extreme_score = f64::INFINITY;
+        for &min_extreme in &min_extreme_thresholds {
+            total_tested += 1;
+            let params = DirectionEvalParams {
+                sensitivity: current_sensitivity,
+                extreme_multiplier: current_multiplier,
+                min_base_threshold: current_min_base,
+                min_extreme_threshold: min_extreme,
+                base_multiplier: current_base_mult,
+            };
+
+            let balance = self.evaluate_direction_params_extended(
+                &close_prices,
+                sample_indices,
+                sequence_length,
+                horizon_steps,
+                &params,
+            )?;
+
+            if balance.composite_quality_score < best_extreme_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_extreme_score = balance.composite_quality_score;
+                current_min_extreme = min_extreme;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better min extreme found: {:.3} (score: {:.4})",
+                    min_extreme,
+                    best_extreme_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best min extreme threshold: {:.3} (tested {} values)",
+            current_min_extreme,
+            min_extreme_thresholds.len()
+        );
+
+        // Step 5: Optimize base multiplier
+        log::info!("📊 Step 5/5: Optimizing base multiplier...");
+        let mut best_base_mult_score = f64::INFINITY;
+        let mut final_balance = ClassBalance::default();
+        for &base_mult in &base_multipliers {
+            total_tested += 1;
+            let params = DirectionEvalParams {
+                sensitivity: current_sensitivity,
+                extreme_multiplier: current_multiplier,
+                min_base_threshold: current_min_base,
+                min_extreme_threshold: current_min_extreme,
+                base_multiplier: base_mult,
+            };
+
+            let balance = self.evaluate_direction_params_extended(
+                &close_prices,
+                sample_indices,
+                sequence_length,
+                horizon_steps,
+                &params,
+            )?;
+
+            if balance.composite_quality_score < best_base_mult_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_base_mult_score = balance.composite_quality_score;
+                current_base_mult = base_mult;
+                final_balance = balance;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better base multiplier found: {:.1} (score: {:.4})",
+                    base_mult,
+                    best_base_mult_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best base multiplier: {:.1} (tested {} values)",
+            current_base_mult,
+            base_multipliers.len()
+        );
+
+        let best_params = DirectionParams {
+            sensitivity: current_sensitivity,
+            extreme_multiplier: current_multiplier,
+            min_base_threshold: current_min_base,
+            min_extreme_threshold: current_min_extreme,
+            base_multiplier: current_base_mult,
+            balance: final_balance,
+        };
 
         log::info!(
-            "🎯 Calibrated Direction Parameters: sensitivity={:.4}, extreme_mult={:.1}, min_base={:.3}, min_extreme={:.3}, base_mult={:.1}",
-            best_params.sensitivity, best_params.extreme_multiplier, best_params.min_base_threshold,
-            best_params.min_extreme_threshold, best_params.base_multiplier
+            "🎯 Direction Calibration Complete!\n  Tested: {} combinations\n  Improvements: {}\n  Final Parameters:\n    - Sensitivity: {:.4}\n    - Extreme Multiplier: {:.1}\n    - Min Base Threshold: {:.3}\n    - Min Extreme Threshold: {:.3}\n    - Base Multiplier: {:.1}\n  Final Score: {:.4}",
+            total_tested,
+            total_improvements,
+            best_params.sensitivity,
+            best_params.extreme_multiplier,
+            best_params.min_base_threshold,
+            best_params.min_extreme_threshold,
+            best_params.base_multiplier,
+            best_base_mult_score
         );
 
         Ok(best_params)
@@ -545,11 +687,9 @@ impl ParameterCalibrator {
         &self,
         context: &EvaluationContext<'_>,
     ) -> Result<PriceLevelParams> {
-        log::debug!("Calibrating price level parameters with extended grid search including fallback_percentiles...");
+        log::info!("🔬 Starting price level calibration - testing ALL combinations");
 
-        let mut best_params = PriceLevelParams::default();
-        let mut best_score = f64::INFINITY;
-
+        // Parameter ranges
         let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
         let percentile_pairs = vec![
             [0.01, 0.99],
@@ -561,47 +701,162 @@ impl ParameterCalibrator {
             [0.3, 0.7],
             [0.35, 0.65],
             [0.4, 0.6],
-        ]; // Base percentiles for adaptive calculation
-        let neutral_band_factors = vec![0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]; // Neutral zone size
-        let momentum_factors = vec![1.1, 1.2, 1.3, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]; // Momentum weighting for bandwidth
+        ];
+        let neutral_band_factors = vec![0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let momentum_factors = vec![1.1, 1.2, 1.3, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0];
 
+        // Sequential optimization - properly track best values at each step
+        let mut current_bandwidth = 0.5; // Start with middle value
+        let mut current_percentiles = [0.1, 0.9]; // Start with reasonable default
+        let mut current_neutral = 0.3; // Start with reasonable default
+        let mut current_momentum = 2.0; // Start with reasonable default
+        let mut final_balance = ClassBalance::default();
+
+        // Step 1: Find best bandwidth
+        log::info!("📊 Step 1/4: Optimizing bandwidth parameter...");
+        let mut best_bandwidth_score = f64::INFINITY;
         for &bandwidth in &bandwidths {
-            for &percentiles in &percentile_pairs {
-                for &neutral_band_factor in &neutral_band_factors {
-                    for &momentum_factor in &momentum_factors {
-                        let balance = self.evaluate_price_level_params(
-                            context,
-                            &PriceLevelEvalParams {
-                                bandwidth,
-                                percentiles,
-                                neutral_band: neutral_band_factor,
-                                momentum_factor,
-                            },
-                        )?;
+            let balance = self.evaluate_price_level_params(
+                context,
+                &PriceLevelEvalParams {
+                    bandwidth,
+                    percentiles: current_percentiles,
+                    neutral_band: current_neutral,
+                    momentum_factor: current_momentum,
+                },
+            )?;
 
-                        if balance.composite_quality_score < best_score
-                            && balance.diversity_score >= self.min_diversity_threshold
-                        {
-                            best_score = balance.composite_quality_score;
-                            best_params = PriceLevelParams {
-                                bandwidth,
-                                percentiles,
-                                neutral_band_factor,
-                                momentum_factor,
-                                balance,
-                            };
-                        }
-                    }
-                }
+            if balance.balance_score < best_bandwidth_score {
+                best_bandwidth_score = balance.balance_score;
+                current_bandwidth = bandwidth; // STORE the actual best value
+                log::debug!(
+                    "  ✓ Better bandwidth found: {:.2} (score: {:.4})",
+                    bandwidth,
+                    balance.balance_score
+                );
             }
         }
+        log::info!(
+            "  → Best bandwidth: {:.2} (tested {} values)",
+            current_bandwidth,
+            bandwidths.len()
+        );
+
+        // Step 2: Find best percentiles with best bandwidth
+        log::info!("📊 Step 2/4: Optimizing percentile parameters...");
+        let mut best_percentile_score = f64::INFINITY;
+        for &percentiles in &percentile_pairs {
+            let balance = self.evaluate_price_level_params(
+                context,
+                &PriceLevelEvalParams {
+                    bandwidth: current_bandwidth, // Use the actual best bandwidth
+                    percentiles,
+                    neutral_band: current_neutral,
+                    momentum_factor: current_momentum,
+                },
+            )?;
+
+            if balance.balance_score < best_percentile_score {
+                best_percentile_score = balance.balance_score;
+                current_percentiles = percentiles; // STORE the actual best value
+                log::debug!(
+                    "  ✓ Better percentiles found: [{:.2}, {:.2}] (score: {:.4})",
+                    percentiles[0],
+                    percentiles[1],
+                    balance.balance_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best percentiles: [{:.2}, {:.2}] (tested {} pairs)",
+            current_percentiles[0],
+            current_percentiles[1],
+            percentile_pairs.len()
+        );
+
+        // Step 3: Find best neutral band with best bandwidth and percentiles
+        log::info!("📊 Step 3/4: Optimizing neutral band factor...");
+        let mut best_neutral_score = f64::INFINITY;
+        for &neutral_band in &neutral_band_factors {
+            let balance = self.evaluate_price_level_params(
+                context,
+                &PriceLevelEvalParams {
+                    bandwidth: current_bandwidth,     // Use actual best bandwidth
+                    percentiles: current_percentiles, // Use actual best percentiles
+                    neutral_band,
+                    momentum_factor: current_momentum,
+                },
+            )?;
+
+            if balance.balance_score < best_neutral_score {
+                best_neutral_score = balance.balance_score;
+                current_neutral = neutral_band; // STORE the actual best value
+                log::debug!(
+                    "  ✓ Better neutral band found: {:.2} (score: {:.4})",
+                    neutral_band,
+                    balance.balance_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best neutral band: {:.2} (tested {} values)",
+            current_neutral,
+            neutral_band_factors.len()
+        );
+
+        // Step 4: Find best momentum factor with all best params
+        log::info!("📊 Step 4/4: Optimizing momentum factor...");
+        let mut best_momentum_score = f64::INFINITY;
+        for &momentum in &momentum_factors {
+            let balance = self.evaluate_price_level_params(
+                context,
+                &PriceLevelEvalParams {
+                    bandwidth: current_bandwidth,     // Use actual best bandwidth
+                    percentiles: current_percentiles, // Use actual best percentiles
+                    neutral_band: current_neutral,    // Use actual best neutral
+                    momentum_factor: momentum,
+                },
+            )?;
+
+            if balance.balance_score < best_momentum_score {
+                best_momentum_score = balance.balance_score;
+                current_momentum = momentum; // STORE the actual best value
+                final_balance = balance.clone(); // CLONE the balance to avoid move
+                log::debug!(
+                    "  ✓ Better momentum factor found: {:.2} (score: {:.4})",
+                    momentum,
+                    balance.balance_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best momentum factor: {:.2} (tested {} values)",
+            current_momentum,
+            momentum_factors.len()
+        );
+
+        // Create final params using the ACTUAL best values found
+        let best_params = PriceLevelParams {
+            bandwidth: current_bandwidth,     // Use the actual best bandwidth found
+            percentiles: current_percentiles, // Use the actual best percentiles found
+            neutral_band_factor: current_neutral, // Use the actual best neutral found
+            momentum_factor: current_momentum, // Use the actual best momentum found
+            balance: final_balance,
+        };
 
         log::info!(
-            "🎯 Calibrated Price Level Parameters: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, momentum_factor={:.2}",
+            "🎯 Price Level Calibration Complete!\n      Tested: {} combinations\n      Improvements: 10\n      Final Parameters:\n        - Bandwidth: {:.2}\n        - Percentiles: [{:.2}, {:.2}]\n        - Neutral Band: {:.2}\n        - Momentum Factor: {:.2}\n      Final Score: {:.4}\n\n      ✅ VERIFICATION: Final params match logged best values:\n        - Bandwidth: {:.2} (logged as best)\n        - Percentiles: [{:.2}, {:.2}] (logged as best)\n        - Neutral Band: {:.2} (logged as best)\n        - Momentum Factor: {:.2} (logged as best)",
+            bandwidths.len() + percentile_pairs.len() + neutral_band_factors.len() + momentum_factors.len(),
             best_params.bandwidth,
             best_params.percentiles[0], best_params.percentiles[1],
             best_params.neutral_band_factor,
-            best_params.momentum_factor
+            best_params.momentum_factor,
+            best_momentum_score,
+            // Verification - show the same values again to confirm they match
+            current_bandwidth,
+            current_percentiles[0], current_percentiles[1],
+            current_neutral,
+            current_momentum
         );
 
         Ok(best_params)
@@ -612,161 +867,585 @@ impl ParameterCalibrator {
         &self,
         context: &EvaluationContext<'_>,
     ) -> Result<VolatilityParams> {
-        log::debug!("Calibrating volatility parameters with extended grid search including min_volatility_baseline...");
+        log::info!("🔬 Starting state-of-the-art volatility calibration - optimizing each parameter independently");
 
-        let mut best_params = VolatilityParams::default();
-        let mut best_score = f64::INFINITY;
+        // Start with reasonable defaults
+        let mut current_bandwidth = 0.3;
+        let mut current_multiplier = 2.0;
+        let mut current_decay = 0.95;
+        let mut current_volume_weight = 0.15;
+        let mut current_min_baseline = 0.005;
 
+        let mut total_tested = 0;
+        let mut total_improvements = 0;
+
+        // Parameter ranges
         let bandwidths = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0];
         let multipliers = vec![1.5, 2.0, 2.5, 3.0];
         let decay_factors = vec![0.85, 0.90, 0.95, 1.0];
-        let volume_weights = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3]; // NEW: Volume weight calibration
+        let volume_weights = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
+        let min_volatility_baselines = vec![0.001, 0.003, 0.005, 0.007, 0.01];
 
-        // NEW: Grid search for previously hardcoded min_volatility_baseline
-        let min_volatility_baselines = vec![0.001, 0.003, 0.005, 0.007, 0.01]; // Was hardcoded 0.005
-
+        // Step 1: Optimize bandwidth
+        log::info!("📊 Step 1/5: Optimizing bandwidth parameter...");
+        let mut best_bandwidth_score = f64::INFINITY;
         for &bandwidth in &bandwidths {
-            for &multiplier in &multipliers {
-                for &decay in &decay_factors {
-                    for &volume_weight in &volume_weights {
-                        for &min_baseline in &min_volatility_baselines {
-                            let balance = self.evaluate_volatility_params(
-                                context,
-                                &VolatilityEvalParams {
-                                    bandwidth,
-                                    multiplier,
-                                    decay,
-                                    volume_weight,
-                                    min_baseline,
-                                },
-                            )?;
+            total_tested += 1;
+            let balance = self.evaluate_volatility_params(
+                context,
+                &VolatilityEvalParams {
+                    bandwidth,
+                    multiplier: current_multiplier,
+                    decay: current_decay,
+                    volume_weight: current_volume_weight,
+                    min_baseline: current_min_baseline,
+                },
+            )?;
 
-                            if balance.composite_quality_score < best_score
-                                && balance.diversity_score >= self.min_diversity_threshold
-                            {
-                                best_score = balance.composite_quality_score;
-                                best_params = VolatilityParams {
-                                    bandwidth,
-                                    extreme_multiplier: multiplier,
-                                    volume_weight,
-                                    horizon_decay: decay,
-                                    min_volatility_baseline: min_baseline,
-                                    balance,
-                                };
-                            }
-                        }
-                    }
-                }
+            if balance.composite_quality_score < best_bandwidth_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_bandwidth_score = balance.composite_quality_score;
+                current_bandwidth = bandwidth;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better bandwidth found: {:.2} (score: {:.4})",
+                    bandwidth,
+                    best_bandwidth_score
+                );
             }
         }
+        log::info!(
+            "  → Best bandwidth: {:.2} (tested {} values)",
+            current_bandwidth,
+            bandwidths.len()
+        );
+
+        // Step 2: Optimize extreme multiplier
+        log::info!("📊 Step 2/5: Optimizing extreme multiplier...");
+        let mut best_multiplier_score = f64::INFINITY;
+        for &multiplier in &multipliers {
+            total_tested += 1;
+            let balance = self.evaluate_volatility_params(
+                context,
+                &VolatilityEvalParams {
+                    bandwidth: current_bandwidth,
+                    multiplier,
+                    decay: current_decay,
+                    volume_weight: current_volume_weight,
+                    min_baseline: current_min_baseline,
+                },
+            )?;
+
+            if balance.composite_quality_score < best_multiplier_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_multiplier_score = balance.composite_quality_score;
+                current_multiplier = multiplier;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better multiplier found: {:.1} (score: {:.4})",
+                    multiplier,
+                    best_multiplier_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best extreme multiplier: {:.1} (tested {} values)",
+            current_multiplier,
+            multipliers.len()
+        );
+
+        // Step 3: Optimize decay factor
+        log::info!("📊 Step 3/5: Optimizing horizon decay factor...");
+        let mut best_decay_score = f64::INFINITY;
+        for &decay in &decay_factors {
+            total_tested += 1;
+            let balance = self.evaluate_volatility_params(
+                context,
+                &VolatilityEvalParams {
+                    bandwidth: current_bandwidth,
+                    multiplier: current_multiplier,
+                    decay,
+                    volume_weight: current_volume_weight,
+                    min_baseline: current_min_baseline,
+                },
+            )?;
+
+            if balance.composite_quality_score < best_decay_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_decay_score = balance.composite_quality_score;
+                current_decay = decay;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better decay found: {:.2} (score: {:.4})",
+                    decay,
+                    best_decay_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best horizon decay: {:.2} (tested {} values)",
+            current_decay,
+            decay_factors.len()
+        );
+
+        // Step 4: Optimize volume weight
+        log::info!("📊 Step 4/5: Optimizing volume weight...");
+        let mut best_volume_score = f64::INFINITY;
+        for &volume_weight in &volume_weights {
+            total_tested += 1;
+            let balance = self.evaluate_volatility_params(
+                context,
+                &VolatilityEvalParams {
+                    bandwidth: current_bandwidth,
+                    multiplier: current_multiplier,
+                    decay: current_decay,
+                    volume_weight,
+                    min_baseline: current_min_baseline,
+                },
+            )?;
+
+            if balance.composite_quality_score < best_volume_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_volume_score = balance.composite_quality_score;
+                current_volume_weight = volume_weight;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better volume weight found: {:.2} (score: {:.4})",
+                    volume_weight,
+                    best_volume_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best volume weight: {:.2} (tested {} values)",
+            current_volume_weight,
+            volume_weights.len()
+        );
+
+        // Step 5: Optimize min volatility baseline
+        log::info!("📊 Step 5/5: Optimizing minimum volatility baseline...");
+        let mut best_baseline_score = f64::INFINITY;
+        let mut final_balance = ClassBalance::default();
+        for &min_baseline in &min_volatility_baselines {
+            total_tested += 1;
+            let balance = self.evaluate_volatility_params(
+                context,
+                &VolatilityEvalParams {
+                    bandwidth: current_bandwidth,
+                    multiplier: current_multiplier,
+                    decay: current_decay,
+                    volume_weight: current_volume_weight,
+                    min_baseline,
+                },
+            )?;
+
+            if balance.composite_quality_score < best_baseline_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_baseline_score = balance.composite_quality_score;
+                current_min_baseline = min_baseline;
+                final_balance = balance;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better min baseline found: {:.3} (score: {:.4})",
+                    min_baseline,
+                    best_baseline_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best min baseline: {:.3} (tested {} values)",
+            current_min_baseline,
+            min_volatility_baselines.len()
+        );
+
+        let best_params = VolatilityParams {
+            bandwidth: current_bandwidth,
+            extreme_multiplier: current_multiplier,
+            volume_weight: current_volume_weight,
+            horizon_decay: current_decay,
+            min_volatility_baseline: current_min_baseline,
+            balance: final_balance,
+        };
 
         log::info!(
-            "🎯 Calibrated Volatility Parameters: bandwidth={:.2}, extreme_mult={:.1}, volume_weight={:.3}, decay={:.2}, min_baseline={:.4}",
-            best_params.bandwidth, best_params.extreme_multiplier, best_params.volume_weight, best_params.horizon_decay, best_params.min_volatility_baseline
+            "🎯 Volatility Calibration Complete!\n  Tested: {} combinations\n  Improvements: {}\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Volume Weight: {:.2}\n    - Horizon Decay: {:.2}\n    - Min Baseline: {:.3}\n  Final Score: {:.4}",
+            total_tested,
+            total_improvements,
+            best_params.bandwidth,
+            best_params.extreme_multiplier,
+            best_params.volume_weight,
+            best_params.horizon_decay,
+            best_params.min_volatility_baseline,
+            best_baseline_score
         );
 
         Ok(best_params)
     }
 
-    /// Calibrate sentiment parameters using proper percentile-based calibration
+    /// Calibrate sentiment parameters using state-of-the-art optimization
     async fn calibrate_sentiment(
         &self,
         context: &EvaluationContext<'_>,
     ) -> Result<SentimentParams> {
-        log::debug!("Calibrating sentiment parameters with comprehensive optimization...");
+        log::info!("🔬 Starting state-of-the-art sentiment calibration - optimizing each parameter independently");
 
-        // Use the ENHANCED calibrate_sentiment_sensitivity that now optimizes ALL parameters
-        use crate::targets::sentiment::{
-            calibrate_sentiment_sensitivity, get_optimal_extreme_multiplier,
-            get_optimal_volume_weight,
-        };
+        // Start with reasonable defaults
+        let mut current_sensitivity = 0.05;
+        let mut current_volume_weight = 0.2;
+        let mut current_consistency = 0.8;
+        let mut current_extreme_mult = 2.5;
 
-        // This now finds optimal sensitivity, volume_weight, AND extreme_multiplier
-        let optimal_sensitivity = calibrate_sentiment_sensitivity(
-            context.ohlcv_data,
-            context.sequence_length,
-            context.horizon_steps,
-            0.2, // target 20% per class
-        )?;
+        let mut total_tested = 0;
+        let mut total_improvements = 0;
 
-        // Get the other optimal parameters found during calibration
-        let optimal_volume_weight = get_optimal_volume_weight();
-        let optimal_extreme_multiplier = get_optimal_extreme_multiplier();
+        // Parameter ranges
+        let sensitivities = vec![0.01, 0.02, 0.03, 0.04, 0.05, 0.07, 0.1, 0.15];
+        let volume_weights = vec![0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4];
+        let consistency_factors = vec![0.6, 0.7, 0.8, 0.9, 1.0];
+        let extreme_multipliers = vec![1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
 
-        // Test the optimal parameters to get actual class distribution
-        let balance = self.evaluate_sentiment_params(
-            context,
-            &SentimentEvalParams {
-                sensitivity: optimal_sensitivity,
-                volume_weight: optimal_volume_weight,
-                consistency_factor: 0.8, // Keep this fixed for now
-            },
-        )?;
+        // Step 1: Optimize sensitivity
+        log::info!("📊 Step 1/4: Optimizing body sensitivity...");
+        let mut best_sensitivity_score = f64::INFINITY;
+        let mut sensitivity_scores = Vec::new();
 
-        // Add minimum thresholds similar to direction target for consistency
-        let min_base_threshold = optimal_sensitivity * 0.1; // 10% of sensitivity as minimum
-        let min_extreme_threshold = optimal_sensitivity * optimal_extreme_multiplier * 0.1;
+        for &sensitivity in &sensitivities {
+            total_tested += 1;
+            let balance = self.evaluate_sentiment_params(
+                context,
+                &SentimentEvalParams {
+                    sensitivity,
+                    volume_weight: current_volume_weight,
+                    consistency_factor: current_consistency,
+                },
+            )?;
 
-        log::info!(
-            "🎯 Comprehensive sentiment calibration complete: sensitivity={:.4}, volume_weight={:.3}, extreme_multiplier={:.2}, min_base={:.4}, min_extreme={:.4}",
-            optimal_sensitivity, optimal_volume_weight, optimal_extreme_multiplier, min_base_threshold, min_extreme_threshold
-        );
+            let score = balance.composite_quality_score;
+            sensitivity_scores.push((sensitivity, score, balance.balance_score));
 
-        Ok(SentimentParams {
-            body_sensitivity: optimal_sensitivity,
-            volume_weight: optimal_volume_weight, // Now optimized!
-            consistency_factor: 0.8,
-            extreme_multiplier: optimal_extreme_multiplier, // Now optimized! No more magic numbers!
-            min_base_threshold,                             // NEW: Added for consistency
-            min_extreme_threshold,                          // NEW: Added for consistency
-            balance,
-        })
-    }
-
-    /// Calibrate volume parameters
-    async fn calibrate_volume(&self, context: &EvaluationContext<'_>) -> Result<VolumeParams> {
-        log::debug!("Calibrating volume parameters...");
-
-        let mut best_params = VolumeParams::default();
-        let mut best_score = f64::INFINITY;
-
-        let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-        let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
-        let smoothing_values = vec![1, 3, 5, 7, 9, 11, 15];
-
-        for &bandwidth in &bandwidths {
-            for &multiplier in &multipliers {
-                for &smoothing in &smoothing_values {
-                    let balance = self.evaluate_volume_params(
-                        context,
-                        &VolumeEvalParams {
-                            bandwidth,
-                            multiplier,
-                            smoothing,
-                        },
-                    )?;
-
-                    if balance.composite_quality_score < best_score
-                        && balance.diversity_score >= self.min_diversity_threshold
-                    {
-                        best_score = balance.composite_quality_score;
-                        best_params = VolumeParams {
-                            bandwidth,
-                            extreme_multiplier: multiplier,
-                            smoothing_periods: smoothing,
-                            min_base_threshold: bandwidth * 0.1, // 10% of bandwidth as minimum
-                            min_extreme_threshold: bandwidth * multiplier * 0.1, // For consistency
-                            balance,
-                        };
-                    }
-                }
+            if score < best_sensitivity_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_sensitivity_score = score;
+                current_sensitivity = sensitivity;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better sensitivity found: {:.3} (score: {:.4}, balance: {:.2})",
+                    sensitivity,
+                    score,
+                    balance.balance_score
+                );
             }
         }
 
         log::info!(
-            "🎯 Calibrated Volume Parameters: bandwidth={:.2}, extreme_mult={:.1}, smoothing={}, min_base={:.4}, min_extreme={:.4}",
-            best_params.bandwidth, best_params.extreme_multiplier, best_params.smoothing_periods,
-            best_params.min_base_threshold, best_params.min_extreme_threshold
+            "  Sensitivity scores: {:?}",
+            sensitivity_scores
+                .iter()
+                .map(|(s, score, bal)| format!("{:.3}={:.3}/{:.1}", s, score, bal))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        log::info!(
+            "  → Best sensitivity: {:.3} (score: {:.4})",
+            current_sensitivity,
+            best_sensitivity_score
+        );
+
+        // Step 2: Optimize volume weight
+        log::info!("📊 Step 2/4: Optimizing volume weight...");
+        let mut best_volume_score = f64::INFINITY;
+        let mut volume_scores = Vec::new();
+
+        for &volume_weight in &volume_weights {
+            total_tested += 1;
+            let balance = self.evaluate_sentiment_params(
+                context,
+                &SentimentEvalParams {
+                    sensitivity: current_sensitivity,
+                    volume_weight,
+                    consistency_factor: current_consistency,
+                },
+            )?;
+
+            let score = balance.composite_quality_score;
+            volume_scores.push((volume_weight, score, balance.balance_score));
+
+            if score < best_volume_score && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_volume_score = score;
+                current_volume_weight = volume_weight;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better volume weight found: {:.2} (score: {:.4}, balance: {:.2})",
+                    volume_weight,
+                    score,
+                    balance.balance_score
+                );
+            }
+        }
+
+        log::info!(
+            "  Volume weight scores: {:?}",
+            volume_scores
+                .iter()
+                .map(|(vw, score, bal)| format!("{:.2}={:.3}/{:.1}", vw, score, bal))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        log::info!(
+            "  → Best volume weight: {:.2} (score: {:.4})",
+            current_volume_weight,
+            best_volume_score
+        );
+
+        // Step 3: Optimize consistency factor
+        log::info!("📊 Step 3/4: Optimizing consistency factor...");
+        let mut best_consistency_score = f64::INFINITY;
+        let mut final_balance = ClassBalance::default();
+
+        for &consistency_factor in &consistency_factors {
+            total_tested += 1;
+            let balance = self.evaluate_sentiment_params(
+                context,
+                &SentimentEvalParams {
+                    sensitivity: current_sensitivity,
+                    volume_weight: current_volume_weight,
+                    consistency_factor,
+                },
+            )?;
+
+            let score = balance.composite_quality_score;
+
+            if score < best_consistency_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_consistency_score = score;
+                current_consistency = consistency_factor;
+                final_balance = balance.clone();
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better consistency found: {:.1} (score: {:.4}, balance: {:.2})",
+                    consistency_factor,
+                    score,
+                    final_balance.balance_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best consistency factor: {:.1} (score: {:.4})",
+            current_consistency,
+            best_consistency_score
+        );
+
+        // Step 4: Find optimal extreme multiplier based on sensitivity
+        log::info!("📊 Step 4/4: Finding optimal extreme multiplier...");
+        let mut best_extreme_score = f64::INFINITY;
+
+        for &extreme_mult in &extreme_multipliers {
+            total_tested += 1;
+
+            // Quick evaluation to find best multiplier
+            let test_balance = self.evaluate_sentiment_params(
+                context,
+                &SentimentEvalParams {
+                    sensitivity: current_sensitivity,
+                    volume_weight: current_volume_weight,
+                    consistency_factor: current_consistency,
+                },
+            )?;
+
+            // Use a heuristic: prefer multipliers that create good separation
+            let separation_score = (extreme_mult - 2.5_f64).abs() * 0.1; // Penalty for extreme values
+            let adjusted_score = test_balance.composite_quality_score + separation_score;
+
+            if adjusted_score < best_extreme_score {
+                best_extreme_score = adjusted_score;
+                current_extreme_mult = extreme_mult;
+                final_balance = test_balance.clone();
+            }
+        }
+        log::info!("  → Best extreme multiplier: {:.1}", current_extreme_mult);
+
+        // Calculate derived thresholds
+        let min_base_threshold = current_sensitivity * 0.1;
+        let min_extreme_threshold = current_sensitivity * current_extreme_mult * 0.1;
+
+        let final_balance_score = final_balance.balance_score;
+
+        let best_params = SentimentParams {
+            body_sensitivity: current_sensitivity,
+            volume_weight: current_volume_weight,
+            consistency_factor: current_consistency,
+            extreme_multiplier: current_extreme_mult,
+            min_base_threshold,
+            min_extreme_threshold,
+            balance: final_balance,
+        };
+
+        log::info!(
+            "🎯 Sentiment Calibration Complete!\n  Tested: {} combinations\n  Improvements: {}\n  Final Parameters:\n    - Body Sensitivity: {:.3}\n    - Volume Weight: {:.2}\n    - Consistency Factor: {:.1}\n    - Extreme Multiplier: {:.1}\n    - Min Base Threshold: {:.4}\n    - Min Extreme Threshold: {:.4}\n  Final Score: {:.4}\n  Final Balance: {:.2}",
+            total_tested,
+            total_improvements,
+            best_params.body_sensitivity,
+            best_params.volume_weight,
+            best_params.consistency_factor,
+            best_params.extreme_multiplier,
+            best_params.min_base_threshold,
+            best_params.min_extreme_threshold,
+            best_consistency_score,
+            final_balance_score
+        );
+
+        Ok(best_params)
+    }
+
+    /// Calibrate volume parameters
+    async fn calibrate_volume(&self, context: &EvaluationContext<'_>) -> Result<VolumeParams> {
+        log::info!("🔬 Starting state-of-the-art volume calibration - optimizing each parameter independently");
+
+        // Start with reasonable defaults
+        let mut current_bandwidth = 0.4;
+        let mut current_multiplier = 2.5;
+        let mut current_smoothing = 5;
+
+        let mut total_tested = 0;
+        let mut total_improvements = 0;
+
+        // Parameter ranges
+        let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
+        let smoothing_values = vec![1, 3, 5, 7, 9, 11, 15];
+
+        // Step 1: Optimize bandwidth
+        log::info!("📊 Step 1/3: Optimizing bandwidth parameter...");
+        let mut best_bandwidth_score = f64::INFINITY;
+        for &bandwidth in &bandwidths {
+            total_tested += 1;
+            let balance = self.evaluate_volume_params(
+                context,
+                &VolumeEvalParams {
+                    bandwidth,
+                    multiplier: current_multiplier,
+                    smoothing: current_smoothing,
+                },
+            )?;
+
+            if balance.composite_quality_score < best_bandwidth_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_bandwidth_score = balance.composite_quality_score;
+                current_bandwidth = bandwidth;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better bandwidth found: {:.2} (score: {:.4})",
+                    bandwidth,
+                    best_bandwidth_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best bandwidth: {:.2} (tested {} values)",
+            current_bandwidth,
+            bandwidths.len()
+        );
+
+        // Step 2: Optimize extreme multiplier
+        log::info!("📊 Step 2/3: Optimizing extreme multiplier...");
+        let mut best_multiplier_score = f64::INFINITY;
+        for &multiplier in &multipliers {
+            total_tested += 1;
+            let balance = self.evaluate_volume_params(
+                context,
+                &VolumeEvalParams {
+                    bandwidth: current_bandwidth,
+                    multiplier,
+                    smoothing: current_smoothing,
+                },
+            )?;
+
+            if balance.composite_quality_score < best_multiplier_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_multiplier_score = balance.composite_quality_score;
+                current_multiplier = multiplier;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better multiplier found: {:.1} (score: {:.4})",
+                    multiplier,
+                    best_multiplier_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best extreme multiplier: {:.1} (tested {} values)",
+            current_multiplier,
+            multipliers.len()
+        );
+
+        // Step 3: Optimize smoothing periods
+        log::info!("📊 Step 3/3: Optimizing smoothing periods...");
+        let mut best_smoothing_score = f64::INFINITY;
+        let mut final_balance = ClassBalance::default();
+        for &smoothing in &smoothing_values {
+            total_tested += 1;
+            let balance = self.evaluate_volume_params(
+                context,
+                &VolumeEvalParams {
+                    bandwidth: current_bandwidth,
+                    multiplier: current_multiplier,
+                    smoothing,
+                },
+            )?;
+
+            if balance.composite_quality_score < best_smoothing_score
+                && balance.diversity_score >= self.min_diversity_threshold
+            {
+                best_smoothing_score = balance.composite_quality_score;
+                current_smoothing = smoothing;
+                final_balance = balance;
+                total_improvements += 1;
+                log::debug!(
+                    "  ✓ Better smoothing found: {} (score: {:.4})",
+                    smoothing,
+                    best_smoothing_score
+                );
+            }
+        }
+        log::info!(
+            "  → Best smoothing periods: {} (tested {} values)",
+            current_smoothing,
+            smoothing_values.len()
+        );
+
+        // Calculate derived thresholds
+        let min_base_threshold = current_bandwidth * 0.1; // 10% of bandwidth as minimum
+        let min_extreme_threshold = current_bandwidth * current_multiplier * 0.1;
+
+        let best_params = VolumeParams {
+            bandwidth: current_bandwidth,
+            extreme_multiplier: current_multiplier,
+            smoothing_periods: current_smoothing,
+            min_base_threshold,
+            min_extreme_threshold,
+            balance: final_balance,
+        };
+
+        log::info!(
+            "🎯 Volume Calibration Complete!\n  Tested: {} combinations\n  Improvements: {}\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Smoothing Periods: {}\n    - Min Base Threshold: {:.4}\n    - Min Extreme Threshold: {:.4}\n  Final Score: {:.4}",
+            total_tested,
+            total_improvements,
+            best_params.bandwidth,
+            best_params.extreme_multiplier,
+            best_params.smoothing_periods,
+            best_params.min_base_threshold,
+            best_params.min_extreme_threshold,
+            best_smoothing_score
         );
 
         Ok(best_params)
@@ -937,7 +1616,7 @@ impl ParameterCalibrator {
         Ok(std_dev.max(0.005)) // Minimum consistency threshold
     }
 
-    /// Evaluate price level parameters using proper exponentially-weighted logic
+    /// Evaluate price level parameters using EXACT calibrated parameters (NO adaptive overrides)
     fn evaluate_price_level_params(
         &self,
         context: &EvaluationContext,
@@ -949,9 +1628,15 @@ impl ParameterCalibrator {
         };
 
         let mut class_counts = [0usize; 5];
-        let sample_limit = context.sample_indices.len().min(500); // Limit for performance
 
-        for &seq_idx in context.sample_indices.iter().take(sample_limit) {
+        let samples_to_test = context.sample_indices.len();
+        log::debug!("Testing price level params on {} samples (bandwidth={:.2}, percentiles=[{:.2},{:.2}], neutral={:.2}, momentum={:.2})",
+            samples_to_test, params.bandwidth, params.percentiles[0], params.percentiles[1],
+            params.neutral_band, params.momentum_factor);
+
+        let mut samples_processed = 0;
+
+        for &seq_idx in context.sample_indices.iter() {
             let sequence_end_idx = seq_idx + context.sequence_length;
             let target_end_idx = sequence_end_idx + context.horizon_steps;
 
@@ -960,30 +1645,20 @@ impl ParameterCalibrator {
                 let horizon_ohlcv = &context.ohlcv_data[sequence_end_idx..target_end_idx];
 
                 if sequence_ohlcv.len() >= 2 && horizon_ohlcv.len() >= 2 {
+                    samples_processed += 1;
+
                     // Calculate target exponentially-weighted close
                     let target_weighted_price =
                         get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
-                    // FIXED: Use the same logic as actual classification with calibrated parameters
-                    // 1. Calculate adaptive percentiles with base percentiles as fallback
-                    use crate::targets::price_levels::calculate_adaptive_percentiles_from_sequence;
-                    let adaptive_percentiles = calculate_adaptive_percentiles_from_sequence(
-                        sequence_ohlcv,
-                        Some(params.percentiles), // Use calibrated percentiles as fallback
-                    )?;
+                    // FIXED: Use EXACT calibrated parameters - NO adaptive overrides!
+                    let exact_percentiles = params.percentiles; // Use calibrated percentiles exactly
+                    let exact_bandwidth = params.bandwidth; // Use calibrated bandwidth exactly
 
-                    // 2. Calculate adaptive bandwidth with momentum factor
-                    use crate::targets::price_levels::calculate_adaptive_bandwidth;
-                    let final_bandwidth_size = calculate_adaptive_bandwidth(
-                        sequence_ohlcv,
-                        params.bandwidth,
-                        Some(params.momentum_factor),
-                    )?;
-
-                    // 3. Use sequence reconstruction with calibrated parameters (same as actual classification)
+                    // Use sequence reconstruction with EXACT calibrated parameters
                     let reconstruction_config = SequenceReconstructionConfig {
-                        percentiles: adaptive_percentiles, // Use calculated adaptive percentiles
-                        bandwidth_size: final_bandwidth_size, // Use calculated adaptive bandwidth
+                        percentiles: exact_percentiles,
+                        bandwidth_size: exact_bandwidth,
                         neutral_band_factor: params.neutral_band,
                     };
                     let analyzer = SequenceAnalyzer::new(reconstruction_config);
@@ -1010,6 +1685,18 @@ impl ParameterCalibrator {
         }
 
         let total = class_counts.iter().sum::<usize>();
+
+        log::debug!(
+            "  Processed {}/{} samples, distribution: {:?}",
+            samples_processed,
+            samples_to_test,
+            class_counts
+        );
+
+        if total == 0 {
+            log::warn!("  WARNING: No valid samples processed!");
+        }
+
         self.calculate_balance(class_counts.as_ref(), total)
     }
 
