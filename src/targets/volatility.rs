@@ -1551,10 +1551,10 @@ pub fn reconstruct_volatility(
 
     // Create simplified thresholds structure for compatibility
     let log_thresholds = LogVolatilityThresholds {
-        very_low_max: (1.0 - extreme_threshold).ln(),
-        low_max: (1.0 - moderate_threshold).ln(),
-        medium_max: (1.0 + moderate_threshold).ln(),
-        high_max: (1.0 + extreme_threshold).ln(),
+        very_low_max: (1.0_f64 - extreme_threshold).ln(),
+        low_max: (1.0_f64 - moderate_threshold).ln(),
+        medium_max: (1.0_f64 + moderate_threshold).ln(),
+        high_max: (1.0_f64 + extreme_threshold).ln(),
     };
 
     Ok(VolatilityReconstruction {

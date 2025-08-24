@@ -195,10 +195,10 @@ pub fn classify_volume_with_calibrated_params(
         .max(calibrated_params.min_extreme_threshold);
 
     let thresholds = LogVolumeThresholds {
-        very_low_max: (1.0 - extreme_threshold).ln(),
-        low_max: (1.0 - base_threshold).ln(),
-        medium_max: (1.0 + base_threshold).ln(),
-        high_max: (1.0 + extreme_threshold).ln(),
+        very_low_max: (1.0_f64 - extreme_threshold).ln(),
+        low_max: (1.0_f64 - base_threshold).ln(),
+        medium_max: (1.0_f64 + base_threshold).ln(),
+        high_max: (1.0_f64 + extreme_threshold).ln(),
     };
 
     // Create config from calibrated params
