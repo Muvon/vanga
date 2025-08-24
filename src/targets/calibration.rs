@@ -552,15 +552,18 @@ impl ParameterCalibrator {
 
         let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
         let percentile_pairs = vec![
+            [0.01, 0.99],
             [0.05, 0.95],
             [0.1, 0.9],
             [0.15, 0.85],
             [0.2, 0.8],
             [0.25, 0.75],
             [0.3, 0.7],
+            [0.35, 0.65],
+            [0.4, 0.6],
         ]; // Base percentiles for adaptive calculation
-        let neutral_band_factors = vec![0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]; // Neutral zone size
-        let momentum_factors = vec![1.0, 1.1, 1.2, 1.3, 1.5, 2.0, 2.5, 3.0]; // Momentum weighting for bandwidth
+        let neutral_band_factors = vec![0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]; // Neutral zone size
+        let momentum_factors = vec![1.1, 1.2, 1.3, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]; // Momentum weighting for bandwidth
 
         for &bandwidth in &bandwidths {
             for &percentiles in &percentile_pairs {
