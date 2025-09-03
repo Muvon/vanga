@@ -44,6 +44,8 @@ pub struct OutputFormatter {
     confidence_calculator: ConfidenceCalculator,
     /// Enhanced position sizer for dynamic sizing
     position_sizer: EnhancedPositionSizer,
+    /// Minimum confidence threshold for trading signals
+    min_confidence: f64,
 }
 
 impl OutputFormatter {
@@ -61,6 +63,7 @@ impl OutputFormatter {
             calibrated_parameters: None,
             confidence_calculator: ConfidenceCalculator::new(confidence_config.clone()),
             position_sizer: EnhancedPositionSizer::new(confidence_config),
+            min_confidence: 0.2, // Default 20% minimum confidence
         }
     }
 
@@ -87,6 +90,12 @@ impl OutputFormatter {
         self.bandwidth_size = Some(params.price_levels.bandwidth);
         self.percentiles = Some(params.price_levels.percentiles);
         self.calibrated_parameters = Some(params);
+        self
+    }
+
+    /// Set minimum confidence threshold for trading signals
+    pub fn with_min_confidence(mut self, min_confidence: f64) -> Self {
+        self.min_confidence = min_confidence;
         self
     }
 
@@ -552,7 +561,7 @@ impl OutputFormatter {
                     .with_volume(self.create_volume_prediction(&volume_output, Some(horizon))?);
             }
 
-            // Generate trading orders if we have all required predictions
+            // Check if we have all required predictions for trading
             if result.price_levels.is_some()
                 && result.direction.is_some()
                 && result.volatility.is_some()
@@ -564,11 +573,23 @@ impl OutputFormatter {
 
                 // Log confidence details for debugging
                 log::info!(
-                    "🎯 Enhanced Confidence: {:.2}% (Base: {:.2}%, Agreement Factor: {:.2}x)",
+                    "🎯 Enhanced Confidence: {:.2}% (Base: {:.2}%, Agreement Factor: {:.2}x, Min Required: {:.2}%)",
                     enhanced_confidence * 100.0,
                     base_confidence * 100.0,
-                    enhanced_confidence / base_confidence.max(0.01)
+                    enhanced_confidence / base_confidence.max(0.01),
+                    self.min_confidence * 100.0
                 );
+
+                // CRITICAL: Skip this prediction entirely if confidence is below threshold
+                if enhanced_confidence < self.min_confidence {
+                    log::warn!(
+                        "⚠️ Skipping prediction for horizon {} - confidence {:.2}% below minimum {:.2}%",
+                        horizon,
+                        enhanced_confidence * 100.0,
+                        self.min_confidence * 100.0
+                    );
+                    continue; // Skip to next horizon, don't add this prediction to results
+                }
 
                 // Clone the predictions to avoid borrow checker issues
                 let price_levels = result.price_levels.clone().unwrap();
@@ -585,6 +606,7 @@ impl OutputFormatter {
 
                     log::info!("🎯 Using SMART order generation with all 5 models");
 
+                    // Pass the confidence calculator to generate_smart
                     match crate::output::trading_orders::TradingOrders::generate_smart(
                         current_price,
                         &price_levels,
@@ -592,6 +614,8 @@ impl OutputFormatter {
                         &volatility,
                         &sentiment,
                         &volume,
+                        &self.confidence_calculator,
+                        self.min_confidence,
                     ) {
                         Ok(smart_orders) => {
                             log::info!(
@@ -603,19 +627,25 @@ impl OutputFormatter {
                         }
                         Err(e) => {
                             log::error!("❌ Failed to generate SMART orders: {}", e);
-                            // Fallback to legacy generation
-                            self.generate_legacy_orders(
-                                current_price,
-                                &price_levels,
-                                &direction,
-                                &volatility,
-                                enhanced_confidence,
-                            )?
+                            // This should not happen since we already checked confidence
+                            // But if it does, skip this prediction
+                            continue;
                         }
                     }
                 } else {
                     // Use legacy order generation (backward compatibility)
                     log::info!("📊 Using legacy order generation (sentiment/volume not available)");
+
+                    // Check confidence for legacy generation too
+                    if enhanced_confidence < self.min_confidence {
+                        log::warn!(
+                            "⚠️ Skipping legacy order generation - confidence {:.2}% below minimum {:.2}%",
+                            enhanced_confidence * 100.0,
+                            self.min_confidence * 100.0
+                        );
+                        continue;
+                    }
+
                     self.generate_legacy_orders(
                         current_price,
                         &price_levels,
@@ -629,12 +659,33 @@ impl OutputFormatter {
 
                 // Apply the enhanced confidence to the prediction result
                 result = result.with_confidence(enhanced_confidence);
-            } else {
-                // No orders generated, just apply base confidence
-                result = result.with_confidence(base_confidence);
-            }
 
-            results.push(result);
+                // Add to results only if we successfully generated orders
+                results.push(result);
+            } else {
+                // No trading predictions available, but we might still want to include
+                // the result for informational purposes if confidence is high enough
+                let basic_confidence = base_confidence;
+
+                if basic_confidence >= self.min_confidence {
+                    result = result.with_confidence(basic_confidence);
+                    // Note: No orders field will be set, which means it won't be serialized
+                    // due to skip_serializing_if in PredictionResult
+                    log::info!(
+                        "ℹ️ Including prediction without orders for horizon {} (confidence: {:.2}%)",
+                        horizon,
+                        basic_confidence * 100.0
+                    );
+                    results.push(result);
+                } else {
+                    log::warn!(
+                        "⚠️ Skipping incomplete prediction for horizon {} - confidence {:.2}% below minimum {:.2}%",
+                        horizon,
+                        basic_confidence * 100.0,
+                        self.min_confidence * 100.0
+                    );
+                }
+            }
         }
 
         Ok(results)
@@ -708,7 +759,7 @@ impl OutputFormatter {
                 volatility: Some(volatility.clone()),
                 sentiment: None,
                 volume: None,
-                orders: crate::output::structures::TradingOrders::default(),
+                orders: None,
                 confidence: enhanced_confidence,
                 metadata: crate::output::metadata::PredictionMetadata::default(),
             },
@@ -726,7 +777,7 @@ impl OutputFormatter {
                 volatility: Some(volatility.clone()),
                 sentiment: None,
                 volume: None,
-                orders: crate::output::structures::TradingOrders::default(),
+                orders: None,
                 confidence: enhanced_confidence,
                 metadata: crate::output::metadata::PredictionMetadata::default(),
             },

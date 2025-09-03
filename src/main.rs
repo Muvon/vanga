@@ -155,7 +155,7 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Minimum confidence threshold
+        /// Minimum confidence threshold for trading signals (default: 0.2 = 20%)
         #[arg(long)]
         min_confidence: Option<f64>,
 

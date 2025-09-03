@@ -23,7 +23,8 @@ impl PostProcessor {
         for step in &self.config.steps {
             predictions = match step {
                 PostProcessingStep::VolatilityAdjustment => {
-                    self.apply_volatility_adjustment(predictions)?
+                    // Volatility adjustment removed - preserve ML model confidence
+                    predictions
                 }
                 PostProcessingStep::TrendSmoothing => self.apply_trend_smoothing(predictions)?,
                 PostProcessingStep::OutlierFiltering => {
@@ -48,44 +49,6 @@ impl PostProcessor {
             .into_iter()
             .filter(|pred| pred.confidence >= min_confidence)
             .collect()
-    }
-
-    /// Apply volatility adjustment to predictions
-    fn apply_volatility_adjustment(
-        &self,
-        mut predictions: Vec<PredictionResult>,
-    ) -> Result<Vec<PredictionResult>> {
-        if !self.config.volatility_adjustment.enabled {
-            return Ok(predictions);
-        }
-
-        // Adjust confidence based on market volatility (5-class system)
-        for pred in &mut predictions {
-            if let Some(ref volatility) = pred.volatility {
-                let vol_factor = match volatility.regime.as_str() {
-                    "VERY_HIGH" => 0.7, // Significantly reduce confidence in extreme volatility
-                    "HIGH" => 0.8,      // Reduce confidence in high volatility
-                    "MEDIUM" => 0.9,    // Slightly reduce confidence in medium volatility
-                    "LOW" => 1.0,       // Keep confidence in low volatility
-                    "VERY_LOW" => 1.0,  // Keep confidence in very low volatility
-                    _ => 1.0,
-                };
-
-                pred.confidence *= vol_factor;
-
-                // Adjust price level confidence
-                if let Some(ref mut price_levels) = pred.price_levels {
-                    price_levels.confidence *= vol_factor;
-                }
-
-                // Adjust direction confidence
-                if let Some(ref mut direction) = pred.direction {
-                    direction.confidence *= vol_factor;
-                }
-            }
-        }
-
-        Ok(predictions)
     }
 
     /// Apply trend smoothing to reduce noise

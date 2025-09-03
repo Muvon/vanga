@@ -449,7 +449,11 @@ impl StreamingPredictor {
                         * 100.0,
                     volatility_emoji,
                     volatility_str,
-                    prediction.orders.entry_levels.len()
+                    prediction
+                        .orders
+                        .as_ref()
+                        .map(|o| o.entry_levels.len())
+                        .unwrap_or(0)
                 );
             }
         }

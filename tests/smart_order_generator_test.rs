@@ -1,6 +1,7 @@
 //! Tests for SMART order generation system
 
 use std::collections::HashMap;
+use vanga::output::confidence_calculator::{ConfidenceCalculator, ConfidenceConfig};
 use vanga::output::prediction_types::*;
 use vanga::output::smart_order_generator::SmartConsensus;
 use vanga::output::trading_orders::TradingOrders;
@@ -152,6 +153,10 @@ fn test_smart_order_generation_no_magic_numbers() {
     let sentiment = create_test_sentiment();
     let volume = create_test_volume();
 
+    // Create confidence calculator
+    let confidence_config = ConfidenceConfig::default();
+    let confidence_calculator = ConfidenceCalculator::new(confidence_config);
+
     // Generate SMART orders
     let orders = TradingOrders::generate_smart(
         current_price,
@@ -160,6 +165,8 @@ fn test_smart_order_generation_no_magic_numbers() {
         &volatility,
         &sentiment,
         &volume,
+        &confidence_calculator,
+        0.2,
     )
     .unwrap();
 
@@ -204,6 +211,10 @@ fn test_short_order_validation() {
     let sentiment = create_test_sentiment();
     let volume = create_test_volume();
 
+    // Create confidence calculator
+    let confidence_config = ConfidenceConfig::default();
+    let confidence_calculator = ConfidenceCalculator::new(confidence_config);
+
     // Generate SHORT orders (direction shows down probability > up)
     let orders = TradingOrders::generate_smart(
         current_price,
@@ -212,6 +223,8 @@ fn test_short_order_validation() {
         &volatility,
         &sentiment,
         &volume,
+        &confidence_calculator,
+        0.2,
     )
     .unwrap();
 
@@ -284,6 +297,10 @@ fn test_long_order_validation() {
     let sentiment = create_test_sentiment();
     let volume = create_test_volume();
 
+    // Create confidence calculator
+    let confidence_config = ConfidenceConfig::default();
+    let confidence_calculator = ConfidenceCalculator::new(confidence_config);
+
     // Generate LONG orders
     let orders = TradingOrders::generate_smart(
         current_price,
@@ -292,6 +309,8 @@ fn test_long_order_validation() {
         &volatility,
         &sentiment,
         &volume,
+        &confidence_calculator,
+        0.2,
     )
     .unwrap();
 
@@ -472,15 +491,28 @@ fn test_position_sizing_normalization() {
 
 #[test]
 fn test_confidence_calculation_from_models() {
-    let consensus = SmartConsensus {
-        direction: create_test_direction(),
-        price_levels: create_test_price_levels(),
-        volatility: create_test_volatility(),
-        sentiment: create_test_sentiment(),
-        volume: create_test_volume(),
+    // Create a test prediction result to calculate confidence
+    let test_result = PredictionResult {
+        symbol: "TEST".to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        horizon: "1h".to_string(),
+        current_price: 100000.0,
+        current_vwap_price: 100000.0,
+        price_levels: Some(create_test_price_levels()),
+        direction: Some(create_test_direction()),
+        volatility: Some(create_test_volatility()),
+        sentiment: Some(create_test_sentiment()),
+        volume: Some(create_test_volume()),
+        orders: None,
+        confidence: 0.0,
+        metadata: vanga::output::metadata::PredictionMetadata::default(),
     };
 
-    let overall_confidence = consensus.calculate_overall_confidence();
+    // Create confidence calculator
+    let confidence_config = ConfidenceConfig::default();
+    let confidence_calculator = ConfidenceCalculator::new(confidence_config);
+
+    let overall_confidence = confidence_calculator.calculate_overall_confidence(&test_result);
 
     // Should be weighted average of model confidences
     assert!(overall_confidence > 0.0 && overall_confidence <= 1.0);
@@ -624,6 +656,10 @@ fn test_atr_distance_semantic_correctness() {
     let sentiment = create_test_sentiment();
     let volume = create_test_volume();
 
+    // Create confidence calculator
+    let confidence_config = ConfidenceConfig::default();
+    let confidence_calculator = ConfidenceCalculator::new(confidence_config);
+
     // Generate orders
     let orders = TradingOrders::generate_smart(
         current_price,
@@ -632,6 +668,8 @@ fn test_atr_distance_semantic_correctness() {
         &volatility,
         &sentiment,
         &volume,
+        &confidence_calculator,
+        0.2,
     )
     .unwrap();
 

@@ -49,8 +49,9 @@ pub struct PredictionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumePrediction>,
 
-    /// Trading orders with dynamic position sizing (always included)
-    pub orders: TradingOrders,
+    /// Trading orders with dynamic position sizing (only included when confidence is sufficient)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orders: Option<TradingOrders>,
 
     /// Overall prediction confidence
     pub confidence: f64,
@@ -866,7 +867,7 @@ impl PredictionResult {
             volatility: None,
             sentiment: None,
             volume: None,
-            orders: TradingOrders::default(),
+            orders: None,
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -901,7 +902,7 @@ impl PredictionResult {
             volatility: None,
             sentiment: None,
             volume: None,
-            orders: TradingOrders::default(),
+            orders: None,
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -961,7 +962,7 @@ impl PredictionResult {
 
     /// Set trading orders
     pub fn with_orders(mut self, orders: TradingOrders) -> Self {
-        self.orders = orders;
+        self.orders = Some(orders);
         self
     }
 }

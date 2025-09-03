@@ -6,9 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 // Import prediction types from other modules
+use super::confidence_calculator::ConfidenceCalculator;
 use super::prediction_types::{
-    DirectionPrediction, PriceLevelPrediction, SentimentPrediction, VolatilityPrediction,
-    VolumePrediction,
+    DirectionPrediction, PredictionResult, PriceLevelPrediction, SentimentPrediction,
+    VolatilityPrediction, VolumePrediction,
 };
 use super::sequence_statistics::SequenceStatistics;
 use super::smart_order_generator::SmartConsensus;
@@ -170,6 +171,8 @@ impl TradingOrders {
         volatility_pred: &VolatilityPrediction,
         sentiment_pred: &SentimentPrediction,
         volume_pred: &VolumePrediction,
+        confidence_calculator: &ConfidenceCalculator,
+        min_confidence: f64,
     ) -> crate::utils::error::Result<Self> {
         // Create SMART consensus calculator
         let consensus = SmartConsensus {
@@ -183,19 +186,48 @@ impl TradingOrders {
         // Step 1: Determine direction using Direction + Sentiment models
         let (direction, direction_confidence) = consensus.calculate_direction_consensus();
 
-        // Step 2: Check if we have sufficient confidence to trade
-        let overall_confidence = consensus.calculate_overall_confidence();
-        let min_confidence = 0.2; // 20% minimum from model outputs, not magic
+        // Step 2: Calculate overall confidence using the sophisticated ConfidenceCalculator
+        // Create a temporary PredictionResult to calculate confidence
+        let temp_result = PredictionResult {
+            symbol: String::new(),
+            timestamp: String::new(),
+            horizon: String::new(),
+            current_price,
+            current_vwap_price: current_price, // Use current price as fallback
+            price_levels: Some(price_levels.clone()),
+            direction: Some(direction_pred.clone()),
+            volatility: Some(volatility_pred.clone()),
+            sentiment: Some(sentiment_pred.clone()),
+            volume: Some(volume_pred.clone()),
+            orders: None,    // Temporary - no orders for confidence calculation
+            confidence: 0.0, // Will be calculated
+            metadata: super::metadata::PredictionMetadata {
+                model_version: String::new(),
+                generated_at: chrono::Utc::now(),
+                feature_count: 0,
+                sequence_length: 0,
+                data_quality: super::metadata::DataQuality {
+                    completeness: 1.0,
+                    freshness_hours: 0.0,
+                    market_condition: "NORMAL".to_string(),
+                },
+            },
+        };
 
+        let overall_confidence = confidence_calculator.calculate_overall_confidence(&temp_result);
+
+        log::info!(
+            "🎯 Using ConfidenceCalculator for order generation: confidence={:.2}%",
+            overall_confidence * 100.0
+        );
+
+        // Step 3: Check if we have sufficient confidence to trade
         if overall_confidence < min_confidence {
-            return Ok(Self::empty(
-                direction_pred,
-                Some(format!(
-                    "Insufficient model confidence: {:.1}% < {:.1}% minimum",
-                    overall_confidence * 100.0,
-                    min_confidence * 100.0
-                )),
-            ));
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Insufficient model confidence: {:.1}% < {:.1}% minimum",
+                overall_confidence * 100.0,
+                min_confidence * 100.0
+            )));
         }
 
         log::info!(
@@ -232,7 +264,7 @@ impl TradingOrders {
             Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
         // Step 9: Calculate dynamic risk-reward requirement based on confidence
-        let overall_confidence = consensus.calculate_overall_confidence();
+        // overall_confidence already calculated above using ConfidenceCalculator
         let min_risk_reward = (1.0_f64 / overall_confidence.max(0.1)).clamp(2.0, 10.0);
         let risk_reward = if initial_risk_reward < min_risk_reward {
             log::info!(

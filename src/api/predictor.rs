@@ -235,6 +235,9 @@ impl Predictor {
         // Pass metadata to formatter for accurate PredictionResult creation
         formatter = formatter.with_metadata(input_feature_count, sequence_length);
 
+        // Set minimum confidence threshold for trading signals
+        formatter = formatter.with_min_confidence(self.config.min_confidence);
+
         // CRITICAL: Adaptive parameters are REQUIRED for consistent prediction reconstruction
         // These parameters were calibrated during training to achieve balanced classification
         let calibrated_params = model.get_calibrated_parameters().ok_or_else(|| {

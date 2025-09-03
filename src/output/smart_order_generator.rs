@@ -1048,24 +1048,6 @@ impl SmartConsensus {
         }
     }
 
-    /// Calculate overall trade confidence using all models
-    pub fn calculate_overall_confidence(&self) -> f64 {
-        // Each model contributes based on its confidence
-        let direction_weight = 0.3;
-        let price_weight = 0.25;
-        let volatility_weight = 0.2;
-        let sentiment_weight = 0.15;
-        let volume_weight = 0.1;
-
-        let weighted_confidence = self.direction.confidence * direction_weight
-            + self.price_levels.confidence * price_weight
-            + self.volatility.regime_confidence * volatility_weight
-            + self.sentiment.confidence * sentiment_weight
-            + self.volume.confidence * volume_weight;
-
-        weighted_confidence.clamp(0.0, 1.0)
-    }
-
     /// Calculate ADAPTIVE risk-reward requirement using information entropy
     /// Higher entropy (uncertainty) = need better risk-reward ratio
     pub fn calculate_adaptive_risk_reward_requirement(
