@@ -34,18 +34,19 @@ pub struct ConfidenceConfig {
 impl Default for ConfidenceConfig {
     fn default() -> Self {
         Self {
-            // CRYPTO-OPTIMIZED WEIGHTS:
-            // Direction + Price Level = 55% (core trading signal)
-            // Volume + Sentiment = 30% (confirmation signals)
-            // Volatility = 15% (risk adjustment)
-            price_level_weight: 0.20, // 20% - Entry/exit zones (works WITH direction)
-            direction_weight: 0.35,   // 35% - Primary trend signal (MOST IMPORTANT)
-            volatility_weight: 0.15,  // 15% - Risk sizing (MORE important in crypto)
-            sentiment_weight: 0.15,   // 15% - Market psychology confirmation
-            volume_weight: 0.15,      // 15% - Move validation (critical for crypto)
-            min_probability_threshold: 0.15, // 15% minimum for confidence
-            agreement_bonus: 1.3,     // 30% bonus when models agree (crypto moves fast)
-            disagreement_penalty: 0.8, // 20% penalty (less harsh for volatile crypto)
+            // CRYPTO-OPTIMIZED WEIGHTS (70% for Direction + Price Level):
+            // Direction is MAIN signal for trend (45%)
+            // Price Level provides entry/exit zones (25%)
+            // Total core signals: 70%
+            // Supporting signals: 30% (volatility, sentiment, volume)
+            direction_weight: 0.45,   // 45% - PRIMARY trend signal (MAIN)
+            price_level_weight: 0.25, // 25% - Entry/exit zones (supports direction)
+            volatility_weight: 0.10,  // 10% - Risk sizing
+            sentiment_weight: 0.10,   // 10% - Market psychology confirmation
+            volume_weight: 0.10,      // 10% - Move validation
+            min_probability_threshold: 0.25, // 25% threshold (above 5-class baseline of 20%)
+            agreement_bonus: 1.3,     // 30% bonus when models agree
+            disagreement_penalty: 0.8, // 20% penalty for disagreement
         }
     }
 }
@@ -190,8 +191,11 @@ impl ConfidenceCalculator {
         final_confidence.clamp(0.05, 0.95)
     }
 
-    /// Calculate confidence for price level predictions using probability distribution
+    /// Calculate confidence for price level predictions
     fn calculate_price_level_confidence(&self, price_levels: &PriceLevelPrediction) -> f64 {
+        // Price levels already have properly calibrated confidence from reconstruction
+        // But we can enhance it further based on distribution analysis
+
         // Get the highest probability bin
         let max_prob = price_levels
             .bins
@@ -201,54 +205,94 @@ impl ConfidenceCalculator {
 
         // Calculate entropy-based confidence (lower entropy = higher confidence)
         let entropy = self.calculate_entropy_from_bins(&price_levels.bins);
-        let entropy_confidence = 1.0 - (entropy / 2.3); // log2(5) ≈ 2.3 for 5 classes
+        let max_entropy = 5_f64.ln(); // ln(5) for 5 classes
+        let entropy_confidence = 1.0 - (entropy / max_entropy);
 
-        // IMPROVED: More generous probability confidence calculation
-        let prob_confidence = if max_prob > self.config.min_probability_threshold {
-            // Scale from threshold to 1.0 more generously
-            0.5 + (max_prob - self.config.min_probability_threshold)
-                / (1.0 - self.config.min_probability_threshold)
-                * 0.5
+        // MATHEMATICALLY CORRECT FOR 5-CLASS SYSTEM
+        // Baseline is 0.2 (uniform distribution), not 0.0
+        let uniform_baseline = 0.2;
+
+        // Calculate deviation from uniform distribution
+        let deviation_from_uniform = if max_prob > uniform_baseline {
+            (max_prob - uniform_baseline) / (1.0 - uniform_baseline)
         } else {
-            // Still give reasonable confidence for lower probabilities
-            max_prob * 2.0 // Was 0.5, now 2.0 to be less punitive
+            0.0
         };
 
-        // Weight between probability and entropy measures - allow natural expression
-        (prob_confidence * 0.6 + entropy_confidence * 0.4).clamp(0.05, 1.0)
+        // Apply proper calibration for 5-class system using our calibration function
+        let calibrated_confidence =
+            crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
+
+        // Combine calibrated confidence with deviation analysis
+        let enhanced_confidence = calibrated_confidence * 0.7 + deviation_from_uniform * 0.3;
+
+        // Combine with entropy confidence and price_levels.confidence
+        let combined =
+            enhanced_confidence * 0.4 + entropy_confidence * 0.3 + price_levels.confidence * 0.3; // Use the already calibrated confidence
+
+        combined.clamp(0.25, 0.98)
     }
 
     /// Calculate confidence for direction predictions
     fn calculate_direction_confidence(&self, direction: &DirectionPrediction) -> f64 {
-        // Calculate directional clarity (how much one direction dominates)
+        // Direction already has calibrated confidence, but we enhance with aggregated analysis
+
+        // Use the already calibrated confidence from DirectionPrediction
+        let base_confidence = direction.confidence;
+
+        // Calculate directional clarity using aggregated probabilities
         let up_strength = direction.up_probability_aggregated;
         let down_strength = direction.down_probability_aggregated;
         let sideways_strength = direction.sideways_probability;
 
-        // Find dominant direction
+        // Find dominant direction strength
         let max_strength = up_strength.max(down_strength).max(sideways_strength);
 
-        // IMPROVED: More generous confidence calculation
-        let dominance_confidence = if max_strength > self.config.min_probability_threshold {
-            // Scale more generously
-            0.5 + (max_strength - self.config.min_probability_threshold)
-                / (1.0 - self.config.min_probability_threshold)
-                * 0.5
+        // MATHEMATICALLY CORRECT FOR 5-CLASS AGGREGATED
+        // For aggregated probabilities, we expect higher values
+        let directional_confidence = if max_strength >= 0.6 {
+            // Very strong directional signal
+            0.9 + (max_strength - 0.6) * 0.25 // Maps 0.6->0.9, 0.8->0.95, 1.0->1.0
+        } else if max_strength >= 0.45 {
+            // Strong directional signal
+            0.75 + (max_strength - 0.45) * 1.0 // Maps 0.45->0.75, 0.6->0.9
+        } else if max_strength >= 0.35 {
+            // Moderate directional signal
+            0.55 + (max_strength - 0.35) * 2.0 // Maps 0.35->0.55, 0.45->0.75
+        } else if max_strength >= 0.25 {
+            // Weak but present signal
+            0.35 + (max_strength - 0.25) * 2.0 // Maps 0.25->0.35, 0.35->0.55
         } else {
-            // Still give reasonable confidence
-            max_strength * 2.0 // Was 0.5, now 2.0
+            // Very weak signal
+            max_strength * 1.4
         };
 
         // Factor in risk-reward ratio (higher R/R = more confidence)
-        let rr_confidence = (direction.risk_reward_ratio / 6.0).min(1.0); // Was /10.0, now /6.0 for better scaling
+        let rr_confidence = if direction.risk_reward_ratio >= 4.0 {
+            0.9 + (direction.risk_reward_ratio - 4.0) / 20.0 // 4->0.9, 6->1.0
+        } else if direction.risk_reward_ratio >= 2.5 {
+            0.7 + (direction.risk_reward_ratio - 2.5) * 0.133 // 2.5->0.7, 4->0.9
+        } else if direction.risk_reward_ratio >= 1.5 {
+            0.5 + (direction.risk_reward_ratio - 1.5) * 0.2 // 1.5->0.5, 2.5->0.7
+        } else {
+            direction.risk_reward_ratio * 0.333 // Linear up to 1.5
+        }
+        .min(1.0);
 
-        // Combine factors
-        (dominance_confidence * 0.7 + rr_confidence * 0.3).clamp(0.2, 1.0) // Min 0.2
+        // Combine: base confidence (from 5-class), directional clarity, and R/R
+        let combined = base_confidence * 0.5 +      // 50% from calibrated 5-class confidence
+                      directional_confidence * 0.35 + // 35% from aggregated direction
+                      rr_confidence * 0.15; // 15% from risk-reward
+
+        combined.clamp(0.25, 0.98)
     }
 
     /// Calculate confidence for sentiment predictions
     fn calculate_sentiment_confidence(&self, sentiment: &SentimentPrediction) -> f64 {
-        // Get sentiment probabilities
+        // Sentiment already has calibrated confidence from the 5-class system
+        let base_confidence = sentiment.confidence;
+
+        // Get sentiment probabilities for additional analysis
         let probs = [
             sentiment.very_bearish_probability,
             sentiment.bearish_probability,
@@ -264,17 +308,46 @@ impl ConfidenceCalculator {
         let extreme_sentiment =
             sentiment.very_bearish_probability + sentiment.very_bullish_probability;
 
-        // Calculate confidence
-        if max_prob > self.config.min_probability_threshold {
-            (max_prob * 0.7 + extreme_sentiment * 0.3).min(1.0)
+        // MATHEMATICALLY CORRECT FOR 5-CLASS SYSTEM
+        let uniform_baseline = 0.2;
+
+        // Calculate calibrated confidence based on max probability
+        let prob_confidence = if max_prob >= 0.5 {
+            // Very confident sentiment
+            0.85 + (max_prob - 0.5) * 0.3
+        } else if max_prob >= 0.4 {
+            // Confident sentiment
+            0.7 + (max_prob - 0.4) * 1.5
+        } else if max_prob >= 0.3 {
+            // Moderate confidence
+            0.5 + (max_prob - 0.3) * 2.0
+        } else if max_prob >= uniform_baseline {
+            // Low confidence
+            0.3 + (max_prob - 0.2) * 2.0
         } else {
-            max_prob * 0.5
-        }
+            max_prob * 1.5
+        };
+
+        // Extreme sentiment bonus (very bearish/bullish are stronger signals)
+        let extreme_bonus = if extreme_sentiment >= 0.6 {
+            1.15 // 15% boost for very extreme sentiment
+        } else if extreme_sentiment >= 0.4 {
+            1.08 // 8% boost for moderate extreme
+        } else {
+            1.0
+        };
+
+        // Combine base confidence with enhanced analysis
+        let combined = base_confidence * 0.6 + prob_confidence * 0.4;
+        (combined * extreme_bonus).clamp(0.2, 0.95)
     }
 
     /// Calculate confidence for volume predictions
     fn calculate_volume_confidence(&self, volume: &VolumePrediction) -> f64 {
-        // Get volume probabilities
+        // Volume already has calibrated confidence from the 5-class system
+        let base_confidence = volume.confidence;
+
+        // Get volume probabilities for additional analysis
         let probs = [
             volume.very_low_probability,
             volume.low_probability,
@@ -286,15 +359,41 @@ impl ConfidenceCalculator {
         // Find max probability
         let max_prob = probs.iter().fold(0.0_f64, |a, &b| a.max(b));
 
-        // High volume confirms moves
+        // High volume confirms moves (important for crypto)
         let high_volume_signal = volume.high_probability + volume.very_high_probability;
 
-        // Calculate confidence
-        if max_prob > self.config.min_probability_threshold {
-            (max_prob * 0.6 + high_volume_signal * 0.4).min(1.0)
+        // MATHEMATICALLY CORRECT FOR 5-CLASS SYSTEM
+        let uniform_baseline = 0.2;
+
+        // Calculate calibrated confidence based on max probability
+        let prob_confidence = if max_prob >= 0.5 {
+            // Very confident volume reading
+            0.85 + (max_prob - 0.5) * 0.3
+        } else if max_prob >= 0.4 {
+            // Confident volume
+            0.7 + (max_prob - 0.4) * 1.5
+        } else if max_prob >= 0.3 {
+            // Moderate confidence
+            0.5 + (max_prob - 0.3) * 2.0
+        } else if max_prob >= uniform_baseline {
+            // Low confidence
+            0.3 + (max_prob - 0.2) * 2.0
         } else {
-            max_prob * 0.5
-        }
+            max_prob * 1.5
+        };
+
+        // High volume bonus (high/very high volume are stronger signals in crypto)
+        let volume_bonus = if high_volume_signal >= 0.6 {
+            1.12 // 12% boost for very high volume
+        } else if high_volume_signal >= 0.4 {
+            1.06 // 6% boost for moderate high volume
+        } else {
+            1.0
+        };
+
+        // Combine base confidence with enhanced analysis
+        let combined = base_confidence * 0.6 + prob_confidence * 0.4;
+        (combined * volume_bonus).clamp(0.2, 0.95)
     }
 
     /// Calculate agreement between different targets
@@ -875,6 +974,91 @@ impl EnhancedPositionSizer {
             f64::max(base_sizes[2] / volatility_adjustment, 0.1),
         ]
     }
+}
+
+/// Standalone calibration function for 5-class confidence
+/// This provides a mathematically correct mapping from raw probabilities to confidence scores
+pub fn calibrate_5_class_confidence(max_probability: f64) -> f64 {
+    // MATHEMATICAL FOUNDATION:
+    // In a 5-class system with balanced training (20% each class):
+    // - 0.20 = random guess (uniform distribution)
+    // - 0.30 = 1.5x better than random (moderate signal)
+    // - 0.40 = 2.0x better than random (good signal)
+    // - 0.50 = 2.5x better than random (strong signal)
+    // - 0.60+ = 3.0x+ better than random (very strong signal)
+
+    const UNIFORM_BASELINE: f64 = 0.2; // 1/5 for 5 classes
+
+    if max_probability < UNIFORM_BASELINE {
+        // Below random (shouldn't happen with softmax, but handle gracefully)
+        max_probability * 1.5
+    } else if max_probability >= 0.6 {
+        // Very strong signal (3x+ better than random)
+        // Maps: 0.6->0.90, 0.7->0.93, 0.8->0.96, 1.0->1.0
+        0.90 + (max_probability - 0.6) * 0.25
+    } else if max_probability >= 0.5 {
+        // Strong signal (2.5x better than random)
+        // Maps: 0.5->0.85, 0.6->0.90
+        0.85 + (max_probability - 0.5) * 0.5
+    } else if max_probability >= 0.4 {
+        // Good signal (2x better than random)
+        // Maps: 0.4->0.70, 0.5->0.85
+        0.70 + (max_probability - 0.4) * 1.5
+    } else if max_probability >= 0.3 {
+        // Moderate signal (1.5x better than random)
+        // Maps: 0.3->0.50, 0.4->0.70
+        0.50 + (max_probability - 0.3) * 2.0
+    } else {
+        // Weak signal but still better than random
+        // Maps: 0.2->0.30, 0.3->0.50
+        0.30 + (max_probability - UNIFORM_BASELINE) * 2.0
+    }
+}
+
+/// Calculate entropy-based confidence for 5-class system
+pub fn calculate_5_class_entropy_confidence(probabilities: &[f64]) -> f64 {
+    if probabilities.len() != 5 {
+        return 0.5; // Default to neutral if not 5 classes
+    }
+
+    // Calculate Shannon entropy
+    let entropy: f64 = probabilities
+        .iter()
+        .filter(|&&p| p > 0.0)
+        .map(|&p| -p * p.ln())
+        .sum();
+
+    // Maximum entropy for 5 classes = ln(5) ≈ 1.609
+    let max_entropy = 5_f64.ln();
+
+    // Convert entropy to confidence (low entropy = high confidence)
+    1.0 - (entropy / max_entropy)
+}
+
+/// Combined confidence calculation using multiple methods
+pub fn calculate_combined_5_class_confidence(probabilities: &[f64], max_probability: f64) -> f64 {
+    // Method 1: Calibrated max probability
+    let calibrated_confidence = calibrate_5_class_confidence(max_probability);
+
+    // Method 2: Entropy-based confidence
+    let entropy_confidence = calculate_5_class_entropy_confidence(probabilities);
+
+    // Method 3: Deviation from uniform
+    let uniform_baseline = 0.2;
+    let deviation_confidence = if max_probability > uniform_baseline {
+        (max_probability - uniform_baseline) / (1.0 - uniform_baseline)
+    } else {
+        0.0
+    };
+
+    // Weighted combination
+    // Calibrated: 50% (most interpretable)
+    // Entropy: 30% (information theory)
+    // Deviation: 20% (simple metric)
+    let combined =
+        calibrated_confidence * 0.5 + entropy_confidence * 0.3 + deviation_confidence * 0.2;
+
+    combined.clamp(0.25, 0.98)
 }
 
 #[cfg(test)]

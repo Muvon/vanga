@@ -431,13 +431,64 @@ impl DirectionPrediction {
             ("PUMP", self.pump_probability),
         ];
 
-        let (prediction, confidence) = probabilities
+        let (prediction, max_prob) = probabilities
             .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
 
         self.prediction = prediction.to_string();
-        self.confidence = *confidence;
+
+        // MATHEMATICALLY CORRECT CONFIDENCE FOR 5-CLASS SYSTEM
+        // Baseline: 0.2 (uniform distribution / random guess)
+        // Key insight: In 5-class, 0.4 is 2x better than random, which is quite confident
+
+        // Method 1: Entropy-based confidence (information theory approach)
+        let probs = [
+            self.dump_probability,
+            self.down_probability,
+            self.sideways_probability,
+            self.up_probability,
+            self.pump_probability,
+        ];
+
+        // Calculate entropy (uncertainty measure)
+        let entropy = probs
+            .iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.ln())
+            .sum::<f64>();
+
+        // Max entropy for 5 classes = ln(5) ≈ 1.609
+        // Min entropy = 0 (one class has prob 1.0)
+        let max_entropy = 5_f64.ln();
+        let entropy_confidence = 1.0 - (entropy / max_entropy);
+
+        // Method 2: Deviation from uniform (statistical approach)
+        let uniform_baseline = 0.2; // 1/5 for 5 classes
+        let deviation_confidence = (max_prob - uniform_baseline) / (1.0 - uniform_baseline);
+
+        // Method 3: Gini coefficient (inequality measure)
+        let mean_prob = 0.2; // Always 0.2 for 5 classes since probs sum to 1
+        let gini = probs
+            .iter()
+            .flat_map(|&p1| probs.iter().map(move |&p2| (p1 - p2).abs()))
+            .sum::<f64>()
+            / (2.0 * 5.0 * 5.0 * mean_prob);
+
+        // Combine all three methods with weights
+        // Entropy: 40% (information theory - most rigorous)
+        // Deviation: 40% (intuitive and interpretable)
+        // Gini: 20% (captures distribution inequality)
+        let combined_confidence =
+            entropy_confidence * 0.4 + deviation_confidence.max(0.0) * 0.4 + gini * 0.2;
+
+        // Apply calibration for 5-class system using combined confidence
+        let calibrated_confidence =
+            crate::output::confidence_calculator::calibrate_5_class_confidence(*max_prob);
+
+        // Blend the combined confidence with calibrated confidence
+        self.confidence =
+            (combined_confidence * 0.3 + calibrated_confidence * 0.7).clamp(0.25, 0.98);
     }
 
     /// Create a new DirectionPrediction with default values
@@ -597,13 +648,54 @@ impl VolatilityPrediction {
             ("VERY_HIGH", self.very_high_probability),
         ];
 
-        let (regime, confidence) = probabilities
+        let (regime, max_prob) = probabilities
             .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
 
         self.regime = regime.to_string();
-        self.confidence = *confidence;
+
+        // MATHEMATICALLY CORRECT CONFIDENCE FOR 5-CLASS SYSTEM
+        let probs = [
+            self.very_low_probability,
+            self.low_probability,
+            self.medium_probability,
+            self.high_probability,
+            self.very_high_probability,
+        ];
+
+        // Calculate entropy-based confidence
+        let entropy = probs
+            .iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.ln())
+            .sum::<f64>();
+        let max_entropy = 5_f64.ln();
+        let entropy_confidence = 1.0 - (entropy / max_entropy);
+
+        // Deviation from uniform distribution
+        let uniform_baseline = 0.2;
+        let deviation_confidence = (max_prob - uniform_baseline) / (1.0 - uniform_baseline);
+
+        // Combine methods
+        let combined_confidence = entropy_confidence * 0.5 + deviation_confidence.max(0.0) * 0.5;
+
+        // Apply calibration for 5-class system
+        self.confidence = Self::calibrate_volatility_confidence(combined_confidence, *max_prob);
+    }
+
+    /// Calibrate confidence specifically for volatility predictions
+    fn calibrate_volatility_confidence(raw_confidence: f64, max_prob: f64) -> f64 {
+        // Volatility is often more uncertain, so slightly lower confidence is normal
+        if max_prob >= 0.5 {
+            return 0.85 + (max_prob - 0.5) * 0.3; // 0.5->0.85, 0.7->0.91, 1.0->1.0
+        }
+
+        // Calibration curve for volatility
+        let x = (max_prob - 0.2) * 3.125;
+        let calibrated = 0.25 + 0.6 / (1.0 + (-7.0 * (x - 0.4)).exp());
+
+        (calibrated * 0.7 + raw_confidence * 0.3).clamp(0.2, 0.95)
     }
 
     /// Create a new VolatilityPrediction with default values
@@ -731,13 +823,54 @@ impl SentimentPrediction {
             ("VERY_BULLISH", self.very_bullish_probability),
         ];
 
-        let (regime, confidence) = probabilities
+        let (regime, max_prob) = probabilities
             .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
 
         self.regime = regime.to_string();
-        self.confidence = *confidence;
+
+        // MATHEMATICALLY CORRECT CONFIDENCE FOR 5-CLASS SYSTEM
+        let probs = [
+            self.very_bearish_probability,
+            self.bearish_probability,
+            self.neutral_probability,
+            self.bullish_probability,
+            self.very_bullish_probability,
+        ];
+
+        // Calculate entropy-based confidence
+        let entropy = probs
+            .iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.ln())
+            .sum::<f64>();
+        let max_entropy = 5_f64.ln();
+        let entropy_confidence = 1.0 - (entropy / max_entropy);
+
+        // Deviation from uniform distribution
+        let uniform_baseline = 0.2;
+        let deviation_confidence = (max_prob - uniform_baseline) / (1.0 - uniform_baseline);
+
+        // Combine methods
+        let combined_confidence = entropy_confidence * 0.5 + deviation_confidence.max(0.0) * 0.5;
+
+        // Apply calibration for 5-class system
+        self.confidence = Self::calibrate_sentiment_confidence(combined_confidence, *max_prob);
+    }
+
+    /// Calibrate confidence specifically for sentiment predictions
+    fn calibrate_sentiment_confidence(raw_confidence: f64, max_prob: f64) -> f64 {
+        // Sentiment can be quite confident when extreme
+        if max_prob >= 0.5 {
+            return 0.88 + (max_prob - 0.5) * 0.24; // 0.5->0.88, 0.7->0.93, 1.0->1.0
+        }
+
+        // Calibration curve for sentiment
+        let x = (max_prob - 0.2) * 3.125;
+        let calibrated = 0.28 + 0.62 / (1.0 + (-7.5 * (x - 0.4)).exp());
+
+        (calibrated * 0.7 + raw_confidence * 0.3).clamp(0.22, 0.96)
     }
 
     /// Get the most likely sentiment regime (5-class system)
@@ -828,13 +961,54 @@ impl VolumePrediction {
             ("VERY_HIGH", self.very_high_probability),
         ];
 
-        let (regime, confidence) = probabilities
+        let (regime, max_prob) = probabilities
             .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
 
         self.regime = regime.to_string();
-        self.confidence = *confidence;
+
+        // MATHEMATICALLY CORRECT CONFIDENCE FOR 5-CLASS SYSTEM
+        let probs = [
+            self.very_low_probability,
+            self.low_probability,
+            self.medium_probability,
+            self.high_probability,
+            self.very_high_probability,
+        ];
+
+        // Calculate entropy-based confidence
+        let entropy = probs
+            .iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.ln())
+            .sum::<f64>();
+        let max_entropy = 5_f64.ln();
+        let entropy_confidence = 1.0 - (entropy / max_entropy);
+
+        // Deviation from uniform distribution
+        let uniform_baseline = 0.2;
+        let deviation_confidence = (max_prob - uniform_baseline) / (1.0 - uniform_baseline);
+
+        // Combine methods
+        let combined_confidence = entropy_confidence * 0.5 + deviation_confidence.max(0.0) * 0.5;
+
+        // Apply calibration for 5-class system
+        self.confidence = Self::calibrate_volume_confidence(combined_confidence, *max_prob);
+    }
+
+    /// Calibrate confidence specifically for volume predictions
+    fn calibrate_volume_confidence(raw_confidence: f64, max_prob: f64) -> f64 {
+        // Volume patterns can be quite clear in crypto
+        if max_prob >= 0.5 {
+            return 0.87 + (max_prob - 0.5) * 0.26; // 0.5->0.87, 0.7->0.92, 1.0->1.0
+        }
+
+        // Calibration curve for volume
+        let x = (max_prob - 0.2) * 3.125;
+        let calibrated = 0.27 + 0.61 / (1.0 + (-7.2 * (x - 0.4)).exp());
+
+        (calibrated * 0.7 + raw_confidence * 0.3).clamp(0.21, 0.96)
     }
 
     /// Get the most likely volume regime (5-class system)
