@@ -107,7 +107,7 @@ impl SmartConsensus {
     }
 
     /// Find natural support/resistance levels from sequence OHLCV data
-    fn find_natural_levels_from_sequence(&self, ohlcv: &Vec<[f64; 5]>) -> Vec<f64> {
+    fn find_natural_levels_from_sequence(&self, ohlcv: &[[f64; 5]]) -> Vec<f64> {
         let mut levels = Vec::new();
 
         if ohlcv.len() < 3 {
@@ -732,7 +732,7 @@ impl SmartConsensus {
         };
 
         // Calculate probability-weighted stop distances
-        for i in 0..3 {
+        for (i, entry) in entry_levels.iter().enumerate().take(3) {
             // 1. VOLATILITY COMPONENT - Base risk from volatility model
             let volatility_stop = volatility_base_stop;
 
@@ -802,7 +802,7 @@ impl SmartConsensus {
 
             stops.push(OrderLevel {
                 price: stop_price,
-                quantity_percentage: entry_levels[i].quantity_percentage, // Match entry size
+                quantity_percentage: entry.quantity_percentage, // Match entry size
                 atr_distance,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: combined_confidence.min(0.95),

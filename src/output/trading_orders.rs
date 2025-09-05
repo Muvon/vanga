@@ -355,17 +355,21 @@ impl TradingOrders {
 
         let risk_reward = if initial_risk_reward < target_risk_reward {
             log::info!(
-                "⚠️ Initial R:R {:.2} below target {:.2}, optimizing using confidence scaling...",
+                "⚠️ Initial R:R {:.2} below target {:.2}, optimizing using adaptive scaling...",
                 initial_risk_reward,
                 target_risk_reward
             );
 
-            // Optimize using confidence-based scaling (pure prediction data)
-            // Scale exits by confidence to improve R:R
-            let confidence_scale = 1.0 + overall_confidence;
+            // Calculate how much we need to improve
+            let improvement_needed = target_risk_reward / initial_risk_reward.max(0.1);
+
+            // Step 1: Aggressive exit scaling based on improvement needed
+            // Use a more aggressive scaling factor that considers the gap to target
+            let exit_scale = 1.0 + (improvement_needed - 1.0) * 0.7; // Scale 70% of the gap
+
             for exit in &mut exit_levels {
                 let distance_from_current = (exit.price - config.current_price).abs();
-                let scaled_distance = distance_from_current * confidence_scale;
+                let scaled_distance = distance_from_current * exit_scale;
                 exit.price = if direction == "LONG" {
                     config.current_price + scaled_distance
                 } else {
@@ -375,11 +379,24 @@ impl TradingOrders {
                 exit.atr_distance = (scaled_distance / config.current_price) * 100.0;
             }
 
-            // If still not enough, scale stops by inverse confidence
-            let new_rr =
+            // Step 2: Check progress and adjust stops if needed
+            let after_exit_rr =
                 Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
-            if new_rr < target_risk_reward {
-                let stop_scale = 1.0 - (overall_confidence * 0.3).min(0.5); // Max 50% tighter
+
+            log::info!(
+                "📈 After exit adjustment: R:R improved from {:.2} to {:.2}",
+                initial_risk_reward,
+                after_exit_rr
+            );
+
+            // If still not at target, tighten stops more aggressively
+            if after_exit_rr < target_risk_reward {
+                // Calculate remaining gap and be more aggressive with stops
+                let remaining_gap = target_risk_reward / after_exit_rr;
+
+                // More aggressive stop tightening based on confidence and remaining gap
+                let stop_scale = 1.0 / remaining_gap.min(1.5); // Can tighten up to 33% more
+
                 for stop in &mut stop_levels {
                     let distance_from_entry = (stop.price - entry_levels[0].price).abs();
                     let scaled_distance = distance_from_entry * stop_scale;
@@ -391,14 +408,58 @@ impl TradingOrders {
                     // Update ATR distance
                     stop.atr_distance = (scaled_distance / config.current_price) * 100.0;
                 }
+
+                log::info!(
+                    "🛑 Stop adjustment: Applied {:.1}% tightening to improve R:R",
+                    (1.0 - stop_scale) * 100.0
+                );
+            }
+
+            // Step 3: Fine-tune if we're close but not quite there
+            let current_rr =
+                Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
+
+            if current_rr < target_risk_reward * 0.95 {
+                // Final adjustment: slightly move both exits and stops
+                let final_adjustment = target_risk_reward / current_rr;
+                let exit_fine_tune = 1.0 + (final_adjustment - 1.0) * 0.5;
+                let stop_fine_tune = 1.0 - (final_adjustment - 1.0) * 0.3;
+
+                // Fine-tune exits
+                for exit in &mut exit_levels {
+                    let distance_from_current = (exit.price - config.current_price).abs();
+                    let adjusted_distance = distance_from_current * exit_fine_tune;
+                    exit.price = if direction == "LONG" {
+                        config.current_price + adjusted_distance
+                    } else {
+                        config.current_price - adjusted_distance
+                    };
+                    exit.atr_distance = (adjusted_distance / config.current_price) * 100.0;
+                }
+
+                // Fine-tune stops
+                for stop in &mut stop_levels {
+                    let distance_from_entry = (stop.price - entry_levels[0].price).abs();
+                    let adjusted_distance = distance_from_entry * stop_fine_tune;
+                    stop.price = if direction == "LONG" {
+                        entry_levels[0].price - adjusted_distance
+                    } else {
+                        entry_levels[0].price + adjusted_distance
+                    };
+                    stop.atr_distance = (adjusted_distance / config.current_price) * 100.0;
+                }
+
+                log::info!("🎯 Fine-tuning: Applied final adjustments to reach target R:R");
             }
 
             let optimized_rr =
                 Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
+
             log::info!(
-                "✅ Optimized R:R from {:.2} to {:.2} using confidence scaling",
+                "✅ Optimized R:R from {:.2} to {:.2} (target: {:.2}) using adaptive scaling",
                 initial_risk_reward,
-                optimized_rr
+                optimized_rr,
+                target_risk_reward
             );
 
             optimized_rr
