@@ -161,26 +161,29 @@ pub struct SequenceAwareConfig<'a> {
     pub horizon_hours: f64,
 }
 
+/// Configuration for smart trading order generation
+pub struct SmartOrderConfig<'a> {
+    pub current_price: f64,
+    pub price_levels: &'a PriceLevelPrediction,
+    pub direction_pred: &'a DirectionPrediction,
+    pub volatility_pred: &'a VolatilityPrediction,
+    pub sentiment_pred: &'a SentimentPrediction,
+    pub volume_pred: &'a VolumePrediction,
+    pub confidence_calculator: &'a ConfidenceCalculator,
+    pub min_confidence: f64,
+}
+
 impl TradingOrders {
     /// Generate SMART trading orders using model-specific strengths (NO MAGIC NUMBERS)
     /// This is the NEW primary method that should be used instead of the old generate()
-    pub fn generate_smart(
-        current_price: f64,
-        price_levels: &PriceLevelPrediction,
-        direction_pred: &DirectionPrediction,
-        volatility_pred: &VolatilityPrediction,
-        sentiment_pred: &SentimentPrediction,
-        volume_pred: &VolumePrediction,
-        confidence_calculator: &ConfidenceCalculator,
-        min_confidence: f64,
-    ) -> crate::utils::error::Result<Self> {
+    pub fn generate_smart(config: SmartOrderConfig) -> crate::utils::error::Result<Self> {
         // Create SMART consensus calculator
         let consensus = SmartConsensus {
-            direction: direction_pred.clone(),
-            price_levels: price_levels.clone(),
-            volatility: volatility_pred.clone(),
-            sentiment: sentiment_pred.clone(),
-            volume: volume_pred.clone(),
+            direction: config.direction_pred.clone(),
+            price_levels: config.price_levels.clone(),
+            volatility: config.volatility_pred.clone(),
+            sentiment: config.sentiment_pred.clone(),
+            volume: config.volume_pred.clone(),
         };
 
         // Step 1: Determine direction using Direction + Sentiment models
@@ -192,13 +195,13 @@ impl TradingOrders {
             symbol: String::new(),
             timestamp: String::new(),
             horizon: String::new(),
-            current_price,
-            current_vwap_price: current_price, // Use current price as fallback
-            price_levels: Some(price_levels.clone()),
-            direction: Some(direction_pred.clone()),
-            volatility: Some(volatility_pred.clone()),
-            sentiment: Some(sentiment_pred.clone()),
-            volume: Some(volume_pred.clone()),
+            current_price: config.current_price,
+            current_vwap_price: config.current_price, // Use current price as fallback
+            price_levels: Some(config.price_levels.clone()),
+            direction: Some(config.direction_pred.clone()),
+            volatility: Some(config.volatility_pred.clone()),
+            sentiment: Some(config.sentiment_pred.clone()),
+            volume: Some(config.volume_pred.clone()),
             orders: None,    // Temporary - no orders for confidence calculation
             confidence: 0.0, // Will be calculated
             metadata: super::metadata::PredictionMetadata {
@@ -214,7 +217,9 @@ impl TradingOrders {
             },
         };
 
-        let overall_confidence = confidence_calculator.calculate_overall_confidence(&temp_result);
+        let overall_confidence = config
+            .confidence_calculator
+            .calculate_overall_confidence(&temp_result);
 
         log::info!(
             "🎯 Using ConfidenceCalculator for order generation: confidence={:.2}%",
@@ -222,11 +227,11 @@ impl TradingOrders {
         );
 
         // Step 3: Check if we have sufficient confidence to trade
-        if overall_confidence < min_confidence {
+        if overall_confidence < config.min_confidence {
             return Err(crate::utils::error::VangaError::PredictionError(format!(
                 "Insufficient model confidence: {:.1}% < {:.1}% minimum",
                 overall_confidence * 100.0,
-                min_confidence * 100.0
+                config.min_confidence * 100.0
             )));
         }
 
@@ -238,10 +243,11 @@ impl TradingOrders {
         );
 
         // Step 3: Generate entry levels using Price Levels model
-        let mut entry_levels = consensus.generate_smart_entries(current_price, &direction)?;
+        let mut entry_levels =
+            consensus.generate_smart_entries(config.current_price, &direction)?;
 
         // Step 4: Generate exit levels using Price Levels + Volume
-        let mut exit_levels = consensus.generate_smart_exits(current_price, &direction)?;
+        let mut exit_levels = consensus.generate_smart_exits(config.current_price, &direction)?;
 
         // Step 5: Generate stop levels using Volatility model
         let mut stop_levels = consensus.generate_smart_stops(&entry_levels, &direction)?;
@@ -253,10 +259,12 @@ impl TradingOrders {
         // Step 7: Calculate ATR distance as percentage from current price for each level
         // This makes ATR distance semantically correct and consistent with smart_order_generator.rs
         for level in &mut entry_levels {
-            level.atr_distance = ((level.price - current_price).abs() / current_price) * 100.0;
+            level.atr_distance =
+                ((level.price - config.current_price).abs() / config.current_price) * 100.0;
         }
         for level in &mut exit_levels {
-            level.atr_distance = ((level.price - current_price).abs() / current_price) * 100.0;
+            level.atr_distance =
+                ((level.price - config.current_price).abs() / config.current_price) * 100.0;
         }
 
         // Step 8: Calculate initial risk-reward ratio
@@ -279,7 +287,7 @@ impl TradingOrders {
                 &mut exit_levels,
                 &mut stop_levels,
                 &direction,
-                current_price,
+                config.current_price,
                 min_risk_reward,
             );
 
@@ -300,7 +308,7 @@ impl TradingOrders {
             &exit_levels,
             &stop_levels,
             &direction,
-            current_price,
+            config.current_price,
         )?;
 
         log::info!(
@@ -317,7 +325,7 @@ impl TradingOrders {
                 "  Entry {}: ${:.2} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
                 i + 1,
                 entry.price,
-                (entry.price / current_price - 1.0) * 100.0,
+                (entry.price / config.current_price - 1.0) * 100.0,
                 entry.quantity_percentage * 100.0,
                 entry.confidence
             );
@@ -329,7 +337,7 @@ impl TradingOrders {
                 "  Exit {}: ${:.2} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
                 i + 1,
                 exit.price,
-                (exit.price / current_price - 1.0) * 100.0,
+                (exit.price / config.current_price - 1.0) * 100.0,
                 exit.quantity_percentage * 100.0,
                 exit.confidence
             );
@@ -341,7 +349,7 @@ impl TradingOrders {
                 "  Stop {}: ${:.2} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
                 i + 1,
                 stop.price,
-                (stop.price / current_price - 1.0) * 100.0,
+                (stop.price / config.current_price - 1.0) * 100.0,
                 stop.quantity_percentage * 100.0,
                 stop.confidence
             );
@@ -354,7 +362,7 @@ impl TradingOrders {
             stop_levels,
             total_position_size: 1.0,
             risk_reward_ratio: risk_reward,
-            atr_multiplier: volatility_pred.position_size_multiplier,
+            atr_multiplier: config.volatility_pred.position_size_multiplier,
             dynamic_sizing: true,
             note: if risk_reward < min_risk_reward {
                 Some(format!(

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use vanga::output::confidence_calculator::{ConfidenceCalculator, ConfidenceConfig};
 use vanga::output::prediction_types::*;
 use vanga::output::smart_order_generator::SmartConsensus;
-use vanga::output::trading_orders::TradingOrders;
+use vanga::output::trading_orders::{SmartOrderConfig, TradingOrders};
 use vanga::output::PriceBin;
 
 /// Create test price levels with realistic bins
@@ -158,17 +158,17 @@ fn test_smart_order_generation_no_magic_numbers() {
     let confidence_calculator = ConfidenceCalculator::new(confidence_config);
 
     // Generate SMART orders
-    let orders = TradingOrders::generate_smart(
+    let config = SmartOrderConfig {
         current_price,
-        &price_levels,
-        &direction,
-        &volatility,
-        &sentiment,
-        &volume,
-        &confidence_calculator,
-        0.2,
-    )
-    .unwrap();
+        price_levels: &price_levels,
+        direction_pred: &direction,
+        volatility_pred: &volatility,
+        sentiment_pred: &sentiment,
+        volume_pred: &volume,
+        confidence_calculator: &confidence_calculator,
+        min_confidence: 0.2,
+    };
+    let orders = TradingOrders::generate_smart(config).unwrap();
 
     // Verify no magic numbers - all confidence values should come from model outputs
     for entry in &orders.entry_levels {
@@ -216,17 +216,17 @@ fn test_short_order_validation() {
     let confidence_calculator = ConfidenceCalculator::new(confidence_config);
 
     // Generate SHORT orders (direction shows down probability > up)
-    let orders = TradingOrders::generate_smart(
+    let config = SmartOrderConfig {
         current_price,
-        &price_levels,
-        &direction,
-        &volatility,
-        &sentiment,
-        &volume,
-        &confidence_calculator,
-        0.2,
-    )
-    .unwrap();
+        price_levels: &price_levels,
+        direction_pred: &direction,
+        volatility_pred: &volatility,
+        sentiment_pred: &sentiment,
+        volume_pred: &volume,
+        confidence_calculator: &confidence_calculator,
+        min_confidence: 0.2,
+    };
+    let orders = TradingOrders::generate_smart(config).unwrap();
 
     if orders.direction == "SHORT" {
         // Verify SHORT order constraints
@@ -302,17 +302,17 @@ fn test_long_order_validation() {
     let confidence_calculator = ConfidenceCalculator::new(confidence_config);
 
     // Generate LONG orders
-    let orders = TradingOrders::generate_smart(
+    let config = SmartOrderConfig {
         current_price,
-        &price_levels,
-        &direction,
-        &volatility,
-        &sentiment,
-        &volume,
-        &confidence_calculator,
-        0.2,
-    )
-    .unwrap();
+        price_levels: &price_levels,
+        direction_pred: &direction,
+        volatility_pred: &volatility,
+        sentiment_pred: &sentiment,
+        volume_pred: &volume,
+        confidence_calculator: &confidence_calculator,
+        min_confidence: 0.2,
+    };
+    let orders = TradingOrders::generate_smart(config).unwrap();
 
     if orders.direction == "LONG" {
         // Verify LONG order constraints
@@ -661,17 +661,17 @@ fn test_atr_distance_semantic_correctness() {
     let confidence_calculator = ConfidenceCalculator::new(confidence_config);
 
     // Generate orders
-    let orders = TradingOrders::generate_smart(
+    let config = SmartOrderConfig {
         current_price,
-        &price_levels,
-        &direction,
-        &volatility,
-        &sentiment,
-        &volume,
-        &confidence_calculator,
-        0.2,
-    )
-    .unwrap();
+        price_levels: &price_levels,
+        direction_pred: &direction,
+        volatility_pred: &volatility,
+        sentiment_pred: &sentiment,
+        volume_pred: &volume,
+        confidence_calculator: &confidence_calculator,
+        min_confidence: 0.2,
+    };
+    let orders = TradingOrders::generate_smart(config).unwrap();
 
     // Verify ATR distance is semantically correct for all levels (with reasonable tolerance)
     for (i, entry) in orders.entry_levels.iter().enumerate() {

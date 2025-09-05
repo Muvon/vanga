@@ -607,16 +607,17 @@ impl OutputFormatter {
                     log::info!("🎯 Using SMART order generation with all 5 models");
 
                     // Pass the confidence calculator to generate_smart
-                    match crate::output::trading_orders::TradingOrders::generate_smart(
+                    let config = crate::output::trading_orders::SmartOrderConfig {
                         current_price,
-                        &price_levels,
-                        &direction,
-                        &volatility,
-                        &sentiment,
-                        &volume,
-                        &self.confidence_calculator,
-                        self.min_confidence,
-                    ) {
+                        price_levels: &price_levels,
+                        direction_pred: &direction,
+                        volatility_pred: &volatility,
+                        sentiment_pred: &sentiment,
+                        volume_pred: &volume,
+                        confidence_calculator: &self.confidence_calculator,
+                        min_confidence: self.min_confidence,
+                    };
+                    match crate::output::trading_orders::TradingOrders::generate_smart(config) {
                         Ok(smart_orders) => {
                             log::info!(
                                 "✅ Generated SMART {} orders with R:R={:.2}",
