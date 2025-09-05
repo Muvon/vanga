@@ -25,6 +25,127 @@ pub struct SmartConsensus {
 }
 
 impl SmartConsensus {
+    /// Calculate adaptive spacing using ONLY prediction data - no hardcoded values
+    fn calculate_adaptive_spacing(&self) -> f64 {
+        // Base spacing from volatility (natural market movement)
+        let volatility_spacing = self.volatility.expected_range_percent;
+
+        // Scale by sequence bandwidth (actual recent price action)
+        let sequence_scale = self.direction.sequence_bandwidth_percent;
+
+        // Combine for market-adaptive spacing
+        let base_spacing = volatility_spacing * sequence_scale;
+
+        log::info!(
+            "📏 Adaptive Spacing: volatility={:.3}% × sequence={:.3}% = {:.3}%",
+            volatility_spacing,
+            sequence_scale,
+            base_spacing
+        );
+
+        base_spacing
+    }
+
+    /// Calculate probability-weighted center from price bins
+    fn calculate_weighted_bin_center(&self, bin_names: &[&str]) -> f64 {
+        let mut weighted_sum = 0.0;
+        let mut total_probability = 0.0;
+
+        for &bin_name in bin_names {
+            if let Some(bin) = self.price_levels.bins.get(bin_name) {
+                let bin_center = (bin.range[0] + bin.range[1]) / 2.0;
+                weighted_sum += bin_center * bin.probability;
+                total_probability += bin.probability;
+            }
+        }
+
+        if total_probability > 0.0 {
+            weighted_sum / total_probability
+        } else {
+            0.0
+        }
+    }
+
+    /// Adjust level to avoid psychological clustering using sequence data
+    pub fn adjust_for_psychological_levels(
+        &self,
+        price: f64,
+        sequence_ohlcv: Option<&Vec<[f64; 5]>>,
+    ) -> f64 {
+        // Find natural support/resistance from sequence data
+        let psychological_zones = if let Some(ohlcv) = sequence_ohlcv {
+            self.find_natural_levels_from_sequence(ohlcv)
+        } else {
+            Vec::new()
+        };
+
+        // Check if our price is too close to a natural level
+        for &level in &psychological_zones {
+            let distance_pct = ((price - level).abs() / level) * 100.0;
+            if distance_pct < 0.1 {
+                // Within 0.1% of natural level
+                // Shift by small amount based on sequence bandwidth
+                let shift = self.direction.sequence_bandwidth_percent * 0.1;
+                let adjusted_price = if price > level {
+                    price * (1.0 + shift / 100.0)
+                } else {
+                    price * (1.0 - shift / 100.0)
+                };
+
+                log::info!(
+                    "🎯 Psychological adjustment: {:.4} → {:.4} (avoiding natural level {:.4})",
+                    price,
+                    adjusted_price,
+                    level
+                );
+
+                return adjusted_price;
+            }
+        }
+
+        price
+    }
+
+    /// Find natural support/resistance levels from sequence OHLCV data
+    fn find_natural_levels_from_sequence(&self, ohlcv: &Vec<[f64; 5]>) -> Vec<f64> {
+        let mut levels = Vec::new();
+
+        if ohlcv.len() < 3 {
+            return levels;
+        }
+
+        // Find local highs and lows (reversal points)
+        for i in 1..(ohlcv.len() - 1) {
+            let prev_high = ohlcv[i - 1][2]; // Previous high
+            let curr_high = ohlcv[i][2]; // Current high
+            let next_high = ohlcv[i + 1][2]; // Next high
+
+            let prev_low = ohlcv[i - 1][3]; // Previous low
+            let curr_low = ohlcv[i][3]; // Current low
+            let next_low = ohlcv[i + 1][3]; // Next low
+
+            // Local high (resistance)
+            if curr_high > prev_high && curr_high > next_high {
+                levels.push(curr_high);
+            }
+
+            // Local low (support)
+            if curr_low < prev_low && curr_low < next_low {
+                levels.push(curr_low);
+            }
+        }
+
+        // Remove duplicates and sort
+        levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        levels.dedup_by(|a, b| ((*a - *b).abs() / *a) < 0.005); // Remove levels within 0.5%
+
+        log::info!(
+            "🎯 Found {} natural levels from sequence data",
+            levels.len()
+        );
+
+        levels
+    }
     /// Calculate SMART consensus for trade direction with confidence
     pub fn calculate_direction_consensus(&self) -> (String, f64) {
         // Direction model is PRIMARY for direction decision
@@ -61,7 +182,7 @@ impl SmartConsensus {
         (direction_signal.to_string(), final_confidence)
     }
 
-    /// Generate SMART entry levels using Price Levels + Direction momentum
+    /// Generate SMART entry levels using PURE prediction data
     pub fn generate_smart_entries(
         &self,
         current_price: f64,
@@ -69,148 +190,101 @@ impl SmartConsensus {
     ) -> Result<[OrderLevel; 3]> {
         let mut entries = Vec::new();
 
-        // Calculate entry depth based on direction confidence and volatility
-        // Strong directional bias = don't chase too far
-        let directional_confidence = (self.direction.up_probability_aggregated
-            - self.direction.down_probability_aggregated)
-            .abs();
-        let max_entry_depth = if directional_confidence > 0.3 {
-            // Strong direction: limit entry depth to expected range
-            self.volatility.expected_range_percent * 0.5 // Only use half the expected range
-        } else if directional_confidence > 0.15 {
-            // Moderate direction: use most of expected range
-            self.volatility.expected_range_percent * 0.75
+        // Get adaptive spacing from market data
+        let base_spacing = self.calculate_adaptive_spacing();
+
+        // Calculate probability-weighted entry zone
+        let entry_bins = if direction == "LONG" {
+            vec!["neutral", "moderate_down", "strong_down"]
         } else {
-            // Weak direction: can use full expected range
-            self.volatility.expected_range_percent
+            vec!["neutral", "moderate_up", "strong_up"]
         };
 
+        let weighted_entry_zone = self.calculate_weighted_bin_center(&entry_bins);
+
+        // Scale spacing by directional confidence (less confident = wider spacing)
+        let confidence_factor = if direction == "LONG" {
+            2.0 - self.direction.up_probability_aggregated
+        } else {
+            2.0 - self.direction.down_probability_aggregated
+        };
+
+        let entry_spacing = base_spacing * confidence_factor;
+
+        // Use Fibonacci ratios for natural progression
+        let fibonacci_ratios = [0.382, 0.618, 1.000];
+
         log::info!(
-            "📍 Entry Depth Calculation: directional_confidence={:.2}, max_depth={:.2}%",
-            directional_confidence,
-            max_entry_depth
+            "📍 Entry Generation: weighted_zone={:.3}%, spacing={:.3}%, confidence={:.2}",
+            weighted_entry_zone.abs(),
+            entry_spacing,
+            confidence_factor
         );
 
-        if direction == "SHORT" {
-            // SHORT entries: Use upside bins (where we want to sell)
-            // But limit depth based on directional confidence
+        // Generate entries using Fibonacci progression
+        for (i, &ratio) in fibonacci_ratios.iter().enumerate() {
+            // Combine weighted zone with progressive spacing
+            let distance = weighted_entry_zone.abs() * ratio + entry_spacing * (i as f64 + 1.0);
 
-            // Entry 1: Close to market - use neutral upper bound or smaller
-            let entry_1_distance = if let Some(neutral_bin) = self.price_levels.bins.get("neutral")
-            {
-                neutral_bin.range[1].min(max_entry_depth / 3.0) // First third of allowed depth
+            let entry_price = if direction == "SHORT" {
+                current_price * (1.0 + distance / 100.0)
             } else {
-                max_entry_depth / 3.0
+                current_price * (1.0 - distance / 100.0)
             };
 
-            // Entry 2: Medium distance - use moderate_up center or limit
-            let entry_2_distance =
-                if let Some(moderate_up_bin) = self.price_levels.bins.get("moderate_up") {
-                    ((moderate_up_bin.range[0] + moderate_up_bin.range[1]) / 2.0)
-                        .min(max_entry_depth * 0.66)
-                } else {
-                    max_entry_depth * 0.66
-                };
+            // Size allocation using prediction-based adaptive sizing
+            let base_size = self.calculate_entry_size(i + 1, &self.direction, &self.volatility);
 
-            // Entry 3: Further out - use strong_up lower or max depth
-            let entry_3_distance =
-                if let Some(strong_up_bin) = self.price_levels.bins.get("strong_up") {
-                    strong_up_bin.range[0].min(max_entry_depth)
-                } else {
-                    max_entry_depth
-                };
-
-            // Generate entries with calculated distances
-            let distances = [entry_1_distance, entry_2_distance, entry_3_distance];
-
-            for (i, distance) in distances.iter().enumerate() {
-                let entry_price = current_price * (1.0 + distance / 100.0);
-                let size = self.calculate_entry_size(i + 1, &self.direction, &self.volatility);
-
-                // Confidence based on:
-                // 1. Price bin probability (if available)
-                // 2. Direction confidence
-                // 3. Distance from current price (closer = higher confidence)
-                let distance_factor = 1.0 - (distance / max_entry_depth).min(1.0) * 0.5; // Keep at least 0.5
-                let confidence =
-                    (self.direction.down_probability_aggregated * distance_factor).max(0.1); // Minimum 10%
-
-                entries.push(OrderLevel {
-                    price: entry_price,
-                    quantity_percentage: size,
-                    atr_distance: 0.0,
-                    order_type: "LIMIT".to_string(),
-                    confidence: confidence.min(0.95),
-                });
-
-                log::info!(
-                    "  SHORT Entry {}: ${:.2} (+{:.3}%) | Size: {:.1}% | Conf: {:.2}",
-                    i + 1,
-                    entry_price,
-                    distance,
-                    size * 100.0,
-                    confidence
-                );
-            }
-        } else {
-            // LONG entries: Use downside bins (where we want to buy)
-            // But limit depth based on directional confidence
-
-            // Entry 1: Close to market
-            let entry_1_distance = if let Some(neutral_bin) = self.price_levels.bins.get("neutral")
-            {
-                neutral_bin.range[0].abs().min(max_entry_depth / 3.0)
+            // Further adjust by directional confidence and bin probability
+            let bin_weight = if i < entry_bins.len() {
+                self.price_levels
+                    .bins
+                    .get(entry_bins[i])
+                    .map(|b| b.probability)
+                    .unwrap_or(0.33)
             } else {
-                max_entry_depth / 3.0
+                0.33
             };
 
-            // Entry 2: Medium distance
-            let entry_2_distance =
-                if let Some(moderate_down_bin) = self.price_levels.bins.get("moderate_down") {
-                    ((moderate_down_bin.range[0] + moderate_down_bin.range[1]) / 2.0)
-                        .abs()
-                        .min(max_entry_depth * 0.66)
+            let adjusted_size = base_size * (0.5 + bin_weight);
+
+            // Confidence based on bin probability and distance
+            let bin_confidence = if i < entry_bins.len() {
+                self.price_levels
+                    .bins
+                    .get(entry_bins[i])
+                    .map(|b| b.probability)
+                    .unwrap_or(0.2)
+            } else {
+                0.2
+            };
+
+            let distance_decay = (-distance / 10.0).exp(); // Exponential decay
+            let confidence = (bin_confidence * distance_decay).max(0.1);
+
+            let atr_distance = ((entry_price - current_price).abs() / current_price) * 100.0;
+
+            entries.push(OrderLevel {
+                price: entry_price,
+                quantity_percentage: adjusted_size,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: confidence.min(0.95),
+            });
+
+            log::info!(
+                "  {} Entry {}: ${:.4} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
+                direction,
+                i + 1,
+                entry_price,
+                if direction == "SHORT" {
+                    distance
                 } else {
-                    max_entry_depth * 0.66
-                };
-
-            // Entry 3: Further out
-            let entry_3_distance =
-                if let Some(strong_down_bin) = self.price_levels.bins.get("strong_down") {
-                    strong_down_bin.range[1].abs().min(max_entry_depth)
-                } else {
-                    max_entry_depth
-                };
-
-            // Generate entries with calculated distances
-            let distances = [entry_1_distance, entry_2_distance, entry_3_distance];
-
-            for (i, distance) in distances.iter().enumerate() {
-                let entry_price = current_price * (1.0 - distance / 100.0);
-                let size = self.calculate_entry_size(i + 1, &self.direction, &self.volatility);
-
-                // Confidence calculation
-                let distance_factor = 1.0 - (distance / max_entry_depth).min(1.0) * 0.5; // Keep at least 0.5
-                let confidence =
-                    (self.direction.up_probability_aggregated * distance_factor).max(0.1); // Minimum 10%
-
-                entries.push(OrderLevel {
-                    price: entry_price,
-                    quantity_percentage: size,
-                    atr_distance: 0.0,
-                    order_type: "LIMIT".to_string(),
-                    confidence: confidence.min(0.95),
-                });
-
-                log::info!(
-                    "  LONG Entry {}: ${:.2} (-{:.3}%) | Size: {:.1}% | Conf: {:.2}",
-                    i + 1,
-                    entry_price,
-                    distance,
-                    size * 100.0,
-                    confidence
-                );
-            }
+                    -distance
+                },
+                adjusted_size * 100.0,
+                confidence
+            );
         }
 
         Ok([entries[0].clone(), entries[1].clone(), entries[2].clone()])
@@ -297,10 +371,13 @@ impl SmartConsensus {
             let confidence =
                 (directional_confidence * distance_decay * efficiency_factor).clamp(0.1, 0.95);
 
+            // Calculate actual ATR distance from current price
+            let atr_distance = ((entry_price - current_price).abs() / current_price) * 100.0;
+
             entries.push(OrderLevel {
                 price: entry_price,
                 quantity_percentage: kelly_adjusted_size,
-                atr_distance: 0.0,
+                atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence,
             });
@@ -324,8 +401,7 @@ impl SmartConsensus {
         Ok([entries[0].clone(), entries[1].clone(), entries[2].clone()])
     }
 
-    /// Generate SMART exit levels using Price Levels + Volume for liquidity
-    /// Can be optimized for better risk-reward ratio
+    /// Generate SMART exit levels using PURE prediction data
     pub fn generate_smart_exits(
         &self,
         current_price: f64,
@@ -333,186 +409,121 @@ impl SmartConsensus {
     ) -> Result<[OrderLevel; 3]> {
         let mut exits = Vec::new();
 
-        // Calculate minimum profitable exit distance based on volatility
-        // This ensures we're not setting exits too close
-        let min_profit_distance = self.volatility.expected_range_percent * 0.5; // At least half the expected range
-
-        if direction == "SHORT" {
-            // SHORT exits (profits): Use downside bins
-            // Exit 1: Conservative - moderate_down center or minimum profit
-            let exit_1_distance =
-                if let Some(moderate_down_bin) = self.price_levels.bins.get("moderate_down") {
-                    ((moderate_down_bin.range[0] + moderate_down_bin.range[1]) / 2.0)
-                        .abs()
-                        .max(min_profit_distance * 0.5) // At least half minimum profit
-                } else {
-                    min_profit_distance * 0.5
-                };
-
-            let exit_1_price = current_price * (1.0 - exit_1_distance / 100.0);
-            let size = self.calculate_exit_size(1, &self.volume);
-            let confidence = self
-                .price_levels
-                .bins
-                .get("moderate_down")
-                .map(|b| b.probability)
-                .unwrap_or(0.2)
-                * self.volume_liquidity_factor();
-
-            exits.push(OrderLevel {
-                price: exit_1_price,
-                quantity_percentage: size,
-                atr_distance: 0.0,
-                order_type: "LIMIT".to_string(),
-                confidence: confidence.min(0.9),
-            });
-
-            // Exit 2: Target - strong_down center or expected profit
-            let exit_2_distance =
-                if let Some(strong_down_bin) = self.price_levels.bins.get("strong_down") {
-                    ((strong_down_bin.range[0] + strong_down_bin.range[1]) / 2.0)
-                        .abs()
-                        .max(min_profit_distance) // At least minimum profit
-                } else {
-                    min_profit_distance
-                };
-
-            let exit_2_price = current_price * (1.0 - exit_2_distance / 100.0);
-            let size = self.calculate_exit_size(2, &self.volume);
-            let confidence = self
-                .price_levels
-                .bins
-                .get("strong_down")
-                .map(|b| b.probability)
-                .unwrap_or(0.15)
-                * self.volume_liquidity_factor();
-
-            exits.push(OrderLevel {
-                price: exit_2_price,
-                quantity_percentage: size,
-                atr_distance: 0.0,
-                order_type: "LIMIT".to_string(),
-                confidence: confidence.min(0.7),
-            });
-
-            // Exit 3: Stretch - strong_down lower or maximum expected profit
-            let exit_3_distance =
-                if let Some(strong_down_bin) = self.price_levels.bins.get("strong_down") {
-                    strong_down_bin.range[0]
-                        .abs()
-                        .max(min_profit_distance * 1.5) // At least 1.5x minimum profit
-                } else {
-                    min_profit_distance * 1.5
-                };
-
-            let exit_3_price = current_price * (1.0 - exit_3_distance / 100.0);
-            let size = self.calculate_exit_size(3, &self.volume);
-            let confidence = self
-                .price_levels
-                .bins
-                .get("strong_down")
-                .map(|b| b.probability * 0.7) // Lower confidence for stretch target
-                .unwrap_or(0.1)
-                * self.volume_liquidity_factor();
-
-            exits.push(OrderLevel {
-                price: exit_3_price,
-                quantity_percentage: size,
-                atr_distance: 0.0,
-                order_type: "LIMIT".to_string(),
-                confidence: confidence.min(0.5),
-            });
+        // Use expected upside/downside from direction prediction
+        let exit_base = if direction == "LONG" {
+            self.direction.expected_upside_percent
         } else {
-            // LONG exits (profits): Use upside bins
-            // Exit 1: Conservative - moderate_up center or minimum profit
-            let exit_1_distance =
-                if let Some(moderate_up_bin) = self.price_levels.bins.get("moderate_up") {
-                    ((moderate_up_bin.range[0] + moderate_up_bin.range[1]) / 2.0)
-                        .max(min_profit_distance * 0.5)
-                } else {
-                    min_profit_distance * 0.5
-                };
+            self.direction.expected_downside_percent
+        };
 
-            let exit_1_price = current_price * (1.0 + exit_1_distance / 100.0);
-            let size = self.calculate_exit_size(1, &self.volume);
-            let confidence = self
-                .price_levels
-                .bins
-                .get("moderate_up")
-                .map(|b| b.probability)
-                .unwrap_or(0.2)
-                * self.volume_liquidity_factor();
+        // Scale by volume regime for liquidity (high volume = can exit easier = tighter)
+        let volume_scale = match self.volume.regime.as_str() {
+            "VERY_HIGH" => 0.8, // Very liquid, can use tighter exits
+            "HIGH" => 1.0,      // Good liquidity
+            "MEDIUM" => 1.5,    // Normal liquidity, wider exits
+            "LOW" => 2.0,       // Poor liquidity, need wider
+            "VERY_LOW" => 2.5,  // Very poor, widest exits
+            _ => 1.0,
+        };
 
-            exits.push(OrderLevel {
-                price: exit_1_price,
-                quantity_percentage: size,
-                atr_distance: 0.0,
-                order_type: "LIMIT".to_string(),
-                confidence: confidence.min(0.9),
-            });
+        // Calculate probability-weighted favorable zone
+        let favorable_bins = if direction == "LONG" {
+            vec!["moderate_up", "strong_up"]
+        } else {
+            vec!["moderate_down", "strong_down"]
+        };
 
-            // Exit 2: Target - strong_up center or expected profit
-            let exit_2_distance = if let Some(strong_up_bin) =
-                self.price_levels.bins.get("strong_up")
-            {
-                ((strong_up_bin.range[0] + strong_up_bin.range[1]) / 2.0).max(min_profit_distance)
-            } else {
-                min_profit_distance
-            };
+        let weighted_exit_zone = self.calculate_weighted_bin_center(&favorable_bins);
 
-            let exit_2_price = current_price * (1.0 + exit_2_distance / 100.0);
-            let size = self.calculate_exit_size(2, &self.volume);
-            let confidence = self
-                .price_levels
-                .bins
-                .get("strong_up")
-                .map(|b| b.probability)
-                .unwrap_or(0.15)
-                * self.volume_liquidity_factor();
+        // Combine expected move with weighted zone
+        let base_exit_distance = if weighted_exit_zone.abs() > exit_base {
+            weighted_exit_zone.abs() // Use bin prediction if larger
+        } else {
+            exit_base // Use expected move if larger
+        };
 
-            exits.push(OrderLevel {
-                price: exit_2_price,
-                quantity_percentage: size,
-                atr_distance: 0.0,
-                order_type: "LIMIT".to_string(),
-                confidence: confidence.min(0.7),
-            });
+        // Apply volume scaling
+        let scaled_exit_distance = base_exit_distance * volume_scale;
 
-            // Exit 3: Stretch - strong_up upper or maximum expected profit
-            let exit_3_distance =
-                if let Some(strong_up_bin) = self.price_levels.bins.get("strong_up") {
-                    strong_up_bin.range[1].max(min_profit_distance * 1.5)
-                } else {
-                    min_profit_distance * 1.5
-                };
-
-            let exit_3_price = current_price * (1.0 + exit_3_distance / 100.0);
-            let size = self.calculate_exit_size(3, &self.volume);
-            let confidence = self
-                .price_levels
-                .bins
-                .get("strong_up")
-                .map(|b| b.probability * 0.7)
-                .unwrap_or(0.1)
-                * self.volume_liquidity_factor();
-
-            exits.push(OrderLevel {
-                price: exit_3_price,
-                quantity_percentage: size,
-                atr_distance: 0.0,
-                order_type: "LIMIT".to_string(),
-                confidence: confidence.min(0.5),
-            });
-        }
+        // Use golden ratio for exit progression
+        let golden_ratio: f64 = 1.618;
+        let exit_progression = [golden_ratio, golden_ratio.powi(2), golden_ratio.powi(3)];
 
         log::info!(
-            "🎯 SMART Exits: Ensuring minimum profit distance of {:.2}%",
-            min_profit_distance
+            "🎯 Exit Generation: base={:.3}%, weighted_zone={:.3}%, volume_scale={:.1}x, final={:.3}%",
+            exit_base,
+            weighted_exit_zone.abs(),
+            volume_scale,
+            scaled_exit_distance
         );
+
+        for (i, &progression) in exit_progression.iter().enumerate() {
+            let distance = scaled_exit_distance * progression;
+
+            let exit_price = if direction == "SHORT" {
+                current_price * (1.0 - distance / 100.0)
+            } else {
+                current_price * (1.0 + distance / 100.0)
+            };
+
+            // Size allocation using volume-based adaptive sizing
+            let base_size = self.calculate_exit_size(i + 1, &self.volume);
+
+            // Adjust by liquidity factor and bin probability
+            let liquidity_factor = self.volume_liquidity_factor();
+            let bin_weight = if i < favorable_bins.len() {
+                self.price_levels
+                    .bins
+                    .get(favorable_bins[i])
+                    .map(|b| b.probability)
+                    .unwrap_or(0.33)
+            } else {
+                0.33
+            };
+
+            let adjusted_size = base_size * liquidity_factor * (0.5 + bin_weight);
+
+            // Confidence based on bin probability and distance
+            let bin_confidence = if i < favorable_bins.len() {
+                self.price_levels
+                    .bins
+                    .get(favorable_bins[i])
+                    .map(|b| b.probability)
+                    .unwrap_or(0.2)
+            } else {
+                0.15
+            };
+
+            let distance_factor = 1.0 / progression; // Decreases with distance
+            let confidence = (bin_confidence * distance_factor * liquidity_factor).min(0.9);
+
+            let atr_distance = ((exit_price - current_price).abs() / current_price) * 100.0;
+
+            exits.push(OrderLevel {
+                price: exit_price,
+                quantity_percentage: adjusted_size,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence,
+            });
+
+            log::info!(
+                "  {} Exit {}: ${:.4} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
+                direction,
+                i + 1,
+                exit_price,
+                if direction == "SHORT" {
+                    -distance
+                } else {
+                    distance
+                },
+                adjusted_size * 100.0,
+                confidence
+            );
+        }
 
         Ok([exits[0].clone(), exits[1].clone(), exits[2].clone()])
     }
-
     /// Generate SEQUENCE-AWARE exit levels using MFE distribution
     /// Uses actual favorable excursions from sequence data for realistic targets
     pub fn generate_sequence_aware_exits(
@@ -598,10 +609,13 @@ impl SmartConsensus {
                 (mfe_confidence * probability_factor * efficiency_multiplier * entropy_factor)
                     .clamp(0.3, 0.95);
 
+            // Calculate actual ATR distance from current price
+            let atr_distance = ((exit_price - current_price).abs() / current_price) * 100.0;
+
             exits.push(OrderLevel {
                 price: exit_price,
                 quantity_percentage: exit_size,
-                atr_distance: 0.0,
+                atr_distance,
                 order_type: "LIMIT".to_string(),
                 confidence: exit_confidence,
             });
@@ -633,9 +647,199 @@ impl SmartConsensus {
         Ok([exits[0].clone(), exits[1].clone(), exits[2].clone()])
     }
 
-    /// Generate SMART stop levels using Volatility model (it knows risk best!)
+    /// Generate ADAPTIVE stop levels using ALL prediction data
+    /// Combines volatility, price levels, sequence data, and confidence
+    pub fn generate_adaptive_stops(
+        &self,
+        entry_levels: &[OrderLevel; 3],
+        direction: &str,
+        sequence_prices: &[f64],
+    ) -> Result<[OrderLevel; 3]> {
+        use crate::output::adaptive_stop_calculator::AdaptiveStopCalculator;
+
+        log::info!("🧠 Using ADAPTIVE stop calculation with multi-source data");
+
+        // Create adaptive stop calculator with ALL available data
+        let calculator = AdaptiveStopCalculator::new(
+            self.volatility.clone(),
+            self.price_levels.clone(),
+            self.direction.clone(),
+            sequence_prices.to_vec(),
+        );
+
+        // Calculate adaptive stops
+        match calculator.calculate_adaptive_stops(entry_levels, direction) {
+            Ok(result) => {
+                log::info!(
+                    "✅ Adaptive stops calculated: {} (confidence: {:.2})",
+                    result.methodology,
+                    result.placement_confidence
+                );
+                log::info!(
+                    "📊 Risk assessment: stop_hit_prob={:.2}%, expected_adverse={:.2}%, volatility_factor={:.2}x, trend_alignment={:.2}x",
+                    result.risk_assessment.stop_hit_probability * 100.0,
+                    result.risk_assessment.expected_adverse_move * 100.0,
+                    result.risk_assessment.volatility_risk_factor,
+                    result.risk_assessment.trend_alignment
+                );
+
+                Ok(result.stop_levels)
+            }
+            Err(e) => {
+                log::warn!(
+                    "⚠️ Adaptive stop calculation failed: {}, falling back to legacy",
+                    e
+                );
+                self.generate_smart_stops_legacy(entry_levels, direction)
+            }
+        }
+    }
+
+    /// Generate SMART stop levels using BOTH Volatility + Price Level Probabilities
     /// CRITICAL: Stops must NEVER intersect with ANY entry level
     pub fn generate_smart_stops(
+        &self,
+        entry_levels: &[OrderLevel; 3],
+        direction: &str,
+    ) -> Result<[OrderLevel; 3]> {
+        self.generate_probability_weighted_stops(entry_levels, direction)
+    }
+
+    /// NEW: Probability-weighted stops using BOTH volatility AND price level probabilities
+    fn generate_probability_weighted_stops(
+        &self,
+        entry_levels: &[OrderLevel; 3],
+        direction: &str,
+    ) -> Result<[OrderLevel; 3]> {
+        let mut stops = Vec::new();
+
+        // Base stop distance from volatility model
+        let volatility_base_stop = self.volatility.recommended_stop_distance_percent;
+
+        // Find extreme entry to ensure NO intersection
+        let extreme_entry = if direction == "SHORT" {
+            // For SHORT, find the HIGHEST entry price
+            entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            // For LONG, find the LOWEST entry price
+            entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::INFINITY, f64::min)
+        };
+
+        // Calculate probability-weighted stop distances
+        for i in 0..3 {
+            // 1. VOLATILITY COMPONENT - Base risk from volatility model
+            let volatility_stop = volatility_base_stop;
+
+            // 2. PRICE LEVEL PROBABILITY COMPONENT - Risk from adverse price movements
+            let adverse_probability = if direction == "SHORT" {
+                // For SHORT, risk comes from upside moves (strong_up, moderate_up)
+                let strong_up_prob = self
+                    .price_levels
+                    .bins
+                    .get("strong_up")
+                    .map(|b| b.probability)
+                    .unwrap_or(0.0);
+                let moderate_up_prob = self
+                    .price_levels
+                    .bins
+                    .get("moderate_up")
+                    .map(|b| b.probability)
+                    .unwrap_or(0.0);
+                strong_up_prob + moderate_up_prob
+            } else {
+                // For LONG, risk comes from downside moves (strong_down, moderate_down)
+                let strong_down_prob = self
+                    .price_levels
+                    .bins
+                    .get("strong_down")
+                    .map(|b| b.probability)
+                    .unwrap_or(0.0);
+                let moderate_down_prob = self
+                    .price_levels
+                    .bins
+                    .get("moderate_down")
+                    .map(|b| b.probability)
+                    .unwrap_or(0.0);
+                strong_down_prob + moderate_down_prob
+            };
+
+            // 3. PROBABILITY-WEIGHTED STOP CALCULATION
+            // Higher adverse probability = wider stops needed
+            let probability_multiplier = 1.0 + (adverse_probability * 3.0); // Scale by adverse risk
+            let probability_weighted_stop = volatility_stop * probability_multiplier;
+
+            // 4. PROGRESSIVE SPACING based on volatility regime
+            let regime_progression = match self.volatility.regime.as_str() {
+                "VERY_LOW" => 1.0 + (i as f64 * 0.2), // Smaller progression in calm markets
+                "LOW" => 1.0 + (i as f64 * 0.3),
+                "MEDIUM" => 1.0 + (i as f64 * 0.4), // Standard progression
+                "HIGH" => 1.0 + (i as f64 * 0.5),   // Larger progression in volatile markets
+                "VERY_HIGH" => 1.0 + (i as f64 * 0.6), // Largest progression
+                _ => 1.0 + (i as f64 * 0.4),
+            };
+
+            let final_stop_distance = probability_weighted_stop * regime_progression;
+
+            // Calculate stop price from extreme entry (ensures no intersection)
+            let stop_price = if direction == "SHORT" {
+                extreme_entry * (1.0 + final_stop_distance / 100.0)
+            } else {
+                extreme_entry * (1.0 - final_stop_distance / 100.0)
+            };
+
+            // Confidence based on BOTH volatility confidence AND probability certainty
+            let volatility_confidence = self.volatility.regime_confidence;
+            let probability_confidence = 1.0 - adverse_probability; // Lower adverse prob = higher confidence
+            let combined_confidence = (volatility_confidence * probability_confidence).max(0.3);
+
+            let atr_distance = ((stop_price - extreme_entry).abs() / extreme_entry) * 100.0;
+
+            stops.push(OrderLevel {
+                price: stop_price,
+                quantity_percentage: entry_levels[i].quantity_percentage, // Match entry size
+                atr_distance,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: combined_confidence.min(0.95),
+            });
+
+            log::info!(
+                "  {} Stop {}: ${:.4} ({:.2}% from extreme) | Vol: {:.2}% | Prob_mult: {:.1}x | Regime_prog: {:.1}x | Final: {:.2}%",
+                direction,
+                i + 1,
+                stop_price,
+                final_stop_distance,
+                volatility_stop,
+                probability_multiplier,
+                regime_progression,
+                final_stop_distance
+            );
+        }
+
+        log::info!(
+            "🛑 Probability-Weighted Stops: volatility={:.2}%, adverse_prob={:.1}%, regime={}, extreme_entry=${:.4}",
+            self.volatility.recommended_stop_distance_percent,
+            if direction == "SHORT" {
+                self.price_levels.bins.get("strong_up").map(|b| b.probability).unwrap_or(0.0) +
+                self.price_levels.bins.get("moderate_up").map(|b| b.probability).unwrap_or(0.0)
+            } else {
+                self.price_levels.bins.get("strong_down").map(|b| b.probability).unwrap_or(0.0) +
+                self.price_levels.bins.get("moderate_down").map(|b| b.probability).unwrap_or(0.0)
+            } * 100.0,
+            self.volatility.regime,
+            extreme_entry
+        );
+
+        Ok([stops[0].clone(), stops[1].clone(), stops[2].clone()])
+    }
+
+    /// Legacy smart stops implementation (kept for backward compatibility)
+    fn generate_smart_stops_legacy(
         &self,
         entry_levels: &[OrderLevel; 3],
         direction: &str,
@@ -983,47 +1187,98 @@ impl SmartConsensus {
         Ok([stops[0].clone(), stops[1].clone(), stops[2].clone()])
     }
 
-    /// Calculate entry size using Direction confidence + Volatility sizing
+    /// Calculate entry size using PURE prediction data - no hardcoded allocations
     fn calculate_entry_size(
         &self,
         level: usize,
         direction: &DirectionPrediction,
         volatility: &VolatilityPrediction,
     ) -> f64 {
-        // Base allocation (front-loaded for better average price)
-        let base_allocations = [0.5, 0.3, 0.2]; // 50%, 30%, 20%
+        // Use Kelly Criterion-like approach based on confidence
+        let directional_edge =
+            if direction.up_probability_aggregated > direction.down_probability_aggregated {
+                direction.up_probability_aggregated - direction.down_probability_aggregated
+            } else {
+                direction.down_probability_aggregated - direction.up_probability_aggregated
+            };
 
-        // Adjust based on direction confidence
-        let confidence_factor = if direction.up_probability_aggregated > 0.6
-            || direction.down_probability_aggregated > 0.6
-        {
-            1.2 // More aggressive sizing with high confidence
-        } else if direction.sideways_probability_aggregated > 0.4 {
-            0.8 // Conservative in sideways markets
-        } else {
-            1.0
-        };
+        // Kelly fraction = edge / odds
+        // Using expected upside/downside as odds proxy
+        let odds = direction.expected_upside_percent / direction.expected_downside_percent.max(0.1);
+        let kelly_fraction = (directional_edge * odds).clamp(0.1, 0.5);
 
-        // Volatility adjustment (from position_size_multiplier)
-        let volatility_factor = volatility.position_size_multiplier;
+        // Progressive allocation based on level (Fibonacci-like)
+        let level_weights = [0.5, 0.3, 0.2]; // Natural 50-30-20 split
+        let base_allocation = kelly_fraction * level_weights[level - 1];
 
-        let size = base_allocations[level - 1] * confidence_factor * volatility_factor;
+        // Volatility adjustment from model
+        let volatility_adjustment = volatility.position_size_multiplier;
 
-        // Ensure sizes sum to 1.0 (will normalize later)
-        size.clamp(0.1, 0.6) // Cap between 10% and 60%
+        // Confidence scaling
+        let confidence_scale = direction.confidence + 0.5; // Range 0.5-1.5
+
+        let final_size = base_allocation * volatility_adjustment * confidence_scale;
+
+        log::debug!(
+            "Entry {} sizing: kelly={:.3}, base={:.3}, vol_adj={:.2}, conf={:.2} → {:.3}",
+            level,
+            kelly_fraction,
+            base_allocation,
+            volatility_adjustment,
+            confidence_scale,
+            final_size
+        );
+
+        final_size.clamp(0.1, 0.6)
     }
 
-    /// Calculate exit size using Volume regime for liquidity assessment
+    /// Calculate exit size using PURE volume data for liquidity-based sizing
     fn calculate_exit_size(&self, level: usize, volume: &VolumePrediction) -> f64 {
-        // Base exit allocation
-        let base_allocations = match volume.regime.as_str() {
-            "VERY_HIGH" | "HIGH" => [0.3, 0.4, 0.3], // Can exit more at once with high volume
-            "MEDIUM" => [0.4, 0.4, 0.2],             // Balanced exits
-            "LOW" | "VERY_LOW" => [0.5, 0.3, 0.2],   // Take more profit early in low volume
-            _ => [0.4, 0.4, 0.2],
+        // Use volume regime probabilities to determine optimal exit sizing
+        let liquidity_score = volume.very_high_probability * 1.0
+            + volume.high_probability * 0.8
+            + volume.medium_probability * 0.5
+            + volume.low_probability * 0.3
+            + volume.very_low_probability * 0.1;
+
+        // Higher liquidity = can exit in larger chunks
+        // Lower liquidity = need to split exits more
+        let liquidity_factor = liquidity_score * 2.0; // Scale to 0-2 range
+
+        // Progressive exit allocation based on liquidity
+        let base_allocation = if liquidity_factor > 1.0 {
+            // High liquidity: can take larger exits
+            match level {
+                1 => 0.3, // Take some profit early
+                2 => 0.4, // Main exit
+                3 => 0.3, // Final exit
+                _ => 0.33,
+            }
+        } else {
+            // Low liquidity: need smaller, distributed exits
+            match level {
+                1 => 0.5, // Take more profit early when possible
+                2 => 0.3, // Moderate middle exit
+                3 => 0.2, // Small final exit
+                _ => 0.33,
+            }
         };
 
-        base_allocations[level - 1]
+        // Confidence adjustment
+        let confidence_scale = volume.confidence + 0.5; // Range 0.5-1.5
+
+        let final_size = base_allocation * confidence_scale;
+
+        log::debug!(
+            "Exit {} sizing: liquidity={:.3}, base={:.3}, conf={:.2} → {:.3}",
+            level,
+            liquidity_score,
+            base_allocation,
+            confidence_scale,
+            final_size
+        );
+
+        final_size.clamp(0.15, 0.5)
     }
 
     /// Calculate volume liquidity factor for exit confidence

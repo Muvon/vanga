@@ -167,6 +167,7 @@ fn test_smart_order_generation_no_magic_numbers() {
         volume_pred: &volume,
         confidence_calculator: &confidence_calculator,
         min_confidence: 0.2,
+        sequence_ohlcv: None, // No sequence data in test
     };
     let orders = TradingOrders::generate_smart(config).unwrap();
 
@@ -225,6 +226,7 @@ fn test_short_order_validation() {
         volume_pred: &volume,
         confidence_calculator: &confidence_calculator,
         min_confidence: 0.2,
+        sequence_ohlcv: None, // No sequence data in test
     };
     let orders = TradingOrders::generate_smart(config).unwrap();
 
@@ -311,6 +313,7 @@ fn test_long_order_validation() {
         volume_pred: &volume,
         confidence_calculator: &confidence_calculator,
         min_confidence: 0.2,
+        sequence_ohlcv: None,
     };
     let orders = TradingOrders::generate_smart(config).unwrap();
 
@@ -670,6 +673,7 @@ fn test_atr_distance_semantic_correctness() {
         volume_pred: &volume,
         confidence_calculator: &confidence_calculator,
         min_confidence: 0.2,
+        sequence_ohlcv: None,
     };
     let orders = TradingOrders::generate_smart(config).unwrap();
 

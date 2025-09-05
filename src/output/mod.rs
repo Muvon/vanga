@@ -3,6 +3,7 @@
 //! This module provides structured output formats for VANGA predictions,
 //! converting raw LSTM outputs into user-friendly JSON and CSV formats.
 
+pub mod adaptive_stop_calculator;
 pub mod confidence_calculator;
 pub mod formatter;
 pub mod metadata;

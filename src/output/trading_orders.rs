@@ -171,6 +171,8 @@ pub struct SmartOrderConfig<'a> {
     pub volume_pred: &'a VolumePrediction,
     pub confidence_calculator: &'a ConfidenceCalculator,
     pub min_confidence: f64,
+    /// Optional sequence OHLCV data for adaptive stop calculation
+    pub sequence_ohlcv: Option<&'a [crate::data::structures::MarketDataRow]>,
 }
 
 impl TradingOrders {
@@ -246,11 +248,72 @@ impl TradingOrders {
         let mut entry_levels =
             consensus.generate_smart_entries(config.current_price, &direction)?;
 
+        // Apply psychological level adjustments if sequence data available
+        if let Some(ohlcv_data) = config.sequence_ohlcv {
+            // Convert MarketDataRow to OHLCV array format
+            let ohlcv_arrays: Vec<[f64; 5]> = ohlcv_data
+                .iter()
+                .map(|row| [row.open, row.high, row.low, row.close, row.volume])
+                .collect();
+
+            // Adjust each entry level
+            for entry in &mut entry_levels {
+                entry.price =
+                    consensus.adjust_for_psychological_levels(entry.price, Some(&ohlcv_arrays));
+            }
+
+            log::info!("🎯 Applied psychological level adjustments to entry levels");
+        }
+
         // Step 4: Generate exit levels using Price Levels + Volume
         let mut exit_levels = consensus.generate_smart_exits(config.current_price, &direction)?;
 
-        // Step 5: Generate stop levels using Volatility model
-        let mut stop_levels = consensus.generate_smart_stops(&entry_levels, &direction)?;
+        // Apply psychological level adjustments to exits if sequence data available
+        if let Some(ohlcv_data) = config.sequence_ohlcv {
+            let ohlcv_arrays: Vec<[f64; 5]> = ohlcv_data
+                .iter()
+                .map(|row| [row.open, row.high, row.low, row.close, row.volume])
+                .collect();
+
+            for exit in &mut exit_levels {
+                exit.price =
+                    consensus.adjust_for_psychological_levels(exit.price, Some(&ohlcv_arrays));
+            }
+
+            log::info!("🎯 Applied psychological level adjustments to exit levels");
+        }
+
+        // Step 5: Generate ADAPTIVE stop levels using ALL prediction data
+        // Extract sequence prices from OHLCV data if available
+        let sequence_prices: Vec<f64> = if let Some(ohlcv_data) = config.sequence_ohlcv {
+            ohlcv_data.iter().map(|row| row.close).collect()
+        } else {
+            // Fallback: generate synthetic sequence around current price
+            let volatility_estimate = config.volatility_pred.expected_range_percent / 100.0;
+            (0..40)
+                .map(|i| {
+                    config.current_price * (1.0 + (i as f64 - 20.0) * volatility_estimate / 20.0)
+                })
+                .collect()
+        };
+
+        let mut stop_levels =
+            consensus.generate_adaptive_stops(&entry_levels, &direction, &sequence_prices)?;
+
+        // Apply psychological level adjustments to stops if sequence data available
+        if let Some(ohlcv_data) = config.sequence_ohlcv {
+            let ohlcv_arrays: Vec<[f64; 5]> = ohlcv_data
+                .iter()
+                .map(|row| [row.open, row.high, row.low, row.close, row.volume])
+                .collect();
+
+            for stop in &mut stop_levels {
+                stop.price =
+                    consensus.adjust_for_psychological_levels(stop.price, Some(&ohlcv_arrays));
+            }
+
+            log::info!("🎯 Applied psychological level adjustments to stop levels");
+        }
 
         // Step 6: Normalize sizes to ensure they sum to 1.0
         SmartConsensus::normalize_sizes(&mut entry_levels);
@@ -271,28 +334,69 @@ impl TradingOrders {
         let initial_risk_reward =
             Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
-        // Step 9: Calculate dynamic risk-reward requirement based on confidence
-        // overall_confidence already calculated above using ConfidenceCalculator
-        let min_risk_reward = (1.0_f64 / overall_confidence.max(0.1)).clamp(2.0, 10.0);
-        let risk_reward = if initial_risk_reward < min_risk_reward {
+        // Step 9: Calculate NATURAL risk-reward from predictions (no hardcoded targets)
+        let natural_rr = config.direction_pred.expected_upside_percent
+            / config.direction_pred.expected_downside_percent.max(0.01);
+
+        // Use prediction's own risk assessment as baseline
+        let prediction_rr = config.direction_pred.risk_reward_ratio;
+
+        // Target R:R is the better of natural calculation or model's assessment
+        let target_risk_reward = natural_rr.max(prediction_rr);
+
+        log::info!(
+            "📊 R:R Assessment: natural={:.2} (up:{:.2}%/down:{:.2}%), model={:.2}, target={:.2}",
+            natural_rr,
+            config.direction_pred.expected_upside_percent,
+            config.direction_pred.expected_downside_percent,
+            prediction_rr,
+            target_risk_reward
+        );
+
+        let risk_reward = if initial_risk_reward < target_risk_reward {
             log::info!(
-                "⚠️ Initial R:R {:.2} below minimum {:.2}, optimizing...",
+                "⚠️ Initial R:R {:.2} below target {:.2}, optimizing using confidence scaling...",
                 initial_risk_reward,
-                min_risk_reward
+                target_risk_reward
             );
 
-            // Try to optimize by adjusting exit levels
-            let optimized_rr = Self::validate_and_optimize_risk_reward(
-                &mut entry_levels,
-                &mut exit_levels,
-                &mut stop_levels,
-                &direction,
-                config.current_price,
-                min_risk_reward,
-            );
+            // Optimize using confidence-based scaling (pure prediction data)
+            // Scale exits by confidence to improve R:R
+            let confidence_scale = 1.0 + overall_confidence;
+            for exit in &mut exit_levels {
+                let distance_from_current = (exit.price - config.current_price).abs();
+                let scaled_distance = distance_from_current * confidence_scale;
+                exit.price = if direction == "LONG" {
+                    config.current_price + scaled_distance
+                } else {
+                    config.current_price - scaled_distance
+                };
+                // Update ATR distance
+                exit.atr_distance = (scaled_distance / config.current_price) * 100.0;
+            }
 
+            // If still not enough, scale stops by inverse confidence
+            let new_rr =
+                Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
+            if new_rr < target_risk_reward {
+                let stop_scale = 1.0 - (overall_confidence * 0.3).min(0.5); // Max 50% tighter
+                for stop in &mut stop_levels {
+                    let distance_from_entry = (stop.price - entry_levels[0].price).abs();
+                    let scaled_distance = distance_from_entry * stop_scale;
+                    stop.price = if direction == "LONG" {
+                        entry_levels[0].price - scaled_distance
+                    } else {
+                        entry_levels[0].price + scaled_distance
+                    };
+                    // Update ATR distance
+                    stop.atr_distance = (scaled_distance / config.current_price) * 100.0;
+                }
+            }
+
+            let optimized_rr =
+                Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
             log::info!(
-                "✅ Optimized R:R from {:.2} to {:.2}",
+                "✅ Optimized R:R from {:.2} to {:.2} using confidence scaling",
                 initial_risk_reward,
                 optimized_rr
             );
@@ -364,10 +468,10 @@ impl TradingOrders {
             risk_reward_ratio: risk_reward,
             atr_multiplier: config.volatility_pred.position_size_multiplier,
             dynamic_sizing: true,
-            note: if risk_reward < min_risk_reward {
+            note: if risk_reward < target_risk_reward * 0.8 {
                 Some(format!(
                     "Risk/Reward {:.2} below target {:.2} - consider waiting for better setup",
-                    risk_reward, min_risk_reward
+                    risk_reward, target_risk_reward
                 ))
             } else {
                 None

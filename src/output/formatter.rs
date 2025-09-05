@@ -616,6 +616,7 @@ impl OutputFormatter {
                         volume_pred: &volume,
                         confidence_calculator: &self.confidence_calculator,
                         min_confidence: self.min_confidence,
+                        sequence_ohlcv: self.sequence_ohlcv.as_deref(),
                     };
                     match crate::output::trading_orders::TradingOrders::generate_smart(config) {
                         Ok(smart_orders) => {
