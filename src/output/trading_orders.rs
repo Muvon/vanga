@@ -244,44 +244,94 @@ impl TradingOrders {
             overall_confidence
         );
 
-        // Step 3: Generate entry levels using Price Levels model
-        let mut entry_levels =
-            consensus.generate_smart_entries(config.current_price, &direction)?;
+        // Step 3: Generate SEQUENCE-AWARE entry levels when sequence data available
+        let mut entry_levels = if let Some(ohlcv_data) = config.sequence_ohlcv {
+            // Extract sequence prices and calculate statistics
+            let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
-        // Apply psychological level adjustments if sequence data available
-        if let Some(ohlcv_data) = config.sequence_ohlcv {
-            // Convert MarketDataRow to OHLCV array format
+            // Calculate sequence statistics for adaptive generation
+            let sequence_stats = SequenceStatistics::from_prices(
+                &sequence_prices,
+                4.0, // Default horizon hours, adjust as needed
+                None,
+            )?;
+
+            log::info!(
+                "📊 Using SEQUENCE-AWARE entry generation with statistics: volatility={:.3}%, hurst={:.3}, kelly={:.3}",
+                sequence_stats.std_return * 100.0,
+                sequence_stats.hurst_exponent,
+                sequence_stats.kelly_fraction
+            );
+
+            // Use the sequence-aware method that works properly
+            let entries = consensus.generate_sequence_aware_entries(
+                config.current_price,
+                &direction,
+                &sequence_stats,
+            )?;
+
+            // Convert MarketDataRow to OHLCV array format for psychological adjustments
             let ohlcv_arrays: Vec<[f64; 5]> = ohlcv_data
                 .iter()
                 .map(|row| [row.open, row.high, row.low, row.close, row.volume])
                 .collect();
 
-            // Adjust each entry level
-            for entry in &mut entry_levels {
+            // Apply psychological level adjustments
+            let mut adjusted_entries = entries;
+            for entry in &mut adjusted_entries {
                 entry.price =
                     consensus.adjust_for_psychological_levels(entry.price, Some(&ohlcv_arrays));
             }
 
-            log::info!("🎯 Applied psychological level adjustments to entry levels");
-        }
+            log::info!("🎯 Generated SEQUENCE-AWARE entries with psychological adjustments");
+            adjusted_entries
+        } else {
+            // Fallback to standard generation when no sequence data available
+            log::warn!("⚠️ No sequence data available, using standard entry generation");
+            consensus.generate_smart_entries(config.current_price, &direction)?
+        };
 
-        // Step 4: Generate exit levels using Price Levels + Volume
-        let mut exit_levels = consensus.generate_smart_exits(config.current_price, &direction)?;
+        // Step 4: Generate SEQUENCE-AWARE exit levels when sequence data available
+        let mut exit_levels = if let Some(ohlcv_data) = config.sequence_ohlcv {
+            // Reuse sequence prices if already calculated, or extract them
+            let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
-        // Apply psychological level adjustments to exits if sequence data available
-        if let Some(ohlcv_data) = config.sequence_ohlcv {
+            // Calculate sequence statistics if not already done
+            let sequence_stats = SequenceStatistics::from_prices(
+                &sequence_prices,
+                4.0, // Default horizon hours
+                None,
+            )?;
+
+            log::info!("📊 Using SEQUENCE-AWARE exit generation with MFE distribution");
+
+            // Use sequence-aware exit generation with MFE distribution
+            let exits = consensus.generate_sequence_aware_exits(
+                config.current_price,
+                &direction,
+                &sequence_stats,
+            )?;
+
+            // Convert for psychological adjustments
             let ohlcv_arrays: Vec<[f64; 5]> = ohlcv_data
                 .iter()
                 .map(|row| [row.open, row.high, row.low, row.close, row.volume])
                 .collect();
 
-            for exit in &mut exit_levels {
+            // Apply psychological level adjustments
+            let mut adjusted_exits = exits;
+            for exit in &mut adjusted_exits {
                 exit.price =
                     consensus.adjust_for_psychological_levels(exit.price, Some(&ohlcv_arrays));
             }
 
-            log::info!("🎯 Applied psychological level adjustments to exit levels");
-        }
+            log::info!("🎯 Generated SEQUENCE-AWARE exits with psychological adjustments");
+            adjusted_exits
+        } else {
+            // Fallback to standard generation
+            log::warn!("⚠️ No sequence data available, using standard exit generation");
+            consensus.generate_smart_exits(config.current_price, &direction)?
+        };
 
         // Step 5: Generate ADAPTIVE stop levels using ALL prediction data
         // Extract sequence prices from OHLCV data if available

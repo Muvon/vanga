@@ -303,33 +303,82 @@ impl SmartConsensus {
         // Golden ratio for natural, non-arbitrary progression
         const PHI: f64 = 1.618033988749895;
 
-        // Use time-scaled volatility from sequence (σ√t)
-        let base_spacing = sequence_stats.time_scaled_volatility;
+        // Use ACTUAL market volatility from sequence data
+        // Standard deviation tells us typical price movement
+        let volatility_base = sequence_stats.std_return;
+
+        // Use MAE (Maximum Adverse Excursion) distribution for realistic entry spacing
+        // This tells us how far price typically moves against us before recovering
+        let mae_median = if !sequence_stats.mae_distribution.is_empty() {
+            SequenceStatistics::percentile(&sequence_stats.mae_distribution, 50.0)
+        } else {
+            // Fallback to standard deviation if MAE not available
+            sequence_stats.std_return
+        };
+
+        // Base spacing on the combination of volatility and typical adverse movement
+        let base_spacing = (volatility_base + mae_median.abs()) / 2.0;
 
         // Adjust spacing based on market regime (trending vs mean-reverting)
         let regime_adjustment = if sequence_stats.mean_reversion_rate.abs() > 0.5 {
             // Mean reverting market: wider spacing (price likely to revert)
+            // Use actual mean reversion strength from data
             1.0 + sequence_stats.mean_reversion_rate.abs()
         } else {
-            // Trending market: tighter spacing to catch the trend
-            // Use ratio of drift to volatility
-            1.0 - (sequence_stats.mean_return / sequence_stats.std_return)
-                .abs()
-                .min(0.5)
+            // Trending market: use Hurst exponent to determine trend strength
+            // Hurst > 0.5 = trending, < 0.5 = mean reverting
+            if sequence_stats.hurst_exponent > 0.5 {
+                // Strong trend: tighter spacing to catch it
+                1.0 / (1.0 + (sequence_stats.hurst_exponent - 0.5))
+            } else {
+                // Weak trend/choppy: wider spacing
+                1.0 + (0.5 - sequence_stats.hurst_exponent)
+            }
         };
 
-        // Combine with directional confidence
+        // Use model predictions to scale spacing
+        // Get the expected move from direction model
+        let expected_move = if direction == "LONG" {
+            self.direction.expected_downside_percent / 100.0 // Entry zone for longs
+        } else {
+            self.direction.expected_upside_percent / 100.0 // Entry zone for shorts
+        };
+
+        // Combine sequence statistics with model predictions
+        let model_adjusted_spacing = base_spacing * (1.0 + expected_move);
+
+        // Use directional confidence to further adjust
         let directional_confidence = (self.direction.up_probability_aggregated
             - self.direction.down_probability_aggregated)
             .abs();
 
-        // Final spacing calculation
-        let entry_spacing = base_spacing * regime_adjustment;
+        // Less confidence = wider spacing (using actual probability)
+        let confidence_multiplier = 2.0 - directional_confidence;
+
+        // Use volatility regime from model to fine-tune
+        let volatility_multiplier = match self.volatility.regime.as_str() {
+            "VERY_HIGH" => 1.5, // High volatility = wider entries
+            "HIGH" => 1.25,
+            "MEDIUM" => 1.0,
+            "LOW" => 0.85,
+            "VERY_LOW" => 0.7, // Low volatility = tighter entries
+            _ => 1.0,
+        };
+
+        // Final spacing uses ALL available data
+        let entry_spacing = model_adjusted_spacing
+            * regime_adjustment
+            * confidence_multiplier
+            * volatility_multiplier;
 
         log::info!(
-            "📊 Sequence-Aware Entry Spacing: base={:.3}%, regime_adj={:.2}x, final={:.3}%",
-            base_spacing * 100.0,
+            "📊 DATA-DRIVEN Entry Spacing: vol_base={:.3}%, MAE={:.3}%, expected_move={:.3}%, regime_adj={:.2}x, conf={:.2}, vol_mult={:.2}x, final={:.3}%",
+            volatility_base * 100.0,
+            mae_median * 100.0,
+            expected_move * 100.0,
             regime_adjustment,
+            directional_confidence,
+            volatility_multiplier,
             entry_spacing * 100.0
         );
 
@@ -344,7 +393,7 @@ impl SmartConsensus {
                 current_price * (1.0 - distance)
             };
 
-            // Size based on Kelly fraction and confidence
+            // Size based on position in sequence
             let base_size = match i {
                 0 => 0.5, // Largest position at best price
                 1 => 0.3, // Medium position
@@ -352,26 +401,37 @@ impl SmartConsensus {
                 _ => 0.33,
             };
 
-            // Adjust size by Kelly fraction (optimal sizing)
-            let kelly_adjusted_size = base_size * (1.0 + sequence_stats.kelly_fraction - 0.25);
+            // Use actual Kelly fraction from sequence statistics
+            let kelly_adjusted_size = base_size * (1.0 + sequence_stats.kelly_fraction);
 
-            // Confidence based on:
-            // 1. Directional confidence
-            // 2. Distance from current (closer = higher confidence)
-            // 3. Market efficiency (Hurst exponent)
-            let distance_decay = (-distance * 10.0).exp(); // Exponential decay with distance
+            // Confidence based on DATA:
+            // 1. Directional confidence from model
+            // 2. Distance decay using volatility scale
+            // 3. Market efficiency from Hurst exponent
+            let distance_in_stdevs = distance / sequence_stats.std_return;
+            let distance_decay = (-distance_in_stdevs).exp(); // Decay based on standard deviations
+
             let efficiency_factor = if sequence_stats.hurst_exponent > 0.5 {
                 // Trending market: higher confidence
-                1.0 + (sequence_stats.hurst_exponent - 0.5)
+                sequence_stats.hurst_exponent * 2.0
             } else {
-                // Mean reverting: lower confidence
+                // Mean reverting: adjust by strength
                 1.0 - (0.5 - sequence_stats.hurst_exponent)
             };
 
-            let confidence =
-                (directional_confidence * distance_decay * efficiency_factor).clamp(0.1, 0.95);
+            // Use volume regime for liquidity confidence
+            let volume_confidence = match self.volume.regime.as_str() {
+                "VERY_HIGH" | "HIGH" => 1.2, // High volume = higher confidence
+                "MEDIUM" => 1.0,
+                "LOW" | "VERY_LOW" => 0.8, // Low volume = lower confidence
+                _ => 1.0,
+            };
 
-            // Calculate actual ATR distance from current price
+            let confidence =
+                (directional_confidence * distance_decay * efficiency_factor * volume_confidence)
+                    .clamp(0.1, 0.95);
+
+            // Calculate actual distance from current price
             let atr_distance = ((entry_price - current_price).abs() / current_price) * 100.0;
 
             entries.push(OrderLevel {
@@ -383,7 +443,7 @@ impl SmartConsensus {
             });
 
             log::info!(
-                "  {} Entry {}: ${:.2} ({:+.3}%) | Size: {:.1}% | Conf: {:.2} | Kelly: {:.2}",
+                "  {} Entry {}: ${:.4} ({:+.3}%) | Size: {:.1}% | Conf: {:.2} | Kelly: {:.3} | Distance in σ: {:.2}",
                 direction,
                 i + 1,
                 entry_price,
@@ -394,7 +454,8 @@ impl SmartConsensus {
                 },
                 kelly_adjusted_size * 100.0,
                 confidence,
-                sequence_stats.kelly_fraction
+                sequence_stats.kelly_fraction,
+                distance_in_stdevs
             );
         }
 
