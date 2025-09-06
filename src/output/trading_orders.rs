@@ -912,32 +912,31 @@ impl TradingOrders {
         dynamic_exit_sizes: Option<[f64; 3]>,
         sequence_prices: &[f64], // NEW: Actual price sequence for smart calculation
     ) -> ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]) {
-        // 🎯 SMART ENTRY CALCULATION: Based on ACTUAL sequence volatility + momentum
-        // Calculate actual volatility from the sequence for realistic entry points
-        let sequence_volatility = if sequence_prices.len() >= 2 {
-            let returns: Vec<f64> = sequence_prices
-                .windows(2)
-                .map(|w| ((w[1] - w[0]) / w[0]) * 100.0)
-                .collect();
-
-            if !returns.is_empty() {
-                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-                let variance =
-                    returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
-                variance.sqrt()
-            } else {
-                volatility_pred.expected_range_percent // Use prediction if can't calculate
-            }
-        } else {
-            volatility_pred.expected_range_percent // Use prediction as fallback
-        };
-
-        // Combine actual and predicted volatility
-        let combined_volatility =
-            sequence_volatility * 0.7 + volatility_pred.expected_range_percent * 0.3;
-
-        // Base distance for entries
-        let base_distance = combined_volatility;
+        // 🎯 SEQUENCE-DERIVED BOUNDS: Calculate adaptive bounds from actual sequence data
+        let sequence_min = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let sequence_max = sequence_prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let sequence_range_pct = ((sequence_max - sequence_min) / current_price) * 100.0;
+        
+        // Calculate percentiles for robust statistics
+        let mut sorted_prices = sequence_prices.to_vec();
+        sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let len = sorted_prices.len();
+        
+        let p25 = sorted_prices[len * 25 / 100];
+        let p50 = sorted_prices[len * 50 / 100];
+        let p75 = sorted_prices[len * 75 / 100];
+        
+        // IQR-based volatility (robust to outliers)
+        let iqr_volatility = ((p75 - p25) / p50) * 100.0;
+        
+        // Maximum drawdown from sequence
+        let max_drawdown_pct = ((current_price - sequence_min) / current_price) * 100.0;
+        let max_upside_pct = ((sequence_max - current_price) / current_price) * 100.0;
+        
+        log::info!(
+            "📊 Sequence Bounds: range={:.2}%, drawdown={:.2}%, upside={:.2}%, IQR_vol={:.2}%",
+            sequence_range_pct, max_drawdown_pct, max_upside_pct, iqr_volatility
+        );
 
         // 🎯 Use direction momentum to adjust entry aggressiveness
         // Strong momentum = can enter closer to market (momentum will continue)
@@ -951,21 +950,48 @@ impl TradingOrders {
         };
 
         log::info!(
-            "📊 LONG Data-Driven Entry: seq_vol={:.3}%, pred_vol={:.3}%, combined={:.3}%, momentum_factor={:.1}x",
-            sequence_volatility,
+            "📊 LONG Adaptive Entry: IQR_vol={:.3}%, pred_vol={:.3}%, seq_range={:.3}%, momentum_factor={:.1}x",
+            iqr_volatility,
             volatility_pred.expected_range_percent,
-            combined_volatility,
+            sequence_range_pct,
             momentum_factor
         );
 
-        // ENTRY LOGIC: For LONG positions, entries BELOW current price (buy low)
-        // Use actual volatility + momentum for realistic, fillable entry points
-        let entry_1_pct = -base_distance * 0.2 * momentum_factor; // Very close - high fill probability
-        let entry_2_pct = -base_distance * 0.5 * momentum_factor; // Medium distance
-        let entry_3_pct = -base_distance * 0.8 * momentum_factor; // Further for better price
+        // 🎯 ADAPTIVE ENTRY DISTANCES: Use price level bins bounded by sequence data
+        let neutral_bin = price_levels.bins.get("neutral");
+        let moderate_down_bin = price_levels.bins.get("moderate_down");
+        let strong_down_bin = price_levels.bins.get("strong_down");
+        
+        // Use model predictions bounded by sequence reality
+        let entry_1_pct = if let Some(bin) = neutral_bin {
+            // Use neutral range (smallest predicted movement) bounded by sequence
+            let model_distance = bin.range[0].abs();
+            let bounded_distance = (sequence_range_pct * bin.probability).min(model_distance);
+            -bounded_distance * momentum_factor
+        } else {
+            -iqr_volatility * 0.2 * momentum_factor
+        };
+        
+        let entry_2_pct = if let Some(bin) = moderate_down_bin {
+            // Use moderate down range bounded by sequence
+            let model_distance = bin.range[0].abs();
+            let bounded_distance = (sequence_range_pct * bin.probability).min(model_distance);
+            -bounded_distance * momentum_factor
+        } else {
+            -iqr_volatility * 0.5 * momentum_factor
+        };
+        
+        let entry_3_pct = if let Some(bin) = strong_down_bin {
+            // Use strong down range bounded by sequence
+            let model_distance = bin.range[0].abs();
+            let bounded_distance = (sequence_range_pct * bin.probability).min(model_distance);
+            -bounded_distance * momentum_factor
+        } else {
+            -iqr_volatility * 0.8 * momentum_factor
+        };
 
         log::info!(
-            "📍 LONG Entry Distances: {:.3}%, {:.3}%, {:.3}% BELOW current price (momentum-adjusted)",
+            "📍 ADAPTIVE Entry Distances: {:.3}%, {:.3}%, {:.3}% (model-guided, sequence-bounded)",
             entry_1_pct.abs(), entry_2_pct.abs(), entry_3_pct.abs()
         );
 
@@ -1047,29 +1073,38 @@ impl TradingOrders {
             },
         ];
 
-        // 🎯 SMART EXIT: Based on MODEL PREDICTIONS for profit targets
-        // For LONG positions, use UPSIDE predictions (above current price)
+        // 🎯 SEQUENCE-BOUNDED EXIT TARGETS: Use model predictions bounded by sequence upside
         let moderate_up_bin = price_levels.bins.get("moderate_up");
         let strong_up_bin = price_levels.bins.get("strong_up");
 
-        // Use model's predicted upside targets
-        let exit_1_pct = moderate_up_bin
-            .map(|bin| bin.range[0].max(base_distance * 2.0))
-            .unwrap_or(base_distance * 2.0);
+        // Use model predictions bounded by sequence reality
+        let exit_1_pct = if let Some(bin) = moderate_up_bin {
+            let model_target = bin.range[0];
+            let bounded_target = (max_upside_pct * bin.probability).min(model_target);
+            bounded_target.max(iqr_volatility * 0.5) // Minimum based on sequence volatility
+        } else {
+            iqr_volatility * 2.0
+        };
 
-        let exit_2_pct = moderate_up_bin
-            .map(|bin| ((bin.range[0] + bin.range[1]) / 2.0).max(exit_1_pct * 1.5))
-            .unwrap_or(exit_1_pct * 1.8);
+        let exit_2_pct = if let Some(bin) = moderate_up_bin {
+            let model_target = (bin.range[0] + bin.range[1]) / 2.0;
+            let bounded_target = (max_upside_pct * bin.probability * 1.2).min(model_target);
+            bounded_target.max(exit_1_pct * 1.2)
+        } else {
+            exit_1_pct * 1.5
+        };
 
-        let exit_3_pct = strong_up_bin
-            .map(|bin| bin.range[0].max(exit_2_pct * 1.3))
-            .unwrap_or(exit_2_pct * 1.5);
+        let exit_3_pct = if let Some(bin) = strong_up_bin {
+            let model_target = bin.range[0];
+            let bounded_target = (max_upside_pct * bin.probability * 1.5).min(model_target);
+            bounded_target.max(exit_2_pct * 1.1)
+        } else {
+            exit_2_pct * 1.3
+        };
 
         log::info!(
-            "🎯 LONG Exit Targets (MODEL-based): {:.3}%, {:.3}%, {:.3}% ABOVE current price",
-            exit_1_pct,
-            exit_2_pct,
-            exit_3_pct
+            "🎯 ADAPTIVE Exit Targets: {:.3}%, {:.3}%, {:.3}% (model-guided, sequence-bounded)",
+            exit_1_pct, exit_2_pct, exit_3_pct
         );
 
         // ENHANCED EXIT SIZING: Use dynamic sizes if available
@@ -1136,34 +1171,25 @@ impl TradingOrders {
             },
         ];
 
-        // STOP LOGIC: ENFORCE RISK-REWARD RATIO WITH INTELLIGENT CONFIDENCE
-        let avg_entry_price =
-            (entry_levels[0].price + entry_levels[1].price + entry_levels[2].price) / 3.0;
-        let avg_exit_price =
-            (exit_levels[0].price + exit_levels[1].price + exit_levels[2].price) / 3.0;
+        // 🎯 SEQUENCE-BASED STOP CALCULATION: Use lowest entry and sequence drawdown
+        let lowest_entry_price = entry_levels.iter().map(|e| e.price).fold(f64::INFINITY, |a, b| a.min(b));
+        
+        // Use sequence-derived maximum drawdown with probability weighting
+        let strong_down_prob = strong_down_bin.map(|bin| bin.probability).unwrap_or(0.1);
+        let stop_distance_pct = (max_drawdown_pct * strong_down_prob).min(volatility_pred.recommended_stop_distance_percent);
+        
+        // Progressive stops below lowest entry (never overlapping)
+        let stop_spacing = iqr_volatility * 0.01; // Use IQR for natural spacing
+        let stop_base = lowest_entry_price * (1.0 - stop_distance_pct / 100.0);
+        
+        let stop_price_1 = stop_base;
+        let stop_price_2 = stop_base - (stop_spacing * current_price / 100.0);
+        let stop_price_3 = stop_base - (stop_spacing * 2.0 * current_price / 100.0);
 
-        // Calculate required stop distance to maintain dynamic risk-reward based on confidence
-        let direction_conf = direction_pred.confidence;
-        let price_conf = price_levels.confidence;
-        let volatility_conf = volatility_pred.regime_confidence;
-
-        // Calculate overall confidence from available predictions
-        let overall_confidence =
-            (direction_conf * 0.4 + price_conf * 0.4 + volatility_conf * 0.2).clamp(0.05, 0.95);
-        let min_risk_reward = (1.0_f64 / overall_confidence.max(0.1)).clamp(2.0, 10.0);
-
-        let expected_profit = avg_exit_price - avg_entry_price;
-        let max_allowed_loss = expected_profit / min_risk_reward;
-
-        // Use volatility recommendation but cap by risk-reward requirement
-        let volatility_stop_distance =
-            volatility_pred.recommended_stop_distance_percent / 100.0 * avg_entry_price;
-        let required_stop_distance = max_allowed_loss.min(volatility_stop_distance);
-
-        // CRITICAL: Stops must be BELOW entry prices for LONG
-        let stop_price_1 = avg_entry_price - required_stop_distance;
-        let stop_price_2 = avg_entry_price - required_stop_distance * 1.1; // 10% wider
-        let stop_price_3 = avg_entry_price - required_stop_distance * 1.2; // 20% wider
+        log::info!(
+            "🛡️ ADAPTIVE Stops: base={:.4}, spacing={:.3}%, below_lowest_entry={:.2}%",
+            stop_base, stop_spacing, ((lowest_entry_price - stop_base) / lowest_entry_price) * 100.0
+        );
 
         // ENHANCED STOP CONFIDENCE: Based on volatility and risk management
         let base_stop_confidence = match volatility_pred.regime.as_str() {
@@ -1213,29 +1239,66 @@ impl TradingOrders {
             },
         ];
 
-        // VALIDATION: Ensure mathematical correctness
-        let actual_risk_reward = expected_profit / required_stop_distance;
-
-        log::info!(
-            "🎯 LONG Orders: Avg Entry={:.2} | Avg Exit={:.2} | Avg Stop={:.2} | R:R={:.2} (min={:.1})",
-            avg_entry_price, avg_exit_price, (stop_price_1 + stop_price_2 + stop_price_3) / 3.0,
-            actual_risk_reward, min_risk_reward
-        );
-
-        // Ensure stops are below entries
-        for (i, stop) in stop_levels.iter().enumerate() {
-            if stop.price >= entry_levels[i].price {
-                log::error!(
-                    "🚨 CRITICAL: Stop {} ({:.2}) >= Entry {} ({:.2})",
-                    i,
-                    stop.price,
-                    i,
-                    entry_levels[i].price
+        // 🎯 STATISTICAL VALIDATION: Use sequence statistics to validate orders
+        let sequence_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+        let sequence_variance = sequence_prices.iter()
+            .map(|&x| (x - sequence_mean).powi(2))
+            .sum::<f64>() / sequence_prices.len() as f64;
+        let sequence_std = sequence_variance.sqrt();
+        
+        // Validate and auto-correct if needed
+        let mut validated_entry_levels = entry_levels;
+        let mut validated_exit_levels = exit_levels;
+        let mut validated_stop_levels = stop_levels;
+        
+        // Check entries are within sequence bounds and not statistical outliers
+        for (i, entry) in validated_entry_levels.iter_mut().enumerate() {
+            let z_score = (entry.price - sequence_mean) / sequence_std;
+            if z_score.abs() > 3.0 || entry.price < sequence_min || entry.price >= current_price {
+                let corrected_price = (sequence_min + current_price) / 2.0; // Safe middle ground
+                log::warn!(
+                    "⚠️ Entry {} corrected: {:.4} -> {:.4} (z_score={:.2})",
+                    i, entry.price, corrected_price, z_score
                 );
+                entry.price = corrected_price;
+            }
+        }
+        
+        // Check exits are above current and within reasonable bounds
+        for (i, exit) in validated_exit_levels.iter_mut().enumerate() {
+            let z_score = (exit.price - sequence_mean) / sequence_std;
+            if z_score.abs() > 3.0 || exit.price > sequence_max || exit.price <= current_price {
+                let corrected_price = (current_price + sequence_max) / 2.0; // Safe middle ground
+                log::warn!(
+                    "⚠️ Exit {} corrected: {:.4} -> {:.4} (z_score={:.2})",
+                    i, exit.price, corrected_price, z_score
+                );
+                exit.price = corrected_price;
+            }
+        }
+        
+        // Ensure stops are below lowest entry with minimum gap
+        let lowest_entry = validated_entry_levels.iter().map(|e| e.price).fold(f64::INFINITY, |a, b| a.min(b));
+        for (i, stop) in validated_stop_levels.iter_mut().enumerate() {
+            let min_stop_price = lowest_entry * 0.995; // 0.5% below lowest entry minimum
+            if stop.price >= min_stop_price {
+                let corrected_price = min_stop_price - (i as f64 * 0.001 * current_price);
+                log::warn!(
+                    "⚠️ Stop {} corrected: {:.4} -> {:.4} (was above entry)",
+                    i, stop.price, corrected_price
+                );
+                stop.price = corrected_price;
             }
         }
 
-        (entry_levels, exit_levels, stop_levels)
+        log::info!(
+            "✅ VALIDATED Orders: Entries [{:.4}, {:.4}, {:.4}] | Exits [{:.4}, {:.4}, {:.4}] | Stops [{:.4}, {:.4}, {:.4}]",
+            validated_entry_levels[0].price, validated_entry_levels[1].price, validated_entry_levels[2].price,
+            validated_exit_levels[0].price, validated_exit_levels[1].price, validated_exit_levels[2].price,
+            validated_stop_levels[0].price, validated_stop_levels[1].price, validated_stop_levels[2].price
+        );
+
+        (validated_entry_levels, validated_exit_levels, validated_stop_levels)
     }
 
     /// Generate sequence-aware short orders using probability-based allocation (NO MAGIC NUMBERS)
@@ -1256,6 +1319,32 @@ impl TradingOrders {
             sequence_prices.len()
         );
 
+        // 🎯 SEQUENCE-DERIVED BOUNDS: Calculate adaptive bounds from actual sequence data
+        let sequence_min = sequence_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let sequence_max = sequence_prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let sequence_range_pct = ((sequence_max - sequence_min) / current_price) * 100.0;
+        
+        // Calculate percentiles for robust statistics
+        let mut sorted_prices = sequence_prices.to_vec();
+        sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let len = sorted_prices.len();
+        
+        let p25 = sorted_prices[len * 25 / 100];
+        let p50 = sorted_prices[len * 50 / 100];
+        let p75 = sorted_prices[len * 75 / 100];
+        
+        // IQR-based volatility (robust to outliers)
+        let iqr_volatility = ((p75 - p25) / p50) * 100.0;
+        
+        // Maximum upside and downside from sequence
+        let max_upside_pct = ((sequence_max - current_price) / current_price) * 100.0;
+        let max_downside_pct = ((current_price - sequence_min) / current_price) * 100.0;
+        
+        log::info!(
+            "📊 SHORT Sequence Bounds: range={:.2}%, upside={:.2}%, downside={:.2}%, IQR_vol={:.2}%",
+            sequence_range_pct, max_upside_pct, max_downside_pct, iqr_volatility
+        );
+
         // CRITICAL FIX: Force correct SHORT order logic regardless of range issues
         // SHORT must enter ABOVE current price and exit BELOW current price
 
@@ -1268,36 +1357,34 @@ impl TradingOrders {
         let strong_down_bin = price_levels.bins.get("strong_down");
         let neutral_bin = price_levels.bins.get("neutral");
 
-        // 🎯 SHORT ENTRIES: Use PROGRESSIVE upside ranges for DIFFERENT entry levels
+        // 🎯 ADAPTIVE SHORT ENTRIES: Use price level bins bounded by sequence upside
         let (entry_1_pct, entry_1_prob) = if let Some(bin) = neutral_bin {
-            (bin.range[1], bin.probability) // neutral upper = 0.909%
+            let model_distance = bin.range[1].abs(); // Upper range of neutral
+            let bounded_distance = (max_upside_pct * bin.probability).min(model_distance);
+            (bounded_distance, bin.probability)
         } else {
-            (0.2, 0.2)
+            (iqr_volatility * 0.2, 0.2)
         };
-
+        
         let (entry_2_pct, entry_2_prob) = if let Some(bin) = moderate_up_bin {
-            ((bin.range[0] + bin.range[1]) / 2.0, bin.probability) // moderate_up CENTER = 1.465%
+            let model_distance = (bin.range[0] + bin.range[1]) / 2.0; // Center of moderate_up
+            let bounded_distance = (max_upside_pct * bin.probability).min(model_distance);
+            (bounded_distance, bin.probability)
         } else {
-            (direction_pred.expected_upside_percent, 0.2)
+            (iqr_volatility * 0.5, 0.2)
         };
-
+        
         let (entry_3_pct, entry_3_prob) = if let Some(bin) = moderate_up_bin {
-            (bin.range[1], bin.probability) // moderate_up upper = 2.021%
+            let model_distance = bin.range[1].abs(); // Upper range of moderate_up
+            let bounded_distance = (max_upside_pct * bin.probability).min(model_distance);
+            (bounded_distance, bin.probability)
         } else {
-            (direction_pred.expected_upside_percent * 1.5, 0.15)
+            (iqr_volatility * 0.8, 0.15)
         };
 
-        log::info!("📊 SMART SHORT ENTRIES using PROGRESSIVE ranges (ABOVE current price):");
         log::info!(
-            "📍 Entry 1: {:.3}% | Entry 2: {:.3}% | Entry 3: {:.3}% (DIFFERENT prices!)",
-            entry_1_pct,
-            entry_2_pct,
-            entry_3_pct
-        );
-
-        log::info!(
-            "📊 SHORT Entry Logic: Catching bounces/resistance ABOVE current price {:.2}",
-            current_price
+            "📍 ADAPTIVE SHORT Entries: {:.3}%, {:.3}%, {:.3}% ABOVE current (sequence-bounded)",
+            entry_1_pct, entry_2_pct, entry_3_pct
         );
 
         let entry_1_price = current_price * (1.0 + entry_1_pct / 100.0);
@@ -1394,57 +1481,47 @@ impl TradingOrders {
             },
         ];
 
-        // 🎯 PROFESSIONAL STOP GRID: Use recommended stop distance
-        let recommended_stop = volatility_pred.recommended_stop_distance_percent;
-        let stop_distance = recommended_stop;
-
-        // Position stops above entries using recommended stop distance
-        let stop_1_pct = entry_1_pct + stop_distance;
-        let stop_2_pct = entry_2_pct + stop_distance;
-        let stop_3_pct = entry_3_pct + stop_distance;
+        // 🎯 SEQUENCE-BASED SHORT STOPS: Above highest entry using sequence bounds
+        let highest_entry_price = entry_levels.iter().map(|e| e.price).fold(f64::NEG_INFINITY, |a, b| a.max(b));
+        
+        // Use sequence-derived maximum upside with probability weighting
+        let strong_up_bin = price_levels.bins.get("strong_up");
+        let strong_up_prob = strong_up_bin.map(|bin| bin.probability).unwrap_or(0.1);
+        let stop_distance_pct = (max_upside_pct * strong_up_prob).min(volatility_pred.recommended_stop_distance_percent);
+        
+        // Progressive stops above highest entry (never overlapping)
+        let stop_spacing = iqr_volatility * 0.01; // Use IQR for natural spacing
+        let stop_base = highest_entry_price * (1.0 + stop_distance_pct / 100.0);
+        
+        let stop_1_price = stop_base;
+        let stop_2_price = stop_base + (stop_spacing * current_price / 100.0);
+        let stop_3_price = stop_base + (stop_spacing * 2.0 * current_price / 100.0);
 
         log::info!(
-            "🛑 SHORT STOPS: Using recommended stop distance {:.3}%",
-            stop_distance
-        );
-        log::info!(
-            "📍 Stop levels: {:.3}%, {:.3}%, {:.3}% above entries",
-            stop_1_pct,
-            stop_2_pct,
-            stop_3_pct
-        );
-
-        log::debug!(
-            "🛑 SHORT Stop Percentages (VOLATILITY-ADAPTIVE): stop_1={:.2}%, stop_2={:.2}%, stop_3={:.2}%",
-            stop_1_pct, stop_2_pct, stop_3_pct
+            "🛡️ ADAPTIVE SHORT Stops: base={:.4}, spacing={:.3}%, above_highest_entry={:.2}%",
+            stop_base, stop_spacing, ((stop_base - highest_entry_price) / highest_entry_price) * 100.0
         );
 
         // Use same probability-based portions for stops as entries (risk consistency)
         let stop_levels = [
             OrderLevel {
-                price: current_price * (1.0 + stop_1_pct / 100.0), // Convert percentage to multiplier
-                quantity_percentage: entry_1_prob,                 // Same as entry allocation
-                atr_distance: ((current_price * (1.0 + stop_1_pct / 100.0) - current_price).abs()
-                    / current_price)
-                    * 100.0,
+                price: stop_1_price,
+                quantity_percentage: entry_1_prob, // Same as entry allocation
+                atr_distance: ((stop_1_price - current_price).abs() / current_price) * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.9,
             },
             OrderLevel {
-                price: current_price * (1.0 + stop_2_pct / 100.0),
+                price: stop_2_price,
                 quantity_percentage: entry_2_prob, // Same as entry allocation
-                atr_distance: ((current_price * (1.0 + stop_2_pct / 100.0) - current_price).abs()
-                    / current_price)
-                    * 100.0,
+                atr_distance: ((stop_2_price - current_price).abs() / current_price) * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.8,
             },
             OrderLevel {
-                price: current_price * (1.0 + stop_3_pct / 100.0),
+                price: stop_3_price,
                 quantity_percentage: entry_3_prob, // Same as entry allocation
-                atr_distance: ((current_price * (1.0 + stop_3_pct / 100.0) - current_price).abs()
-                    / current_price)
-                    * 100.0,
+                atr_distance: ((stop_3_price - current_price).abs() / current_price) * 100.0,
                 order_type: "STOP_LOSS".to_string(),
                 confidence: 0.7,
             },
