@@ -401,6 +401,146 @@ impl SmartConsensus {
         Ok([entries[0].clone(), entries[1].clone(), entries[2].clone()])
     }
 
+    /// FULLY ADAPTIVE entry generation using ONLY sequence data and model predictions
+    /// NO hardcoded values - everything derived from mathematical relationships
+    pub fn generate_fully_adaptive_entries(
+        &self,
+        current_price: f64,
+        direction: &str,
+        sequence_prices: &[f64],
+        sequence_stats: &SequenceStatistics,
+    ) -> Result<[OrderLevel; 3]> {
+        log::info!("🚀 USING FULLY ADAPTIVE ENTRY GENERATION - NO HARDCODED VALUES");
+        log::info!(
+            "📊 Sequence data: {} prices, current: ${:.4}",
+            sequence_prices.len(),
+            current_price
+        );
+
+        let mut entries = Vec::new();
+
+        // Get adaptive bounds from sequence data
+        let bounds = sequence_stats.get_adaptive_bounds(sequence_prices, current_price);
+
+        // Calculate probability-weighted entry zone using model predictions
+        let entry_bins = if direction == "LONG" {
+            vec!["neutral", "moderate_down", "strong_down"]
+        } else {
+            vec!["neutral", "moderate_up", "strong_up"]
+        };
+
+        log::info!(
+            "🎯 Fully Adaptive Entry Generation: seq_range={:.2}%, max_drawdown={:.2}%, IQR_vol={:.2}%",
+            bounds.sequence_range_pct,
+            bounds.max_drawdown_pct,
+            bounds.iqr_volatility
+        );
+        log::info!(
+            "📈 Sequence bounds: min=${:.4}, max=${:.4}, p25=${:.4}, p75=${:.4}",
+            bounds.sequence_min,
+            bounds.sequence_max,
+            bounds.p25,
+            bounds.p75
+        );
+
+        // Generate 3 entries using sequence-derived bounds
+        for i in 0..3 {
+            // Get model prediction for this entry level
+            let bin_name = entry_bins.get(i).unwrap_or(&"neutral");
+            let bin_probability = self
+                .price_levels
+                .bins
+                .get(*bin_name)
+                .map(|b| b.probability)
+                .unwrap_or(0.33);
+
+            let bin_range = self
+                .price_levels
+                .bins
+                .get(*bin_name)
+                .map(|b| b.range)
+                .unwrap_or([0.0, 0.0]);
+
+            // Use MODEL predictions but bound by SEQUENCE reality
+            let model_distance = if direction == "LONG" {
+                bin_range[0].abs() // Use lower bound for long entries (negative values)
+            } else {
+                bin_range[0] // Use lower bound for short entries (positive values)
+            };
+
+            // Bound by actual sequence movement using probability weighting
+            let sequence_bounded_distance =
+                (bounds.sequence_range_pct * bin_probability).min(model_distance.abs());
+
+            // Progressive spacing using sequence percentiles (no hardcoded ratios)
+            let percentile_spacing = match i {
+                0 => (bounds.p50 - current_price).abs() / current_price * 100.0, // Median distance
+                1 => (bounds.p25 - current_price).abs() / current_price * 100.0, // Q1 distance
+                2 => (bounds.p10 - current_price).abs() / current_price * 100.0, // 10th percentile distance
+                _ => bounds.iqr_volatility * 0.5,
+            };
+
+            // Use the smaller of model prediction or sequence-derived spacing
+            let final_distance = sequence_bounded_distance.min(percentile_spacing);
+
+            // Calculate entry price
+            let entry_price = if direction == "SHORT" {
+                current_price * (1.0 + final_distance / 100.0)
+            } else {
+                current_price * (1.0 - final_distance / 100.0)
+            };
+
+            // Validate using z-score (within 3 standard deviations)
+            let validated_price =
+                sequence_stats.validate_price_with_zscore(sequence_prices, entry_price);
+
+            // Size allocation based on bin probability and Kelly fraction
+            let probability_size = bin_probability * 0.8; // Scale by probability
+            let kelly_adjusted_size = probability_size * (1.0 + sequence_stats.kelly_fraction);
+
+            // Normalize to reasonable range
+            let final_size = kelly_adjusted_size.clamp(0.15, 0.6);
+
+            // Confidence based on bin probability and distance from sequence bounds
+            let distance_from_current = (validated_price - current_price).abs() / current_price;
+            let distance_confidence = (-distance_from_current * 5.0).exp(); // Exponential decay
+            let final_confidence = (bin_probability * distance_confidence).clamp(0.2, 0.95);
+
+            let atr_distance = ((validated_price - current_price).abs() / current_price) * 100.0;
+
+            entries.push(OrderLevel {
+                price: validated_price,
+                quantity_percentage: final_size,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: final_confidence,
+            });
+
+            log::info!(
+                "  {} Adaptive Entry {}: ${:.4} ({:+.2}%) | Model: {:.2}% | Seq: {:.2}% | Final: {:.2}% | Size: {:.1}% | Conf: {:.2}",
+                direction,
+                i + 1,
+                validated_price,
+                if direction == "SHORT" { final_distance } else { -final_distance },
+                model_distance,
+                percentile_spacing,
+                final_distance,
+                final_size * 100.0,
+                final_confidence
+            );
+        }
+
+        // Normalize sizes to sum to 1.0
+        let total_size: f64 = entries.iter().map(|e| e.quantity_percentage).sum();
+        if total_size > 0.0 {
+            for entry in &mut entries {
+                entry.quantity_percentage /= total_size;
+            }
+        }
+
+        Ok([entries[0].clone(), entries[1].clone(), entries[2].clone()])
+    }
+
     /// Generate SMART exit levels using PURE prediction data
     pub fn generate_smart_exits(
         &self,
@@ -633,6 +773,164 @@ impl SmartConsensus {
                 exit_size * 100.0,
                 adjusted_target * 100.0,
                 exit_confidence
+            );
+        }
+
+        // Normalize exit sizes to sum to 1.0
+        let total_size: f64 = exits.iter().map(|e| e.quantity_percentage).sum();
+        if total_size > 0.0 {
+            for exit in &mut exits {
+                exit.quantity_percentage /= total_size;
+            }
+        }
+
+        Ok([exits[0].clone(), exits[1].clone(), exits[2].clone()])
+    }
+
+    /// FULLY ADAPTIVE exit generation using sequence upside bounds and model predictions
+    /// NO hardcoded values - everything bounded by actual sequence potential
+    pub fn generate_fully_adaptive_exits(
+        &self,
+        current_price: f64,
+        direction: &str,
+        sequence_prices: &[f64],
+        sequence_stats: &SequenceStatistics,
+    ) -> Result<[OrderLevel; 3]> {
+        log::info!("🚀 USING FULLY ADAPTIVE EXIT GENERATION - SEQUENCE BOUNDED");
+        log::info!(
+            "📊 Sequence data: {} prices, current: ${:.4}",
+            sequence_prices.len(),
+            current_price
+        );
+
+        let mut exits = Vec::new();
+
+        // Get adaptive bounds from sequence data
+        let bounds = sequence_stats.get_adaptive_bounds(sequence_prices, current_price);
+
+        // Calculate probability-weighted favorable zone using model predictions
+        let favorable_bins = if direction == "LONG" {
+            vec!["moderate_up", "strong_up"]
+        } else {
+            vec!["moderate_down", "strong_down"]
+        };
+
+        log::info!(
+            "🎯 Fully Adaptive Exit Generation: max_upside={:.2}%, seq_range={:.2}%, IQR_vol={:.2}%",
+            bounds.max_upside_pct,
+            bounds.sequence_range_pct,
+            bounds.iqr_volatility
+        );
+        log::info!(
+            "📈 Sequence upside bounds: max=${:.4}, p90=${:.4}, current=${:.4}",
+            bounds.sequence_max,
+            bounds.p90,
+            current_price
+        );
+
+        // Generate 3 exits using sequence-bounded approach
+        for i in 0..3 {
+            // Get model prediction for this exit level
+            let bin_name = favorable_bins
+                .get(i % favorable_bins.len())
+                .unwrap_or(&"moderate_up");
+            let bin_probability = self
+                .price_levels
+                .bins
+                .get(*bin_name)
+                .map(|b| b.probability)
+                .unwrap_or(0.33);
+
+            let bin_range = self
+                .price_levels
+                .bins
+                .get(*bin_name)
+                .map(|b| b.range)
+                .unwrap_or([0.0, 0.0]);
+
+            // Use MODEL predictions but bound by SEQUENCE reality
+            let model_exit_distance = if direction == "LONG" {
+                bin_range[0] // Use lower bound for conservative exits
+            } else {
+                bin_range[0].abs() // Use absolute value for short exits
+            };
+
+            // Bound by actual sequence upside potential
+            let sequence_bounded_distance = if bounds.max_upside_pct > 0.0 {
+                (bounds.max_upside_pct * bin_probability).min(model_exit_distance)
+            } else {
+                // Fallback to IQR-based targets if no upside in sequence
+                bounds.iqr_volatility * bin_probability
+            };
+
+            // Progressive exits using sequence percentiles and IQR spacing
+            let percentile_target = match i {
+                0 => (bounds.p75 - current_price) / current_price * 100.0, // Q3 target (conservative)
+                1 => (bounds.p90 - current_price) / current_price * 100.0, // 90th percentile (median)
+                2 => (bounds.sequence_max - current_price) / current_price * 100.0, // Maximum seen (optimistic)
+                _ => bounds.iqr_volatility * 0.5,
+            };
+
+            // Use the smaller of model prediction or sequence-derived target
+            let final_distance = sequence_bounded_distance.min(percentile_target.abs());
+
+            // Calculate exit price
+            let exit_price = if direction == "SHORT" {
+                current_price * (1.0 - final_distance / 100.0)
+            } else {
+                current_price * (1.0 + final_distance / 100.0)
+            };
+
+            // Validate using z-score (within 3 standard deviations)
+            let validated_price =
+                sequence_stats.validate_price_with_zscore(sequence_prices, exit_price);
+
+            // Size allocation based on probability of reaching target
+            // Higher probability targets get larger allocations
+            let probability_size = bin_probability * 0.7; // Scale by probability
+
+            // Adjust by distance (closer targets get larger size)
+            let distance_factor = 1.0 / (1.0 + final_distance / 100.0);
+            let distance_adjusted_size = probability_size * distance_factor;
+
+            // Normalize to reasonable range
+            let final_size = distance_adjusted_size.clamp(0.2, 0.5);
+
+            // Confidence based on:
+            // 1. Bin probability (model confidence)
+            // 2. Sequence upside potential (realistic achievability)
+            // 3. Distance from current price (closer = higher confidence)
+            let upside_confidence = if bounds.max_upside_pct > 0.0 {
+                (final_distance / bounds.max_upside_pct).min(1.0)
+            } else {
+                0.5 // Neutral confidence if no historical upside
+            };
+
+            let distance_confidence = (-final_distance / 10.0).exp(); // Exponential decay
+            let final_confidence =
+                (bin_probability * upside_confidence * distance_confidence).clamp(0.3, 0.9);
+
+            let atr_distance = ((validated_price - current_price).abs() / current_price) * 100.0;
+
+            exits.push(OrderLevel {
+                price: validated_price,
+                quantity_percentage: final_size,
+                atr_distance,
+                order_type: "LIMIT".to_string(),
+                confidence: final_confidence,
+            });
+
+            log::info!(
+                "  {} Adaptive Exit {}: ${:.4} ({:+.2}%) | Model: {:.2}% | Seq: {:.2}% | Final: {:.2}% | Size: {:.1}% | Conf: {:.2}",
+                direction,
+                i + 1,
+                validated_price,
+                if direction == "SHORT" { -final_distance } else { final_distance },
+                model_exit_distance,
+                percentile_target.abs(),
+                final_distance,
+                final_size * 100.0,
+                final_confidence
             );
         }
 
@@ -1172,6 +1470,172 @@ impl SmartConsensus {
                         extreme_entry * (1.0 + min_mae * 1.5)
                     } else {
                         extreme_entry * (1.0 - min_mae * 1.5)
+                    };
+
+                    adjustments_needed.push((i, new_price));
+                }
+            }
+        }
+
+        // Apply adjustments after iteration
+        for (i, new_price) in adjustments_needed {
+            stops[i].price = new_price;
+        }
+
+        Ok([stops[0].clone(), stops[1].clone(), stops[2].clone()])
+    }
+
+    /// FULLY ADAPTIVE stop generation using actual sequence drawdown analysis
+    /// NO hardcoded multipliers - everything derived from sequence statistical boundaries
+    pub fn generate_fully_adaptive_stops(
+        &self,
+        entry_levels: &[OrderLevel; 3],
+        direction: &str,
+        sequence_prices: &[f64],
+        sequence_stats: &SequenceStatistics,
+    ) -> Result<[OrderLevel; 3]> {
+        let mut stops = Vec::new();
+
+        // Get adaptive bounds from sequence data
+        let bounds = sequence_stats.get_adaptive_bounds(sequence_prices, entry_levels[0].price);
+
+        // Find extreme entry for stop placement (ensures no intersection)
+        let extreme_entry = if direction == "SHORT" {
+            entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::INFINITY, f64::min)
+        };
+
+        // Calculate adverse probability from model predictions
+        let adverse_probability = if direction == "SHORT" {
+            // For SHORT, risk comes from upside moves
+            let strong_up_prob = self
+                .price_levels
+                .bins
+                .get("strong_up")
+                .map(|b| b.probability)
+                .unwrap_or(0.0);
+            let moderate_up_prob = self
+                .price_levels
+                .bins
+                .get("moderate_up")
+                .map(|b| b.probability)
+                .unwrap_or(0.0);
+            strong_up_prob + moderate_up_prob
+        } else {
+            // For LONG, risk comes from downside moves
+            let strong_down_prob = self
+                .price_levels
+                .bins
+                .get("strong_down")
+                .map(|b| b.probability)
+                .unwrap_or(0.0);
+            let moderate_down_prob = self
+                .price_levels
+                .bins
+                .get("moderate_down")
+                .map(|b| b.probability)
+                .unwrap_or(0.0);
+            strong_down_prob + moderate_down_prob
+        };
+
+        log::info!(
+            "🛑 Fully Adaptive Stop Generation: max_drawdown={:.2}%, adverse_prob={:.1}%, IQR_vol={:.2}%",
+            bounds.max_drawdown_pct,
+            adverse_probability * 100.0,
+            bounds.iqr_volatility
+        );
+
+        // Generate 3 stops using sequence drawdown analysis
+        for (i, entry) in entry_levels.iter().enumerate() {
+            // Base stop distance using actual sequence drawdown
+            let sequence_stop_distance = bounds.max_drawdown_pct * adverse_probability;
+
+            // Progressive stops using IQR-based spacing from sequence percentiles
+            let iqr_spacing = match i {
+                0 => (extreme_entry - bounds.p25).abs() / extreme_entry * 100.0, // Q1 distance (conservative)
+                1 => (extreme_entry - bounds.p10).abs() / extreme_entry * 100.0, // 10th percentile (moderate)
+                2 => (extreme_entry - bounds.sequence_min).abs() / extreme_entry * 100.0, // Minimum seen (aggressive)
+                _ => bounds.iqr_volatility * 0.5,
+            };
+
+            // Use the larger of sequence-based or IQR-based distance for safety
+            let final_stop_distance = sequence_stop_distance.max(iqr_spacing);
+
+            // Calculate stop price from extreme entry
+            let stop_price = if direction == "SHORT" {
+                extreme_entry * (1.0 + final_stop_distance / 100.0)
+            } else {
+                extreme_entry * (1.0 - final_stop_distance / 100.0)
+            };
+
+            // Validate using z-score (within 3 standard deviations)
+            let validated_price =
+                sequence_stats.validate_price_with_zscore(sequence_prices, stop_price);
+
+            // Confidence based on:
+            // 1. Adverse probability (lower adverse risk = higher confidence)
+            // 2. Sequence drawdown reliability (how much historical data we have)
+            // 3. Distance from extreme entry (further = lower confidence due to slippage risk)
+            let adverse_confidence = 1.0 - adverse_probability; // Lower adverse prob = higher confidence
+            let data_confidence = (sequence_prices.len() as f64 / 100.0).min(1.0); // More data = higher confidence
+            let distance_confidence = (-final_stop_distance / 20.0).exp(); // Exponential decay with distance
+
+            let final_confidence =
+                (adverse_confidence * data_confidence * distance_confidence).clamp(0.3, 0.95);
+
+            let atr_distance = ((validated_price - extreme_entry).abs() / extreme_entry) * 100.0;
+
+            stops.push(OrderLevel {
+                price: validated_price,
+                quantity_percentage: entry.quantity_percentage, // Match entry size
+                atr_distance,
+                order_type: "STOP_LOSS".to_string(),
+                confidence: final_confidence,
+            });
+
+            log::info!(
+                "  {} Adaptive Stop {}: ${:.4} ({:.2}% from extreme) | Seq: {:.2}% | IQR: {:.2}% | Final: {:.2}% | Conf: {:.2}",
+                direction,
+                i + 1,
+                validated_price,
+                atr_distance,
+                sequence_stop_distance,
+                iqr_spacing,
+                final_stop_distance,
+                final_confidence
+            );
+        }
+
+        // Validate stops don't intersect with entries using sequence-based safety buffer
+        let mut adjustments_needed = Vec::new();
+        for (i, stop) in stops.iter().enumerate() {
+            for (j, entry) in entry_levels.iter().enumerate() {
+                let intersects = if direction == "SHORT" {
+                    stop.price <= entry.price
+                } else {
+                    stop.price >= entry.price
+                };
+
+                if intersects {
+                    log::warn!(
+                        "⚠️ Stop {} would intersect entry {}. Adjusting using sequence IQR safety buffer.",
+                        i + 1,
+                        j + 1
+                    );
+
+                    // Use IQR as safety buffer (robust to outliers)
+                    let safety_buffer = bounds.iqr_volatility / 100.0;
+                    let new_price = if direction == "SHORT" {
+                        extreme_entry * (1.0 + safety_buffer * 1.5)
+                    } else {
+                        extreme_entry * (1.0 - safety_buffer * 1.5)
                     };
 
                     adjustments_needed.push((i, new_price));

@@ -3,6 +3,37 @@
 
 use crate::utils::error::{Result, VangaError};
 
+/// Adaptive bounds calculated from sequence data for order generation
+#[derive(Debug, Clone)]
+pub struct AdaptiveBounds {
+    /// Minimum price in sequence
+    pub sequence_min: f64,
+    /// Maximum price in sequence
+    pub sequence_max: f64,
+    /// 10th percentile
+    pub p10: f64,
+    /// 25th percentile (Q1)
+    pub p25: f64,
+    /// 50th percentile (median)
+    pub p50: f64,
+    /// 75th percentile (Q3)
+    pub p75: f64,
+    /// 90th percentile
+    pub p90: f64,
+    /// IQR-based volatility percentage
+    pub iqr_volatility: f64,
+    /// Maximum drawdown percentage from current price
+    pub max_drawdown_pct: f64,
+    /// Maximum upside percentage from current price
+    pub max_upside_pct: f64,
+    /// Sequence range as percentage of current price
+    pub sequence_range_pct: f64,
+    /// Sequence mean for z-score calculations
+    pub sequence_mean: f64,
+    /// Sequence standard deviation for z-score calculations
+    pub sequence_std: f64,
+}
+
 /// Statistics extracted from raw price sequence
 #[derive(Debug, Clone)]
 pub struct SequenceStatistics {
@@ -356,6 +387,133 @@ impl SequenceStatistics {
 
         let index = ((percentile / 100.0) * (sorted_values.len() - 1) as f64).round() as usize;
         sorted_values[index.min(sorted_values.len() - 1)]
+    }
+
+    /// Calculate sequence-derived bounds for fully adaptive order generation
+    /// Returns (sequence_min, sequence_max, p10, p25, p50, p75, p90)
+    pub fn calculate_sequence_percentiles(
+        &self,
+        prices: &[f64],
+    ) -> (f64, f64, f64, f64, f64, f64, f64) {
+        if prices.is_empty() {
+            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        let mut sorted_prices = prices.to_vec();
+        sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let sequence_min = sorted_prices[0];
+        let sequence_max = sorted_prices[sorted_prices.len() - 1];
+        let p10 = Self::percentile(&sorted_prices, 10.0);
+        let p25 = Self::percentile(&sorted_prices, 25.0);
+        let p50 = Self::percentile(&sorted_prices, 50.0);
+        let p75 = Self::percentile(&sorted_prices, 75.0);
+        let p90 = Self::percentile(&sorted_prices, 90.0);
+
+        (sequence_min, sequence_max, p10, p25, p50, p75, p90)
+    }
+
+    /// Calculate IQR-based volatility (robust to outliers)
+    pub fn calculate_iqr_volatility(&self, prices: &[f64]) -> f64 {
+        let (_, _, _, p25, p50, p75, _) = self.calculate_sequence_percentiles(prices);
+
+        if p50 == 0.0 {
+            return 0.0;
+        }
+
+        // IQR volatility as percentage: ((p75 - p25) / p50) * 100.0
+        ((p75 - p25) / p50) * 100.0
+    }
+
+    /// Calculate maximum drawdown and upside percentages from current price
+    pub fn calculate_drawdown_upside_from_current(
+        &self,
+        prices: &[f64],
+        current_price: f64,
+    ) -> (f64, f64) {
+        if prices.is_empty() || current_price <= 0.0 {
+            return (0.0, 0.0);
+        }
+
+        let (sequence_min, sequence_max, _, _, _, _, _) =
+            self.calculate_sequence_percentiles(prices);
+
+        // Maximum drawdown from current price to sequence minimum
+        let max_drawdown_pct = if current_price > sequence_min {
+            ((current_price - sequence_min) / current_price) * 100.0
+        } else {
+            0.0
+        };
+
+        // Maximum upside from current price to sequence maximum
+        let max_upside_pct = if sequence_max > current_price {
+            ((sequence_max - current_price) / current_price) * 100.0
+        } else {
+            0.0
+        };
+
+        (max_drawdown_pct, max_upside_pct)
+    }
+
+    /// Calculate sequence range percentage from current price
+    pub fn calculate_sequence_range_pct(&self, prices: &[f64], current_price: f64) -> f64 {
+        if prices.is_empty() || current_price <= 0.0 {
+            return 0.0;
+        }
+
+        let (sequence_min, sequence_max, _, _, _, _, _) =
+            self.calculate_sequence_percentiles(prices);
+        ((sequence_max - sequence_min) / current_price) * 100.0
+    }
+
+    /// Validate price using z-score analysis (within 3 standard deviations)
+    pub fn validate_price_with_zscore(&self, prices: &[f64], target_price: f64) -> f64 {
+        if prices.is_empty() {
+            return target_price;
+        }
+
+        let sequence_mean = Self::mean(prices);
+        let sequence_std = Self::std_dev(prices, sequence_mean);
+
+        if sequence_std == 0.0 {
+            return target_price; // No variation, return as-is
+        }
+
+        let z_score = (target_price - sequence_mean) / sequence_std;
+
+        // Within 3 standard deviations (99.7% of normal distribution)
+        if z_score.abs() <= 3.0 {
+            target_price
+        } else {
+            // Scale back to 3-sigma boundary
+            sequence_mean + (3.0 * z_score.signum() * sequence_std)
+        }
+    }
+
+    /// Get sequence statistics for adaptive order generation
+    pub fn get_adaptive_bounds(&self, prices: &[f64], current_price: f64) -> AdaptiveBounds {
+        let (sequence_min, sequence_max, p10, p25, p50, p75, p90) =
+            self.calculate_sequence_percentiles(prices);
+        let iqr_volatility = self.calculate_iqr_volatility(prices);
+        let (max_drawdown_pct, max_upside_pct) =
+            self.calculate_drawdown_upside_from_current(prices, current_price);
+        let sequence_range_pct = self.calculate_sequence_range_pct(prices, current_price);
+
+        AdaptiveBounds {
+            sequence_min,
+            sequence_max,
+            p10,
+            p25,
+            p50,
+            p75,
+            p90,
+            iqr_volatility,
+            max_drawdown_pct,
+            max_upside_pct,
+            sequence_range_pct,
+            sequence_mean: Self::mean(prices),
+            sequence_std: Self::std_dev(prices, Self::mean(prices)),
+        }
     }
 }
 
