@@ -29,11 +29,11 @@ async fn test_reproducible_single_model_training() {
 
     // Initialize both models (this will attempt seeding)
     println!("🔧 Attempting to initialize model 1...");
-    let init_result1 = model1.initialize_network();
+    let init_result1 = model1.initialize_network(None); // Default behavior (with weight init)
     println!("🔧 Model 1 initialization result: {:?}", init_result1);
 
     println!("🔧 Attempting to initialize model 2...");
-    let init_result2 = model2.initialize_network();
+    let init_result2 = model2.initialize_network(None); // Default behavior (with weight init)
     println!("🔧 Model 2 initialization result: {:?}", init_result2);
 
     // Check if initialization failed
@@ -93,8 +93,8 @@ async fn test_different_seeds_produce_different_results() {
     let mut model2 = LSTMModel::new_with_seed(config.clone(), Some(123)).unwrap();
 
     // Initialize both models
-    model1.initialize_network().unwrap();
-    model2.initialize_network().unwrap();
+    model1.initialize_network(None).unwrap(); // Default behavior (with weight init)
+    model2.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
     // Mark models as trained for testing purposes (allows predictions)
     model1.mark_as_trained_for_testing();
@@ -137,8 +137,8 @@ async fn test_seed_zero_vs_none_randomness() {
     let mut model_zero = LSTMModel::new_with_seed(config.clone(), Some(0)).unwrap();
     let mut model_none = LSTMModel::new_with_seed(config, None).unwrap();
 
-    model_zero.initialize_network().unwrap();
-    model_none.initialize_network().unwrap();
+    model_zero.initialize_network(None).unwrap(); // Default behavior (with weight init)
+    model_none.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
     // Mark models as trained for testing purposes (allows predictions)
     model_zero.mark_as_trained_for_testing();
@@ -272,12 +272,12 @@ async fn test_reproducible_weight_initialization() {
 
     // Create and initialize first model
     let mut model1 = LSTMModel::new_with_seed(config.clone(), Some(seed)).unwrap();
-    model1.initialize_network().unwrap();
+    model1.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model1.mark_as_trained_for_testing();
 
     // Create and initialize second model with same seed
     let mut model2 = LSTMModel::new_with_seed(config.clone(), Some(seed)).unwrap();
-    model2.initialize_network().unwrap();
+    model2.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model2.mark_as_trained_for_testing();
 
     // Create dummy input
@@ -328,13 +328,13 @@ async fn test_seed_consistency_across_training_runs() {
 
     // First training run
     let mut model1 = LSTMModel::new_with_seed(config.clone(), Some(seed)).unwrap();
-    model1.initialize_network().unwrap();
+    model1.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model1.mark_as_trained_for_testing();
     let pred1_before = model1.predict(&sequences).await.unwrap();
 
     // Second training run with same seed
     let mut model2 = LSTMModel::new_with_seed(config.clone(), Some(seed)).unwrap();
-    model2.initialize_network().unwrap();
+    model2.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model2.mark_as_trained_for_testing();
     let pred2_before = model2.predict(&sequences).await.unwrap();
 

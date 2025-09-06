@@ -561,7 +561,7 @@ mod tests {
         ));
 
         // Initialize the network - this should create both forward and backward layers
-        model.initialize_network().unwrap();
+        model.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
         // Verify both forward and backward layers are created
         assert!(model.lstm_layers.is_some());
@@ -616,7 +616,7 @@ mod tests {
         let mut model =
             LSTMModel::from_model_config(&model_config, input_size, expected_output_size).unwrap();
 
-        model.initialize_network().unwrap();
+        model.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
         // Mark model as trained for prediction (bypass training requirement for test)
         model.trained = true;
@@ -721,8 +721,8 @@ mod tests {
         let mut bi_model =
             LSTMModel::from_model_config(&bidirectional_config, input_size, output_size).unwrap();
 
-        uni_model.initialize_network().unwrap();
-        bi_model.initialize_network().unwrap();
+        uni_model.initialize_network(None).unwrap(); // Default behavior (with weight init)
+        bi_model.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
         // Verify unidirectional has no backward layers
         assert!(uni_model.backward_lstm_layers.is_none());
@@ -772,7 +772,7 @@ mod tests {
 
         let mut model =
             LSTMModel::from_model_config(&model_config, input_size, expected_output_size).unwrap();
-        model.initialize_network().unwrap();
+        model.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
         println!("✅ Attention integration test configuration created!");
     }

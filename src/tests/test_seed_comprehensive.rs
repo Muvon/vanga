@@ -45,7 +45,7 @@ async fn test_seed_initialization_logging() {
     let mut model = LSTMModel::new_with_seed(config, Some(123)).unwrap();
 
     // This should trigger all the seeding logic and logging
-    let result = model.initialize_network();
+    let result = model.initialize_network(None); // Default behavior (with weight init)
     assert!(
         result.is_ok(),
         "Network initialization should succeed even if seeding doesn't work"
@@ -99,7 +99,7 @@ async fn test_seed_validation_logic() {
 
     for (seed, description) in test_cases {
         let mut model = LSTMModel::new_with_seed(config.clone(), seed).unwrap();
-        let result = model.initialize_network();
+        let result = model.initialize_network(None); // Default behavior (with weight init)
         assert!(
             result.is_ok(),
             "Initialization should succeed for {}",
@@ -132,7 +132,7 @@ async fn test_weight_tensor_access() {
         num_layers: 1,
     };
     let mut model = LSTMModel::new_with_seed(config, Some(789)).unwrap();
-    model.initialize_network().unwrap();
+    model.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model.mark_as_trained_for_testing(); // Allow predictions if needed
 
     // Test that we can access weight tensors
@@ -198,8 +198,8 @@ async fn test_seed_consistency_attempt() {
     let mut model1 = LSTMModel::new_with_seed(config.clone(), Some(seed)).unwrap();
     let mut model2 = LSTMModel::new_with_seed(config, Some(seed)).unwrap();
 
-    model1.initialize_network().unwrap();
-    model2.initialize_network().unwrap();
+    model1.initialize_network(None).unwrap(); // Default behavior (with weight init)
+    model2.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
     // Mark as trained for any potential prediction tests
     model1.mark_as_trained_for_testing();

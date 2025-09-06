@@ -14,7 +14,7 @@ async fn test_validation_metrics_method_signature() {
     };
 
     let mut model = LSTMModel::new(config).unwrap();
-    model.initialize_network().unwrap();
+    model.initialize_network(None).unwrap(); // Default behavior (with weight init)
 
     // Create dummy validation data
     let val_sequences = Array3::<f64>::zeros((2, 10, 5));

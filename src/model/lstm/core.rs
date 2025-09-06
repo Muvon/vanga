@@ -540,10 +540,12 @@ impl LSTMModel {
     }
 
     /// Initialize multi-layer LSTM network using Sequential - Enhanced with bidirectional support
-    pub fn initialize_network(&mut self) -> Result<()> {
+    pub fn initialize_network(&mut self, skip_weight_init: Option<bool>) -> Result<()> {
         if self.lstm_layers.is_some() {
             return Ok(()); // Already initialized
         }
+
+        let skip_weights = skip_weight_init.unwrap_or(false);
 
         log::info!(
             "Initializing multi-layer LSTM network with config: {:?}",
@@ -739,28 +741,32 @@ impl LSTMModel {
             ));
         }
 
-        // Apply proper LSTM weight initialization after network creation
-        log::info!("🎯 Applying proper LSTM weight initialization...");
+        // Apply proper LSTM weight initialization after network creation (only if not skipped)
+        if skip_weights {
+            log::info!("🔧 Initializing network structure (skipping weight initialization for model loading)");
+        } else {
+            log::info!("🎯 Applying proper LSTM weight initialization...");
 
-        // First, let's see what tensors we actually have with their names
-        let var_data = self.varmap.data().lock().unwrap();
-        let var_names: Vec<String> = var_data.keys().cloned().collect();
-        drop(var_data); // Release the lock
+            // First, let's see what tensors we actually have with their names
+            let var_data = self.varmap.data().lock().unwrap();
+            let var_names: Vec<String> = var_data.keys().cloned().collect();
+            drop(var_data); // Release the lock
 
-        let all_vars = self.varmap.all_vars();
-        log::info!("📊 Found {} tensors in VarMap:", all_vars.len());
-        for (idx, var) in all_vars.iter().enumerate() {
-            let shape = var.shape();
-            let dims = shape.dims();
-            let var_name = var_names.get(idx).map(|s| s.as_str()).unwrap_or("unknown");
-            log::info!("  Tensor {}: '{}' shape={:?}", idx, var_name, dims);
+            let all_vars = self.varmap.all_vars();
+            log::info!("📊 Found {} tensors in VarMap:", all_vars.len());
+            for (idx, var) in all_vars.iter().enumerate() {
+                let shape = var.shape();
+                let dims = shape.dims();
+                let var_name = var_names.get(idx).map(|s| s.as_str()).unwrap_or("unknown");
+                log::info!("  Tensor {}: '{}' shape={:?}", idx, var_name, dims);
+            }
+
+            crate::model::lstm::seeded_weights::SeededTensorUtils::apply_lstm_weight_initialization(
+                &self.varmap,
+                &self.device,
+                self.seed,
+            )?;
         }
-
-        crate::model::lstm::seeded_weights::SeededTensorUtils::apply_lstm_weight_initialization(
-            &self.varmap,
-            &self.device,
-            self.seed,
-        )?;
 
         Ok(())
     }
@@ -842,8 +848,9 @@ impl LSTMModel {
         model.calibrated_parameters = model_state.calibrated_parameters.clone();
 
         // CRITICAL FIX: Initialize network structure FIRST to create tensor placeholders
-        log::info!("🔧 Initializing network structure...");
-        model.initialize_network()?;
+        // Skip weight initialization since we'll load trained weights from safetensors
+        log::info!("🔧 Initializing network structure for model loading...");
+        model.initialize_network(Some(true))?;
 
         // Verify network was initialized
         let pre_load_keys: Vec<String> = model
@@ -1084,8 +1091,9 @@ impl LSTMModel {
         let mut model = Self::from_model_config(model_config, input_size, output_size)?;
 
         // Initialize network structure FIRST to create tensor placeholders
-        log::info!("🔧 Initializing network structure with provided config...");
-        model.initialize_network()?;
+        // Skip weight initialization since we'll load trained weights from safetensors
+        log::info!("🔧 Initializing network structure with provided config (for loading)...");
+        model.initialize_network(Some(true))?;
 
         // Load model weights from safetensors
         log::info!("🔄 Loading weights from: {}", weights_path.display());
@@ -1232,10 +1240,10 @@ impl LSTMModel {
     /// Save current model weights as the best checkpoint
     /// Called when validation loss improves during training
     pub fn save_best_checkpoint(&mut self, validation_loss: f64, epoch: usize) -> Result<()> {
-        // Ensure network is initialized before saving
+        // Ensure network is initialized before saving (with weight initialization for training)
         if self.lstm_layers.is_none() || self.output_layer.is_none() {
             log::warn!("⚠️ Network not initialized, initializing before checkpoint save...");
-            self.initialize_network()?;
+            self.initialize_network(Some(false))?; // Ensure weight initialization for training
         }
 
         // Verify current model has parameters before saving
@@ -1356,11 +1364,12 @@ impl LSTMModel {
 
                         // CRITICAL FIX: Ensure network is initialized before loading weights
                         // This creates the variables in the VarMap that load() can update
+                        // Skip weight initialization since we're loading checkpoint weights
                         if self.lstm_layers.is_none() || self.output_layer.is_none() {
                             log::info!(
-                                "🔧 Initializing network before loading checkpoint weights..."
+                                "🔧 Initializing network before loading checkpoint weights (skipping weight init)..."
                             );
-                            self.initialize_network()?;
+                            self.initialize_network(Some(true))?; // Skip weight init for loading
                         }
 
                         // Verify we have variables to load into

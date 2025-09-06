@@ -493,10 +493,10 @@ impl LSTMModel {
         // Configure training parameters from final config (original or incremental)
         self.configure_training(&final_config);
 
-        // Initialize network if not already done
+        // Initialize network if not already done (with weight initialization for training)
         if self.lstm_layers.is_none() || self.output_layer.is_none() {
             log::info!("🆕 FRESH TRAINING: Initializing new LSTM network layers and weights");
-            self.initialize_network()?;
+            self.initialize_network(Some(false))?; // Ensure weight initialization for training
 
             // Apply Xavier initialization for fresh training
             self.apply_xavier_initialization()?;
