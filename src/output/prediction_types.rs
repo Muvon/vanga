@@ -487,8 +487,22 @@ impl DirectionPrediction {
             crate::output::confidence_calculator::calibrate_5_class_confidence(*max_prob);
 
         // Blend the combined confidence with calibrated confidence
-        self.confidence =
-            (combined_confidence * 0.3 + calibrated_confidence * 0.7).clamp(0.25, 0.98);
+        // Adjusted for crypto trading reality where 0.4 max_prob is common
+        let final_confidence =
+            (combined_confidence * 0.4 + calibrated_confidence * 0.6).clamp(0.20, 0.98);
+
+        // Debug logging to understand confidence calculation
+        log::debug!(
+            "DirectionPrediction confidence: max_prob={:.3}, entropy_conf={:.3}, deviation_conf={:.3}, combined={:.3}, calibrated={:.3}, final={:.3}",
+            max_prob,
+            entropy_confidence,
+            deviation_confidence,
+            combined_confidence,
+            calibrated_confidence,
+            final_confidence
+        );
+
+        self.confidence = final_confidence;
     }
 
     /// Create a new DirectionPrediction with default values

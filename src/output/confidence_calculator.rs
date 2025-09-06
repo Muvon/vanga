@@ -79,9 +79,23 @@ impl ConfidenceCalculator {
         if let Some(ref direction) = prediction.direction {
             let dir_score = self.calculate_direction_confidence(direction);
 
+            // Debug logging
+            log::debug!(
+                "Direction confidence: raw={:.3}, calculated={:.3}",
+                direction.confidence,
+                dir_score
+            );
+
             if let Some(ref price_levels) = prediction.price_levels {
                 has_core_signals = true;
                 let price_score = self.calculate_price_level_confidence(price_levels);
+
+                // Debug logging
+                log::debug!(
+                    "Price levels confidence: raw={:.3}, calculated={:.3}",
+                    price_levels.confidence,
+                    price_score
+                );
 
                 // Check if direction and price level agree
                 let core_agreement = self.check_price_direction_agreement(price_levels, direction);
@@ -96,6 +110,14 @@ impl ConfidenceCalculator {
                     core_confidence =
                         (dir_score * 0.5 + price_score * 0.5) * (0.7 + core_agreement * 0.5);
                 }
+
+                log::debug!(
+                    "Core confidence: dir={:.3}, price={:.3}, agreement={:.3}, final={:.3}",
+                    dir_score,
+                    price_score,
+                    core_agreement,
+                    core_confidence
+                );
             } else {
                 // Only direction available
                 core_confidence = dir_score * 0.7; // Reduce confidence without price levels
@@ -188,7 +210,19 @@ impl ConfidenceCalculator {
 
         // Allow natural confidence expression - no artificial clamping
         // Only apply safety bounds to prevent extreme values
-        final_confidence.clamp(0.05, 0.95)
+        let clamped_confidence = final_confidence.clamp(0.05, 0.95);
+
+        log::debug!(
+            "Overall confidence calculation: core={:.3}, confirmation={:.3}, risk_adj={:.3}, agreement={:.3}, final={:.3}, clamped={:.3}",
+            core_confidence,
+            confirmation_confidence,
+            risk_adjustment,
+            agreement_factor,
+            final_confidence,
+            clamped_confidence
+        );
+
+        clamped_confidence
     }
 
     /// Calculate confidence for price level predictions
@@ -230,7 +264,8 @@ impl ConfidenceCalculator {
         let combined =
             enhanced_confidence * 0.4 + entropy_confidence * 0.3 + price_levels.confidence * 0.3; // Use the already calibrated confidence
 
-        combined.clamp(0.25, 0.98)
+        // Less restrictive clamping for crypto trading
+        combined.clamp(0.20, 0.98)
     }
 
     /// Calculate confidence for direction predictions
@@ -284,7 +319,8 @@ impl ConfidenceCalculator {
                       directional_confidence * 0.35 + // 35% from aggregated direction
                       rr_confidence * 0.15; // 15% from risk-reward
 
-        combined.clamp(0.25, 0.98)
+        // Less restrictive clamping for crypto trading
+        combined.clamp(0.20, 0.98)
     }
 
     /// Calculate confidence for sentiment predictions
@@ -979,39 +1015,50 @@ impl EnhancedPositionSizer {
 /// Standalone calibration function for 5-class confidence
 /// This provides a mathematically correct mapping from raw probabilities to confidence scores
 pub fn calibrate_5_class_confidence(max_probability: f64) -> f64 {
-    // MATHEMATICAL FOUNDATION:
+    // MATHEMATICAL FOUNDATION FOR CRYPTO TRADING:
     // In a 5-class system with balanced training (20% each class):
     // - 0.20 = random guess (uniform distribution)
-    // - 0.30 = 1.5x better than random (moderate signal)
-    // - 0.40 = 2.0x better than random (good signal)
-    // - 0.50 = 2.5x better than random (strong signal)
-    // - 0.60+ = 3.0x+ better than random (very strong signal)
+    // - 0.30 = 1.5x better than random (tradeable signal in crypto)
+    // - 0.40 = 2.0x better than random (good signal, common in well-calibrated models)
+    // - 0.50 = 2.5x better than random (strong signal, rare but valuable)
+    // - 0.60+ = 3.0x+ better than random (very strong, usually overfitting if common)
+    //
+    // ADJUSTED FOR REALITY: With 60-65% model accuracy, max_prob of 0.4 is EXPECTED
+    // We need to map this to usable confidence levels for trading decisions
 
     const UNIFORM_BASELINE: f64 = 0.2; // 1/5 for 5 classes
 
     if max_probability < UNIFORM_BASELINE {
         // Below random (shouldn't happen with softmax, but handle gracefully)
-        max_probability * 1.5
+        max_probability * 2.0
     } else if max_probability >= 0.6 {
-        // Very strong signal (3x+ better than random)
-        // Maps: 0.6->0.90, 0.7->0.93, 0.8->0.96, 1.0->1.0
-        0.90 + (max_probability - 0.6) * 0.25
+        // Very strong signal (3x+ better than random) - RARE in well-calibrated models
+        // Maps: 0.6->0.95, 0.7->0.97, 0.8->0.99, 1.0->1.0
+        0.95 + (max_probability - 0.6) * 0.125
     } else if max_probability >= 0.5 {
-        // Strong signal (2.5x better than random)
-        // Maps: 0.5->0.85, 0.6->0.90
-        0.85 + (max_probability - 0.5) * 0.5
+        // Strong signal (2.5x better than random) - UNCOMMON but excellent
+        // Maps: 0.5->0.88, 0.6->0.95
+        0.88 + (max_probability - 0.5) * 0.7
     } else if max_probability >= 0.4 {
-        // Good signal (2x better than random)
-        // Maps: 0.4->0.70, 0.5->0.85
-        0.70 + (max_probability - 0.4) * 1.5
+        // Good signal (2x better than random) - COMMON in good models
+        // Maps: 0.4->0.75, 0.5->0.88 (adjusted up for crypto trading reality)
+        0.75 + (max_probability - 0.4) * 1.3
+    } else if max_probability >= 0.35 {
+        // Decent signal (1.75x better than random) - TYPICAL output
+        // Maps: 0.35->0.65, 0.4->0.75
+        0.65 + (max_probability - 0.35) * 2.0
     } else if max_probability >= 0.3 {
-        // Moderate signal (1.5x better than random)
-        // Maps: 0.3->0.50, 0.4->0.70
-        0.50 + (max_probability - 0.3) * 2.0
+        // Moderate signal (1.5x better than random) - MINIMUM tradeable
+        // Maps: 0.3->0.55, 0.35->0.65
+        0.55 + (max_probability - 0.3) * 2.0
+    } else if max_probability >= 0.25 {
+        // Weak but present signal (1.25x better than random)
+        // Maps: 0.25->0.45, 0.3->0.55
+        0.45 + (max_probability - 0.25) * 2.0
     } else {
-        // Weak signal but still better than random
-        // Maps: 0.2->0.30, 0.3->0.50
-        0.30 + (max_probability - UNIFORM_BASELINE) * 2.0
+        // Very weak signal but still better than random
+        // Maps: 0.2->0.35, 0.25->0.45
+        0.35 + (max_probability - UNIFORM_BASELINE) * 2.0
     }
 }
 
@@ -1052,13 +1099,14 @@ pub fn calculate_combined_5_class_confidence(probabilities: &[f64], max_probabil
     };
 
     // Weighted combination
-    // Calibrated: 50% (most interpretable)
-    // Entropy: 30% (information theory)
-    // Deviation: 20% (simple metric)
+    // Calibrated: 60% (most interpretable and adjusted for crypto reality)
+    // Entropy: 25% (information theory)
+    // Deviation: 15% (simple metric)
     let combined =
-        calibrated_confidence * 0.5 + entropy_confidence * 0.3 + deviation_confidence * 0.2;
+        calibrated_confidence * 0.6 + entropy_confidence * 0.25 + deviation_confidence * 0.15;
 
-    combined.clamp(0.25, 0.98)
+    // Less restrictive clamping for crypto trading
+    combined.clamp(0.20, 0.98)
 }
 
 #[cfg(test)]

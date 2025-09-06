@@ -566,6 +566,17 @@ impl OutputFormatter {
                     .confidence_calculator
                     .calculate_overall_confidence(&result);
 
+                // Log individual target confidences for debugging
+                if let Some(ref dir) = result.direction {
+                    log::info!("Direction raw confidence: {:.3}", dir.confidence);
+                }
+                if let Some(ref price) = result.price_levels {
+                    log::info!("Price levels raw confidence: {:.3}", price.confidence);
+                }
+                if let Some(ref vol) = result.volatility {
+                    log::info!("Volatility raw confidence: {:.3}", vol.confidence);
+                }
+
                 // Log confidence details for debugging
                 log::info!(
                     "🎯 Enhanced Confidence: {:.2}% (Base: {:.2}%, Agreement Factor: {:.2}x, Min Required: {:.2}%)",
