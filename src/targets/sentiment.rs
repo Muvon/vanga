@@ -807,7 +807,11 @@ pub fn reconstruct_sentiment(
         .map(|(i, _)| i)
         .unwrap_or(2); // Default to neutral
 
-    let confidence = probabilities[most_likely_class];
+    // UNIFIED CONFIDENCE CALCULATION
+    // All targets now use the same research-based calibration function
+    // This eliminates target-specific confidence inflation and ensures consistency
+    let max_prob = probabilities.iter().fold(0.0_f64, |a, &b| a.max(b));
+    let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
     // Calculate expected momentum (weighted average)
     let expected_momentum = probabilities

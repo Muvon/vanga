@@ -787,31 +787,11 @@ pub fn reconstruct_price_levels(
 
     // MATHEMATICALLY CORRECT CONFIDENCE FOR 5-CLASS SYSTEM
     // Calculate entropy-based confidence
-    let entropy = probabilities
-        .iter()
-        .filter(|&&p| p > 0.0)
-        .map(|&p| -p * p.ln())
-        .sum::<f64>();
-    let max_entropy = 5_f64.ln();
-    let entropy_confidence = 1.0 - (entropy / max_entropy);
-
-    // Deviation from uniform distribution
-    let uniform_baseline = 0.2;
-    let deviation_confidence = (max_prob - uniform_baseline) / (1.0 - uniform_baseline);
-
-    // Combine methods
-    let combined_confidence = entropy_confidence * 0.5 + deviation_confidence.max(0.0) * 0.5;
-
-    // Apply calibration for 5-class price level predictions
-    // Price levels are critical for trading, so we want higher confidence when clear
-    let confidence = if max_prob >= 0.5 {
-        0.88 + (max_prob - 0.5) * 0.24 // 0.5->0.88, 0.7->0.93, 1.0->1.0
-    } else {
-        // Calibration curve for price levels
-        let x = (max_prob - 0.2) * 3.125;
-        let calibrated = 0.3 + 0.62 / (1.0 + (-8.0 * (x - 0.4)).exp());
-        (calibrated * 0.7 + combined_confidence * 0.3).clamp(0.25, 0.98)
-    };
+    // UNIFIED CONFIDENCE CALCULATION
+    // All targets now use the same research-based calibration function
+    // This ensures consistent confidence scores across all prediction types
+    // Based on "On Calibration of Modern Neural Networks" research findings
+    let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
     // Calculate expected price change (weighted average of class midpoints)
     let class_midpoints: Vec<f64> = percentage_ranges

@@ -5,6 +5,8 @@
 
 pub mod adaptive_stop_calculator;
 pub mod confidence_calculator;
+#[cfg(test)]
+pub mod confidence_calculator_test;
 pub mod formatter;
 pub mod metadata;
 pub mod multi_target_parser;
