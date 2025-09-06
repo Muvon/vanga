@@ -183,8 +183,9 @@ impl FractionalDerivative {
 
                 // Apply the (1/h^α) scaling and normalize by weight sum
                 // This ensures proper scaling according to the fractional derivative theory
-                let scale_factor =
-                    (1.0 / (self.step_size.powf(self.alpha) * abs_weight_sum)) as f32;
+                // CRITICAL FIX: Bound scale_factor to prevent gradient explosion
+                let raw_scale_factor = 1.0 / (self.step_size.powf(self.alpha) * abs_weight_sum);
+                let scale_factor = raw_scale_factor.clamp(0.1, 10.0) as f32; // Bound between 0.1 and 10.0
 
                 let scale_tensor = Tensor::new(scale_factor, weighted_sum.device())?
                     .broadcast_as(weighted_sum.shape())?
@@ -195,9 +196,15 @@ impl FractionalDerivative {
                     .mul(&scale_tensor)?
                     .contiguous()?;
 
-                // Log for debugging (occasionally)
+                // Log for debugging (occasionally) and warn about scaling bounds
                 if history.len() == self.memory_window && self.gradient_history[0].len() % 100 == 1
                 {
+                    if !(0.1..=10.0).contains(&raw_scale_factor) {
+                        log::warn!(
+                            "🔧 Fractional gradient scaling bounded: raw={:.6} → bounded={:.6} (α={:.2}, h={:.2})",
+                            raw_scale_factor, scale_factor, self.alpha, self.step_size
+                        );
+                    }
                     log::trace!(
                         "Fractional gradient: α={:.2}, h={:.2}, weight_sum={:.4}, scale={:.6}",
                         self.alpha,
@@ -209,7 +216,9 @@ impl FractionalDerivative {
             } else {
                 // For early steps, use regular gradient with mild scaling
                 // The (1/h^α) factor still applies but with reduced effect
-                let early_scale = (1.0 / self.step_size.powf(self.alpha * 0.5)) as f32;
+                // CRITICAL FIX: Bound early scaling to prevent explosion
+                let raw_early_scale = 1.0 / self.step_size.powf(self.alpha * 0.5);
+                let early_scale = raw_early_scale.clamp(0.2, 5.0) as f32; // Conservative bounds
 
                 let scale_tensor = Tensor::new(early_scale, fractional_grad.device())?
                     .broadcast_as(fractional_grad.shape())?
@@ -221,8 +230,9 @@ impl FractionalDerivative {
                     .contiguous()?;
 
                 log::trace!(
-                    "Early step gradient scaling: history_len={}, scale={:.4}",
+                    "Early step gradient scaling: history_len={}, raw_scale={:.4}, bounded_scale={:.4}",
                     history.len(),
+                    raw_early_scale,
                     early_scale
                 );
             }
