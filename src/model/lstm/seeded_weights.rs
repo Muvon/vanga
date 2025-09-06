@@ -369,58 +369,147 @@ impl SeededTensorUtils {
 
         log::info!("🔧 Applying proper LSTM weight initialization...");
 
-        for (var_name, var) in all_vars.iter().enumerate() {
+        // Get the variable names to better identify tensor types
+        let var_data = varmap.data().lock().unwrap();
+        let var_names: Vec<String> = var_data.keys().cloned().collect();
+        drop(var_data); // Release the lock
+
+        for (var_idx, var) in all_vars.iter().enumerate() {
             let shape = var.shape();
             let dims = shape.dims();
+            let var_name = var_names
+                .get(var_idx)
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
 
-            // Determine weight type based on tensor shape and position
+            log::debug!("🔍 Processing tensor '{}': shape={:?}", var_name, dims);
+
+            // Determine weight type based on tensor name and shape
             if dims.len() == 2 {
                 // 2D tensors are weight matrices
                 let (rows, cols) = (dims[0], dims[1]);
 
-                // Heuristic to identify recurrent weights:
-                // In LSTM, recurrent weights are typically square or have specific patterns
-                // This is a simplified heuristic - you may need to adjust based on Candle's LSTM structure
-                let is_recurrent_weight = rows == cols || var_name % 8 >= 4; // Assuming Candle stores weights in groups of 8 (4 gates × 2 weight types)
+                // Identify weight types based on Candle's LSTM naming convention
+                // In Candle LSTM: weight_ih = input-to-hidden, weight_hh = hidden-to-hidden (recurrent)
+                let is_recurrent_weight = var_name.contains("weight_hh") ||
+                                        var_name.contains("hh") ||
+                                        var_name.contains("hidden_hidden") ||
+                                        var_name.contains("recurrent") ||
+                                        // Fallback: square matrices are likely recurrent
+                                        (rows == cols && rows > 50); // Avoid small matrices
 
                 if is_recurrent_weight {
                     // Apply orthogonal initialization for recurrent weights
-                    log::debug!(
-                        "🔄 Applying orthogonal initialization to recurrent weight: shape={:?}",
-                        dims
+                    log::info!(
+                        "🔄 Applying orthogonal initialization to recurrent weight '{}': shape={:?}",
+                        var_name, dims
                     );
                     let orthogonal_weights = Self::orthogonal_tensor(dims, device, var.dtype())?;
+
+                    // Verify the tensor was created correctly
+                    let orth_shape = orthogonal_weights.shape();
+                    if orth_shape.dims() != dims {
+                        log::error!(
+                            "❌ Shape mismatch: expected {:?}, got {:?}",
+                            dims,
+                            orth_shape.dims()
+                        );
+                        continue;
+                    }
+
                     var.set(&orthogonal_weights)?;
                     recurrent_count += 1;
+
+                    // Verify the weight was actually set by checking a sample value
+                    if let Ok(sample_val) = orthogonal_weights
+                        .flatten_all()?
+                        .narrow(0, 0, 1)?
+                        .to_vec1::<f32>()
+                    {
+                        log::info!(
+                            "✅ Orthogonal weight '{}' set successfully, sample value: {:.6}",
+                            var_name,
+                            sample_val[0]
+                        );
+                    }
                 } else {
                     // Apply Xavier initialization for input-to-hidden weights
-                    log::debug!(
-                        "📥 Applying Xavier initialization to input weight: shape={:?}",
+                    log::info!(
+                        "📥 Applying Xavier initialization to input weight '{}': shape={:?}",
+                        var_name,
                         dims
                     );
                     let xavier_weights = Self::xavier_tensor(dims, device, var.dtype())?;
                     var.set(&xavier_weights)?;
+
+                    // Verify the weight was actually set
+                    if let Ok(sample_val) = xavier_weights
+                        .flatten_all()?
+                        .narrow(0, 0, 1)?
+                        .to_vec1::<f32>()
+                    {
+                        log::info!(
+                            "✅ Xavier weight '{}' set successfully, sample value: {:.6}",
+                            var_name,
+                            sample_val[0]
+                        );
+                    }
                 }
                 initialized_count += 1;
             } else if dims.len() == 1 {
                 // 1D tensors are biases
                 let bias_size = dims[0];
 
-                // Initialize biases to zero, except forget gate bias should be 1.0
-                // This is another heuristic - adjust based on your LSTM structure
-                let is_forget_gate_bias = (var_name % 4) == 1; // Assuming forget gate is second in gate order
+                // Identify forget gate bias based on Candle's LSTM naming
+                // In LSTM, forget gate bias should be initialized to 1.0
+                let is_forget_gate_bias = var_name.contains("bias_hh")
+                    && (var_name.contains("forget") ||
+                                         // LSTM gate order is usually: input, forget, cell, output
+                                         // So forget gate is at positions bias_size/4 to bias_size/2
+                                         bias_size >= 4);
 
                 let bias_value = if is_forget_gate_bias { 1.0 } else { 0.0 };
-                let bias_tensor =
-                    Tensor::new(vec![bias_value; bias_size], device)?.to_dtype(var.dtype())?;
 
-                log::debug!(
-                    "⚖️ Initializing bias: shape={:?}, value={}",
+                // For forget gate bias, we need to set only the forget gate portion to 1.0
+                let bias_tensor = if is_forget_gate_bias && bias_size >= 4 {
+                    // Create bias tensor with forget gate portion set to 1.0
+                    let mut bias_values = vec![0.0; bias_size];
+                    let gate_size = bias_size / 4;
+                    // Set forget gate bias (second quarter) to 1.0
+                    for bias_val in bias_values.iter_mut().take(2 * gate_size).skip(gate_size) {
+                        *bias_val = 1.0;
+                    }
+                    Tensor::new(bias_values, device)?.to_dtype(var.dtype())?
+                } else {
+                    // Regular bias initialization (all zeros)
+                    Tensor::new(vec![bias_value; bias_size], device)?.to_dtype(var.dtype())?
+                };
+
+                log::info!(
+                    "⚖️ Initializing bias '{}': shape={:?}, forget_gate={}, value={}",
+                    var_name,
                     dims,
+                    is_forget_gate_bias,
                     bias_value
                 );
                 var.set(&bias_tensor)?;
                 bias_count += 1;
+
+                // Verify the bias was actually set
+                if let Ok(sample_vals) = bias_tensor.to_vec1::<f32>() {
+                    let first_val = sample_vals[0];
+                    let mid_val = if sample_vals.len() > 4 {
+                        sample_vals[sample_vals.len() / 4]
+                    } else {
+                        first_val
+                    };
+                    log::info!(
+                        "✅ Bias '{}' set successfully, first={:.6}, mid={:.6}",
+                        var_name,
+                        first_val,
+                        mid_val
+                    );
+                }
             }
         }
 
@@ -433,6 +522,82 @@ impl SeededTensorUtils {
 
         if initialized_count == 0 {
             log::warn!("⚠️ No weight tensors found for initialization - using Candle defaults");
+        }
+
+        // Verify initialization worked by checking some sample weights
+        Self::verify_weight_initialization(varmap)?;
+
+        Ok(())
+    }
+
+    /// Verify that weight initialization actually worked
+    fn verify_weight_initialization(varmap: &candle_nn::VarMap) -> Result<()> {
+        let all_vars = varmap.all_vars();
+        if all_vars.is_empty() {
+            log::warn!("⚠️ No variables to verify");
+            return Ok(());
+        }
+
+        let mut total_sum = 0.0f32;
+        let mut total_count = 0usize;
+        let mut weight_matrices = 0;
+
+        for var in all_vars.iter() {
+            let shape = var.shape();
+            let dims = shape.dims();
+
+            if dims.len() == 2 {
+                // Check 2D weight matrices
+                weight_matrices += 1;
+                if let Ok(flattened) = var.flatten_all() {
+                    if let Ok(values) = flattened.to_vec1::<f32>() {
+                        let matrix_sum: f32 = values.iter().sum();
+                        let matrix_mean = matrix_sum / values.len() as f32;
+                        let matrix_std = {
+                            let variance: f32 = values
+                                .iter()
+                                .map(|x| (x - matrix_mean).powi(2))
+                                .sum::<f32>()
+                                / values.len() as f32;
+                            variance.sqrt()
+                        };
+
+                        total_sum += matrix_sum;
+                        total_count += values.len();
+
+                        log::debug!(
+                            "📊 Weight matrix {}: shape={:?}, mean={:.6}, std={:.6}, sum={:.6}",
+                            weight_matrices,
+                            dims,
+                            matrix_mean,
+                            matrix_std,
+                            matrix_sum
+                        );
+
+                        // Check if this looks like proper initialization (not all zeros or ones)
+                        if matrix_std < 1e-6 {
+                            log::warn!("⚠️ Weight matrix {} has very low std deviation ({:.6}) - may not be properly initialized", weight_matrices, matrix_std);
+                        }
+                    }
+                }
+            }
+        }
+
+        if total_count > 0 {
+            let overall_mean = total_sum / total_count as f32;
+            log::info!(
+                "🔍 Weight verification: {} matrices, overall mean={:.6}, total_weights={}",
+                weight_matrices,
+                overall_mean,
+                total_count
+            );
+
+            // For proper initialization, we expect the overall mean to be close to 0
+            if overall_mean.abs() > 0.5 {
+                log::warn!("⚠️ Overall weight mean ({:.6}) is high - initialization may not be working properly", overall_mean);
+            } else {
+                log::info!("✅ Weight initialization verification passed");
+            }
         }
 
         Ok(())

@@ -741,6 +741,21 @@ impl LSTMModel {
 
         // Apply proper LSTM weight initialization after network creation
         log::info!("🎯 Applying proper LSTM weight initialization...");
+
+        // First, let's see what tensors we actually have with their names
+        let var_data = self.varmap.data().lock().unwrap();
+        let var_names: Vec<String> = var_data.keys().cloned().collect();
+        drop(var_data); // Release the lock
+
+        let all_vars = self.varmap.all_vars();
+        log::info!("📊 Found {} tensors in VarMap:", all_vars.len());
+        for (idx, var) in all_vars.iter().enumerate() {
+            let shape = var.shape();
+            let dims = shape.dims();
+            let var_name = var_names.get(idx).map(|s| s.as_str()).unwrap_or("unknown");
+            log::info!("  Tensor {}: '{}' shape={:?}", idx, var_name, dims);
+        }
+
         crate::model::lstm::seeded_weights::SeededTensorUtils::apply_lstm_weight_initialization(
             &self.varmap,
             &self.device,
