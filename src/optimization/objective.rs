@@ -3,9 +3,10 @@
 //! Defines optimization metrics and objective functions specifically designed
 //! for cryptocurrency forecasting performance evaluation.
 
-use crate::output::structures::{
-    DirectionPrediction, OrderConfig, PriceLevelPrediction, TradingOrders, VolatilityPrediction,
+use crate::output::prediction_types::{
+    DirectionPrediction, PriceBin, PriceLevelPrediction, VolatilityPrediction,
 };
+use crate::output::trading_orders::TradingOrders;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
@@ -504,7 +505,7 @@ impl ObjectiveFunction {
 
                 bins.insert(
                     "support".to_string(),
-                    crate::output::structures::PriceBin {
+                    PriceBin {
                         range: [lower_bound, current_price],
                         vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [lower_bound, current_price],
@@ -514,7 +515,7 @@ impl ObjectiveFunction {
 
                 bins.insert(
                     "resistance".to_string(),
-                    crate::output::structures::PriceBin {
+                    PriceBin {
                         range: [current_price, upper_bound],
                         vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [current_price, upper_bound],
@@ -537,7 +538,7 @@ impl ObjectiveFunction {
                 let mut bins = HashMap::new();
                 bins.insert(
                     "support".to_string(),
-                    crate::output::structures::PriceBin {
+                    PriceBin {
                         range: [current_price * (1.0 - range_pct), current_price],
                         vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [current_price * (1.0 - range_pct), current_price],
@@ -546,7 +547,7 @@ impl ObjectiveFunction {
                 );
                 bins.insert(
                     "resistance".to_string(),
-                    crate::output::structures::PriceBin {
+                    PriceBin {
                         range: [current_price, current_price * (1.0 + range_pct)],
                         vwap_range: [0.0, 0.0], // Placeholder for optimization context
                         price: [current_price, current_price * (1.0 + range_pct)],
@@ -564,36 +565,168 @@ impl ObjectiveFunction {
                 }
             };
 
-            // Calculate ATR from recent price data
-            let atr_value = self.calculate_atr_from_prices(&prices[..i + 1]);
-
-            // Generate trading orders using sophisticated signal generation
-            let order_config = OrderConfig::default();
-
             // Create sequence prices for order generation (use recent price history)
             let sequence_start = i.saturating_sub(30); // Use up to 30 recent prices
             let sequence_prices = &prices[sequence_start..=i];
 
             // Calculate bandwidth size from recent price volatility
-            let bandwidth_size = if sequence_prices.len() > 1 {
+            let _bandwidth_size = if sequence_prices.len() > 1 {
                 let price_std = self.calculate_std_dev(sequence_prices);
                 (price_std / current_price).max(0.01) // At least 1% bandwidth
             } else {
                 0.02 // Default 2% bandwidth
             };
 
-            let config = crate::output::structures::SequenceAwareOrderConfig {
+            // Extract sentiment prediction (column 3 if available)
+            let sentiment_pred = if predictions.ncols() > 3 {
+                // We have 5 classes for sentiment, extract from predictions
+                // Assuming predictions are 5-class probabilities
+                let very_bearish = predictions[[i, 3]].clamp(0.0, 1.0);
+                let bearish = if predictions.ncols() > 4 {
+                    predictions[[i, 4]].clamp(0.0, 1.0)
+                } else {
+                    0.2
+                };
+                let neutral = 0.2; // Default neutral
+                let bullish = 0.2;
+                let very_bullish = 0.2;
+
+                // Normalize to sum to 1.0
+                let total = very_bearish + bearish + neutral + bullish + very_bullish;
+                let probs = [
+                    very_bearish / total,
+                    bearish / total,
+                    neutral / total,
+                    bullish / total,
+                    very_bullish / total,
+                ];
+
+                // Determine regime based on highest probability
+                let max_idx = probs
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(2);
+
+                let regime = match max_idx {
+                    0 => "VERY_BEARISH",
+                    1 => "BEARISH",
+                    2 => "NEUTRAL",
+                    3 => "BULLISH",
+                    4 => "VERY_BULLISH",
+                    _ => "NEUTRAL",
+                }
+                .to_string();
+
+                crate::output::prediction_types::SentimentPrediction {
+                    very_bearish_probability: probs[0],
+                    bearish_probability: probs[1],
+                    neutral_probability: probs[2],
+                    bullish_probability: probs[3],
+                    very_bullish_probability: probs[4],
+                    confidence: 0.6,
+                    training_horizon: "1h".to_string(), // Default for optimization
+                    regime,
+                }
+            } else {
+                // Default neutral sentiment
+                crate::output::prediction_types::SentimentPrediction {
+                    very_bearish_probability: 0.2,
+                    bearish_probability: 0.2,
+                    neutral_probability: 0.2,
+                    bullish_probability: 0.2,
+                    very_bullish_probability: 0.2,
+                    confidence: 0.5,
+                    training_horizon: "1h".to_string(),
+                    regime: "NEUTRAL".to_string(),
+                }
+            };
+
+            // Extract volume prediction (column 4/5 if available)
+            let volume_pred = if predictions.ncols() > 4 {
+                // We have 5 classes for volume, extract from predictions
+                let very_low = if predictions.ncols() > 5 {
+                    predictions[[i, 5]].clamp(0.0, 1.0)
+                } else {
+                    0.2
+                };
+                let low = 0.2;
+                let medium = 0.2;
+                let high = 0.2;
+                let very_high = 0.2;
+
+                // Normalize to sum to 1.0
+                let total = very_low + low + medium + high + very_high;
+                let probs = [
+                    very_low / total,
+                    low / total,
+                    medium / total,
+                    high / total,
+                    very_high / total,
+                ];
+
+                // Determine regime based on highest probability
+                let max_idx = probs
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(2);
+
+                let regime = match max_idx {
+                    0 => "VERY_LOW",
+                    1 => "LOW",
+                    2 => "MEDIUM",
+                    3 => "HIGH",
+                    4 => "VERY_HIGH",
+                    _ => "MEDIUM",
+                }
+                .to_string();
+
+                crate::output::prediction_types::VolumePrediction {
+                    very_low_probability: probs[0],
+                    low_probability: probs[1],
+                    medium_probability: probs[2],
+                    high_probability: probs[3],
+                    very_high_probability: probs[4],
+                    confidence: 0.6,
+                    training_horizon: "1h".to_string(), // Default for optimization
+                    regime,
+                }
+            } else {
+                // Default normal volume
+                crate::output::prediction_types::VolumePrediction {
+                    very_low_probability: 0.2,
+                    low_probability: 0.2,
+                    medium_probability: 0.2,
+                    high_probability: 0.2,
+                    very_high_probability: 0.2,
+                    confidence: 0.5,
+                    training_horizon: "1h".to_string(),
+                    regime: "MEDIUM".to_string(),
+                }
+            };
+
+            // Create confidence calculator with default settings
+            let confidence_calculator =
+                crate::output::confidence_calculator::ConfidenceCalculator::new(
+                    crate::output::confidence_calculator::ConfidenceConfig::default(),
+                );
+
+            // Convert sequence prices to MarketDataRow for SmartOrderConfig
+            let sequence_ohlcv = None; // Not available in optimization context
+
+            let config = crate::output::trading_orders::SmartOrderConfig {
                 current_price,
+                price_levels: &price_levels,
                 direction_pred: &direction_pred,
                 volatility_pred: &volatility_pred,
-                price_levels: &price_levels,
-                atr_value,
-                config: &order_config,
-                sequence_prices,
-                bandwidth_size,
-                dynamic_entry_sizes: None,
-                dynamic_exit_sizes: None,
-                overall_confidence: None,
+                sentiment_pred: &sentiment_pred,
+                volume_pred: &volume_pred,
+                confidence_calculator: &confidence_calculator,
+                min_confidence: 0.3, // Lower threshold for optimization context
+                sequence_ohlcv,
             };
 
             match TradingOrders::generate(config) {
@@ -610,31 +743,6 @@ impl ObjectiveFunction {
         }
 
         Ok(returns)
-    }
-
-    /// Calculate ATR from price data using simple moving average
-    fn calculate_atr_from_prices(&self, prices: &[f64]) -> f64 {
-        if prices.len() < 3 {
-            return prices.last().unwrap_or(&1.0) * 0.02; // Default 2% of price
-        }
-
-        let period = 14.min(prices.len() - 1);
-        let mut true_ranges = Vec::new();
-
-        // Calculate true ranges (simplified - using price changes as proxy)
-        for i in 1..prices.len() {
-            let price_change = (prices[i] - prices[i - 1]).abs();
-            let price_pct = price_change / prices[i - 1];
-            true_ranges.push(price_pct * prices[i]); // Convert back to absolute terms
-        }
-
-        // Calculate simple moving average of true ranges
-        if true_ranges.len() >= period {
-            let recent_ranges: Vec<f64> = true_ranges.iter().rev().take(period).cloned().collect();
-            recent_ranges.iter().sum::<f64>() / recent_ranges.len() as f64
-        } else {
-            true_ranges.iter().sum::<f64>() / true_ranges.len() as f64
-        }
     }
 
     /// Calculate strategy return from trading orders

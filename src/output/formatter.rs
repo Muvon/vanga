@@ -620,23 +620,22 @@ impl OutputFormatter {
                     min_confidence: self.min_confidence,
                     sequence_ohlcv: self.sequence_ohlcv.as_deref(),
                 };
-                let orders =
-                    match crate::output::trading_orders::TradingOrders::generate_smart(config) {
-                        Ok(smart_orders) => {
-                            log::info!(
-                                "✅ Generated SMART {} orders with R:R={:.2}",
-                                smart_orders.direction,
-                                smart_orders.risk_reward_ratio
-                            );
-                            smart_orders
-                        }
-                        Err(e) => {
-                            log::error!("❌ Failed to generate SMART orders: {}", e);
-                            // This should not happen since we already checked confidence
-                            // But if it does, skip this prediction
-                            continue;
-                        }
-                    };
+                let orders = match crate::output::trading_orders::TradingOrders::generate(config) {
+                    Ok(smart_orders) => {
+                        log::info!(
+                            "✅ Generated SMART {} orders with R:R={:.2}",
+                            smart_orders.direction,
+                            smart_orders.risk_reward_ratio
+                        );
+                        smart_orders
+                    }
+                    Err(e) => {
+                        log::error!("❌ Failed to generate SMART orders: {}", e);
+                        // This should not happen since we already checked confidence
+                        // But if it does, skip this prediction
+                        continue;
+                    }
+                };
 
                 result = result.with_orders(orders);
 

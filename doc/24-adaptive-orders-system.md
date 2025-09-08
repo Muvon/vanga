@@ -780,7 +780,7 @@ pub struct TradingOrders {
 
 ```rust
 // Method 1: Prediction-Only (Original)
-let orders = TradingOrders::generate_smart(
+let orders = TradingOrders::generate(
     current_price,
     &price_levels,
     &direction_pred,
@@ -964,7 +964,7 @@ pub async fn generate_adaptive_orders(
         TradingOrders::generate_with_sequence_stats(config)
     } else {
         // Fallback to prediction-only
-        TradingOrders::generate_smart(
+        TradingOrders::generate(
             current_price,
             &predictions.price_levels,
             &predictions.direction,

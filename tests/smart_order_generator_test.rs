@@ -169,7 +169,7 @@ fn test_smart_order_generation_no_magic_numbers() {
         min_confidence: 0.2,
         sequence_ohlcv: None, // No sequence data in test
     };
-    let orders = TradingOrders::generate_smart(config).unwrap();
+    let orders = TradingOrders::generate(config).unwrap();
 
     // Verify no magic numbers - all confidence values should come from model outputs
     for entry in &orders.entry_levels {
@@ -228,7 +228,7 @@ fn test_short_order_validation() {
         min_confidence: 0.2,
         sequence_ohlcv: None, // No sequence data in test
     };
-    let orders = TradingOrders::generate_smart(config).unwrap();
+    let orders = TradingOrders::generate(config).unwrap();
 
     if orders.direction == "SHORT" {
         // Verify SHORT order constraints
@@ -315,7 +315,7 @@ fn test_long_order_validation() {
         min_confidence: 0.2,
         sequence_ohlcv: None,
     };
-    let orders = TradingOrders::generate_smart(config).unwrap();
+    let orders = TradingOrders::generate(config).unwrap();
 
     if orders.direction == "LONG" {
         // Verify LONG order constraints
@@ -675,7 +675,7 @@ fn test_atr_distance_semantic_correctness() {
         min_confidence: 0.2,
         sequence_ohlcv: None,
     };
-    let orders = TradingOrders::generate_smart(config).unwrap();
+    let orders = TradingOrders::generate(config).unwrap();
 
     // Verify ATR distance is semantically correct for all levels (with reasonable tolerance)
     for (i, entry) in orders.entry_levels.iter().enumerate() {
