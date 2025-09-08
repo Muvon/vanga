@@ -88,10 +88,10 @@ impl Default for OrderConfig {
     fn default() -> Self {
         Self {
             base_atr_multiplier: 2.0, // Crypto-aggressive spacing
-            min_risk_reward: 2.0, // Dynamic minimum (will be overridden by confidence calculation)
-            max_risk_reward: 12.0, // Maximum 12:1 for high conviction
-            aggressive_sizing: true, // Enable dynamic sizing
-            hunt_protection: 1.5, // 50% extra distance for stops
+            min_risk_reward: 4.0,     // Crypto minimum R:R target
+            max_risk_reward: 12.0,    // Maximum 12:1 for high conviction
+            aggressive_sizing: true,  // Enable dynamic sizing
+            hunt_protection: 1.5,     // 50% extra distance for stops
         }
     }
 }
@@ -381,6 +381,7 @@ impl TradingOrders {
         // Step 6: Normalize sizes to ensure they sum to 1.0
         SmartConsensus::normalize_sizes(&mut entry_levels);
         SmartConsensus::normalize_sizes(&mut exit_levels);
+        SmartConsensus::normalize_sizes(&mut stop_levels); // FIX: Normalize stops too!
 
         // Step 7: Calculate ATR distance as percentage from current price for each level
         // This makes ATR distance semantically correct and consistent with smart_order_generator.rs
@@ -397,18 +398,33 @@ impl TradingOrders {
         let initial_risk_reward =
             Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
-        // Step 9: Calculate NATURAL risk-reward from predictions (no hardcoded targets)
+        // Step 9: Use CONFIGURED minimum R:R as base target, enhanced by model confidence
+        const MIN_RR_TARGET: f64 = 4.0; // CONSTANT minimum R:R target
+        let order_config = OrderConfig::default();
+        let configured_min_rr = if order_config.min_risk_reward >= 2.0 {
+            order_config.min_risk_reward
+        } else {
+            MIN_RR_TARGET // Use constant if config is not properly set
+        };
+
+        // Model's natural R:R for reference (but not as target)
         let natural_rr = config.direction_pred.expected_upside_percent
             / config.direction_pred.expected_downside_percent.max(0.01);
-
-        // Use prediction's own risk assessment as baseline
         let prediction_rr = config.direction_pred.risk_reward_ratio;
 
-        // Target R:R is the better of natural calculation or model's assessment
-        let target_risk_reward = natural_rr.max(prediction_rr);
+        // Target R:R uses configured minimum, can be enhanced if model shows strong opportunity
+        // But NEVER go below the configured minimum
+        let target_risk_reward = if prediction_rr > configured_min_rr {
+            // Model sees exceptional opportunity, use it
+            prediction_rr.min(order_config.max_risk_reward)
+        } else {
+            // Use configured minimum as floor
+            configured_min_rr
+        };
 
         log::info!(
-            "📊 R:R Assessment: natural={:.2} (up:{:.2}%/down:{:.2}%), model={:.2}, target={:.2}",
+            "📊 R:R Assessment: configured_min={:.2}, model_natural={:.2} (up:{:.2}%/down:{:.2}%), model_rr={:.2}, TARGET={:.2}",
+            configured_min_rr,
             natural_rr,
             config.direction_pred.expected_upside_percent,
             config.direction_pred.expected_downside_percent,
@@ -423,37 +439,48 @@ impl TradingOrders {
                 target_risk_reward
             );
 
-            // CRITICAL: Store original exit levels BEFORE optimization
-            let original_exit_levels = exit_levels.clone();
+            // Calculate average stop distance for R:R calculation
+            let avg_stop_distance = stop_levels
+                .iter()
+                .map(|s| ((s.price - entry_levels[0].price).abs() / entry_levels[0].price) * 100.0)
+                .sum::<f64>()
+                / stop_levels.len() as f64;
 
-            // Define HARD boundaries based on predictions
-            // Maximum exit distance is bounded by model predictions
+            // Define boundaries based on price level predictions
+            // IMPROVED: Use bin centers as targets, with buffer for R:R achievement
             let max_exit_boundary = if direction == "LONG" {
-                // For LONG, use the strong_up bin upper boundary or expected upside
-                let strong_up_max = config
+                // For LONG, find the most optimistic reasonable target
+                let strong_up_target = config
                     .price_levels
                     .bins
                     .get("strong_up")
                     .map(|b| {
-                        // Use the actual price boundary, not just the range percentage
-                        let upper_price = b.price[1]; // Upper bound of strong_up bin
-                        ((upper_price - config.current_price) / config.current_price) * 100.0
+                        // Use bin CENTER as primary target
+                        let center_price = (b.price[0] + b.price[1]) / 2.0;
+                        ((center_price - config.current_price) / config.current_price) * 100.0
                     })
-                    .unwrap_or(config.direction_pred.expected_upside_percent);
-                strong_up_max.max(config.direction_pred.expected_upside_percent)
+                    .unwrap_or(3.0); // Default 3% if no bin
+
+                // Allow extension beyond bin center for R:R, but be reasonable
+                // Use max of: strong_up center, 3x stop distance, or 3%
+                let min_for_rr = (avg_stop_distance * target_risk_reward).max(3.0);
+                strong_up_target.max(min_for_rr)
             } else {
-                // For SHORT, use the strong_down bin lower boundary or expected downside
-                let strong_down_max = config
+                // For SHORT, find the most optimistic reasonable target
+                let strong_down_target = config
                     .price_levels
                     .bins
                     .get("strong_down")
                     .map(|b| {
-                        // Use the actual price boundary, not just the range percentage
-                        let lower_price = b.price[0]; // Lower bound of strong_down bin
-                        ((config.current_price - lower_price) / config.current_price) * 100.0
+                        // Use bin CENTER as primary target
+                        let center_price = (b.price[0] + b.price[1]) / 2.0;
+                        ((config.current_price - center_price) / config.current_price) * 100.0
                     })
-                    .unwrap_or(config.direction_pred.expected_downside_percent);
-                strong_down_max.max(config.direction_pred.expected_downside_percent)
+                    .unwrap_or(3.0); // Default 3% if no bin
+
+                // Allow extension for R:R achievement
+                let min_for_rr = (avg_stop_distance * target_risk_reward).max(3.0);
+                strong_down_target.max(min_for_rr)
             };
 
             log::info!(
@@ -467,41 +494,35 @@ impl TradingOrders {
                 .map(|e| ((e.price - config.current_price).abs() / config.current_price) * 100.0)
                 .collect();
 
-            let current_stop_distances: Vec<f64> = stop_levels
-                .iter()
-                .map(|s| ((s.price - entry_levels[0].price).abs() / entry_levels[0].price) * 100.0)
-                .collect();
-
             // Current middle exit distance (this will be our limiting factor)
             let current_middle_exit_distance = current_exit_distances[1];
 
             // Calculate the maximum scale factor based on middle exit reaching boundary
-            // The middle exit should NOT exceed the prediction boundary OR original last exit level
-            let original_last_exit_distance =
-                ((original_exit_levels[2].price - config.current_price).abs()
-                    / config.current_price)
-                    * 100.0;
 
-            // Use the MORE CONSERVATIVE boundary (smaller of the two)
-            let effective_max_middle_distance = max_exit_boundary.min(original_last_exit_distance);
+            // FIXED: Use prediction boundary as primary constraint, but respect middle exit rule
+            // Middle exit should reach towards prediction boundary, not be limited by original exits
+            let effective_max_middle_distance = max_exit_boundary;
 
-            // Maximum scale is when middle exit reaches the boundary
-            let max_scale_factor =
-                effective_max_middle_distance / current_middle_exit_distance.max(0.1);
+            // FIXED: Middle exit should reach FULL prediction boundary for maximum R:R
+            // This is the max we go as you specified
+            let max_for_middle = max_exit_boundary; // Use FULL boundary, not 70%
+
+            // Maximum scale is when middle exit reaches FULL boundary
+            let max_scale_factor = max_for_middle / current_middle_exit_distance.max(0.1);
 
             log::info!(
-                "📏 Middle exit constraint: current={:.2}%, max={:.2}% (min of prediction {:.2}% and original last {:.2}%)",
+                "📏 Middle exit constraint: current={:.2}%, max_for_middle={:.2}% (FULL boundary {:.2}%)",
                 current_middle_exit_distance,
-                effective_max_middle_distance,
-                max_exit_boundary,
-                original_last_exit_distance
+                max_for_middle,
+                max_exit_boundary
             );
 
             // Calculate desired scale to achieve target R:R
-            let desired_scale = (target_risk_reward / initial_risk_reward.max(0.1)).sqrt();
+            // Direct ratio, not sqrt - we want to actually reach the target!
+            let desired_scale = target_risk_reward / initial_risk_reward.max(0.1);
 
-            // CRITICAL: Apply the SAME scale to both exits and stops, but cap by boundary
-            let final_scale = desired_scale.min(max_scale_factor).min(2.0); // Never scale more than 2x
+            // CRITICAL: Apply the scale to reach target R:R, capped by boundary
+            let final_scale = desired_scale.min(max_scale_factor);
 
             log::info!(
                 "🔄 PROPORTIONAL scaling: desired={:.2}x, max_allowed={:.2}x, final={:.2}x",
@@ -538,40 +559,9 @@ impl TradingOrders {
                 );
             }
 
-            // Apply SAME PROPORTIONAL scaling to ALL stop levels (moving them CLOSER)
-            // For stops, we DIVIDE by the scale factor to tighten them
-            let stop_scale = 1.0 / final_scale;
-
-            for (i, stop) in stop_levels.iter_mut().enumerate() {
-                let distance_from_entry = (stop.price - entry_levels[0].price).abs();
-                let scaled_distance = distance_from_entry * stop_scale;
-
-                // Ensure minimum safe distance (at least 0.5% from entry)
-                let min_safe_distance = entry_levels[0].price * 0.005;
-                let final_distance = scaled_distance.max(min_safe_distance);
-
-                stop.price = if direction == "LONG" {
-                    entry_levels[0].price - final_distance
-                } else {
-                    entry_levels[0].price + final_distance
-                };
-
-                // Update ATR distance
-                stop.atr_distance = (final_distance / config.current_price) * 100.0;
-
-                log::debug!(
-                    "  Stop {}: {:.4} → {:.4} (distance: {:.2}% → {:.2}%)",
-                    i + 1,
-                    if direction == "LONG" {
-                        entry_levels[0].price - distance_from_entry
-                    } else {
-                        entry_levels[0].price + distance_from_entry
-                    },
-                    stop.price,
-                    current_stop_distances[i],
-                    stop.atr_distance
-                );
-            }
+            // STOPS NEVER MOVE - they stay exactly where they were calculated
+            // Only exits are scaled to improve R:R ratio
+            log::info!("🛑 STOPS REMAIN UNCHANGED - never moved during optimization");
 
             // Verify middle exit constraint
             let new_middle_exit_distance = ((exit_levels[1].price - config.current_price).abs()
@@ -579,9 +569,8 @@ impl TradingOrders {
                 * 100.0;
 
             log::info!(
-                "✅ PROPORTIONAL optimization complete: exits scaled {:.1}x, stops tightened {:.1}x",
-                final_scale,
-                1.0 / stop_scale
+                "✅ PROPORTIONAL optimization complete: exits scaled {:.1}x, stops UNCHANGED",
+                final_scale
             );
 
             log::info!(
@@ -591,33 +580,163 @@ impl TradingOrders {
                 effective_max_middle_distance
             );
 
+            // Calculate initial optimized R:R after scaling
             let optimized_rr =
                 Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
-            // Log final status
-            if optimized_rr >= target_risk_reward * 0.9 {
+            let mut final_rr = optimized_rr;
+
+            // ADDITIONAL OPTIMIZATION: If R:R still below target, try adjusting entries
+            if optimized_rr < target_risk_reward * 0.9 {
                 log::info!(
-                    "✅ Successfully optimized R:R from {:.2} to {:.2} (target: {:.2})",
-                    initial_risk_reward,
+                    "🔧 R:R still below target ({:.2} < {:.2}), trying entry adjustment...",
                     optimized_rr,
                     target_risk_reward
                 );
-            } else if optimized_rr > initial_risk_reward {
+
+                // For R:R improvement, we need to:
+                // - For LONG: Move entries LOWER (better entry prices) OR keep exits same
+                // - For SHORT: Move entries HIGHER (better entry prices) OR keep exits same
+
+                // Calculate current weighted averages for analysis
+                let current_avg_entry = Self::weighted_average_price(&entry_levels);
+                let current_avg_exit = Self::weighted_average_price(&exit_levels);
+                let current_avg_stop = Self::weighted_average_price(&stop_levels);
+
+                log::debug!(
+                    "Current averages: entry=${:.4}, exit=${:.4}, stop=${:.4}",
+                    current_avg_entry,
+                    current_avg_exit,
+                    current_avg_stop
+                );
+
+                // Try to improve R:R by adjusting entries (but not MARKET orders)
+                let mut entries_adjusted = false;
+
+                // VOLATILITY-BASED entry adjustment - NO MAGIC NUMBERS
+                // Get volatility recommendation from the actual model (like 0.33% we see in logs)
+                let volatility_stop_distance =
+                    config.volatility_pred.recommended_stop_distance_percent;
+
+                // Entry movement limited by volatility - can't move more than volatility allows
+                let max_entry_movement = volatility_stop_distance; // Use actual volatility recommendation
+
+                log::debug!(
+                    "🔧 Volatility-based entry adjustment: max_movement={:.2}% (from volatility model)",
+                    max_entry_movement
+                );
+
+                for (i, entry) in entry_levels.iter_mut().enumerate() {
+                    if entry.order_type == "MARKET" {
+                        continue; // Don't adjust market orders at current price
+                    }
+
+                    // Calculate how much we can safely move this entry (limited by volatility)
+                    let current_distance = (entry.price - config.current_price).abs();
+
+                    // Move entry by maximum volatility allows (e.g., 0.33%)
+                    let movement_amount = config.current_price * (max_entry_movement / 100.0);
+                    let new_distance = current_distance + movement_amount;
+
+                    let new_entry_price = if direction == "LONG" {
+                        // LONG: move entries LOWER (better entry prices)
+                        config.current_price - new_distance
+                    } else {
+                        // SHORT: move entries HIGHER (better entry prices)
+                        config.current_price + new_distance
+                    };
+
+                    // CRITICAL: Check that new entry doesn't intersect with stops
+                    let safe_from_stops = if direction == "LONG" {
+                        // For LONG: entry must be ABOVE all stops
+                        let highest_stop = stop_levels
+                            .iter()
+                            .map(|s| s.price)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        new_entry_price > highest_stop * 1.02 // 2% safety buffer
+                    } else {
+                        // For SHORT: entry must be BELOW all stops
+                        let lowest_stop = stop_levels
+                            .iter()
+                            .map(|s| s.price)
+                            .fold(f64::INFINITY, f64::min);
+                        new_entry_price < lowest_stop * 0.98 // 2% safety buffer
+                    };
+
+                    // Validate the new entry price makes sense AND is safe from stops
+                    let price_makes_sense = if direction == "LONG" {
+                        new_entry_price < config.current_price && new_entry_price > 0.0
+                    } else {
+                        new_entry_price > config.current_price
+                    };
+
+                    if price_makes_sense && safe_from_stops {
+                        entry.price = new_entry_price;
+                        entry.atr_distance = (new_distance / config.current_price) * 100.0;
+                        entries_adjusted = true;
+
+                        log::debug!(
+                            "  Adjusted Entry {}: ${:.4} → ${:.4} (moved {:.2}% further from current)",
+                            i + 1,
+                            config.current_price - current_distance * if direction == "LONG" { 1.0 } else { -1.0 },
+                            new_entry_price,
+                            (new_distance - current_distance) / config.current_price * 100.0
+                        );
+                    }
+                }
+
+                if entries_adjusted {
+                    // CRITICAL: Stops should maintain their ORIGINAL absolute price, not move at all
+                    // Only log that entries moved but stops stay exactly where they were
+                    log::info!(
+                        "🛑 Stops remain at original prices - entries moved but stops UNCHANGED"
+                    );
+
+                    // Recalculate R:R after both entry and stop adjustment
+                    final_rr = Self::calculate_risk_reward(
+                        &entry_levels,
+                        &exit_levels,
+                        &stop_levels,
+                        &direction,
+                    );
+
+                    log::info!(
+                        "🔧 Entry adjustment: R:R improved from {:.2} to {:.2} (stops unchanged)",
+                        optimized_rr,
+                        final_rr
+                    );
+                } else {
+                    log::info!(
+                        "🔧 No entry adjustments possible, keeping R:R at {:.2}",
+                        optimized_rr
+                    );
+                }
+            }
+
+            // Log final status
+            if final_rr >= target_risk_reward * 0.9 {
+                log::info!(
+                    "✅ Successfully optimized R:R from {:.2} to {:.2} (target: {:.2})",
+                    initial_risk_reward,
+                    final_rr,
+                    target_risk_reward
+                );
+            } else if final_rr > initial_risk_reward {
                 log::info!(
                     "📈 Improved R:R from {:.2} to {:.2} (target: {:.2} limited by boundaries)",
                     initial_risk_reward,
-                    optimized_rr,
+                    final_rr,
                     target_risk_reward
                 );
             } else {
                 log::warn!(
                     "⚠️ Could not improve R:R (remains at {:.2}, target was {:.2})",
-                    optimized_rr,
+                    final_rr,
                     target_risk_reward
                 );
             }
 
-            optimized_rr
+            final_rr
         } else {
             log::info!(
                 "✅ Initial R:R {:.2} already meets/exceeds target {:.2}, no optimization needed",
@@ -755,11 +874,21 @@ impl TradingOrders {
             }
         } else {
             // LONG orders validation
-            // Entries must be BELOW current price
+            // Entries must be BELOW current price (except MARKET orders which can be AT current price)
             for (i, entry) in entry_levels.iter().enumerate() {
-                if entry.price >= current_price {
+                if entry.order_type == "MARKET" {
+                    // MARKET orders can be AT current price for immediate execution
+                    if (entry.price - current_price).abs() > current_price * 0.001 {
+                        return Err(crate::utils::error::VangaError::PredictionError(format!(
+                            "LONG MARKET entry {} at ${:.4} must be at current price ${:.4} (within 0.1%)",
+                            i + 1,
+                            entry.price,
+                            current_price
+                        )));
+                    }
+                } else if entry.price >= current_price {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "LONG entry {} at ${:.2} must be below current ${:.2}",
+                        "LONG LIMIT entry {} at ${:.4} must be below current ${:.4}",
                         i + 1,
                         entry.price,
                         current_price
@@ -922,6 +1051,7 @@ impl TradingOrders {
         // Normalize sizes
         SmartConsensus::normalize_sizes(&mut entry_levels);
         SmartConsensus::normalize_sizes(&mut exit_levels);
+        SmartConsensus::normalize_sizes(&mut stop_levels); // FIX: Normalize stops too!
 
         // Calculate adaptive risk-reward requirement
         let required_rr = consensus.calculate_adaptive_risk_reward_requirement(&sequence_stats);

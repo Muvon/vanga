@@ -25,47 +25,6 @@ pub struct SmartConsensus {
 }
 
 impl SmartConsensus {
-    /// Calculate adaptive spacing using ONLY prediction data - no hardcoded values
-    fn calculate_adaptive_spacing(&self) -> f64 {
-        // Base spacing from volatility (natural market movement)
-        let volatility_spacing = self.volatility.expected_range_percent;
-
-        // Scale by sequence bandwidth (actual recent price action)
-        let sequence_scale = self.direction.sequence_bandwidth_percent;
-
-        // Combine for market-adaptive spacing
-        let base_spacing = volatility_spacing * sequence_scale;
-
-        log::info!(
-            "📏 Adaptive Spacing: volatility={:.3}% × sequence={:.3}% = {:.3}%",
-            volatility_spacing,
-            sequence_scale,
-            base_spacing
-        );
-
-        base_spacing
-    }
-
-    /// Calculate probability-weighted center from price bins
-    fn calculate_weighted_bin_center(&self, bin_names: &[&str]) -> f64 {
-        let mut weighted_sum = 0.0;
-        let mut total_probability = 0.0;
-
-        for &bin_name in bin_names {
-            if let Some(bin) = self.price_levels.bins.get(bin_name) {
-                let bin_center = (bin.range[0] + bin.range[1]) / 2.0;
-                weighted_sum += bin_center * bin.probability;
-                total_probability += bin.probability;
-            }
-        }
-
-        if total_probability > 0.0 {
-            weighted_sum / total_probability
-        } else {
-            0.0
-        }
-    }
-
     /// Adjust level to avoid psychological clustering using sequence data
     /// Enhanced to handle stop-specific adjustments when is_stop_loss is true
     pub fn adjust_for_psychological_levels(
@@ -301,101 +260,109 @@ impl SmartConsensus {
     ) -> Result<[OrderLevel; 3]> {
         let mut entries = Vec::new();
 
-        // Get adaptive spacing from market data
-        let base_spacing = self.calculate_adaptive_spacing();
+        // FIXED: First entry at EXACTLY current price for immediate execution (taker)
+        let first_entry_price = current_price; // EXACTLY at current price
 
-        // Calculate probability-weighted entry zone
-        let entry_bins = if direction == "LONG" {
-            vec!["neutral", "moderate_down", "strong_down"]
-        } else {
-            vec!["neutral", "moderate_up", "strong_up"]
-        };
-
-        let weighted_entry_zone = self.calculate_weighted_bin_center(&entry_bins);
-
-        // Scale spacing by directional confidence (less confident = wider spacing)
-        let confidence_factor = if direction == "LONG" {
-            2.0 - self.direction.up_probability_aggregated
-        } else {
-            2.0 - self.direction.down_probability_aggregated
-        };
-
-        let entry_spacing = base_spacing * confidence_factor;
-
-        // Use Fibonacci ratios for natural progression
-        let fibonacci_ratios = [0.382, 0.618, 1.000];
+        entries.push(OrderLevel {
+            price: first_entry_price,
+            quantity_percentage: self.calculate_entry_size(1, &self.direction, &self.volatility), // Use proper sizing
+            atr_distance: 0.0,                // At current price
+            order_type: "MARKET".to_string(), // Market order for immediate fill
+            confidence: 0.9,                  // High confidence for immediate entry
+        });
 
         log::info!(
-            "📍 Entry Generation: weighted_zone={:.3}%, spacing={:.3}%, confidence={:.2}",
-            weighted_entry_zone.abs(),
-            entry_spacing,
-            confidence_factor
+            "  {} Entry 1 (TAKER): ${:.4} (at current price) | Size: 50.0% | Type: MARKET",
+            direction,
+            first_entry_price
         );
 
-        // Generate entries using Fibonacci progression
-        for (i, &ratio) in fibonacci_ratios.iter().enumerate() {
-            // Combine weighted zone with progressive spacing
-            let distance = weighted_entry_zone.abs() * ratio + entry_spacing * (i as f64 + 1.0);
+        // Entries 2 & 3: Use zone-based approach for limit orders
+        let entry_bins = if direction == "LONG" {
+            vec!["neutral", "moderate_down"] // Buy on dips
+        } else {
+            vec!["neutral", "moderate_up"] // Sell on rallies
+        };
 
-            let entry_price = if direction == "SHORT" {
-                current_price * (1.0 + distance / 100.0)
-            } else {
-                current_price * (1.0 - distance / 100.0)
-            };
+        // Get zone boundaries for remaining entries
+        let mut zone_entries = Vec::new();
+        for bin_name in &entry_bins {
+            if let Some(bin) = self.price_levels.bins.get(*bin_name) {
+                // Use edge of zone for entry
+                let entry_price = if direction == "LONG" {
+                    bin.price[0] // Lower edge for LONG entries
+                } else {
+                    bin.price[1] // Upper edge for SHORT entries
+                };
+                zone_entries.push((entry_price, bin.probability));
+            }
+        }
 
-            // Size allocation using prediction-based adaptive sizing
-            let base_size = self.calculate_entry_size(i + 1, &self.direction, &self.volatility);
+        // If we don't have enough zones, use ATR-based fallback
+        if zone_entries.is_empty() {
+            let atr_spacing = self.volatility.expected_range_percent / 100.0;
+            for i in 1..=2 {
+                let distance = atr_spacing * (i as f64 * 0.5); // 0.5x, 1x ATR
+                let price = if direction == "LONG" {
+                    current_price * (1.0 - distance)
+                } else {
+                    current_price * (1.0 + distance)
+                };
+                zone_entries.push((price, 0.33));
+            }
+        }
 
-            // Further adjust by directional confidence and bin probability
-            let bin_weight = if i < entry_bins.len() {
-                self.price_levels
-                    .bins
-                    .get(entry_bins[i])
-                    .map(|b| b.probability)
-                    .unwrap_or(0.33)
-            } else {
-                0.33
-            };
-
-            let adjusted_size = base_size * (0.5 + bin_weight);
-
-            // Confidence based on bin probability and distance
-            let bin_confidence = if i < entry_bins.len() {
-                self.price_levels
-                    .bins
-                    .get(entry_bins[i])
-                    .map(|b| b.probability)
-                    .unwrap_or(0.2)
-            } else {
-                0.2
-            };
-
-            let distance_decay = (-distance / 10.0).exp(); // Exponential decay
-            let confidence = (bin_confidence * distance_decay).max(0.1);
-
-            let atr_distance = ((entry_price - current_price).abs() / current_price) * 100.0;
+        // Add remaining entries (using proper sizing)
+        for (i, (entry_price, confidence)) in zone_entries.iter().take(2).enumerate() {
+            let atr_distance = ((*entry_price - current_price).abs() / current_price) * 100.0;
 
             entries.push(OrderLevel {
-                price: entry_price,
-                quantity_percentage: adjusted_size,
+                price: *entry_price,
+                quantity_percentage: self.calculate_entry_size(
+                    i + 2,
+                    &self.direction,
+                    &self.volatility,
+                ), // Use proper sizing
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence: confidence.min(0.95),
+                confidence: confidence.min(0.9),
             });
 
             log::info!(
-                "  {} Entry {}: ${:.4} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
+                "  {} Entry {}: ${:.4} ({:+.2}%) | Size: {:.1}% | Type: LIMIT",
                 direction,
-                i + 1,
+                i + 2, // Entry 2 and 3
                 entry_price,
                 if direction == "SHORT" {
-                    distance
+                    atr_distance
                 } else {
-                    -distance
+                    -atr_distance
                 },
-                adjusted_size * 100.0,
-                confidence
+                self.calculate_entry_size(i + 2, &self.direction, &self.volatility) * 100.0
             );
+        }
+
+        // Ensure we have exactly 3 entries
+        while entries.len() < 3 {
+            // Fallback entry
+            let distance = self.volatility.expected_range_percent / 100.0 * entries.len() as f64;
+            let price = if direction == "LONG" {
+                current_price * (1.0 - distance)
+            } else {
+                current_price * (1.0 + distance)
+            };
+
+            entries.push(OrderLevel {
+                price,
+                quantity_percentage: self.calculate_entry_size(
+                    entries.len() + 1,
+                    &self.direction,
+                    &self.volatility,
+                ),
+                atr_distance: distance * 100.0,
+                order_type: "LIMIT".to_string(),
+                confidence: 0.5,
+            });
         }
 
         Ok([entries[0].clone(), entries[1].clone(), entries[2].clone()])
@@ -411,19 +378,31 @@ impl SmartConsensus {
     ) -> Result<[OrderLevel; 3]> {
         let mut entries = Vec::new();
 
-        // Golden ratio for natural, non-arbitrary progression
+        // FIXED: First entry EXACTLY at current price for immediate execution (taker)
+        entries.push(OrderLevel {
+            price: current_price, // EXACTLY at current price
+            quantity_percentage: self.calculate_entry_size(1, &self.direction, &self.volatility),
+            atr_distance: 0.0,                // At current price
+            order_type: "MARKET".to_string(), // Market order for immediate fill
+            confidence: 0.9,                  // High confidence for immediate entry
+        });
+
+        log::info!(
+            "  {} Entry 1 (TAKER): ${:.4} (EXACTLY at current price) | Type: MARKET",
+            direction,
+            current_price
+        );
+
+        // Golden ratio for natural, non-arbitrary progression for remaining entries
         const PHI: f64 = 1.618033988749895;
 
-        // Use ACTUAL market volatility from sequence data
-        // Standard deviation tells us typical price movement
+        // Use ACTUAL market volatility from sequence data for entries 2 & 3
         let volatility_base = sequence_stats.std_return;
 
         // Use MAE (Maximum Adverse Excursion) distribution for realistic entry spacing
-        // This tells us how far price typically moves against us before recovering
         let mae_median = if !sequence_stats.mae_distribution.is_empty() {
             SequenceStatistics::percentile(&sequence_stats.mae_distribution, 50.0)
         } else {
-            // Fallback to standard deviation if MAE not available
             sequence_stats.std_return
         };
 
@@ -493,8 +472,9 @@ impl SmartConsensus {
             entry_spacing * 100.0
         );
 
-        // Generate entries with golden ratio progression
-        for i in 0..3 {
+        // Generate remaining 2 entries (entries 2 & 3) with golden ratio progression
+        for i in 1..3 {
+            // Start from 1, not 0, since we already have entry 1
             let progression_factor = PHI.powi(i);
             let distance = entry_spacing * progression_factor;
 
@@ -504,16 +484,12 @@ impl SmartConsensus {
                 current_price * (1.0 - distance)
             };
 
-            // Size based on position in sequence
-            let base_size = match i {
-                0 => 0.5, // Largest position at best price
-                1 => 0.3, // Medium position
-                2 => 0.2, // Smallest position at worst price
-                _ => 0.33,
-            };
+            // Use proper sizing for entries 2 & 3
+            let entry_size =
+                self.calculate_entry_size((i + 1) as usize, &self.direction, &self.volatility);
 
             // Use actual Kelly fraction from sequence statistics
-            let kelly_adjusted_size = base_size * (1.0 + sequence_stats.kelly_fraction);
+            let kelly_adjusted_size = entry_size * (1.0 + sequence_stats.kelly_fraction);
 
             // Confidence based on DATA:
             // 1. Directional confidence from model
@@ -721,102 +697,61 @@ impl SmartConsensus {
     ) -> Result<[OrderLevel; 3]> {
         let mut exits = Vec::new();
 
-        // Use expected upside/downside from direction prediction
-        let exit_base = if direction == "LONG" {
-            self.direction.expected_upside_percent
-        } else {
-            self.direction.expected_downside_percent
-        };
-
-        // Scale by volume regime for liquidity (high volume = can exit easier = tighter)
-        let volume_scale = match self.volume.regime.as_str() {
-            "VERY_HIGH" => 0.8, // Very liquid, can use tighter exits
-            "HIGH" => 1.0,      // Good liquidity
-            "MEDIUM" => 1.5,    // Normal liquidity, wider exits
-            "LOW" => 2.0,       // Poor liquidity, need wider
-            "VERY_LOW" => 2.5,  // Very poor, widest exits
-            _ => 1.0,
-        };
-
-        // Calculate probability-weighted favorable zone
+        // IMPROVED: Use price level bin CENTERS as targets for better R:R
         let favorable_bins = if direction == "LONG" {
-            vec!["moderate_up", "strong_up"]
+            vec!["neutral", "moderate_up", "strong_up"]
         } else {
-            vec!["moderate_down", "strong_down"]
+            vec!["neutral", "moderate_down", "strong_down"]
         };
 
-        let weighted_exit_zone = self.calculate_weighted_bin_center(&favorable_bins);
+        // Get bin centers for optimal target placement
+        let mut bin_targets = Vec::new();
+        for bin_name in &favorable_bins {
+            if let Some(bin) = self.price_levels.bins.get(*bin_name) {
+                // Use bin CENTER for maximum capture (except first exit)
+                let target_price = if bin_targets.is_empty() && *bin_name == "neutral" {
+                    // First exit: use neutral edge for quick profit
+                    if direction == "LONG" {
+                        bin.price[1] // Upper edge of neutral
+                    } else {
+                        bin.price[0] // Lower edge of neutral
+                    }
+                } else {
+                    // Further exits: use bin center
+                    (bin.price[0] + bin.price[1]) / 2.0
+                };
+                bin_targets.push((target_price, bin.probability));
+            }
+        }
 
-        // Combine expected move with weighted zone
-        let base_exit_distance = if weighted_exit_zone.abs() > exit_base {
-            weighted_exit_zone.abs() // Use bin prediction if larger
-        } else {
-            exit_base // Use expected move if larger
-        };
+        // If we don't have enough bins, use volatility-based fallback
+        while bin_targets.len() < 3 {
+            let base_distance = self.volatility.expected_range_percent / 100.0;
+            let multiplier = 1.0 + (bin_targets.len() as f64 * 0.5);
+            let distance = base_distance * multiplier;
 
-        // Apply volume scaling
-        let scaled_exit_distance = base_exit_distance * volume_scale;
-
-        // Use golden ratio for exit progression
-        let golden_ratio: f64 = 1.618;
-        let exit_progression = [golden_ratio, golden_ratio.powi(2), golden_ratio.powi(3)];
-
-        log::info!(
-            "🎯 Exit Generation: base={:.3}%, weighted_zone={:.3}%, volume_scale={:.1}x, final={:.3}%",
-            exit_base,
-            weighted_exit_zone.abs(),
-            volume_scale,
-            scaled_exit_distance
-        );
-
-        for (i, &progression) in exit_progression.iter().enumerate() {
-            let distance = scaled_exit_distance * progression;
-
-            let exit_price = if direction == "SHORT" {
-                current_price * (1.0 - distance / 100.0)
+            let price = if direction == "LONG" {
+                current_price * (1.0 + distance)
             } else {
-                current_price * (1.0 + distance / 100.0)
+                current_price * (1.0 - distance)
             };
+            bin_targets.push((price, 0.33));
+        }
 
-            // Size allocation using volume-based adaptive sizing
-            let base_size = self.calculate_exit_size(i + 1, &self.volume);
+        // Progressive sizing: 50%, 33%, 17% for balanced distribution
+        let sizes = [0.5, 0.333, 0.167];
 
-            // Adjust by liquidity factor and bin probability
-            let liquidity_factor = self.volume_liquidity_factor();
-            let bin_weight = if i < favorable_bins.len() {
-                self.price_levels
-                    .bins
-                    .get(favorable_bins[i])
-                    .map(|b| b.probability)
-                    .unwrap_or(0.33)
-            } else {
-                0.33
-            };
+        log::info!("🎯 Exit Generation: Using price bin CENTERS as targets for optimal R:R");
 
-            let adjusted_size = base_size * liquidity_factor * (0.5 + bin_weight);
-
-            // Confidence based on bin probability and distance
-            let bin_confidence = if i < favorable_bins.len() {
-                self.price_levels
-                    .bins
-                    .get(favorable_bins[i])
-                    .map(|b| b.probability)
-                    .unwrap_or(0.2)
-            } else {
-                0.15
-            };
-
-            let distance_factor = 1.0 / progression; // Decreases with distance
-            let confidence = (bin_confidence * distance_factor * liquidity_factor).min(0.9);
-
-            let atr_distance = ((exit_price - current_price).abs() / current_price) * 100.0;
+        for (i, (exit_price, confidence)) in bin_targets.iter().take(3).enumerate() {
+            let atr_distance = ((*exit_price - current_price).abs() / current_price) * 100.0;
 
             exits.push(OrderLevel {
-                price: exit_price,
-                quantity_percentage: adjusted_size,
+                price: *exit_price,
+                quantity_percentage: sizes[i],
                 atr_distance,
                 order_type: "LIMIT".to_string(),
-                confidence,
+                confidence: confidence.min(0.9),
             });
 
             log::info!(
@@ -825,17 +760,17 @@ impl SmartConsensus {
                 i + 1,
                 exit_price,
                 if direction == "SHORT" {
-                    -distance
+                    -atr_distance
                 } else {
-                    distance
+                    atr_distance
                 },
-                adjusted_size * 100.0,
+                sizes[i] * 100.0,
                 confidence
             );
         }
-
         Ok([exits[0].clone(), exits[1].clone(), exits[2].clone()])
     }
+
     /// Generate SEQUENCE-AWARE exit levels using MFE distribution
     /// Uses actual favorable excursions from sequence data for realistic targets
     pub fn generate_sequence_aware_exits(
@@ -1868,56 +1803,6 @@ impl SmartConsensus {
         final_size.clamp(0.1, 0.6)
     }
 
-    /// Calculate exit size using PURE volume data for liquidity-based sizing
-    fn calculate_exit_size(&self, level: usize, volume: &VolumePrediction) -> f64 {
-        // Use volume regime probabilities to determine optimal exit sizing
-        let liquidity_score = volume.very_high_probability * 1.0
-            + volume.high_probability * 0.8
-            + volume.medium_probability * 0.5
-            + volume.low_probability * 0.3
-            + volume.very_low_probability * 0.1;
-
-        // Higher liquidity = can exit in larger chunks
-        // Lower liquidity = need to split exits more
-        let liquidity_factor = liquidity_score * 2.0; // Scale to 0-2 range
-
-        // Progressive exit allocation based on liquidity
-        let base_allocation = if liquidity_factor > 1.0 {
-            // High liquidity: can take larger exits
-            match level {
-                1 => 0.3, // Take some profit early
-                2 => 0.4, // Main exit
-                3 => 0.3, // Final exit
-                _ => 0.33,
-            }
-        } else {
-            // Low liquidity: need smaller, distributed exits
-            match level {
-                1 => 0.5, // Take more profit early when possible
-                2 => 0.3, // Moderate middle exit
-                3 => 0.2, // Small final exit
-                _ => 0.33,
-            }
-        };
-
-        // Confidence adjustment
-        let confidence_scale = volume.confidence + 0.5; // Range 0.5-1.5
-
-        let final_size = base_allocation * confidence_scale;
-
-        log::debug!(
-            "Exit {} sizing: liquidity={:.3}, base={:.3}, conf={:.2} → {:.3}",
-            level,
-            liquidity_score,
-            base_allocation,
-            confidence_scale,
-            final_size
-        );
-
-        final_size.clamp(0.15, 0.5)
-    }
-
-    /// Calculate volume liquidity factor for exit confidence
     fn volume_liquidity_factor(&self) -> f64 {
         match self.volume.regime.as_str() {
             "VERY_HIGH" => 1.2, // High volume = easier exits

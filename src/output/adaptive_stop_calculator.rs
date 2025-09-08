@@ -622,8 +622,10 @@ impl AdaptiveStopCalculator {
                         _ => 1.0,
                     };
 
-                // Use price boundary as anchor, then subtract ATR buffer
-                let boundary_based_stop = stop_boundary - (stop_boundary * atr_buffer);
+                // Use price boundary as anchor, then subtract ATR distance (NOT multiply!)
+                // CRITICAL FIX: Calculate actual distance, don't multiply price by percentage
+                let atr_distance = reference_entry * atr_buffer;
+                let boundary_based_stop = stop_boundary - atr_distance;
 
                 // Also calculate volatility-based stop from reference entry
                 let volatility_based_stop =
@@ -650,8 +652,10 @@ impl AdaptiveStopCalculator {
                         _ => 1.0,
                     };
 
-                // Use price boundary as anchor, then add ATR buffer
-                let boundary_based_stop = stop_boundary + (stop_boundary * atr_buffer);
+                // Use price boundary as anchor, then add ATR distance (NOT multiply!)
+                // CRITICAL FIX: Calculate actual distance, don't multiply price by percentage
+                let atr_distance = reference_entry * atr_buffer;
+                let boundary_based_stop = stop_boundary + atr_distance;
 
                 // Also calculate volatility-based stop from reference entry
                 let volatility_based_stop =
