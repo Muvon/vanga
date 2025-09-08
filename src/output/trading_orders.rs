@@ -713,6 +713,77 @@ impl TradingOrders {
                 }
             }
 
+            // Step 4: SMART Quantity Rebalancing (if R:R still below target)
+            if final_rr < target_risk_reward {
+                // First try entry quantity optimization
+                let entry_optimized_rr = Self::optimize_entry_quantities(
+                    &mut entry_levels,
+                    &exit_levels,
+                    &stop_levels,
+                    &direction,
+                    final_rr,
+                    target_risk_reward,
+                );
+
+                if entry_optimized_rr > final_rr {
+                    log::info!(
+                        "🎯 Entry quantity rebalancing: R:R improved from {:.2} to {:.2}",
+                        final_rr,
+                        entry_optimized_rr
+                    );
+                    final_rr = entry_optimized_rr;
+                }
+
+                // If still below target, try exit quantity optimization
+                if final_rr < target_risk_reward {
+                    let exit_optimized_rr = Self::optimize_exit_quantities(
+                        &entry_levels,
+                        &mut exit_levels,
+                        &stop_levels,
+                        &direction,
+                        final_rr,
+                        target_risk_reward,
+                    );
+
+                    if exit_optimized_rr > final_rr {
+                        log::info!(
+                            "🎯 Exit quantity rebalancing: R:R improved from {:.2} to {:.2}",
+                            final_rr,
+                            exit_optimized_rr
+                        );
+                        final_rr = exit_optimized_rr;
+                    }
+                }
+
+                // If still below target, try stop quantity optimization
+                if final_rr < target_risk_reward {
+                    let stop_optimized_rr = Self::optimize_stop_quantities(
+                        &entry_levels,
+                        &exit_levels,
+                        &mut stop_levels,
+                        &direction,
+                        final_rr,
+                        target_risk_reward,
+                    );
+
+                    if stop_optimized_rr > final_rr {
+                        log::info!(
+                            "🎯 Stop quantity rebalancing: R:R improved from {:.2} to {:.2}",
+                            final_rr,
+                            stop_optimized_rr
+                        );
+                        final_rr = stop_optimized_rr;
+                    }
+                }
+
+                if final_rr >= target_risk_reward {
+                    log::info!(
+                        "🎯 Quantity optimization reached target R:R {:.2}!",
+                        target_risk_reward
+                    );
+                }
+            }
+
             // Log final status
             if final_rr >= target_risk_reward * 0.9 {
                 log::info!(
@@ -997,8 +1068,592 @@ impl TradingOrders {
                 .sum::<f64>()
                 / total_weight
         } else {
-            levels.iter().map(|l| l.price).sum::<f64>() / 3.0
+            levels[0].price // Fallback to first level price
         }
+    }
+
+    /// SMART Entry Quantity Rebalancing - Optimize R:R by adjusting entry quantity distribution
+    /// Constraints: No quantity below MIN_QUANTITY (0.2) for reasonable lot sizes
+    fn optimize_entry_quantities(
+        entry_levels: &mut [OrderLevel; 3],
+        exit_levels: &[OrderLevel; 3],
+        stop_levels: &[OrderLevel; 3],
+        direction: &str,
+        current_rr: f64,
+        target_rr: f64,
+    ) -> f64 {
+        const MIN_QUANTITY: f64 = 0.2; // Minimum quantity per level (20%)
+        const MAX_ITERATIONS: usize = 10; // Prevent infinite loops
+        const IMPROVEMENT_THRESHOLD: f64 = 0.01; // Stop if improvement less than 1%
+
+        // Save original quantities for rollback if needed
+        let original_quantities: [f64; 3] = [
+            entry_levels[0].quantity_percentage,
+            entry_levels[1].quantity_percentage,
+            entry_levels[2].quantity_percentage,
+        ];
+
+        // For LONG: Move quantity from market (worst) to limit orders (better)
+        // For SHORT: Move quantity from market (worst) to limit orders (better)
+        let mut best_rr = current_rr;
+        let mut iterations = 0;
+        let mut improved = false;
+
+        // Determine which entry has best price (lowest for LONG, highest for SHORT)
+        let best_entry_idx = if direction == "LONG" {
+            // For LONG: lowest price is best
+            if entry_levels[1].price < entry_levels[2].price {
+                1
+            } else {
+                2
+            }
+        } else {
+            // For SHORT: highest price is best
+            if entry_levels[1].price > entry_levels[2].price {
+                1
+            } else {
+                2
+            }
+        };
+
+        // Determine which entry has second best price
+        let second_best_idx = if best_entry_idx == 1 { 2 } else { 1 };
+
+        // Market entry is always index 0
+        let market_idx = 0;
+
+        while iterations < MAX_ITERATIONS {
+            // Try moving 5% quantity from market to best entry
+            let shift_amount = 0.05; // 5% shift per iteration
+
+            // Ensure we don't go below minimum quantity
+            if entry_levels[market_idx].quantity_percentage - shift_amount >= MIN_QUANTITY {
+                // Move quantity from market to best entry
+                entry_levels[market_idx].quantity_percentage -= shift_amount;
+                entry_levels[best_entry_idx].quantity_percentage += shift_amount;
+
+                // Normalize to ensure sum is 1.0
+                let total: f64 = entry_levels.iter().map(|l| l.quantity_percentage).sum();
+                for level in entry_levels.iter_mut() {
+                    level.quantity_percentage /= total;
+                }
+
+                // Calculate new R:R
+                let new_rr =
+                    Self::calculate_risk_reward(entry_levels, exit_levels, stop_levels, direction);
+
+                // If improved, keep going
+                if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                    log::debug!(
+                        "  Quantity shift: Market -{:.1}% → Best entry +{:.1}%, R:R: {:.2} → {:.2}",
+                        shift_amount * 100.0,
+                        shift_amount * 100.0,
+                        best_rr,
+                        new_rr
+                    );
+                    best_rr = new_rr;
+                    improved = true;
+
+                    // If we've reached target, stop
+                    if new_rr >= target_rr {
+                        log::info!(
+                            "🎯 Quantity optimization reached target R:R {:.2}",
+                            target_rr
+                        );
+                        break;
+                    }
+                } else {
+                    // Try moving to second best entry instead
+                    entry_levels[market_idx].quantity_percentage += shift_amount; // Undo
+                    entry_levels[best_entry_idx].quantity_percentage -= shift_amount; // Undo
+
+                    // Now try second best
+                    if entry_levels[market_idx].quantity_percentage - shift_amount >= MIN_QUANTITY {
+                        entry_levels[market_idx].quantity_percentage -= shift_amount;
+                        entry_levels[second_best_idx].quantity_percentage += shift_amount;
+
+                        // Normalize
+                        let total: f64 = entry_levels.iter().map(|l| l.quantity_percentage).sum();
+                        for level in entry_levels.iter_mut() {
+                            level.quantity_percentage /= total;
+                        }
+
+                        // Calculate new R:R
+                        let new_rr = Self::calculate_risk_reward(
+                            entry_levels,
+                            exit_levels,
+                            stop_levels,
+                            direction,
+                        );
+
+                        if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                            log::debug!(
+                                "  Quantity shift: Market -{:.1}% → Second best +{:.1}%, R:R: {:.2} → {:.2}",
+                                shift_amount * 100.0,
+                                shift_amount * 100.0,
+                                best_rr,
+                                new_rr
+                            );
+                            best_rr = new_rr;
+                            improved = true;
+                        } else {
+                            // Undo and stop - no more improvements possible
+                            entry_levels[market_idx].quantity_percentage += shift_amount;
+                            entry_levels[second_best_idx].quantity_percentage -= shift_amount;
+                            break;
+                        }
+                    } else {
+                        // Can't shift more from market - stop
+                        break;
+                    }
+                }
+            } else {
+                // Can't shift more from market - try shifting between limit orders
+                if entry_levels[second_best_idx].quantity_percentage - shift_amount >= MIN_QUANTITY
+                {
+                    entry_levels[second_best_idx].quantity_percentage -= shift_amount;
+                    entry_levels[best_entry_idx].quantity_percentage += shift_amount;
+
+                    // Normalize
+                    let total: f64 = entry_levels.iter().map(|l| l.quantity_percentage).sum();
+                    for level in entry_levels.iter_mut() {
+                        level.quantity_percentage /= total;
+                    }
+
+                    // Calculate new R:R
+                    let new_rr = Self::calculate_risk_reward(
+                        entry_levels,
+                        exit_levels,
+                        stop_levels,
+                        direction,
+                    );
+
+                    if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                        log::debug!(
+                            "  Quantity shift: Second best -{:.1}% → Best +{:.1}%, R:R: {:.2} → {:.2}",
+                            shift_amount * 100.0,
+                            shift_amount * 100.0,
+                            best_rr,
+                            new_rr
+                        );
+                        best_rr = new_rr;
+                        improved = true;
+                    } else {
+                        // Undo and stop - no more improvements possible
+                        entry_levels[second_best_idx].quantity_percentage += shift_amount;
+                        entry_levels[best_entry_idx].quantity_percentage -= shift_amount;
+                        break;
+                    }
+                } else {
+                    // Can't shift more - stop
+                    break;
+                }
+            }
+
+            iterations += 1;
+        }
+
+        // If no improvement, roll back to original quantities
+        if !improved {
+            entry_levels[0].quantity_percentage = original_quantities[0];
+            entry_levels[1].quantity_percentage = original_quantities[1];
+            entry_levels[2].quantity_percentage = original_quantities[2];
+            return current_rr;
+        }
+
+        // Final normalization to ensure sum is exactly 1.0
+        let total: f64 = entry_levels.iter().map(|l| l.quantity_percentage).sum();
+        for level in entry_levels.iter_mut() {
+            level.quantity_percentage /= total;
+        }
+
+        // Log final distribution
+        log::info!(
+            "🎯 Optimized quantity distribution: Market: {:.0}%, Limit1: {:.0}%, Limit2: {:.0}%",
+            entry_levels[0].quantity_percentage * 100.0,
+            entry_levels[1].quantity_percentage * 100.0,
+            entry_levels[2].quantity_percentage * 100.0
+        );
+
+        best_rr
+    }
+
+    /// SMART Exit Quantity Rebalancing - Optimize R:R by adjusting exit quantity distribution
+    /// Constraints: No quantity below MIN_QUANTITY (0.2) for reasonable lot sizes
+    fn optimize_exit_quantities(
+        entry_levels: &[OrderLevel; 3],
+        exit_levels: &mut [OrderLevel; 3],
+        stop_levels: &[OrderLevel; 3],
+        direction: &str,
+        current_rr: f64,
+        target_rr: f64,
+    ) -> f64 {
+        const MIN_QUANTITY: f64 = 0.2; // Minimum quantity per level (20%)
+        const MAX_ITERATIONS: usize = 10; // Prevent infinite loops
+        const IMPROVEMENT_THRESHOLD: f64 = 0.01; // Stop if improvement less than 1%
+
+        // Save original quantities for rollback if needed
+        let original_quantities: [f64; 3] = [
+            exit_levels[0].quantity_percentage,
+            exit_levels[1].quantity_percentage,
+            exit_levels[2].quantity_percentage,
+        ];
+
+        // For LONG: Move quantity from first exit (worst) to further exits (better)
+        // For SHORT: Move quantity from first exit (worst) to further exits (better)
+        let mut best_rr = current_rr;
+        let mut iterations = 0;
+        let mut improved = false;
+
+        // First exit is always index 0, furthest exit is index 2
+        let worst_exit_idx = 0;
+        let best_exit_idx = 2;
+        let middle_exit_idx = 1;
+
+        while iterations < MAX_ITERATIONS {
+            // Try moving 5% quantity from first exit to furthest exit
+            let shift_amount = 0.05; // 5% shift per iteration
+
+            // Ensure we don't go below minimum quantity
+            if exit_levels[worst_exit_idx].quantity_percentage - shift_amount >= MIN_QUANTITY {
+                // Move quantity from first exit to furthest exit
+                exit_levels[worst_exit_idx].quantity_percentage -= shift_amount;
+                exit_levels[best_exit_idx].quantity_percentage += shift_amount;
+
+                // Normalize to ensure sum is 1.0
+                let total: f64 = exit_levels.iter().map(|l| l.quantity_percentage).sum();
+                for level in exit_levels.iter_mut() {
+                    level.quantity_percentage /= total;
+                }
+
+                // Calculate new R:R
+                let new_rr =
+                    Self::calculate_risk_reward(entry_levels, exit_levels, stop_levels, direction);
+
+                // If improved, keep going
+                if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                    log::debug!(
+                        "  Exit quantity shift: First -{:.1}% → Furthest +{:.1}%, R:R: {:.2} → {:.2}",
+                        shift_amount * 100.0,
+                        shift_amount * 100.0,
+                        best_rr,
+                        new_rr
+                    );
+                    best_rr = new_rr;
+                    improved = true;
+
+                    // If we've reached target, stop
+                    if new_rr >= target_rr {
+                        log::info!(
+                            "ud83cudfaf Exit quantity optimization reached target R:R {:.2}",
+                            target_rr
+                        );
+                        break;
+                    }
+                } else {
+                    // Try moving to middle exit instead
+                    exit_levels[worst_exit_idx].quantity_percentage += shift_amount; // Undo
+                    exit_levels[best_exit_idx].quantity_percentage -= shift_amount; // Undo
+
+                    // Now try middle exit
+                    if exit_levels[worst_exit_idx].quantity_percentage - shift_amount
+                        >= MIN_QUANTITY
+                    {
+                        exit_levels[worst_exit_idx].quantity_percentage -= shift_amount;
+                        exit_levels[middle_exit_idx].quantity_percentage += shift_amount;
+
+                        // Normalize
+                        let total: f64 = exit_levels.iter().map(|l| l.quantity_percentage).sum();
+                        for level in exit_levels.iter_mut() {
+                            level.quantity_percentage /= total;
+                        }
+
+                        // Calculate new R:R
+                        let new_rr = Self::calculate_risk_reward(
+                            entry_levels,
+                            exit_levels,
+                            stop_levels,
+                            direction,
+                        );
+
+                        if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                            log::debug!(
+                                "  Exit quantity shift: First -{:.1}% → Middle +{:.1}%, R:R: {:.2} → {:.2}",
+                                shift_amount * 100.0,
+                                shift_amount * 100.0,
+                                best_rr,
+                                new_rr
+                            );
+                            best_rr = new_rr;
+                            improved = true;
+                        } else {
+                            // Undo and stop - no more improvements possible
+                            exit_levels[worst_exit_idx].quantity_percentage += shift_amount;
+                            exit_levels[middle_exit_idx].quantity_percentage -= shift_amount;
+                            break;
+                        }
+                    } else {
+                        // Can't shift more from first exit - stop
+                        break;
+                    }
+                }
+            } else {
+                // Can't shift more from first exit - try shifting between middle and furthest
+                if exit_levels[middle_exit_idx].quantity_percentage - shift_amount >= MIN_QUANTITY {
+                    exit_levels[middle_exit_idx].quantity_percentage -= shift_amount;
+                    exit_levels[best_exit_idx].quantity_percentage += shift_amount;
+
+                    // Normalize
+                    let total: f64 = exit_levels.iter().map(|l| l.quantity_percentage).sum();
+                    for level in exit_levels.iter_mut() {
+                        level.quantity_percentage /= total;
+                    }
+
+                    // Calculate new R:R
+                    let new_rr = Self::calculate_risk_reward(
+                        entry_levels,
+                        exit_levels,
+                        stop_levels,
+                        direction,
+                    );
+
+                    if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                        log::debug!(
+                            "  Exit quantity shift: Middle -{:.1}% → Furthest +{:.1}%, R:R: {:.2} → {:.2}",
+                            shift_amount * 100.0,
+                            shift_amount * 100.0,
+                            best_rr,
+                            new_rr
+                        );
+                        best_rr = new_rr;
+                        improved = true;
+                    } else {
+                        // Undo and stop - no more improvements possible
+                        exit_levels[middle_exit_idx].quantity_percentage += shift_amount;
+                        exit_levels[best_exit_idx].quantity_percentage -= shift_amount;
+                        break;
+                    }
+                } else {
+                    // Can't shift more - stop
+                    break;
+                }
+            }
+
+            iterations += 1;
+        }
+
+        // If no improvement, roll back to original quantities
+        if !improved {
+            exit_levels[0].quantity_percentage = original_quantities[0];
+            exit_levels[1].quantity_percentage = original_quantities[1];
+            exit_levels[2].quantity_percentage = original_quantities[2];
+            return current_rr;
+        }
+
+        // Final normalization to ensure sum is exactly 1.0
+        let total: f64 = exit_levels.iter().map(|l| l.quantity_percentage).sum();
+        for level in exit_levels.iter_mut() {
+            level.quantity_percentage /= total;
+        }
+
+        // Log final distribution
+        log::info!(
+            "ud83cudfaf Optimized exit distribution: First: {:.0}%, Middle: {:.0}%, Furthest: {:.0}%",
+            exit_levels[0].quantity_percentage * 100.0,
+            exit_levels[1].quantity_percentage * 100.0,
+            exit_levels[2].quantity_percentage * 100.0
+        );
+
+        best_rr
+    }
+
+    /// SMART Stop Quantity Rebalancing - Optimize R:R by adjusting stop quantity distribution
+    /// Constraints: No quantity below MIN_QUANTITY (0.2) for reasonable lot sizes
+    fn optimize_stop_quantities(
+        entry_levels: &[OrderLevel; 3],
+        exit_levels: &[OrderLevel; 3],
+        stop_levels: &mut [OrderLevel; 3],
+        direction: &str,
+        current_rr: f64,
+        target_rr: f64,
+    ) -> f64 {
+        const MIN_QUANTITY: f64 = 0.2; // Minimum quantity per level (20%)
+        const MAX_ITERATIONS: usize = 10; // Prevent infinite loops
+        const IMPROVEMENT_THRESHOLD: f64 = 0.01; // Stop if improvement less than 1%
+
+        // Save original quantities for rollback if needed
+        let original_quantities: [f64; 3] = [
+            stop_levels[0].quantity_percentage,
+            stop_levels[1].quantity_percentage,
+            stop_levels[2].quantity_percentage,
+        ];
+
+        // For LONG: Move quantity from furthest stop (worst) to closest stop (better)
+        // For SHORT: Move quantity from furthest stop (worst) to closest stop (better)
+        let mut best_rr = current_rr;
+        let mut iterations = 0;
+        let mut improved = false;
+
+        // Closest stop is index 0, furthest stop is index 2
+        let best_stop_idx = 0; // Closest stop (best for R:R)
+        let worst_stop_idx = 2; // Furthest stop (worst for R:R)
+        let middle_stop_idx = 1;
+
+        while iterations < MAX_ITERATIONS {
+            // Try moving 5% quantity from furthest stop to closest stop
+            let shift_amount = 0.05; // 5% shift per iteration
+
+            // Ensure we don't go below minimum quantity
+            if stop_levels[worst_stop_idx].quantity_percentage - shift_amount >= MIN_QUANTITY {
+                // Move quantity from furthest stop to closest stop
+                stop_levels[worst_stop_idx].quantity_percentage -= shift_amount;
+                stop_levels[best_stop_idx].quantity_percentage += shift_amount;
+
+                // Normalize to ensure sum is 1.0
+                let total: f64 = stop_levels.iter().map(|l| l.quantity_percentage).sum();
+                for level in stop_levels.iter_mut() {
+                    level.quantity_percentage /= total;
+                }
+
+                // Calculate new R:R
+                let new_rr =
+                    Self::calculate_risk_reward(entry_levels, exit_levels, stop_levels, direction);
+
+                // If improved, keep going
+                if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                    log::debug!(
+                        "  Stop quantity shift: Furthest -{:.1}% → Closest +{:.1}%, R:R: {:.2} → {:.2}",
+                        shift_amount * 100.0,
+                        shift_amount * 100.0,
+                        best_rr,
+                        new_rr
+                    );
+                    best_rr = new_rr;
+                    improved = true;
+
+                    // If we've reached target, stop
+                    if new_rr >= target_rr {
+                        log::info!(
+                            "ud83cudfaf Stop quantity optimization reached target R:R {:.2}",
+                            target_rr
+                        );
+                        break;
+                    }
+                } else {
+                    // Try moving to middle stop instead
+                    stop_levels[worst_stop_idx].quantity_percentage += shift_amount; // Undo
+                    stop_levels[best_stop_idx].quantity_percentage -= shift_amount; // Undo
+
+                    // Now try middle stop
+                    if stop_levels[worst_stop_idx].quantity_percentage - shift_amount
+                        >= MIN_QUANTITY
+                    {
+                        stop_levels[worst_stop_idx].quantity_percentage -= shift_amount;
+                        stop_levels[middle_stop_idx].quantity_percentage += shift_amount;
+
+                        // Normalize
+                        let total: f64 = stop_levels.iter().map(|l| l.quantity_percentage).sum();
+                        for level in stop_levels.iter_mut() {
+                            level.quantity_percentage /= total;
+                        }
+
+                        // Calculate new R:R
+                        let new_rr = Self::calculate_risk_reward(
+                            entry_levels,
+                            exit_levels,
+                            stop_levels,
+                            direction,
+                        );
+
+                        if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                            log::debug!(
+                                "  Stop quantity shift: Furthest -{:.1}% → Middle +{:.1}%, R:R: {:.2} → {:.2}",
+                                shift_amount * 100.0,
+                                shift_amount * 100.0,
+                                best_rr,
+                                new_rr
+                            );
+                            best_rr = new_rr;
+                            improved = true;
+                        } else {
+                            // Undo and stop - no more improvements possible
+                            stop_levels[worst_stop_idx].quantity_percentage += shift_amount;
+                            stop_levels[middle_stop_idx].quantity_percentage -= shift_amount;
+                            break;
+                        }
+                    } else {
+                        // Can't shift more from furthest stop - stop
+                        break;
+                    }
+                }
+            } else {
+                // Can't shift more from furthest stop - try shifting between middle and closest
+                if stop_levels[middle_stop_idx].quantity_percentage - shift_amount >= MIN_QUANTITY {
+                    stop_levels[middle_stop_idx].quantity_percentage -= shift_amount;
+                    stop_levels[best_stop_idx].quantity_percentage += shift_amount;
+
+                    // Normalize
+                    let total: f64 = stop_levels.iter().map(|l| l.quantity_percentage).sum();
+                    for level in stop_levels.iter_mut() {
+                        level.quantity_percentage /= total;
+                    }
+
+                    // Calculate new R:R
+                    let new_rr = Self::calculate_risk_reward(
+                        entry_levels,
+                        exit_levels,
+                        stop_levels,
+                        direction,
+                    );
+
+                    if new_rr > best_rr + IMPROVEMENT_THRESHOLD {
+                        log::debug!(
+                            "  Stop quantity shift: Middle -{:.1}% → Closest +{:.1}%, R:R: {:.2} → {:.2}",
+                            shift_amount * 100.0,
+                            shift_amount * 100.0,
+                            best_rr,
+                            new_rr
+                        );
+                        best_rr = new_rr;
+                        improved = true;
+                    } else {
+                        // Undo and stop - no more improvements possible
+                        stop_levels[middle_stop_idx].quantity_percentage += shift_amount;
+                        stop_levels[best_stop_idx].quantity_percentage -= shift_amount;
+                        break;
+                    }
+                } else {
+                    // Can't shift more - stop
+                    break;
+                }
+            }
+
+            iterations += 1;
+        }
+
+        // If no improvement, roll back to original quantities
+        if !improved {
+            stop_levels[0].quantity_percentage = original_quantities[0];
+            stop_levels[1].quantity_percentage = original_quantities[1];
+            stop_levels[2].quantity_percentage = original_quantities[2];
+            return current_rr;
+        }
+
+        // Final normalization to ensure sum is exactly 1.0
+        let total: f64 = stop_levels.iter().map(|l| l.quantity_percentage).sum();
+        for level in stop_levels.iter_mut() {
+            level.quantity_percentage /= total;
+        }
+
+        // Log final distribution
+        log::info!(
+            "ud83cudfaf Optimized stop distribution: Closest: {:.0}%, Middle: {:.0}%, Furthest: {:.0}%",
+            stop_levels[0].quantity_percentage * 100.0,
+            stop_levels[1].quantity_percentage * 100.0,
+            stop_levels[2].quantity_percentage * 100.0
+        );
+
+        best_rr
     }
 
     /// Generate trading orders with sequence statistics for fully adaptive behavior
