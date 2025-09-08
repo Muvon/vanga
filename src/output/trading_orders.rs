@@ -279,8 +279,12 @@ impl TradingOrders {
             // Apply psychological level adjustments
             let mut adjusted_entries = entries;
             for entry in &mut adjusted_entries {
-                entry.price =
-                    consensus.adjust_for_psychological_levels(entry.price, Some(&ohlcv_arrays));
+                entry.price = consensus.adjust_for_psychological_levels(
+                    entry.price,
+                    Some(&ohlcv_arrays),
+                    false, // is_stop_loss = false for entries
+                    None,  // direction not needed for entries
+                );
             }
 
             log::info!("🎯 Generated SEQUENCE-AWARE entries with psychological adjustments");
@@ -321,8 +325,12 @@ impl TradingOrders {
             // Apply psychological level adjustments
             let mut adjusted_exits = exits;
             for exit in &mut adjusted_exits {
-                exit.price =
-                    consensus.adjust_for_psychological_levels(exit.price, Some(&ohlcv_arrays));
+                exit.price = consensus.adjust_for_psychological_levels(
+                    exit.price,
+                    Some(&ohlcv_arrays),
+                    false, // is_stop_loss = false for targets
+                    None,  // direction not needed for targets
+                );
             }
 
             log::info!("🎯 Generated SEQUENCE-AWARE exits with psychological adjustments");
@@ -358,11 +366,16 @@ impl TradingOrders {
                 .collect();
 
             for stop in &mut stop_levels {
-                stop.price =
-                    consensus.adjust_for_psychological_levels(stop.price, Some(&ohlcv_arrays));
+                // Use enhanced existing method with stop-specific parameters
+                stop.price = consensus.adjust_for_psychological_levels(
+                    stop.price,
+                    Some(&ohlcv_arrays),
+                    true,             // is_stop_loss = true
+                    Some(&direction), // Pass direction for stop-specific logic
+                );
             }
 
-            log::info!("🎯 Applied psychological level adjustments to stop levels");
+            log::info!("🛡️ Applied stop hunt protection via psychological level adjustments");
         }
 
         // Step 6: Normalize sizes to ensure they sum to 1.0
@@ -405,150 +418,177 @@ impl TradingOrders {
 
         let risk_reward = if initial_risk_reward < target_risk_reward {
             log::info!(
-                "⚠️ Initial R:R {:.2} below target {:.2}, checking if optimization is needed...",
+                "⚠️ Initial R:R {:.2} below target {:.2}, optimizing with PROPORTIONAL scaling...",
                 initial_risk_reward,
                 target_risk_reward
             );
 
-            // CRITICAL: Define prediction boundaries - we should NOT go beyond these!
-            // The model's predictions are our reality check
-            let max_exit_distance = if direction == "LONG" {
-                // For LONG, use the maximum of expected upside or strong_up bin
+            // CRITICAL: Store original exit levels BEFORE optimization
+            let original_exit_levels = exit_levels.clone();
+
+            // Define HARD boundaries based on predictions
+            // Maximum exit distance is bounded by model predictions
+            let max_exit_boundary = if direction == "LONG" {
+                // For LONG, use the strong_up bin upper boundary or expected upside
                 let strong_up_max = config
                     .price_levels
                     .bins
                     .get("strong_up")
-                    .map(|b| b.range[1].abs())
+                    .map(|b| {
+                        // Use the actual price boundary, not just the range percentage
+                        let upper_price = b.price[1]; // Upper bound of strong_up bin
+                        ((upper_price - config.current_price) / config.current_price) * 100.0
+                    })
                     .unwrap_or(config.direction_pred.expected_upside_percent);
-                strong_up_max.max(config.direction_pred.expected_upside_percent * 1.5)
+                strong_up_max.max(config.direction_pred.expected_upside_percent)
             } else {
-                // For SHORT, use the maximum of expected downside or strong_down bin
+                // For SHORT, use the strong_down bin lower boundary or expected downside
                 let strong_down_max = config
                     .price_levels
                     .bins
                     .get("strong_down")
-                    .map(|b| b.range[1].abs())
+                    .map(|b| {
+                        // Use the actual price boundary, not just the range percentage
+                        let lower_price = b.price[0]; // Lower bound of strong_down bin
+                        ((config.current_price - lower_price) / config.current_price) * 100.0
+                    })
                     .unwrap_or(config.direction_pred.expected_downside_percent);
-                strong_down_max.max(config.direction_pred.expected_downside_percent * 1.5)
+                strong_down_max.max(config.direction_pred.expected_downside_percent)
             };
 
-            let min_stop_distance = config.volatility_pred.expected_range_percent * 0.3; // At least 30% of volatility
-
             log::info!(
-                "🎯 Prediction boundaries: max_exit={:.2}%, min_stop={:.2}%",
-                max_exit_distance,
-                min_stop_distance
+                "🎯 Optimization boundaries: max_exit={:.2}% (from predictions)",
+                max_exit_boundary
             );
 
-            // Check if we even have room to optimize
-            let current_max_exit_distance = exit_levels
+            // Calculate current distances for all levels
+            let current_exit_distances: Vec<f64> = exit_levels
                 .iter()
-                .map(|e| ((e.price - config.current_price).abs() / config.current_price * 100.0))
-                .fold(0.0, f64::max);
+                .map(|e| ((e.price - config.current_price).abs() / config.current_price) * 100.0)
+                .collect();
 
-            let current_min_stop_distance = stop_levels
+            let current_stop_distances: Vec<f64> = stop_levels
                 .iter()
-                .map(|s| ((s.price - entry_levels[0].price).abs() / entry_levels[0].price * 100.0))
-                .fold(f64::INFINITY, f64::min);
+                .map(|s| ((s.price - entry_levels[0].price).abs() / entry_levels[0].price) * 100.0)
+                .collect();
 
-            // If we're already at prediction boundaries, we can't optimize much
-            if current_max_exit_distance >= max_exit_distance * 0.9 {
-                log::warn!(
-                    "⚠️ Exit levels already near prediction boundary ({:.2}% vs max {:.2}%), limited optimization possible",
-                    current_max_exit_distance,
-                    max_exit_distance
-                );
-            }
+            // Current middle exit distance (this will be our limiting factor)
+            let current_middle_exit_distance = current_exit_distances[1];
 
-            if current_min_stop_distance <= min_stop_distance * 1.1 {
-                log::warn!(
-                    "⚠️ Stop levels already near minimum safe distance ({:.2}% vs min {:.2}%), limited optimization possible",
-                    current_min_stop_distance,
-                    min_stop_distance
-                );
-            }
+            // Calculate the maximum scale factor based on middle exit reaching boundary
+            // The middle exit should NOT exceed the prediction boundary OR original last exit level
+            let original_last_exit_distance =
+                ((original_exit_levels[2].price - config.current_price).abs()
+                    / config.current_price)
+                    * 100.0;
 
-            // Calculate how much we COULD improve within boundaries
-            let max_possible_exit_scale = max_exit_distance / current_max_exit_distance.max(0.1);
-            let max_possible_stop_tighten = current_min_stop_distance / min_stop_distance.max(0.1);
+            // Use the MORE CONSERVATIVE boundary (smaller of the two)
+            let effective_max_middle_distance = max_exit_boundary.min(original_last_exit_distance);
 
-            let max_achievable_rr =
-                initial_risk_reward * max_possible_exit_scale * max_possible_stop_tighten;
-
-            if max_achievable_rr < target_risk_reward * 0.8 {
-                log::warn!(
-                    "⚠️ Cannot achieve target R:R {:.2} within prediction boundaries (max achievable: {:.2})",
-                    target_risk_reward,
-                    max_achievable_rr
-                );
-                log::info!("📊 Optimizing to best possible R:R within model predictions...");
-            }
-
-            // Calculate improvement needed, but cap it by what's achievable
-            let improvement_needed = (target_risk_reward / initial_risk_reward.max(0.1))
-                .min(max_achievable_rr / initial_risk_reward.max(0.1));
-
-            // BALANCED APPROACH with prediction boundaries
-            let sqrt_improvement = improvement_needed.sqrt();
-
-            // Scale exits, but respect prediction boundaries
-            let desired_exit_scale = 1.0 + (sqrt_improvement - 1.0) * 0.4; // Conservative: 40% of sqrt gap
-            let exit_scale = desired_exit_scale.min(max_possible_exit_scale).min(1.5); // Cap at 1.5x or prediction boundary
-
-            // Scale stops, but respect minimum safe distance
-            let desired_stop_scale = 1.0 / (1.0 + (sqrt_improvement - 1.0) * 0.3);
-            let stop_scale = desired_stop_scale
-                .max(1.0 / max_possible_stop_tighten)
-                .max(0.7); // Don't tighten more than 30%
+            // Maximum scale is when middle exit reaches the boundary
+            let max_scale_factor =
+                effective_max_middle_distance / current_middle_exit_distance.max(0.1);
 
             log::info!(
-                "🔄 Bounded scaling: exit_scale={:.2}x (max:{:.2}x), stop_scale={:.2}x (min:{:.2}x)",
-                exit_scale,
-                max_possible_exit_scale,
-                stop_scale,
-                1.0 / max_possible_stop_tighten
+                "📏 Middle exit constraint: current={:.2}%, max={:.2}% (min of prediction {:.2}% and original last {:.2}%)",
+                current_middle_exit_distance,
+                effective_max_middle_distance,
+                max_exit_boundary,
+                original_last_exit_distance
             );
 
-            // Step 1: Apply exit scaling with boundary checks
-            for exit in &mut exit_levels {
+            // Calculate desired scale to achieve target R:R
+            let desired_scale = (target_risk_reward / initial_risk_reward.max(0.1)).sqrt();
+
+            // CRITICAL: Apply the SAME scale to both exits and stops, but cap by boundary
+            let final_scale = desired_scale.min(max_scale_factor).min(2.0); // Never scale more than 2x
+
+            log::info!(
+                "🔄 PROPORTIONAL scaling: desired={:.2}x, max_allowed={:.2}x, final={:.2}x",
+                desired_scale,
+                max_scale_factor,
+                final_scale
+            );
+
+            // Apply PROPORTIONAL scaling to ALL exit levels
+            for (i, exit) in exit_levels.iter_mut().enumerate() {
                 let distance_from_current = (exit.price - config.current_price).abs();
-                let scaled_distance = distance_from_current * exit_scale;
-
-                // Enforce prediction boundary
-                let bounded_distance =
-                    scaled_distance.min(max_exit_distance * config.current_price / 100.0);
+                let scaled_distance = distance_from_current * final_scale;
 
                 exit.price = if direction == "LONG" {
-                    config.current_price + bounded_distance
+                    config.current_price + scaled_distance
                 } else {
-                    config.current_price - bounded_distance
+                    config.current_price - scaled_distance
                 };
+
                 // Update ATR distance
-                exit.atr_distance = (bounded_distance / config.current_price) * 100.0;
+                exit.atr_distance = (scaled_distance / config.current_price) * 100.0;
+
+                log::debug!(
+                    "  Exit {}: {:.4} → {:.4} (distance: {:.2}% → {:.2}%)",
+                    i + 1,
+                    if direction == "LONG" {
+                        config.current_price + distance_from_current
+                    } else {
+                        config.current_price - distance_from_current
+                    },
+                    exit.price,
+                    current_exit_distances[i],
+                    exit.atr_distance
+                );
             }
 
-            // Step 2: Apply stop scaling with safety checks
-            for stop in &mut stop_levels {
+            // Apply SAME PROPORTIONAL scaling to ALL stop levels (moving them CLOSER)
+            // For stops, we DIVIDE by the scale factor to tighten them
+            let stop_scale = 1.0 / final_scale;
+
+            for (i, stop) in stop_levels.iter_mut().enumerate() {
                 let distance_from_entry = (stop.price - entry_levels[0].price).abs();
                 let scaled_distance = distance_from_entry * stop_scale;
 
-                // Enforce minimum safe distance
-                let bounded_distance =
-                    scaled_distance.max(min_stop_distance * entry_levels[0].price / 100.0);
+                // Ensure minimum safe distance (at least 0.5% from entry)
+                let min_safe_distance = entry_levels[0].price * 0.005;
+                let final_distance = scaled_distance.max(min_safe_distance);
 
                 stop.price = if direction == "LONG" {
-                    entry_levels[0].price - bounded_distance
+                    entry_levels[0].price - final_distance
                 } else {
-                    entry_levels[0].price + bounded_distance
+                    entry_levels[0].price + final_distance
                 };
+
                 // Update ATR distance
-                stop.atr_distance = (bounded_distance / config.current_price) * 100.0;
+                stop.atr_distance = (final_distance / config.current_price) * 100.0;
+
+                log::debug!(
+                    "  Stop {}: {:.4} → {:.4} (distance: {:.2}% → {:.2}%)",
+                    i + 1,
+                    if direction == "LONG" {
+                        entry_levels[0].price - distance_from_entry
+                    } else {
+                        entry_levels[0].price + distance_from_entry
+                    },
+                    stop.price,
+                    current_stop_distances[i],
+                    stop.atr_distance
+                );
             }
 
+            // Verify middle exit constraint
+            let new_middle_exit_distance = ((exit_levels[1].price - config.current_price).abs()
+                / config.current_price)
+                * 100.0;
+
             log::info!(
-                "📊 Applied bounded adjustments: exits expanded by {:.1}%, stops tightened by {:.1}%",
-                (exit_scale - 1.0) * 100.0,
-                (1.0 - stop_scale) * 100.0
+                "✅ PROPORTIONAL optimization complete: exits scaled {:.1}x, stops tightened {:.1}x",
+                final_scale,
+                1.0 / stop_scale
+            );
+
+            log::info!(
+                "📊 Middle exit moved: {:.2}% → {:.2}% (boundary: {:.2}%)",
+                current_middle_exit_distance,
+                new_middle_exit_distance,
+                effective_max_middle_distance
             );
 
             let optimized_rr =
@@ -562,20 +602,28 @@ impl TradingOrders {
                     optimized_rr,
                     target_risk_reward
                 );
-            } else {
-                log::warn!(
-                    "⚠️ Optimized R:R to {:.2} (from {:.2}), below target {:.2} due to prediction boundaries",
-                    optimized_rr,
+            } else if optimized_rr > initial_risk_reward {
+                log::info!(
+                    "📈 Improved R:R from {:.2} to {:.2} (target: {:.2} limited by boundaries)",
                     initial_risk_reward,
+                    optimized_rr,
                     target_risk_reward
                 );
-                log::info!(
-                    "💡 Consider waiting for better market conditions or adjusting position size"
+            } else {
+                log::warn!(
+                    "⚠️ Could not improve R:R (remains at {:.2}, target was {:.2})",
+                    optimized_rr,
+                    target_risk_reward
                 );
             }
 
             optimized_rr
         } else {
+            log::info!(
+                "✅ Initial R:R {:.2} already meets/exceeds target {:.2}, no optimization needed",
+                initial_risk_reward,
+                target_risk_reward
+            );
             initial_risk_reward
         };
 

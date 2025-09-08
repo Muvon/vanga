@@ -67,10 +67,13 @@ impl SmartConsensus {
     }
 
     /// Adjust level to avoid psychological clustering using sequence data
+    /// Enhanced to handle stop-specific adjustments when is_stop_loss is true
     pub fn adjust_for_psychological_levels(
         &self,
         price: f64,
         sequence_ohlcv: Option<&Vec<[f64; 5]>>,
+        is_stop_loss: bool,
+        direction: Option<&str>,
     ) -> f64 {
         // Find natural support/resistance from sequence data
         let psychological_zones = if let Some(ohlcv) = sequence_ohlcv {
@@ -79,21 +82,59 @@ impl SmartConsensus {
             Vec::new()
         };
 
+        // For stops, use wider range to avoid stop hunting
+        let detection_range = if is_stop_loss {
+            self.volatility.expected_range_percent / 100.0 // Wider range for stops
+        } else {
+            0.001 // 0.1% for regular orders
+        };
+
         // Check if our price is too close to a natural level
         for &level in &psychological_zones {
-            let distance_pct = ((price - level).abs() / level) * 100.0;
-            if distance_pct < 0.1 {
-                // Within 0.1% of natural level
-                // Shift by small amount based on sequence bandwidth
-                let shift = self.direction.sequence_bandwidth_percent * 0.1;
-                let adjusted_price = if price > level {
-                    price * (1.0 + shift / 100.0)
+            let distance = (price - level).abs() / level;
+
+            if distance < detection_range {
+                // Adjust based on sequence bandwidth
+                let adjustment = self.direction.sequence_bandwidth_percent / 100.0;
+
+                let adjusted_price = if is_stop_loss {
+                    // More aggressive adjustment for stops to avoid hunting
+                    if let Some(dir) = direction {
+                        if dir == "LONG" {
+                            // For LONG stops, push below support levels
+                            if price > level {
+                                level * (1.0 - adjustment * 0.5)
+                            } else {
+                                price * (1.0 - adjustment * 0.3)
+                            }
+                        } else {
+                            // For SHORT stops, push above resistance levels
+                            if price < level {
+                                level * (1.0 + adjustment * 0.5)
+                            } else {
+                                price * (1.0 + adjustment * 0.3)
+                            }
+                        }
+                    } else {
+                        // Fallback if direction not provided
+                        if price > level {
+                            price * (1.0 + adjustment * 0.2)
+                        } else {
+                            price * (1.0 - adjustment * 0.2)
+                        }
+                    }
                 } else {
-                    price * (1.0 - shift / 100.0)
+                    // Regular adjustment for entry/target orders
+                    if price > level {
+                        price * (1.0 + adjustment * 0.1)
+                    } else {
+                        price * (1.0 - adjustment * 0.1)
+                    }
                 };
 
                 log::info!(
-                    "🎯 Psychological adjustment: {:.4} → {:.4} (avoiding natural level {:.4})",
+                    "{} Psychological adjustment: {:.4} → {:.4} (avoiding level {:.4})",
+                    if is_stop_loss { "🛡️" } else { "🎯" },
                     price,
                     adjusted_price,
                     level
@@ -103,7 +144,77 @@ impl SmartConsensus {
             }
         }
 
+        // Also check round numbers for stops
+        if is_stop_loss {
+            let round_levels = self.find_round_number_levels(price);
+            for round_level in round_levels {
+                let distance = (price - round_level).abs() / round_level;
+
+                if distance < detection_range * 0.5 {
+                    let adjustment = self.direction.sequence_bandwidth_percent / 100.0;
+
+                    let adjusted_price = if let Some(dir) = direction {
+                        if dir == "LONG" {
+                            if price > round_level {
+                                round_level * (1.0 - adjustment * 0.2)
+                            } else {
+                                price * (1.0 - adjustment * 0.2)
+                            }
+                        } else if price < round_level {
+                            round_level * (1.0 + adjustment * 0.2)
+                        } else {
+                            price * (1.0 + adjustment * 0.2)
+                        }
+                    } else {
+                        price * (1.0 + adjustment * 0.1)
+                    };
+
+                    log::info!(
+                        "🎯 Round number avoidance: {:.4} → {:.4} (avoiding {:.4})",
+                        price,
+                        adjusted_price,
+                        round_level
+                    );
+
+                    return adjusted_price;
+                }
+            }
+        }
+
         price
+    }
+
+    /// Find nearby round number levels (psychological levels)
+    fn find_round_number_levels(&self, price: f64) -> Vec<f64> {
+        let mut levels = Vec::new();
+
+        // Determine the scale based on price magnitude
+        let scale = if price < 0.01 {
+            0.0001 // For very small prices
+        } else if price < 0.1 {
+            0.001
+        } else if price < 1.0 {
+            0.01
+        } else if price < 10.0 {
+            0.1
+        } else if price < 100.0 {
+            1.0
+        } else {
+            10.0
+        };
+
+        // Find nearest round numbers
+        let lower_round = (price / scale).floor() * scale;
+        let upper_round = (price / scale).ceil() * scale;
+
+        if lower_round > 0.0 {
+            levels.push(lower_round);
+        }
+        if upper_round != lower_round {
+            levels.push(upper_round);
+        }
+
+        levels
     }
 
     /// Find natural support/resistance levels from sequence OHLCV data
