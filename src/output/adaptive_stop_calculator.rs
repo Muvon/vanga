@@ -614,18 +614,38 @@ impl AdaptiveStopCalculator {
                 // Stop 2: Below moderate_down zone with medium ATR buffer
                 // Stop 3: Well below moderate_down with large ATR buffer
 
-                let atr_buffer = sequence_atr
-                    * match i {
-                        0 => 0.5, // Half ATR buffer for tight stop
-                        1 => 1.0, // Full ATR buffer for medium stop
-                        2 => 1.5, // 1.5x ATR buffer for wide stop
-                        _ => 1.0,
-                    };
+                // Progressive ATR multipliers for each stop level
+                let atr_multiplier = match i {
+                    0 => 0.5, // Half ATR buffer for tight stop
+                    1 => 1.0, // Full ATR buffer for medium stop
+                    2 => 1.5, // 1.5x ATR buffer for wide stop
+                    _ => 1.0,
+                };
 
-                // Use price boundary as anchor, then subtract ATR distance (NOT multiply!)
-                // CRITICAL FIX: Calculate actual distance, don't multiply price by percentage
+                // When multiple stops use the same zone boundary, differentiate using distance_multiplier
+                // Count how many previous stops used the same zone
+                let same_zone_count = stop_strategy
+                    .iter()
+                    .take(i)
+                    .filter(|&zone| zone == &stop_bin_name)
+                    .count();
+
+                // If we're reusing a zone, add the distance_multiplier offset to differentiate
+                // distance_multiplier is already calculated above (1.0, 1.5, 2.0 based on i)
+                let zone_offset = if same_zone_count > 0 {
+                    // Use the base_distance (volatility recommendation) scaled by how many times we've used this zone
+                    base_distance * (same_zone_count as f64)
+                } else {
+                    0.0
+                };
+
+                let atr_buffer = sequence_atr * atr_multiplier;
+
+                // Use price boundary as anchor, then subtract ATR distance PLUS zone offset
+                // This ensures progressive stops even when using same zone
                 let atr_distance = reference_entry * atr_buffer;
-                let boundary_based_stop = stop_boundary - atr_distance;
+                let boundary_based_stop =
+                    stop_boundary - atr_distance - (reference_entry * zone_offset);
 
                 // Also calculate volatility-based stop from reference entry
                 let volatility_based_stop =
@@ -644,18 +664,38 @@ impl AdaptiveStopCalculator {
                 // Stop 2: Above moderate_up zone with medium ATR buffer
                 // Stop 3: Well above moderate_up with large ATR buffer
 
-                let atr_buffer = sequence_atr
-                    * match i {
-                        0 => 0.5, // Half ATR buffer for tight stop
-                        1 => 1.0, // Full ATR buffer for medium stop
-                        2 => 1.5, // 1.5x ATR buffer for wide stop
-                        _ => 1.0,
-                    };
+                // Progressive ATR multipliers for each stop level
+                let atr_multiplier = match i {
+                    0 => 0.5, // Half ATR buffer for tight stop
+                    1 => 1.0, // Full ATR buffer for medium stop
+                    2 => 1.5, // 1.5x ATR buffer for wide stop
+                    _ => 1.0,
+                };
 
-                // Use price boundary as anchor, then add ATR distance (NOT multiply!)
-                // CRITICAL FIX: Calculate actual distance, don't multiply price by percentage
+                // When multiple stops use the same zone boundary, differentiate using distance_multiplier
+                // Count how many previous stops used the same zone
+                let same_zone_count = stop_strategy
+                    .iter()
+                    .take(i)
+                    .filter(|&zone| zone == &stop_bin_name)
+                    .count();
+
+                // If we're reusing a zone, add the distance_multiplier offset to differentiate
+                // distance_multiplier is already calculated above (1.0, 1.5, 2.0 based on i)
+                let zone_offset = if same_zone_count > 0 {
+                    // Use the base_distance (volatility recommendation) scaled by how many times we've used this zone
+                    base_distance * (same_zone_count as f64)
+                } else {
+                    0.0
+                };
+
+                let atr_buffer = sequence_atr * atr_multiplier;
+
+                // Use price boundary as anchor, then add ATR distance PLUS zone offset
+                // This ensures progressive stops even when using same zone
                 let atr_distance = reference_entry * atr_buffer;
-                let boundary_based_stop = stop_boundary + atr_distance;
+                let boundary_based_stop =
+                    stop_boundary + atr_distance + (reference_entry * zone_offset);
 
                 // Also calculate volatility-based stop from reference entry
                 let volatility_based_stop =
@@ -725,6 +765,7 @@ impl AdaptiveStopCalculator {
         }
 
         // Validate stops are progressive and on correct side of entries
+        // First pass: validation
         for (i, stop) in result_stops.iter().enumerate() {
             if trade_direction == "LONG" {
                 if stop.price >= reference_entry {
@@ -735,29 +776,45 @@ impl AdaptiveStopCalculator {
                         reference_entry
                     )));
                 }
-            } else {
-                if stop.price <= reference_entry {
-                    return Err(VangaError::PredictionError(format!(
-                        "SHORT stop {} at ${:.4} must be above highest entry ${:.4}",
-                        i + 1,
-                        stop.price,
-                        reference_entry
-                    )));
-                }
+            } else if stop.price <= reference_entry {
+                return Err(VangaError::PredictionError(format!(
+                    "SHORT stop {} at ${:.4} must be above highest entry ${:.4}",
+                    i + 1,
+                    stop.price,
+                    reference_entry
+                )));
             }
+        }
 
-            // Ensure progressive stops (each one further from entry)
-            if i > 0 {
-                let prev_distance = (result_stops[i - 1].price - reference_entry).abs();
-                let curr_distance = (stop.price - reference_entry).abs();
-                if curr_distance <= prev_distance {
-                    log::warn!(
-                        "Stop {} not progressive: distance {:.4} <= previous {:.4}",
-                        i + 1,
-                        curr_distance,
-                        prev_distance
-                    );
-                }
+        // Second pass: fix any duplicate or insufficiently separated stops
+        for i in 1..result_stops.len() {
+            let curr_distance = (result_stops[i].price - reference_entry).abs();
+
+            // Each subsequent stop should be progressively further
+            // Using the same multiplier pattern as in stop generation (1.0, 1.5, 2.0)
+            let expected_multiplier = 1.0 + (i as f64 * 0.5);
+            let min_distance =
+                (result_stops[0].price - reference_entry).abs() * expected_multiplier;
+
+            if curr_distance < min_distance {
+                // Adjust to maintain progression
+                let new_price = if trade_direction == "LONG" {
+                    reference_entry - (reference_entry * min_distance / reference_entry)
+                } else {
+                    reference_entry + (reference_entry * min_distance / reference_entry)
+                };
+
+                log::warn!(
+                    "Stop {} adjusted for progression: ${:.4} → ${:.4} ({:.2}% from entry)",
+                    i + 1,
+                    result_stops[i].price,
+                    new_price,
+                    (min_distance / reference_entry) * 100.0
+                );
+
+                // Update the stop
+                result_stops[i].price = new_price;
+                result_stops[i].atr_distance = (min_distance / reference_entry) * 100.0;
             }
         }
 
