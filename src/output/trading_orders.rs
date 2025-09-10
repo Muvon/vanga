@@ -626,17 +626,23 @@ impl TradingOrders {
                     max_entry_movement
                 );
 
-                for (i, entry) in entry_levels.iter_mut().enumerate() {
+                // FIXED: Apply proportional adjustment to maintain entry order relationships
+                // Calculate the maximum safe movement for all entries
+                let movement_percentage = max_entry_movement / 100.0;
+
+                // Check safety constraints for ALL entries before applying any changes
+                let mut can_adjust_all = true;
+                let mut new_entry_prices = Vec::new();
+
+                for entry in entry_levels.iter() {
                     if entry.order_type == "MARKET" {
-                        continue; // Don't adjust market orders at current price
+                        new_entry_prices.push(entry.price); // Keep market orders unchanged
+                        continue;
                     }
 
-                    // Calculate how much we can safely move this entry (limited by volatility)
+                    // Calculate new price with proportional movement
                     let current_distance = (entry.price - config.current_price).abs();
-
-                    // Move entry by maximum volatility allows (e.g., 0.33%)
-                    let movement_amount = config.current_price * (max_entry_movement / 100.0);
-                    let new_distance = current_distance + movement_amount;
+                    let new_distance = current_distance * (1.0 + movement_percentage);
 
                     let new_entry_price = if direction == "LONG" {
                         // LONG: move entries LOWER (better entry prices)
@@ -646,42 +652,67 @@ impl TradingOrders {
                         config.current_price + new_distance
                     };
 
-                    // CRITICAL: Check that new entry doesn't intersect with stops
-                    let safe_from_stops = if direction == "LONG" {
-                        // For LONG: entry must be ABOVE all stops
-                        let highest_stop = stop_levels
-                            .iter()
-                            .map(|s| s.price)
-                            .fold(f64::NEG_INFINITY, f64::max);
-                        new_entry_price > highest_stop * 1.02 // 2% safety buffer
-                    } else {
-                        // For SHORT: entry must be BELOW all stops
-                        let lowest_stop = stop_levels
-                            .iter()
-                            .map(|s| s.price)
-                            .fold(f64::INFINITY, f64::min);
-                        new_entry_price < lowest_stop * 0.98 // 2% safety buffer
-                    };
-
-                    // Validate the new entry price makes sense AND is safe from stops
+                    // Validate this new price
                     let price_makes_sense = if direction == "LONG" {
                         new_entry_price < config.current_price && new_entry_price > 0.0
                     } else {
                         new_entry_price > config.current_price
                     };
 
-                    if price_makes_sense && safe_from_stops {
-                        entry.price = new_entry_price;
-                        entry.atr_distance = (new_distance / config.current_price) * 100.0;
-                        entries_adjusted = true;
+                    if !price_makes_sense {
+                        can_adjust_all = false;
+                        break;
+                    }
 
-                        log::debug!(
-                            "  Adjusted Entry {}: ${:.4} → ${:.4} (moved {:.2}% further from current)",
-                            i + 1,
-                            config.current_price - current_distance * if direction == "LONG" { 1.0 } else { -1.0 },
-                            new_entry_price,
-                            (new_distance - current_distance) / config.current_price * 100.0
-                        );
+                    new_entry_prices.push(new_entry_price);
+                }
+
+                // Check that new entries don't intersect with stops
+                if can_adjust_all {
+                    let extreme_new_entry = if direction == "LONG" {
+                        new_entry_prices
+                            .iter()
+                            .fold(f64::INFINITY, |a, &b| a.min(b))
+                    } else {
+                        new_entry_prices
+                            .iter()
+                            .fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+                    };
+
+                    let safe_from_stops = if direction == "LONG" {
+                        let highest_stop = stop_levels
+                            .iter()
+                            .map(|s| s.price)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        extreme_new_entry > highest_stop * 1.02 // 2% safety buffer
+                    } else {
+                        let lowest_stop = stop_levels
+                            .iter()
+                            .map(|s| s.price)
+                            .fold(f64::INFINITY, f64::min);
+                        extreme_new_entry < lowest_stop * 0.98 // 2% safety buffer
+                    };
+
+                    if safe_from_stops {
+                        // Apply all adjustments - they maintain relative order
+                        for (i, entry) in entry_levels.iter_mut().enumerate() {
+                            if entry.order_type != "MARKET" {
+                                let old_price = entry.price;
+                                entry.price = new_entry_prices[i];
+                                entry.atr_distance = ((entry.price - config.current_price).abs()
+                                    / config.current_price)
+                                    * 100.0;
+                                entries_adjusted = true;
+
+                                log::debug!(
+                                    "  Proportionally Adjusted Entry {}: ${:.4} → ${:.4} (moved {:.2}% further)",
+                                    i + 1,
+                                    old_price,
+                                    entry.price,
+                                    movement_percentage * 100.0
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -817,14 +848,20 @@ impl TradingOrders {
             initial_risk_reward
         };
 
-        // Step 10: Validate order consistency
-        Self::validate_smart_orders(
+        // Step 10: COMPREHENSIVE order integrity validation (at the END)
+        if let Err(validation_error) = Self::validate_order_integrity(
             &entry_levels,
             &exit_levels,
             &stop_levels,
             &direction,
             config.current_price,
-        )?;
+        ) {
+            log::error!("❌ Order validation failed: {}", validation_error);
+            log::error!("🚫 Returning empty orders due to validation failure");
+
+            // Return empty orders (no signal) when validation fails
+            return Ok(TradingOrders::default());
+        }
 
         log::info!(
             "✅ SMART Orders Generated: R:R={:.2}, Direction={}, Confidence={:.2}",
@@ -890,133 +927,274 @@ impl TradingOrders {
         })
     }
 
-    /// Validate SMART orders for consistency and correctness
-    fn validate_smart_orders(
+    /// Comprehensive validation of order integrity - called at the END after all generation
+    /// Returns detailed error if any issues found, Ok(()) if all checks pass
+    pub fn validate_order_integrity(
         entry_levels: &[OrderLevel; 3],
         exit_levels: &[OrderLevel; 3],
         stop_levels: &[OrderLevel; 3],
         direction: &str,
         current_price: f64,
     ) -> crate::utils::error::Result<()> {
-        // Validate SHORT orders
-        if direction == "SHORT" {
-            // Entries must be ABOVE current price
-            for (i, entry) in entry_levels.iter().enumerate() {
-                if entry.price <= current_price {
+        // Check (a): All arrays have exactly 3 levels
+        if entry_levels.len() != 3 || exit_levels.len() != 3 || stop_levels.len() != 3 {
+            return Err(crate::utils::error::VangaError::PredictionError(
+                "Order arrays must have exactly 3 levels each".to_string(),
+            ));
+        }
+
+        // Check (b): Quantities sum to 1.0 (±0.01 tolerance)
+        let entry_sum: f64 = entry_levels.iter().map(|l| l.quantity_percentage).sum();
+        let exit_sum: f64 = exit_levels.iter().map(|l| l.quantity_percentage).sum();
+        let stop_sum: f64 = stop_levels.iter().map(|l| l.quantity_percentage).sum();
+
+        if (entry_sum - 1.0).abs() > 0.01 {
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Entry quantities sum to {:.3}, expected 1.0 (±0.01)",
+                entry_sum
+            )));
+        }
+        if (exit_sum - 1.0).abs() > 0.01 {
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Exit quantities sum to {:.3}, expected 1.0 (±0.01)",
+                exit_sum
+            )));
+        }
+        if (stop_sum - 1.0).abs() > 0.01 {
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Stop quantities sum to {:.3}, expected 1.0 (±0.01)",
+                stop_sum
+            )));
+        }
+
+        // Check (c): No duplicate prices within same order type
+        let entry_prices: Vec<f64> = entry_levels.iter().map(|l| l.price).collect();
+        let exit_prices: Vec<f64> = exit_levels.iter().map(|l| l.price).collect();
+        let stop_prices: Vec<f64> = stop_levels.iter().map(|l| l.price).collect();
+
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                if (entry_prices[i] - entry_prices[j]).abs() < 0.0001 {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "SHORT entry {} at ${:.2} must be above current ${:.2}",
+                        "Duplicate entry prices: Entry {} and {} both at ${:.4}",
                         i + 1,
-                        entry.price,
-                        current_price
+                        j + 1,
+                        entry_prices[i]
+                    )));
+                }
+                if (exit_prices[i] - exit_prices[j]).abs() < 0.0001 {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "Duplicate exit prices: Exit {} and {} both at ${:.4}",
+                        i + 1,
+                        j + 1,
+                        exit_prices[i]
+                    )));
+                }
+                if (stop_prices[i] - stop_prices[j]).abs() < 0.0001 {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "Duplicate stop prices: Stop {} and {} both at ${:.4}",
+                        i + 1,
+                        j + 1,
+                        stop_prices[i]
                     )));
                 }
             }
+        }
 
-            // Exits must be BELOW current price
-            for (i, exit) in exit_levels.iter().enumerate() {
-                if exit.price >= current_price {
+        // Check (d): All prices > 0
+        for (i, entry) in entry_levels.iter().enumerate() {
+            if entry.price <= 0.0 {
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "Entry {} price ${:.4} must be > 0",
+                    i + 1,
+                    entry.price
+                )));
+            }
+        }
+        for (i, exit) in exit_levels.iter().enumerate() {
+            if exit.price <= 0.0 {
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "Exit {} price ${:.4} must be > 0",
+                    i + 1,
+                    exit.price
+                )));
+            }
+        }
+        for (i, stop) in stop_levels.iter().enumerate() {
+            if stop.price <= 0.0 {
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "Stop {} price ${:.4} must be > 0",
+                    i + 1,
+                    stop.price
+                )));
+            }
+        }
+
+        // Check (e): Proper ordering based on direction
+        if direction == "LONG" {
+            // LONG entries should be descending (highest first for best opportunity)
+            for i in 0..2 {
+                if entry_levels[i].price < entry_levels[i + 1].price {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "SHORT exit {} at ${:.2} must be below current ${:.2}",
+                        "LONG entry ordering broken: Entry {} (${:.4}) should be >= Entry {} (${:.4})",
                         i + 1,
-                        exit.price,
-                        current_price
+                        entry_levels[i].price,
+                        i + 2,
+                        entry_levels[i + 1].price
                     )));
                 }
             }
-
-            // CRITICAL: Stops must be ABOVE ALL entries (no intersection!)
-            let highest_entry = entry_levels
-                .iter()
-                .map(|e| e.price)
-                .fold(f64::NEG_INFINITY, f64::max);
-
-            for (i, stop) in stop_levels.iter().enumerate() {
-                // Check against ALL entries, not just corresponding one
-                for (j, entry) in entry_levels.iter().enumerate() {
-                    if stop.price <= entry.price {
-                        return Err(crate::utils::error::VangaError::PredictionError(
-                            format!(
-                                "❌ CRITICAL: SHORT stop {} at ${:.2} intersects with entry {} at ${:.2}. Stop must be above ALL entries (highest: ${:.2})",
-                                i+1, stop.price, j+1, entry.price, highest_entry
-                            )
-                        ));
-                    }
-                }
-            }
-        } else {
-            // LONG orders validation
-            // Entries must be BELOW current price (except MARKET orders which can be AT current price)
-            for (i, entry) in entry_levels.iter().enumerate() {
-                if entry.order_type == "MARKET" {
-                    // MARKET orders can be AT current price for immediate execution
-                    if (entry.price - current_price).abs() > current_price * 0.001 {
-                        return Err(crate::utils::error::VangaError::PredictionError(format!(
-                            "LONG MARKET entry {} at ${:.4} must be at current price ${:.4} (within 0.1%)",
-                            i + 1,
-                            entry.price,
-                            current_price
-                        )));
-                    }
-                } else if entry.price >= current_price {
+            // LONG exits should be ascending (lowest target first)
+            for i in 0..2 {
+                if exit_levels[i].price > exit_levels[i + 1].price {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "LONG LIMIT entry {} at ${:.4} must be below current ${:.4}",
+                        "LONG exit ordering broken: Exit {} (${:.4}) should be <= Exit {} (${:.4})",
                         i + 1,
-                        entry.price,
-                        current_price
+                        exit_levels[i].price,
+                        i + 2,
+                        exit_levels[i + 1].price
                     )));
                 }
             }
-
-            // Exits must be ABOVE current price
-            for (i, exit) in exit_levels.iter().enumerate() {
-                if exit.price <= current_price {
+            // LONG stops should be descending (highest stop first)
+            for i in 0..2 {
+                if stop_levels[i].price < stop_levels[i + 1].price {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "LONG exit {} at ${:.2} must be above current ${:.2}",
+                        "LONG stop ordering broken: Stop {} (${:.4}) should be >= Stop {} (${:.4})",
                         i + 1,
-                        exit.price,
-                        current_price
+                        stop_levels[i].price,
+                        i + 2,
+                        stop_levels[i + 1].price
                     )));
                 }
             }
+        } else if direction == "SHORT" {
+            // SHORT entries should be ascending (lowest first for best opportunity)
+            for i in 0..2 {
+                if entry_levels[i].price > entry_levels[i + 1].price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "SHORT entry ordering broken: Entry {} (${:.4}) should be <= Entry {} (${:.4})",
+                        i + 1,
+                        entry_levels[i].price,
+                        i + 2,
+                        entry_levels[i + 1].price
+                    )));
+                }
+            }
+            // SHORT exits should be descending (highest target first)
+            for i in 0..2 {
+                if exit_levels[i].price < exit_levels[i + 1].price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "SHORT exit ordering broken: Exit {} (${:.4}) should be >= Exit {} (${:.4})",
+                        i + 1,
+                        exit_levels[i].price,
+                        i + 2,
+                        exit_levels[i + 1].price
+                    )));
+                }
+            }
+            // SHORT stops should be ascending (lowest stop first)
+            for i in 0..2 {
+                if stop_levels[i].price > stop_levels[i + 1].price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "SHORT stop ordering broken: Stop {} (${:.4}) should be <= Stop {} (${:.4})",
+                        i + 1,
+                        stop_levels[i].price,
+                        i + 2,
+                        stop_levels[i + 1].price
+                    )));
+                }
+            }
+        }
 
-            // CRITICAL: Stops must be BELOW ALL entries (no intersection!)
+        // Check (f): No intersection between entries and stops
+        if direction == "LONG" {
+            // For LONG: all stops must be below all entries
             let lowest_entry = entry_levels
                 .iter()
                 .map(|e| e.price)
                 .fold(f64::INFINITY, f64::min);
+            let highest_stop = stop_levels
+                .iter()
+                .map(|s| s.price)
+                .fold(f64::NEG_INFINITY, f64::max);
 
-            for (i, stop) in stop_levels.iter().enumerate() {
-                // Check against ALL entries, not just corresponding one
-                for (j, entry) in entry_levels.iter().enumerate() {
-                    if stop.price >= entry.price {
-                        return Err(crate::utils::error::VangaError::PredictionError(
-                            format!(
-                                "❌ CRITICAL: LONG stop {} at ${:.2} intersects with entry {} at ${:.2}. Stop must be below ALL entries (lowest: ${:.2})",
-                                i+1, stop.price, j+1, entry.price, lowest_entry
-                            )
-                        ));
-                    }
+            if highest_stop >= lowest_entry {
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "LONG stop-entry intersection: highest stop ${:.4} >= lowest entry ${:.4}",
+                    highest_stop, lowest_entry
+                )));
+            }
+
+            // All entries must be below or at current price (except MARKET orders)
+            for (i, entry) in entry_levels.iter().enumerate() {
+                if entry.order_type != "MARKET" && entry.price > current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "LONG entry {} at ${:.4} must be <= current price ${:.4}",
+                        i + 1,
+                        entry.price,
+                        current_price
+                    )));
+                }
+            }
+
+            // All exits must be above current price
+            for (i, exit) in exit_levels.iter().enumerate() {
+                if exit.price <= current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "LONG exit {} at ${:.4} must be > current price ${:.4}",
+                        i + 1,
+                        exit.price,
+                        current_price
+                    )));
+                }
+            }
+        } else if direction == "SHORT" {
+            // For SHORT: all stops must be above all entries
+            let highest_entry = entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let lowest_stop = stop_levels
+                .iter()
+                .map(|s| s.price)
+                .fold(f64::INFINITY, f64::min);
+
+            if lowest_stop <= highest_entry {
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "SHORT stop-entry intersection: lowest stop ${:.4} <= highest entry ${:.4}",
+                    lowest_stop, highest_entry
+                )));
+            }
+
+            // All entries must be above or at current price (except MARKET orders)
+            for (i, entry) in entry_levels.iter().enumerate() {
+                if entry.order_type != "MARKET" && entry.price < current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "SHORT entry {} at ${:.4} must be >= current price ${:.4}",
+                        i + 1,
+                        entry.price,
+                        current_price
+                    )));
+                }
+            }
+
+            // All exits must be below current price
+            for (i, exit) in exit_levels.iter().enumerate() {
+                if exit.price >= current_price {
+                    return Err(crate::utils::error::VangaError::PredictionError(format!(
+                        "SHORT exit {} at ${:.4} must be < current price ${:.4}",
+                        i + 1,
+                        exit.price,
+                        current_price
+                    )));
                 }
             }
         }
 
-        // Validate sizes sum to 1.0
-        let entry_sum: f64 = entry_levels.iter().map(|l| l.quantity_percentage).sum();
-        let exit_sum: f64 = exit_levels.iter().map(|l| l.quantity_percentage).sum();
-
-        if (entry_sum - 1.0).abs() > 0.01 {
-            log::warn!("Entry sizes sum to {:.3}, expected 1.0", entry_sum);
-        }
-        if (exit_sum - 1.0).abs() > 0.01 {
-            log::warn!("Exit sizes sum to {:.3}, expected 1.0", exit_sum);
-        }
-
-        // Log successful validation
-        log::info!("✅ Order validation passed: No stop/entry intersections detected");
-
+        log::info!("✅ Order integrity validation passed - all orders properly aligned");
         Ok(())
     }
-
     /// Calculate risk-reward ratio from order levels with direction awareness
     fn calculate_risk_reward(
         entry_levels: &[OrderLevel; 3],

@@ -472,10 +472,13 @@ impl SmartConsensus {
             entry_spacing * 100.0
         );
 
-        // Generate remaining 2 entries (entries 2 & 3) with golden ratio progression
-        for i in 1..3 {
-            // Start from 1, not 0, since we already have entry 1
-            let progression_factor = PHI.powi(i);
+        // FIXED: Generate ALL 3 entries properly with correct indexing
+        // Entry 1 is already in the vector (MARKET order at current price)
+        // Now generate entries 2 and 3 with proper indexing
+        for i in 0..2 {
+            // i=0 for entry 2, i=1 for entry 3
+            let entry_index = i + 2; // This gives us entry 2 and 3
+            let progression_factor = PHI.powi(i as i32 + 1); // PHI^1 for entry 2, PHI^2 for entry 3
             let distance = entry_spacing * progression_factor;
 
             let entry_price = if direction == "SHORT" {
@@ -486,7 +489,7 @@ impl SmartConsensus {
 
             // Use proper sizing for entries 2 & 3
             let entry_size =
-                self.calculate_entry_size((i + 1) as usize, &self.direction, &self.volatility);
+                self.calculate_entry_size(entry_index, &self.direction, &self.volatility);
 
             // Use actual Kelly fraction from sequence statistics
             let kelly_adjusted_size = entry_size * (1.0 + sequence_stats.kelly_fraction);
@@ -532,7 +535,7 @@ impl SmartConsensus {
             log::info!(
                 "  {} Entry {}: ${:.4} ({:+.3}%) | Size: {:.1}% | Conf: {:.2} | Kelly: {:.3} | Distance in σ: {:.2}",
                 direction,
-                i + 1,
+                entry_index,
                 entry_price,
                 if direction == "SHORT" {
                     distance * 100.0
@@ -544,6 +547,16 @@ impl SmartConsensus {
                 sequence_stats.kelly_fraction,
                 distance_in_stdevs
             );
+        }
+
+        // Entries should already be properly ordered by the math above
+
+        // Validate we have exactly 3 entries
+        if entries.len() != 3 {
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Entry generation failed: expected 3 entries, got {}",
+                entries.len()
+            )));
         }
 
         Ok([entries[0].clone(), entries[1].clone(), entries[2].clone()])
