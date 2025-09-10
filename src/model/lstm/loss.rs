@@ -1404,8 +1404,8 @@ impl LSTMModel {
             [0.0, 0.3, 0.5, 1.5, 2.0], // Predicting UP in crash is worst
             // True = 1 (Down)
             [0.3, 0.0, 0.3, 1.2, 1.8], // Still bad to predict UP
-            // True = 2 (Sideways)
-            [0.8, 0.4, 0.0, 0.4, 0.8], // Symmetric penalties for unnecessary trades
+            // True = 2 (Sideways) - FIXED: Stronger gradient to attract predictions
+            [1.0, 0.5, 0.0, 0.5, 1.0], // Balanced penalties with clear gradient toward class 2
             // True = 3 (Up)
             [1.8, 1.2, 0.3, 0.0, 0.3], // Bad to predict DOWN
             // True = 4 (VeryUp)
@@ -1433,8 +1433,8 @@ impl LSTMModel {
         let ordinal_penalty = class_probs.mul(&ordinal_weight_tensor)?.sum(1)?; // Sum across classes for each sample
 
         // Combine losses: CE loss + λ * ordinal penalty
-        // λ = 0.3 for trading (lower than pure ordinal since penalties are already strong)
-        let lambda = 0.3f32;
+        // λ = 0.5 for balanced 5-class system (increased from 0.3 for stronger ordinal influence)
+        let lambda = 0.5f32;
         let lambda_tensor = Tensor::new(lambda, pred_contiguous.device())?;
         let scaled_penalty = ordinal_penalty.broadcast_mul(&lambda_tensor)?;
         let combined_loss = ce_loss.add(&scaled_penalty)?;
