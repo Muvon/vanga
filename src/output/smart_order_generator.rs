@@ -229,7 +229,9 @@ impl SmartConsensus {
         };
 
         // Find the HIGHEST PROBABILITY price level bin (best predicted class)
-        let best_price_bin = self.price_levels.bins
+        let best_price_bin = self
+            .price_levels
+            .bins
             .iter()
             .max_by(|a, b| a.1.probability.partial_cmp(&b.1.probability).unwrap())
             .map(|(name, bin)| (name.as_str(), bin.probability));
@@ -239,7 +241,7 @@ impl SmartConsensus {
             let alignment_valid = match (direction_signal, best_bin_name) {
                 // LONG direction - favorable bins
                 ("LONG", "moderate_up") | ("LONG", "strong_up") => true,
-                // SHORT direction - favorable bins  
+                // SHORT direction - favorable bins
                 ("SHORT", "moderate_down") | ("SHORT", "strong_down") => true,
                 // NEUTRAL is acceptable for any direction (as requested)
                 (_, "neutral") => true,
@@ -256,13 +258,17 @@ impl SmartConsensus {
             if !alignment_valid {
                 return Err(crate::utils::error::VangaError::PredictionError(format!(
                     "Direction {} conflicts with best price level prediction {} (prob: {:.1}%)",
-                    direction_signal, best_bin_name, best_probability * 100.0
+                    direction_signal,
+                    best_bin_name,
+                    best_probability * 100.0
                 )));
             }
 
             log::info!(
                 "✅ Direction-Price Level Alignment: {} direction with {} bin (prob: {:.1}%)",
-                direction_signal, best_bin_name, best_probability * 100.0
+                direction_signal,
+                best_bin_name,
+                best_probability * 100.0
             );
         }
 
@@ -1190,7 +1196,8 @@ impl SmartConsensus {
 
         log::info!(
             "🛡️ Stop positioning: extreme_entry=${:.4}, base_stop={:.2}%",
-            extreme_entry, volatility_base_stop
+            extreme_entry,
+            volatility_base_stop
         );
 
         // Calculate probability-weighted stop distances
@@ -1241,7 +1248,7 @@ impl SmartConsensus {
                 "VERY_LOW" => 1.0 + (i as f64 * 0.1), // Tighter progression in calm markets
                 "LOW" => 1.0 + (i as f64 * 0.15),
                 "MEDIUM" => 1.0 + (i as f64 * 0.2), // Tighter than before
-                "HIGH" => 1.0 + (i as f64 * 0.25),   
+                "HIGH" => 1.0 + (i as f64 * 0.25),
                 "VERY_HIGH" => 1.0 + (i as f64 * 0.3), // Still progressive but tighter
                 _ => 1.0 + (i as f64 * 0.2),
             };

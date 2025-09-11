@@ -14,6 +14,9 @@ use super::prediction_types::{
 use super::sequence_statistics::SequenceStatistics;
 use super::smart_order_generator::SmartConsensus;
 
+/// Type alias for order level arrays (entry, exit, stop)
+type OrderLevelArrays = ([OrderLevel; 3], [OrderLevel; 3], [OrderLevel; 3]);
+
 /// Trading orders with dynamic position sizing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingOrders {
@@ -88,7 +91,7 @@ impl Default for OrderConfig {
     fn default() -> Self {
         Self {
             base_atr_multiplier: 2.0, // Crypto-aggressive spacing
-            min_risk_reward: 4.0,     // Crypto minimum R:R target
+            min_risk_reward: 3.0,     // Crypto minimum R:R target
             max_risk_reward: 12.0,    // Maximum 12:1 for high conviction
             aggressive_sizing: true,  // Enable dynamic sizing
             hunt_protection: 1.5,     // 50% extra distance for stops
@@ -257,10 +260,16 @@ impl TradingOrders {
             // Extract sequence prices and calculate statistics
             let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
+            // Parse horizon using the existing utility function
+            let horizon_hours = crate::utils::parser::parse_horizon_to_steps(
+                &config.volatility_pred.training_horizon,
+            )
+            .unwrap_or(4) as f64;
+
             // Calculate sequence statistics for adaptive generation
             let sequence_stats = SequenceStatistics::from_prices(
                 &sequence_prices,
-                4.0, // Default horizon hours, adjust as needed
+                horizon_hours, // Use actual model horizon
                 None,
             )?;
 
@@ -308,10 +317,16 @@ impl TradingOrders {
             // Reuse sequence prices if already calculated, or extract them
             let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
 
+            // Parse horizon using the existing utility function
+            let horizon_hours = crate::utils::parser::parse_horizon_to_steps(
+                &config.volatility_pred.training_horizon,
+            )
+            .unwrap_or(4) as f64;
+
             // Calculate sequence statistics if not already done
             let sequence_stats = SequenceStatistics::from_prices(
                 &sequence_prices,
-                4.0, // Default horizon hours
+                horizon_hours, // Use actual model horizon
                 None,
             )?;
 
@@ -402,12 +417,61 @@ impl TradingOrders {
                 ((level.price - config.current_price).abs() / config.current_price) * 100.0;
         }
 
-        // Step 8: Calculate initial risk-reward ratio
+        // Step 8: ATR-based spacing validation and adjustment (post-processing)
+        // Calculate sequence statistics from OHLCV data if available
+        let atr_adjustment_result = if let Some(sequence_ohlcv) = config.sequence_ohlcv {
+            // Extract prices and volumes from OHLCV data
+            let prices: Vec<f64> = sequence_ohlcv.iter().map(|row| row.close).collect();
+            let volumes: Vec<f64> = sequence_ohlcv.iter().map(|row| row.volume).collect();
+
+            // Parse horizon using the existing utility function
+            let horizon_hours = crate::utils::parser::parse_horizon_to_steps(
+                &config.volatility_pred.training_horizon,
+            )
+            .unwrap_or(24) as f64;
+
+            let sequence_stats =
+                crate::output::sequence_statistics::SequenceStatistics::from_prices(
+                    &prices,
+                    horizon_hours,
+                    Some(&volumes), // Use actual volume data from OHLCV
+                )?;
+
+            Self::apply_atr_spacing_validation(
+                entry_levels,
+                exit_levels,
+                stop_levels,
+                &direction,
+                &sequence_stats,
+                config.current_price,
+            )?
+        } else {
+            // No sequence data available, skip ATR adjustment
+            log::info!("⚠️ No sequence OHLCV data available, skipping ATR spacing validation");
+            (entry_levels, exit_levels, stop_levels)
+        };
+
+        let (mut entry_levels, mut exit_levels, mut stop_levels) = atr_adjustment_result;
+        if let Err(validation_error) = Self::validate_order_integrity(
+            &entry_levels,
+            &exit_levels,
+            &stop_levels,
+            &direction,
+            config.current_price,
+        ) {
+            log::error!("❌ Order validation failed: {}", validation_error);
+            log::error!("🚫 Returning empty orders due to validation failure");
+
+            // Return empty orders (no signal) when validation fails
+            return Ok(TradingOrders::default());
+        }
+
+        // Step 9: Calculate initial risk-reward ratio
         let initial_risk_reward =
             Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
-        // Step 9: Use CONFIGURED minimum R:R as base target, enhanced by model confidence
-        const MIN_RR_TARGET: f64 = 4.0; // CONSTANT minimum R:R target
+        // Step 10: Use CONFIGURED minimum R:R as base target, enhanced by model confidence
+        const MIN_RR_TARGET: f64 = 3.0; // CONSTANT minimum R:R target
         let order_config = OrderConfig::default();
         let configured_min_rr = if order_config.min_risk_reward >= 2.0 {
             order_config.min_risk_reward
@@ -463,16 +527,19 @@ impl TradingOrders {
                 } else {
                     vec!["moderate_down", "strong_down", "neutral"]
                 };
-                
+
                 // Find the bin with highest probability among favorable ones
                 let best_favorable_bin = favorable_bins
                     .iter()
                     .filter_map(|bin_name| {
-                        config.price_levels.bins.get(*bin_name)
+                        config
+                            .price_levels
+                            .bins
+                            .get(*bin_name)
                             .map(|bin| (*bin_name, bin.probability, bin))
                     })
                     .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                
+
                 if let Some((best_bin_name, best_probability, best_bin)) = best_favorable_bin {
                     // Use the CENTER of the best predicted favorable bin as boundary
                     let center_price = (best_bin.price[0] + best_bin.price[1]) / 2.0;
@@ -481,12 +548,14 @@ impl TradingOrders {
                     } else {
                         ((config.current_price - center_price) / config.current_price) * 100.0
                     };
-                    
+
                     log::info!(
                         "🎯 Using {} bin (prob: {:.1}%) as exit boundary: {:.2}%",
-                        best_bin_name, best_probability * 100.0, boundary_percent
+                        best_bin_name,
+                        best_probability * 100.0,
+                        boundary_percent
                     );
-                    
+
                     // Ensure minimum reasonable boundary for R:R (use stop distance, not magic numbers)
                     let min_boundary = avg_stop_distance * target_risk_reward;
                     boundary_percent.max(min_boundary)
@@ -862,29 +931,68 @@ impl TradingOrders {
             initial_risk_reward
         };
 
-        // Step 10: COMPREHENSIVE order integrity validation (at the END)
-        if let Err(validation_error) = Self::validate_order_integrity(
-            &entry_levels,
-            &exit_levels,
-            &stop_levels,
-            &direction,
-            config.current_price,
-        ) {
-            log::error!("❌ Order validation failed: {}", validation_error);
-            log::error!("🚫 Returning empty orders due to validation failure");
+        // Step 11: Recalculate FINAL risk-reward ratio after ALL adjustments (including ATR)
+        // This ensures the reported R:R matches the actual orders being generated
+        let final_risk_reward =
+            Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
-            // Return empty orders (no signal) when validation fails
-            return Ok(TradingOrders::default());
+        // Log if R:R changed due to ATR adjustment
+        if (final_risk_reward - risk_reward).abs() > 0.01 {
+            log::info!(
+                "📊 Final R:R after ATR adjustment: {:.2} (was {:.2} before ATR validation)",
+                final_risk_reward,
+                risk_reward
+            );
         }
 
+        // Use the FINAL risk_reward for reporting and the struct
+        let risk_reward = final_risk_reward;
+
         log::info!(
-            "✅ SMART Orders Generated: R:R={:.2}, Direction={}, Confidence={:.2}",
+            "✅ SMART Orders Generated: FINAL R:R={:.2}, Direction={}, Confidence={:.2}",
             risk_reward,
             direction,
             overall_confidence
         );
 
-        // Log detailed order information
+        // Log detailed order information with weighted averages for transparency
+        let weighted_avg_entry = Self::weighted_average_price(&entry_levels);
+        let weighted_avg_exit = Self::weighted_average_price(&exit_levels);
+        let weighted_avg_stop = Self::weighted_average_price(&stop_levels);
+
+        log::info!("📊 Weighted Average Prices (used for R:R calculation):");
+        log::info!("  Avg Entry: ${:.2}", weighted_avg_entry);
+        log::info!("  Avg Exit:  ${:.2}", weighted_avg_exit);
+        log::info!("  Avg Stop:  ${:.2}", weighted_avg_stop);
+
+        if direction == "LONG" {
+            let profit = weighted_avg_exit - weighted_avg_entry;
+            let loss = weighted_avg_entry - weighted_avg_stop;
+            log::info!(
+                "  Potential Profit: ${:.2} ({:.2}%)",
+                profit,
+                (profit / weighted_avg_entry) * 100.0
+            );
+            log::info!(
+                "  Potential Loss:   ${:.2} ({:.2}%)",
+                loss,
+                (loss / weighted_avg_entry) * 100.0
+            );
+        } else {
+            let profit = weighted_avg_entry - weighted_avg_exit;
+            let loss = weighted_avg_stop - weighted_avg_entry;
+            log::info!(
+                "  Potential Profit: ${:.2} ({:.2}%)",
+                profit,
+                (profit / weighted_avg_entry) * 100.0
+            );
+            log::info!(
+                "  Potential Loss:   ${:.2} ({:.2}%)",
+                loss,
+                (loss / weighted_avg_entry) * 100.0
+            );
+        }
+
         log::info!("📍 Entry Levels:");
         for (i, entry) in entry_levels.iter().enumerate() {
             log::info!(
@@ -1938,5 +2046,141 @@ impl TradingOrders {
             dynamic_sizing: true,
             note,
         })
+    }
+
+    /// ATR-based spacing validation and adjustment (post-processing)
+    /// Ensures professional spacing standards while preserving model intelligence
+    fn apply_atr_spacing_validation(
+        entry_levels: [OrderLevel; 3],
+        exit_levels: [OrderLevel; 3],
+        stop_levels: [OrderLevel; 3],
+        direction: &str,
+        sequence_stats: &crate::output::sequence_statistics::SequenceStatistics,
+        current_price: f64,
+    ) -> Result<OrderLevelArrays, crate::utils::error::VangaError> {
+        // Calculate true ATR from sequence data (convert to percentage)
+        let true_atr_percent = sequence_stats.std_return * 100.0;
+
+        // Calculate maximum entry spacing
+        let max_entry_spacing = Self::calculate_max_entry_spacing(&entry_levels, current_price);
+
+        // Professional minimum: stop distance >= max(entry_spacing, 2x ATR)
+        let min_stop_distance = max_entry_spacing.max(true_atr_percent * 2.0);
+
+        // Calculate current minimum stop distance from worst entry
+        let current_min_stop_distance = Self::calculate_min_stop_distance(
+            &entry_levels,
+            &stop_levels,
+            direction,
+            current_price,
+        );
+
+        log::info!(
+            "🔍 ATR Spacing Analysis: true_ATR={:.2}%, max_entry_spacing={:.2}%, min_required_stop={:.2}%, current_stop={:.2}%",
+            true_atr_percent, max_entry_spacing, min_stop_distance, current_min_stop_distance
+        );
+
+        // Check if spacing violation exists
+        if current_min_stop_distance < min_stop_distance {
+            let scale_factor = min_stop_distance / current_min_stop_distance.max(0.01);
+
+            log::info!(
+                "⚠️ Spacing violation detected: stop distance {:.2}% < required {:.2}%, scaling by {:.2}x",
+                current_min_stop_distance, min_stop_distance, scale_factor
+            );
+
+            // Scale stops proportionally to meet minimum distance
+            let mut adjusted_stops = stop_levels;
+            let worst_entry_price = Self::get_worst_entry_price(&entry_levels, direction);
+
+            for stop in adjusted_stops.iter_mut() {
+                let distance_from_entry = (stop.price - worst_entry_price).abs();
+                let scaled_distance = distance_from_entry * scale_factor;
+
+                stop.price = if direction == "SHORT" {
+                    worst_entry_price + scaled_distance
+                } else {
+                    worst_entry_price - scaled_distance
+                };
+
+                // Update ATR distance
+                stop.atr_distance = (scaled_distance / current_price) * 100.0;
+            }
+
+            // Scale exits proportionally to maintain R:R
+            let mut adjusted_exits = exit_levels;
+            for exit in adjusted_exits.iter_mut() {
+                let distance_from_current = (exit.price - current_price).abs();
+                let scaled_distance = distance_from_current * scale_factor;
+
+                exit.price = if direction == "LONG" {
+                    current_price + scaled_distance
+                } else {
+                    current_price - scaled_distance
+                };
+
+                // Update ATR distance
+                exit.atr_distance = (scaled_distance / current_price) * 100.0;
+            }
+
+            log::info!(
+                "✅ ATR spacing adjustment applied: stops and exits scaled {:.2}x to maintain mathematical consistency",
+                scale_factor
+            );
+
+            Ok((entry_levels, adjusted_exits, adjusted_stops))
+        } else {
+            log::info!("✅ ATR spacing validation passed: no adjustment needed");
+            Ok((entry_levels, exit_levels, stop_levels))
+        }
+    }
+
+    /// Calculate maximum spacing between consecutive entry levels
+    fn calculate_max_entry_spacing(entry_levels: &[OrderLevel; 3], current_price: f64) -> f64 {
+        let mut max_spacing = 0.0;
+
+        for i in 0..entry_levels.len() - 1 {
+            let spacing =
+                ((entry_levels[i + 1].price - entry_levels[i].price).abs() / current_price) * 100.0;
+            max_spacing = if spacing > max_spacing {
+                spacing
+            } else {
+                max_spacing
+            };
+        }
+
+        max_spacing
+    }
+
+    /// Calculate minimum stop distance from worst entry
+    fn calculate_min_stop_distance(
+        entry_levels: &[OrderLevel; 3],
+        stop_levels: &[OrderLevel; 3],
+        direction: &str,
+        current_price: f64,
+    ) -> f64 {
+        let worst_entry_price = Self::get_worst_entry_price(entry_levels, direction);
+
+        // Find closest stop to worst entry
+        let min_stop_distance = stop_levels
+            .iter()
+            .map(|stop| ((stop.price - worst_entry_price).abs() / current_price) * 100.0)
+            .fold(f64::INFINITY, f64::min);
+
+        min_stop_distance
+    }
+
+    /// Get worst entry price (furthest from current price in trade direction)
+    fn get_worst_entry_price(entry_levels: &[OrderLevel; 3], direction: &str) -> f64 {
+        if direction == "SHORT" {
+            // For SHORT, worst entry is highest price
+            entry_levels.iter().map(|e| e.price).fold(0.0, f64::max)
+        } else {
+            // For LONG, worst entry is lowest price
+            entry_levels
+                .iter()
+                .map(|e| e.price)
+                .fold(f64::INFINITY, f64::min)
+        }
     }
 }
