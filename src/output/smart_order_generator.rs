@@ -217,7 +217,8 @@ impl SmartConsensus {
         levels
     }
     /// Calculate SMART consensus for trade direction with confidence
-    pub fn calculate_direction_consensus(&self) -> (String, f64) {
+    /// Now includes direction-price level alignment validation
+    pub fn calculate_direction_consensus(&self) -> Result<(String, f64)> {
         // Direction model is PRIMARY for direction decision
         let direction_signal = if self.direction.up_probability_aggregated
             > self.direction.down_probability_aggregated
@@ -226,6 +227,44 @@ impl SmartConsensus {
         } else {
             "SHORT"
         };
+
+        // Find the HIGHEST PROBABILITY price level bin (best predicted class)
+        let best_price_bin = self.price_levels.bins
+            .iter()
+            .max_by(|a, b| a.1.probability.partial_cmp(&b.1.probability).unwrap())
+            .map(|(name, bin)| (name.as_str(), bin.probability));
+
+        // Validate alignment between direction and best price level class
+        if let Some((best_bin_name, best_probability)) = best_price_bin {
+            let alignment_valid = match (direction_signal, best_bin_name) {
+                // LONG direction - favorable bins
+                ("LONG", "moderate_up") | ("LONG", "strong_up") => true,
+                // SHORT direction - favorable bins  
+                ("SHORT", "moderate_down") | ("SHORT", "strong_down") => true,
+                // NEUTRAL is acceptable for any direction (as requested)
+                (_, "neutral") => true,
+                // Contradictory alignment - reject
+                ("LONG", "moderate_down") | ("LONG", "strong_down") => false,
+                ("SHORT", "moderate_up") | ("SHORT", "strong_up") => false,
+                // Unknown bins - allow but log warning
+                _ => {
+                    log::warn!("⚠️ Unknown price level bin: {}", best_bin_name);
+                    true
+                }
+            };
+
+            if !alignment_valid {
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "Direction {} conflicts with best price level prediction {} (prob: {:.1}%)",
+                    direction_signal, best_bin_name, best_probability * 100.0
+                )));
+            }
+
+            log::info!(
+                "✅ Direction-Price Level Alignment: {} direction with {} bin (prob: {:.1}%)",
+                direction_signal, best_bin_name, best_probability * 100.0
+            );
+        }
 
         // Calculate confidence using Direction + Sentiment alignment
         let direction_confidence = (self.direction.up_probability_aggregated
@@ -249,7 +288,7 @@ impl SmartConsensus {
             sentiment_alignment
         );
 
-        (direction_signal.to_string(), final_confidence)
+        Ok((direction_signal.to_string(), final_confidence))
     }
 
     /// Generate SMART entry levels using PURE prediction data
@@ -1149,6 +1188,11 @@ impl SmartConsensus {
                 .fold(f64::INFINITY, f64::min)
         };
 
+        log::info!(
+            "🛡️ Stop positioning: extreme_entry=${:.4}, base_stop={:.2}%",
+            extreme_entry, volatility_base_stop
+        );
+
         // Calculate probability-weighted stop distances
         for (i, entry) in entry_levels.iter().enumerate().take(3) {
             // 1. VOLATILITY COMPONENT - Base risk from volatility model
@@ -1188,21 +1232,23 @@ impl SmartConsensus {
             };
 
             // 3. PROBABILITY-WEIGHTED STOP CALCULATION
-            // Higher adverse probability = wider stops needed
-            let probability_multiplier = 1.0 + (adverse_probability * 3.0); // Scale by adverse risk
+            // Higher adverse probability = wider stops needed (use adverse probability directly, no magic multiplier)
+            let probability_multiplier = 1.0 + adverse_probability; // Direct scaling by adverse risk
             let probability_weighted_stop = volatility_stop * probability_multiplier;
 
-            // 4. PROGRESSIVE SPACING based on volatility regime
+            // 4. PROGRESSIVE SPACING based on volatility regime (use smaller multipliers for tighter stops)
             let regime_progression = match self.volatility.regime.as_str() {
-                "VERY_LOW" => 1.0 + (i as f64 * 0.2), // Smaller progression in calm markets
-                "LOW" => 1.0 + (i as f64 * 0.3),
-                "MEDIUM" => 1.0 + (i as f64 * 0.4), // Standard progression
-                "HIGH" => 1.0 + (i as f64 * 0.5),   // Larger progression in volatile markets
-                "VERY_HIGH" => 1.0 + (i as f64 * 0.6), // Largest progression
-                _ => 1.0 + (i as f64 * 0.4),
+                "VERY_LOW" => 1.0 + (i as f64 * 0.1), // Tighter progression in calm markets
+                "LOW" => 1.0 + (i as f64 * 0.15),
+                "MEDIUM" => 1.0 + (i as f64 * 0.2), // Tighter than before
+                "HIGH" => 1.0 + (i as f64 * 0.25),   
+                "VERY_HIGH" => 1.0 + (i as f64 * 0.3), // Still progressive but tighter
+                _ => 1.0 + (i as f64 * 0.2),
             };
 
-            let final_stop_distance = probability_weighted_stop * regime_progression;
+            // Make stops extremely close to extreme entry as requested
+            let base_stop_distance = probability_weighted_stop * regime_progression;
+            let final_stop_distance = base_stop_distance * 0.5; // Make stops much tighter
 
             // Calculate stop price from extreme entry (ensures no intersection)
             let stop_price = if direction == "SHORT" {

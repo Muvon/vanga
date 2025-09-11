@@ -632,8 +632,9 @@ impl VolatilityPrediction {
             .map(|(multiplier, prob)| multiplier * prob * sequence_bandwidth_percent)
             .sum();
 
-        // Adaptive stop loss distance (based on expected range)
-        self.recommended_stop_distance_percent = self.expected_range_percent * 0.6; // 60% of expected range
+        // Adaptive stop loss distance - combine model prediction with sequence reality
+        // Use the LARGER of: model's expected range OR sequence bandwidth (no magic multipliers)
+        self.recommended_stop_distance_percent = self.expected_range_percent.max(sequence_bandwidth_percent);
 
         // Position size multiplier (inverse relationship with volatility)
         self.position_size_multiplier = match self.regime.as_str() {

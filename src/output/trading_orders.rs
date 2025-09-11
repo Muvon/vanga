@@ -188,8 +188,16 @@ impl TradingOrders {
             volume: config.volume_pred.clone(),
         };
 
-        // Step 1: Determine direction using Direction + Sentiment models
-        let (direction, direction_confidence) = consensus.calculate_direction_consensus();
+        // Step 1: Determine direction using Direction + Sentiment models with alignment validation
+        let (direction, direction_confidence) = match consensus.calculate_direction_consensus() {
+            Ok(result) => result,
+            Err(alignment_error) => {
+                return Err(crate::utils::error::VangaError::PredictionError(format!(
+                    "Direction-Price Level alignment failed: {}",
+                    alignment_error
+                )));
+            }
+        };
 
         // Step 2: Calculate overall confidence using the sophisticated ConfidenceCalculator
         // Create a temporary PredictionResult to calculate confidence
@@ -447,40 +455,46 @@ impl TradingOrders {
                 / stop_levels.len() as f64;
 
             // Define boundaries based on price level predictions
-            // IMPROVED: Use bin centers as targets, with buffer for R:R achievement
-            let max_exit_boundary = if direction == "LONG" {
-                // For LONG, find the most optimistic reasonable target
-                let strong_up_target = config
-                    .price_levels
-                    .bins
-                    .get("strong_up")
-                    .map(|b| {
-                        // Use bin CENTER as primary target
-                        let center_price = (b.price[0] + b.price[1]) / 2.0;
+            // Use BEST PREDICTED price level bin as boundary (not hardcoded strong_up/strong_down)
+            let max_exit_boundary = {
+                // Find favorable bins for this direction
+                let favorable_bins = if direction == "LONG" {
+                    vec!["moderate_up", "strong_up", "neutral"] // Order by preference
+                } else {
+                    vec!["moderate_down", "strong_down", "neutral"]
+                };
+                
+                // Find the bin with highest probability among favorable ones
+                let best_favorable_bin = favorable_bins
+                    .iter()
+                    .filter_map(|bin_name| {
+                        config.price_levels.bins.get(*bin_name)
+                            .map(|bin| (*bin_name, bin.probability, bin))
+                    })
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                
+                if let Some((best_bin_name, best_probability, best_bin)) = best_favorable_bin {
+                    // Use the CENTER of the best predicted favorable bin as boundary
+                    let center_price = (best_bin.price[0] + best_bin.price[1]) / 2.0;
+                    let boundary_percent = if direction == "LONG" {
                         ((center_price - config.current_price) / config.current_price) * 100.0
-                    })
-                    .unwrap_or(3.0); // Default 3% if no bin
-
-                // Allow extension beyond bin center for R:R, but be reasonable
-                // Use max of: strong_up center, 3x stop distance, or 3%
-                let min_for_rr = (avg_stop_distance * target_risk_reward).max(3.0);
-                strong_up_target.max(min_for_rr)
-            } else {
-                // For SHORT, find the most optimistic reasonable target
-                let strong_down_target = config
-                    .price_levels
-                    .bins
-                    .get("strong_down")
-                    .map(|b| {
-                        // Use bin CENTER as primary target
-                        let center_price = (b.price[0] + b.price[1]) / 2.0;
+                    } else {
                         ((config.current_price - center_price) / config.current_price) * 100.0
-                    })
-                    .unwrap_or(3.0); // Default 3% if no bin
-
-                // Allow extension for R:R achievement
-                let min_for_rr = (avg_stop_distance * target_risk_reward).max(3.0);
-                strong_down_target.max(min_for_rr)
+                    };
+                    
+                    log::info!(
+                        "🎯 Using {} bin (prob: {:.1}%) as exit boundary: {:.2}%",
+                        best_bin_name, best_probability * 100.0, boundary_percent
+                    );
+                    
+                    // Ensure minimum reasonable boundary for R:R (use stop distance, not magic numbers)
+                    let min_boundary = avg_stop_distance * target_risk_reward;
+                    boundary_percent.max(min_boundary)
+                } else {
+                    // Fallback to volatility-based boundary
+                    log::warn!("⚠️ No favorable price level bins found, using volatility fallback");
+                    config.volatility_pred.expected_range_percent
+                }
             };
 
             log::info!(
@@ -1862,8 +1876,8 @@ impl TradingOrders {
             volume: config.volume_pred.clone(),
         };
 
-        // Get direction consensus
-        let (direction, _direction_confidence) = consensus.calculate_direction_consensus();
+        // Get direction consensus with error handling
+        let (direction, _direction_confidence) = consensus.calculate_direction_consensus()?;
 
         // Generate sequence-aware orders
         let mut entry_levels = consensus.generate_sequence_aware_entries(
