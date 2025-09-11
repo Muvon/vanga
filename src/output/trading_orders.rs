@@ -312,94 +312,64 @@ impl TradingOrders {
             consensus.generate_smart_entries(config.current_price, &direction)?
         };
 
-        // Step 4: Generate SEQUENCE-AWARE exit levels when sequence data available
-        let mut exit_levels = if let Some(ohlcv_data) = config.sequence_ohlcv {
-            // Reuse sequence prices if already calculated, or extract them
-            let sequence_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
+        // Step 4: Generate MODEL-BASED exit levels using LSTM predictions
+        let mut exit_levels = {
+            log::info!("📊 Using MODEL-BASED exit generation with price level predictions");
 
-            // Parse horizon using the existing utility function
-            let horizon_hours = crate::utils::parser::parse_horizon_to_steps(
-                &config.volatility_pred.training_horizon,
-            )
-            .unwrap_or(4) as f64;
+            // ALWAYS use model predictions for exits - this is why we trained the LSTM!
+            let mut exits = consensus.generate_smart_exits(config.current_price, &direction)?;
 
-            // Calculate sequence statistics if not already done
-            let sequence_stats = SequenceStatistics::from_prices(
-                &sequence_prices,
-                horizon_hours, // Use actual model horizon
-                None,
-            )?;
-
-            log::info!("📊 Using SEQUENCE-AWARE exit generation with MFE distribution");
-
-            // Use sequence-aware exit generation with MFE distribution
-            let exits = consensus.generate_sequence_aware_exits(
-                config.current_price,
-                &direction,
-                &sequence_stats,
-            )?;
-
-            // Convert for psychological adjustments
-            let ohlcv_arrays: Vec<[f64; 5]> = ohlcv_data
+            // Apply psychological level adjustments using sequence data
+            let ohlcv_arrays: Vec<[f64; 5]> = config
+                .sequence_ohlcv
+                .expect("Sequence OHLCV data should always be available")
                 .iter()
                 .map(|row| [row.open, row.high, row.low, row.close, row.volume])
                 .collect();
 
-            // Apply psychological level adjustments
-            let mut adjusted_exits = exits;
-            for exit in &mut adjusted_exits {
-                exit.price = consensus.adjust_for_psychological_levels(
-                    exit.price,
-                    Some(&ohlcv_arrays),
-                    false, // is_stop_loss = false for targets
-                    None,  // direction not needed for targets
-                );
-            }
+            // Apply separation-aware psychological adjustments to exits
+            Self::apply_separation_aware_psychological_adjustments(
+                &mut exits,
+                &consensus,
+                &ohlcv_arrays,
+                false, // is_stop_loss = false
+                Some(&direction),
+                config.current_price,
+            );
 
-            log::info!("🎯 Generated SEQUENCE-AWARE exits with psychological adjustments");
-            adjusted_exits
-        } else {
-            // Fallback to standard generation
-            log::warn!("⚠️ No sequence data available, using standard exit generation");
-            consensus.generate_smart_exits(config.current_price, &direction)?
+            log::info!("🎯 Generated MODEL-BASED exits with psychological adjustments");
+            exits
         };
 
         // Step 5: Generate ADAPTIVE stop levels using ALL prediction data
-        // Extract sequence prices from OHLCV data if available
-        let sequence_prices: Vec<f64> = if let Some(ohlcv_data) = config.sequence_ohlcv {
-            ohlcv_data.iter().map(|row| row.close).collect()
-        } else {
-            // Fallback: generate synthetic sequence around current price
-            let volatility_estimate = config.volatility_pred.expected_range_percent / 100.0;
-            (0..40)
-                .map(|i| {
-                    config.current_price * (1.0 + (i as f64 - 20.0) * volatility_estimate / 20.0)
-                })
-                .collect()
-        };
+        let sequence_prices: Vec<f64> = config
+            .sequence_ohlcv
+            .expect("Sequence OHLCV data should always be available")
+            .iter()
+            .map(|row| row.close)
+            .collect();
 
         let mut stop_levels =
             consensus.generate_adaptive_stops(&entry_levels, &direction, &sequence_prices)?;
 
-        // Apply psychological level adjustments to stops if sequence data available
-        if let Some(ohlcv_data) = config.sequence_ohlcv {
-            let ohlcv_arrays: Vec<[f64; 5]> = ohlcv_data
-                .iter()
-                .map(|row| [row.open, row.high, row.low, row.close, row.volume])
-                .collect();
+        // Apply separation-aware psychological level adjustments to stops
+        let ohlcv_arrays: Vec<[f64; 5]> = config
+            .sequence_ohlcv
+            .expect("Sequence OHLCV data should always be available")
+            .iter()
+            .map(|row| [row.open, row.high, row.low, row.close, row.volume])
+            .collect();
 
-            for stop in &mut stop_levels {
-                // Use enhanced existing method with stop-specific parameters
-                stop.price = consensus.adjust_for_psychological_levels(
-                    stop.price,
-                    Some(&ohlcv_arrays),
-                    true,             // is_stop_loss = true
-                    Some(&direction), // Pass direction for stop-specific logic
-                );
-            }
+        Self::apply_separation_aware_psychological_adjustments(
+            &mut stop_levels,
+            &consensus,
+            &ohlcv_arrays,
+            true, // is_stop_loss = true
+            Some(&direction),
+            config.current_price,
+        );
 
-            log::info!("🛡️ Applied stop hunt protection via psychological level adjustments");
-        }
+        log::info!("🛡️ Applied stop hunt protection via psychological level adjustments");
 
         // Step 6: Normalize sizes to ensure they sum to 1.0
         SmartConsensus::normalize_sizes(&mut entry_levels);
@@ -418,38 +388,33 @@ impl TradingOrders {
         }
 
         // Step 8: ATR-based spacing validation and adjustment (post-processing)
-        // Calculate sequence statistics from OHLCV data if available
-        let atr_adjustment_result = if let Some(sequence_ohlcv) = config.sequence_ohlcv {
-            // Extract prices and volumes from OHLCV data
-            let prices: Vec<f64> = sequence_ohlcv.iter().map(|row| row.close).collect();
-            let volumes: Vec<f64> = sequence_ohlcv.iter().map(|row| row.volume).collect();
+        // Calculate sequence statistics from OHLCV data
+        let sequence_ohlcv = config
+            .sequence_ohlcv
+            .expect("Sequence OHLCV data should always be available");
 
-            // Parse horizon using the existing utility function
-            let horizon_hours = crate::utils::parser::parse_horizon_to_steps(
-                &config.volatility_pred.training_horizon,
-            )
-            .unwrap_or(24) as f64;
+        let prices: Vec<f64> = sequence_ohlcv.iter().map(|row| row.close).collect();
+        let volumes: Vec<f64> = sequence_ohlcv.iter().map(|row| row.volume).collect();
 
-            let sequence_stats =
-                crate::output::sequence_statistics::SequenceStatistics::from_prices(
-                    &prices,
-                    horizon_hours,
-                    Some(&volumes), // Use actual volume data from OHLCV
-                )?;
+        // Parse horizon using the existing utility function
+        let horizon_hours =
+            crate::utils::parser::parse_horizon_to_steps(&config.volatility_pred.training_horizon)
+                .unwrap_or(24) as f64;
 
-            Self::apply_atr_spacing_validation(
-                entry_levels,
-                exit_levels,
-                stop_levels,
-                &direction,
-                &sequence_stats,
-                config.current_price,
-            )?
-        } else {
-            // No sequence data available, skip ATR adjustment
-            log::info!("⚠️ No sequence OHLCV data available, skipping ATR spacing validation");
-            (entry_levels, exit_levels, stop_levels)
-        };
+        let sequence_stats = crate::output::sequence_statistics::SequenceStatistics::from_prices(
+            &prices,
+            horizon_hours,
+            Some(&volumes), // Use actual volume data from OHLCV
+        )?;
+
+        let atr_adjustment_result = Self::apply_atr_spacing_validation(
+            entry_levels,
+            exit_levels,
+            stop_levels,
+            &direction,
+            &sequence_stats,
+            config.current_price,
+        )?;
 
         let (mut entry_levels, mut exit_levels, mut stop_levels) = atr_adjustment_result;
         if let Err(validation_error) = Self::validate_order_integrity(
@@ -2118,21 +2083,63 @@ impl TradingOrders {
                 stop.atr_distance = new_distance_pct;
             }
 
-            // Scale exits proportionally to maintain R:R
+            // Scale exits proportionally to maintain R:R AND preserve relative spacing
             let mut adjusted_exits = exit_levels;
-            for exit in adjusted_exits.iter_mut() {
-                let distance_from_current = (exit.price - current_price).abs();
-                let scaled_distance = distance_from_current * scale_factor;
 
-                exit.price = if direction == "LONG" {
-                    current_price + scaled_distance
-                } else {
-                    current_price - scaled_distance
-                };
+            // CRITICAL: Scale the ENTIRE exit structure proportionally
+            // Find the reference point (closest exit to current price)
+            let reference_exit_distance = adjusted_exits
+                .iter()
+                .map(|exit| (exit.price - current_price).abs())
+                .fold(f64::INFINITY, f64::min);
+
+            // Calculate the scaling anchor point
+            let reference_exit_price = if direction == "LONG" {
+                // For LONG, find the lowest exit (closest to current)
+                adjusted_exits
+                    .iter()
+                    .map(|exit| exit.price)
+                    .fold(f64::INFINITY, f64::min)
+            } else {
+                // For SHORT, find the highest exit (closest to current)
+                adjusted_exits
+                    .iter()
+                    .map(|exit| exit.price)
+                    .fold(0.0, f64::max)
+            };
+
+            // Scale the reference distance
+            let scaled_reference_distance = reference_exit_distance * scale_factor;
+            let new_reference_price = if direction == "LONG" {
+                current_price + scaled_reference_distance
+            } else {
+                current_price - scaled_reference_distance
+            };
+
+            // Calculate the scaling factor for the exit structure
+            let structure_scale_factor = if reference_exit_price != current_price {
+                (new_reference_price - current_price) / (reference_exit_price - current_price)
+            } else {
+                scale_factor
+            };
+
+            // Apply proportional scaling to ALL exits
+            for exit in adjusted_exits.iter_mut() {
+                // Scale relative to current price, maintaining proportional relationships
+                let original_offset = exit.price - current_price;
+                let scaled_offset = original_offset * structure_scale_factor;
+                exit.price = current_price + scaled_offset;
 
                 // Update ATR distance
-                exit.atr_distance = (scaled_distance / current_price) * 100.0;
+                exit.atr_distance = (scaled_offset.abs() / current_price) * 100.0;
             }
+
+            log::info!(
+                "📊 Proportional exit scaling: reference_distance={:.2}% → {:.2}%, structure_factor={:.2}x",
+                reference_exit_distance / current_price * 100.0,
+                scaled_reference_distance / current_price * 100.0,
+                structure_scale_factor
+            );
 
             log::info!(
                 "✅ ATR spacing adjustment applied: stops and exits scaled {:.2}x to maintain mathematical consistency",
@@ -2192,6 +2199,68 @@ impl TradingOrders {
                 .iter()
                 .map(|e| e.price)
                 .fold(f64::INFINITY, f64::min)
+        }
+    }
+
+    /// Apply psychological level adjustments while maintaining separation between orders
+    fn apply_separation_aware_psychological_adjustments(
+        orders: &mut [OrderLevel; 3],
+        consensus: &SmartConsensus,
+        ohlcv_arrays: &Vec<[f64; 5]>,
+        is_stop_loss: bool,
+        direction: Option<&str>,
+        current_price: f64,
+    ) {
+        let min_separation = current_price * 0.001; // 0.1% minimum separation
+
+        // Apply psychological adjustments one by one, checking separation
+        for i in 0..orders.len() {
+            let original_price = orders[i].price;
+
+            // Apply psychological adjustment
+            let adjusted_price = consensus.adjust_for_psychological_levels(
+                original_price,
+                Some(ohlcv_arrays),
+                is_stop_loss,
+                direction,
+            );
+
+            // Check if adjustment would create duplicates with previous orders
+            let mut final_price = adjusted_price;
+            for (j, other_order) in orders.iter().enumerate().take(i) {
+                if (final_price - other_order.price).abs() < min_separation {
+                    // Adjust to maintain separation
+                    let adjustment_direction = if is_stop_loss {
+                        // For stops, spread them further apart in the safe direction
+                        if direction == Some("LONG") {
+                            -1.0 // LONG stops go lower
+                        } else {
+                            1.0 // SHORT stops go higher
+                        }
+                    } else {
+                        // For exits, spread them in the profitable direction
+                        if direction == Some("LONG") {
+                            1.0 // LONG exits go higher
+                        } else {
+                            -1.0 // SHORT exits go lower
+                        }
+                    };
+
+                    final_price = other_order.price
+                        + (min_separation * (i as f64 + 1.0) * adjustment_direction);
+
+                    log::info!(
+                        "🔧 Separation-aware adjustment: Order {} moved to ${:.5} to maintain separation from Order {}",
+                        i + 1, final_price, j + 1
+                    );
+                    break;
+                }
+            }
+
+            orders[i].price = final_price;
+
+            // Update ATR distance
+            orders[i].atr_distance = ((final_price - current_price).abs() / current_price) * 100.0;
         }
     }
 }

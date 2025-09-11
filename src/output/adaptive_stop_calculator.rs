@@ -452,9 +452,11 @@ impl AdaptiveStopCalculator {
             // Step 1: Get ATR from sequence (actual recent volatility)
             let sequence_atr = self.direction.sequence_bandwidth_percent / 100.0;
 
-            // Step 2: INTELLIGENT STOP PLACEMENT based on where profits are targeted
-            // First, identify which bin is most likely for profits
-            let (primary_target_bin, stop_strategy) = if trade_direction == "LONG" {
+            // Step 2: INTELLIGENT STOP PLACEMENT using GREAT MATH
+            // Calculate invalidation distance based on prediction strength and current position
+
+            // Find our target zone and its probability
+            let (target_zone, target_probability) = if trade_direction == "LONG" {
                 // For LONG: Find which UP bin has highest probability
                 let moderate_up_prob = self
                     .price_levels
@@ -470,14 +472,9 @@ impl AdaptiveStopCalculator {
                     .unwrap_or(0.2);
 
                 if strong_up_prob > moderate_up_prob {
-                    // Targeting strong_up → can use tighter stops at neutral
-                    ("strong_up", vec!["neutral", "neutral", "moderate_down"])
+                    ("strong_up", strong_up_prob)
                 } else {
-                    // Targeting moderate_up → use very tight stops below neutral
-                    (
-                        "moderate_up",
-                        vec!["neutral", "moderate_down", "moderate_down"],
-                    )
+                    ("moderate_up", moderate_up_prob)
                 }
             } else {
                 // For SHORT: Find which DOWN bin has highest probability
@@ -495,227 +492,51 @@ impl AdaptiveStopCalculator {
                     .unwrap_or(0.2);
 
                 if strong_down_prob > moderate_down_prob {
-                    // Targeting strong_down → can use tighter stops at neutral
-                    ("strong_down", vec!["neutral", "neutral", "moderate_up"])
+                    ("strong_down", strong_down_prob)
                 } else {
-                    // Targeting moderate_down → use very tight stops above neutral
-                    (
-                        "moderate_down",
-                        vec!["neutral", "moderate_up", "moderate_up"],
-                    )
+                    ("moderate_down", moderate_down_prob)
                 }
             };
+
+            // Use volatility model's recommended stop distance as base
+            let base_stop_distance = self.volatility.recommended_stop_distance_percent / 100.0;
+
+            // Use sequence ATR as the primary stop distance (actual market volatility)
+            let invalidation_distance = sequence_atr.max(base_stop_distance);
 
             log::debug!(
-                "Primary target: {} → Stop strategy: {:?}",
-                primary_target_bin,
-                stop_strategy
+                "Stop {} using volatility model: target={}, prob={:.2}, stop_distance={:.3}%",
+                i + 1,
+                target_zone,
+                target_probability,
+                invalidation_distance * 100.0
             );
-
-            // Step 3: Get the stop zone boundary for this level
-            // CRITICAL: For stops, we need zones that are ADVERSE to our position
-            let stop_bin_name = stop_strategy[i.min(2)];
-
-            // For LONG stops, we want the LOWER boundary of adverse zones
-            // For SHORT stops, we want the UPPER boundary of adverse zones
-            let stop_boundary = match stop_bin_name {
-                "neutral" => {
-                    let bin = self.price_levels.bins.get("neutral").ok_or_else(|| {
-                        VangaError::PredictionError("Missing neutral bin".to_string())
-                    })?;
-
-                    // Check if neutral zone is above or below current price
-                    let current_price = self
-                        .sequence_prices
-                        .last()
-                        .copied()
-                        .unwrap_or(reference_entry);
-                    let neutral_mid = (bin.price[0] + bin.price[1]) / 2.0;
-
-                    if trade_direction == "LONG" {
-                        // For LONG, if we're below neutral, use its lower edge as resistance
-                        // If we're above neutral, look for support below
-                        if current_price < neutral_mid {
-                            // We're below neutral, so neutral is resistance above us
-                            // Stop should be below us, use moderate_down if available
-                            if let Some(down_bin) = self.price_levels.bins.get("moderate_down") {
-                                down_bin.price[1] // Upper edge of moderate_down
-                            } else {
-                                bin.price[0] * 0.98 // 2% below neutral lower edge
-                            }
-                        } else {
-                            // We're in or above neutral, use its lower edge as support
-                            bin.price[0]
-                        }
-                    } else {
-                        // For SHORT, if we're above neutral, use its upper edge as support
-                        // If we're below neutral, look for resistance above
-                        if current_price > neutral_mid {
-                            // We're above neutral, so neutral is support below us
-                            // Stop should be above us, use moderate_up if available
-                            if let Some(up_bin) = self.price_levels.bins.get("moderate_up") {
-                                up_bin.price[0] // Lower edge of moderate_up
-                            } else {
-                                bin.price[1] * 1.02 // 2% above neutral upper edge
-                            }
-                        } else {
-                            // We're in or below neutral, use its upper edge as resistance
-                            bin.price[1]
-                        }
-                    }
-                }
-                "moderate_down" => {
-                    let bin = self.price_levels.bins.get("moderate_down").ok_or_else(|| {
-                        VangaError::PredictionError("Missing moderate_down bin".to_string())
-                    })?;
-                    if trade_direction == "LONG" {
-                        bin.price[0] // Lower edge
-                    } else {
-                        // For SHORT, this shouldn't be used, but if it is, use upper edge
-                        bin.price[1]
-                    }
-                }
-                "moderate_up" => {
-                    let bin = self.price_levels.bins.get("moderate_up").ok_or_else(|| {
-                        VangaError::PredictionError("Missing moderate_up bin".to_string())
-                    })?;
-                    if trade_direction == "SHORT" {
-                        bin.price[1] // Upper edge
-                    } else {
-                        // For LONG, this shouldn't be used, but if it is, use lower edge
-                        bin.price[0]
-                    }
-                }
-                _ => {
-                    return Err(VangaError::PredictionError(format!(
-                        "Invalid stop bin name: {}",
-                        stop_bin_name
-                    )));
-                }
-            };
-
-            // Step 4: SMART stop calculation using price levels + ATR
-            // We want stops BEYOND adverse zones with ATR-based buffers
-
-            let base_distance = self.volatility.recommended_stop_distance_percent / 100.0;
 
             // Progressive multipliers for distance from reference
             let distance_multiplier = match i {
-                0 => 1.0, // Tightest stop
+                0 => 1.0, // Base stop
                 1 => 1.5, // Medium stop
-                2 => 2.0, // Widest stop
+                2 => 2.0, // Wide stop
                 _ => 1.5,
             };
 
-            // Base stop should respect BOTH price levels AND volatility
+            // Use volatility model distance with progressive multipliers
+            let final_stop_distance = invalidation_distance * distance_multiplier;
+
+            // Calculate stop price using final distance
             let stop_price = if trade_direction == "LONG" {
-                // For LONG: We need stops BELOW the adverse price zones
-                // Stop 1: Just below neutral zone with small ATR buffer
-                // Stop 2: Below moderate_down zone with medium ATR buffer
-                // Stop 3: Well below moderate_down with large ATR buffer
-
-                // Progressive ATR multipliers for each stop level
-                let atr_multiplier = match i {
-                    0 => 0.5, // Half ATR buffer for tight stop
-                    1 => 1.0, // Full ATR buffer for medium stop
-                    2 => 1.5, // 1.5x ATR buffer for wide stop
-                    _ => 1.0,
-                };
-
-                // When multiple stops use the same zone boundary, differentiate using distance_multiplier
-                // Count how many previous stops used the same zone
-                let same_zone_count = stop_strategy
-                    .iter()
-                    .take(i)
-                    .filter(|&zone| zone == &stop_bin_name)
-                    .count();
-
-                // If we're reusing a zone, add the distance_multiplier offset to differentiate
-                // distance_multiplier is already calculated above (1.0, 1.5, 2.0 based on i)
-                let zone_offset = if same_zone_count > 0 {
-                    // Use the base_distance (volatility recommendation) scaled by how many times we've used this zone
-                    base_distance * (same_zone_count as f64)
-                } else {
-                    0.0
-                };
-
-                let atr_buffer = sequence_atr * atr_multiplier;
-
-                // Use price boundary as anchor, then subtract ATR distance PLUS zone offset
-                // This ensures progressive stops even when using same zone
-                let atr_distance = reference_entry * atr_buffer;
-                let boundary_based_stop =
-                    stop_boundary - atr_distance - (reference_entry * zone_offset);
-
-                // Also calculate volatility-based stop from reference entry
-                let volatility_based_stop =
-                    reference_entry * (1.0 - (base_distance * distance_multiplier));
-
-                // Use the MORE CONSERVATIVE stop (further from entry)
-                // This ensures we respect BOTH price levels AND volatility
-                let calculated_stop = boundary_based_stop.min(volatility_based_stop);
-
-                // Ensure stop is below ALL entries
-                let max_allowed = reference_entry * (1.0 - 0.002); // At least 0.2% below
-                calculated_stop.min(max_allowed)
+                // For LONG: stops below entry
+                reference_entry * (1.0 - final_stop_distance)
             } else {
-                // For SHORT: We need stops ABOVE the adverse price zones
-                // Stop 1: Just above neutral zone with small ATR buffer
-                // Stop 2: Above moderate_up zone with medium ATR buffer
-                // Stop 3: Well above moderate_up with large ATR buffer
-
-                // Progressive ATR multipliers for each stop level
-                let atr_multiplier = match i {
-                    0 => 0.5, // Half ATR buffer for tight stop
-                    1 => 1.0, // Full ATR buffer for medium stop
-                    2 => 1.5, // 1.5x ATR buffer for wide stop
-                    _ => 1.0,
-                };
-
-                // When multiple stops use the same zone boundary, differentiate using distance_multiplier
-                // Count how many previous stops used the same zone
-                let same_zone_count = stop_strategy
-                    .iter()
-                    .take(i)
-                    .filter(|&zone| zone == &stop_bin_name)
-                    .count();
-
-                // If we're reusing a zone, add the distance_multiplier offset to differentiate
-                // distance_multiplier is already calculated above (1.0, 1.5, 2.0 based on i)
-                let zone_offset = if same_zone_count > 0 {
-                    // Use the base_distance (volatility recommendation) scaled by how many times we've used this zone
-                    base_distance * (same_zone_count as f64)
-                } else {
-                    0.0
-                };
-
-                let atr_buffer = sequence_atr * atr_multiplier;
-
-                // Use price boundary as anchor, then add ATR distance PLUS zone offset
-                // This ensures progressive stops even when using same zone
-                let atr_distance = reference_entry * atr_buffer;
-                let boundary_based_stop =
-                    stop_boundary + atr_distance + (reference_entry * zone_offset);
-
-                // Also calculate volatility-based stop from reference entry
-                let volatility_based_stop =
-                    reference_entry * (1.0 + (base_distance * distance_multiplier));
-
-                // Use the MORE CONSERVATIVE stop (further from entry)
-                // This ensures we respect BOTH price levels AND volatility
-                let calculated_stop = boundary_based_stop.max(volatility_based_stop);
-
-                // Ensure stop is above ALL entries
-                let min_allowed = reference_entry * (1.0 + 0.002); // At least 0.2% above
-                calculated_stop.max(min_allowed)
+                // For SHORT: stops above entry
+                reference_entry * (1.0 + final_stop_distance)
             };
 
             log::debug!(
-                "Stop {} calculation: boundary=${:.4}, atr_buffer={:.3}%, vol_stop={:.3}%, final=${:.4}",
+                "Stop {} calculation: base_distance={:.3}%, multiplier={:.1}x, final=${:.4}",
                 i + 1,
-                stop_boundary,
-                sequence_atr * 100.0 * match i { 0 => 0.5, 1 => 1.0, 2 => 1.5, _ => 1.0 },
-                base_distance * distance_multiplier * 100.0,
+                invalidation_distance * 100.0,
+                distance_multiplier,
                 stop_price
             );
 
@@ -729,16 +550,8 @@ impl AdaptiveStopCalculator {
             // Size allocation matches entry sizes
             let size = entry_level.quantity_percentage;
 
-            // Confidence based on stop bin probability (lower prob = higher confidence in stop)
-            let stop_bin_prob = self
-                .price_levels
-                .bins
-                .get(stop_bin_name)
-                .map(|b| b.probability)
-                .unwrap_or(0.2);
-
-            // If stop zone has LOW probability, we have HIGH confidence it won't be hit
-            let stop_confidence = (0.8 - stop_bin_prob * 2.0).clamp(0.3, 0.85);
+            // Confidence based on volatility model confidence
+            let stop_confidence = self.volatility.confidence.clamp(0.3, 0.85);
 
             result_stops.push(OrderLevel {
                 price: final_stop,
@@ -749,7 +562,7 @@ impl AdaptiveStopCalculator {
             });
 
             log::info!(
-                "  Stop {}: ${:.4} ({:+.2}% from ref) | Zone: {} @ ${:.4} | ATR buffer: {:.3}% | Conf: {:.2}",
+                "  Stop {}: ${:.4} ({:+.2}% from ref) | Target: {} (prob:{:.2}) | Distance: {:.3}% | Conf: {:.2}",
                 i + 1,
                 final_stop,
                 if trade_direction == "SHORT" {
@@ -757,9 +570,9 @@ impl AdaptiveStopCalculator {
                 } else {
                     -stop_distance_percent
                 },
-                stop_bin_name,
-                stop_boundary,
-                sequence_atr * 100.0 * match i { 0 => 0.5, 1 => 1.0, 2 => 1.5, _ => 1.0 },
+                target_zone,
+                target_probability,
+                final_stop_distance * 100.0,
                 stop_confidence
             );
         }

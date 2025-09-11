@@ -769,42 +769,104 @@ impl SmartConsensus {
             model_boundaries.max_exit_boundary_percent
         );
 
-        // Get bin targets from suitable bins (already filtered by model boundaries)
-        let mut bin_targets = Vec::new();
-        for (i, (bin_name, probability, bin)) in
-            model_boundaries.suitable_bins.iter().take(3).enumerate()
-        {
-            let target_price = if i == 0 {
-                // First exit: use edge closest to current price for quick profit
-                let edge_price = if direction == "LONG" {
-                    bin.price[0] // Lower edge (closest to current for LONG)
-                } else {
-                    bin.price[1] // Upper edge (closest to current for SHORT)
-                };
+        // Get bin targets from suitable bins with PROGRESSIVE SEPARATION
+        let mut bin_targets: Vec<(f64, f64)> = Vec::new();
+        let min_separation_percent = 0.001; // 0.1% minimum separation between exits
 
-                // CRITICAL: Ensure the edge is actually profitable
-                let is_profitable = if direction == "LONG" {
-                    edge_price > current_price
-                } else {
-                    edge_price < current_price
-                };
+        // CRITICAL: Sort bins by distance from current price for proper exit ordering
+        let mut sorted_bins = model_boundaries.suitable_bins.clone();
+        sorted_bins.sort_by(|a, b| {
+            // Calculate center price for each bin
+            let a_center = (a.2.price[0] + a.2.price[1]) / 2.0;
+            let b_center = (b.2.price[0] + b.2.price[1]) / 2.0;
 
-                if is_profitable {
-                    edge_price
-                } else {
-                    // Fallback to center if edge is not profitable
+            // Calculate distance from current price
+            let a_distance = (a_center - current_price).abs();
+            let b_distance = (b_center - current_price).abs();
+
+            // Sort by distance (closest first)
+            a_distance.partial_cmp(&b_distance).unwrap()
+        });
+
+        log::info!(
+            "📊 Sorted bins by distance: {} bins ordered from closest to furthest",
+            sorted_bins.len()
+        );
+
+        for (i, (bin_name, probability, bin)) in sorted_bins.iter().take(3).enumerate() {
+            let base_target_price = match i {
+                0 => {
+                    // First exit: use edge closest to current price for quick profit
+                    let edge_price = if direction == "LONG" {
+                        bin.price[0] // Lower edge (closest to current for LONG)
+                    } else {
+                        bin.price[1] // Upper edge (closest to current for SHORT)
+                    };
+
+                    // CRITICAL: Ensure the edge is actually profitable
+                    let is_profitable = if direction == "LONG" {
+                        edge_price > current_price
+                    } else {
+                        edge_price < current_price
+                    };
+
+                    if is_profitable {
+                        edge_price
+                    } else {
+                        // Fallback to center if edge is not profitable
+                        (bin.price[0] + bin.price[1]) / 2.0
+                    }
+                }
+                1 => {
+                    // Second exit: use bin center
                     (bin.price[0] + bin.price[1]) / 2.0
                 }
-            } else {
-                // Further exits: use bin center for maximum capture
-                (bin.price[0] + bin.price[1]) / 2.0
+                2 => {
+                    // Third exit: use far edge for maximum capture
+                    if direction == "LONG" {
+                        bin.price[1] // Upper edge (furthest for LONG)
+                    } else {
+                        bin.price[0] // Lower edge (furthest for SHORT)
+                    }
+                }
+                _ => (bin.price[0] + bin.price[1]) / 2.0,
             };
 
+            // PROGRESSIVE SEPARATION: Ensure each exit is meaningfully different
+            let mut target_price = base_target_price;
+
+            // Check against previous exits to ensure separation
+            for (prev_price, _) in &bin_targets {
+                let separation: f64 = (target_price - *prev_price).abs() / current_price;
+                if separation < min_separation_percent {
+                    // Adjust target to ensure minimum separation
+                    let adjustment =
+                        min_separation_percent * current_price * (i as f64 + 1.0) * 0.5;
+                    target_price = if direction == "LONG" {
+                        base_target_price + adjustment
+                    } else {
+                        base_target_price - adjustment
+                    };
+
+                    log::info!(
+                        "🔧 Exit {} adjusted for separation: ${:.5} -> ${:.5} (min separation: {:.3}%)",
+                        i + 1, base_target_price, target_price, min_separation_percent * 100.0
+                    );
+                    break;
+                }
+            }
+
             log::info!(
-                "🎯 {} bin {}: target_price=${:.5} (edge/center logic)",
+                "🎯 {} bin {}: target_price=${:.5} (progressive: {})",
                 bin_name,
                 i + 1,
-                target_price
+                target_price,
+                match i {
+                    0 => "edge",
+                    1 => "center",
+                    2 => "far_edge",
+                    _ => "center",
+                }
             );
 
             bin_targets.push((target_price, *probability));
@@ -921,6 +983,28 @@ impl SmartConsensus {
                 confidence
             );
         }
+
+        // FINAL VALIDATION: Ensure no duplicate exits
+        let min_separation = current_price * 0.001; // 0.1% minimum separation
+        for i in 0..exits.len() {
+            for j in (i + 1)..exits.len() {
+                if (exits[i].price - exits[j].price).abs() < min_separation {
+                    // Force separation by adjusting the later exit
+                    let adjustment = min_separation * (j as f64 + 1.0);
+                    exits[j].price = if direction == "LONG" {
+                        exits[i].price + adjustment
+                    } else {
+                        exits[i].price - adjustment
+                    };
+
+                    log::info!(
+                        "🔧 Final separation adjustment: Exit {} moved to ${:.5} to avoid duplicate",
+                        j + 1, exits[j].price
+                    );
+                }
+            }
+        }
+
         Ok([exits[0].clone(), exits[1].clone(), exits[2].clone()])
     }
 
