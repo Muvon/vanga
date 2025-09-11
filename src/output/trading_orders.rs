@@ -91,7 +91,7 @@ impl Default for OrderConfig {
     fn default() -> Self {
         Self {
             base_atr_multiplier: 2.0, // Crypto-aggressive spacing
-            min_risk_reward: 3.0,     // Crypto minimum R:R target
+            min_risk_reward: 3.5,     // Crypto minimum R:R target
             max_risk_reward: 12.0,    // Maximum 12:1 for high conviction
             aggressive_sizing: true,  // Enable dynamic sizing
             hunt_protection: 1.5,     // 50% extra distance for stops
@@ -471,13 +471,8 @@ impl TradingOrders {
             Self::calculate_risk_reward(&entry_levels, &exit_levels, &stop_levels, &direction);
 
         // Step 10: Use CONFIGURED minimum R:R as base target, enhanced by model confidence
-        const MIN_RR_TARGET: f64 = 3.0; // CONSTANT minimum R:R target
         let order_config = OrderConfig::default();
-        let configured_min_rr = if order_config.min_risk_reward >= 2.0 {
-            order_config.min_risk_reward
-        } else {
-            MIN_RR_TARGET // Use constant if config is not properly set
-        };
+        let configured_min_rr = order_config.min_risk_reward;
 
         // Model's natural R:R for reference (but not as target)
         let natural_rr = config.direction_pred.expected_upside_percent
@@ -518,53 +513,27 @@ impl TradingOrders {
                 .sum::<f64>()
                 / stop_levels.len() as f64;
 
-            // Define boundaries based on price level predictions
-            // Use BEST PREDICTED price level bin as boundary (not hardcoded strong_up/strong_down)
-            let max_exit_boundary = {
-                // Find favorable bins for this direction
-                let favorable_bins = if direction == "LONG" {
-                    vec!["moderate_up", "strong_up", "neutral"] // Order by preference
-                } else {
-                    vec!["moderate_down", "strong_down", "neutral"]
-                };
+            log::debug!("Average stop distance: {:.2}%", avg_stop_distance);
 
-                // Find the bin with highest probability among favorable ones
-                let best_favorable_bin = favorable_bins
-                    .iter()
-                    .filter_map(|bin_name| {
-                        config
-                            .price_levels
-                            .bins
-                            .get(*bin_name)
-                            .map(|bin| (*bin_name, bin.probability, bin))
-                    })
-                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            // Calculate unified model boundaries for consistent optimization
+            let model_boundaries = crate::output::model_boundaries::ModelBoundaries::calculate(
+                config.price_levels,
+                config.current_price,
+                &direction,
+                config.volatility_pred.expected_range_percent,
+            );
 
-                if let Some((best_bin_name, best_probability, best_bin)) = best_favorable_bin {
-                    // Use the CENTER of the best predicted favorable bin as boundary
-                    let center_price = (best_bin.price[0] + best_bin.price[1]) / 2.0;
-                    let boundary_percent = if direction == "LONG" {
-                        ((center_price - config.current_price) / config.current_price) * 100.0
-                    } else {
-                        ((config.current_price - center_price) / config.current_price) * 100.0
-                    };
+            log::info!(
+                "🎯 Model Boundaries: max_exit={:.2}% (${:.5}), absolute={:.2}% (${:.5}), suitable_bins={}",
+                model_boundaries.max_exit_boundary_percent,
+                model_boundaries.max_exit_boundary_price,
+                model_boundaries.absolute_boundary_percent,
+                model_boundaries.absolute_boundary_price,
+                model_boundaries.suitable_bins.len()
+            );
 
-                    log::info!(
-                        "🎯 Using {} bin (prob: {:.1}%) as exit boundary: {:.2}%",
-                        best_bin_name,
-                        best_probability * 100.0,
-                        boundary_percent
-                    );
-
-                    // Ensure minimum reasonable boundary for R:R (use stop distance, not magic numbers)
-                    let min_boundary = avg_stop_distance * target_risk_reward;
-                    boundary_percent.max(min_boundary)
-                } else {
-                    // Fallback to volatility-based boundary
-                    log::warn!("⚠️ No favorable price level bins found, using volatility fallback");
-                    config.volatility_pred.expected_range_percent
-                }
-            };
+            // Use model boundary as the optimization limit
+            let max_exit_boundary = model_boundaries.max_exit_boundary_percent;
 
             log::info!(
                 "🎯 Optimization boundaries: max_exit={:.2}% (from predictions)",
@@ -588,27 +557,30 @@ impl TradingOrders {
 
             // FIXED: Middle exit should reach FULL prediction boundary for maximum R:R
             // This is the max we go as you specified
-            let max_for_middle = max_exit_boundary; // Use FULL boundary, not 70%
-
-            // Maximum scale is when middle exit reaches FULL boundary
-            let max_scale_factor = max_for_middle / current_middle_exit_distance.max(0.1);
-
-            log::info!(
-                "📏 Middle exit constraint: current={:.2}%, max_for_middle={:.2}% (FULL boundary {:.2}%)",
-                current_middle_exit_distance,
-                max_for_middle,
+            log::debug!(
+                "Using full boundary for middle exit: {:.2}%",
                 max_exit_boundary
             );
 
-            // Calculate desired scale to achieve target R:R
-            // Direct ratio, not sqrt - we want to actually reach the target!
+            // Maximum scale is when middle exit reaches model boundary (not exceeds)
+            let max_scale_factor =
+                model_boundaries.get_max_scale_factor(current_middle_exit_distance);
+
+            log::info!(
+                "📏 Middle exit constraint: current={:.2}%, model_boundary={:.2}%, max_scale={:.2}x",
+                current_middle_exit_distance,
+                model_boundaries.max_exit_boundary_percent,
+                max_scale_factor
+            );
+
             let desired_scale = target_risk_reward / initial_risk_reward.max(0.1);
 
-            // CRITICAL: Apply the scale to reach target R:R, capped by boundary
+            // CRITICAL: Apply the scale to reach target R:R, capped by model boundary
+            // The boundary ensures middle exit doesn't exceed the most predicted class center
             let final_scale = desired_scale.min(max_scale_factor);
 
             log::info!(
-                "🔄 PROPORTIONAL scaling: desired={:.2}x, max_allowed={:.2}x, final={:.2}x",
+                "🔄 Model-bounded scaling: desired={:.2}x, model_max={:.2}x, final={:.2}x",
                 desired_scale,
                 max_scale_factor,
                 final_scale
@@ -625,8 +597,27 @@ impl TradingOrders {
                     config.current_price - scaled_distance
                 };
 
+                // CRITICAL: Validate exit respects model boundaries
+                if let Err(boundary_error) =
+                    model_boundaries.validate_exit_price(exit.price, config.current_price)
+                {
+                    log::warn!(
+                        "⚠️ Exit {} violates model boundary: {}. Adjusting to boundary.",
+                        i + 1,
+                        boundary_error
+                    );
+
+                    // Adjust to stay within absolute boundary
+                    exit.price = if direction == "LONG" {
+                        exit.price.min(model_boundaries.absolute_boundary_price)
+                    } else {
+                        exit.price.max(model_boundaries.absolute_boundary_price)
+                    };
+                }
+
                 // Update ATR distance
-                exit.atr_distance = (scaled_distance / config.current_price) * 100.0;
+                exit.atr_distance =
+                    ((exit.price - config.current_price).abs() / config.current_price) * 100.0;
 
                 log::debug!(
                     "  Exit {}: {:.4} → {:.4} (distance: {:.2}% → {:.2}%)",

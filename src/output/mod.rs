@@ -7,9 +7,16 @@ pub mod adaptive_stop_calculator;
 pub mod confidence_calculator;
 #[cfg(test)]
 pub mod confidence_calculator_test;
+#[cfg(test)]
+pub mod direct_exit_test;
+#[cfg(test)]
+pub mod exit_generation_bug_analysis_test;
 pub mod formatter;
 pub mod metadata;
+pub mod model_boundaries;
 pub mod multi_target_parser;
+#[cfg(test)]
+pub mod order_generation_test;
 pub mod post_processor;
 pub mod prediction_types;
 pub mod sequence_statistics;

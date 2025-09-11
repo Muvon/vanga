@@ -755,44 +755,99 @@ impl SmartConsensus {
     ) -> Result<[OrderLevel; 3]> {
         let mut exits = Vec::new();
 
-        // IMPROVED: Use price level bin CENTERS as targets for better R:R
-        let favorable_bins = if direction == "LONG" {
-            vec!["neutral", "moderate_up", "strong_up"]
-        } else {
-            vec!["neutral", "moderate_down", "strong_down"]
-        };
+        // Use unified model boundaries for consistent exit generation
+        let model_boundaries = crate::output::model_boundaries::ModelBoundaries::calculate(
+            &self.price_levels,
+            current_price,
+            direction,
+            self.volatility.expected_range_percent,
+        );
 
-        // Get bin centers for optimal target placement
+        log::info!(
+            "🎯 Exit generation using model boundaries: {} suitable bins, boundary={:.2}%",
+            model_boundaries.suitable_bins.len(),
+            model_boundaries.max_exit_boundary_percent
+        );
+
+        // Get bin targets from suitable bins (already filtered by model boundaries)
         let mut bin_targets = Vec::new();
-        for bin_name in &favorable_bins {
-            if let Some(bin) = self.price_levels.bins.get(*bin_name) {
-                // Use bin CENTER for maximum capture (except first exit)
-                let target_price = if bin_targets.is_empty() && *bin_name == "neutral" {
-                    // First exit: use neutral edge for quick profit
-                    if direction == "LONG" {
-                        bin.price[1] // Upper edge of neutral
-                    } else {
-                        bin.price[0] // Lower edge of neutral
-                    }
+        for (i, (bin_name, probability, bin)) in
+            model_boundaries.suitable_bins.iter().take(3).enumerate()
+        {
+            let target_price = if i == 0 {
+                // First exit: use edge closest to current price for quick profit
+                let edge_price = if direction == "LONG" {
+                    bin.price[0] // Lower edge (closest to current for LONG)
                 } else {
-                    // Further exits: use bin center
-                    (bin.price[0] + bin.price[1]) / 2.0
+                    bin.price[1] // Upper edge (closest to current for SHORT)
                 };
-                bin_targets.push((target_price, bin.probability));
-            }
+
+                // CRITICAL: Ensure the edge is actually profitable
+                let is_profitable = if direction == "LONG" {
+                    edge_price > current_price
+                } else {
+                    edge_price < current_price
+                };
+
+                if is_profitable {
+                    edge_price
+                } else {
+                    // Fallback to center if edge is not profitable
+                    (bin.price[0] + bin.price[1]) / 2.0
+                }
+            } else {
+                // Further exits: use bin center for maximum capture
+                (bin.price[0] + bin.price[1]) / 2.0
+            };
+
+            log::info!(
+                "🎯 {} bin {}: target_price=${:.5} (edge/center logic)",
+                bin_name,
+                i + 1,
+                target_price
+            );
+
+            bin_targets.push((target_price, *probability));
         }
 
-        // If we don't have enough bins, use volatility-based fallback
+        // If we don't have enough bins from model, use volatility-based fallback
+        if bin_targets.is_empty() {
+            log::warn!(
+                "⚠️ No suitable bins found for {} direction, using volatility fallback",
+                direction
+            );
+        }
+
+        log::info!(
+            "📊 Found {} model-based bin targets before fallback",
+            bin_targets.len()
+        );
+
         while bin_targets.len() < 3 {
-            let base_distance = self.volatility.expected_range_percent / 100.0;
-            let multiplier = 1.0 + (bin_targets.len() as f64 * 0.5);
-            let distance = base_distance * multiplier;
+            // Use model boundaries for consistent fallback calculation
+            let fallback_distance_percent = model_boundaries.max_exit_boundary_percent;
+            let progressive_factor = match bin_targets.len() {
+                0 => 0.3, // 30% of boundary distance for first fallback
+                1 => 0.6, // 60% of boundary distance for second fallback
+                2 => 1.0, // Full boundary distance for third fallback
+                _ => 1.0,
+            };
+            let distance = (fallback_distance_percent / 100.0) * progressive_factor;
 
             let price = if direction == "LONG" {
                 current_price * (1.0 + distance)
             } else {
                 current_price * (1.0 - distance)
             };
+
+            log::info!(
+                "📊 Model-bounded fallback exit {}: ${:.5} (distance: {:.2}%, factor: {:.1}x)",
+                bin_targets.len() + 1,
+                price,
+                distance * 100.0,
+                progressive_factor
+            );
+
             bin_targets.push((price, 0.33));
         }
 
@@ -802,12 +857,52 @@ impl SmartConsensus {
         log::info!("🎯 Exit Generation: Using price bin CENTERS as targets for optimal R:R");
 
         for (i, (exit_price, confidence)) in bin_targets.iter().take(3).enumerate() {
-            let atr_distance = ((*exit_price - current_price).abs() / current_price) * 100.0;
+            // Calculate distance for logging purposes
+            let distance_percent = ((*exit_price - current_price).abs() / current_price) * 100.0;
+            log::debug!("Exit {} distance: {:.2}%", i + 1, distance_percent);
+
+            // Validate exit respects model boundaries before adding
+            let final_exit_price = if let Err(boundary_error) =
+                model_boundaries.validate_exit_price(*exit_price, current_price)
+            {
+                log::warn!(
+                    "⚠️ Exit {} violates model boundary: {}. Adjusting to boundary.",
+                    i + 1,
+                    boundary_error
+                );
+
+                // Adjust to stay within absolute boundary
+                if direction == "LONG" {
+                    exit_price.min(model_boundaries.absolute_boundary_price)
+                } else {
+                    exit_price.max(model_boundaries.absolute_boundary_price)
+                }
+            } else {
+                *exit_price
+            };
+
+            // Ensure the final price is still valid
+            if final_exit_price <= 0.0 {
+                log::error!(
+                    "❌ Exit {} price became invalid: ${:.5}. Using fallback.",
+                    i + 1,
+                    final_exit_price
+                );
+                // Use a reasonable fallback based on current price and direction
+                let fallback_distance = 0.02; // 2% as minimal distance
+                if direction == "LONG" {
+                    current_price * (1.0 + fallback_distance)
+                } else {
+                    current_price * (1.0 - fallback_distance)
+                }
+            } else {
+                final_exit_price
+            };
 
             exits.push(OrderLevel {
-                price: *exit_price,
+                price: final_exit_price,
                 quantity_percentage: sizes[i],
-                atr_distance,
+                atr_distance: ((final_exit_price - current_price).abs() / current_price) * 100.0,
                 order_type: "LIMIT".to_string(),
                 confidence: confidence.min(0.9),
             });
@@ -816,11 +911,11 @@ impl SmartConsensus {
                 "  {} Exit {}: ${:.4} ({:+.2}%) | Size: {:.1}% | Conf: {:.2}",
                 direction,
                 i + 1,
-                exit_price,
+                final_exit_price,
                 if direction == "SHORT" {
-                    -atr_distance
+                    -((final_exit_price - current_price).abs() / current_price) * 100.0
                 } else {
-                    atr_distance
+                    ((final_exit_price - current_price).abs() / current_price) * 100.0
                 },
                 sizes[i] * 100.0,
                 confidence
