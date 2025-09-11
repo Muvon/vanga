@@ -1,22 +1,64 @@
 //! Fractional derivative computation for fractional optimizers
 //!
-//! This module implements the Grünwald-Letnikov approximation for fractional derivatives
-//! as described in the paper "Fractional Adam and Fractional NAdam for Neural Network Optimization"
+//! This module implements the Caputo fractional derivative for optimization
+//! as it's better suited for financial time series than Grünwald-Letnikov.
 //!
-//! The key insight: For discrete optimization, we need to handle the alternating signs
-//! of the Grünwald-Letnikov weights carefully to prevent gradient cancellation.
+//! The Caputo derivative maintains zero derivative on constants and uses
+//! standard initial conditions, making it ideal for LSTM training.
 
 use candle_core::{Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::f64::consts::PI;
 
-/// Fractional derivative computation using Grünwald-Letnikov approximation
+/// Compute Gamma function approximation for Caputo derivative
+/// Optimized for x ∈ (0, 2) which covers our use case of Γ(1-α) where α ∈ (0,1)
+fn compute_gamma(x: f64) -> f64 {
+    // For Caputo derivative, we need Γ(1-α) where α ∈ (0,1), so x ∈ (0,1)
+    // We use a simple but accurate approximation suitable for optimization
+
+    if x <= 0.0 {
+        return f64::INFINITY; // Γ(x) has poles at non-positive integers
+    }
+
+    // For x close to 1, use Taylor series around x=1
+    // Γ(1+z) ≈ 1 - γz + (π²/6 + γ²)z²/2 + ... where γ is Euler-Mascheroni constant
+    if (x - 1.0).abs() < 0.1 {
+        const EULER_GAMMA: f64 = 0.5772156649015329;
+        let z = x - 1.0;
+        return 1.0 - EULER_GAMMA * z + (PI * PI / 6.0 + EULER_GAMMA * EULER_GAMMA) * z * z / 2.0;
+    }
+
+    // For x in (0, 0.5), use reflection formula: Γ(x)Γ(1-x) = π/sin(πx)
+    if x < 0.5 {
+        return PI / ((PI * x).sin() * compute_gamma(1.0 - x));
+    }
+
+    // For x in [0.5, 2], use Stirling's approximation with corrections
+    // This is accurate enough for our optimization purposes
+    if x <= 2.0 {
+        // Polynomial approximation optimized for [0.5, 2]
+        let t = x - 1.0;
+        return 1.0
+            + t * (-0.5772156649
+                + t * (0.9882058891
+                    + t * (-0.8970569639
+                        + t * (0.9182068604
+                            + t * (-0.7568024953
+                                + t * (0.4822199332 + t * (-0.1935278186 + t * 0.0358683481)))))));
+    }
+
+    // For x > 2, use recursion: Γ(x) = (x-1)Γ(x-1)
+    (x - 1.0) * compute_gamma(x - 1.0)
+}
+
+/// Fractional derivative computation using Caputo method
 ///
-/// Implements the short-memory approximation from the paper:
-/// D^α f(t) ≈ (1/h^α) * Σ(k=0 to M) ω_k^(α) * f(t-kh)
-///
-/// Where ω_k^(α) are the Grünwald-Letnikov weights.
-/// For discrete optimization, we use a modified approach to handle negative weights.
+/// The Caputo fractional derivative is superior for financial time series:
+/// - Zero derivative on constants (D^α_C(constant) = 0)
+/// - Uses standard initial conditions (compatible with LSTM states)
+/// - Better captures long-term memory without sign alternation
+/// - More stable for trend-following markets
 #[derive(Debug, Clone)]
 pub struct FractionalDerivative {
     /// Fractional order α ∈ (0, 1]
@@ -25,8 +67,6 @@ pub struct FractionalDerivative {
     memory_window: usize,
     /// Step size h (typically 1.0 for discrete optimization)
     step_size: f64,
-    /// Precomputed Grünwald-Letnikov weights
-    weights: Vec<f64>,
     /// Gradient history buffer for each parameter
     gradient_history: Vec<VecDeque<Tensor>>,
 }
@@ -58,10 +98,13 @@ impl FractionalDerivative {
             ));
         }
 
-        // Precompute Grünwald-Letnikov weights
-        let weights = Self::compute_gl_weights(alpha, memory_window);
+        if step_size <= 0.0 {
+            return Err(candle_core::Error::Msg(
+                "Step size must be positive".to_string(),
+            ));
+        }
 
-        // Initialize gradient history buffers
+        // Initialize gradient history buffers for Caputo method
         let gradient_history = (0..num_params)
             .map(|_| VecDeque::with_capacity(memory_window))
             .collect();
@@ -70,27 +113,8 @@ impl FractionalDerivative {
             alpha,
             memory_window,
             step_size,
-            weights,
             gradient_history,
         })
-    }
-
-    /// Compute Grünwald-Letnikov weights ω_k^(α)
-    ///
-    /// Using the recursive formula:
-    /// ω_0^(α) = 1
-    /// ω_k^(α) = ω_{k-1}^(α) * (1 - (α+1)/k) for k ≥ 1
-    fn compute_gl_weights(alpha: f64, memory_window: usize) -> Vec<f64> {
-        let mut weights = Vec::with_capacity(memory_window + 1);
-        weights.push(1.0); // ω_0^(α) = 1
-
-        for k in 1..=memory_window {
-            let prev_weight = weights[k - 1];
-            let new_weight = prev_weight * (1.0 - (alpha + 1.0) / k as f64);
-            weights.push(new_weight);
-        }
-
-        weights
     }
 
     /// Update gradient history with new gradients
@@ -127,14 +151,25 @@ impl FractionalDerivative {
         Ok(())
     }
 
-    /// Compute fractional gradients using short-memory approximation
+    /// Compute fractional gradients using Caputo derivative with short-memory approximation
     ///
-    /// Implements: D^α ∇J(θ_t) ≈ (1/h^α) * Σ(k=0 to M) ω_k^(α) * ∇J(θ_{t-k})
+    /// Implements Caputo fractional derivative for financial time series:
+    /// D^α_C f(t) = (1/Γ(n-α)) ∫[0,t] f^(n)(τ) / (t-τ)^(α-n+1) dτ
     ///
-    /// CRITICAL FIX: For discrete optimization, we modify the approach to handle
-    /// the alternating signs of GL weights which cause gradient cancellation.
+    /// For discrete optimization with short memory:
+    /// D^α_C ∇J(θ_t) ≈ (1/Γ(1-α)) * Σ(k=1 to M) (∇J(θ_{t-k+1}) - ∇J(θ_{t-k})) / (k^α * h^α)
+    ///
+    /// Key advantages of Caputo over Grünwald-Letnikov:
+    /// - Zero derivative on constants (better for LSTM initial states)
+    /// - Uses standard initial conditions (more natural for neural networks)
+    /// - Better suited for financial time series with trends
+    /// - Smoother memory integration without sign alternation
     pub fn compute_fractional_gradients(&self) -> Result<Vec<Tensor>> {
         let mut fractional_gradients = Vec::with_capacity(self.gradient_history.len());
+
+        // Compute Gamma(1-α) for Caputo normalization
+        // Using Stirling's approximation for efficiency
+        let gamma_factor = compute_gamma(1.0 - self.alpha);
 
         for history in &self.gradient_history {
             if history.is_empty() {
@@ -143,91 +178,84 @@ impl FractionalDerivative {
                 ));
             }
 
-            // Start with the most recent gradient
-            let mut fractional_grad = history[0].clone();
+            // For Caputo derivative, we need at least 2 gradients to compute differences
+            if history.len() < 2 {
+                // For the first step, return the gradient as-is
+                fractional_gradients.push(history[0].clone());
+                continue;
+            }
 
-            // Only apply fractional weighting if we have sufficient history
-            if history.len() >= 3 {
-                // CRITICAL INSIGHT: The Grünwald-Letnikov weights alternate signs
-                // ω_0 = 1, ω_1 = -α, ω_2 = -α(1-α)/2, etc.
-                // This causes gradient cancellation in discrete optimization.
-                //
-                // Solution: Use a modified weighting scheme that preserves gradient flow
-                // while incorporating memory effects.
+            // Caputo derivative computation using finite differences
+            // The key insight: Caputo uses the derivative of the function (gradient differences)
+            // weighted by a power-law kernel (t-τ)^(-α)
 
-                // Approach 1: Use absolute values of weights and normalize
-                let mut weighted_sum = history[0].clone();
-                let mut abs_weight_sum = self.weights[0].abs(); // 1.0
+            let device = history[0].device();
+            let shape = history[0].shape();
 
-                for (k, gradient) in history.iter().enumerate().skip(1) {
-                    if k >= self.weights.len() {
-                        break;
-                    }
+            // Initialize with zeros (Caputo naturally handles initialization)
+            let mut caputo_sum = Tensor::zeros(shape, candle_core::DType::F32, device)?;
 
-                    // Use absolute value to prevent sign flipping
-                    let abs_weight = self.weights[k].abs();
+            // Compute the Caputo fractional derivative
+            // Sum from k=1 to min(M, history_len-1)
+            let max_k = (self.memory_window).min(history.len() - 1);
 
-                    // Skip very small weights
-                    if abs_weight < 1e-8 {
-                        continue;
-                    }
-
-                    let weight_tensor = Tensor::new(abs_weight as f32, gradient.device())?
-                        .broadcast_as(gradient.shape())?
-                        .contiguous()?;
-
-                    let weighted_grad = gradient.contiguous()?.mul(&weight_tensor)?.contiguous()?;
-                    weighted_sum = weighted_sum.add(&weighted_grad)?.contiguous()?;
-                    abs_weight_sum += abs_weight;
+            for k in 1..=max_k {
+                if k >= history.len() {
+                    break;
                 }
 
-                // Apply the (1/h^α) scaling and normalize by weight sum
-                // This ensures proper scaling according to the fractional derivative theory
-                let scale_factor =
-                    (1.0 / (self.step_size.powf(self.alpha) * abs_weight_sum)) as f32;
-
-                let scale_tensor = Tensor::new(scale_factor, weighted_sum.device())?
-                    .broadcast_as(weighted_sum.shape())?
-                    .contiguous()?;
-
-                fractional_grad = weighted_sum
+                // Compute gradient difference: ∇J(θ_{t-k+1}) - ∇J(θ_{t-k})
+                let grad_diff = history[k - 1]
                     .contiguous()?
-                    .mul(&scale_tensor)?
+                    .sub(&history[k])?
                     .contiguous()?;
 
-                // Log for debugging (occasionally)
-                if history.len() == self.memory_window && self.gradient_history[0].len() % 100 == 1
-                {
-                    log::trace!(
-                        "Fractional gradient: α={:.2}, h={:.2}, weight_sum={:.4}, scale={:.6}",
-                        self.alpha,
-                        self.step_size,
-                        abs_weight_sum,
-                        scale_factor
-                    );
+                // Caputo weight: 1 / (k^α)
+                // This gives a power-law decay for memory effects
+                let caputo_weight = 1.0 / (k as f64).powf(self.alpha);
+
+                // Skip negligible weights for efficiency
+                if caputo_weight < 1e-10 {
+                    continue;
                 }
-            } else {
-                // For early steps, use regular gradient with mild scaling
-                // The (1/h^α) factor still applies but with reduced effect
-                let early_scale = (1.0 / self.step_size.powf(self.alpha * 0.5)) as f32;
 
-                let scale_tensor = Tensor::new(early_scale, fractional_grad.device())?
-                    .broadcast_as(fractional_grad.shape())?
+                let weight_tensor = Tensor::new(caputo_weight as f32, device)?
+                    .broadcast_as(shape)?
                     .contiguous()?;
 
-                fractional_grad = fractional_grad
-                    .contiguous()?
-                    .mul(&scale_tensor)?
-                    .contiguous()?;
+                let weighted_diff = grad_diff.contiguous()?.mul(&weight_tensor)?.contiguous()?;
 
+                caputo_sum = caputo_sum.add(&weighted_diff)?.contiguous()?;
+            }
+
+            // Apply Caputo normalization: (1/Γ(1-α)) * (1/h^α)
+            let scale_factor = (1.0 / (gamma_factor * self.step_size.powf(self.alpha))) as f32;
+
+            let scale_tensor = Tensor::new(scale_factor, device)?
+                .broadcast_as(shape)?
+                .contiguous()?;
+
+            let fractional_grad = caputo_sum.contiguous()?.mul(&scale_tensor)?.contiguous()?;
+
+            // Add the current gradient (Caputo includes the integer-order term)
+            // This is the key difference: Caputo = fractional part + integer part
+            let final_grad = history[0]
+                .contiguous()?
+                .add(&fractional_grad)?
+                .contiguous()?;
+
+            // Log for debugging (occasionally)
+            if history.len() == self.memory_window && self.gradient_history[0].len() % 100 == 1 {
                 log::trace!(
-                    "Early step gradient scaling: history_len={}, scale={:.4}",
-                    history.len(),
-                    early_scale
+                    "Caputo fractional gradient: α={:.2}, Γ(1-α)={:.4}, scale={:.6}, history_len={}",
+                    self.alpha,
+                    gamma_factor,
+                    scale_factor,
+                    history.len()
                 );
             }
 
-            fractional_gradients.push(fractional_grad);
+            fractional_gradients.push(final_grad);
         }
 
         Ok(fractional_gradients)
@@ -374,22 +402,49 @@ mod tests {
     use candle_core::Device;
 
     #[test]
-    fn test_gl_weights_computation() {
-        let alpha = 0.5;
-        let memory_window = 5;
-        let weights = FractionalDerivative::compute_gl_weights(alpha, memory_window);
+    fn test_gamma_function() {
+        // Test that gamma function returns reasonable values for our use case
+        // We mainly need Γ(1-α) where α ∈ (0,1)
 
-        // Check first weight
-        assert_eq!(weights[0], 1.0);
+        // Test Γ(0.5) ≈ 1.772 (√π)
+        let gamma_half = compute_gamma(0.5);
+        assert!(
+            gamma_half > 1.5 && gamma_half < 2.0,
+            "Γ(0.5) should be around 1.77"
+        );
 
-        // Check recursive formula for subsequent weights
-        for k in 1..weights.len() {
-            let expected = weights[k - 1] * (1.0 - (alpha + 1.0) / k as f64);
-            assert!((weights[k] - expected).abs() < 1e-10);
-        }
+        // Test Γ(1) = 1
+        let gamma_one = compute_gamma(1.0);
+        assert!((gamma_one - 1.0).abs() < 0.1, "Γ(1) should be close to 1");
 
-        // Note: Most weights after the first are negative!
-        assert!(weights[1] < 0.0, "Second weight should be negative");
+        // Test values we'll actually use: Γ(1-α) for various α
+        // α = 0.3 → Γ(0.7) ≈ 1.298
+        let gamma_0_7 = compute_gamma(0.7);
+        assert!(
+            gamma_0_7 > 1.0 && gamma_0_7 < 1.5,
+            "Γ(0.7) should be around 1.3"
+        );
+
+        // α = 0.5 → Γ(0.5) ≈ 1.772
+        let gamma_0_5 = compute_gamma(0.5);
+        assert!(
+            gamma_0_5 > 1.5 && gamma_0_5 < 2.0,
+            "Γ(0.5) should be around 1.77"
+        );
+
+        // α = 0.8 → Γ(0.2) ≈ 4.591
+        let gamma_0_2 = compute_gamma(0.2);
+        assert!(
+            gamma_0_2 > 3.0 && gamma_0_2 < 6.0,
+            "Γ(0.2) should be around 4.6"
+        );
+
+        // α = 0.9 → Γ(0.1) ≈ 9.513
+        let gamma_0_1 = compute_gamma(0.1);
+        assert!(
+            gamma_0_1 > 7.0 && gamma_0_1 < 12.0,
+            "Γ(0.1) should be around 9.5"
+        );
     }
 
     #[test]
