@@ -1092,25 +1092,26 @@ impl TradingOrders {
 
         for i in 0..3 {
             for j in (i + 1)..3 {
-                if (entry_prices[i] - entry_prices[j]).abs() < 0.0001 {
+                // Prices are duplicate if they are exactly equal (floating point equality)
+                if entry_prices[i] == entry_prices[j] {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "Duplicate entry prices: Entry {} and {} both at ${:.4}",
+                        "Duplicate entry prices: Entry {} and {} both at ${}",
                         i + 1,
                         j + 1,
                         entry_prices[i]
                     )));
                 }
-                if (exit_prices[i] - exit_prices[j]).abs() < 0.0001 {
+                if exit_prices[i] == exit_prices[j] {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "Duplicate exit prices: Exit {} and {} both at ${:.4}",
+                        "Duplicate exit prices: Exit {} and {} both at ${}",
                         i + 1,
                         j + 1,
                         exit_prices[i]
                     )));
                 }
-                if (stop_prices[i] - stop_prices[j]).abs() < 0.0001 {
+                if stop_prices[i] == stop_prices[j] {
                     return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "Duplicate stop prices: Stop {} and {} both at ${:.4}",
+                        "Duplicate stop prices: Stop {} and {} both at ${}",
                         i + 1,
                         j + 1,
                         stop_prices[i]
@@ -2086,21 +2087,35 @@ impl TradingOrders {
             );
 
             // Scale stops proportionally to meet minimum distance
+            // CRITICAL: Scale each stop individually to maintain their relative spacing
             let mut adjusted_stops = stop_levels;
             let worst_entry_price = Self::get_worst_entry_price(&entry_levels, direction);
 
+            // Calculate the current closest stop distance as percentage
+            let closest_stop_distance_pct = adjusted_stops
+                .iter()
+                .map(|stop| ((stop.price - worst_entry_price).abs() / current_price) * 100.0)
+                .fold(f64::INFINITY, f64::min);
+
+            // Apply scaling to each stop individually to maintain their relative proportions
             for stop in adjusted_stops.iter_mut() {
-                let distance_from_entry = (stop.price - worst_entry_price).abs();
-                let scaled_distance = distance_from_entry * scale_factor;
+                let current_distance_pct =
+                    ((stop.price - worst_entry_price).abs() / current_price) * 100.0;
+
+                // Each stop maintains its relative distance ratio
+                // If stop was 2x further than closest, it remains 2x further after scaling
+                let distance_ratio = current_distance_pct / closest_stop_distance_pct;
+                let new_distance_pct = min_stop_distance * distance_ratio;
+                let new_distance = (new_distance_pct / 100.0) * current_price;
 
                 stop.price = if direction == "SHORT" {
-                    worst_entry_price + scaled_distance
+                    worst_entry_price + new_distance
                 } else {
-                    worst_entry_price - scaled_distance
+                    worst_entry_price - new_distance
                 };
 
                 // Update ATR distance
-                stop.atr_distance = (scaled_distance / current_price) * 100.0;
+                stop.atr_distance = new_distance_pct;
             }
 
             // Scale exits proportionally to maintain R:R

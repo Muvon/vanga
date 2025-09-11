@@ -1021,7 +1021,7 @@ impl SmartConsensus {
             });
 
             log::info!(
-                "  {} Exit {}: ${:.2} ({:+.3}%) | Size: {:.1}% | MFE-based: {:.3}% | Conf: {:.2}",
+                "  {} Exit {}: ${} ({:+.3}%) | Size: {:.1}% | MFE-based: {:.3}% | Conf: {:.2}",
                 direction,
                 i + 1,
                 exit_price,
@@ -1529,7 +1529,7 @@ impl SmartConsensus {
             });
 
             log::info!(
-                "  Stop {}: ${:.2} ({:+.3}% from extreme) | Size: {:.1}% | Distance: {:.3}%",
+                "  Stop {}: ${} ({:+.3}% from extreme) | Size: {:.1}% | Distance: {:.3}%",
                 i + 1,
                 stop_price,
                 ((stop_price - extreme_entry) / extreme_entry) * 100.0,
@@ -1700,7 +1700,7 @@ impl SmartConsensus {
             });
 
             log::info!(
-                "  Stop {}: ${:.2} ({:+.3}% from extreme) | Size: {:.1}% | MAE-based: {:.3}% | Conf: {:.2}",
+                "  Stop {}: ${} ({:+.3}% from extreme) | Size: {:.1}% | MAE-based: {:.3}% | Conf: {:.2}",
                 i + 1,
                 stop_price,
                 ((stop_price - extreme_entry) / extreme_entry) * 100.0,

@@ -856,7 +856,7 @@ impl AdaptiveStopCalculator {
                 zones.push(zone_price);
 
                 log::debug!(
-                    "  Adverse zone '{}': ${:.2} (prob: {:.2})",
+                    "  Adverse zone '{}': ${} (prob: {:.2})",
                     bin_name,
                     zone_price,
                     bin.probability
