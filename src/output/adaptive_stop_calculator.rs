@@ -449,94 +449,110 @@ impl AdaptiveStopCalculator {
         // SMART: Combine price levels, ATR, and volatility for optimal stops
 
         for (i, entry_level) in entry_levels.iter().enumerate().take(3) {
-            // Step 1: Get ATR from sequence (actual recent volatility)
-            let sequence_atr = self.direction.sequence_bandwidth_percent / 100.0;
+            // Get neutral zone boundaries
+            let neutral_bin = self.price_levels.bins.get("neutral");
 
-            // Step 2: INTELLIGENT STOP PLACEMENT using GREAT MATH
-            // Calculate invalidation distance based on prediction strength and current position
-
-            // Find our target zone and its probability
-            let (target_zone, target_probability) = if trade_direction == "LONG" {
-                // For LONG: Find which UP bin has highest probability
-                let moderate_up_prob = self
-                    .price_levels
-                    .bins
-                    .get("moderate_up")
-                    .map(|b| b.probability)
-                    .unwrap_or(0.2);
-                let strong_up_prob = self
-                    .price_levels
-                    .bins
-                    .get("strong_up")
-                    .map(|b| b.probability)
-                    .unwrap_or(0.2);
-
-                if strong_up_prob > moderate_up_prob {
-                    ("strong_up", strong_up_prob)
+            // Calculate stop from neutral zone edge
+            let stop_price = if let Some(neutral) = neutral_bin {
+                let neutral_edge = if trade_direction == "LONG" {
+                    neutral.price[0] // Lower edge of neutral for LONG
                 } else {
-                    ("moderate_up", moderate_up_prob)
+                    neutral.price[1] // Upper edge of neutral for SHORT
+                };
+
+                // Check if entries are already in adverse zone
+                let entries_in_adverse = if trade_direction == "LONG" {
+                    reference_entry < neutral_edge
+                } else {
+                    reference_entry > neutral_edge
+                };
+
+                if entries_in_adverse {
+                    // Entries already in adverse zone - use distance to next price bin
+                    let next_bin = if trade_direction == "LONG" {
+                        self.price_levels.bins.get("strong_down")
+                    } else {
+                        self.price_levels.bins.get("strong_up")
+                    };
+
+                    if let Some(next) = next_bin {
+                        let next_edge = if trade_direction == "LONG" {
+                            next.price[1] // Upper edge of strong_down (closer to entry)
+                        } else {
+                            next.price[0] // Lower edge of strong_up (closer to entry)
+                        };
+
+                        let distance_to_next = (next_edge - reference_entry).abs();
+
+                        // Progressive penetration into next zone
+                        let penetration_factor = match i {
+                            0 => 0.2, // 20% into next zone
+                            1 => 0.5, // 50% into next zone
+                            2 => 0.8, // 80% into next zone
+                            _ => 0.5,
+                        };
+
+                        if trade_direction == "LONG" {
+                            reference_entry - (distance_to_next * penetration_factor)
+                        } else {
+                            reference_entry + (distance_to_next * penetration_factor)
+                        }
+                    } else {
+                        // No next bin - use neutral distance as reference
+                        let neutral_distance = (neutral_edge - reference_entry).abs();
+                        if trade_direction == "LONG" {
+                            reference_entry - neutral_distance * (0.5 + i as f64 * 0.5)
+                        } else {
+                            reference_entry + neutral_distance * (0.5 + i as f64 * 0.5)
+                        }
+                    }
+                } else {
+                    // Normal case - use neutral edge as reference
+                    let distance_to_neutral = (neutral_edge - reference_entry).abs();
+
+                    // Progressive stops: 1/3, 2/3, full distance beyond neutral
+                    let distance_factor = match i {
+                        0 => 0.33, // 1/3 distance
+                        1 => 0.66, // 2/3 distance
+                        2 => 1.0,  // Full distance
+                        _ => 0.66,
+                    };
+
+                    if trade_direction == "LONG" {
+                        // For LONG: go below neutral edge
+                        neutral_edge - (distance_to_neutral * distance_factor)
+                    } else {
+                        // For SHORT: go above neutral edge
+                        neutral_edge + (distance_to_neutral * distance_factor)
+                    }
                 }
             } else {
-                // For SHORT: Find which DOWN bin has highest probability
-                let moderate_down_prob = self
-                    .price_levels
-                    .bins
-                    .get("moderate_down")
-                    .map(|b| b.probability)
-                    .unwrap_or(0.2);
-                let strong_down_prob = self
-                    .price_levels
-                    .bins
-                    .get("strong_down")
-                    .map(|b| b.probability)
-                    .unwrap_or(0.2);
-
-                if strong_down_prob > moderate_down_prob {
-                    ("strong_down", strong_down_prob)
+                // Fallback if no bins - use simple percentage from reference entry
+                if trade_direction == "LONG" {
+                    reference_entry * (1.0 - 0.01 * (1.0 + i as f64)) // 1%, 2%, 3% below
                 } else {
-                    ("moderate_down", moderate_down_prob)
+                    reference_entry * (1.0 + 0.01 * (1.0 + i as f64)) // 1%, 2%, 3% above
                 }
             };
 
-            // Use volatility model's recommended stop distance as base
-            let base_stop_distance = self.volatility.recommended_stop_distance_percent / 100.0;
-
-            // Use sequence ATR as the primary stop distance (actual market volatility)
-            let invalidation_distance = sequence_atr.max(base_stop_distance);
-
-            log::debug!(
-                "Stop {} using volatility model: target={}, prob={:.2}, stop_distance={:.3}%",
+            log::info!(
+                "Stop {} using neutral edge: ${:.4}, factor={:.0}%, final=${:.4}",
                 i + 1,
-                target_zone,
-                target_probability,
-                invalidation_distance * 100.0
-            );
-
-            // Progressive multipliers for distance from reference
-            let distance_multiplier = match i {
-                0 => 1.0, // Base stop
-                1 => 1.5, // Medium stop
-                2 => 2.0, // Wide stop
-                _ => 1.5,
-            };
-
-            // Use volatility model distance with progressive multipliers
-            let final_stop_distance = invalidation_distance * distance_multiplier;
-
-            // Calculate stop price using final distance
-            let stop_price = if trade_direction == "LONG" {
-                // For LONG: stops below entry
-                reference_entry * (1.0 - final_stop_distance)
-            } else {
-                // For SHORT: stops above entry
-                reference_entry * (1.0 + final_stop_distance)
-            };
-
-            log::debug!(
-                "Stop {} calculation: base_distance={:.3}%, multiplier={:.1}x, final=${:.4}",
-                i + 1,
-                invalidation_distance * 100.0,
-                distance_multiplier,
+                if let Some(neutral) = neutral_bin {
+                    if trade_direction == "LONG" {
+                        neutral.price[0]
+                    } else {
+                        neutral.price[1]
+                    }
+                } else {
+                    reference_entry
+                },
+                match i {
+                    0 => 33,
+                    1 => 66,
+                    2 => 100,
+                    _ => 66,
+                },
                 stop_price
             );
 
@@ -562,7 +578,7 @@ impl AdaptiveStopCalculator {
             });
 
             log::info!(
-                "  Stop {}: ${:.4} ({:+.2}% from ref) | Target: {} (prob:{:.2}) | Distance: {:.3}% | Conf: {:.2}",
+                "  Stop {}: ${:.4} ({:+.2}% from ref) | Neutral edge used | Conf: {:.2}",
                 i + 1,
                 final_stop,
                 if trade_direction == "SHORT" {
@@ -570,9 +586,6 @@ impl AdaptiveStopCalculator {
                 } else {
                     -stop_distance_percent
                 },
-                target_zone,
-                target_probability,
-                final_stop_distance * 100.0,
                 stop_confidence
             );
         }
