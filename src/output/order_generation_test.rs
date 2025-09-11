@@ -144,11 +144,11 @@ fn test_neutral_prediction_exit_generation() -> Result<(), VangaError> {
 
     // Generate exits using the smart exit generation
     let exits = consensus.generate_smart_exits(current_price, "SHORT")?;
-    
+
     // Sort exits by price (descending for SHORT - highest to lowest for progressive profit taking)
     let mut sorted_exits = exits.clone();
     sorted_exits.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
-    
+
     // Create orders structure for validation
     let orders = TradingOrders {
         direction: "SHORT".to_string(),

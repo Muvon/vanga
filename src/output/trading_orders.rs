@@ -460,10 +460,15 @@ impl TradingOrders {
             config.current_price,
         ) {
             log::error!("❌ Order validation failed: {}", validation_error);
-            log::error!("🚫 Returning empty orders due to validation failure");
+            log::error!(
+                "🚫 Skipping prediction due to validation failure - no signal will be output"
+            );
 
-            // Return empty orders (no signal) when validation fails
-            return Ok(TradingOrders::default());
+            // Return error instead of empty orders - this will cause the prediction to be skipped entirely
+            return Err(crate::utils::error::VangaError::PredictionError(format!(
+                "Order validation failed: {}. No prediction will be output to avoid zero prices.",
+                validation_error
+            )));
         }
 
         // Step 9: Calculate initial risk-reward ratio
