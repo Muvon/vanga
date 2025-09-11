@@ -8,6 +8,7 @@
 - **Adaptive Calibration**: Optimal parameters for balanced 20% per class distribution
 - **Multi-Model Architecture**: Separate LSTM per target×horizon combination
 - **Real-time Prediction**: Streaming WebSocket integration with live market data
+- **Smart Order Generation**: AI-driven trading orders with dynamic position sizing
 
 ## 🏗️ Core Architecture Principles
 
@@ -21,6 +22,7 @@
 - **Adaptive Parameters**: System finds optimal thresholds for balanced class distribution
 - **Training-Prediction Consistency**: Same calibrated parameters used in both phases
 - **5-Class System**: All targets use `NUM_CLASSES = 5` (0-4) for LSTM compatibility
+- **FULLY BALANCED TRAINING**: All datasets are PERFECTLY balanced (exactly 20% per class) for optimal training
 
 ### Multi-Model Coordination
 - **Individual Models**: Each target×horizon = separate LSTM model
@@ -36,26 +38,71 @@
 - **Tensor safety**: Always use `broadcast_as()` for shape matching, ensure `.contiguous()` for operations
 - **Test organization**: ALL tests must be in separate `*_test.rs` files - NEVER inline `#[cfg(test)]` modules
 
-## 📊 Data Flow Architecture
+## 📊 Complete System Architecture
 
+### A) Training Pipeline Flow
 ```
 Raw CSV Data (OHLCV + Volume)
     ↓
-Feature Engineering (50+ Technical Indicators)
+Feature Engineering (50+ Technical Indicators) → src/features/
     ↓
-Sequence Generation (Sliding Windows: 30-120 timesteps)
+NaN Removal & Outlier Handling → src/data/preprocessor.rs
+    ↓
+Sequence Generation (Sliding Windows: 30-120 timesteps) → src/data/sequence.rs
     ↓
 Per-Sequence Normalization (Each sequence: mean=0, std=1)
     ↓
-Calibration System (Find optimal adaptive parameters)
+Calibration System (Find optimal adaptive parameters) → src/targets/calibration.rs
     ↓
-Target Generation (5-class classification per sequence)
+Target Generation (5-class classification per sequence) → src/targets/
     ↓
-Chronological Splitting (Train/Validation/Test by time)
+Chronological Splitting (Train/Validation/Test by time) → src/data/loader.rs
     ↓
-Multi-Model Training (Separate LSTM per target×horizon)
+Multi-Model Training (Separate LSTM per target×horizon) → src/model/multi_target.rs
     ↓
-Prediction & Reconstruction (Using same adaptive parameters)
+Model Persistence (Save trained models + calibration params)
+```
+
+### B) Prediction Pipeline Flow
+```
+Raw CSV Data (Recent OHLCV)
+    ↓
+Feature Engineering (Same 50+ indicators) → src/features/
+    ↓
+NaN Removal & Outlier Handling → src/data/preprocessor.rs
+    ↓
+Sequence Generation (Latest sequences) → src/data/sequence.rs
+    ↓
+Per-Sequence Normalization (Using saved training stats)
+    ↓
+Multi-Model Prediction → src/model/multi_target.rs
+    ↓
+Raw LSTM Outputs (Array2<f64>)
+    ↓
+Output Parsing & Reconstruction → src/output/multi_target_parser.rs
+    ↓
+Structured Predictions → src/output/formatter.rs
+    ↓
+Post-Processing & Confidence Filtering → src/output/post_processor.rs
+    ↓
+Smart Order Generation → src/output/smart_order_generator.rs
+    ↓
+Trading Orders with Dynamic Position Sizing → src/output/trading_orders.rs
+```
+
+### C) Real-time Streaming Flow
+```
+Live Market Data (WebSocket/CSV Stream)
+    ↓
+Feature Buffer Management → src/realtime/predictor.rs
+    ↓
+Sliding Window Updates (Maintain sequence length)
+    ↓
+Continuous Prediction Pipeline (B above)
+    ↓
+Real-time Order Generation
+    ↓
+Output Streaming (JSON/CSV formats)
 ```
 
 ### Key Processing Steps
@@ -66,29 +113,54 @@ Prediction & Reconstruction (Using same adaptive parameters)
 - **Market Microstructure**: Price velocity, VWAP deviations, trade intensity
 - **Output**: Enhanced DataFrame with engineered features
 
-#### 2. Sequence Generation (`src/data/sequence.rs`)
+#### 2. Data Preprocessing (`src/data/preprocessor.rs`)
+- **NaN Removal**: Critical step to remove lag feature warmup period
+- **Outlier Handling**: IQR and Z-score methods for data cleaning
+- **Feature Processing**: Apply engineering without global normalization
+- **Output**: Clean DataFrame ready for sequence generation
+
+#### 3. Sequence Generation (`src/data/sequence.rs`)
 - **Sliding Windows**: Extract sequences of configurable length (30-120 timesteps)
 - **Per-Sequence Normalization**: Each sequence normalized independently
 - **No Global Stats**: Each sequence self-contained for symbol-agnostic operation
 - **Output**: `Array3<f64>` [batch_size, sequence_length, features]
 
-#### 3. Calibration System (`src/targets/calibration.rs`)
+#### 4. Calibration System (`src/targets/calibration.rs`)
 - **Purpose**: Find optimal adaptive parameters for balanced class distribution
 - **Process**: Analyze entire dataset to find "sweet spot" thresholds
 - **Target**: 20% per class distribution across all 5 targets
 - **Output**: `CalibratedParameters` with optimized thresholds
+- **CRITICAL**: All training datasets are PERFECTLY balanced (exactly 20% per class, validated by `validate_perfect_balance()`)
 
-#### 4. Target Generation (`src/targets/`)
+#### 5. Target Generation (`src/targets/`)
 - **5 Target Types**: Price Levels, Direction, Volatility, Volume, Sentiment
 - **5-Class System**: Each target classified into classes 0-4
 - **Sequence-Based**: Each sequence generates one target based on horizon analysis
 - **Adaptive Parameters**: Use calibrated thresholds for consistent classification
+- **Perfect Balance**: Training data is perfectly balanced across all classes for optimal learning
 
-#### 5. Multi-Model Training (`src/model/multi_target.rs`)
+#### 6. Multi-Model Training (`src/model/multi_target.rs`)
 - **Individual Models**: Each target×horizon = separate LSTM model
 - **Coordination**: `MultiTargetLSTMModel` wrapper manages all models
 - **Shared Input**: Same normalized sequences for all models
 - **Different Targets**: Each model trained on specific target classification
+
+#### 7. Prediction Processing (`src/output/`)
+- **Raw Output Parsing**: Convert LSTM Array2<f64> to structured predictions
+- **Reconstruction**: Apply target-specific reconstruction functions
+- **Confidence Calculation**: Multi-target agreement and uncertainty quantification
+- **Post-Processing**: Filtering, smoothing, and regime adjustments
+- **CRITICAL CONFIDENCE MAPPING**: 5-class predictions mapped to real-world confidence using `calibrate_5_class_confidence()`
+  - **Baseline**: 0.2 (20% = random guessing for 5 classes)
+  - **Good Model**: 0.25-0.35 max probability → 0.42-0.68 confidence
+  - **Excellent Model**: 0.35-0.42 max probability → 0.68-0.78 confidence
+  - **Exceptional**: 0.42+ max probability → 0.78+ confidence (rare in well-calibrated models)
+
+#### 8. Smart Order Generation (`src/output/smart_order_generator.rs`)
+- **Consensus Building**: Combine predictions from all 5 targets optimally
+- **Dynamic Position Sizing**: Confidence-based position allocation
+- **Risk Management**: Adaptive stop-loss and take-profit levels
+- **Psychological Level Avoidance**: Smart order placement to avoid clustering
 
 ## 🚀 Quick Start Checklist
 
@@ -233,52 +305,82 @@ src/
 │   │   ├── training.rs    # THE unified training method (MAIN LOGIC)
 │   │   ├── inference.rs   # Prediction and forward pass
 │   │   ├── loss.rs        # Loss calculation and metrics
-│   │   ├── manual_lstm.rs # Manual LSTM cell implementation
 │   │   └── mod.rs         # Public API and re-exports
 │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
 │   ├── multi_target.rs # Multi-target wrapper
 │   ├── attention.rs   # Multi-head attention mechanisms
-│   └── loss.rs        # Composite loss functions
+│   ├── xgboost.rs     # XGBoost integration for hybrid models
+│   └── bias_correction.rs # Bias correction and calibration
 ├── features/      # Feature engineering
 │   ├── technical.rs   # 50+ technical indicators
 │   ├── cross_asset.rs # Cross-asset features
+│   ├── microstructure.rs # Market microstructure features
 │   └── engineering.rs # Feature engineering pipeline
 ├── data/          # Data loading and preprocessing
 │   ├── loader.rs      # CSV loading and validation
-│   ├── preprocessor.rs # Feature normalization (CRITICAL)
-│   ├── sequence.rs    # Sequence generation
+│   ├── preprocessor.rs # Feature normalization and cleaning
+│   ├── sequence.rs    # Sequence generation with per-sequence normalization
 │   ├── schema.rs      # Data schema definitions
 │   ├── structures.rs  # Data structures
 │   └── target_converter.rs # Target conversion utilities
-├── targets/       # Target generation (CRITICAL)
+├── targets/       # Target generation (5 targets × 5 classes)
 │   ├── mod.rs         # Target orchestration
-│   └── price_levels.rs # VWAP-weighted range analysis (5-class system)
+│   ├── calibration.rs # Adaptive parameter optimization
+│   ├── price_levels.rs # VWAP-weighted range analysis
+│   ├── direction.rs   # Directional movement classification
+│   ├── volatility.rs  # Volatility regime classification
+│   ├── volume.rs      # Volume activity classification
+│   ├── sentiment.rs   # Market sentiment classification
+│   └── sequence_reconstruction.rs # Unified reconstruction logic
+├── output/        # Prediction processing & order generation
+│   ├── multi_target_parser.rs # Raw LSTM output parsing
+│   ├── formatter.rs   # Structured prediction formatting
+│   ├── post_processor.rs # Confidence filtering and smoothing
+│   ├── smart_order_generator.rs # AI-driven order generation
+│   ├── trading_orders.rs # Dynamic position sizing
+│   ├── confidence_calculator.rs # Multi-target agreement
+│   └── structures.rs  # Prediction result types
+├── realtime/      # Real-time streaming prediction
+│   ├── predictor.rs   # Streaming prediction engine
+│   ├── stream.rs      # CSV streaming and parsing
+│   └── watcher.rs     # File watching for new data
 ├── config/        # Configuration management
 │   ├── training.rs    # TrainingConfig, TrainingParams, 9 optimizers
+│   ├── prediction.rs  # PredictionConfig, OutputConfig
 │   ├── features.rs    # Feature configurations
 │   ├── model.rs       # Model architecture configurations
 │   └── mod.rs         # Configuration coordination
 ├── optimization/  # Optimization and feature selection
-│   └── feature_selection.rs # Feature selection algorithms
+│   ├── feature_selection.rs # Feature selection algorithms
+│   ├── hyperparameter.rs # Hyperparameter optimization
+│   └── fractional.rs # Fractional optimization methods
 └── utils/         # Utilities and error handling
     ├── error.rs       # VangaError types and handling
-    └── metrics.rs     # Evaluation metrics
+    ├── metrics.rs     # Evaluation metrics
+    └── device.rs      # Device management (CPU/GPU/Metal)
 ```
 
 ## 🔄 CRITICAL: Training vs Prediction Data Flow
 
 ### Training Pipeline Architecture
 ```
-Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Target Generation → Sequence Creation → Multi-Model Training
-    ↓           ↓                    ↓             ↓                ↓                  ↓                ↓
-OHLCV Data  Technical Indicators  Clean Data   Processed Data   3×5 Targets      Sequences      N×LSTMModel
+Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Sequence Creation → Target Generation → Calibration → Multi-Model Training → Model Persistence
+    ↓           ↓                    ↓             ↓                ↓                  ↓                ↓             ↓                    ↓
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences         5×Targets        Parameters   N×LSTMModel         Saved Models
 ```
 
 ### Prediction Pipeline Architecture
 ```
-Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Sequence Creation → Multi-Model Prediction
-    ↓           ↓                    ↓             ↓                ↓                  ↓
-OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences         N×Predictions
+Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Sequence Creation → Multi-Model Prediction → Output Parsing → Reconstruction → Post-Processing → Order Generation
+    ↓           ↓                    ↓             ↓                ↓                  ↓                    ↓             ↓               ↓                ↓
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences         Raw Predictions      Structured    Formatted       Filtered         Trading Orders
+```
+
+### Real-time Pipeline Architecture
+```
+Live Data Stream → Feature Buffer → Sliding Window → Prediction Pipeline → Order Stream → Output Formats
+       ↓               ↓              ↓                    ↓                  ↓             ↓
+   WebSocket/CSV   Circular Buffer  Latest Sequence    Same as Above      Live Orders   JSON/CSV/API
 ```
 
 ### Key Data Flow Details
@@ -287,15 +389,31 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences       
 - **NaN Removal**: Critical step to remove lag feature warmup period
 - **Target Independence**: Each target type calculated independently from sequences
 - **Multi-Model Coordination**: MultiTargetLSTMModel manages separate models per target×horizon
+- **Calibration Consistency**: Same adaptive parameters used in training and prediction
+- **Output Processing**: Raw LSTM outputs converted to structured predictions and trading orders
 
 ### ⚠️ CRITICAL ARCHITECTURE REQUIREMENTS
+
+#### Perfect Balance Training System
+- **MANDATORY BALANCE**: All training datasets are PERFECTLY balanced (exactly 20% per class)
+- **Balance Validation**: `validate_perfect_balance()` enforces strict 20% distribution
+- **Global Balance**: `src/data/balance.rs` provides sophisticated balanced sequence selection
+- **No Imbalance**: System rejects any training data that isn't perfectly balanced
+- **Why Critical**: Prevents model bias toward dominant classes, ensures fair learning
 
 #### Multi-Model Architecture
 - **Single LSTMModel Limitation**: Each `LSTMModel` handles only ONE target (5 categorical outputs)
 - **MultiTargetLSTMModel Solution**: Wraps multiple `LSTMModel` instances (one per target×horizon)
-- **Example**: 3 targets × 2 horizons = 6 separate `LSTMModel` instances
+- **Example**: 5 targets × 2 horizons = 10 separate `LSTMModel` instances
 - **Training Coordination**: `TrainingContext` manages training across all models
 - **Prediction Aggregation**: Combines predictions from all individual models
+
+#### Real-World Confidence Mapping (CRITICAL)
+- **5-Class Challenge**: Raw LSTM probabilities don't directly translate to trading confidence
+- **Confidence Calibration**: `calibrate_5_class_confidence()` maps model outputs to real-world confidence
+- **Conservative Approach**: Recognizes that 0.3 max probability in 5-class is actually very good
+- **Trading Reality**: Prevents overconfidence that leads to excessive risk-taking
+- **Mathematical Basis**: Uses entropy, deviation from uniform, and Gini coefficient
 
 #### Target Generation (Training Only)
 - **3 Target Types**: Price levels, direction, volatility - each independent
@@ -313,8 +431,13 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences       
 
 ### Key Files to Know
 
+#### `src/api/` - HIGH-LEVEL ORCHESTRATION
+- **trainer.rs**: `pub async fn train_multi_target()` - Complete training pipeline orchestration
+- **predictor.rs**: `pub async fn predict()` - Unified prediction pipeline for single/multi-target models
+- **backtester.rs**: Backtesting framework with walk-forward validation
+
 #### `src/model/lstm/` - SINGLE LSTM MODEL (Core Implementation)
-- **training.rs**: `pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>, config: &TrainingConfig, val_sequences: Option<&Array3<f64>>, val_targets: Option<&Array2<f64>>, class_weights: Option<&Vec<f32>>) -> Result<()>` - THE unified training method
+- **training.rs**: `pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>, config: &TrainingConfig, val_sequences: Option<&Array3<f64>>, val_targets: Option<&Array2<f64>>) -> Result<()>` - THE unified training method
 - **config.rs**: `LSTMConfig`, `OptimizerWrapper` (9 optimizers), `TargetFormat` - Single model configuration
 - **core.rs**: Model lifecycle, initialization, persistence, Xavier initialization
 - **inference.rs**: `predict()` method - Single model prediction
@@ -324,7 +447,7 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences       
 #### `src/model/multi_target.rs` - MULTI-LSTM WRAPPER
 - **Purpose**: Wraps multiple `LSTMModel` instances to overcome single-target limitation
 - **Architecture**: Creates separate `LSTMModel` for each target×horizon combination
-- **Example**: 3 targets × 2 horizons = 6 separate `LSTMModel` instances
+- **Example**: 5 targets × 2 horizons = 10 separate `LSTMModel` instances
 - **Training**: `TrainingContext` coordinates training across all models
 - **Prediction**: Aggregates predictions from all individual models
 
@@ -332,15 +455,32 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences       
 - **Implementation**: `pub use crate::model::lstm::*;` - Pure re-export
 - **Purpose**: Maintains backward compatibility for existing code
 
-#### `src/targets/` - TARGET GENERATION (3 Targets × 5 Classes Each)
-- **Architecture**: 3 independent target types, each with 5 categorical outputs
+#### `src/targets/` - TARGET GENERATION (5 Targets × 5 Classes Each)
+- **Architecture**: 5 independent target types, each with 5 categorical outputs
 - **price_levels.rs**: VWAP-weighted range analysis (5-class: Strong Down, Moderate Down, Neutral, Moderate Up, Strong Up)
 - **direction.rs**: Directional movement classification (5-class categorical)
 - **volatility.rs**: Volatility regime classification (5-class categorical)
-- **mod.rs**: `TargetGenerator` orchestrates all 3 target types
+- **volume.rs**: Volume activity classification (5-class categorical)
+- **sentiment.rs**: Market sentiment classification (5-class categorical)
+- **calibration.rs**: Adaptive parameter optimization for balanced class distribution
+- **mod.rs**: `TargetGenerator` orchestrates all 5 target types
 - **Output Structure**: `NUM_CLASSES = 5` for each target type
 - **Sequence-based**: All targets calculated from sequence data, independent of market/regime
-- **Total Output**: 3 targets × 5 classes = 15 total outputs per prediction
+- **Total Output**: 5 targets × 5 classes = 25 total outputs per prediction
+
+#### `src/output/` - PREDICTION PROCESSING & ORDER GENERATION
+- **multi_target_parser.rs**: Parse raw LSTM Array2<f64> outputs into structured predictions
+- **formatter.rs**: `OutputFormatter` - Convert raw predictions to structured formats using reconstruction functions
+- **post_processor.rs**: `PostProcessor` - Apply confidence filtering, smoothing, outlier removal
+- **smart_order_generator.rs**: `SmartConsensus` - Generate trading orders using optimal model consensus
+- **trading_orders.rs**: `TradingOrders` - Dynamic position sizing and risk management
+- **confidence_calculator.rs**: Multi-target agreement and uncertainty quantification
+- **structures.rs**: Prediction result types and data structures
+
+#### `src/realtime/` - STREAMING PREDICTION
+- **predictor.rs**: `StreamingPredictor` - Real-time prediction with feature buffer management
+- **stream.rs**: CSV streaming and incremental parsing
+- **watcher.rs**: File watching for new data detection
 
 #### `src/config/training.rs` - TRAINING CONFIGURATION
 - **TrainingConfig**: Complete pipeline configuration coordinator
@@ -357,12 +497,17 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences       
 - **No global normalization**: Uses per-sequence approach
 - **Feature engineering integration**: Applies technical indicators first
 
-#### `src/data/preprocessor.rs` - CRITICAL NORMALIZATION
-- **Feature normalization**: Z-score normalization with saved statistics
-- **Training mode**: Calculates and saves normalization parameters
-- **Prediction mode**: Loads and applies SAME normalization parameters
-- **Consistency rule**: Prediction MUST use training normalization stats
-- **Storage**: Normalization stats saved with model for inference consistency
+#### `src/data/sequence.rs` - SEQUENCE GENERATION
+- **generate_training_sequences()**: Create training sequences with targets
+- **generate_prediction_sequences()**: Create prediction sequences without targets
+- **Per-sequence normalization**: Each sequence normalized independently
+- **Sliding window**: Configurable overlap and sequence length
+
+#### `src/output/confidence_calculator.rs` - CONFIDENCE MAPPING
+- **calibrate_5_class_confidence()**: Maps raw LSTM probabilities to real-world confidence
+- **Conservative Mapping**: Prevents overconfidence in crypto trading
+- **Mathematical Foundation**: Entropy, deviation from uniform, Gini coefficient
+- **Trading-Optimized**: Recognizes that 0.3 max probability is actually very good in 5-class system
 
 ## 🔧 Common Task Patterns
 
@@ -829,9 +974,69 @@ src/
 - **`quick_start.toml`**: Beginner-friendly minimal setup
 - **30+ specialized configs**: Various training scenarios and optimizations
 
-## 🔧 Development Workflow
+## 🚀 Entry Points & Command Interface
 
-### Quick Start Commands
+### Main Entry Points (`src/main.rs`)
+
+#### Training Commands
+```bash
+# Single symbol training
+cargo run -- train --symbol BTCUSDT --data data.csv --config configs/training.toml
+
+# Multi-symbol batch training
+cargo run -- train --symbol BTCUSDT,ETHUSDT,DOTUSDT --data data_directory/ --batch
+
+# Continue training existing model
+cargo run -- train --symbol BTCUSDT --data new_data.csv --continue-training
+
+# XGBoost-only training (requires existing LSTM model)
+cargo run -- train --symbol BTCUSDT --data data.csv --xgboost-only
+```
+
+#### Prediction Commands
+```bash
+# Single prediction
+cargo run -- predict --symbol BTCUSDT --input recent_data.csv --horizon 1h
+
+# All horizons prediction
+cargo run -- predict --symbol BTCUSDT --input data.csv --all-horizons
+
+# Real-time streaming prediction
+cargo run -- predict --symbol BTCUSDT --input data.csv --realtime --interval 1m
+
+# Batch prediction with confidence filtering
+cargo run -- predict --symbol BTCUSDT --input data_dir/ --batch --min-confidence 0.7
+```
+
+#### Model Management Commands
+```bash
+# List available models and their horizons
+cargo run -- models list
+
+# Model information and statistics
+cargo run -- models info --symbol BTCUSDT
+
+# Validate model integrity
+cargo run -- models validate --symbol BTCUSDT
+```
+
+### API Entry Points (`src/api/`)
+
+#### High-Level Training API
+- **`api::trainer::train_multi_target()`**: Complete training pipeline orchestration
+- **`api::trainer::continue_training()`**: Continue training existing models
+- **`api::trainer::train_xgboost_only()`**: XGBoost-only training phase
+
+#### High-Level Prediction API
+- **`api::predictor::predict()`**: Unified prediction pipeline
+- **`api::predictor::predict_single_target()`**: Single target prediction
+- **`api::predictor::predict_multi_target()`**: Multi-target prediction
+
+#### Backtesting API
+- **`api::backtester::run_backtest()`**: Walk-forward backtesting
+- **`api::backtester::evaluate_performance()`**: Performance evaluation
+
+## 🔧 Development Workflow
 ```bash
 # Fast development cycle (PREFERRED)
 cargo check --message-format=short
@@ -846,23 +1051,32 @@ cargo test
 cargo run -- train --symbol BTCUSDT --data data.csv --config configs/training.toml
 
 # Prediction example
-cargo run -- predict --symbol BTCUSDT --data recent_data.csv --model models/BTCUSDT.bin
+cargo run -- predict --symbol BTCUSDT --input recent_data.csv --output predictions.json
+
+# Real-time streaming
+cargo run -- predict --symbol BTCUSDT --input data.csv --realtime --interval 1m
 ```
 
 ### Understanding Problems (Debugging Checklist)
-1. **Sequence Context**: What sequence length/horizon is involved?
-2. **Normalization**: Is per-sequence normalization working correctly?
-3. **Calibration**: Are adaptive parameters being used consistently?
-4. **Target Classification**: Are all 5 targets using same classification logic?
-5. **Multi-Model**: Is each target×horizon handled by separate LSTM?
-6. **Tensor Broadcasting**: Are shapes compatible with `broadcast_as()`?
+1. **Training Issues**: Check `src/api/trainer.rs` → `src/model/multi_target.rs` → `src/model/lstm/training.rs`
+2. **Prediction Issues**: Check `src/api/predictor.rs` → `src/output/formatter.rs` → `src/output/post_processor.rs`
+3. **Order Generation**: Check `src/output/smart_order_generator.rs` → `src/output/trading_orders.rs`
+4. **Real-time Issues**: Check `src/realtime/predictor.rs` → `src/realtime/stream.rs`
+5. **Sequence Context**: What sequence length/horizon is involved?
+6. **Normalization**: Is per-sequence normalization working correctly?
+7. **Calibration**: Are adaptive parameters being used consistently?
+8. **Target Classification**: Are all 5 targets using same classification logic?
+9. **Multi-Model**: Is each target×horizon handled by separate LSTM?
+10. **Tensor Broadcasting**: Are shapes compatible with `broadcast_as()`?
 
 ### Making Changes (Development Rules)
 1. **Sequence-First Thinking**: How does this affect sequence processing?
 2. **Calibration Impact**: Do adaptive parameters need recalibration?
 3. **Training-Prediction Consistency**: Same logic in both phases?
 4. **Multi-Model Coordination**: Does wrapper handle all combinations?
-5. **Test with Real Data**: Verify with actual sequences, not synthetic data
+5. **Output Processing**: How does this affect order generation?
+6. **Real-time Impact**: Does this affect streaming predictions?
+7. **Test with Real Data**: Verify with actual sequences, not synthetic data
 
 ### Critical Implementation Patterns
 
@@ -897,34 +1111,73 @@ for target_type in ["price_levels", "direction", "volatility", "volume", "sentim
 }
 ```
 
+#### Prediction Processing
+```rust
+// Raw LSTM outputs → Structured predictions
+let raw_predictions = multi_target_model.predict(&sequences).await?;
+let parsed_predictions = parser.parse_multi_target_output(&raw_predictions)?;
+let formatted_predictions = formatter.format_predictions(parsed_predictions)?;
+let filtered_predictions = post_processor.process(formatted_predictions)?;
+```
+
+#### Smart Order Generation
+```rust
+// Combine all 5 target predictions optimally
+let consensus = SmartConsensus {
+    direction: direction_prediction,
+    price_levels: price_level_prediction,
+    volatility: volatility_prediction,
+    sentiment: sentiment_prediction,
+    volume: volume_prediction,
+};
+let trading_orders = consensus.generate_smart_orders(&sequence_stats)?;
+```
+
 ### ⚠️ Critical Rules (NEVER BREAK)
 
 1. **Sequence-Based Processing**: All operations work on sequences, not individual data points
 2. **Per-Sequence Normalization**: Each sequence normalized using only its own data
-3. **Adaptive Parameter Consistency**: Same calibrated parameters in training and prediction
-4. **Chronological Integrity**: Never shuffle time-series data
-5. **Multi-Model Architecture**: Each target×horizon requires separate LSTM model
-6. **Tensor Broadcasting**: Always use `broadcast_as()` for shape compatibility
-7. **Test Separation**: ALL tests in separate `*_test.rs` files
+3. **PERFECT BALANCE REQUIREMENT**: All training datasets must be exactly 20% per class (validated by `validate_perfect_balance()`)
+4. **Adaptive Parameter Consistency**: Same calibrated parameters in training and prediction
+5. **Chronological Integrity**: Never shuffle time-series data
+6. **Multi-Model Architecture**: Each target×horizon requires separate LSTM model
+7. **Tensor Broadcasting**: Always use `broadcast_as()` for shape compatibility
+8. **Test Separation**: ALL tests in separate `*_test.rs` files
+9. **Output Processing**: Raw LSTM outputs must be parsed, formatted, and post-processed
+10. **Confidence Mapping**: Use `calibrate_5_class_confidence()` for real-world confidence translation
+11. **Order Generation**: Use SmartConsensus for optimal multi-target decision making
+12. **Real-time Consistency**: Streaming predictions use same pipeline as batch predictions
 
 ### 🚫 Anti-Patterns (AVOID)
 
 - **Global Normalization**: Using dataset-wide statistics for normalization
+- **Imbalanced Training**: Using datasets that aren't perfectly balanced (20% per class)
+- **Raw Confidence Usage**: Using LSTM probabilities directly without confidence calibration
 - **Method Proliferation**: Creating `train_a`, `train_b` instead of enhancing existing methods
 - **Hardcoded Parameters**: Not using adaptive/calibrated parameters
 - **Data Shuffling**: Breaking chronological order in time-series data
 - **Inline Tests**: Using `#[cfg(test)]` modules within source files
 - **Hidden Variables**: Using `_variable` to silence warnings instead of fixing issues
+- **Raw Output Usage**: Using LSTM outputs directly without parsing/formatting
+- **Single-Target Thinking**: Ignoring multi-target consensus in decision making
+- **Batch-Only Design**: Not considering real-time streaming requirements
+- **Overconfident Trading**: Not using conservative confidence mapping for crypto markets
 
 ## 🎯 Architecture Mastery Checklist
 
 After reading this document, you should understand:
 
-✅ **Data Flow**: Raw CSV → Features → Sequences → Normalization → Calibration → Targets → Training
+✅ **Complete Data Flow**: Raw CSV → Features → Sequences → Normalization → Calibration → Targets → Training → Prediction → Orders
 ✅ **Sequence Processing**: Each sequence self-contained, normalized independently
+✅ **PERFECT BALANCE TRAINING**: All datasets exactly 20% per class, validated by `validate_perfect_balance()`
 ✅ **Calibration System**: How adaptive parameters achieve balanced classification
-✅ **5-Class Targets**: All targets use unified classification (0-4)
+✅ **5-Target Architecture**: All targets use unified 5-class classification (0-4)
 ✅ **Multi-Model Reality**: Each target×horizon = separate LSTM model
+✅ **Output Processing**: Raw predictions → Parsing → Formatting → Post-processing → Orders
+✅ **CONFIDENCE MAPPING**: How 5-class probabilities map to real-world trading confidence
+✅ **Smart Order Generation**: Multi-target consensus for optimal trading decisions
+✅ **Real-time Integration**: Streaming predictions with feature buffer management
+✅ **Entry Points**: CLI commands and API entry points for all operations
 ✅ **File Organization**: Where to find specific functionality
 ✅ **Development Rules**: Critical patterns and anti-patterns
 
