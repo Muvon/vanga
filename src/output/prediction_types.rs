@@ -7,9 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// Import types that will be defined in other modules
 use super::metadata::PredictionMetadata;
-use super::trading_orders::{OrderLevel, TradingOrders};
 
 /// Main prediction result structure matching ARCHITECTURE.md JSON format
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,10 +47,6 @@ pub struct PredictionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumePrediction>,
 
-    /// Trading orders with dynamic position sizing (only included when confidence is sufficient)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub orders: Option<TradingOrders>,
-
     /// Overall prediction confidence
     pub confidence: f64,
 
@@ -89,210 +83,8 @@ pub struct PriceBin {
     pub probability: f64,
 }
 
-impl PriceLevelPrediction {
-    /// Extract price level ranges as percentage arrays for order generation
-    /// Returns ranges in the order: [strong_down, moderate_down, neutral, moderate_up, strong_up]
-    pub fn extract_ranges_for_orders(&self) -> [[f64; 2]; 5] {
-        let mut ranges = [[0.0, 0.0]; 5];
+impl PriceLevelPrediction {}
 
-        // Map bin names to array indices
-        let bin_order = [
-            "strong_down",   // 0
-            "moderate_down", // 1
-            "neutral",       // 2
-            "moderate_up",   // 3
-            "strong_up",     // 4
-        ];
-
-        for (i, bin_name) in bin_order.iter().enumerate() {
-            if let Some(bin) = self.bins.get(*bin_name) {
-                ranges[i] = bin.range;
-            }
-        }
-
-        ranges
-    }
-
-    /// Extract probability-based order portions for adaptive allocation
-    /// Returns (up_portions, down_portions) for SHORT position logic
-    pub fn extract_probability_portions(&self) -> ([f64; 3], [f64; 3]) {
-        // For SHORT: entries use UP probabilities, exits use DOWN probabilities
-        let moderate_up_prob = self
-            .bins
-            .get("moderate_up")
-            .map(|b| b.probability)
-            .unwrap_or(0.0);
-        let strong_up_prob = self
-            .bins
-            .get("strong_up")
-            .map(|b| b.probability)
-            .unwrap_or(0.0);
-        let moderate_down_prob = self
-            .bins
-            .get("moderate_down")
-            .map(|b| b.probability)
-            .unwrap_or(0.0);
-        let strong_down_prob = self
-            .bins
-            .get("strong_down")
-            .map(|b| b.probability)
-            .unwrap_or(0.0);
-
-        let up_total = moderate_up_prob + strong_up_prob;
-        let down_total = moderate_down_prob + strong_down_prob;
-
-        // Entry portions (based on UP probabilities - we enter when price moves against us)
-        let entry_portions = if up_total > 0.0 {
-            let moderate_portion = moderate_up_prob / up_total;
-            let strong_portion = strong_up_prob / up_total;
-            // Split into 3 orders: moderate_lower, moderate_upper, strong_lower
-            [
-                moderate_portion * 0.6, // 60% of moderate_up probability
-                moderate_portion * 0.4, // 40% of moderate_up probability
-                strong_portion,         // 100% of strong_up probability
-            ]
-        } else {
-            [0.33, 0.33, 0.34] // Fallback to equal distribution
-        };
-
-        // Exit portions (based on DOWN probabilities - we exit when price moves with us)
-        let exit_portions = if down_total > 0.0 {
-            let moderate_portion = moderate_down_prob / down_total;
-            let strong_portion = strong_down_prob / down_total;
-            // Split into 3 orders: moderate_center, strong_upper, strong_lower
-            [
-                moderate_portion,     // 100% of moderate_down probability
-                strong_portion * 0.5, // 50% of strong_down probability
-                strong_portion * 0.5, // 50% of strong_down probability
-            ]
-        } else {
-            [0.33, 0.33, 0.34] // Fallback to equal distribution
-        };
-
-        (entry_portions, exit_portions)
-    }
-
-    /// Get natural price positioning from range centers and boundaries
-    pub fn get_natural_price_positions(&self) -> (Vec<f64>, Vec<f64>) {
-        let moderate_up = self.bins.get("moderate_up");
-        let strong_up = self.bins.get("strong_up");
-        let moderate_down = self.bins.get("moderate_down");
-        let strong_down = self.bins.get("strong_down");
-
-        // Entry positions (UP ranges for SHORT)
-        let entry_positions = if let (Some(mod_up), Some(str_up)) = (moderate_up, strong_up) {
-            vec![
-                mod_up.range[0],                           // moderate_up lower
-                (mod_up.range[0] + mod_up.range[1]) / 2.0, // moderate_up center
-                str_up.range[0],                           // strong_up lower
-            ]
-        } else {
-            vec![0.8, 1.2, 1.8] // Fallback percentages
-        };
-
-        // Exit positions (DOWN ranges for SHORT)
-        let exit_positions = if let (Some(mod_down), Some(str_down)) = (moderate_down, strong_down)
-        {
-            vec![
-                (mod_down.range[0] + mod_down.range[1]) / 2.0, // moderate_down center
-                str_down.range[1], // strong_down upper (closer to current)
-                (str_down.range[0] + str_down.range[1]) / 2.0, // strong_down center
-            ]
-        } else {
-            vec![-1.5, -2.5, -3.5] // Fallback percentages
-        };
-
-        (entry_positions, exit_positions)
-    }
-
-    /// Validate probability-driven orders for consistency and eliminate duplicates
-    pub fn validate_orders(
-        &self,
-        entry_levels: &[OrderLevel; 3],
-        exit_levels: &[OrderLevel; 3],
-        stop_levels: &[OrderLevel; 3],
-    ) -> crate::utils::error::Result<()> {
-        // 1. Validate probability portions sum to 1.0
-        let (entry_portions, exit_portions) = self.extract_probability_portions();
-        let entry_sum: f64 = entry_portions.iter().sum();
-        let exit_sum: f64 = exit_portions.iter().sum();
-
-        if (entry_sum - 1.0).abs() > 0.001 {
-            return Err(crate::utils::error::VangaError::PredictionError(format!(
-                "Entry portions sum to {:.6}, expected 1.0",
-                entry_sum
-            )));
-        }
-
-        if (exit_sum - 1.0).abs() > 0.001 {
-            return Err(crate::utils::error::VangaError::PredictionError(format!(
-                "Exit portions sum to {:.6}, expected 1.0",
-                exit_sum
-            )));
-        }
-
-        // 2. Validate no duplicate prices
-        let entry_prices: Vec<f64> = entry_levels.iter().map(|l| l.price).collect();
-        let exit_prices: Vec<f64> = exit_levels.iter().map(|l| l.price).collect();
-        let stop_prices: Vec<f64> = stop_levels.iter().map(|l| l.price).collect();
-
-        for i in 0..3 {
-            for j in (i + 1)..3 {
-                if (entry_prices[i] - entry_prices[j]).abs() < 0.01 {
-                    return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "Duplicate entry prices: {:.2} and {:.2}",
-                        entry_prices[i], entry_prices[j]
-                    )));
-                }
-                if (exit_prices[i] - exit_prices[j]).abs() < 0.01 {
-                    return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "Duplicate exit prices: {:.2} and {:.2}",
-                        exit_prices[i], exit_prices[j]
-                    )));
-                }
-                if (stop_prices[i] - stop_prices[j]).abs() < 0.01 {
-                    return Err(crate::utils::error::VangaError::PredictionError(format!(
-                        "Duplicate stop prices: {:.2} and {:.2}",
-                        stop_prices[i], stop_prices[j]
-                    )));
-                }
-            }
-        }
-
-        // 3. Validate proper order sequencing for SHORT
-        let current_price =
-            entry_levels[0].price / (1.0 + self.get_natural_price_positions().0[0] / 100.0);
-
-        for level in entry_levels {
-            if level.price <= current_price {
-                return Err(crate::utils::error::VangaError::PredictionError(format!(
-                    "SHORT entry price {:.2} must be above current price {:.2}",
-                    level.price, current_price
-                )));
-            }
-        }
-
-        for level in exit_levels {
-            if level.price >= current_price {
-                return Err(crate::utils::error::VangaError::PredictionError(format!(
-                    "SHORT exit price {:.2} must be below current price {:.2}",
-                    level.price, current_price
-                )));
-            }
-        }
-
-        for (i, level) in stop_levels.iter().enumerate() {
-            if level.price <= entry_levels[i].price {
-                return Err(crate::utils::error::VangaError::PredictionError(format!(
-                    "SHORT stop price {:.2} must be above entry price {:.2}",
-                    level.price, entry_levels[i].price
-                )));
-            }
-        }
-
-        Ok(())
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionPrediction {
     // 5-Class Probabilities (Enhanced from 2-class system)
@@ -1057,7 +849,7 @@ impl PredictionResult {
             volatility: None,
             sentiment: None,
             volume: None,
-            orders: None,
+
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -1092,7 +884,7 @@ impl PredictionResult {
             volatility: None,
             sentiment: None,
             volume: None,
-            orders: None,
+
             confidence: 0.0,
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
@@ -1147,12 +939,6 @@ impl PredictionResult {
     /// Update metadata
     pub fn with_metadata(mut self, metadata: PredictionMetadata) -> Self {
         self.metadata = metadata;
-        self
-    }
-
-    /// Set trading orders
-    pub fn with_orders(mut self, orders: TradingOrders) -> Self {
-        self.orders = Some(orders);
         self
     }
 }

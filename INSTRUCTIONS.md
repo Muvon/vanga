@@ -8,14 +8,13 @@
 - **Adaptive Calibration**: Optimal parameters for balanced 20% per class distribution
 - **Multi-Model Architecture**: Separate LSTM per target×horizon combination
 - **Real-time Prediction**: Streaming WebSocket integration with live market data
-- **Smart Order Generation**: AI-driven trading orders with dynamic position sizing
 
 ## 🏗️ Core Architecture Principles
 
 ### Sequence-First Design
 - **No Global Normalization**: Each sequence (e.g., 60 timesteps) normalized using only its own data
 - **Sequence-Based Targets**: Each sequence generates ONE target based on horizon analysis
-- **Chronological Integrity**: Time-series order preserved, no shuffling
+- **Chronological Integrity**: Time-series preserved, no shuffling
 - **Symbol-Agnostic**: Percentage-based calculations work for any trading pair
 
 ### Calibration-Driven Classification
@@ -85,9 +84,7 @@ Structured Predictions → src/output/formatter.rs
     ↓
 Post-Processing & Confidence Filtering → src/output/post_processor.rs
     ↓
-Smart Order Generation → src/output/smart_order_generator.rs
-    ↓
-Trading Orders with Dynamic Position Sizing → src/output/trading_orders.rs
+Final Predictions with Confidence Scores
 ```
 
 ### C) Real-time Streaming Flow
@@ -100,7 +97,7 @@ Sliding Window Updates (Maintain sequence length)
     ↓
 Continuous Prediction Pipeline (B above)
     ↓
-Real-time Order Generation
+Real-time Predictions
     ↓
 Output Streaming (JSON/CSV formats)
 ```
@@ -156,11 +153,11 @@ Output Streaming (JSON/CSV formats)
   - **Excellent Model**: 0.35-0.42 max probability → 0.68-0.78 confidence
   - **Exceptional**: 0.42+ max probability → 0.78+ confidence (rare in well-calibrated models)
 
-#### 8. Smart Order Generation (`src/output/smart_order_generator.rs`)
-- **Consensus Building**: Combine predictions from all 5 targets optimally
-- **Dynamic Position Sizing**: Confidence-based position allocation
-- **Risk Management**: Adaptive stop-loss and take-profit levels
-- **Psychological Level Avoidance**: Smart order placement to avoid clustering
+#### 8. Prediction Processing (`src/output/`)
+- **Raw Output Parsing**: Convert LSTM Array2<f64> to structured predictions
+- **Reconstruction**: Apply target-specific reconstruction functions
+- **Confidence Calculation**: Multi-target agreement and uncertainty quantification
+- **Post-Processing**: Filtering, smoothing, and regime adjustments
 
 ## 🚀 Quick Start Checklist
 
@@ -332,12 +329,10 @@ src/
 │   ├── volume.rs      # Volume activity classification
 │   ├── sentiment.rs   # Market sentiment classification
 │   └── sequence_reconstruction.rs # Unified reconstruction logic
-├── output/        # Prediction processing & order generation
+├── output/        # Prediction processing & formatting
 │   ├── multi_target_parser.rs # Raw LSTM output parsing
 │   ├── formatter.rs   # Structured prediction formatting
 │   ├── post_processor.rs # Confidence filtering and smoothing
-│   ├── smart_order_generator.rs # AI-driven order generation
-│   ├── trading_orders.rs # Dynamic position sizing
 │   ├── confidence_calculator.rs # Multi-target agreement
 │   └── structures.rs  # Prediction result types
 ├── realtime/      # Real-time streaming prediction
@@ -371,16 +366,16 @@ OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences       
 
 ### Prediction Pipeline Architecture
 ```
-Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Sequence Creation → Multi-Model Prediction → Output Parsing → Reconstruction → Post-Processing → Order Generation
+Raw CSV → Feature Engineering → NaN Removal → Outlier Handling → Sequence Creation → Multi-Model Prediction → Output Parsing → Reconstruction → Post-Processing → Final Predictions
     ↓           ↓                    ↓             ↓                ↓                  ↓                    ↓             ↓               ↓                ↓
-OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences         Raw Predictions      Structured    Formatted       Filtered         Trading Orders
+OHLCV Data  Technical Indicators  Clean Data   Processed Data   Sequences         Raw Predictions      Structured    Formatted       Filtered         Confidence Scores
 ```
 
 ### Real-time Pipeline Architecture
 ```
-Live Data Stream → Feature Buffer → Sliding Window → Prediction Pipeline → Order Stream → Output Formats
-       ↓               ↓              ↓                    ↓                  ↓             ↓
-   WebSocket/CSV   Circular Buffer  Latest Sequence    Same as Above      Live Orders   JSON/CSV/API
+Live Data Stream → Feature Buffer → Sliding Window → Prediction Pipeline → Prediction Stream → Output Formats
+       ↓               ↓              ↓                    ↓                  ↓                 ↓
+   WebSocket/CSV   Circular Buffer  Latest Sequence    Same as Above      Live Predictions  JSON/CSV/API
 ```
 
 ### Key Data Flow Details
@@ -390,7 +385,7 @@ Live Data Stream → Feature Buffer → Sliding Window → Prediction Pipeline �
 - **Target Independence**: Each target type calculated independently from sequences
 - **Multi-Model Coordination**: MultiTargetLSTMModel manages separate models per target×horizon
 - **Calibration Consistency**: Same adaptive parameters used in training and prediction
-- **Output Processing**: Raw LSTM outputs converted to structured predictions and trading orders
+- **Output Processing**: Raw LSTM outputs converted to structured predictions with confidence scores
 
 ### ⚠️ CRITICAL ARCHITECTURE REQUIREMENTS
 
@@ -468,12 +463,10 @@ Live Data Stream → Feature Buffer → Sliding Window → Prediction Pipeline �
 - **Sequence-based**: All targets calculated from sequence data, independent of market/regime
 - **Total Output**: 5 targets × 5 classes = 25 total outputs per prediction
 
-#### `src/output/` - PREDICTION PROCESSING & ORDER GENERATION
+#### `src/output/` - PREDICTION PROCESSING & FORMATTING
 - **multi_target_parser.rs**: Parse raw LSTM Array2<f64> outputs into structured predictions
 - **formatter.rs**: `OutputFormatter` - Convert raw predictions to structured formats using reconstruction functions
 - **post_processor.rs**: `PostProcessor` - Apply confidence filtering, smoothing, outlier removal
-- **smart_order_generator.rs**: `SmartConsensus` - Generate trading orders using optimal model consensus
-- **trading_orders.rs**: `TradingOrders` - Dynamic position sizing and risk management
 - **confidence_calculator.rs**: Multi-target agreement and uncertainty quantification
 - **structures.rs**: Prediction result types and data structures
 
@@ -1060,8 +1053,7 @@ cargo run -- predict --symbol BTCUSDT --input data.csv --realtime --interval 1m
 ### Understanding Problems (Debugging Checklist)
 1. **Training Issues**: Check `src/api/trainer.rs` → `src/model/multi_target.rs` → `src/model/lstm/training.rs`
 2. **Prediction Issues**: Check `src/api/predictor.rs` → `src/output/formatter.rs` → `src/output/post_processor.rs`
-3. **Order Generation**: Check `src/output/smart_order_generator.rs` → `src/output/trading_orders.rs`
-4. **Real-time Issues**: Check `src/realtime/predictor.rs` → `src/realtime/stream.rs`
+3. **Real-time Issues**: Check `src/realtime/predictor.rs` → `src/realtime/stream.rs`
 5. **Sequence Context**: What sequence length/horizon is involved?
 6. **Normalization**: Is per-sequence normalization working correctly?
 7. **Calibration**: Are adaptive parameters being used consistently?
@@ -1074,7 +1066,7 @@ cargo run -- predict --symbol BTCUSDT --input data.csv --realtime --interval 1m
 2. **Calibration Impact**: Do adaptive parameters need recalibration?
 3. **Training-Prediction Consistency**: Same logic in both phases?
 4. **Multi-Model Coordination**: Does wrapper handle all combinations?
-5. **Output Processing**: How does this affect order generation?
+5. **Output Processing**: How does this affect prediction formatting?
 6. **Real-time Impact**: Does this affect streaming predictions?
 7. **Test with Real Data**: Verify with actual sequences, not synthetic data
 
@@ -1120,19 +1112,6 @@ let formatted_predictions = formatter.format_predictions(parsed_predictions)?;
 let filtered_predictions = post_processor.process(formatted_predictions)?;
 ```
 
-#### Smart Order Generation
-```rust
-// Combine all 5 target predictions optimally
-let consensus = SmartConsensus {
-    direction: direction_prediction,
-    price_levels: price_level_prediction,
-    volatility: volatility_prediction,
-    sentiment: sentiment_prediction,
-    volume: volume_prediction,
-};
-let trading_orders = consensus.generate_smart_orders(&sequence_stats)?;
-```
-
 ### ⚠️ Critical Rules (NEVER BREAK)
 
 1. **Sequence-Based Processing**: All operations work on sequences, not individual data points
@@ -1145,8 +1124,7 @@ let trading_orders = consensus.generate_smart_orders(&sequence_stats)?;
 8. **Test Separation**: ALL tests in separate `*_test.rs` files
 9. **Output Processing**: Raw LSTM outputs must be parsed, formatted, and post-processed
 10. **Confidence Mapping**: Use `calibrate_5_class_confidence()` for real-world confidence translation
-11. **Order Generation**: Use SmartConsensus for optimal multi-target decision making
-12. **Real-time Consistency**: Streaming predictions use same pipeline as batch predictions
+10. **Real-time Consistency**: Streaming predictions use same pipeline as batch predictions
 
 ### 🚫 Anti-Patterns (AVOID)
 
@@ -1155,7 +1133,7 @@ let trading_orders = consensus.generate_smart_orders(&sequence_stats)?;
 - **Raw Confidence Usage**: Using LSTM probabilities directly without confidence calibration
 - **Method Proliferation**: Creating `train_a`, `train_b` instead of enhancing existing methods
 - **Hardcoded Parameters**: Not using adaptive/calibrated parameters
-- **Data Shuffling**: Breaking chronological order in time-series data
+- **Data Shuffling**: Breaking chronological sequence in time-series data
 - **Inline Tests**: Using `#[cfg(test)]` modules within source files
 - **Hidden Variables**: Using `_variable` to silence warnings instead of fixing issues
 - **Raw Output Usage**: Using LSTM outputs directly without parsing/formatting
@@ -1167,15 +1145,15 @@ let trading_orders = consensus.generate_smart_orders(&sequence_stats)?;
 
 After reading this document, you should understand:
 
-✅ **Complete Data Flow**: Raw CSV → Features → Sequences → Normalization → Calibration → Targets → Training → Prediction → Orders
+✅ **Complete Data Flow**: Raw CSV → Features → Sequences → Normalization → Calibration → Targets → Training → Prediction → Confidence
 ✅ **Sequence Processing**: Each sequence self-contained, normalized independently
 ✅ **PERFECT BALANCE TRAINING**: All datasets exactly 20% per class, validated by `validate_perfect_balance()`
 ✅ **Calibration System**: How adaptive parameters achieve balanced classification
 ✅ **5-Target Architecture**: All targets use unified 5-class classification (0-4)
 ✅ **Multi-Model Reality**: Each target×horizon = separate LSTM model
-✅ **Output Processing**: Raw predictions → Parsing → Formatting → Post-processing → Orders
+✅ **Output Processing**: Raw predictions → Parsing → Formatting → Post-processing → Confidence Scores
 ✅ **CONFIDENCE MAPPING**: How 5-class probabilities map to real-world trading confidence
-✅ **Smart Order Generation**: Multi-target consensus for optimal trading decisions
+✅ **Real-time Integration**: Streaming predictions with feature buffer management
 ✅ **Real-time Integration**: Streaming predictions with feature buffer management
 ✅ **Entry Points**: CLI commands and API entry points for all operations
 ✅ **File Organization**: Where to find specific functionality

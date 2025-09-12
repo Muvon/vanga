@@ -724,52 +724,6 @@ impl ConfidenceCalculator {
         // Minimum 0.25x to always have some position
         f64::clamp(final_multiplier, 0.25, 3.0)
     }
-
-    /// Calculate individual order level confidence based on price probability
-    pub fn calculate_order_confidence(
-        &self,
-        order_price: f64,
-        current_price: f64,
-        prediction: &PredictionResult,
-        order_type: &str, // "entry", "exit", or "stop"
-    ) -> f64 {
-        let price_change_pct = ((order_price - current_price) / current_price) * 100.0;
-
-        // Find which bin this price falls into
-        if let Some(ref price_levels) = prediction.price_levels {
-            for bin in price_levels.bins.values() {
-                if price_change_pct >= bin.range[0] && price_change_pct <= bin.range[1] {
-                    // Base confidence on bin probability
-                    let bin_confidence = bin.probability;
-
-                    // Adjust based on order type
-                    return match order_type {
-                        "entry" => {
-                            // Entry orders: higher confidence for higher probability bins
-                            if bin_confidence > 0.3 {
-                                bin_confidence * 1.2 // Boost high probability entries
-                            } else {
-                                bin_confidence * 0.8 // Reduce low probability entries
-                            }
-                        }
-                        "exit" => {
-                            // Exit orders: scale confidence by expected probability
-                            bin_confidence
-                        }
-                        "stop" => {
-                            // Stop orders: inverse confidence (low probability = good stop)
-                            1.0 - bin_confidence * 0.5
-                        }
-                        _ => bin_confidence,
-                    }
-                    .clamp(0.1, 0.95);
-                }
-            }
-        }
-
-        // Default confidence if no bin match
-        0.5
-    }
 }
 
 /// Enhanced position sizing based on multi-target agreement

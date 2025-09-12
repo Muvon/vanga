@@ -3,10 +3,6 @@
 //! Defines optimization metrics and objective functions specifically designed
 //! for cryptocurrency forecasting performance evaluation.
 
-use crate::output::prediction_types::{
-    DirectionPrediction, PriceBin, PriceLevelPrediction, VolatilityPrediction,
-};
-use crate::output::trading_orders::TradingOrders;
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
@@ -420,365 +416,39 @@ impl ObjectiveFunction {
 
         let mut returns = Vec::new();
 
-        // Sophisticated trading strategy using TradingOrders infrastructure
-        // Extract multi-target predictions and generate trading signals
+        // Simple directional trading strategy based on predictions
         for i in 1..prices.len().min(predictions.nrows()) {
             let price_return = (prices[i] - prices[i - 1]) / prices[i - 1];
-            let current_price = prices[i];
 
-            // Extract predictions from multi-target array
-            let direction_pred = if predictions.ncols() > 0 {
-                let up_prob = predictions[[i, 0]].clamp(0.0, 1.0);
-                let down_prob = 1.0 - up_prob;
-
-                // Convert 2-class to 5-class probabilities for new structure
-                let sideways_prob = 0.2; // Neutral probability
-                let remaining = 1.0 - sideways_prob;
-                let dump_prob = if down_prob > 0.5 {
-                    (down_prob - 0.5) * remaining
-                } else {
-                    0.0
-                };
-                let pump_prob = if up_prob > 0.5 {
-                    (up_prob - 0.5) * remaining
-                } else {
-                    0.0
-                };
-                let down_moderate = down_prob - dump_prob;
-                let up_moderate = up_prob - pump_prob;
-
-                DirectionPrediction::from_probabilities(
-                    dump_prob,
-                    down_moderate,
-                    sideways_prob,
-                    up_moderate,
-                    pump_prob,
-                )
+            // Extract directional signal from first column
+            let signal = if predictions.ncols() > 0 {
+                predictions[[i, 0]].clamp(-1.0, 1.0)
             } else {
-                // Default neutral prediction
-                DirectionPrediction::from_probabilities(
-                    0.1, 0.2, 0.4, 0.2,
-                    0.1, // dump, down, sideways, up, pump - neutral distribution
-                )
+                0.0 // Neutral if no predictions
             };
 
-            // Extract volatility prediction (column 1 if available)
-            let volatility_pred = if predictions.ncols() > 1 {
-                let vol_value = predictions[[i, 1]].clamp(0.0, 1.0);
-
-                // Convert prediction value to actual volatility using proper financial scaling
-                // Assume vol_value is a normalized prediction (0-1) that needs to be mapped to realistic volatility
-                // Classify regime using VANGA's percentile-based thresholds
-                // Based on src/targets/volatility.rs: (0.33, 0.67) percentiles
-                let regime = if vol_value <= 0.33 {
-                    "LOW"
-                } else if vol_value <= 0.67 {
-                    "MEDIUM"
-                } else {
-                    "HIGH"
-                };
-
-                // Create probability distribution based on regime
-                let (very_low, low, medium, high, very_high) = match regime {
-                    "LOW" => (0.2, 0.6, 0.2, 0.0, 0.0),
-                    "MEDIUM" => (0.1, 0.2, 0.4, 0.2, 0.1),
-                    "HIGH" => (0.0, 0.0, 0.2, 0.6, 0.2),
-                    _ => (0.1, 0.2, 0.4, 0.2, 0.1),
-                };
-
-                VolatilityPrediction::from_probabilities(very_low, low, medium, high, very_high)
+            // Calculate strategy return based on signal strength
+            let strategy_return = if signal > 0.5 {
+                // Strong bullish signal
+                price_return * 0.8
+            } else if signal < -0.5 {
+                // Strong bearish signal
+                -price_return * 0.8
+            } else if signal > 0.2 {
+                // Moderate bullish signal
+                price_return * 0.4
+            } else if signal < -0.2 {
+                // Moderate bearish signal
+                -price_return * 0.4
             } else {
-                // Default medium volatility using 5-class probabilities
-                VolatilityPrediction::from_probabilities(
-                    0.1, 0.2, 0.4, 0.2, 0.1, // very_low, low, medium, high, very_high
-                )
+                // Neutral/sideways - no position
+                0.0
             };
 
-            // Extract price level predictions (columns 2+ if available)
-            let price_levels = if predictions.ncols() > 2 {
-                let mut bins = HashMap::new();
-
-                // Create price bins around current price
-                let range_pct = 0.05; // 5% range
-                let lower_bound = current_price * (1.0 - range_pct);
-                let upper_bound = current_price * (1.0 + range_pct);
-
-                bins.insert(
-                    "support".to_string(),
-                    PriceBin {
-                        range: [lower_bound, current_price],
-                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
-                        price: [lower_bound, current_price],
-                        probability: predictions[[i, 2]].clamp(0.0, 1.0),
-                    },
-                );
-
-                bins.insert(
-                    "resistance".to_string(),
-                    PriceBin {
-                        range: [current_price, upper_bound],
-                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
-                        price: [current_price, upper_bound],
-                        probability: if predictions.ncols() > 3 {
-                            predictions[[i, 3]].clamp(0.0, 1.0)
-                        } else {
-                            0.5
-                        },
-                    },
-                );
-
-                PriceLevelPrediction {
-                    bins,
-                    most_likely_range: [lower_bound, upper_bound],
-                    confidence: 0.7,
-                }
-            } else {
-                // Default price levels
-                let range_pct = 0.03;
-                let mut bins = HashMap::new();
-                bins.insert(
-                    "support".to_string(),
-                    PriceBin {
-                        range: [current_price * (1.0 - range_pct), current_price],
-                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
-                        price: [current_price * (1.0 - range_pct), current_price],
-                        probability: 0.5,
-                    },
-                );
-                bins.insert(
-                    "resistance".to_string(),
-                    PriceBin {
-                        range: [current_price, current_price * (1.0 + range_pct)],
-                        vwap_range: [0.0, 0.0], // Placeholder for optimization context
-                        price: [current_price, current_price * (1.0 + range_pct)],
-                        probability: 0.5,
-                    },
-                );
-
-                PriceLevelPrediction {
-                    bins,
-                    most_likely_range: [
-                        current_price * (1.0 - range_pct),
-                        current_price * (1.0 + range_pct),
-                    ],
-                    confidence: 0.5,
-                }
-            };
-
-            // Create sequence prices for order generation (use recent price history)
-            let sequence_start = i.saturating_sub(30); // Use up to 30 recent prices
-            let sequence_prices = &prices[sequence_start..=i];
-
-            // Calculate bandwidth size from recent price volatility
-            let _bandwidth_size = if sequence_prices.len() > 1 {
-                let price_std = self.calculate_std_dev(sequence_prices);
-                (price_std / current_price).max(0.01) // At least 1% bandwidth
-            } else {
-                0.02 // Default 2% bandwidth
-            };
-
-            // Extract sentiment prediction (column 3 if available)
-            let sentiment_pred = if predictions.ncols() > 3 {
-                // We have 5 classes for sentiment, extract from predictions
-                // Assuming predictions are 5-class probabilities
-                let very_bearish = predictions[[i, 3]].clamp(0.0, 1.0);
-                let bearish = if predictions.ncols() > 4 {
-                    predictions[[i, 4]].clamp(0.0, 1.0)
-                } else {
-                    0.2
-                };
-                let neutral = 0.2; // Default neutral
-                let bullish = 0.2;
-                let very_bullish = 0.2;
-
-                // Normalize to sum to 1.0
-                let total = very_bearish + bearish + neutral + bullish + very_bullish;
-                let probs = [
-                    very_bearish / total,
-                    bearish / total,
-                    neutral / total,
-                    bullish / total,
-                    very_bullish / total,
-                ];
-
-                // Determine regime based on highest probability
-                let max_idx = probs
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(2);
-
-                let regime = match max_idx {
-                    0 => "VERY_BEARISH",
-                    1 => "BEARISH",
-                    2 => "NEUTRAL",
-                    3 => "BULLISH",
-                    4 => "VERY_BULLISH",
-                    _ => "NEUTRAL",
-                }
-                .to_string();
-
-                crate::output::prediction_types::SentimentPrediction {
-                    very_bearish_probability: probs[0],
-                    bearish_probability: probs[1],
-                    neutral_probability: probs[2],
-                    bullish_probability: probs[3],
-                    very_bullish_probability: probs[4],
-                    confidence: 0.6,
-                    training_horizon: "1h".to_string(), // Default for optimization
-                    regime,
-                }
-            } else {
-                // Default neutral sentiment
-                crate::output::prediction_types::SentimentPrediction {
-                    very_bearish_probability: 0.2,
-                    bearish_probability: 0.2,
-                    neutral_probability: 0.2,
-                    bullish_probability: 0.2,
-                    very_bullish_probability: 0.2,
-                    confidence: 0.5,
-                    training_horizon: "1h".to_string(),
-                    regime: "NEUTRAL".to_string(),
-                }
-            };
-
-            // Extract volume prediction (column 4/5 if available)
-            let volume_pred = if predictions.ncols() > 4 {
-                // We have 5 classes for volume, extract from predictions
-                let very_low = if predictions.ncols() > 5 {
-                    predictions[[i, 5]].clamp(0.0, 1.0)
-                } else {
-                    0.2
-                };
-                let low = 0.2;
-                let medium = 0.2;
-                let high = 0.2;
-                let very_high = 0.2;
-
-                // Normalize to sum to 1.0
-                let total = very_low + low + medium + high + very_high;
-                let probs = [
-                    very_low / total,
-                    low / total,
-                    medium / total,
-                    high / total,
-                    very_high / total,
-                ];
-
-                // Determine regime based on highest probability
-                let max_idx = probs
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(2);
-
-                let regime = match max_idx {
-                    0 => "VERY_LOW",
-                    1 => "LOW",
-                    2 => "MEDIUM",
-                    3 => "HIGH",
-                    4 => "VERY_HIGH",
-                    _ => "MEDIUM",
-                }
-                .to_string();
-
-                crate::output::prediction_types::VolumePrediction {
-                    very_low_probability: probs[0],
-                    low_probability: probs[1],
-                    medium_probability: probs[2],
-                    high_probability: probs[3],
-                    very_high_probability: probs[4],
-                    confidence: 0.6,
-                    training_horizon: "1h".to_string(), // Default for optimization
-                    regime,
-                }
-            } else {
-                // Default normal volume
-                crate::output::prediction_types::VolumePrediction {
-                    very_low_probability: 0.2,
-                    low_probability: 0.2,
-                    medium_probability: 0.2,
-                    high_probability: 0.2,
-                    very_high_probability: 0.2,
-                    confidence: 0.5,
-                    training_horizon: "1h".to_string(),
-                    regime: "MEDIUM".to_string(),
-                }
-            };
-
-            // Create confidence calculator with default settings
-            let confidence_calculator =
-                crate::output::confidence_calculator::ConfidenceCalculator::new(
-                    crate::output::confidence_calculator::ConfidenceConfig::default(),
-                );
-
-            // Convert sequence prices to MarketDataRow for SmartOrderConfig
-            let sequence_ohlcv = None; // Not available in optimization context
-
-            let config = crate::output::trading_orders::SmartOrderConfig {
-                current_price,
-                price_levels: &price_levels,
-                direction_pred: &direction_pred,
-                volatility_pred: &volatility_pred,
-                sentiment_pred: &sentiment_pred,
-                volume_pred: &volume_pred,
-                confidence_calculator: &confidence_calculator,
-                min_confidence: 0.3, // Lower threshold for optimization context
-                sequence_ohlcv,
-            };
-
-            match TradingOrders::generate(config) {
-                Ok(orders) => {
-                    // Calculate strategy return based on trading orders
-                    let strategy_return = self.calculate_return_from_orders(&orders, price_return);
-                    returns.push(strategy_return);
-                }
-                Err(_) => {
-                    // Fallback to neutral position on order generation failure
-                    returns.push(0.0);
-                }
-            }
+            returns.push(strategy_return);
         }
 
         Ok(returns)
-    }
-
-    /// Calculate strategy return from trading orders
-    fn calculate_return_from_orders(&self, orders: &TradingOrders, price_return: f64) -> f64 {
-        // If no valid trading direction, return neutral
-        if orders.direction == "NEUTRAL" || orders.entry_levels.is_empty() {
-            return 0.0;
-        }
-
-        // Calculate position size based on confidence and risk management
-        let base_position_size = orders.total_position_size;
-
-        // Apply risk-reward adjustment
-        let risk_adjusted_size = if orders.risk_reward_ratio > 2.0 {
-            base_position_size * (1.0 + (orders.risk_reward_ratio - 2.0) * 0.1).min(2.0)
-        } else {
-            base_position_size * 0.5 // Reduce size for poor risk-reward
-        };
-
-        // Calculate directional return
-        let directional_return = match orders.direction.as_str() {
-            "LONG" => price_return * risk_adjusted_size,
-            "SHORT" => -price_return * risk_adjusted_size,
-            _ => 0.0,
-        };
-
-        // Apply volatility-based scaling
-        let volatility_scaling = if orders.atr_multiplier > 2.5 {
-            0.8 // Reduce exposure in high volatility
-        } else if orders.atr_multiplier < 1.5 {
-            1.2 // Increase exposure in low volatility
-        } else {
-            1.0
-        };
-
-        directional_return * volatility_scaling
     }
 
     /// Detect market regime from price data
@@ -833,18 +503,6 @@ impl ObjectiveFunction {
             / (prices.len() - prices.len() / 2) as f64;
 
         (second_half_avg - first_half_avg) / first_half_avg
-    }
-
-    /// Calculate standard deviation from prices
-    fn calculate_std_dev(&self, prices: &[f64]) -> f64 {
-        if prices.len() < 2 {
-            return 0.0;
-        }
-
-        let mean = prices.iter().sum::<f64>() / prices.len() as f64;
-        let variance = prices.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / prices.len() as f64;
-
-        variance.sqrt()
     }
 }
 

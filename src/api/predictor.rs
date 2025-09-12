@@ -199,17 +199,17 @@ impl Predictor {
 
         // Confidence calculation for predictions should use model uncertainty, not target generation
         // Target generation is inappropriate for prediction data as it requires full historical context
-        // Extract sequence data for order generation before cleanup - REQUIRED!
+        // Extract sequence data for VWAP calculations - REQUIRED!
         let sequence_ohlc = prepared_data.sequence_ohlc.clone()
             .ok_or_else(|| VangaError::PredictionError(
-                "FATAL: No sequence OHLC data available for order generation. This is required for proper ATR calculation and sequence-aware orders.".to_string()
+                "FATAL: No sequence OHLC data available for VWAP calculations. This is required for proper price level analysis.".to_string()
             ))?;
 
         // Extract OHLCV data for VWAP-based range calculation (matches training approach)
         let sequence_ohlcv = sequence_ohlc.clone();
 
         log::info!(
-            "✅ Sequence OHLCV data loaded: {} rows for VWAP-based order generation",
+            "✅ Sequence OHLCV data loaded: {} rows for VWAP-based calculations",
             sequence_ohlcv.len()
         );
 

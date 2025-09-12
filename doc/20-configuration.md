@@ -1037,12 +1037,6 @@ parse_volatility = true                        # Parse volatility predictions
 parse_sentiment = true                         # Parse sentiment predictions
 parse_volume = true                            # Parse volume predictions
 
-# Trading order generation
-[output.trading_orders]
-enabled = true                                 # Generate trading orders
-order_type = "Adaptive"                        # Adaptive, Fixed, or Probability
-risk_level = "Medium"                          # Low, Medium, High
-position_sizing = "Kelly"                      # Kelly, Fixed, Percentage
 ```
 
 ### **Prediction Output Structure**

@@ -437,7 +437,7 @@ impl StreamingPredictor {
                 };
 
                 println!(
-                    "🔮 {} Prediction: {} {} ({:.1}%) | Volatility: {} {} | Orders: {} levels",
+                    "🔮 {} Prediction: {} {} ({:.1}%) | Volatility: {} {}",
                     self.config.symbol,
                     direction_emoji,
                     direction_str,
@@ -448,12 +448,7 @@ impl StreamingPredictor {
                         .unwrap_or(0.0)
                         * 100.0,
                     volatility_emoji,
-                    volatility_str,
-                    prediction
-                        .orders
-                        .as_ref()
-                        .map(|o| o.entry_levels.len())
-                        .unwrap_or(0)
+                    volatility_str
                 );
             }
         }
@@ -661,9 +656,6 @@ impl StreamingPredictor {
             )
         };
 
-        // Use the trading orders from ML prediction
-        let orders = ml_prediction.orders.clone();
-
         Ok(PredictionResult {
             symbol: self.config.symbol.clone(),
             timestamp: ml_prediction.timestamp.clone(),
@@ -675,8 +667,8 @@ impl StreamingPredictor {
             volatility: Some(volatility),
             sentiment: ml_prediction.sentiment.clone(),
             volume: ml_prediction.volume.clone(),
-            orders,
             confidence: ml_prediction.confidence,
+
             metadata: ml_prediction.metadata.clone(),
         })
     }

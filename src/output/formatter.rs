@@ -561,7 +561,7 @@ impl OutputFormatter {
                 && result.direction.is_some()
                 && result.volatility.is_some()
             {
-                // Calculate enhanced confidence BEFORE order generation
+                // Calculate enhanced confidence
                 let enhanced_confidence = self
                     .confidence_calculator
                     .calculate_overall_confidence(&result);
@@ -597,52 +597,10 @@ impl OutputFormatter {
                     continue; // Skip to next horizon, don't add this prediction to results
                 }
 
-                // Clone the predictions to avoid borrow checker issues
-                let price_levels = result.price_levels.clone().unwrap();
-                let direction = result.direction.clone().unwrap();
-                let volatility = result.volatility.clone().unwrap();
-
-                // Use SMART order generation with all 5 models
-                let sentiment = result.sentiment.clone().unwrap();
-                let volume = result.volume.clone().unwrap();
-
-                log::info!("🎯 Using SMART order generation with all 5 models");
-
-                // Pass the confidence calculator to generate_smart
-                let config = crate::output::trading_orders::SmartOrderConfig {
-                    current_price,
-                    price_levels: &price_levels,
-                    direction_pred: &direction,
-                    volatility_pred: &volatility,
-                    sentiment_pred: &sentiment,
-                    volume_pred: &volume,
-                    confidence_calculator: &self.confidence_calculator,
-                    min_confidence: self.min_confidence,
-                    sequence_ohlcv: self.sequence_ohlcv.as_deref(),
-                };
-                let orders = match crate::output::trading_orders::TradingOrders::generate(config) {
-                    Ok(smart_orders) => {
-                        log::info!(
-                            "✅ Generated SMART {} orders with R:R={:.2}",
-                            smart_orders.direction,
-                            smart_orders.risk_reward_ratio
-                        );
-                        smart_orders
-                    }
-                    Err(e) => {
-                        log::error!("❌ Failed to generate SMART orders: {}", e);
-                        // This should not happen since we already checked confidence
-                        // But if it does, skip this prediction
-                        continue;
-                    }
-                };
-
-                result = result.with_orders(orders);
-
                 // Apply the enhanced confidence to the prediction result
                 result = result.with_confidence(enhanced_confidence);
 
-                // Add to results only if we successfully generated orders
+                // Add to results
                 results.push(result);
             } else {
                 // No trading predictions available, but we might still want to include
@@ -651,10 +609,8 @@ impl OutputFormatter {
 
                 if basic_confidence >= self.min_confidence {
                     result = result.with_confidence(basic_confidence);
-                    // Note: No orders field will be set, which means it won't be serialized
-                    // due to skip_serializing_if in PredictionResult
                     log::info!(
-                        "ℹ️ Including prediction without orders for horizon {} (confidence: {:.2}%)",
+                        "ℹ️ Including prediction without complete targets for horizon {} (confidence: {:.2}%)",
                         horizon,
                         basic_confidence * 100.0
                     );
