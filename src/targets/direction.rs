@@ -511,11 +511,12 @@ fn log_direction_distribution(targets: &[i32], horizon: &str) {
 // ============================================================================
 
 /// Reconstruction result for direction predictions
+
 #[derive(Debug, Clone)]
 pub struct DirectionReconstruction {
     /// Class probabilities from model [DUMP, DOWN, SIDEWAYS, UP, PUMP]
     pub probabilities: Vec<f64>,
-    /// Expected momentum change values for each class
+    /// Representative momentum change values used for each class
     pub momentum_changes: Vec<f64>,
     /// Trend acceleration percentages for each class
     pub trend_accelerations: Vec<f64>,
@@ -523,7 +524,7 @@ pub struct DirectionReconstruction {
     pub most_likely_class: usize,
     /// Confidence (probability of most likely class)
     pub confidence: f64,
-    /// Expected momentum change (weighted average)
+    /// Expected momentum change (weighted average across classes)
     pub expected_momentum_change: f64,
     /// Expected trend acceleration percentage (weighted average)
     pub expected_trend_acceleration: f64,
@@ -533,12 +534,29 @@ pub struct DirectionReconstruction {
     pub upward_probability: f64,
     /// Downward bias probability (DUMP + DOWN)
     pub downward_probability: f64,
-    /// Sequence trend consistency used for thresholds
+    /// Sequence trend consistency used for thresholds (persistence proxy)
     pub trend_consistency: f64,
     /// Base threshold used for classification
     pub base_threshold: f64,
     /// Extreme threshold used for classification
     pub extreme_threshold: f64,
+    // -------------------- Enhanced reconstruction metrics --------------------
+    /// 10th percentile of momentum change (discrete CDF over class reps)
+    pub momentum_ci_10: f64,
+    /// 90th percentile of momentum change (discrete CDF over class reps)
+    pub momentum_ci_90: f64,
+    /// Normalized magnitude of expected momentum change in [0,1]
+    pub directional_magnitude: f64,
+    /// Normalized geometric distance to nearest boundary (0 at boundary, 1 at center)
+    pub class_margin: f64,
+    /// Normalized certainty from entropy (1 - H/ln(5))
+    pub entropy_norm: f64,
+    /// Distribution skew toward up vs down: (UP+PUMP) - (DOWN+DUMP)
+    pub directional_skew: f64,
+    /// Estimated horizon momentum = sequence_momentum + expected_momentum_change
+    pub horizon_momentum_estimate: f64,
+    /// Exposed persistence score (alias of trend_consistency)
+    pub persistence_score: f64,
 }
 
 /// Reconstruct direction predictions from model probabilities
@@ -593,7 +611,8 @@ pub fn reconstruct_direction(
     let final_base_threshold = base_threshold.max(min_base);
     let final_extreme_threshold = extreme_threshold.max(min_extreme);
 
-    // Calculate representative momentum change for each class (reverse of classification)
+    // Representative momentum change for each class (reverse of classification)
+    // NOTE: Keep factors consistent with training-time reconstruction to preserve calibration
     let momentum_changes = vec![
         -final_extreme_threshold * 1.5, // DUMP: Strong negative momentum change
         -final_base_threshold * 1.5,    // DOWN: Moderate negative momentum change
@@ -616,7 +635,7 @@ pub fn reconstruct_direction(
         .map(|(idx, &prob)| (idx, prob))
         .unwrap_or((2, 0.2)); // Default to SIDEWAYS
 
-    // Calculate expected values (weighted averages)
+    // Expected values (weighted averages)
     let expected_momentum_change: f64 = probabilities
         .iter()
         .zip(momentum_changes.iter())
@@ -629,10 +648,78 @@ pub fn reconstruct_direction(
         .map(|(&prob, &accel)| prob * accel)
         .sum();
 
-    // Calculate directional probabilities
+    // Directional aggregates
     let breakout_probability = probabilities[0] + probabilities[4]; // DUMP + PUMP
     let upward_probability = probabilities[3] + probabilities[4]; // UP + PUMP
     let downward_probability = probabilities[0] + probabilities[1]; // DUMP + DOWN
+
+    // Additional reconstruction metrics (pure reconstruction, no training change)
+    // 1) Credible interval over momentum change (10% and 90% quantiles)
+    let mut cdf = 0.0;
+    let mut q10 = momentum_changes[0];
+    let mut q90 = momentum_changes[4];
+    for (i, &p) in probabilities.iter().enumerate() {
+        cdf += p;
+        if cdf >= 0.10 && q10 == momentum_changes[0] {
+            q10 = momentum_changes[i];
+        }
+        if cdf >= 0.90 {
+            q90 = momentum_changes[i];
+            break;
+        }
+    }
+
+    // 2) Directional magnitude normalized to [0,1]
+    let max_abs = (final_extreme_threshold * 1.5).abs().max(1e-12);
+    let directional_magnitude = (expected_momentum_change.abs() / max_abs).min(1.0);
+
+    let boundaries = [
+        0.5 * (momentum_changes[0] + momentum_changes[1]),
+        0.5 * (momentum_changes[1] + momentum_changes[2]),
+        0.5 * (momentum_changes[2] + momentum_changes[3]),
+        0.5 * (momentum_changes[3] + momentum_changes[4]),
+    ];
+    // Find interval containing expected_momentum_change
+    let (left_bound, right_bound) = if expected_momentum_change <= boundaries[0] {
+        (f64::NEG_INFINITY, boundaries[0])
+    } else if expected_momentum_change <= boundaries[1] {
+        (boundaries[0], boundaries[1])
+    } else if expected_momentum_change <= boundaries[2] {
+        (boundaries[1], boundaries[2])
+    } else if expected_momentum_change <= boundaries[3] {
+        (boundaries[2], boundaries[3])
+    } else {
+        (boundaries[3], f64::INFINITY)
+    };
+    let class_margin = if left_bound.is_finite() && right_bound.is_finite() {
+        let center = 0.5 * (left_bound + right_bound);
+        let half_interval = 0.5 * (right_bound - left_bound).max(1e-12);
+        (1.0 - ((expected_momentum_change - center).abs() / half_interval)).clamp(0.0, 1.0)
+    } else {
+        // Outside inner intervals: margin degrades toward 0 near open ends
+        0.0
+    };
+
+    // 4) Entropy (normalized) and skew
+    let ln5 = 5_f64.ln();
+    let entropy = probabilities
+        .iter()
+        .filter(|&&p| p > 0.0)
+        .map(|&p| -p * p.ln())
+        .sum::<f64>();
+    let entropy_norm = (1.0 - (entropy / ln5)).clamp(0.0, 1.0);
+    let directional_skew =
+        (probabilities[3] + probabilities[4]) - (probabilities[0] + probabilities[1]);
+
+    // 5) Horizon momentum estimate = sequence momentum + expected Δmomentum
+    let seq_start = sequence_prices.first().copied().unwrap_or(0.0);
+    let seq_end = sequence_prices.last().copied().unwrap_or(0.0);
+    let sequence_momentum = if seq_start.abs() < 1e-12 {
+        0.0
+    } else {
+        (seq_end - seq_start) / seq_start
+    };
+    let horizon_momentum_estimate = sequence_momentum + expected_momentum_change;
 
     Ok(DirectionReconstruction {
         probabilities: probabilities.to_vec(),
@@ -648,6 +735,15 @@ pub fn reconstruct_direction(
         trend_consistency,
         base_threshold: final_base_threshold,
         extreme_threshold: final_extreme_threshold,
+        // New fields
+        momentum_ci_10: q10,
+        momentum_ci_90: q90,
+        directional_magnitude,
+        class_margin,
+        entropy_norm,
+        directional_skew,
+        horizon_momentum_estimate,
+        persistence_score: trend_consistency,
     })
 }
 

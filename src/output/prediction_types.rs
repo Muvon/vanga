@@ -141,10 +141,18 @@ pub struct DirectionPrediction {
 
     /// Aggregated sideways probability (SIDEWAYS only) - NEW for proper 3-way aggregation
     pub sideways_probability_aggregated: f64,
-
+    // Reconstruction metrics (from direction reconstruction)
+    pub expected_momentum_change: f64,
+    pub momentum_ci_10: f64,
+    pub momentum_ci_90: f64,
+    pub directional_magnitude: f64,
+    pub class_margin: f64,
+    pub entropy_norm: f64,
+    pub directional_skew: f64,
+    pub horizon_momentum_estimate: f64,
+    pub persistence_score: f64,
     /// Most likely direction class
     pub prediction: String,
-
     /// Confidence in direction prediction (highest probability)
     pub confidence: f64,
 }
@@ -293,7 +301,6 @@ impl DirectionPrediction {
             calibrated_confidence,
             final_confidence
         );
-
         self.confidence = final_confidence;
     }
 
@@ -319,6 +326,16 @@ impl DirectionPrediction {
             sideways_probability_aggregated: 0.0,
             prediction: "UNKNOWN".to_string(),
             confidence: 0.0,
+            // Reconstruction metrics defaults
+            expected_momentum_change: 0.0,
+            momentum_ci_10: 0.0,
+            momentum_ci_90: 0.0,
+            directional_magnitude: 0.0,
+            class_margin: 0.0,
+            entropy_norm: 0.0,
+            directional_skew: 0.0,
+            horizon_momentum_estimate: 0.0,
+            persistence_score: 0.0,
         }
     }
 
@@ -332,6 +349,7 @@ impl DirectionPrediction {
         prediction.pump_probability = pump;
         prediction.up_probability_aggregated = up + pump;
         prediction.down_probability_aggregated = down + dump;
+        prediction.sideways_probability_aggregated = sideways;
         prediction.update_prediction_and_confidence();
         prediction
     }

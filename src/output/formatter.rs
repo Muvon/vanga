@@ -745,6 +745,17 @@ impl OutputFormatter {
                     // Update existing fields with reconstruction results
                     prediction.breakout_probability = reconstruction.breakout_probability;
 
+                    // Populate reconstruction metrics into prediction
+                    prediction.expected_momentum_change = reconstruction.expected_momentum_change;
+                    prediction.momentum_ci_10 = reconstruction.momentum_ci_10;
+                    prediction.momentum_ci_90 = reconstruction.momentum_ci_90;
+                    prediction.directional_magnitude = reconstruction.directional_magnitude;
+                    prediction.class_margin = reconstruction.class_margin;
+                    prediction.entropy_norm = reconstruction.entropy_norm;
+                    prediction.directional_skew = reconstruction.directional_skew;
+                    prediction.horizon_momentum_estimate = reconstruction.horizon_momentum_estimate;
+                    prediction.persistence_score = reconstruction.persistence_score;
+
                     // Use reconstruction data to enhance existing calculations
                     let enhanced_upside = reconstruction.expected_trend_acceleration.max(0.0);
                     let enhanced_downside = (-reconstruction.expected_trend_acceleration).max(0.0);
