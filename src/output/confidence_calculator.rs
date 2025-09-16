@@ -127,8 +127,7 @@ impl ConfidenceCalculator {
 
                 // Core confidence: weighted average with agreement boost
                 core_confidence =
-                    (dir_score * 0.65 + price_score * 0.35) * (0.8 + core_agreement * 0.4);
-
+                    (dir_score * 0.60 + price_score * 0.40) * (0.8 + core_agreement * 0.4);
                 // CRYPTO INSIGHT: Strong directional moves need price level confirmation
                 if direction.pump_probability > 0.3 || direction.dump_probability > 0.3 {
                     // For pump/dump scenarios, price levels are MORE important
@@ -197,11 +196,11 @@ impl ConfidenceCalculator {
         if let Some(ref volatility) = prediction.volatility {
             // CRYPTO-SPECIFIC: Medium-High volatility is NORMAL and tradeable
             risk_adjustment = match volatility.regime.as_str() {
-                "VERY_LOW" => 0.85,  // Too quiet = less opportunity
-                "LOW" => 0.95,       // Slightly below normal
-                "MEDIUM" => 1.0,     // Perfect for crypto trading
-                "HIGH" => 0.95,      // Normal for crypto, slight caution
-                "VERY_HIGH" => 0.75, // Extreme = reduce confidence
+                "VERY_LOW" => 0.90,
+                "LOW" => 0.98,
+                "MEDIUM" => 1.02,
+                "HIGH" => 0.98,
+                "VERY_HIGH" => 0.85,
                 _ => 1.0,
             };
 
@@ -223,11 +222,11 @@ impl ConfidenceCalculator {
 
         // 5. CRYPTO-SPECIFIC ADJUSTMENTS
 
-        // Check for confluence (multiple models strongly agreeing)
         let agreement_factor = self.calculate_target_agreement(prediction);
-        if agreement_factor > 1.1 {
-            // Strong agreement = confidence boost
-            final_confidence *= agreement_factor;
+        if agreement_factor > 1.05 {
+            // Strong agreement = confidence boost (wider activation, capped)
+            let boost = (agreement_factor * 1.15).min(1.25);
+            final_confidence *= boost;
         } else if agreement_factor < 0.9 {
             // Disagreement = reduce but don't kill confidence (crypto is noisy)
             final_confidence *= 0.8 + agreement_factor * 0.2;
@@ -259,9 +258,14 @@ impl ConfidenceCalculator {
             .map(|bin| bin.probability)
             .fold(0.0, f64::max);
 
-        // Use unified calibration function - price levels already have properly calibrated confidence
-        // but we enhance it slightly for crypto trading context
-        let base_confidence = calibrate_5_class_confidence(max_prob);
+        // Base confidence from unified calibration
+        // Use combined (calibrated + entropy + deviation) for better sensitivity to peaked distributions
+        let probs: Vec<f64> = price_levels
+            .bins
+            .values()
+            .map(|bin| bin.probability)
+            .collect();
+        let base_confidence = calculate_combined_5_class_confidence(&probs, max_prob);
 
         // Slight enhancement for price levels (most critical for trading decisions)
         // But keep it conservative to avoid overconfidence
@@ -293,8 +297,20 @@ impl ConfidenceCalculator {
             0.95 // 5% reduction for poor R:R
         };
 
-        // Apply R:R adjustment conservatively
-        let enhanced_confidence = base_confidence * rr_multiplier;
+        // Apply R:R adjustment conservatively and add margin-based clarity boost (3-class separation)
+        // Compute margin between top-1 and top-2 among aggregated probabilities
+        let mut aggs = [
+            direction.up_probability_aggregated,
+            direction.down_probability_aggregated,
+            direction.sideways_probability,
+        ];
+        aggs.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        let p1 = aggs[0];
+        let p2 = aggs[1];
+        // Normalize margin to [0,1] for 3-class (uniform baseline=1/3)
+        let margin = ((p1 - p2) / (1.0 - (1.0 / 3.0))).clamp(0.0, 1.0);
+        let margin_boost = 1.0 + 0.08 * margin; // up to +8%
+        let enhanced_confidence = base_confidence * rr_multiplier * margin_boost;
 
         // Conservative clamping for crypto trading
         enhanced_confidence.clamp(0.20, 0.95)
@@ -315,8 +331,8 @@ impl ConfidenceCalculator {
         let max_prob = probs.iter().fold(0.0_f64, |a, &b| a.max(b));
 
         // Base confidence from unified calibration
-        let base_confidence = calibrate_5_class_confidence(max_prob);
-
+        // Use combined (calibrated + entropy + deviation) for better sensitivity to peaked distributions
+        let base_confidence = calculate_combined_5_class_confidence(&probs, max_prob);
         // Extreme sentiment bonus (very bearish/bullish are stronger signals in crypto)
         let extreme_sentiment =
             sentiment.very_bearish_probability + sentiment.very_bullish_probability;
@@ -348,9 +364,9 @@ impl ConfidenceCalculator {
 
         // Find max probability for unified calibration
         let max_prob = probs.iter().fold(0.0_f64, |a, &b| a.max(b));
-
         // Base confidence from unified calibration
-        let base_confidence = calibrate_5_class_confidence(max_prob);
+        // Use combined (calibrated + entropy + deviation) for better sensitivity to peaked distributions
+        let base_confidence = calculate_combined_5_class_confidence(&probs, max_prob);
 
         // High volume bonus (high/very high volume are stronger signals in crypto)
         let high_volume_signal = volume.high_probability + volume.very_high_probability;
@@ -912,16 +928,16 @@ pub fn calibrate_5_class_confidence(max_probability: f64) -> f64 {
         0.85 + (max_probability - 0.50) * 0.30
     } else if max_probability >= 0.42 {
         // EXCELLENT: Top 5% of predictions in well-calibrated models
-        // Maps: 0.42→0.78, 0.50→0.85
-        0.78 + (max_probability - 0.42) * 0.875
+        // Maps: 0.42→0.80, 0.50→0.85
+        0.80 + (max_probability - 0.42) * 0.625
     } else if max_probability >= 0.35 {
         // VERY GOOD: Top 15% of predictions, this is actually excellent performance
-        // Maps: 0.35→0.68, 0.42→0.78
-        0.68 + (max_probability - 0.35) * 1.43
+        // Maps: 0.35→0.70, 0.42→0.80
+        0.70 + (max_probability - 0.35) * 1.4285714286
     } else if max_probability >= 0.30 {
         // GOOD: Top 30% of predictions, significantly better than random
-        // Maps: 0.30→0.55, 0.35→0.68
-        0.55 + (max_probability - 0.30) * 2.60
+        // Maps: 0.30→0.58, 0.35→0.70
+        0.58 + (max_probability - 0.30) * 2.40
     } else if max_probability >= 0.25 {
         // MODERATE: Better than random, tradeable signal
         // Maps: 0.25→0.42, 0.30→0.55
