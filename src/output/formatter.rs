@@ -855,19 +855,40 @@ impl OutputFormatter {
             volatility_output.very_high_probability,
         );
 
+        // Add enhanced metrics that don't require reconstruction
+        let probabilities = vec![
+            volatility_output.very_low_probability,
+            volatility_output.low_probability,
+            volatility_output.medium_probability,
+            volatility_output.high_probability,
+            volatility_output.very_high_probability,
+        ];
+
+        // Regime margin and skew are useful even without reconstruction
+        let mut sorted = probabilities.clone();
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        if sorted.len() >= 2 {
+            let margin = (sorted[0] - sorted[1]).max(0.0);
+            prediction.regime_margin = Some(margin);
+        }
+        let low_sum = probabilities[0] + probabilities[1];
+        let high_sum = probabilities[3] + probabilities[4];
+        prediction.high_low_skew = Some((high_sum - low_sum).clamp(-1.0, 1.0));
+        
+        // Simple persistence proxy: 1 - normalized entropy (0..1)
+        let entropy: f64 = probabilities
+            .iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.ln())
+            .sum();
+        let max_entropy = 5f64.ln();
+        let persistence = (1.0 - (entropy / max_entropy)).clamp(0.0, 1.0);
+        prediction.persistence_score = Some(persistence);
+
         // Enhance with reconstruction if sequence data is available
         if let Some(ohlcv_data) = sequence_ohlcv {
-            let probabilities = vec![
-                volatility_output.very_low_probability,
-                volatility_output.low_probability,
-                volatility_output.medium_probability,
-                volatility_output.high_probability,
-                volatility_output.very_high_probability,
-            ];
-
             // Use enhanced reconstruction from volatility module with calibrated parameters
-            let volatility_result = if let Some(ref calibrated_params) = self.calibrated_parameters
-            {
+            let volatility_result = if let Some(ref calibrated_params) = self.calibrated_parameters {
                 // Use calibrated parameters for volatility reconstruction
                 reconstruct_volatility(&probabilities, ohlcv_data, &calibrated_params.volatility)
             } else {
@@ -877,30 +898,44 @@ impl OutputFormatter {
                 ))
             };
 
-            match volatility_result {
-                Ok(reconstruction) => {
-                    // Update existing fields with reconstruction results
-                    // Use ATR ratio to enhance expected range calculation
-                    if let Some(bandwidth) = sequence_bandwidth_percent {
-                        prediction.expected_range_percent =
-                            bandwidth * reconstruction.expected_atr_ratio;
-                    }
+            if let Ok(reconstruction) = volatility_result {
+                // Attach ATR ratio (dimensionless)
+                prediction.atr_ratio = Some(reconstruction.expected_atr_ratio);
 
-                    // Expected ATR ratio is already in reconstruction
-                    // Clamp to reasonable range (0.1% to 100% expected range)
-                    prediction.expected_range_percent =
-                        prediction.expected_range_percent.clamp(0.001, 1.0);
+                // Use ATR ratio with provided bandwidth to estimate symmetric percent range
+                if let Some(bandwidth) = sequence_bandwidth_percent {
+                    let expected = (bandwidth * reconstruction.expected_atr_ratio).clamp(0.001, 1.0);
+                    prediction.expected_range_percent = expected;
+                    prediction.expected_range_low_pct = Some(-expected);
+                    prediction.expected_range_high_pct = Some(expected);
+                }
 
-                    log::debug!(
-                        "🎯 Volatility reconstruction: atr_ratio={:.3}, vol_change={:.2}%, extreme_prob={:.3}",
-                        reconstruction.expected_atr_ratio,
-                        reconstruction.expected_volatility_change,
-                        reconstruction.extreme_volatility_probability
-                    );
-                }
-                Err(e) => {
-                    log::warn!("Volatility reconstruction failed: {}, using fallback", e);
-                }
+                // Determine volatility trend using ATR ratio (dimensionless)
+                let trend = if reconstruction.expected_atr_ratio > 1.02 {
+                    "RISING"
+                } else if reconstruction.expected_atr_ratio < 0.98 {
+                    "FALLING"
+                } else {
+                    "STABLE"
+                };
+                prediction.volatility_trend = Some(trend.to_string());
+
+                log::debug!(
+                    "🎯 Volatility reconstruction: atr_ratio={:.3}, vol_change={:.2}%, extreme_prob={:.3}",
+                    reconstruction.expected_atr_ratio,
+                    reconstruction.expected_volatility_change,
+                    reconstruction.extreme_volatility_probability
+                );
+            } else {
+                log::warn!("Volatility reconstruction failed, using fallback");
+            }
+        }
+
+        // Fallback trend based on skew if not set via reconstruction
+        if prediction.volatility_trend.is_none() {
+            if let Some(s) = prediction.high_low_skew {
+                let trend = if s > 0.10 { "RISING" } else if s < -0.10 { "FALLING" } else { "STABLE" };
+                prediction.volatility_trend = Some(trend.to_string());
             }
         }
 

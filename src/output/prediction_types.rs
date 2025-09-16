@@ -404,6 +404,31 @@ pub struct VolatilityPrediction {
 
     /// Confidence in volatility prediction
     pub confidence: f64,
+    /// Optional: top1-top2 probability margin for regime stability (0..1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regime_margin: Option<f64>,
+
+    /// Optional: expected ATR ratio (dimensionless), from reconstruction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atr_ratio: Option<f64>,
+
+    /// Optional: symmetric expected range bounds in percent of price
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_range_low_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_range_high_pct: Option<f64>,
+
+    /// Optional: skew toward high vs low volatility ((P_high+P_vhigh)-(P_low+P_vlow))
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high_low_skew: Option<f64>,
+
+    /// Optional: volatility trend direction ("RISING", "FALLING", "STABLE")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volatility_trend: Option<String>,
+
+    /// Optional: persistence score (0..1) based on probability distribution entropy
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence_score: Option<f64>,
 }
 
 impl VolatilityPrediction {
@@ -524,7 +549,6 @@ impl VolatilityPrediction {
         (calibrated * 0.7 + raw_confidence * 0.3).clamp(0.2, 0.95)
     }
 
-    /// Create a new VolatilityPrediction with default values
     pub fn new() -> Self {
         Self {
             very_low_probability: 0.0,
@@ -540,6 +564,14 @@ impl VolatilityPrediction {
             regime_confidence: 0.0,
             regime: "UNKNOWN".to_string(),
             confidence: 0.0,
+            // Optional, percent-only fields for downstream usage
+            regime_margin: None,
+            atr_ratio: None,
+            expected_range_low_pct: None,
+            expected_range_high_pct: None,
+            high_low_skew: None,
+            volatility_trend: None,
+            persistence_score: None,
         }
     }
 
