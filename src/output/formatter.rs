@@ -577,6 +577,71 @@ impl OutputFormatter {
                     log::info!("Volatility raw confidence: {:.3}", vol.confidence);
                 }
 
+                // Simple consistency check between price_levels and direction
+                // Rule: neutral is allowed with anything; opposite strong signals are rejected
+                if let (Some(ref price_levels), Some(ref direction)) = (&result.price_levels, &result.direction) {
+                    let pl_up = price_levels
+                        .bins
+                        .get("moderate_up")
+                        .map(|b| b.probability)
+                        .unwrap_or(0.0)
+                        + price_levels
+                            .bins
+                            .get("strong_up")
+                            .map(|b| b.probability)
+                            .unwrap_or(0.0);
+                    let pl_down = price_levels
+                        .bins
+                        .get("moderate_down")
+                        .map(|b| b.probability)
+                        .unwrap_or(0.0)
+                        + price_levels
+                            .bins
+                            .get("strong_down")
+                            .map(|b| b.probability)
+                            .unwrap_or(0.0);
+                    let pl_neutral = price_levels
+                        .bins
+                        .get("neutral")
+                        .map(|b| b.probability)
+                        .unwrap_or(0.0);
+
+                    enum Bias { Up, Down, Neutral }
+                    let pl_bias = if pl_neutral >= pl_up && pl_neutral >= pl_down {
+                        Bias::Neutral
+                    } else if pl_up > pl_down && pl_up > pl_neutral {
+                        Bias::Up
+                    } else if pl_down > pl_up && pl_down > pl_neutral {
+                        Bias::Down
+                    } else {
+                        Bias::Neutral
+                    };
+
+                    let dir_up = direction.up_probability_aggregated;
+                    let dir_down = direction.down_probability_aggregated;
+                    let dir_sideways = direction.sideways_probability_aggregated;
+                    let dir_bias = if dir_sideways >= dir_up && dir_sideways >= dir_down {
+                        Bias::Neutral
+                    } else if dir_up > dir_down && dir_up > dir_sideways {
+                        Bias::Up
+                    } else if dir_down > dir_up && dir_down > dir_sideways {
+                        Bias::Down
+                    } else {
+                        Bias::Neutral
+                    };
+
+                    let is_opposite = matches!((pl_bias, dir_bias), (Bias::Up, Bias::Down) | (Bias::Down, Bias::Up));
+                    if is_opposite {
+                        let pb = match pl_bias { Bias::Up => "UP", Bias::Down => "DOWN", Bias::Neutral => "NEUTRAL" };
+                        let db = match dir_bias { Bias::Up => "UP", Bias::Down => "DOWN", Bias::Neutral => "NEUTRAL" };
+                        log::error!(
+                            "❌ Inconsistent prediction for horizon {}: price_levels={}, direction={}. Skipping signal.",
+                            horizon, pb, db
+                        );
+                        continue; // Drop this prediction entirely
+                    }
+                }
+
                 // Log confidence details for debugging
                 log::info!(
                     "🎯 Enhanced Confidence: {:.2}% (Base: {:.2}%, Agreement Factor: {:.2}x, Min Required: {:.2}%)",
