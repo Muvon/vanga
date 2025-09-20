@@ -579,7 +579,9 @@ impl OutputFormatter {
 
                 // Simple consistency check between price_levels and direction
                 // Rule: neutral is allowed with anything; opposite strong signals are rejected
-                if let (Some(ref price_levels), Some(ref direction)) = (&result.price_levels, &result.direction) {
+                if let (Some(ref price_levels), Some(ref direction)) =
+                    (&result.price_levels, &result.direction)
+                {
                     let pl_up = price_levels
                         .bins
                         .get("moderate_up")
@@ -606,7 +608,12 @@ impl OutputFormatter {
                         .map(|b| b.probability)
                         .unwrap_or(0.0);
 
-                    enum Bias { Up, Down, Neutral }
+                    #[derive(Copy, Clone)]
+                    enum Bias {
+                        Up,
+                        Down,
+                        Neutral,
+                    }
                     let pl_bias = if pl_neutral >= pl_up && pl_neutral >= pl_down {
                         Bias::Neutral
                     } else if pl_up > pl_down && pl_up > pl_neutral {
@@ -630,10 +637,21 @@ impl OutputFormatter {
                         Bias::Neutral
                     };
 
-                    let is_opposite = matches!((pl_bias, dir_bias), (Bias::Up, Bias::Down) | (Bias::Down, Bias::Up));
+                    let is_opposite = matches!(
+                        (pl_bias, dir_bias),
+                        (Bias::Up, Bias::Down) | (Bias::Down, Bias::Up)
+                    );
                     if is_opposite {
-                        let pb = match pl_bias { Bias::Up => "UP", Bias::Down => "DOWN", Bias::Neutral => "NEUTRAL" };
-                        let db = match dir_bias { Bias::Up => "UP", Bias::Down => "DOWN", Bias::Neutral => "NEUTRAL" };
+                        let pb = match pl_bias {
+                            Bias::Up => "UP",
+                            Bias::Down => "DOWN",
+                            Bias::Neutral => "NEUTRAL",
+                        };
+                        let db = match dir_bias {
+                            Bias::Up => "UP",
+                            Bias::Down => "DOWN",
+                            Bias::Neutral => "NEUTRAL",
+                        };
                         log::error!(
                             "❌ Inconsistent prediction for horizon {}: price_levels={}, direction={}. Skipping signal.",
                             horizon, pb, db
@@ -939,7 +957,7 @@ impl OutputFormatter {
         let low_sum = probabilities[0] + probabilities[1];
         let high_sum = probabilities[3] + probabilities[4];
         prediction.high_low_skew = Some((high_sum - low_sum).clamp(-1.0, 1.0));
-        
+
         // Simple persistence proxy: 1 - normalized entropy (0..1)
         let entropy: f64 = probabilities
             .iter()
@@ -953,7 +971,8 @@ impl OutputFormatter {
         // Enhance with reconstruction if sequence data is available
         if let Some(ohlcv_data) = sequence_ohlcv {
             // Use enhanced reconstruction from volatility module with calibrated parameters
-            let volatility_result = if let Some(ref calibrated_params) = self.calibrated_parameters {
+            let volatility_result = if let Some(ref calibrated_params) = self.calibrated_parameters
+            {
                 // Use calibrated parameters for volatility reconstruction
                 reconstruct_volatility(&probabilities, ohlcv_data, &calibrated_params.volatility)
             } else {
@@ -969,7 +988,8 @@ impl OutputFormatter {
 
                 // Use ATR ratio with provided bandwidth to estimate symmetric percent range
                 if let Some(bandwidth) = sequence_bandwidth_percent {
-                    let expected = (bandwidth * reconstruction.expected_atr_ratio).clamp(0.001, 1.0);
+                    let expected =
+                        (bandwidth * reconstruction.expected_atr_ratio).clamp(0.001, 1.0);
                     prediction.expected_range_percent = expected;
                     prediction.expected_range_low_pct = Some(-expected);
                     prediction.expected_range_high_pct = Some(expected);
@@ -999,7 +1019,13 @@ impl OutputFormatter {
         // Fallback trend based on skew if not set via reconstruction
         if prediction.volatility_trend.is_none() {
             if let Some(s) = prediction.high_low_skew {
-                let trend = if s > 0.10 { "RISING" } else if s < -0.10 { "FALLING" } else { "STABLE" };
+                let trend = if s > 0.10 {
+                    "RISING"
+                } else if s < -0.10 {
+                    "FALLING"
+                } else {
+                    "STABLE"
+                };
                 prediction.volatility_trend = Some(trend.to_string());
             }
         }
