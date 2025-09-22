@@ -662,31 +662,62 @@ pub fn reconstruct_volume(
         ));
     }
 
-    // Convert calibrated parameters to log thresholds with minimum thresholds applied
+    // RECONSTRUCTION MUST MATCH TRAINING LOGIC EXACTLY
+    // Training uses: log_volume_ratio = ln(horizon_volume / sequence_volume)
+    // Classification is based on log_volume_ratio thresholds
+
+    // Convert calibrated parameters to log thresholds (same as training)
     let base_threshold = calibrated_params
         .bandwidth
         .max(calibrated_params.min_base_threshold);
     let extreme_threshold = (calibrated_params.extreme_multiplier * calibrated_params.bandwidth)
         .max(calibrated_params.min_extreme_threshold);
 
-    let half_bandwidth = base_threshold / 2.0;
-    let extreme_bandwidth = extreme_threshold;
+    // These are the SAME thresholds used in training
+    let log_thresholds = LogVolumeThresholds {
+        very_low_max: (1.0_f64 - extreme_threshold).ln(),
+        low_max: (1.0_f64 - base_threshold).ln(),
+        medium_max: (1.0_f64 + base_threshold).ln(),
+        high_max: (1.0_f64 + extreme_threshold).ln(),
+    };
 
-    // Convert log thresholds to ratio boundaries
-    let ratio_boundaries = [
-        (-extreme_bandwidth).exp(), // Very Low upper bound
-        (-half_bandwidth).exp(),    // Low upper bound
-        half_bandwidth.exp(),       // Medium upper bound
-        extreme_bandwidth.exp(),    // High upper bound
+    // Calculate log ratio midpoints for each class (matching training logic)
+    // This ensures bidirectional consistency with classification
+    let log_ratio_midpoints = [
+        // Very Low: midpoint of (-∞, very_low_max]
+        log_thresholds.very_low_max - (log_thresholds.low_max - log_thresholds.very_low_max) / 2.0,
+        // Low: midpoint of (very_low_max, low_max]
+        (log_thresholds.very_low_max + log_thresholds.low_max) / 2.0,
+        // Medium: midpoint of (low_max, medium_max]
+        (log_thresholds.low_max + log_thresholds.medium_max) / 2.0,
+        // High: midpoint of (medium_max, high_max]
+        (log_thresholds.medium_max + log_thresholds.high_max) / 2.0,
+        // Very High: midpoint of (high_max, +∞)
+        log_thresholds.high_max + (log_thresholds.high_max - log_thresholds.medium_max) / 2.0,
     ];
 
-    // Define volume ratio ranges for each class
+    // Convert log ratios back to actual volume ratios
+    let class_volume_ratios: Vec<f64> = log_ratio_midpoints
+        .iter()
+        .map(|&log_ratio| log_ratio.exp())
+        .collect();
+
+    // Define volume ratio ranges for each class (for display purposes)
     let volume_ratio_ranges = vec![
-        [0.0, ratio_boundaries[0]],                 // Very Low
-        [ratio_boundaries[0], ratio_boundaries[1]], // Low
-        [ratio_boundaries[1], ratio_boundaries[2]], // Medium
-        [ratio_boundaries[2], ratio_boundaries[3]], // High
-        [ratio_boundaries[3], f64::INFINITY],       // Very High
+        [0.0, log_thresholds.very_low_max.exp()], // Very Low
+        [
+            log_thresholds.very_low_max.exp(),
+            log_thresholds.low_max.exp(),
+        ], // Low
+        [
+            log_thresholds.low_max.exp(),
+            log_thresholds.medium_max.exp(),
+        ], // Medium
+        [
+            log_thresholds.medium_max.exp(),
+            log_thresholds.high_max.exp(),
+        ], // High
+        [log_thresholds.high_max.exp(), f64::INFINITY], // Very High
     ];
 
     // Convert to absolute volume ranges
@@ -718,19 +749,11 @@ pub fn reconstruct_volume(
     let max_prob = probabilities.iter().fold(0.0_f64, |a, &b| a.max(b));
     let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
-    // Calculate expected volume ratio (weighted average)
-    let class_midpoints = [
-        ratio_boundaries[0] * 0.5,                         // Very Low
-        (ratio_boundaries[0] + ratio_boundaries[1]) / 2.0, // Low
-        (ratio_boundaries[1] + ratio_boundaries[2]) / 2.0, // Medium
-        (ratio_boundaries[2] + ratio_boundaries[3]) / 2.0, // High
-        ratio_boundaries[3] * 1.5,                         // Very High
-    ];
-
+    // Calculate expected volume ratio (weighted average of class ratios)
     let expected_volume_ratio = probabilities
         .iter()
-        .zip(class_midpoints.iter())
-        .map(|(prob, midpoint)| prob * midpoint)
+        .zip(class_volume_ratios.iter())
+        .map(|(prob, ratio)| prob * ratio)
         .sum::<f64>();
 
     // Generate interpretation

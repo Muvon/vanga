@@ -31,7 +31,11 @@ mod price_level_test;
 #[cfg(test)]
 mod direction_test;
 #[cfg(test)]
+mod volatility_reconstruction_test;
+#[cfg(test)]
 mod volatility_test;
+#[cfg(test)]
+mod volume_reconstruction_test;
 #[cfg(test)]
 mod volume_test;
 

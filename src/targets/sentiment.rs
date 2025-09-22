@@ -772,12 +772,18 @@ pub fn reconstruct_sentiment(
     ];
 
     // Calculate representative momentum values for each class (midpoints)
+    // This ensures bidirectional consistency with classification logic
     let class_momentum_midpoints = [
-        -extreme_threshold * 1.5,                        // Strong Panic
-        -(extreme_threshold + moderate_threshold) / 2.0, // Moderate Panic
-        0.0,                                             // Neutral
-        (moderate_threshold + extreme_threshold) / 2.0,  // Moderate Greed
-        extreme_threshold * 1.5,                         // Strong Greed
+        // Strong Panic: midpoint of (-∞, -extreme_threshold]
+        -extreme_threshold - (extreme_threshold - moderate_threshold) / 2.0,
+        // Moderate Panic: midpoint of (-extreme_threshold, -moderate_threshold]
+        -(extreme_threshold + moderate_threshold) / 2.0,
+        // Neutral: midpoint of (-moderate_threshold, +moderate_threshold)
+        0.0,
+        // Moderate Greed: midpoint of [+moderate_threshold, +extreme_threshold)
+        (moderate_threshold + extreme_threshold) / 2.0,
+        // Strong Greed: midpoint of [+extreme_threshold, +∞)
+        extreme_threshold + (extreme_threshold - moderate_threshold) / 2.0,
     ];
 
     // Convert momentum ranges to sentiment ranges (for compatibility)

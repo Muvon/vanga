@@ -1268,111 +1268,6 @@ fn calculate_atr_consistency(atr_values: &[f64]) -> f64 {
     (1.0 / (1.0 + coefficient_of_variation)).clamp(0.0, 1.0)
 }
 
-/// Calculate enhanced score midpoints for each volatility class using proper mathematical boundaries
-///
-/// This function calculates the actual enhanced score boundaries for each class and finds
-/// the mathematical midpoints, eliminating magic numbers and making it fully adaptive.
-///
-/// # Arguments
-/// * `sequence_ohlcv` - Sequence OHLCV data for feature calculation
-/// * `adaptive_params` - Adaptive parameters for threshold calculation
-/// * `moderate_threshold` - Moderate threshold for classification
-/// * `extreme_threshold` - Extreme threshold for classification
-///
-/// # Returns
-/// * `Vec<f64>` - Enhanced score midpoints for each class [VeryLow, Low, Medium, High, VeryHigh]
-fn calculate_enhanced_score_midpoints(
-    sequence_ohlcv: &[MarketDataRow],
-    calibrated_params: &crate::targets::calibration::VolatilityParams,
-    moderate_threshold: f64,
-    extreme_threshold: f64,
-) -> Result<Vec<f64>> {
-    // Calculate sequence-based features (available during prediction)
-    let sequence_atr = calculate_simple_atr_with_params(
-        sequence_ohlcv,
-        calibrated_params.min_volatility_baseline,
-    )?;
-    let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline);
-
-    // Calculate sequence-only features for neutral approximation
-    let sequence_trend = calculate_sequence_volatility_trend(sequence_ohlcv)?;
-    let sequence_volume_weighted =
-        calculate_volume_weighted_atr(sequence_ohlcv, calibrated_params.min_volatility_baseline)?;
-    let sequence_persistence = calculate_sequence_volatility_persistence(sequence_ohlcv)?;
-
-    // Calculate actual enhanced score boundaries (same as classify_enhanced_volatility_score)
-    let boundary_ratios = [
-        1.0 - extreme_threshold,  // VeryLow/Low boundary
-        1.0 - moderate_threshold, // Low/Medium boundary
-        1.0 + moderate_threshold, // Medium/High boundary
-        1.0 + extreme_threshold,  // High/VeryHigh boundary
-    ];
-
-    // Calculate enhanced scores for boundaries
-    let mut boundary_enhanced_scores = Vec::new();
-    for &ratio in &boundary_ratios {
-        // Use neutral features for boundary calculation (no magic scaling)
-        let trend_change = sequence_trend * (ratio - 1.0); // Proportional to ratio change
-        let volume_change = ratio * (sequence_volume_weighted / baseline_atr);
-        let persistence = sequence_persistence;
-
-        let enhanced_score =
-            combine_volatility_features(ratio, trend_change, volume_change, persistence);
-        boundary_enhanced_scores.push(enhanced_score);
-    }
-
-    // Calculate mathematical midpoints between boundaries
-    let enhanced_score_midpoints = vec![
-        // VeryLow: midpoint between 0 and first boundary
-        boundary_enhanced_scores[0] * 0.5,
-        // Low: midpoint between first and second boundary
-        (boundary_enhanced_scores[0] + boundary_enhanced_scores[1]) * 0.5,
-        // Medium: midpoint between second and third boundary (around 1.0)
-        (boundary_enhanced_scores[1] + boundary_enhanced_scores[2]) * 0.5,
-        // High: midpoint between third and fourth boundary
-        (boundary_enhanced_scores[2] + boundary_enhanced_scores[3]) * 0.5,
-        // VeryHigh: extrapolate beyond fourth boundary using same spacing as High class
-        boundary_enhanced_scores[3] + (boundary_enhanced_scores[3] - boundary_enhanced_scores[2]),
-    ];
-
-    Ok(enhanced_score_midpoints)
-}
-
-/// Calculate volatility trend from sequence data only (for prediction)
-///
-/// This approximates the trend change calculation using only sequence data
-/// by analyzing the volatility trend within the sequence itself.
-fn calculate_sequence_volatility_trend(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    if sequence_ohlcv.len() < 3 {
-        return Ok(0.0);
-    }
-
-    let atr_values = calculate_rolling_atr_values(sequence_ohlcv)?;
-    if atr_values.len() < 2 {
-        return Ok(0.0);
-    }
-
-    // Calculate trend slope within sequence
-    calculate_atr_trend_slope(&atr_values)
-}
-
-/// Calculate volatility persistence from sequence data only (for prediction)
-///
-/// This approximates the persistence calculation using only sequence data
-/// by analyzing the consistency within the sequence itself.
-fn calculate_sequence_volatility_persistence(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    if sequence_ohlcv.len() < 3 {
-        return Ok(0.5);
-    }
-
-    let atr_values = calculate_rolling_atr_values(sequence_ohlcv)?;
-    if atr_values.is_empty() {
-        return Ok(0.5);
-    }
-
-    Ok(calculate_atr_consistency(&atr_values))
-}
-
 /// Log volatility class distribution with logarithmic ratio analysis
 fn log_volatility_distribution(targets: &[i32], horizon: &str) {
     let class_names = ["VeryLow", "Low", "Medium", "High", "VeryHigh"];
@@ -1453,6 +1348,8 @@ pub struct VolatilityReconstruction {
     pub log_thresholds: LogVolatilityThresholds,
     /// Training ATR baseline for ratio calculations
     pub train_atr: f64,
+    /// Recommended stop distance multiplier (for direct use in predictions)
+    pub recommended_stop_multiplier: f64,
 }
 
 /// Reconstruct volatility predictions from model probabilities using enhanced multi-feature approach
@@ -1503,20 +1400,36 @@ pub fn reconstruct_volatility(
     let moderate_threshold = calibrated_params.bandwidth;
     let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
 
-    // Calculate enhanced score midpoints for each class using same logic as training
-    // These represent the enhanced scores that would classify to each class
-    let enhanced_score_midpoints = calculate_enhanced_score_midpoints(
-        sequence_ohlcv,
-        calibrated_params,
-        moderate_threshold,
-        extreme_threshold,
-    )?;
+    // RECONSTRUCTION MUST MATCH TRAINING LOGIC EXACTLY
+    // Training uses: atr_momentum = (horizon_atr - baseline_atr) / baseline_atr
+    // Which simplifies to: atr_momentum = (horizon_atr / baseline_atr) - 1
+    // Therefore: horizon_atr / baseline_atr = atr_momentum + 1
 
-    // Convert enhanced scores back to basic ATR ratios for compatibility
-    let class_ratio_midpoints: Vec<f64> = enhanced_score_midpoints.clone();
+    // Calculate the ATR momentum values that represent each class midpoint
+    // Based on the classification thresholds used in training
+    // This ensures bidirectional consistency with classification logic
+    let class_atr_momentums = [
+        // VeryLow: midpoint of (-∞, -extreme_threshold]
+        -extreme_threshold - (extreme_threshold - moderate_threshold) / 2.0,
+        // Low: midpoint of (-extreme_threshold, -moderate_threshold]
+        -(extreme_threshold + moderate_threshold) / 2.0,
+        // Medium: midpoint of (-moderate_threshold, +moderate_threshold)
+        0.0,
+        // High: midpoint of [+moderate_threshold, +extreme_threshold)
+        (moderate_threshold + extreme_threshold) / 2.0,
+        // VeryHigh: midpoint of [+extreme_threshold, +∞)
+        extreme_threshold + (extreme_threshold - moderate_threshold) / 2.0,
+    ];
 
-    // Convert enhanced scores to actual ATR ratios for compatibility
-    let atr_ratios: Vec<f64> = class_ratio_midpoints.clone();
+    // Convert ATR momentums to ATR ratios (horizon_atr / baseline_atr)
+    // Using the formula: ratio = momentum + 1
+    let class_atr_ratios: Vec<f64> = class_atr_momentums
+        .iter()
+        .map(|&momentum| momentum + 1.0)
+        .collect();
+
+    // These are the actual ATR ratios for each class
+    let atr_ratios = class_atr_ratios.clone();
 
     // Convert ATR ratios to volatility change percentages
     let volatility_changes: Vec<f64> = atr_ratios
@@ -1538,10 +1451,10 @@ pub fn reconstruct_volatility(
     let max_prob = probabilities.iter().fold(0.0_f64, |a, &b| a.max(b));
     let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
-    // Calculate expected ATR ratio (weighted average)
+    // Calculate expected ATR ratio (weighted average of class ratios)
     let expected_atr_ratio = probabilities
         .iter()
-        .zip(class_ratio_midpoints.iter())
+        .zip(class_atr_ratios.iter())
         .map(|(prob, ratio)| prob * ratio)
         .sum::<f64>();
 
@@ -1561,6 +1474,12 @@ pub fn reconstruct_volatility(
         high_max: (1.0_f64 + extreme_threshold).ln(),
     };
 
+    // Calculate recommended stop distance multiplier
+    // This is the same as expected_atr_ratio but clamped to reasonable bounds
+    // Minimum 0.5 (half volatility) to avoid stops that are too tight
+    // Maximum 2.5 (2.5x volatility) to avoid stops that are too wide
+    let recommended_stop_multiplier = expected_atr_ratio.clamp(0.5, 2.5);
+
     Ok(VolatilityReconstruction {
         probabilities: probabilities.to_vec(),
         atr_ratios,
@@ -1574,6 +1493,7 @@ pub fn reconstruct_volatility(
         extreme_volatility_probability,
         log_thresholds,
         train_atr: baseline_atr,
+        recommended_stop_multiplier,
     })
 }
 

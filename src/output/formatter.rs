@@ -968,6 +968,9 @@ impl OutputFormatter {
         let persistence = (1.0 - (entropy / max_entropy)).clamp(0.0, 1.0);
         prediction.persistence_score = Some(persistence);
 
+        // Store reconstruction data for later use
+        let mut reconstruction_atr_ratio: Option<f64> = None;
+
         // Enhance with reconstruction if sequence data is available
         if let Some(ohlcv_data) = sequence_ohlcv {
             // Use enhanced reconstruction from volatility module with calibrated parameters
@@ -983,6 +986,9 @@ impl OutputFormatter {
             };
 
             if let Ok(reconstruction) = volatility_result {
+                // Store the ATR ratio for use in adaptive metrics calculation
+                reconstruction_atr_ratio = Some(reconstruction.expected_atr_ratio);
+
                 // Attach ATR ratio (dimensionless)
                 prediction.atr_ratio = Some(reconstruction.expected_atr_ratio);
 
@@ -1030,17 +1036,40 @@ impl OutputFormatter {
             }
         }
 
-        // Calculate adaptive metrics if we have the required information
+        // Calculate adaptive metrics using reconstruction data when available
         if let (Some(horizon), Some(bandwidth), Some(percentile)) = (
             training_horizon,
             sequence_bandwidth_percent,
             current_volatility_percentile,
         ) {
-            prediction.calculate_horizon_adaptive_volatility(
-                bandwidth,
-                horizon.to_string(),
-                percentile,
-            );
+            // Use the reconstruction-based method if we have the ATR ratio
+            if let Some(atr_ratio) = reconstruction_atr_ratio {
+                // Use the NEW method that properly uses reconstruction values
+                prediction.calculate_horizon_adaptive_volatility_with_reconstruction(
+                    bandwidth,
+                    horizon.to_string(),
+                    percentile,
+                    atr_ratio, // Pass the actual ATR ratio from reconstruction
+                );
+
+                log::debug!(
+                    "📊 Using reconstruction-based stop distance: ATR ratio={:.3}, bandwidth={:.2}%, stop_distance={:.2}%",
+                    atr_ratio,
+                    bandwidth,
+                    prediction.recommended_stop_distance_percent
+                );
+            } else {
+                // Fallback to old method if reconstruction failed
+                prediction.calculate_horizon_adaptive_volatility(
+                    bandwidth,
+                    horizon.to_string(),
+                    percentile,
+                );
+
+                log::debug!(
+                    "⚠️ Using fallback stop distance calculation (no reconstruction available)"
+                );
+            }
         } else {
             // Set default values for backward compatibility
             prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();

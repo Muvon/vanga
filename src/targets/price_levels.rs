@@ -715,25 +715,24 @@ pub fn reconstruct_price_levels(
         ));
     }
 
-    // Use calibrated parameters to calculate adaptive percentiles (same as classification)
-    let adaptive_percentiles = calculate_adaptive_percentiles_from_sequence(
-        sequence_ohlcv,
-        Some(calibrated_params.percentiles), // Use calibrated percentiles as fallback
-    )?;
-    let bandwidth_size = calibrated_params.bandwidth;
+    // CRITICAL FIX: Use EXACT calibrated parameters - NO recalculation during reconstruction!
+    // The calibration process already found the optimal parameters for balanced classification
+    // Recalculating them during prediction would break the training-prediction consistency
 
-    // Calculate adaptive bandwidth (same logic as training)
-    let final_bandwidth_size = calculate_adaptive_bandwidth(
-        sequence_ohlcv,
-        bandwidth_size,
-        Some(calibrated_params.momentum_factor), // Use calibrated momentum factor
-    )?;
+    // Use EXACT calibrated percentiles (no adaptive recalculation)
+    let exact_percentiles = calibrated_params.percentiles;
 
-    // Use centralized sequence reconstruction logic (same as training)
+    // Use EXACT calibrated bandwidth (no adaptive recalculation)
+    let exact_bandwidth = calibrated_params.bandwidth;
+
+    // Use EXACT calibrated neutral band factor
+    let exact_neutral_band_factor = calibrated_params.neutral_band_factor;
+
+    // Use centralized sequence reconstruction logic with EXACT calibrated parameters
     let reconstruction_config = SequenceReconstructionConfig {
-        percentiles: adaptive_percentiles, // Use calculated adaptive percentiles
-        bandwidth_size: final_bandwidth_size,
-        neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
+        percentiles: exact_percentiles,  // Use exact calibrated percentiles
+        bandwidth_size: exact_bandwidth, // Use exact calibrated bandwidth
+        neutral_band_factor: exact_neutral_band_factor, // Use exact calibrated neutral band
     };
     let analyzer = SequenceAnalyzer::new(reconstruction_config);
     let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;

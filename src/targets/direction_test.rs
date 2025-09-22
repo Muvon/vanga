@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::calibration::DirectionParams;
+    use super::super::calibration::{ClassBalance, DirectionParams};
     use super::super::direction::*;
     use polars::prelude::*;
 
@@ -61,12 +61,12 @@ mod tests {
     #[test]
     fn test_classify_direction_with_calibrated_params() {
         let params = DirectionParams {
-            sensitivity: 1.0,
+            sensitivity: 0.4,
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
-            base_multiplier: 1.0, // Reduced from 20.0 for more reasonable thresholds
-            balance: Default::default(),
+            base_multiplier: 20.0,
+            balance: ClassBalance::default(),
         };
 
         // Test strong upward ACCELERATION (should be UP or PUMP)
@@ -158,12 +158,12 @@ mod tests {
         let sequence_length = 3;
 
         let params = DirectionParams {
-            sensitivity: 0.8,
+            sensitivity: 0.4,
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
-            base_multiplier: 1.0, // Reduced for reasonable thresholds
-            balance: Default::default(),
+            base_multiplier: 20.0,
+            balance: ClassBalance::default(),
         };
 
         let result = generate_direction_targets_with_calibrated_params(
@@ -221,22 +221,22 @@ mod tests {
 
         // Low sensitivity - should classify more as sideways
         let low_sensitivity_params = DirectionParams {
-            sensitivity: 0.1,
+            sensitivity: 0.2,
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
             base_multiplier: 20.0,
-            balance: Default::default(),
+            balance: ClassBalance::default(),
         };
 
         // High sensitivity - should classify more as directional
         let high_sensitivity_params = DirectionParams {
-            sensitivity: 2.0,
+            sensitivity: 0.8,
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
             base_multiplier: 20.0,
-            balance: Default::default(),
+            balance: ClassBalance::default(),
         };
 
         let (low_class, _) = classify_direction_with_calibrated_params(
@@ -272,12 +272,12 @@ mod tests {
     #[test]
     fn test_edge_cases() {
         let params = DirectionParams {
-            sensitivity: 1.0,
+            sensitivity: 0.4,
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
             base_multiplier: 20.0,
-            balance: Default::default(),
+            balance: ClassBalance::default(),
         };
 
         // Test with minimal data
@@ -336,12 +336,12 @@ mod tests {
         ];
 
         let params = DirectionParams {
-            sensitivity: 1.0,
+            sensitivity: 0.4,
             extreme_multiplier: 2.0,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.03,
             base_multiplier: 20.0,
-            balance: Default::default(),
+            balance: ClassBalance::default(),
         };
 
         // Test reconstruction with clear up probabilities

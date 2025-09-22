@@ -611,14 +611,19 @@ pub fn reconstruct_direction(
     let final_base_threshold = base_threshold.max(min_base);
     let final_extreme_threshold = extreme_threshold.max(min_extreme);
 
-    // Representative momentum change for each class (reverse of classification)
-    // NOTE: Keep factors consistent with training-time reconstruction to preserve calibration
+    // Representative momentum change for each class (midpoint of each class range)
+    // This ensures bidirectional consistency with classification logic
     let momentum_changes = vec![
-        -final_extreme_threshold * 1.5, // DUMP: Strong negative momentum change
-        -final_base_threshold * 1.5,    // DOWN: Moderate negative momentum change
-        0.0,                            // SIDEWAYS: No momentum change
-        final_base_threshold * 1.5,     // UP: Moderate positive momentum change
-        final_extreme_threshold * 1.5,  // PUMP: Strong positive momentum change
+        // DUMP: midpoint of (-∞, -extreme_threshold]
+        -final_extreme_threshold - (final_extreme_threshold - final_base_threshold) / 2.0,
+        // DOWN: midpoint of (-extreme_threshold, -base_threshold]
+        -(final_extreme_threshold + final_base_threshold) / 2.0,
+        // SIDEWAYS: midpoint of (-base_threshold, +base_threshold]
+        0.0,
+        // UP: midpoint of (+base_threshold, +extreme_threshold]
+        (final_base_threshold + final_extreme_threshold) / 2.0,
+        // PUMP: midpoint of (+extreme_threshold, +∞)
+        final_extreme_threshold + (final_extreme_threshold - final_base_threshold) / 2.0,
     ];
 
     // Convert momentum changes to trend acceleration percentages
