@@ -31,6 +31,9 @@ pub struct PredictionMetadata {
     /// Prediction generation timestamp
     pub generated_at: DateTime<Utc>,
 
+    /// Most recent date used in input sequence
+    pub sequence_date: DateTime<Utc>,
+
     /// Number of features used
     pub feature_count: usize,
 
@@ -59,6 +62,7 @@ impl Default for PredictionMetadata {
         Self {
             model_version: "1.0.0".to_string(),
             generated_at: Utc::now(),
+            sequence_date: Utc::now(),
             feature_count: 0,
             sequence_length: 0,
             data_quality: DataQuality {

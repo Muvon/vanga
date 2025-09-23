@@ -3,7 +3,7 @@
 //! These structures define the JSON output format that matches ARCHITECTURE.md specifications
 //! while reusing existing target generation logic from src/targets/
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -961,8 +961,9 @@ impl PredictionResult {
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
                 generated_at: Utc::now(),
-                feature_count: 0,   // Will be updated by formatter
-                sequence_length: 0, // Will be updated by formatter
+                sequence_date: Utc::now(), // Default to current time
+                feature_count: 0,          // Will be updated by formatter
+                sequence_length: 0,        // Will be updated by formatter
                 data_quality: super::metadata::DataQuality {
                     completeness: 1.0,
                     freshness_hours: 0.0,
@@ -979,6 +980,7 @@ impl PredictionResult {
         current_price: f64,
         feature_count: usize,
         sequence_length: usize,
+        sequence_date: DateTime<Utc>,
     ) -> Self {
         Self {
             symbol,
@@ -996,6 +998,7 @@ impl PredictionResult {
             metadata: PredictionMetadata {
                 model_version: "1.0.0".to_string(),
                 generated_at: Utc::now(),
+                sequence_date,
                 feature_count,
                 sequence_length,
                 data_quality: super::metadata::DataQuality {

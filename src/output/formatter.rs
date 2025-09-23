@@ -333,12 +333,25 @@ impl OutputFormatter {
             let feature_count = self.feature_count.unwrap_or(raw_predictions.ncols());
             let sequence_length = self.sequence_length.unwrap_or(60); // Default LSTM sequence length
 
+            // Extract the most recent date from sequence data (always the last element)
+            let sequence_date = if let Some(ohlcv_data) = &self.sequence_ohlcv {
+                if let Some(last_row) = ohlcv_data.last() {
+                    chrono::DateTime::from_timestamp(last_row.timestamp, 0)
+                        .unwrap_or_else(chrono::Utc::now)
+                } else {
+                    chrono::Utc::now() // Empty sequence fallback
+                }
+            } else {
+                chrono::Utc::now() // Fallback if no sequence data available
+            };
+
             let mut result = PredictionResult::new_with_metadata(
                 symbol.to_string(),
                 horizon.to_string(),
                 current_price,
                 feature_count,
                 sequence_length,
+                sequence_date,
             );
 
             // Calculate sequence VWAP using the same method as training
