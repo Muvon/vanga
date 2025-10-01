@@ -263,7 +263,11 @@ impl SequenceBalancer {
         let mut selected_indices = Vec::new();
         let mut class_distribution = HashMap::new();
 
-        for (class, indices) in class_sequences {
+        // CRITICAL FIX: Sort classes for deterministic processing order (avoid HashMap randomness)
+        let mut sorted_classes: Vec<_> = class_sequences.into_iter().collect();
+        sorted_classes.sort_by_key(|(class, _)| *class);
+
+        for (class, indices) in sorted_classes {
             let available = indices.len();
             let needed = sequences_per_class;
 

@@ -437,8 +437,16 @@ impl DataPipeline {
             &config.horizons,
         )?;
 
-        // Log per-target balance summary
-        for ((target_type, horizon), dataset) in &target_balanced_datasets {
+        // Log per-target balance summary (sorted for consistent logging)
+        let mut sorted_log_targets: Vec<_> = target_balanced_datasets.keys().collect();
+        sorted_log_targets.sort_by(|a, b| {
+            match a.0.cmp(&b.0) {
+                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+                other => other,
+            }
+        });
+        for (target_type, horizon) in sorted_log_targets {
+            let dataset = target_balanced_datasets.get(&(*target_type, horizon.clone())).unwrap();
             log::info!(
                 "   {:?} {}: {} balanced sequences ({} per class × {} classes)",
                 target_type,
@@ -871,7 +879,17 @@ impl DataPipeline {
         );
 
         // Only initialize and populate target arrays for the SPECIFIC target types present
-        for (target_type, horizon) in indices_by_target.keys() {
+        // CRITICAL FIX: Sort keys for deterministic processing order (avoid HashMap randomness)
+        let mut sorted_keys: Vec<_> = indices_by_target.keys().collect();
+        sorted_keys.sort_by(|a, b| {
+            // Sort by target type first, then by horizon
+            match a.0.cmp(&b.0) {
+                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+                other => other,
+            }
+        });
+
+        for (target_type, horizon) in sorted_keys {
             let target_name = match target_type {
                 crate::targets::TargetType::PriceLevel => format!("price_level_{}", horizon),
                 crate::targets::TargetType::Direction => format!("direction_{}", horizon),

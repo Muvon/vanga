@@ -3,7 +3,7 @@
 //! This module provides utilities for reproducible weight initialization
 //! using Candle's native Device::set_seed() functionality.
 
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, Var};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -362,27 +362,26 @@ impl SeededTensorUtils {
             set_device_seed_with_logging(device, Some(seed_value))?;
         }
 
-        let all_vars = varmap.all_vars();
+        let name_var_pairs: Vec<(String, Var)> = {
+            let var_data = varmap.data().lock().unwrap();
+            var_data
+                .iter()
+                .map(|(name, var)| (name.clone(), var.clone()))
+                .collect()
+        };
+
         let mut initialized_count = 0;
         let mut recurrent_count = 0;
         let mut bias_count = 0;
 
         log::info!("🔧 Applying proper LSTM weight initialization...");
 
-        // Get the variable names to better identify tensor types
-        let var_data = varmap.data().lock().unwrap();
-        let var_names: Vec<String> = var_data.keys().cloned().collect();
-        drop(var_data); // Release the lock
-
-        for (var_idx, var) in all_vars.iter().enumerate() {
+        for (var_name, var) in name_var_pairs.iter() {
             let shape = var.shape();
             let dims = shape.dims();
-            let var_name = var_names
-                .get(var_idx)
-                .map(|s| s.as_str())
-                .unwrap_or("unknown");
+            let var_name_str = var_name.as_str();
 
-            log::debug!("🔍 Processing tensor '{}': shape={:?}", var_name, dims);
+            log::debug!("🔍 Processing tensor '{}': shape={:?}", var_name_str, dims);
 
             // Determine weight type based on tensor name and shape
             if dims.len() == 2 {
@@ -391,18 +390,19 @@ impl SeededTensorUtils {
 
                 // Identify weight types based on Candle's LSTM naming convention
                 // In Candle LSTM: weight_ih = input-to-hidden, weight_hh = hidden-to-hidden (recurrent)
-                let is_recurrent_weight = var_name.contains("weight_hh") ||
-                                        var_name.contains("hh") ||
-                                        var_name.contains("hidden_hidden") ||
-                                        var_name.contains("recurrent") ||
-                                        // Fallback: square matrices are likely recurrent
-                                        (rows == cols && rows > 50); // Avoid small matrices
+                let is_recurrent_weight = var_name_str.contains("weight_hh")
+                    || var_name_str.contains("hh")
+                    || var_name_str.contains("hidden_hidden")
+                    || var_name_str.contains("recurrent")
+                    ||
+                    // Fallback: square matrices are likely recurrent
+                    (rows == cols && rows > 50); // Avoid small matrices
 
                 if is_recurrent_weight {
                     // Apply orthogonal initialization for recurrent weights
                     log::info!(
                         "🔄 Applying orthogonal initialization to recurrent weight '{}': shape={:?}",
-                        var_name, dims
+                        var_name_str, dims
                     );
                     let orthogonal_weights = Self::orthogonal_tensor(dims, device, var.dtype())?;
 
@@ -428,7 +428,7 @@ impl SeededTensorUtils {
                     {
                         log::info!(
                             "✅ Orthogonal weight '{}' set successfully, sample value: {:.6}",
-                            var_name,
+                            var_name_str,
                             sample_val[0]
                         );
                     }
@@ -436,7 +436,7 @@ impl SeededTensorUtils {
                     // Apply Xavier initialization for input-to-hidden weights
                     log::info!(
                         "📥 Applying Xavier initialization to input weight '{}': shape={:?}",
-                        var_name,
+                        var_name_str,
                         dims
                     );
                     let xavier_weights = Self::xavier_tensor(dims, device, var.dtype())?;
@@ -450,7 +450,7 @@ impl SeededTensorUtils {
                     {
                         log::info!(
                             "✅ Xavier weight '{}' set successfully, sample value: {:.6}",
-                            var_name,
+                            var_name_str,
                             sample_val[0]
                         );
                     }
@@ -462,11 +462,12 @@ impl SeededTensorUtils {
 
                 // Identify forget gate bias based on Candle's LSTM naming
                 // In LSTM, forget gate bias should be initialized to 1.0
-                let is_forget_gate_bias = var_name.contains("bias_hh")
-                    && (var_name.contains("forget") ||
-                                         // LSTM gate order is usually: input, forget, cell, output
-                                         // So forget gate is at positions bias_size/4 to bias_size/2
-                                         bias_size >= 4);
+                let is_forget_gate_bias = var_name_str.contains("bias_hh")
+                    && (var_name_str.contains("forget")
+                        ||
+                        // LSTM gate order is usually: input, forget, cell, output
+                        // So forget gate is at positions bias_size/4 to bias_size/2
+                        bias_size >= 4);
 
                 let bias_value = if is_forget_gate_bias { 1.0 } else { 0.0 };
 
@@ -487,7 +488,7 @@ impl SeededTensorUtils {
 
                 log::info!(
                     "⚖️ Initializing bias '{}': shape={:?}, forget_gate={}, value={}",
-                    var_name,
+                    var_name_str,
                     dims,
                     is_forget_gate_bias,
                     bias_value
@@ -505,7 +506,7 @@ impl SeededTensorUtils {
                     };
                     log::info!(
                         "✅ Bias '{}' set successfully, first={:.6}, mid={:.6}",
-                        var_name,
+                        var_name_str,
                         first_val,
                         mid_val
                     );
