@@ -52,6 +52,7 @@ lazy_static = "1.5"  # For global static instances
 # Parallel processing
 rayon = "1.11"
 rand = "0.9.2"
+rand_distr = "0.4"  # Probability distributions for Bayesian optimization
 num_cpus = "1.17"  # For optimal thread configuration
 
 # Real-time streaming and file watching

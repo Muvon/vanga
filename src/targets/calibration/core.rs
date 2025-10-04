@@ -421,4 +421,131 @@ impl ParameterCalibrator {
     pub async fn calibrate_volume(&self, context: &EvaluationContext<'_>) -> Result<VolumeParams> {
         super::volume::calibrate_volume(self, context).await
     }
+
+    /// Calibrate parameters using Bayesian Optimization
+    ///
+    /// This method uses Gaussian Process-based Bayesian Optimization to find
+    /// optimal parameters efficiently. It's significantly faster than grid search
+    /// and finds better parameters by modeling the objective function.
+    ///
+    /// # Arguments
+    /// * `param_bounds` - Min/max bounds for each parameter
+    /// * `param_names` - Names for logging
+    /// * `objective_fn` - Function to minimize (returns score, lower is better)
+    /// * `config` - Bayesian optimization configuration
+    ///
+    /// # Returns
+    /// Best parameters found
+    pub async fn calibrate_with_bayesian<F>(
+        &self,
+        param_bounds: Vec<(f64, f64)>,
+        param_names: Vec<String>,
+        objective_fn: F,
+        config: super::bayesian::BayesianConfig,
+    ) -> Result<Vec<f64>>
+    where
+        F: Fn(&[f64]) -> Result<f64>,
+    {
+        use super::bayesian::BayesianOptimizer;
+
+        log::info!(
+            "🔬 Starting Bayesian Optimization with {} parameters",
+            param_names.len()
+        );
+        log::info!(
+            "   Initial samples: {}, Max iterations: {}, Tolerance: {:.6}",
+            config.n_initial,
+            config.max_iterations,
+            config.tolerance
+        );
+
+        let mut optimizer = BayesianOptimizer::new(param_bounds, param_names, &config);
+
+        // Phase 1: Initial random exploration (Latin Hypercube Sampling)
+        log::info!(
+            "📊 Phase 1: Initial exploration ({} samples)",
+            config.n_initial
+        );
+        let initial_samples = optimizer.initialize_latin_hypercube(config.n_initial);
+
+        for (i, params) in initial_samples.iter().enumerate() {
+            let score = objective_fn(params)?;
+            optimizer.add_observation(params.clone(), score);
+            log::debug!(
+                "  Sample {}/{}: score = {:.6}",
+                i + 1,
+                config.n_initial,
+                score
+            );
+        }
+
+        if let Some((_, best_score)) = optimizer.get_best() {
+            log::info!(
+                "  Initial best score: {:.6} (from {} samples)",
+                best_score,
+                config.n_initial
+            );
+        }
+
+        // Phase 2: Bayesian optimization iterations
+        log::info!(
+            "📊 Phase 2: Bayesian optimization (up to {} iterations)",
+            config.max_iterations
+        );
+        let mut prev_best_score = f64::INFINITY;
+        let mut no_improvement_count = 0;
+        let max_no_improvement = 5; // Stop if no improvement for 5 iterations
+
+        for iteration in 0..config.max_iterations {
+            // Suggest next point to evaluate
+            let next_params = optimizer.suggest_next()?;
+
+            // Evaluate objective function
+            let score = objective_fn(&next_params)?;
+            optimizer.add_observation(next_params, score);
+
+            // Log progress every 5 iterations
+            if (iteration + 1) % 5 == 0 || iteration == 0 {
+                optimizer.log_progress(optimizer.n_observations());
+            }
+
+            // Check convergence
+            if let Some((_, best_score)) = optimizer.get_best() {
+                let improvement = prev_best_score - best_score;
+
+                if improvement < config.tolerance {
+                    no_improvement_count += 1;
+                    if no_improvement_count >= max_no_improvement {
+                        log::info!(
+                            "✅ Converged after {} iterations (no improvement for {} iterations)",
+                            iteration + 1,
+                            max_no_improvement
+                        );
+                        break;
+                    }
+                } else {
+                    no_improvement_count = 0; // Reset counter on improvement
+                }
+
+                prev_best_score = best_score;
+            }
+        }
+
+        // Return best parameters found
+        if let Some((best_params, best_score)) = optimizer.get_best() {
+            log::info!("🎯 Bayesian Optimization Complete!");
+            log::info!("  Total evaluations: {}", optimizer.n_observations());
+            log::info!("  Best Score: {:.6}", best_score);
+            log::info!("  Best Parameters:");
+            for (name, &value) in optimizer.param_names.iter().zip(best_params.iter()) {
+                log::info!("    {}: {:.6}", name, value);
+            }
+
+            Ok(best_params)
+        } else {
+            Err(crate::utils::error::VangaError::ConfigError(
+                "Bayesian optimization failed to find any valid parameters".to_string(),
+            ))
+        }
+    }
 }
