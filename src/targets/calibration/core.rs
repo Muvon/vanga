@@ -42,9 +42,10 @@ impl ParameterCalibrator {
             horizon_steps,
         )?;
 
-        // Step 2: Determine target sample size - 50% of available, min 1000, max 20000
+        // Step 2: Use ALL available samples for QUALITY calibration (no artificial limits)
+        // Only limit if explicitly requested via sample_size parameter
         let max_available = all_possible_indices.len();
-        let target_samples = sample_size.unwrap_or_else(|| (max_available / 2).clamp(1000, 20000));
+        let target_samples = sample_size.unwrap_or(max_available); // Use ALL samples by default
 
         log::info!(
             "🎯 Calibration sampling: {} total possible sequences, targeting {} diverse samples ({:.1}% coverage, overlap={:.1}%)",
@@ -76,51 +77,37 @@ impl ParameterCalibrator {
         Ok(selected_indices)
     }
 
-    /// Select diverse samples using temporal stratification (reuse DiversitySelector logic)
+    /// Select diverse samples using UNIFORM temporal stratification for maximum diversity
     fn select_diverse_temporal_samples(
         &self,
         all_indices: &[usize],
         target_count: usize,
     ) -> Result<Vec<usize>> {
-        use rand::seq::SliceRandom;
+        if target_count >= all_indices.len() {
+            return Ok(all_indices.to_vec());
+        }
 
-        // Sort by temporal position for temporal diversity
+        // Sort by temporal position
         let mut temporal_sorted: Vec<usize> = all_indices.to_vec();
         temporal_sorted.sort_unstable();
 
-        // Divide into temporal buckets and select from each (same as DiversitySelector)
-        let num_buckets = (target_count / 10).clamp(5, 20); // 5-20 buckets for good coverage
-        let bucket_size = temporal_sorted.len() / num_buckets;
-        let sequences_per_bucket = target_count / num_buckets;
-        let remainder = target_count % num_buckets;
+        // Use UNIFORM sampling for maximum temporal spread
+        // This ensures samples are evenly distributed across time
+        let step = all_indices.len() as f64 / target_count as f64;
+        let mut selected = Vec::with_capacity(target_count);
 
-        let mut selected = Vec::new();
-        let mut rng = rand::rng();
-
-        for bucket_idx in 0..num_buckets {
-            let start = bucket_idx * bucket_size;
-            let end = if bucket_idx == num_buckets - 1 {
-                temporal_sorted.len() // Last bucket gets remainder
-            } else {
-                (bucket_idx + 1) * bucket_size
-            };
-
-            let mut bucket_sequences: Vec<usize> = temporal_sorted[start..end].to_vec();
-
-            // Shuffle and select from this temporal bucket
-            bucket_sequences.shuffle(&mut rng);
-
-            let take_count = if bucket_idx < remainder {
-                sequences_per_bucket + 1
-            } else {
-                sequences_per_bucket
-            };
-
-            selected.extend(bucket_sequences.into_iter().take(take_count));
+        for i in 0..target_count {
+            let idx = (i as f64 * step) as usize;
+            if idx < temporal_sorted.len() {
+                selected.push(temporal_sorted[idx]);
+            }
         }
 
-        // Ensure we have exactly the right count
-        selected.truncate(target_count);
+        log::debug!(
+            "Uniform temporal sampling: selected {} samples with step size {:.2}",
+            selected.len(),
+            step
+        );
 
         Ok(selected)
     }
@@ -177,6 +164,72 @@ impl ParameterCalibrator {
         }
     }
 
+    /// Validate sample quality to ensure diverse, representative calibration data
+    fn validate_sample_quality(
+        &self,
+        ohlcv_data: &[MarketDataRow],
+        sample_indices: &[usize],
+    ) -> Result<()> {
+        use super::utils::CalibrationUtils;
+
+        log::info!("🔍 Validating calibration sample quality...");
+
+        // 1. Temporal coverage check
+        let temporal_diversity = CalibrationUtils::calculate_temporal_diversity(sample_indices);
+        log::info!("  📅 Temporal diversity: {:.2}%", temporal_diversity * 100.0);
+
+        if temporal_diversity < 0.5 {
+            log::warn!(
+                "  ⚠️  Low temporal diversity ({:.1}%) - samples may be clustered in time",
+                temporal_diversity * 100.0
+            );
+        }
+
+        // 2. Feature space coverage check
+        let feature_diversity =
+            CalibrationUtils::calculate_feature_space_diversity(ohlcv_data, sample_indices);
+        log::info!(
+            "  📊 Feature space diversity: {:.2}%",
+            feature_diversity * 100.0
+        );
+
+        if feature_diversity < 0.5 {
+            log::warn!(
+                "  ⚠️  Low feature diversity ({:.1}%) - samples may not cover full price/volatility range",
+                feature_diversity * 100.0
+            );
+        }
+
+        // 3. Market condition balance check
+        let market_diversity =
+            CalibrationUtils::calculate_market_condition_diversity(ohlcv_data, sample_indices);
+        log::info!(
+            "  🎯 Market condition diversity: {:.2}%",
+            market_diversity * 100.0
+        );
+
+        if market_diversity < 0.5 {
+            log::warn!(
+                "  ⚠️  Low market condition diversity ({:.1}%) - samples may be biased toward bull/bear/sideways",
+                market_diversity * 100.0
+            );
+        }
+
+        // 4. Overall quality assessment
+        let overall_quality = (temporal_diversity + feature_diversity + market_diversity) / 3.0;
+        log::info!("  ✅ Overall sample quality: {:.2}%", overall_quality * 100.0);
+
+        if overall_quality < 0.6 {
+            log::warn!(
+                "  ⚠️  Sample quality below recommended threshold (60%) - calibration may be suboptimal"
+            );
+        } else if overall_quality >= 0.8 {
+            log::info!("  🌟 Excellent sample quality - calibration should be highly reliable");
+        }
+
+        Ok(())
+    }
+
     /// Single calibration method - returns parameters for ALL targets
     ///
     /// This is the main entry point for parameter calibration. It analyzes the provided
@@ -223,6 +276,9 @@ impl ParameterCalibrator {
             samples_to_use,
             self.min_diversity_threshold
         );
+
+        // Validate sample quality before calibration
+        self.validate_sample_quality(ohlcv_data, &sample_indices)?;
 
         // Calibrate each target type
         let context = EvaluationContext {
@@ -490,14 +546,17 @@ impl ParameterCalibrator {
             );
         }
 
-        // Phase 2: Bayesian optimization iterations
+        // Phase 2: Bayesian optimization iterations with SMART convergence
         log::info!(
             "📊 Phase 2: Bayesian optimization (up to {} iterations)",
             config.max_iterations
         );
+        
         let mut prev_best_score = f64::INFINITY;
         let mut no_improvement_count = 0;
-        let max_no_improvement = 5; // Stop if no improvement for 5 iterations
+        let max_patience = 15; // Increased from 5 for quality
+        let n_params = optimizer.param_names.len();
+        let min_iterations = if n_params >= 6 { 50 } else { 30 }; // Minimum iterations based on dimensionality
 
         for iteration in 0..config.max_iterations {
             // Suggest next point to evaluate
@@ -512,25 +571,56 @@ impl ParameterCalibrator {
                 optimizer.log_progress(optimizer.n_observations());
             }
 
-            // Check convergence
-            if let Some((_, best_score)) = optimizer.get_best() {
-                let improvement = prev_best_score - best_score;
+            // Check convergence (but enforce minimum iterations)
+            if iteration + 1 >= min_iterations {
+                if let Some((_, best_score)) = optimizer.get_best() {
+                    let absolute_improvement = prev_best_score - best_score;
+                    let relative_improvement = if prev_best_score.abs() > 1e-10 {
+                        absolute_improvement / prev_best_score.abs()
+                    } else {
+                        absolute_improvement
+                    };
 
-                if improvement < config.tolerance {
-                    no_improvement_count += 1;
-                    if no_improvement_count >= max_no_improvement {
-                        log::info!(
-                            "✅ Converged after {} iterations (no improvement for {} iterations)",
-                            iteration + 1,
-                            max_no_improvement
-                        );
-                        break;
+                    // Check multiple convergence criteria
+                    let absolute_converged = absolute_improvement < config.tolerance;
+                    let relative_converged = relative_improvement < 0.001; // 0.1% relative improvement
+
+                    if absolute_converged && relative_converged {
+                        no_improvement_count += 1;
+                        
+                        if no_improvement_count >= max_patience {
+                            log::info!(
+                                "✅ Converged after {} iterations (no improvement for {} iterations)",
+                                iteration + 1,
+                                max_patience
+                            );
+                            log::info!(
+                                "   Final score: {:.6}, Absolute improvement: {:.6}, Relative: {:.4}%",
+                                best_score,
+                                absolute_improvement,
+                                relative_improvement * 100.0
+                            );
+                            break;
+                        }
+                    } else {
+                        no_improvement_count = 0; // Reset counter on improvement
+                        
+                        if absolute_improvement > 0.0 {
+                            log::debug!(
+                                "  Improvement: {:.6} ({:.4}% relative)",
+                                absolute_improvement,
+                                relative_improvement * 100.0
+                            );
+                        }
                     }
-                } else {
-                    no_improvement_count = 0; // Reset counter on improvement
-                }
 
-                prev_best_score = best_score;
+                    prev_best_score = best_score;
+                }
+            } else {
+                // Still in minimum iteration phase
+                if let Some((_, best_score)) = optimizer.get_best() {
+                    prev_best_score = best_score;
+                }
             }
         }
 

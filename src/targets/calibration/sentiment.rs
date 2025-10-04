@@ -14,14 +14,15 @@ pub async fn calibrate_sentiment(
 ) -> Result<SentimentParams> {
     log::info!("🔬 Starting Bayesian Optimization for Real Sentiment Analysis");
 
-    // Define parameter bounds (4 feature weights + 2 thresholds)
+    // Define 6D parameter space with WIDE, ADAPTIVE bounds for all market conditions
+    // These bounds are designed to work across different cryptocurrencies and market regimes
     let param_bounds = vec![
-        (0.5, 2.0),   // body_weight
-        (0.1, 1.0),   // size_weight
-        (0.1, 0.8),   // wick_weight
-        (0.1, 0.8),   // volume_weight
-        (0.01, 0.15), // sensitivity
-        (1.5, 4.0),   // extreme_multiplier
+        (0.5, 3.0),   // body_weight: 0.5-3.0 (wide range for different candle importance)
+        (0.05, 1.5),  // size_weight: 0.05-1.5 (from subtle to dominant)
+        (0.05, 1.2),  // wick_weight: 0.05-1.2 (wick pressure importance)
+        (0.05, 1.2),  // volume_weight: 0.05-1.2 (volume confirmation strength)
+        (0.005, 0.2), // sensitivity: 0.005-0.2 (very sensitive to very conservative)
+        (1.2, 5.0),   // extreme_multiplier: 1.2-5.0 (narrow to wide extreme zones)
     ];
 
     let param_names = vec![
@@ -52,15 +53,8 @@ pub async fn calibrate_sentiment(
         Ok(balance.composite_quality_score)
     };
 
-    // Run Bayesian optimization with more samples (6D space)
-    let bayesian_config = super::bayesian::BayesianConfig {
-        n_initial: 20,      // More initial samples for 6D space
-        max_iterations: 60, // More iterations for complex space
-        tolerance: 1e-4,
-        acquisition: super::bayesian::AcquisitionFunction::ExpectedImprovement,
-        gp_length_scale: 0.5,
-        gp_noise: 1e-6,
-    };
+    // Run Bayesian optimization with high-dimensional config (6D space)
+    let bayesian_config = super::bayesian::BayesianConfig::for_high_dimensional();
 
     let best_params = calibrator
         .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
@@ -97,7 +91,7 @@ pub async fn calibrate_sentiment(
     })
 }
 
-/// Evaluate sentiment parameters using real candle psychology
+/// Evaluate sentiment parameters using real candle psychology with REAL diversity metrics
 fn evaluate_sentiment_params(
     utils: &super::utils::CalibrationUtils,
     context: &EvaluationContext,
@@ -131,5 +125,12 @@ fn evaluate_sentiment_params(
     }
 
     let total = class_counts.iter().sum::<usize>();
-    utils.calculate_balance(class_counts.as_ref(), total)
+    
+    // Use diversity-aware balance calculation
+    utils.calculate_balance_with_diversity(
+        class_counts.as_ref(),
+        total,
+        context.ohlcv_data,
+        context.sample_indices,
+    )
 }

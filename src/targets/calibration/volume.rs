@@ -12,17 +12,17 @@ pub async fn calibrate_volume(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
 ) -> Result<VolumeParams> {
-    use super::bayesian::{AcquisitionFunction, BayesianConfig};
+    use super::bayesian::BayesianConfig;
 
     log::info!("🔬 Starting Bayesian Optimization for Volume calibration");
 
     let utils = calibrator.get_utils();
 
-    // Define 3D parameter space
+    // Define 3D parameter space with WIDE, ADAPTIVE bounds for all market conditions
     let param_bounds = vec![
-        (0.2, 0.8),  // bandwidth
-        (1.5, 5.0),  // extreme_multiplier
-        (1.0, 15.0), // smoothing_periods
+        (0.1, 3.0),  // bandwidth: 0.1-3.0 (narrow to very wide volume ranges)
+        (1.2, 6.0),  // extreme_multiplier: 1.2-6.0 (narrow to very wide extremes)
+        (1.0, 30.0), // smoothing_periods: 1-30 (no smoothing to heavy smoothing)
     ];
 
     let param_names = vec![
@@ -51,14 +51,8 @@ pub async fn calibrate_volume(
     };
 
     // Bayesian optimization configuration
-    let bayesian_config = BayesianConfig {
-        n_initial: 10,
-        max_iterations: 40,
-        tolerance: 1e-4,
-        acquisition: AcquisitionFunction::ExpectedImprovement,
-        gp_length_scale: 0.5,
-        gp_noise: 1e-6,
-    };
+    // Use quality-first Bayesian configuration (default for 3D space)
+    let bayesian_config = BayesianConfig::default();
 
     // Run Bayesian optimization
     let best_params = calibrator
@@ -160,5 +154,6 @@ fn evaluate_volume_params(
     }
 
     let total = class_counts.iter().sum::<usize>();
-    utils.calculate_balance(class_counts.as_ref(), total)
+    // Use diversity-aware balance calculation
+    utils.calculate_balance_with_diversity(class_counts.as_ref(), total, context.ohlcv_data, context.sample_indices)
 }

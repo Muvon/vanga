@@ -16,20 +16,20 @@ pub async fn calibrate_direction(
     horizon_steps: usize,
     sample_indices: &[usize],
 ) -> Result<DirectionParams> {
-    use super::bayesian::{AcquisitionFunction, BayesianConfig};
+    use super::bayesian::BayesianConfig;
 
     log::info!("🔬 Starting Bayesian Optimization for Direction calibration");
 
     let close_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
     let utils = calibrator.get_utils();
 
-    // Define 5D parameter space
+    // Define 5D parameter space with WIDE, ADAPTIVE bounds for all market conditions
     let param_bounds = vec![
-        (0.01, 0.5),    // sensitivity
-        (1.5, 5.0),     // extreme_multiplier
-        (0.001, 0.015), // min_base_threshold
-        (0.005, 0.03),  // min_extreme_threshold
-        (2.0, 30.0),    // base_multiplier
+        (0.005, 0.8),   // sensitivity: 0.005-0.8 (very sensitive to very conservative)
+        (1.2, 6.0),     // extreme_multiplier: 1.2-6.0 (narrow to very wide extremes)
+        (0.0001, 0.02), // min_base_threshold: 0.01%-2% (minimum movement detection)
+        (0.001, 0.05),  // min_extreme_threshold: 0.1%-5% (minimum extreme movement)
+        (1.0, 50.0),    // base_multiplier: 1-50 (adaptive scaling for different volatilities)
     ];
 
     let param_names = vec![
@@ -50,9 +50,10 @@ pub async fn calibrate_direction(
             base_multiplier: params[4],
         };
 
-        let balance = evaluate_direction_params_extended(
+        let balance = evaluate_direction_params(
             &utils,
             &close_prices,
+            ohlcv_data,
             sample_indices,
             sequence_length,
             horizon_steps,
@@ -68,15 +69,8 @@ pub async fn calibrate_direction(
         }
     };
 
-    // Bayesian optimization configuration
-    let bayesian_config = BayesianConfig {
-        n_initial: 15,
-        max_iterations: 50,
-        tolerance: 1e-4,
-        acquisition: AcquisitionFunction::ExpectedImprovement,
-        gp_length_scale: 0.5,
-        gp_noise: 1e-6,
-    };
+    // Use quality-first Bayesian configuration (default for 5D space)
+    let bayesian_config = BayesianConfig::default();
 
     // Run Bayesian optimization
     let best_params = calibrator
@@ -92,9 +86,10 @@ pub async fn calibrate_direction(
         base_multiplier: best_params[4],
     };
 
-    let final_balance = evaluate_direction_params_extended(
+    let final_balance = evaluate_direction_params(
         &utils,
         &close_prices,
+        ohlcv_data,
         sample_indices,
         sequence_length,
         horizon_steps,
@@ -122,11 +117,11 @@ pub async fn calibrate_direction(
 
     Ok(result)
 }
-
-/// Evaluate direction parameters with extended calibration including previously hardcoded values
-fn evaluate_direction_params_extended(
+/// Evaluate direction parameters with REAL diversity metrics
+fn evaluate_direction_params(
     utils: &super::utils::CalibrationUtils,
     close_prices: &[f64],
+    ohlcv_data: &[MarketDataRow],
     sample_indices: &[usize],
     sequence_length: usize,
     horizon_steps: usize,
@@ -153,7 +148,8 @@ fn evaluate_direction_params_extended(
         }
     }
 
-    utils.calculate_balance(&class_counts, total)
+    // Use diversity-aware balance calculation
+    utils.calculate_balance_with_diversity(&class_counts, total, ohlcv_data, sample_indices)
 }
 
 /// Classify direction using calibrated parameters (mirrors actual classification logic)

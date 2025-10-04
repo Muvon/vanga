@@ -12,19 +12,19 @@ pub async fn calibrate_volatility(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
 ) -> Result<VolatilityParams> {
-    use super::bayesian::{AcquisitionFunction, BayesianConfig};
+    use super::bayesian::BayesianConfig;
 
     log::info!("🔬 Starting Bayesian Optimization for Volatility calibration");
 
     let utils = calibrator.get_utils();
 
-    // Define 5D parameter space
+    // Define 5D parameter space with WIDE, ADAPTIVE bounds for all market conditions
     let param_bounds = vec![
-        (0.1, 1.0),    // bandwidth
-        (1.5, 3.0),    // extreme_multiplier
-        (0.85, 1.0),   // horizon_decay
-        (0.05, 0.3),   // volume_weight
-        (0.001, 0.01), // min_volatility_baseline
+        (0.1, 3.0),    // bandwidth: 0.1-3.0 (narrow to very wide volatility ranges)
+        (1.2, 6.0),    // extreme_multiplier: 1.2-6.0 (narrow to very wide extremes)
+        (0.7, 1.0),    // horizon_decay: 0.7-1.0 (strong to no decay)
+        (0.01, 0.5),   // volume_weight: 1%-50% (subtle to dominant volume influence)
+        (0.0001, 0.02),// min_volatility_baseline: 0.01%-2% (minimum detectable volatility)
     ];
 
     let param_names = vec![
@@ -57,14 +57,8 @@ pub async fn calibrate_volatility(
     };
 
     // Bayesian optimization configuration
-    let bayesian_config = BayesianConfig {
-        n_initial: 15,
-        max_iterations: 50,
-        tolerance: 1e-4,
-        acquisition: AcquisitionFunction::ExpectedImprovement,
-        gp_length_scale: 0.5,
-        gp_noise: 1e-6,
-    };
+    // Use quality-first Bayesian configuration (default for 5D space)
+    let bayesian_config = BayesianConfig::default();
 
     // Run Bayesian optimization
     let best_params = calibrator
@@ -149,5 +143,6 @@ fn evaluate_volatility_params(
     }
 
     let total = class_counts.iter().sum::<usize>();
-    utils.calculate_balance(class_counts.as_ref(), total)
+    // Use diversity-aware balance calculation
+    utils.calculate_balance_with_diversity(class_counts.as_ref(), total, context.ohlcv_data, context.sample_indices)
 }

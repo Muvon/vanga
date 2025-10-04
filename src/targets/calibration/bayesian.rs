@@ -66,14 +66,57 @@ pub struct BayesianConfig {
 }
 
 impl Default for BayesianConfig {
+    /// Default configuration optimized for QUALITY over speed
+    /// Suitable for 4D parameter spaces (direction, price_levels, volatility, volume)
     fn default() -> Self {
         Self {
-            n_initial: 15,
-            max_iterations: 50,
+            n_initial: 30,           // Increased from 15 for better initial exploration
+            max_iterations: 100,     // Increased from 50 for thorough optimization
+            tolerance: 1e-5,         // Stricter from 1e-4 for better convergence
+            acquisition: AcquisitionFunction::ExpectedImprovement,
+            gp_length_scale: 0.5,
+            gp_noise: 1e-5,          // Increased from 1e-6 for better numerical stability
+        }
+    }
+}
+
+impl BayesianConfig {
+    /// Configuration for high-dimensional spaces (6D sentiment with 4 weights + 2 thresholds)
+    /// Uses more initial samples and iterations for complex parameter spaces
+    pub fn for_high_dimensional() -> Self {
+        Self {
+            n_initial: 40,           // More samples for 6D space
+            max_iterations: 120,     // More iterations for complex optimization
+            tolerance: 1e-5,
+            acquisition: AcquisitionFunction::ExpectedImprovement,
+            gp_length_scale: 0.5,
+            gp_noise: 1e-5,
+        }
+    }
+
+    /// Configuration for quick calibration (testing/development)
+    /// Trades quality for speed - NOT recommended for production
+    pub fn for_quick_testing() -> Self {
+        Self {
+            n_initial: 10,
+            max_iterations: 30,
             tolerance: 1e-4,
             acquisition: AcquisitionFunction::ExpectedImprovement,
             gp_length_scale: 0.5,
-            gp_noise: 1e-6,
+            gp_noise: 1e-5,
+        }
+    }
+
+    /// Configuration for maximum quality (research/final calibration)
+    /// Uses extensive exploration - very slow but finds best parameters
+    pub fn for_maximum_quality() -> Self {
+        Self {
+            n_initial: 50,
+            max_iterations: 200,
+            tolerance: 1e-6,
+            acquisition: AcquisitionFunction::ExpectedImprovement,
+            gp_length_scale: 0.5,
+            gp_noise: 1e-5,
         }
     }
 }
@@ -92,41 +135,109 @@ impl BayesianOptimizer {
         }
     }
 
-    /// Initialize with Latin Hypercube Sampling for better space coverage
+    /// Initialize with Enhanced Latin Hypercube Sampling using maximin criterion
+    /// This provides superior space coverage compared to basic LHS
     pub fn initialize_latin_hypercube(&self, n_samples: usize) -> Vec<Vec<f64>> {
         let mut rng = rand::rng();
         let n_params = self.bounds.len();
 
-        // Latin Hypercube Sampling: divide each dimension into n_samples bins
-        let mut samples = vec![vec![0.0; n_params]; n_samples];
+        // Generate multiple LHS candidates and select best using maximin criterion
+        let n_candidates = 5; // Generate 5 candidates, pick best
+        let mut best_samples = Vec::new();
+        let mut best_min_distance = 0.0;
 
-        for param_idx in 0..n_params {
-            // Create shuffled indices for this parameter
-            let mut indices: Vec<usize> = (0..n_samples).collect();
-            for i in (1..n_samples).rev() {
-                let j = rng.random_range(0..=i);
-                indices.swap(i, j);
+        for candidate_idx in 0..n_candidates {
+            // Generate one LHS candidate
+            let mut samples = vec![vec![0.0; n_params]; n_samples];
+
+            for param_idx in 0..n_params {
+                // Create shuffled indices for this parameter
+                let mut indices: Vec<usize> = (0..n_samples).collect();
+                for i in (1..n_samples).rev() {
+                    let j = rng.random_range(0..=i);
+                    indices.swap(i, j);
+                }
+
+                // Assign values within bins
+                let (min, max) = self.bounds[param_idx];
+                let bin_size = (max - min) / n_samples as f64;
+
+                for (sample_idx, &bin_idx) in indices.iter().enumerate() {
+                    let bin_start = min + bin_idx as f64 * bin_size;
+                    let bin_end = bin_start + bin_size;
+                    let value = rng.random_range(bin_start..bin_end);
+                    samples[sample_idx][param_idx] = value;
+                }
             }
 
-            // Assign values within bins
-            let (min, max) = self.bounds[param_idx];
-            let bin_size = (max - min) / n_samples as f64;
+            // Calculate minimum pairwise distance (maximin criterion)
+            let min_distance = self.calculate_min_pairwise_distance(&samples);
 
-            for (sample_idx, &bin_idx) in indices.iter().enumerate() {
-                let bin_start = min + bin_idx as f64 * bin_size;
-                let bin_end = bin_start + bin_size;
-                let value = rng.random_range(bin_start..bin_end);
-                samples[sample_idx][param_idx] = value;
+            if candidate_idx == 0 || min_distance > best_min_distance {
+                best_min_distance = min_distance;
+                best_samples = samples;
             }
         }
 
-        log::debug!(
-            "🎲 Generated {} Latin Hypercube samples for {} parameters",
+        // Calculate quality metrics
+        let (min_dist, avg_dist, max_dist) = self.calculate_distance_statistics(&best_samples);
+
+        log::info!(
+            "🎲 Enhanced LHS: {} samples, {} params | Min dist: {:.4}, Avg dist: {:.4}, Max dist: {:.4}",
             n_samples,
-            n_params
+            n_params,
+            min_dist,
+            avg_dist,
+            max_dist
         );
 
-        samples
+        best_samples
+    }
+
+    /// Calculate minimum pairwise distance between samples (for maximin criterion)
+    fn calculate_min_pairwise_distance(&self, samples: &[Vec<f64>]) -> f64 {
+        if samples.len() < 2 {
+            return 0.0;
+        }
+
+        let mut min_distance = f64::INFINITY;
+
+        for i in 0..samples.len() {
+            for j in (i + 1)..samples.len() {
+                let dist = self.squared_distance(&samples[i], &samples[j]).sqrt();
+                if dist < min_distance {
+                    min_distance = dist;
+                }
+            }
+        }
+
+        min_distance
+    }
+
+    /// Calculate distance statistics for quality assessment
+    fn calculate_distance_statistics(&self, samples: &[Vec<f64>]) -> (f64, f64, f64) {
+        if samples.len() < 2 {
+            return (0.0, 0.0, 0.0);
+        }
+
+        let mut distances = Vec::new();
+
+        for i in 0..samples.len() {
+            for j in (i + 1)..samples.len() {
+                let dist = self.squared_distance(&samples[i], &samples[j]).sqrt();
+                distances.push(dist);
+            }
+        }
+
+        if distances.is_empty() {
+            return (0.0, 0.0, 0.0);
+        }
+
+        let min_dist = distances.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_dist = distances.iter().fold(0.0_f64, |a, &b| a.max(b));
+        let avg_dist = distances.iter().sum::<f64>() / distances.len() as f64;
+
+        (min_dist, avg_dist, max_dist)
     }
 
     /// Add observation (parameter values + objective score)
@@ -204,14 +315,16 @@ impl BayesianOptimizer {
         a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
     }
 
-    /// Optimize acquisition function to find next best point
+    /// Optimize acquisition function to find next best point with QUALITY-FIRST approach
+    /// Uses 250k evaluations (50 restarts × 5000 candidates) for thorough exploration
     fn optimize_acquisition(&self, gp: &GaussianProcess) -> Result<Vec<f64>> {
         let mut rng = rand::rng();
-        let n_restarts = 10; // Multiple random restarts
-        let n_candidates = 2000; // Random candidates per restart
+        let n_restarts = 50; // Increased from 10 for quality
+        let n_candidates = 5000; // Increased from 2000 for quality
 
         let mut best_params = Vec::new();
         let mut best_acquisition_value = f64::NEG_INFINITY;
+        let mut all_acquisition_values = Vec::new();
 
         // Find best of current observations
         let best_y = self
@@ -219,8 +332,8 @@ impl BayesianOptimizer {
             .iter()
             .fold(f64::INFINITY, |a, &b| a.min(b));
 
-        for _ in 0..n_restarts {
-            // Generate random candidates
+        for restart_idx in 0..n_restarts {
+            // Generate random candidates for this restart
             for _ in 0..n_candidates {
                 let mut candidate = Vec::new();
                 for (min, max) in &self.bounds {
@@ -240,14 +353,80 @@ impl BayesianOptimizer {
                     }
                 };
 
-                if acquisition_value > best_acquisition_value {
-                    best_acquisition_value = acquisition_value;
+                // Add diversity penalty to avoid clustering near previous observations
+                let diversity_penalty = self.calculate_diversity_penalty(&candidate);
+                let adjusted_acquisition = acquisition_value * (1.0 - 0.1 * diversity_penalty);
+
+                all_acquisition_values.push(adjusted_acquisition);
+
+                if adjusted_acquisition > best_acquisition_value {
+                    best_acquisition_value = adjusted_acquisition;
                     best_params = candidate;
                 }
             }
+
+            // Log progress every 10 restarts
+            if (restart_idx + 1) % 10 == 0 {
+                log::debug!(
+                    "  Acquisition optimization: {}/{} restarts, best EI: {:.6}",
+                    restart_idx + 1,
+                    n_restarts,
+                    best_acquisition_value
+                );
+            }
+        }
+
+        // Log acquisition statistics
+        if !all_acquisition_values.is_empty() {
+            let min_acq = all_acquisition_values
+                .iter()
+                .fold(f64::INFINITY, |a, &b| a.min(b));
+            let max_acq = all_acquisition_values
+                .iter()
+                .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let avg_acq =
+                all_acquisition_values.iter().sum::<f64>() / all_acquisition_values.len() as f64;
+
+            log::debug!(
+                "📊 Acquisition stats: min={:.6}, avg={:.6}, max={:.6} (from {} evaluations)",
+                min_acq,
+                avg_acq,
+                max_acq,
+                all_acquisition_values.len()
+            );
         }
 
         Ok(best_params)
+    }
+
+    /// Calculate diversity penalty to avoid clustering near previous observations
+    /// Returns 0.0 (far from all observations) to 1.0 (very close to an observation)
+    fn calculate_diversity_penalty(&self, candidate: &[f64]) -> f64 {
+        if self.observations_x.is_empty() {
+            return 0.0;
+        }
+
+        // Find minimum distance to any previous observation
+        let mut min_distance = f64::INFINITY;
+        for obs in &self.observations_x {
+            let dist = self.squared_distance(candidate, obs).sqrt();
+            if dist < min_distance {
+                min_distance = dist;
+            }
+        }
+
+        // Normalize by parameter space diagonal
+        let diagonal = self
+            .bounds
+            .iter()
+            .map(|(min, max)| (max - min).powi(2))
+            .sum::<f64>()
+            .sqrt();
+
+        let normalized_distance = min_distance / diagonal;
+
+        // Convert to penalty (closer = higher penalty)
+        (1.0 - normalized_distance.min(1.0)).clamp(0.0, 1.0)
     }
 
     /// Expected Improvement acquisition function

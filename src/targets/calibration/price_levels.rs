@@ -12,19 +12,19 @@ pub async fn calibrate_price_levels(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
 ) -> Result<PriceLevelParams> {
-    use super::bayesian::{AcquisitionFunction, BayesianConfig};
+    use super::bayesian::BayesianConfig;
 
     log::info!("🔬 Starting Bayesian Optimization for Price Levels calibration");
 
     let utils = calibrator.get_utils();
 
-    // Define 5D parameter space (split percentiles into low/high)
+    // Define 5D parameter space with WIDE, ADAPTIVE bounds for all market conditions
     let param_bounds = vec![
-        (0.2, 1.0),  // bandwidth
-        (0.01, 0.4), // percentile_low
-        (0.6, 0.99), // percentile_high
-        (0.05, 1.0), // neutral_band_factor
-        (1.1, 5.0),  // momentum_factor
+        (0.1, 3.0),   // bandwidth: 0.1-3.0 (narrow to very wide price ranges)
+        (0.01, 0.45), // percentile_low: 1%-45% (adaptive lower boundary)
+        (0.55, 0.99), // percentile_high: 55%-99% (adaptive upper boundary)
+        (0.05, 0.9),  // neutral_band_factor: 5%-90% (narrow to wide neutral zone)
+        (0.8, 6.0),   // momentum_factor: 0.8-6.0 (conservative to aggressive momentum)
     ];
 
     let param_names = vec![
@@ -51,14 +51,8 @@ pub async fn calibrate_price_levels(
     };
 
     // Bayesian optimization configuration
-    let bayesian_config = BayesianConfig {
-        n_initial: 15,
-        max_iterations: 60,
-        tolerance: 1e-4,
-        acquisition: AcquisitionFunction::ExpectedImprovement,
-        gp_length_scale: 0.5,
-        gp_noise: 1e-6,
-    };
+    // Use quality-first Bayesian configuration (default for 4D space)
+    let bayesian_config = BayesianConfig::default();
 
     // Run Bayesian optimization
     let best_params = calibrator
@@ -174,5 +168,6 @@ fn evaluate_price_level_params(
         log::warn!("  WARNING: No valid samples processed!");
     }
 
-    utils.calculate_balance(class_counts.as_ref(), total)
+    // Use diversity-aware balance calculation
+    utils.calculate_balance_with_diversity(class_counts.as_ref(), total, context.ohlcv_data, context.sample_indices)
 }
