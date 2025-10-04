@@ -261,7 +261,7 @@ impl Predictor {
             calibrated_params.direction.sensitivity,
             calibrated_params.price_levels.bandwidth,
             calibrated_params.volatility.bandwidth,
-            calibrated_params.sentiment.body_sensitivity,
+            calibrated_params.sentiment.sensitivity,
             calibrated_params.volume.bandwidth
         );
 

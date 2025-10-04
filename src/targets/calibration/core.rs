@@ -324,9 +324,12 @@ impl ParameterCalibrator {
         );
 
         log::info!(
-            "📊 Sentiment: sensitivity={:.6}, volume_weight={:.2}, balance={:.2}, diversity={:.2}, composite={:.3}",
-            sentiment.body_sensitivity,
+            "📊 Sentiment: body_weight={:.3}, size_weight={:.3}, wick_weight={:.3}, volume_weight={:.3}, sensitivity={:.4}, balance={:.2}, diversity={:.2}, composite={:.3}",
+            sentiment.body_weight,
+            sentiment.size_weight,
+            sentiment.wick_weight,
             sentiment.volume_weight,
+            sentiment.sensitivity,
             sentiment.balance.balance_score,
             sentiment.balance.diversity_score,
             sentiment.balance.composite_quality_score

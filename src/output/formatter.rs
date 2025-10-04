@@ -1134,8 +1134,8 @@ impl OutputFormatter {
                         // Use reconstruction results to enhance prediction
                         // The reconstruction provides richer information than basic probabilities
                         log::debug!(
-                        "🎯 Sentiment reconstruction: expected={:.4}, confidence={:.3}, interpretation={}",
-                        reconstruction.expected_sentiment,
+                        "🎯 Sentiment reconstruction: expected_change={:.4}, confidence={:.3}, interpretation={}",
+                        reconstruction.expected_sentiment_change,
                         reconstruction.confidence,
                         reconstruction.sentiment_interpretation
                     );

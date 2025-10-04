@@ -56,9 +56,7 @@ pub use price_levels::{
     generate_price_level_targets_with_calibrated_params, get_horizon_exponential_weighted_close,
     get_sequence_exponential_weighted_close, reconstruct_price_levels, PriceLevelConfig,
 };
-pub use sentiment::{
-    generate_sentiment_targets_with_calibrated_params, get_sentiment_class_names, SentimentConfig,
-};
+pub use sentiment::{generate_sentiment_targets_with_calibrated_params, get_sentiment_class_names};
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
 };
