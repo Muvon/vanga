@@ -8,7 +8,7 @@ use super::types::*;
 use crate::data::structures::MarketDataRow;
 use crate::utils::error::Result;
 
-/// Calibrate direction parameters
+/// Calibrate direction parameters using Bayesian optimization
 pub async fn calibrate_direction(
     calibrator: &ParameterCalibrator,
     ohlcv_data: &[MarketDataRow],
@@ -16,40 +16,38 @@ pub async fn calibrate_direction(
     horizon_steps: usize,
     sample_indices: &[usize],
 ) -> Result<DirectionParams> {
-    log::info!("🔬 Starting state-of-the-art direction calibration - optimizing each parameter independently");
+    use super::bayesian::{AcquisitionFunction, BayesianConfig};
+
+    log::info!("🔬 Starting Bayesian Optimization for Direction calibration");
 
     let close_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
-
-    // Start with reasonable defaults
-    let mut current_sensitivity = 0.05;
-    let mut current_multiplier = 2.5;
-    let mut current_min_base = 0.005;
-    let mut current_min_extreme = 0.01;
-    let mut current_base_mult = 10.0;
-
-    let mut total_tested = 0;
-    let mut total_improvements = 0;
-
-    // Parameter ranges
-    let sensitivities = vec![0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5];
-    let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
-    let min_base_thresholds = vec![0.001, 0.003, 0.005, 0.01, 0.015];
-    let min_extreme_thresholds = vec![0.005, 0.01, 0.015, 0.02, 0.03];
-    let base_multipliers = vec![2.0, 5.0, 10.0, 15.0, 20.0, 30.0];
-
     let utils = calibrator.get_utils();
 
-    // Step 1: Optimize sensitivity
-    log::info!("📊 Step 1/5: Optimizing sensitivity parameter...");
-    let mut best_sensitivity_score = f64::INFINITY;
-    for &sensitivity in &sensitivities {
-        total_tested += 1;
-        let params = DirectionEvalParams {
-            sensitivity,
-            extreme_multiplier: current_multiplier,
-            min_base_threshold: current_min_base,
-            min_extreme_threshold: current_min_extreme,
-            base_multiplier: current_base_mult,
+    // Define 5D parameter space
+    let param_bounds = vec![
+        (0.01, 0.5),    // sensitivity
+        (1.5, 5.0),     // extreme_multiplier
+        (0.001, 0.015), // min_base_threshold
+        (0.005, 0.03),  // min_extreme_threshold
+        (2.0, 30.0),    // base_multiplier
+    ];
+
+    let param_names = vec![
+        "sensitivity".to_string(),
+        "extreme_multiplier".to_string(),
+        "min_base_threshold".to_string(),
+        "min_extreme_threshold".to_string(),
+        "base_multiplier".to_string(),
+    ];
+
+    // Objective function: minimize composite_quality_score
+    let objective_fn = |params: &[f64]| -> Result<f64> {
+        let test_params = DirectionEvalParams {
+            sensitivity: params[0],
+            extreme_multiplier: params[1],
+            min_base_threshold: params[2],
+            min_extreme_threshold: params[3],
+            base_multiplier: params[4],
         };
 
         let balance = evaluate_direction_params_extended(
@@ -58,217 +56,71 @@ pub async fn calibrate_direction(
             sample_indices,
             sequence_length,
             horizon_steps,
-            &params,
+            &test_params,
         )?;
 
-        if balance.composite_quality_score < best_sensitivity_score
-            && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_sensitivity_score = balance.composite_quality_score;
-            current_sensitivity = sensitivity;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better sensitivity found: {:.4} (score: {:.4})",
-                sensitivity,
-                best_sensitivity_score
-            );
+        // Return score only if diversity is acceptable
+        if balance.diversity_score >= 0.3 {
+            Ok(balance.composite_quality_score)
+        } else {
+            // Penalize low diversity
+            Ok(balance.composite_quality_score + 10.0)
         }
-    }
-    log::info!(
-        "  → Best sensitivity: {:.4} (tested {} values)",
-        current_sensitivity,
-        sensitivities.len()
-    );
+    };
 
-    // Step 2: Optimize extreme multiplier
-    log::info!("📊 Step 2/5: Optimizing extreme multiplier...");
-    let mut best_multiplier_score = f64::INFINITY;
-    for &multiplier in &multipliers {
-        total_tested += 1;
-        let params = DirectionEvalParams {
-            sensitivity: current_sensitivity,
-            extreme_multiplier: multiplier,
-            min_base_threshold: current_min_base,
-            min_extreme_threshold: current_min_extreme,
-            base_multiplier: current_base_mult,
-        };
+    // Bayesian optimization configuration
+    let bayesian_config = BayesianConfig {
+        n_initial: 15,
+        max_iterations: 50,
+        tolerance: 1e-4,
+        acquisition: AcquisitionFunction::ExpectedImprovement,
+        gp_length_scale: 0.5,
+        gp_noise: 1e-6,
+    };
 
-        let balance = evaluate_direction_params_extended(
-            &utils,
-            &close_prices,
-            sample_indices,
-            sequence_length,
-            horizon_steps,
-            &params,
-        )?;
+    // Run Bayesian optimization
+    let best_params = calibrator
+        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .await?;
 
-        if balance.composite_quality_score < best_multiplier_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_multiplier_score = balance.composite_quality_score;
-            current_multiplier = multiplier;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better multiplier found: {:.1} (score: {:.4})",
-                multiplier,
-                best_multiplier_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best extreme multiplier: {:.1} (tested {} values)",
-        current_multiplier,
-        multipliers.len()
-    );
+    // Evaluate final parameters to get balance
+    let final_eval_params = DirectionEvalParams {
+        sensitivity: best_params[0],
+        extreme_multiplier: best_params[1],
+        min_base_threshold: best_params[2],
+        min_extreme_threshold: best_params[3],
+        base_multiplier: best_params[4],
+    };
 
-    // Step 3: Optimize min base threshold
-    log::info!("📊 Step 3/5: Optimizing minimum base threshold...");
-    let mut best_base_score = f64::INFINITY;
-    for &min_base in &min_base_thresholds {
-        total_tested += 1;
-        let params = DirectionEvalParams {
-            sensitivity: current_sensitivity,
-            extreme_multiplier: current_multiplier,
-            min_base_threshold: min_base,
-            min_extreme_threshold: current_min_extreme,
-            base_multiplier: current_base_mult,
-        };
+    let final_balance = evaluate_direction_params_extended(
+        &utils,
+        &close_prices,
+        sample_indices,
+        sequence_length,
+        horizon_steps,
+        &final_eval_params,
+    )?;
 
-        let balance = evaluate_direction_params_extended(
-            &utils,
-            &close_prices,
-            sample_indices,
-            sequence_length,
-            horizon_steps,
-            &params,
-        )?;
-
-        if balance.composite_quality_score < best_base_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_base_score = balance.composite_quality_score;
-            current_min_base = min_base;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better min base found: {:.3} (score: {:.4})",
-                min_base,
-                best_base_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best min base threshold: {:.3} (tested {} values)",
-        current_min_base,
-        min_base_thresholds.len()
-    );
-
-    // Step 4: Optimize min extreme threshold
-    log::info!("📊 Step 4/5: Optimizing minimum extreme threshold...");
-    let mut best_extreme_score = f64::INFINITY;
-    for &min_extreme in &min_extreme_thresholds {
-        total_tested += 1;
-        let params = DirectionEvalParams {
-            sensitivity: current_sensitivity,
-            extreme_multiplier: current_multiplier,
-            min_base_threshold: current_min_base,
-            min_extreme_threshold: min_extreme,
-            base_multiplier: current_base_mult,
-        };
-
-        let balance = evaluate_direction_params_extended(
-            &utils,
-            &close_prices,
-            sample_indices,
-            sequence_length,
-            horizon_steps,
-            &params,
-        )?;
-
-        if balance.composite_quality_score < best_extreme_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_extreme_score = balance.composite_quality_score;
-            current_min_extreme = min_extreme;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better min extreme found: {:.3} (score: {:.4})",
-                min_extreme,
-                best_extreme_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best min extreme threshold: {:.3} (tested {} values)",
-        current_min_extreme,
-        min_extreme_thresholds.len()
-    );
-
-    // Step 5: Optimize base multiplier
-    log::info!("📊 Step 5/5: Optimizing base multiplier...");
-    let mut best_base_mult_score = f64::INFINITY;
-    let mut final_balance = ClassBalance::default();
-    for &base_mult in &base_multipliers {
-        total_tested += 1;
-        let params = DirectionEvalParams {
-            sensitivity: current_sensitivity,
-            extreme_multiplier: current_multiplier,
-            min_base_threshold: current_min_base,
-            min_extreme_threshold: current_min_extreme,
-            base_multiplier: base_mult,
-        };
-
-        let balance = evaluate_direction_params_extended(
-            &utils,
-            &close_prices,
-            sample_indices,
-            sequence_length,
-            horizon_steps,
-            &params,
-        )?;
-
-        if balance.composite_quality_score < best_base_mult_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_base_mult_score = balance.composite_quality_score;
-            current_base_mult = base_mult;
-            final_balance = balance;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better base multiplier found: {:.1} (score: {:.4})",
-                base_mult,
-                best_base_mult_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best base multiplier: {:.1} (tested {} values)",
-        current_base_mult,
-        base_multipliers.len()
-    );
-
-    let best_params = DirectionParams {
-        sensitivity: current_sensitivity,
-        extreme_multiplier: current_multiplier,
-        min_base_threshold: current_min_base,
-        min_extreme_threshold: current_min_extreme,
-        base_multiplier: current_base_mult,
+    let result = DirectionParams {
+        sensitivity: best_params[0],
+        extreme_multiplier: best_params[1],
+        min_base_threshold: best_params[2],
+        min_extreme_threshold: best_params[3],
+        base_multiplier: best_params[4],
         balance: final_balance,
     };
 
     log::info!(
-        "🎯 Direction Calibration Complete!\n  Tested: {} combinations\n  Improvements: {}\n  Final Parameters:\n    - Sensitivity: {:.4}\n    - Extreme Multiplier: {:.1}\n    - Min Base Threshold: {:.3}\n    - Min Extreme Threshold: {:.3}\n    - Base Multiplier: {:.1}\n  Final Score: {:.4}",
-        total_tested,
-        total_improvements,
-        best_params.sensitivity,
-        best_params.extreme_multiplier,
-        best_params.min_base_threshold,
-        best_params.min_extreme_threshold,
-        best_params.base_multiplier,
-        best_base_mult_score
+        "🎯 Direction Calibration Complete!\n  Final Parameters:\n    - Sensitivity: {:.4}\n    - Extreme Multiplier: {:.1}\n    - Min Base Threshold: {:.3}\n    - Min Extreme Threshold: {:.3}\n    - Base Multiplier: {:.1}\n  Final Score: {:.4}",
+        result.sensitivity,
+        result.extreme_multiplier,
+        result.min_base_threshold,
+        result.min_extreme_threshold,
+        result.base_multiplier,
+        result.balance.composite_quality_score
     );
 
-    Ok(best_params)
+    Ok(result)
 }
 
 /// Evaluate direction parameters with extended calibration including previously hardcoded values

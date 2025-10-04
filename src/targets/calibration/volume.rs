@@ -7,160 +7,97 @@ use super::core::ParameterCalibrator;
 use super::types::*;
 use crate::utils::error::Result;
 
-/// Calibrate volume parameters
+/// Calibrate volume parameters using Bayesian optimization
 pub async fn calibrate_volume(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
 ) -> Result<VolumeParams> {
-    log::info!(
-        "🔬 Starting state-of-the-art volume calibration - optimizing each parameter independently"
-    );
+    use super::bayesian::{AcquisitionFunction, BayesianConfig};
 
-    // Start with reasonable defaults
-    let mut current_bandwidth = 0.4;
-    let mut current_multiplier = 2.5;
-    let mut current_smoothing = 5;
-
-    let mut total_tested = 0;
-    let mut total_improvements = 0;
-
-    // Parameter ranges
-    let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-    let multipliers = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
-    let smoothing_values = vec![1, 3, 5, 7, 9, 11, 15];
+    log::info!("🔬 Starting Bayesian Optimization for Volume calibration");
 
     let utils = calibrator.get_utils();
 
-    // Step 1: Optimize bandwidth
-    log::info!("📊 Step 1/3: Optimizing bandwidth parameter...");
-    let mut best_bandwidth_score = f64::INFINITY;
-    for &bandwidth in &bandwidths {
-        total_tested += 1;
-        let balance = evaluate_volume_params(
-            &utils,
-            context,
-            &VolumeEvalParams {
-                bandwidth,
-                multiplier: current_multiplier,
-                smoothing: current_smoothing,
-            },
-        )?;
+    // Define 3D parameter space
+    let param_bounds = vec![
+        (0.2, 0.8),  // bandwidth
+        (1.5, 5.0),  // extreme_multiplier
+        (1.0, 15.0), // smoothing_periods
+    ];
 
-        if balance.composite_quality_score < best_bandwidth_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_bandwidth_score = balance.composite_quality_score;
-            current_bandwidth = bandwidth;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better bandwidth found: {:.2} (score: {:.4})",
-                bandwidth,
-                best_bandwidth_score
-            );
+    let param_names = vec![
+        "bandwidth".to_string(),
+        "extreme_multiplier".to_string(),
+        "smoothing_periods".to_string(),
+    ];
+
+    // Objective function: minimize composite_quality_score
+    let objective_fn = |params: &[f64]| -> Result<f64> {
+        let test_params = VolumeEvalParams {
+            bandwidth: params[0],
+            multiplier: params[1],
+            smoothing: params[2].round() as usize, // Round to integer
+        };
+
+        let balance = evaluate_volume_params(&utils, context, &test_params)?;
+
+        // Return score only if diversity is acceptable
+        if balance.diversity_score >= 0.3 {
+            Ok(balance.composite_quality_score)
+        } else {
+            // Penalize low diversity
+            Ok(balance.composite_quality_score + 10.0)
         }
-    }
-    log::info!(
-        "  → Best bandwidth: {:.2} (tested {} values)",
-        current_bandwidth,
-        bandwidths.len()
-    );
+    };
 
-    // Step 2: Optimize extreme multiplier
-    log::info!("📊 Step 2/3: Optimizing extreme multiplier...");
-    let mut best_multiplier_score = f64::INFINITY;
-    for &multiplier in &multipliers {
-        total_tested += 1;
-        let balance = evaluate_volume_params(
-            &utils,
-            context,
-            &VolumeEvalParams {
-                bandwidth: current_bandwidth,
-                multiplier,
-                smoothing: current_smoothing,
-            },
-        )?;
+    // Bayesian optimization configuration
+    let bayesian_config = BayesianConfig {
+        n_initial: 10,
+        max_iterations: 40,
+        tolerance: 1e-4,
+        acquisition: AcquisitionFunction::ExpectedImprovement,
+        gp_length_scale: 0.5,
+        gp_noise: 1e-6,
+    };
 
-        if balance.composite_quality_score < best_multiplier_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_multiplier_score = balance.composite_quality_score;
-            current_multiplier = multiplier;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better multiplier found: {:.1} (score: {:.4})",
-                multiplier,
-                best_multiplier_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best extreme multiplier: {:.1} (tested {} values)",
-        current_multiplier,
-        multipliers.len()
-    );
+    // Run Bayesian optimization
+    let best_params = calibrator
+        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .await?;
 
-    // Step 3: Optimize smoothing periods
-    log::info!("📊 Step 3/3: Optimizing smoothing periods...");
-    let mut best_smoothing_score = f64::INFINITY;
-    let mut final_balance = ClassBalance::default();
-    for &smoothing in &smoothing_values {
-        total_tested += 1;
-        let balance = evaluate_volume_params(
-            &utils,
-            context,
-            &VolumeEvalParams {
-                bandwidth: current_bandwidth,
-                multiplier: current_multiplier,
-                smoothing,
-            },
-        )?;
+    // Evaluate final parameters to get balance
+    let final_eval_params = VolumeEvalParams {
+        bandwidth: best_params[0],
+        multiplier: best_params[1],
+        smoothing: best_params[2].round() as usize,
+    };
 
-        if balance.composite_quality_score < best_smoothing_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_smoothing_score = balance.composite_quality_score;
-            current_smoothing = smoothing;
-            final_balance = balance;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better smoothing found: {} (score: {:.4})",
-                smoothing,
-                best_smoothing_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best smoothing periods: {} (tested {} values)",
-        current_smoothing,
-        smoothing_values.len()
-    );
+    let final_balance = evaluate_volume_params(&utils, context, &final_eval_params)?;
 
     // Calculate derived thresholds
-    let min_base_threshold = current_bandwidth * 0.1; // 10% of bandwidth as minimum
-    let min_extreme_threshold = current_bandwidth * current_multiplier * 0.1;
+    let min_base_threshold = best_params[0] * 0.1;
+    let min_extreme_threshold = best_params[0] * best_params[1] * 0.1;
 
-    let best_params = VolumeParams {
-        bandwidth: current_bandwidth,
-        extreme_multiplier: current_multiplier,
-        smoothing_periods: current_smoothing,
+    let result = VolumeParams {
+        bandwidth: best_params[0],
+        extreme_multiplier: best_params[1],
+        smoothing_periods: best_params[2].round() as usize,
         min_base_threshold,
         min_extreme_threshold,
         balance: final_balance,
     };
 
     log::info!(
-        "🎯 Volume Calibration Complete!\n  Tested: {} combinations\n  Improvements: {}\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Smoothing Periods: {}\n    - Min Base Threshold: {:.4}\n    - Min Extreme Threshold: {:.4}\n  Final Score: {:.4}",
-        total_tested,
-        total_improvements,
-        best_params.bandwidth,
-        best_params.extreme_multiplier,
-        best_params.smoothing_periods,
-        best_params.min_base_threshold,
-        best_params.min_extreme_threshold,
-        best_smoothing_score
+        "🎯 Volume Calibration Complete!\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Smoothing Periods: {}\n    - Min Base Threshold: {:.4}\n    - Min Extreme Threshold: {:.4}\n  Final Score: {:.4}",
+        result.bandwidth,
+        result.extreme_multiplier,
+        result.smoothing_periods,
+        result.min_base_threshold,
+        result.min_extreme_threshold,
+        result.balance.composite_quality_score
     );
 
-    Ok(best_params)
+    Ok(result)
 }
 
 /// Evaluate volume parameters using proper volume regime classification

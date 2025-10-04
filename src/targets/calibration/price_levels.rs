@@ -7,190 +7,93 @@ use super::core::ParameterCalibrator;
 use super::types::*;
 use crate::utils::error::Result;
 
-/// Calibrate price level parameters with extended grid search including fallback_percentiles
+/// Calibrate price level parameters using Bayesian optimization
 pub async fn calibrate_price_levels(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
 ) -> Result<PriceLevelParams> {
-    log::info!("🔬 Starting price level calibration - testing ALL combinations");
+    use super::bayesian::{AcquisitionFunction, BayesianConfig};
 
-    // Parameter ranges
-    let bandwidths = vec![0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-    let percentile_pairs = vec![
-        [0.01, 0.99],
-        [0.05, 0.95],
-        [0.1, 0.9],
-        [0.15, 0.85],
-        [0.2, 0.8],
-        [0.25, 0.75],
-        [0.3, 0.7],
-        [0.35, 0.65],
-        [0.4, 0.6],
-    ];
-    let neutral_band_factors = vec![0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-    let momentum_factors = vec![1.1, 1.2, 1.3, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0];
+    log::info!("🔬 Starting Bayesian Optimization for Price Levels calibration");
 
     let utils = calibrator.get_utils();
 
-    // Sequential optimization - properly track best values at each step
-    let mut current_bandwidth = 0.5; // Start with middle value
-    let mut current_percentiles = [0.1, 0.9]; // Start with reasonable default
-    let mut current_neutral = 0.3; // Start with reasonable default
-    let mut current_momentum = 2.0; // Start with reasonable default
-    let mut final_balance = ClassBalance::default();
+    // Define 5D parameter space (split percentiles into low/high)
+    let param_bounds = vec![
+        (0.2, 1.0),  // bandwidth
+        (0.01, 0.4), // percentile_low
+        (0.6, 0.99), // percentile_high
+        (0.05, 1.0), // neutral_band_factor
+        (1.1, 5.0),  // momentum_factor
+    ];
 
-    // Step 1: Find best bandwidth
-    log::info!("📊 Step 1/4: Optimizing bandwidth parameter...");
-    let mut best_bandwidth_score = f64::INFINITY;
-    for &bandwidth in &bandwidths {
-        let balance = evaluate_price_level_params(
-            &utils,
-            context,
-            &PriceLevelEvalParams {
-                bandwidth,
-                percentiles: current_percentiles,
-                neutral_band: current_neutral,
-                momentum_factor: current_momentum,
-            },
-        )?;
+    let param_names = vec![
+        "bandwidth".to_string(),
+        "percentile_low".to_string(),
+        "percentile_high".to_string(),
+        "neutral_band_factor".to_string(),
+        "momentum_factor".to_string(),
+    ];
 
-        if balance.balance_score < best_bandwidth_score {
-            best_bandwidth_score = balance.balance_score;
-            current_bandwidth = bandwidth; // STORE the actual best value
-            log::debug!(
-                "  ✓ Better bandwidth found: {:.2} (score: {:.4})",
-                bandwidth,
-                balance.balance_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best bandwidth: {:.2} (tested {} values)",
-        current_bandwidth,
-        bandwidths.len()
-    );
+    // Objective function: minimize balance_score (not composite_quality_score)
+    let objective_fn = |params: &[f64]| -> Result<f64> {
+        let test_params = PriceLevelEvalParams {
+            bandwidth: params[0],
+            percentiles: [params[1], params[2]], // Combine low/high
+            neutral_band: params[3],
+            momentum_factor: params[4],
+        };
 
-    // Step 2: Find best percentiles with best bandwidth
-    log::info!("📊 Step 2/4: Optimizing percentile parameters...");
-    let mut best_percentile_score = f64::INFINITY;
-    for &percentiles in &percentile_pairs {
-        let balance = evaluate_price_level_params(
-            &utils,
-            context,
-            &PriceLevelEvalParams {
-                bandwidth: current_bandwidth, // Use the actual best bandwidth
-                percentiles,
-                neutral_band: current_neutral,
-                momentum_factor: current_momentum,
-            },
-        )?;
+        let balance = evaluate_price_level_params(&utils, context, &test_params)?;
 
-        if balance.balance_score < best_percentile_score {
-            best_percentile_score = balance.balance_score;
-            current_percentiles = percentiles; // STORE the actual best value
-            log::debug!(
-                "  ✓ Better percentiles found: [{:.2}, {:.2}] (score: {:.4})",
-                percentiles[0],
-                percentiles[1],
-                balance.balance_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best percentiles: [{:.2}, {:.2}] (tested {} pairs)",
-        current_percentiles[0],
-        current_percentiles[1],
-        percentile_pairs.len()
-    );
+        // Price levels use balance_score, not composite_quality_score
+        Ok(balance.balance_score)
+    };
 
-    // Step 3: Find best neutral band with best bandwidth and percentiles
-    log::info!("📊 Step 3/4: Optimizing neutral band factor...");
-    let mut best_neutral_score = f64::INFINITY;
-    for &neutral_band in &neutral_band_factors {
-        let balance = evaluate_price_level_params(
-            &utils,
-            context,
-            &PriceLevelEvalParams {
-                bandwidth: current_bandwidth,     // Use actual best bandwidth
-                percentiles: current_percentiles, // Use actual best percentiles
-                neutral_band,
-                momentum_factor: current_momentum,
-            },
-        )?;
+    // Bayesian optimization configuration
+    let bayesian_config = BayesianConfig {
+        n_initial: 15,
+        max_iterations: 60,
+        tolerance: 1e-4,
+        acquisition: AcquisitionFunction::ExpectedImprovement,
+        gp_length_scale: 0.5,
+        gp_noise: 1e-6,
+    };
 
-        if balance.balance_score < best_neutral_score {
-            best_neutral_score = balance.balance_score;
-            current_neutral = neutral_band; // STORE the actual best value
-            log::debug!(
-                "  ✓ Better neutral band found: {:.2} (score: {:.4})",
-                neutral_band,
-                balance.balance_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best neutral band: {:.2} (tested {} values)",
-        current_neutral,
-        neutral_band_factors.len()
-    );
+    // Run Bayesian optimization
+    let best_params = calibrator
+        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .await?;
 
-    // Step 4: Find best momentum factor with all best params
-    log::info!("📊 Step 4/4: Optimizing momentum factor...");
-    let mut best_momentum_score = f64::INFINITY;
-    for &momentum in &momentum_factors {
-        let balance = evaluate_price_level_params(
-            &utils,
-            context,
-            &PriceLevelEvalParams {
-                bandwidth: current_bandwidth,     // Use actual best bandwidth
-                percentiles: current_percentiles, // Use actual best percentiles
-                neutral_band: current_neutral,    // Use actual best neutral
-                momentum_factor: momentum,
-            },
-        )?;
+    // Evaluate final parameters to get balance
+    let final_eval_params = PriceLevelEvalParams {
+        bandwidth: best_params[0],
+        percentiles: [best_params[1], best_params[2]],
+        neutral_band: best_params[3],
+        momentum_factor: best_params[4],
+    };
 
-        if balance.balance_score < best_momentum_score {
-            best_momentum_score = balance.balance_score;
-            current_momentum = momentum; // STORE the actual best value
-            final_balance = balance.clone(); // CLONE the balance to avoid move
-            log::debug!(
-                "  ✓ Better momentum factor found: {:.2} (score: {:.4})",
-                momentum,
-                balance.balance_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best momentum factor: {:.2} (tested {} values)",
-        current_momentum,
-        momentum_factors.len()
-    );
+    let final_balance = evaluate_price_level_params(&utils, context, &final_eval_params)?;
 
-    // Create final params using the ACTUAL best values found
-    let best_params = PriceLevelParams {
-        bandwidth: current_bandwidth,     // Use the actual best bandwidth found
-        percentiles: current_percentiles, // Use the actual best percentiles found
-        neutral_band_factor: current_neutral, // Use the actual best neutral found
-        momentum_factor: current_momentum, // Use the actual best momentum found
+    let result = PriceLevelParams {
+        bandwidth: best_params[0],
+        percentiles: [best_params[1], best_params[2]],
+        neutral_band_factor: best_params[3],
+        momentum_factor: best_params[4],
         balance: final_balance,
     };
 
     log::info!(
-        "🎯 Price Level Calibration Complete!\n      Tested: {} combinations\n      Improvements: 10\n      Final Parameters:\n        - Bandwidth: {:.2}\n        - Percentiles: [{:.2}, {:.2}]\n        - Neutral Band: {:.2}\n        - Momentum Factor: {:.2}\n      Final Score: {:.4}\n\n      ✅ VERIFICATION: Final params match logged best values:\n        - Bandwidth: {:.2} (logged as best)\n        - Percentiles: [{:.2}, {:.2}] (logged as best)\n        - Neutral Band: {:.2} (logged as best)\n        - Momentum Factor: {:.2} (logged as best)",
-        bandwidths.len() + percentile_pairs.len() + neutral_band_factors.len() + momentum_factors.len(),
-        best_params.bandwidth,
-        best_params.percentiles[0], best_params.percentiles[1],
-        best_params.neutral_band_factor,
-        best_params.momentum_factor,
-        best_momentum_score,
-        // Verification - show the same values again to confirm they match
-        current_bandwidth,
-        current_percentiles[0], current_percentiles[1],
-        current_neutral,
-        current_momentum
+        "🎯 Price Level Calibration Complete!\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Percentiles: [{:.2}, {:.2}]\n    - Neutral Band: {:.2}\n    - Momentum Factor: {:.2}\n  Final Score: {:.4}",
+        result.bandwidth,
+        result.percentiles[0],
+        result.percentiles[1],
+        result.neutral_band_factor,
+        result.momentum_factor,
+        result.balance.balance_score
     );
 
-    Ok(best_params)
+    Ok(result)
 }
 
 /// Evaluate price level parameters using EXACT calibrated parameters (NO adaptive overrides)

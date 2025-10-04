@@ -7,236 +7,101 @@ use super::core::ParameterCalibrator;
 use super::types::*;
 use crate::utils::error::Result;
 
-/// Calibrate volatility parameters using proper ATR analysis with extended grid search
+/// Calibrate volatility parameters using Bayesian optimization
 pub async fn calibrate_volatility(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
 ) -> Result<VolatilityParams> {
-    log::info!("🔬 Starting state-of-the-art volatility calibration - optimizing each parameter independently");
+    use super::bayesian::{AcquisitionFunction, BayesianConfig};
 
-    // Start with reasonable defaults
-    let mut current_bandwidth = 0.3;
-    let mut current_multiplier = 2.0;
-    let mut current_decay = 0.95;
-    let mut current_volume_weight = 0.15;
-    let mut current_min_baseline = 0.005;
-
-    let mut total_tested = 0;
-    let mut total_improvements = 0;
-
-    // Parameter ranges
-    let bandwidths = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0];
-    let multipliers = vec![1.5, 2.0, 2.5, 3.0];
-    let decay_factors = vec![0.85, 0.90, 0.95, 1.0];
-    let volume_weights = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
-    let min_volatility_baselines = vec![0.001, 0.003, 0.005, 0.007, 0.01];
+    log::info!("🔬 Starting Bayesian Optimization for Volatility calibration");
 
     let utils = calibrator.get_utils();
 
-    // Step 1: Optimize bandwidth
-    log::info!("📊 Step 1/5: Optimizing bandwidth parameter...");
-    let mut best_bandwidth_score = f64::INFINITY;
-    for &bandwidth in &bandwidths {
-        total_tested += 1;
-        let balance = evaluate_volatility_params(
-            &utils,
-            context,
-            &VolatilityEvalParams {
-                bandwidth,
-                multiplier: current_multiplier,
-                decay: current_decay,
-                volume_weight: current_volume_weight,
-                min_baseline: current_min_baseline,
-            },
-        )?;
+    // Define 5D parameter space
+    let param_bounds = vec![
+        (0.1, 1.0),    // bandwidth
+        (1.5, 3.0),    // extreme_multiplier
+        (0.85, 1.0),   // horizon_decay
+        (0.05, 0.3),   // volume_weight
+        (0.001, 0.01), // min_volatility_baseline
+    ];
 
-        if balance.composite_quality_score < best_bandwidth_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_bandwidth_score = balance.composite_quality_score;
-            current_bandwidth = bandwidth;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better bandwidth found: {:.2} (score: {:.4})",
-                bandwidth,
-                best_bandwidth_score
-            );
+    let param_names = vec![
+        "bandwidth".to_string(),
+        "extreme_multiplier".to_string(),
+        "horizon_decay".to_string(),
+        "volume_weight".to_string(),
+        "min_volatility_baseline".to_string(),
+    ];
+
+    // Objective function: minimize composite_quality_score
+    let objective_fn = |params: &[f64]| -> Result<f64> {
+        let test_params = VolatilityEvalParams {
+            bandwidth: params[0],
+            multiplier: params[1],
+            decay: params[2],
+            volume_weight: params[3],
+            min_baseline: params[4],
+        };
+
+        let balance = evaluate_volatility_params(&utils, context, &test_params)?;
+
+        // Return score only if diversity is acceptable
+        if balance.diversity_score >= 0.3 {
+            Ok(balance.composite_quality_score)
+        } else {
+            // Penalize low diversity
+            Ok(balance.composite_quality_score + 10.0)
         }
-    }
-    log::info!(
-        "  → Best bandwidth: {:.2} (tested {} values)",
-        current_bandwidth,
-        bandwidths.len()
-    );
+    };
 
-    // Step 2: Optimize extreme multiplier
-    log::info!("📊 Step 2/5: Optimizing extreme multiplier...");
-    let mut best_multiplier_score = f64::INFINITY;
-    for &multiplier in &multipliers {
-        total_tested += 1;
-        let balance = evaluate_volatility_params(
-            &utils,
-            context,
-            &VolatilityEvalParams {
-                bandwidth: current_bandwidth,
-                multiplier,
-                decay: current_decay,
-                volume_weight: current_volume_weight,
-                min_baseline: current_min_baseline,
-            },
-        )?;
+    // Bayesian optimization configuration
+    let bayesian_config = BayesianConfig {
+        n_initial: 15,
+        max_iterations: 50,
+        tolerance: 1e-4,
+        acquisition: AcquisitionFunction::ExpectedImprovement,
+        gp_length_scale: 0.5,
+        gp_noise: 1e-6,
+    };
 
-        if balance.composite_quality_score < best_multiplier_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_multiplier_score = balance.composite_quality_score;
-            current_multiplier = multiplier;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better multiplier found: {:.1} (score: {:.4})",
-                multiplier,
-                best_multiplier_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best extreme multiplier: {:.1} (tested {} values)",
-        current_multiplier,
-        multipliers.len()
-    );
+    // Run Bayesian optimization
+    let best_params = calibrator
+        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .await?;
 
-    // Step 3: Optimize decay factor
-    log::info!("📊 Step 3/5: Optimizing horizon decay factor...");
-    let mut best_decay_score = f64::INFINITY;
-    for &decay in &decay_factors {
-        total_tested += 1;
-        let balance = evaluate_volatility_params(
-            &utils,
-            context,
-            &VolatilityEvalParams {
-                bandwidth: current_bandwidth,
-                multiplier: current_multiplier,
-                decay,
-                volume_weight: current_volume_weight,
-                min_baseline: current_min_baseline,
-            },
-        )?;
+    // Evaluate final parameters to get balance
+    let final_eval_params = VolatilityEvalParams {
+        bandwidth: best_params[0],
+        multiplier: best_params[1],
+        decay: best_params[2],
+        volume_weight: best_params[3],
+        min_baseline: best_params[4],
+    };
 
-        if balance.composite_quality_score < best_decay_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_decay_score = balance.composite_quality_score;
-            current_decay = decay;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better decay found: {:.2} (score: {:.4})",
-                decay,
-                best_decay_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best horizon decay: {:.2} (tested {} values)",
-        current_decay,
-        decay_factors.len()
-    );
+    let final_balance = evaluate_volatility_params(&utils, context, &final_eval_params)?;
 
-    // Step 4: Optimize volume weight
-    log::info!("📊 Step 4/5: Optimizing volume weight...");
-    let mut best_volume_score = f64::INFINITY;
-    for &volume_weight in &volume_weights {
-        total_tested += 1;
-        let balance = evaluate_volatility_params(
-            &utils,
-            context,
-            &VolatilityEvalParams {
-                bandwidth: current_bandwidth,
-                multiplier: current_multiplier,
-                decay: current_decay,
-                volume_weight,
-                min_baseline: current_min_baseline,
-            },
-        )?;
-
-        if balance.composite_quality_score < best_volume_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_volume_score = balance.composite_quality_score;
-            current_volume_weight = volume_weight;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better volume weight found: {:.2} (score: {:.4})",
-                volume_weight,
-                best_volume_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best volume weight: {:.2} (tested {} values)",
-        current_volume_weight,
-        volume_weights.len()
-    );
-
-    // Step 5: Optimize min volatility baseline
-    log::info!("📊 Step 5/5: Optimizing minimum volatility baseline...");
-    let mut best_baseline_score = f64::INFINITY;
-    let mut final_balance = ClassBalance::default();
-    for &min_baseline in &min_volatility_baselines {
-        total_tested += 1;
-        let balance = evaluate_volatility_params(
-            &utils,
-            context,
-            &VolatilityEvalParams {
-                bandwidth: current_bandwidth,
-                multiplier: current_multiplier,
-                decay: current_decay,
-                volume_weight: current_volume_weight,
-                min_baseline,
-            },
-        )?;
-
-        if balance.composite_quality_score < best_baseline_score && balance.diversity_score >= 0.3
-        // min_diversity_threshold
-        {
-            best_baseline_score = balance.composite_quality_score;
-            current_min_baseline = min_baseline;
-            final_balance = balance;
-            total_improvements += 1;
-            log::debug!(
-                "  ✓ Better min baseline found: {:.3} (score: {:.4})",
-                min_baseline,
-                best_baseline_score
-            );
-        }
-    }
-    log::info!(
-        "  → Best min baseline: {:.3} (tested {} values)",
-        current_min_baseline,
-        min_volatility_baselines.len()
-    );
-
-    let best_params = VolatilityParams {
-        bandwidth: current_bandwidth,
-        extreme_multiplier: current_multiplier,
-        volume_weight: current_volume_weight,
-        horizon_decay: current_decay,
-        min_volatility_baseline: current_min_baseline,
+    let result = VolatilityParams {
+        bandwidth: best_params[0],
+        extreme_multiplier: best_params[1],
+        volume_weight: best_params[3],
+        horizon_decay: best_params[2],
+        min_volatility_baseline: best_params[4],
         balance: final_balance,
     };
 
     log::info!(
-        "🎯 Volatility Calibration Complete!\n  Tested: {} combinations\n  Improvements: {}\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Volume Weight: {:.2}\n    - Horizon Decay: {:.2}\n    - Min Baseline: {:.3}\n  Final Score: {:.4}",
-        total_tested,
-        total_improvements,
-        best_params.bandwidth,
-        best_params.extreme_multiplier,
-        best_params.volume_weight,
-        best_params.horizon_decay,
-        best_params.min_volatility_baseline,
-        best_baseline_score
+        "🎯 Volatility Calibration Complete!\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Volume Weight: {:.2}\n    - Horizon Decay: {:.2}\n    - Min Baseline: {:.3}\n  Final Score: {:.4}",
+        result.bandwidth,
+        result.extreme_multiplier,
+        result.volume_weight,
+        result.horizon_decay,
+        result.min_volatility_baseline,
+        result.balance.composite_quality_score
     );
 
-    Ok(best_params)
+    Ok(result)
 }
 
 /// Evaluate volatility parameters using simplified ATR momentum classification
