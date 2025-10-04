@@ -439,14 +439,14 @@ impl DataPipeline {
 
         // Log per-target balance summary (sorted for consistent logging)
         let mut sorted_log_targets: Vec<_> = target_balanced_datasets.keys().collect();
-        sorted_log_targets.sort_by(|a, b| {
-            match a.0.cmp(&b.0) {
-                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-                other => other,
-            }
+        sorted_log_targets.sort_by(|a, b| match a.0.cmp(&b.0) {
+            std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+            other => other,
         });
         for (target_type, horizon) in sorted_log_targets {
-            let dataset = target_balanced_datasets.get(&(*target_type, horizon.clone())).unwrap();
+            let dataset = target_balanced_datasets
+                .get(&(*target_type, horizon.clone()))
+                .unwrap();
             log::info!(
                 "   {:?} {}: {} balanced sequences ({} per class × {} classes)",
                 target_type,

@@ -1180,16 +1180,9 @@ impl OutputFormatter {
         // Enhanced reconstruction using calibrated parameters if available
         if let Some(sequence_ohlcv) = &self.sequence_ohlcv {
             if self.calibrated_parameters.is_some() {
-                // Calculate sequence volume (average volume from OHLCV data)
-                let sequence_volume = if !sequence_ohlcv.is_empty() {
-                    sequence_ohlcv
-                        .iter()
-                        .map(|candle| candle.volume)
-                        .sum::<f64>()
-                        / sequence_ohlcv.len() as f64
-                } else {
-                    1000.0 // Default fallback
-                };
+                // Extract sequence volumes from OHLCV data (NEW: for percentile-based reconstruction)
+                let sequence_volumes: Vec<f64> =
+                    sequence_ohlcv.iter().map(|candle| candle.volume).collect();
 
                 // Prepare probabilities array for reconstruction
                 let probabilities = vec![
@@ -1200,10 +1193,10 @@ impl OutputFormatter {
                     volume_output.very_high_probability,
                 ];
 
-                // Call reconstruction function with calibrated parameters
+                // Call reconstruction function with calibrated parameters (NEW: percentile-based)
                 match reconstruct_volume(
                     &probabilities,
-                    sequence_volume,
+                    &sequence_volumes, // Now passes array of volumes
                     &self.calibrated_parameters.as_ref().unwrap().volume,
                 ) {
                     Ok(reconstruction) => {

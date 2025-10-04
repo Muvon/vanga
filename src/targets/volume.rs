@@ -211,11 +211,20 @@ pub fn classify_volume_with_calibrated_params(
     classify_volume_regime_with_strength(&sequence_volumes, &horizon_volumes, &thresholds, &config)
 }
 
-/// Classify volume regime using logarithmic ratio analysis with strength calculation
+/// Classify volume regime using PERCENTILE-BASED analysis (like price levels)
+///
+/// **NEW APPROACH**: Instead of log ratio of averages, use percentile-based classification
+/// similar to price levels for better signal separation and learnability.
+///
+/// **Logic**:
+/// 1. Calculate sequence volume percentiles (p10, p90) to establish volume range
+/// 2. Calculate horizon median volume as target
+/// 3. Classify target relative to sequence range with bandwidth expansion
+/// 4. This creates clear boundaries similar to price level classification
 pub fn classify_volume_regime_with_strength(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
-    thresholds: &LogVolumeThresholds,
+    _thresholds: &LogVolumeThresholds,
     config: &VolumeConfig,
 ) -> Result<(i32, f64)> {
     if sequence_volumes.is_empty() || horizon_volumes.is_empty() {
@@ -224,33 +233,144 @@ pub fn classify_volume_regime_with_strength(
         ));
     }
 
-    // Calculate smoothed average volumes
-    let sequence_avg_volume =
-        calculate_smoothed_volume(sequence_volumes, config.smoothing_periods)?;
-    let horizon_avg_volume = calculate_smoothed_volume(horizon_volumes, config.smoothing_periods)?;
+    // NEW APPROACH: Percentile-based classification (like price levels)
 
-    // Handle edge cases
-    if sequence_avg_volume <= 0.0 || horizon_avg_volume <= 0.0 {
-        return Ok((2, 0.5)); // Default to medium with neutral strength for invalid volume values
+    // 1. Calculate sequence volume percentiles to establish range
+    let mut sorted_seq_volumes = sequence_volumes.to_vec();
+    sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let p10_idx = (sorted_seq_volumes.len() as f64 * 0.15).floor() as usize;
+    let p90_idx = ((sorted_seq_volumes.len() as f64 * 0.85).ceil() as usize)
+        .min(sorted_seq_volumes.len() - 1);
+
+    let sequence_volume_min = sorted_seq_volumes[p10_idx];
+    let sequence_volume_max = sorted_seq_volumes[p90_idx];
+    let sequence_volume_range = sequence_volume_max - sequence_volume_min;
+
+    // 2. Calculate horizon median volume (more robust than mean)
+    let mut sorted_hor_volumes = horizon_volumes.to_vec();
+    sorted_hor_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let horizon_median_volume = if sorted_hor_volumes.len() % 2 == 0 {
+        let mid = sorted_hor_volumes.len() / 2;
+        (sorted_hor_volumes[mid - 1] + sorted_hor_volumes[mid]) / 2.0
+    } else {
+        sorted_hor_volumes[sorted_hor_volumes.len() / 2]
+    };
+
+    // 3. Calculate bandwidth for breakout detection (similar to price levels)
+    let bandwidth = sequence_volume_range * config.bandwidth_size;
+
+    // Handle edge case: flat volume
+    if sequence_volume_range < 1e-10 || bandwidth < 1e-10 {
+        return Ok((2, 0.5)); // Default to medium with neutral strength
     }
 
-    // Calculate volume ratio and log transformation
-    let volume_ratio = horizon_avg_volume / sequence_avg_volume;
-    let log_volume_ratio = volume_ratio.ln();
+    // 4. Define classification boundaries (5-class system)
+    let boundary_0 = sequence_volume_min - bandwidth; // Strong Down boundary
+    let boundary_1 = sequence_volume_min; // Moderate Down boundary
+    let boundary_2 = sequence_volume_max; // Neutral/Moderate Up boundary
+    let boundary_3 = sequence_volume_max + bandwidth; // Strong Up boundary
 
-    // Classify using logarithmic thresholds
-    let class = classify_volume_log_ratio(log_volume_ratio, thresholds);
+    // 5. Classify based on where horizon median falls
+    let class = if horizon_median_volume < boundary_0 {
+        0 // Very Low: Major volume decrease
+    } else if horizon_median_volume < boundary_1 {
+        1 // Low: Moderate volume decrease
+    } else if horizon_median_volume < boundary_2 {
+        2 // Medium: Within sequence range
+    } else if horizon_median_volume < boundary_3 {
+        3 // High: Moderate volume increase
+    } else {
+        4 // Very High: Major volume surge
+    };
 
-    // Calculate classification strength
-    let strength = calculate_volume_strength(log_volume_ratio, thresholds, class);
+    // 6. Calculate classification strength based on position within range
+    let strength = calculate_volume_strength_percentile(
+        horizon_median_volume,
+        boundary_0,
+        boundary_1,
+        boundary_2,
+        boundary_3,
+        class,
+    );
 
     log::debug!(
-        "🎯 Volume Analysis: seq_vol={:.2}, hor_vol={:.2}, ratio={:.3}, log_ratio={:.4} → class={} ({}) strength={:.3}",
-        sequence_avg_volume, horizon_avg_volume, volume_ratio, log_volume_ratio, class,
+        "🎯 Volume Percentile Analysis: seq_range=[{:.2}, {:.2}], hor_median={:.2}, bandwidth={:.2} → class={} ({}) strength={:.3}",
+        sequence_volume_min, sequence_volume_max, horizon_median_volume, bandwidth, class,
         ["VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"][class as usize], strength
     );
 
     Ok((class, strength))
+}
+
+/// Calculate volume strength for percentile-based classification
+fn calculate_volume_strength_percentile(
+    target_volume: f64,
+    boundary_0: f64,
+    boundary_1: f64,
+    boundary_2: f64,
+    boundary_3: f64,
+    class: i32,
+) -> f64 {
+    match class {
+        0 => {
+            // Very Low: target < boundary_0
+            let distance_below = (boundary_0 - target_volume).max(0.0);
+            let max_distance = (boundary_1 - boundary_0).abs();
+            if max_distance > 0.0 {
+                (distance_below / max_distance).clamp(0.1, 1.0)
+            } else {
+                0.5
+            }
+        }
+        1 => {
+            // Low: boundary_0 <= target < boundary_1
+            let range_center = (boundary_0 + boundary_1) / 2.0;
+            let range_half_width = (boundary_1 - boundary_0) / 2.0;
+            if range_half_width > 0.0 {
+                let distance_from_center = (target_volume - range_center).abs();
+                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+                strength.max(0.1)
+            } else {
+                0.5
+            }
+        }
+        2 => {
+            // Medium: boundary_1 <= target < boundary_2
+            let range_center = (boundary_1 + boundary_2) / 2.0;
+            let range_half_width = (boundary_2 - boundary_1) / 2.0;
+            if range_half_width > 0.0 {
+                let distance_from_center = (target_volume - range_center).abs();
+                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+                strength.max(0.1)
+            } else {
+                0.5
+            }
+        }
+        3 => {
+            // High: boundary_2 <= target < boundary_3
+            let range_center = (boundary_2 + boundary_3) / 2.0;
+            let range_half_width = (boundary_3 - boundary_2) / 2.0;
+            if range_half_width > 0.0 {
+                let distance_from_center = (target_volume - range_center).abs();
+                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+                strength.max(0.1)
+            } else {
+                0.5
+            }
+        }
+        4 => {
+            // Very High: target >= boundary_3
+            let distance_beyond = (target_volume - boundary_3).max(0.0);
+            let max_distance = (boundary_3 - boundary_2).abs();
+            if max_distance > 0.0 {
+                (distance_beyond / max_distance).clamp(0.1, 1.0)
+            } else {
+                0.5
+            }
+        }
+        _ => 0.5,
+    }
 }
 
 /// Classify volume regime using logarithmic ratio analysis (legacy function for compatibility)
@@ -269,12 +389,12 @@ pub fn classify_volume_regime(
     Ok(class)
 }
 
-/// Calculate classification strength for volume based on distance from boundaries
+/// OLD FUNCTION - Kept for backward compatibility with legacy code
+/// Calculate classification strength for volume based on distance from boundaries (LOG-BASED)
 ///
-/// Strength represents how confident/strong the classification is:
-/// - 1.0 = Very strong (deep in the center of the class range)
-/// - 0.5 = Moderate (near class boundaries)
-/// - 0.0 = Very weak (just barely in the class)
+/// NOTE: This function is no longer used by the main classification logic,
+/// which now uses percentile-based approach. Kept for any legacy code that might reference it.
+#[allow(dead_code)]
 fn calculate_volume_strength(log_ratio: f64, thresholds: &LogVolumeThresholds, class: i32) -> f64 {
     match class {
         0 => {
@@ -651,9 +771,11 @@ pub struct VolumeReconstruction {
 }
 
 /// Reconstruct volume from model probabilities
+///
+/// **UPDATED**: Now uses percentile-based reconstruction to match the new training logic
 pub fn reconstruct_volume(
     probabilities: &[f64],
-    sequence_volume: f64,
+    sequence_volumes: &[f64], // Changed from single value to array
     calibrated_params: &crate::targets::calibration::VolumeParams,
 ) -> Result<VolumeReconstruction> {
     if probabilities.len() != 5 {
@@ -662,107 +784,112 @@ pub fn reconstruct_volume(
         ));
     }
 
-    // RECONSTRUCTION MUST MATCH TRAINING LOGIC EXACTLY
-    // Training uses: log_volume_ratio = ln(horizon_volume / sequence_volume)
-    // Classification is based on log_volume_ratio thresholds
+    if sequence_volumes.is_empty() {
+        return Err(VangaError::DataError(
+            "Sequence volumes required for percentile-based reconstruction".to_string(),
+        ));
+    }
 
-    // Convert calibrated parameters to log thresholds (same as training)
-    let base_threshold = calibrated_params
-        .bandwidth
-        .max(calibrated_params.min_base_threshold);
-    let extreme_threshold = (calibrated_params.extreme_multiplier * calibrated_params.bandwidth)
-        .max(calibrated_params.min_extreme_threshold);
+    // RECONSTRUCTION MUST MATCH NEW PERCENTILE-BASED TRAINING LOGIC
+    // Training now uses: percentile-based boundaries (like price levels)
 
-    // These are the SAME thresholds used in training
-    let log_thresholds = LogVolumeThresholds {
-        very_low_max: (1.0_f64 - extreme_threshold).ln(),
-        low_max: (1.0_f64 - base_threshold).ln(),
-        medium_max: (1.0_f64 + base_threshold).ln(),
-        high_max: (1.0_f64 + extreme_threshold).ln(),
+    // 1. Calculate sequence volume percentiles (same as training)
+    let mut sorted_seq_volumes = sequence_volumes.to_vec();
+    sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let p10_idx = (sorted_seq_volumes.len() as f64 * 0.15).floor() as usize;
+    let p90_idx = ((sorted_seq_volumes.len() as f64 * 0.85).ceil() as usize)
+        .min(sorted_seq_volumes.len() - 1);
+
+    let sequence_volume_min = sorted_seq_volumes[p10_idx];
+    let sequence_volume_max = sorted_seq_volumes[p90_idx];
+    let sequence_volume_range = sequence_volume_max - sequence_volume_min;
+
+    // 2. Calculate bandwidth (same as training)
+    let bandwidth = sequence_volume_range * calibrated_params.bandwidth;
+
+    // 3. Define classification boundaries (same as training)
+    let boundary_0 = sequence_volume_min - bandwidth; // Very Low boundary
+    let boundary_1 = sequence_volume_min; // Low boundary
+    let boundary_2 = sequence_volume_max; // Medium boundary
+    let boundary_3 = sequence_volume_max + bandwidth; // High boundary
+
+    // 4. Calculate representative volumes for each class (midpoints)
+    let class_representative_volumes = [
+        // Very Low: midpoint below boundary_0
+        boundary_0 - bandwidth / 2.0,
+        // Low: midpoint between boundary_0 and boundary_1
+        (boundary_0 + boundary_1) / 2.0,
+        // Medium: midpoint between boundary_1 and boundary_2
+        (boundary_1 + boundary_2) / 2.0,
+        // High: midpoint between boundary_2 and boundary_3
+        (boundary_2 + boundary_3) / 2.0,
+        // Very High: midpoint above boundary_3
+        boundary_3 + bandwidth / 2.0,
+    ];
+
+    // 5. Define volume ranges for each class
+    let volume_ranges = vec![
+        [0.0, boundary_0],           // Very Low
+        [boundary_0, boundary_1],    // Low
+        [boundary_1, boundary_2],    // Medium
+        [boundary_2, boundary_3],    // High
+        [boundary_3, f64::INFINITY], // Very High
+    ];
+
+    // 6. Calculate volume ratios relative to sequence median
+    let sequence_median = if sorted_seq_volumes.len() % 2 == 0 {
+        let mid = sorted_seq_volumes.len() / 2;
+        (sorted_seq_volumes[mid - 1] + sorted_seq_volumes[mid]) / 2.0
+    } else {
+        sorted_seq_volumes[sorted_seq_volumes.len() / 2]
     };
 
-    // Calculate log ratio midpoints for each class (matching training logic)
-    // This ensures bidirectional consistency with classification
-    let log_ratio_midpoints = [
-        // Very Low: midpoint of (-∞, very_low_max]
-        log_thresholds.very_low_max - (log_thresholds.low_max - log_thresholds.very_low_max) / 2.0,
-        // Low: midpoint of (very_low_max, low_max]
-        (log_thresholds.very_low_max + log_thresholds.low_max) / 2.0,
-        // Medium: midpoint of (low_max, medium_max]
-        (log_thresholds.low_max + log_thresholds.medium_max) / 2.0,
-        // High: midpoint of (medium_max, high_max]
-        (log_thresholds.medium_max + log_thresholds.high_max) / 2.0,
-        // Very High: midpoint of (high_max, +∞)
-        log_thresholds.high_max + (log_thresholds.high_max - log_thresholds.medium_max) / 2.0,
-    ];
-
-    // Convert log ratios back to actual volume ratios
-    let class_volume_ratios: Vec<f64> = log_ratio_midpoints
+    let volume_ratio_ranges: Vec<[f64; 2]> = volume_ranges
         .iter()
-        .map(|&log_ratio| log_ratio.exp())
-        .collect();
-
-    // Define volume ratio ranges for each class (for display purposes)
-    let volume_ratio_ranges = vec![
-        [0.0, log_thresholds.very_low_max.exp()], // Very Low
-        [
-            log_thresholds.very_low_max.exp(),
-            log_thresholds.low_max.exp(),
-        ], // Low
-        [
-            log_thresholds.low_max.exp(),
-            log_thresholds.medium_max.exp(),
-        ], // Medium
-        [
-            log_thresholds.medium_max.exp(),
-            log_thresholds.high_max.exp(),
-        ], // High
-        [log_thresholds.high_max.exp(), f64::INFINITY], // Very High
-    ];
-
-    // Convert to absolute volume ranges
-    let volume_ranges: Vec<[f64; 2]> = volume_ratio_ranges
-        .iter()
-        .map(|[lower_ratio, upper_ratio]| {
-            [
-                sequence_volume * lower_ratio,
-                if upper_ratio.is_infinite() {
-                    f64::INFINITY
-                } else {
-                    sequence_volume * upper_ratio
-                },
-            ]
+        .map(|[lower, upper]| {
+            let lower_ratio = if sequence_median > 0.0 {
+                lower / sequence_median
+            } else {
+                0.0
+            };
+            let upper_ratio = if sequence_median > 0.0 && upper.is_finite() {
+                upper / sequence_median
+            } else {
+                f64::INFINITY
+            };
+            [lower_ratio, upper_ratio]
         })
         .collect();
 
-    // Find most likely class
-    let most_likely_class = probabilities
+    // 7. Find most likely class and confidence
+    let (most_likely_class, confidence) = probabilities
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(i, _)| i)
-        .unwrap_or(2); // Default to medium
+        .map(|(idx, &prob)| (idx, prob))
+        .unwrap_or((2, 0.2)); // Default to MEDIUM
 
-    // UNIFIED CONFIDENCE CALCULATION
-    // All targets now use the same research-based calibration function
-    // This eliminates target-specific confidence inflation and ensures consistency
-    let max_prob = probabilities.iter().fold(0.0_f64, |a, &b| a.max(b));
-    let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
-
-    // Calculate expected volume ratio (weighted average of class ratios)
-    let expected_volume_ratio = probabilities
+    // 8. Calculate expected volume (weighted average of representative volumes)
+    let expected_volume: f64 = probabilities
         .iter()
-        .zip(class_volume_ratios.iter())
-        .map(|(prob, ratio)| prob * ratio)
-        .sum::<f64>();
+        .zip(class_representative_volumes.iter())
+        .map(|(&prob, &vol)| prob * vol)
+        .sum();
 
-    // Generate interpretation
-    let class_names = get_volume_class_names();
+    // 9. Calculate expected volume ratio
+    let expected_volume_ratio = if sequence_median > 0.0 {
+        expected_volume / sequence_median
+    } else {
+        1.0
+    };
+
+    // 10. Generate interpretation
+    let class_names = ["Very Low", "Low", "Medium", "High", "Very High"];
     let volume_interpretation = format!(
-        "{} (confidence: {:.1}%, expected ratio: {:.2}x)",
+        "{} volume regime ({}% confidence)",
         class_names[most_likely_class],
-        confidence * 100.0,
-        expected_volume_ratio
+        (confidence * 100.0) as i32
     );
 
     Ok(VolumeReconstruction {
@@ -772,7 +899,7 @@ pub fn reconstruct_volume(
         most_likely_class,
         confidence,
         expected_volume_ratio,
-        sequence_volume,
+        sequence_volume: sequence_median, // Use median as representative
         volume_interpretation,
     })
 }

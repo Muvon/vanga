@@ -432,7 +432,8 @@ mod tests {
 
         // Test reconstruction with clear high volume signal
         let high_vol_probs = vec![0.05, 0.05, 0.1, 0.2, 0.6]; // Strong VERY_HIGH signal
-        let reconstruction = reconstruct_volume(&high_vol_probs, 1000.0, &params).unwrap();
+        let reconstruction =
+            reconstruct_volume(&high_vol_probs, &[1000.0, 1100.0, 1050.0], &params).unwrap();
 
         assert_eq!(
             reconstruction.most_likely_class, 4,
@@ -449,7 +450,8 @@ mod tests {
 
         // Test reconstruction with low volume signal
         let low_vol_probs = vec![0.6, 0.2, 0.1, 0.05, 0.05]; // Strong VERY_LOW signal
-        let reconstruction = reconstruct_volume(&low_vol_probs, 5000.0, &params).unwrap();
+        let reconstruction =
+            reconstruct_volume(&low_vol_probs, &[5000.0, 5100.0, 5050.0], &params).unwrap();
 
         assert_eq!(
             reconstruction.most_likely_class, 0,
@@ -462,7 +464,8 @@ mod tests {
 
         // Test reconstruction with unclear probabilities
         let unclear_probs = vec![0.2, 0.2, 0.2, 0.2, 0.2]; // Equal probabilities
-        let reconstruction = reconstruct_volume(&unclear_probs, 1000.0, &params).unwrap();
+        let reconstruction =
+            reconstruct_volume(&unclear_probs, &[1000.0, 1100.0, 1050.0], &params).unwrap();
 
         assert!(
             reconstruction.confidence < 0.3,

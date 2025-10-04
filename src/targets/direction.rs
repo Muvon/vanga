@@ -413,6 +413,9 @@ fn calculate_direction_strength(
 /// Direction classification should detect TREND CHANGES and MOMENTUM SHIFTS,
 /// not just movement magnitude. This function analyzes how the directional
 /// momentum changes from the sequence period to the horizon period.
+///
+/// **ENHANCED VERSION**: Normalizes momentum change by sequence volatility
+/// to make the signal more stable and comparable across different market conditions.
 fn calculate_directional_momentum_change(
     sequence_prices: &[f64],
     horizon_prices: &[f64],
@@ -443,10 +446,45 @@ fn calculate_directional_momentum_change(
         (hor_end - hor_start) / hor_start
     };
 
-    // Calculate momentum change (this is the key directional signal)
-    let momentum_change = horizon_momentum - sequence_momentum;
+    // Calculate raw momentum change
+    let raw_momentum_change = horizon_momentum - sequence_momentum;
 
-    Ok((sequence_momentum, horizon_momentum, momentum_change))
+    // ENHANCEMENT: Normalize by sequence volatility for stability
+    // Calculate coefficient of variation (CV) for sequence
+    let sequence_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+    let sequence_variance = sequence_prices
+        .iter()
+        .map(|&p| (p - sequence_mean).powi(2))
+        .sum::<f64>()
+        / sequence_prices.len() as f64;
+    let sequence_std = sequence_variance.sqrt();
+
+    // Coefficient of variation (volatility as percentage of price)
+    let sequence_cv = if sequence_mean.abs() > 1e-10 {
+        sequence_std / sequence_mean
+    } else {
+        0.01 // Default 1% volatility for edge cases
+    };
+
+    // Normalize momentum change by volatility context
+    // Higher volatility = larger normalization factor = smaller normalized signal
+    // This makes momentum changes comparable across different volatility regimes
+    let volatility_normalization_factor = 1.0 + sequence_cv;
+    let normalized_momentum_change = raw_momentum_change / volatility_normalization_factor;
+
+    log::debug!(
+        "🎯 Direction Momentum: seq_cv={:.4}, raw_change={:.6}, normalized_change={:.6} (factor={:.3})",
+        sequence_cv,
+        raw_momentum_change,
+        normalized_momentum_change,
+        volatility_normalization_factor
+    );
+
+    Ok((
+        sequence_momentum,
+        horizon_momentum,
+        normalized_momentum_change,
+    ))
 }
 
 /// Classify direction using momentum change analysis
@@ -611,9 +649,26 @@ pub fn reconstruct_direction(
     let final_base_threshold = base_threshold.max(min_base);
     let final_extreme_threshold = extreme_threshold.max(min_extreme);
 
+    // CRITICAL: Calculate volatility normalization factor (same as training)
+    // This ensures reconstruction uses the SAME normalized values as classification
+    let sequence_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+    let sequence_variance = sequence_prices
+        .iter()
+        .map(|&p| (p - sequence_mean).powi(2))
+        .sum::<f64>()
+        / sequence_prices.len() as f64;
+    let sequence_std = sequence_variance.sqrt();
+    let sequence_cv = if sequence_mean.abs() > 1e-10 {
+        sequence_std / sequence_mean
+    } else {
+        0.01 // Default 1% volatility
+    };
+    let volatility_normalization_factor = 1.0 + sequence_cv;
+
     // Representative momentum change for each class (midpoint of each class range)
-    // This ensures bidirectional consistency with classification logic
-    let momentum_changes = vec![
+    // IMPORTANT: These are NORMALIZED momentum changes (same as training)
+    // The thresholds are applied to normalized values, so representatives must also be normalized
+    let normalized_momentum_changes = [
         // DUMP: midpoint of (-∞, -extreme_threshold]
         -final_extreme_threshold - (final_extreme_threshold - final_base_threshold) / 2.0,
         // DOWN: midpoint of (-extreme_threshold, -base_threshold]
@@ -626,8 +681,15 @@ pub fn reconstruct_direction(
         final_extreme_threshold + (final_extreme_threshold - final_base_threshold) / 2.0,
     ];
 
-    // Convert momentum changes to trend acceleration percentages
-    let trend_accelerations: Vec<f64> = momentum_changes
+    // Convert normalized momentum changes back to raw momentum changes for interpretation
+    // This allows users to understand the actual momentum change magnitude
+    let raw_momentum_changes: Vec<f64> = normalized_momentum_changes
+        .iter()
+        .map(|&normalized| normalized * volatility_normalization_factor)
+        .collect();
+
+    // Convert raw momentum changes to trend acceleration percentages
+    let trend_accelerations: Vec<f64> = raw_momentum_changes
         .iter()
         .map(|&change| change * 100.0) // Convert to percentage
         .collect();
@@ -640,10 +702,10 @@ pub fn reconstruct_direction(
         .map(|(idx, &prob)| (idx, prob))
         .unwrap_or((2, 0.2)); // Default to SIDEWAYS
 
-    // Expected values (weighted averages)
+    // Expected values (weighted averages using RAW momentum changes)
     let expected_momentum_change: f64 = probabilities
         .iter()
-        .zip(momentum_changes.iter())
+        .zip(raw_momentum_changes.iter())
         .map(|(&prob, &change)| prob * change)
         .sum();
 
@@ -658,31 +720,33 @@ pub fn reconstruct_direction(
     let upward_probability = probabilities[3] + probabilities[4]; // UP + PUMP
     let downward_probability = probabilities[0] + probabilities[1]; // DUMP + DOWN
 
-    // Additional reconstruction metrics (pure reconstruction, no training change)
+    // Additional reconstruction metrics (using RAW momentum changes for interpretation)
     // 1) Credible interval over momentum change (10% and 90% quantiles)
     let mut cdf = 0.0;
-    let mut q10 = momentum_changes[0];
-    let mut q90 = momentum_changes[4];
+    let mut q10 = raw_momentum_changes[0];
+    let mut q90 = raw_momentum_changes[4];
     for (i, &p) in probabilities.iter().enumerate() {
         cdf += p;
-        if cdf >= 0.10 && q10 == momentum_changes[0] {
-            q10 = momentum_changes[i];
+        if cdf >= 0.10 && q10 == raw_momentum_changes[0] {
+            q10 = raw_momentum_changes[i];
         }
         if cdf >= 0.90 {
-            q90 = momentum_changes[i];
+            q90 = raw_momentum_changes[i];
             break;
         }
     }
 
     // 2) Directional magnitude normalized to [0,1]
-    let max_abs = (final_extreme_threshold * 1.5).abs().max(1e-12);
+    let max_abs = (final_extreme_threshold * volatility_normalization_factor * 1.5)
+        .abs()
+        .max(1e-12);
     let directional_magnitude = (expected_momentum_change.abs() / max_abs).min(1.0);
 
     let boundaries = [
-        0.5 * (momentum_changes[0] + momentum_changes[1]),
-        0.5 * (momentum_changes[1] + momentum_changes[2]),
-        0.5 * (momentum_changes[2] + momentum_changes[3]),
-        0.5 * (momentum_changes[3] + momentum_changes[4]),
+        0.5 * (raw_momentum_changes[0] + raw_momentum_changes[1]),
+        0.5 * (raw_momentum_changes[1] + raw_momentum_changes[2]),
+        0.5 * (raw_momentum_changes[2] + raw_momentum_changes[3]),
+        0.5 * (raw_momentum_changes[3] + raw_momentum_changes[4]),
     ];
     // Find interval containing expected_momentum_change
     let (left_bound, right_bound) = if expected_momentum_change <= boundaries[0] {
@@ -728,7 +792,7 @@ pub fn reconstruct_direction(
 
     Ok(DirectionReconstruction {
         probabilities: probabilities.to_vec(),
-        momentum_changes,
+        momentum_changes: raw_momentum_changes, // Use RAW values for user interpretation
         trend_accelerations,
         most_likely_class,
         confidence,

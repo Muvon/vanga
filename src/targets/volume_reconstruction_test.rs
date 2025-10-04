@@ -71,13 +71,12 @@ mod tests {
             let mut probabilities = vec![0.1; 5];
             probabilities[class as usize] = 0.6; // High confidence in the classified class
 
-            // Calculate average sequence volume for reconstruction
-            let sequence_volume: f64 = sequence_ohlcv.iter().map(|row| row.volume).sum::<f64>()
-                / sequence_ohlcv.len() as f64;
+            // Calculate sequence volumes for reconstruction (NEW: array instead of average)
+            let sequence_volumes: Vec<f64> = sequence_ohlcv.iter().map(|row| row.volume).collect();
 
             // Reconstruct using the same parameters
             let reconstruction =
-                reconstruct_volume(&probabilities, sequence_volume, &calibrated_params)
+                reconstruct_volume(&probabilities, &sequence_volumes, &calibrated_params)
                     .expect("Reconstruction should succeed");
 
             println!(
@@ -134,7 +133,7 @@ mod tests {
             balance: crate::targets::calibration::ClassBalance::default(),
         };
 
-        let sequence_volume = 1000.0;
+        let sequence_volumes = vec![1000.0, 1100.0, 1050.0, 1200.0, 1150.0]; // Sample volumes
 
         // Test each volume class
         for class in 0..5 {
@@ -142,7 +141,7 @@ mod tests {
             probabilities[class] = 1.0; // 100% confidence in one class
 
             let reconstruction =
-                reconstruct_volume(&probabilities, sequence_volume, &calibrated_params)
+                reconstruct_volume(&probabilities, &sequence_volumes, &calibrated_params)
                     .expect("Reconstruction should succeed");
 
             println!(
