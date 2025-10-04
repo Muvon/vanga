@@ -14,9 +14,8 @@ pub struct ParameterCalibrator {
     max_iterations: usize,
 
     // NEW: Diversity optimization weights
-    balance_weight: f64,          // Weight for class balance (default: 0.6)
-    diversity_weight: f64,        // Weight for sample diversity (default: 0.4)
-    min_diversity_threshold: f64, // Minimum acceptable diversity score (default: 0.3)
+    balance_weight: f64,   // Weight for class balance (default: 0.6)
+    diversity_weight: f64, // Weight for sample diversity (default: 0.4)
 }
 
 impl ParameterCalibrator {
@@ -121,7 +120,6 @@ impl ParameterCalibrator {
             // NEW: Diversity optimization configuration
             balance_weight: 0.6,   // Prioritize balance but consider diversity
             diversity_weight: 0.4, // Significant weight for diversity
-            min_diversity_threshold: 0.3, // Require reasonable diversity
         }
     }
 
@@ -133,35 +131,21 @@ impl ParameterCalibrator {
             max_iterations: 100,
             balance_weight: balance_weight / total, // Normalize weights
             diversity_weight: diversity_weight / total,
-            min_diversity_threshold: 0.3,
         }
     }
 
-    /// Create calibrator with custom diversity threshold
-    pub fn with_diversity_threshold(threshold: f64) -> Self {
-        Self {
-            target_balance: 0.2,
-            max_iterations: 100,
-            balance_weight: 0.6,
-            diversity_weight: 0.4,
-            min_diversity_threshold: threshold.clamp(0.0, 1.0),
-        }
+    /// Create calibrator with custom diversity threshold (deprecated - kept for compatibility)
+    pub fn with_diversity_threshold(_threshold: f64) -> Self {
+        Self::default()
     }
 
     /// Create calibrator with full customization
     pub fn with_custom_config(
         balance_weight: f64,
         diversity_weight: f64,
-        min_threshold: f64,
+        _min_threshold: f64,
     ) -> Self {
-        let total = balance_weight + diversity_weight;
-        Self {
-            target_balance: 0.2,
-            max_iterations: 100,
-            balance_weight: balance_weight / total,
-            diversity_weight: diversity_weight / total,
-            min_diversity_threshold: min_threshold.clamp(0.0, 1.0),
-        }
+        Self::with_diversity_weights(balance_weight, diversity_weight)
     }
 
     /// Validate sample quality to ensure diverse, representative calibration data
@@ -176,7 +160,10 @@ impl ParameterCalibrator {
 
         // 1. Temporal coverage check
         let temporal_diversity = CalibrationUtils::calculate_temporal_diversity(sample_indices);
-        log::info!("  📅 Temporal diversity: {:.2}%", temporal_diversity * 100.0);
+        log::info!(
+            "  📅 Temporal diversity: {:.2}%",
+            temporal_diversity * 100.0
+        );
 
         if temporal_diversity < 0.5 {
             log::warn!(
@@ -217,7 +204,10 @@ impl ParameterCalibrator {
 
         // 4. Overall quality assessment
         let overall_quality = (temporal_diversity + feature_diversity + market_diversity) / 3.0;
-        log::info!("  ✅ Overall sample quality: {:.2}%", overall_quality * 100.0);
+        log::info!(
+            "  ✅ Overall sample quality: {:.2}%",
+            overall_quality * 100.0
+        );
 
         if overall_quality < 0.6 {
             log::warn!(
@@ -230,189 +220,167 @@ impl ParameterCalibrator {
         Ok(())
     }
 
-    /// Single calibration method - returns parameters for ALL targets
+    /// PER-HORIZON calibration method - returns parameters for ALL targets × ALL horizons
     ///
     /// This is the main entry point for parameter calibration. It analyzes the provided
     /// OHLCV data and finds optimal parameters for all target types (direction, price levels,
-    /// volatility, sentiment, volume) that achieve balanced class distributions.
+    /// volatility, sentiment, volume) FOR EACH HORIZON SEPARATELY.
     ///
     /// # Arguments
     /// * `ohlcv_data` - Market data for calibration analysis
     /// * `sequence_length` - Length of input sequences for the model
-    /// * `horizon_steps` - Number of steps to predict into the future
-    /// * `sample_size` - Optional limit on samples to use (default: min(1000, available))
+    /// * `horizons` - All prediction horizons (e.g., ["1h", "4h", "24h"])
+    /// * `sample_size` - Optional limit on samples to use (default: all available)
     ///
     /// # Returns
-    /// * `CalibratedParameters` - Optimized parameters for all target types with metadata
+    /// * `CalibratedParameters` - Optimized parameters per horizon for all target types
     ///
     /// # Algorithm
-    /// 1. Determines optimal sample size for calibration performance
-    /// 2. Calibrates each target type independently using grid search
-    /// 3. Evaluates parameter combinations using proper classification logic
-    /// 4. Selects parameters that minimize class imbalance
-    /// 5. Returns comprehensive results with calibration metadata
+    /// 1. For each horizon:
+    ///    a. Generate diverse sample indices
+    ///    b. Calibrate all 5 targets independently
+    ///    c. Store parameters in HashMap<horizon, params>
+    /// 2. Returns comprehensive results with per-horizon metadata
     pub async fn calibrate(
         &self,
         ohlcv_data: &[MarketDataRow],
         sequence_length: usize,
-        horizon_steps: usize,
+        horizons: &[String],
         sample_size: Option<usize>,
         sequence_overlap: f64,
     ) -> Result<CalibratedParameters> {
-        let start_time = std::time::Instant::now();
-
-        // Generate diverse sample indices using same logic as sequence generation
-        let sample_indices = self.generate_diverse_calibration_indices(
-            ohlcv_data.len(),
-            sequence_length,
-            horizon_steps,
-            sample_size,
-            sequence_overlap,
-        )?;
-        let samples_to_use = sample_indices.len();
-
         log::info!(
-            "🎯 Starting parameter calibration for {} samples (min_diversity_threshold: {:.2})",
-            samples_to_use,
-            self.min_diversity_threshold
+            "🎯 Starting PER-HORIZON calibration for {} horizons: {:?}",
+            horizons.len(),
+            horizons
         );
 
-        // Validate sample quality before calibration
-        self.validate_sample_quality(ohlcv_data, &sample_indices)?;
+        let mut direction_params = std::collections::HashMap::new();
+        let mut price_level_params = std::collections::HashMap::new();
+        let mut volatility_params = std::collections::HashMap::new();
+        let mut sentiment_params = std::collections::HashMap::new();
+        let mut volume_params = std::collections::HashMap::new();
 
-        // Calibrate each target type
-        let context = EvaluationContext {
-            ohlcv_data,
-            sample_indices: &sample_indices,
-            sequence_length,
-            horizon_steps,
-        };
+        let mut total_optimization_time = 0u64;
+        let mut overall_scores = Vec::new();
 
-        let direction = self
-            .calibrate_direction(ohlcv_data, sequence_length, horizon_steps, &sample_indices)
-            .await?;
-        let price_levels = self.calibrate_price_levels(&context).await?;
-        let volatility = self.calibrate_volatility(&context).await?;
-        let sentiment = self.calibrate_sentiment(&context).await?;
-        let volume = self.calibrate_volume(&context).await?;
+        // Calibrate each horizon separately
+        for (horizon_idx, horizon) in horizons.iter().enumerate() {
+            let horizon_start = std::time::Instant::now();
 
-        let overall_score = (direction.balance.composite_quality_score
-            + price_levels.balance.composite_quality_score
-            + volatility.balance.composite_quality_score
-            + sentiment.balance.composite_quality_score
-            + volume.balance.composite_quality_score)
-            / 5.0;
+            log::info!(
+                "\n{}\n🕐 HORIZON {}/{}: {} \n{}",
+                "=".repeat(60),
+                horizon_idx + 1,
+                horizons.len(),
+                horizon,
+                "=".repeat(60)
+            );
 
-        let success = overall_score < 1.0; // Lower threshold for composite score
+            // Parse horizon to steps
+            let horizon_steps =
+                crate::utils::parser::parse_horizon_to_steps(horizon).map_err(|e| {
+                    crate::utils::error::VangaError::ConfigError(format!(
+                        "Invalid horizon '{}': {}",
+                        horizon, e
+                    ))
+                })?;
+
+            // Generate diverse sample indices for this horizon
+            let sample_indices = self.generate_diverse_calibration_indices(
+                ohlcv_data.len(),
+                sequence_length,
+                horizon_steps,
+                sample_size,
+                sequence_overlap,
+            )?;
+
+            log::info!(
+                "  📊 Calibrating with {} samples for horizon {}",
+                sample_indices.len(),
+                horizon
+            );
+
+            // Validate sample quality
+            self.validate_sample_quality(ohlcv_data, &sample_indices)?;
+
+            // Calibrate all targets for this horizon
+            let direction = self
+                .calibrate_direction(ohlcv_data, sequence_length, horizon_steps, &sample_indices)
+                .await?;
+
+            let context = EvaluationContext {
+                ohlcv_data,
+                sample_indices: &sample_indices,
+                sequence_length,
+                horizon_steps,
+            };
+
+            let price_levels = self.calibrate_price_levels(&context).await?;
+            let volatility = self.calibrate_volatility(&context).await?;
+            let sentiment = self.calibrate_sentiment(&context).await?;
+            let volume = self.calibrate_volume(&context).await?;
+
+            // Calculate horizon score
+            let horizon_score = (direction.balance.composite_quality_score
+                + price_levels.balance.composite_quality_score
+                + volatility.balance.composite_quality_score
+                + sentiment.balance.composite_quality_score
+                + volume.balance.composite_quality_score)
+                / 5.0;
+
+            overall_scores.push(horizon_score);
+
+            // Store parameters for this horizon
+            direction_params.insert(horizon.clone(), direction);
+            price_level_params.insert(horizon.clone(), price_levels);
+            volatility_params.insert(horizon.clone(), volatility);
+            sentiment_params.insert(horizon.clone(), sentiment);
+            volume_params.insert(horizon.clone(), volume);
+
+            let horizon_time = horizon_start.elapsed().as_millis() as u64;
+            total_optimization_time += horizon_time;
+
+            log::info!(
+                "  ✅ Horizon {} calibrated in {}ms (score: {:.3})",
+                horizon,
+                horizon_time,
+                horizon_score
+            );
+        }
+
+        // Calculate overall statistics
+        let overall_score = overall_scores.iter().sum::<f64>() / overall_scores.len() as f64;
+        let success = overall_score < 1.0;
 
         let metadata = CalibrationMetadata {
             data_length: ohlcv_data.len(),
             sequence_length,
-            horizon_steps,
-            calibration_samples: samples_to_use,
+            horizons: horizons.to_vec(),
+            calibration_samples: 0, // Will be set per-horizon
             calibration_iterations: self.max_iterations,
-            optimization_time_ms: start_time.elapsed().as_millis() as u64,
+            optimization_time_ms: total_optimization_time,
             target_balance: self.target_balance,
             overall_balance_score: overall_score,
             calibration_success: success,
         };
 
-        // Log results
-        self.log_results(
-            &direction,
-            &price_levels,
-            &volatility,
-            &sentiment,
-            &volume,
-            &metadata,
-        );
+        log::info!("\n{}", "=".repeat(60));
+        log::info!("🎯 PER-HORIZON CALIBRATION COMPLETE");
+        log::info!("{}", "=".repeat(60));
+        log::info!("  Total time: {}ms", total_optimization_time);
+        log::info!("  Overall score: {:.3}", overall_score);
+        log::info!("  Success: {}", if success { "✅" } else { "❌" });
+        log::info!("{}\n", "=".repeat(60));
 
         Ok(CalibratedParameters {
-            direction,
-            price_levels,
-            volatility,
-            sentiment,
-            volume,
+            direction: direction_params,
+            price_levels: price_level_params,
+            volatility: volatility_params,
+            sentiment: sentiment_params,
+            volume: volume_params,
             metadata,
         })
-    }
-
-    /// Log calibration results
-    fn log_results(
-        &self,
-        direction: &DirectionParams,
-        price_levels: &PriceLevelParams,
-        volatility: &VolatilityParams,
-        sentiment: &SentimentParams,
-        volume: &VolumeParams,
-        metadata: &CalibrationMetadata,
-    ) {
-        log::info!("🎯 CALIBRATION RESULTS");
-        log::info!("======================");
-
-        log::info!(
-            "📊 Direction: sensitivity={:.6}, extreme_mult={:.2}, balance={:.2}, diversity={:.2}, composite={:.3}",
-            direction.sensitivity,
-            direction.extreme_multiplier,
-            direction.balance.balance_score,
-            direction.balance.diversity_score,
-            direction.balance.composite_quality_score
-        );
-
-        log::info!(
-            "📊 Price Levels: bandwidth={:.2}, percentiles=[{:.2}, {:.2}], balance={:.2}, diversity={:.2}, composite={:.3}",
-            price_levels.bandwidth,
-            price_levels.percentiles[0],
-            price_levels.percentiles[1],
-            price_levels.balance.balance_score,
-            price_levels.balance.diversity_score,
-            price_levels.balance.composite_quality_score
-        );
-
-        log::info!(
-            "📊 Volatility: bandwidth={:.2}, extreme_mult={:.2}, decay={:.2}, balance={:.2}, diversity={:.2}, composite={:.3}",
-            volatility.bandwidth,
-            volatility.extreme_multiplier,
-            volatility.horizon_decay,
-            volatility.balance.balance_score,
-            volatility.balance.diversity_score,
-            volatility.balance.composite_quality_score
-        );
-
-        log::info!(
-            "📊 Sentiment: body_weight={:.3}, size_weight={:.3}, wick_weight={:.3}, volume_weight={:.3}, sensitivity={:.4}, balance={:.2}, diversity={:.2}, composite={:.3}",
-            sentiment.body_weight,
-            sentiment.size_weight,
-            sentiment.wick_weight,
-            sentiment.volume_weight,
-            sentiment.sensitivity,
-            sentiment.balance.balance_score,
-            sentiment.balance.diversity_score,
-            sentiment.balance.composite_quality_score
-        );
-
-        log::info!(
-            "📊 Volume: bandwidth={:.2}, extreme_mult={:.2}, smoothing={}, balance={:.2}, diversity={:.2}, composite={:.3}",
-            volume.bandwidth,
-            volume.extreme_multiplier,
-            volume.smoothing_periods,
-            volume.balance.balance_score,
-            volume.balance.diversity_score,
-            volume.balance.composite_quality_score
-        );
-
-        log::info!(
-            "🎯 Overall: score={:.2}, time={}ms, success={}",
-            metadata.overall_balance_score,
-            metadata.optimization_time_ms,
-            if metadata.calibration_success {
-                "✅"
-            } else {
-                "❌"
-            }
-        );
-
-        log::info!("======================");
     }
 
     /// Get utility helper for balance calculations
@@ -432,7 +400,6 @@ impl Default for ParameterCalibrator {
             max_iterations: 100,
             balance_weight: 0.6,
             diversity_weight: 0.4,
-            min_diversity_threshold: 0.3,
         }
     }
 }
@@ -551,7 +518,7 @@ impl ParameterCalibrator {
             "📊 Phase 2: Bayesian optimization (up to {} iterations)",
             config.max_iterations
         );
-        
+
         let mut prev_best_score = f64::INFINITY;
         let mut no_improvement_count = 0;
         let max_patience = 15; // Increased from 5 for quality
@@ -587,7 +554,7 @@ impl ParameterCalibrator {
 
                     if absolute_converged && relative_converged {
                         no_improvement_count += 1;
-                        
+
                         if no_improvement_count >= max_patience {
                             log::info!(
                                 "✅ Converged after {} iterations (no improvement for {} iterations)",
@@ -604,7 +571,7 @@ impl ParameterCalibrator {
                         }
                     } else {
                         no_improvement_count = 0; // Reset counter on improvement
-                        
+
                         if absolute_improvement > 0.0 {
                             log::debug!(
                                 "  Improvement: {:.6} ({:.4}% relative)",

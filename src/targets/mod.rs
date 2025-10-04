@@ -431,7 +431,7 @@ impl TargetGenerator {
             )
         })?;
 
-        // Extract calibrated parameters - no defaults!
+        // Extract calibrated parameters (now per-horizon HashMaps)
         let direction_params = &calibrated_params.direction;
         let price_level_params = &calibrated_params.price_levels;
         let volatility_params = &calibrated_params.volatility;
@@ -439,11 +439,8 @@ impl TargetGenerator {
         let volume_params = &calibrated_params.volume;
 
         log::debug!(
-            "✅ Using calibrated parameters: direction_sensitivity={:.4}, \
-             price_bandwidth={:.4}, volatility_bandwidth={:.4}",
-            direction_params.sensitivity,
-            price_level_params.bandwidth,
-            volatility_params.bandwidth
+            "✅ Using per-horizon calibrated parameters for {} horizons",
+            calibrated_params.metadata.horizons.len()
         );
 
         // CONDITIONAL GENERATION: Only generate enabled targets

@@ -70,12 +70,12 @@ impl Default for BayesianConfig {
     /// Suitable for 4D parameter spaces (direction, price_levels, volatility, volume)
     fn default() -> Self {
         Self {
-            n_initial: 30,           // Increased from 15 for better initial exploration
-            max_iterations: 100,     // Increased from 50 for thorough optimization
-            tolerance: 1e-5,         // Stricter from 1e-4 for better convergence
+            n_initial: 30,       // Increased from 15 for better initial exploration
+            max_iterations: 100, // Increased from 50 for thorough optimization
+            tolerance: 1e-5,     // Stricter from 1e-4 for better convergence
             acquisition: AcquisitionFunction::ExpectedImprovement,
             gp_length_scale: 0.5,
-            gp_noise: 1e-5,          // Increased from 1e-6 for better numerical stability
+            gp_noise: 1e-5, // Increased from 1e-6 for better numerical stability
         }
     }
 }
@@ -85,8 +85,8 @@ impl BayesianConfig {
     /// Uses more initial samples and iterations for complex parameter spaces
     pub fn for_high_dimensional() -> Self {
         Self {
-            n_initial: 40,           // More samples for 6D space
-            max_iterations: 120,     // More iterations for complex optimization
+            n_initial: 40,       // More samples for 6D space
+            max_iterations: 120, // More iterations for complex optimization
             tolerance: 1e-5,
             acquisition: AcquisitionFunction::ExpectedImprovement,
             gp_length_scale: 0.5,

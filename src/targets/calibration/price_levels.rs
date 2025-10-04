@@ -169,5 +169,10 @@ fn evaluate_price_level_params(
     }
 
     // Use diversity-aware balance calculation
-    utils.calculate_balance_with_diversity(class_counts.as_ref(), total, context.ohlcv_data, context.sample_indices)
+    utils.calculate_balance_with_diversity(
+        class_counts.as_ref(),
+        total,
+        context.ohlcv_data,
+        context.sample_indices,
+    )
 }

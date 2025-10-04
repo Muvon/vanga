@@ -164,21 +164,31 @@ pub fn generate_sentiment_targets_with_calibrated_params(
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    calibrated_params: &crate::targets::calibration::SentimentParams,
+    calibrated_params: &std::collections::HashMap<
+        String,
+        crate::targets::calibration::SentimentParams,
+    >,
 ) -> Result<TargetResult> {
-    log::info!(
-        "🎯 Using calibrated sentiment parameters: body_weight={:.3}, size_weight={:.3}, wick_weight={:.3}, volume_weight={:.3}",
-        calibrated_params.body_weight,
-        calibrated_params.size_weight,
-        calibrated_params.wick_weight,
-        calibrated_params.volume_weight
-    );
-
+    log::info!("🎯 Generating sentiment targets with per-horizon calibrated parameters");
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
 
     for horizon in horizons {
+        let params = calibrated_params.get(horizon).ok_or_else(|| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "No calibrated sentiment parameters found for horizon: {}",
+                horizon
+            ))
+        })?;
+
+        log::debug!(
+            "  Horizon {}: body_weight={:.2}, sensitivity={:.4}",
+            horizon,
+            params.body_weight,
+            params.sensitivity
+        );
+
         let horizon_steps = parse_horizon_steps(horizon)?;
         let mut horizon_targets = Vec::new();
         let mut horizon_strengths = Vec::new();
@@ -194,11 +204,7 @@ pub fn generate_sentiment_targets_with_calibrated_params(
             let sequence_data = &ohlcv_data[seq_start..seq_end];
             let horizon_data = &ohlcv_data[seq_end..horizon_end];
 
-            match classify_sentiment_with_calibrated_params(
-                sequence_data,
-                horizon_data,
-                calibrated_params,
-            ) {
+            match classify_sentiment_with_calibrated_params(sequence_data, horizon_data, params) {
                 Ok((class, strength)) => {
                     horizon_targets.push(class);
                     horizon_strengths.push(strength);

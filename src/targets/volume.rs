@@ -100,36 +100,44 @@ pub fn generate_volume_targets_with_calibrated_params(
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    calibrated_params: &crate::targets::calibration::VolumeParams, // Now mandatory
+    calibrated_params: &std::collections::HashMap<
+        String,
+        crate::targets::calibration::VolumeParams,
+    >,
 ) -> Result<TargetResult> {
     let volume_data = extract_volume_data(df)?;
 
-    // Use pre-calibrated parameters (always available)
-    log::info!(
-        "🎯 Using calibrated volume parameters: bandwidth={:.4}, extreme_multiplier={:.2}, smoothing={}",
-        calibrated_params.bandwidth,
-        calibrated_params.extreme_multiplier,
-        calibrated_params.smoothing_periods
-    );
-
-    let config = VolumeConfig {
-        bandwidth_size: calibrated_params.bandwidth,
-        extreme_multiplier: calibrated_params.extreme_multiplier,
-        smoothing_periods: calibrated_params.smoothing_periods,
-    };
-
-    log::info!(
-        "🎯 Volume targets using calibrated bandwidth: {:.6}",
-        calibrated_params.bandwidth
-    );
+    log::info!("🎯 Generating volume targets with per-horizon calibrated parameters");
 
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
 
-    // Calculate logarithmic volume thresholds
-    let thresholds = calculate_log_volume_thresholds(&config)?;
-
     for horizon in horizons {
+        // Get parameters for this specific horizon
+        let params = calibrated_params.get(horizon).ok_or_else(|| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "No calibrated volume parameters found for horizon: {}",
+                horizon
+            ))
+        })?;
+
+        log::debug!(
+            "  Horizon {}: bandwidth={:.4}, extreme_mult={:.2}, smoothing={}",
+            horizon,
+            params.bandwidth,
+            params.extreme_multiplier,
+            params.smoothing_periods
+        );
+
+        let config = VolumeConfig {
+            bandwidth_size: params.bandwidth,
+            extreme_multiplier: params.extreme_multiplier,
+            smoothing_periods: params.smoothing_periods,
+        };
+
+        // Calculate logarithmic volume thresholds for this horizon
+        let thresholds = calculate_log_volume_thresholds(&config)?;
+
         let horizon_steps = parse_horizon_steps(horizon)?;
         let mut horizon_targets = Vec::new();
         let mut horizon_strengths = Vec::new();

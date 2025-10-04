@@ -397,33 +397,30 @@ impl ModelTrainer {
             }
         };
 
-        // Get horizon steps from first horizon in config
-        let horizon_steps = if !self.config.horizons.is_empty() {
-            crate::utils::parser::parse_horizon_to_steps(&self.config.horizons[0]).unwrap_or(24)
-        } else {
-            24 // Default fallback
-        };
-
         log::info!(
-            "🎯 Calibrating with sequence_length={} and horizon_steps={} from config",
+            "🎯 Calibrating with sequence_length={} for {} horizons: {:?}",
             sequence_length,
-            horizon_steps
+            self.config.horizons.len(),
+            self.config.horizons
         );
 
-        // Use clean calibration interface
+        // Use clean calibration interface with PER-HORIZON calibration
         let calibrator = crate::targets::calibration::ParameterCalibrator::new();
 
         let calibrated_params = calibrator
             .calibrate(
                 &ohlcv_data,
                 sequence_length,
-                horizon_steps,
-                Some(1000), // Will be replaced with 50% diverse sampling
+                &self.config.horizons, // Pass ALL horizons
+                None,                  // Use all available samples
                 self.config.data.sequence_overlap,
             )
             .await?;
 
-        log::info!("✅ Parameters calibrated successfully");
+        log::info!(
+            "✅ Per-horizon parameters calibrated successfully for {} horizons",
+            self.config.horizons.len()
+        );
 
         // Load and prepare target-specific training data with calibrated parameters
         log::info!(

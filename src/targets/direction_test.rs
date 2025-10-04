@@ -166,12 +166,18 @@ mod tests {
             balance: ClassBalance::default(),
         };
 
+        // Create HashMap with params for each horizon
+        let mut params_map = std::collections::HashMap::new();
+        for horizon in &horizons {
+            params_map.insert(horizon.clone(), params.clone());
+        }
+
         let result = generate_direction_targets_with_calibrated_params(
             &df,
             &horizons,
             &sequence_indices,
             sequence_length,
-            &params,
+            &params_map,
         );
 
         assert!(

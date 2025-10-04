@@ -81,9 +81,7 @@ impl OutputFormatter {
         mut self,
         params: crate::targets::calibration::CalibratedParameters,
     ) -> Self {
-        // Override training config with calibrated parameters for better accuracy
-        self.bandwidth_size = Some(params.price_levels.bandwidth);
-        self.percentiles = Some(params.price_levels.percentiles);
+        // Store the full per-horizon parameters
         self.calibrated_parameters = Some(params);
         self
     }
@@ -403,6 +401,7 @@ impl OutputFormatter {
                 result = result.with_price_levels(self.create_price_level_prediction(
                     &price_level_probs,
                     current_price,
+                    horizon,
                     self.bandwidth_size,
                     self.percentiles,
                 )?);
@@ -730,6 +729,7 @@ impl OutputFormatter {
         &self,
         probabilities: &[f64],
         current_price: f64,
+        horizon: &str,
         _bandwidth_size: Option<f64>, // Kept for API compatibility but unused (we use stored config)
         _percentiles: Option<[f64; 2]>, // Kept for API compatibility but unused (we use stored config)
     ) -> Result<PriceLevelPrediction> {
@@ -751,12 +751,15 @@ impl OutputFormatter {
 
         // Use calibrated parameters if available, otherwise return error
         let reconstruction = if let Some(ref calibrated_params) = self.calibrated_parameters {
-            reconstruct_price_levels(
-                probabilities,
-                sequence_ohlcv,
-                current_price,
-                &calibrated_params.price_levels,
-            )?
+            // Extract parameters for this specific horizon
+            let horizon_params = calibrated_params.get_price_levels(horizon).ok_or_else(|| {
+                VangaError::ConfigError(format!(
+                    "No calibrated price level parameters found for horizon: {}",
+                    horizon
+                ))
+            })?;
+
+            reconstruct_price_levels(probabilities, sequence_ohlcv, current_price, horizon_params)?
         } else {
             return Err(VangaError::ConfigError(
                 "Adaptive parameters required for price level reconstruction".to_string(),
@@ -829,7 +832,19 @@ impl OutputFormatter {
             // Use enhanced reconstruction from direction module with calibrated parameters
             let reconstruction_result =
                 if let Some(ref calibrated_params) = self.calibrated_parameters {
-                    reconstruct_direction(&probabilities, ohlcv_data, &calibrated_params.direction)
+                    // Extract parameters for the specific horizon
+                    let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
+                    let horizon_params =
+                        calibrated_params
+                            .get_direction(horizon_str)
+                            .ok_or_else(|| {
+                                VangaError::ConfigError(format!(
+                                    "No calibrated direction parameters found for horizon: {}",
+                                    horizon_str
+                                ))
+                            })?;
+
+                    reconstruct_direction(&probabilities, ohlcv_data, horizon_params)
                 } else {
                     Err(VangaError::ConfigError(
                         "Adaptive parameters required for direction reconstruction".to_string(),
@@ -989,8 +1004,20 @@ impl OutputFormatter {
             // Use enhanced reconstruction from volatility module with calibrated parameters
             let volatility_result = if let Some(ref calibrated_params) = self.calibrated_parameters
             {
+                // Extract parameters for the specific horizon
+                let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
+                let horizon_params =
+                    calibrated_params
+                        .get_volatility(horizon_str)
+                        .ok_or_else(|| {
+                            VangaError::ConfigError(format!(
+                                "No calibrated volatility parameters found for horizon: {}",
+                                horizon_str
+                            ))
+                        })?;
+
                 // Use calibrated parameters for volatility reconstruction
-                reconstruct_volatility(&probabilities, ohlcv_data, &calibrated_params.volatility)
+                reconstruct_volatility(&probabilities, ohlcv_data, horizon_params)
             } else {
                 // Calibrated parameters are required for reconstruction
                 Err(VangaError::ConfigError(
@@ -1125,11 +1152,20 @@ impl OutputFormatter {
                 ];
 
                 // Call reconstruction function with calibrated parameters
-                match reconstruct_sentiment(
-                    &probabilities,
-                    sequence_ohlcv,
-                    &self.calibrated_parameters.as_ref().unwrap().sentiment,
-                ) {
+                let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
+                let horizon_params = self
+                    .calibrated_parameters
+                    .as_ref()
+                    .unwrap()
+                    .get_sentiment(horizon_str)
+                    .ok_or_else(|| {
+                        VangaError::ConfigError(format!(
+                            "No calibrated sentiment parameters found for horizon: {}",
+                            horizon_str
+                        ))
+                    })?;
+
+                match reconstruct_sentiment(&probabilities, sequence_ohlcv, horizon_params) {
                     Ok(reconstruction) => {
                         // Use reconstruction results to enhance prediction
                         // The reconstruction provides richer information than basic probabilities
@@ -1194,10 +1230,23 @@ impl OutputFormatter {
                 ];
 
                 // Call reconstruction function with calibrated parameters (NEW: percentile-based)
+                let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
+                let horizon_params = self
+                    .calibrated_parameters
+                    .as_ref()
+                    .unwrap()
+                    .get_volume(horizon_str)
+                    .ok_or_else(|| {
+                        VangaError::ConfigError(format!(
+                            "No calibrated volume parameters found for horizon: {}",
+                            horizon_str
+                        ))
+                    })?;
+
                 match reconstruct_volume(
                     &probabilities,
                     &sequence_volumes, // Now passes array of volumes
-                    &self.calibrated_parameters.as_ref().unwrap().volume,
+                    horizon_params,
                 ) {
                     Ok(reconstruction) => {
                         // Use reconstruction results to enhance prediction

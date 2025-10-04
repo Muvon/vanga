@@ -120,21 +120,33 @@ pub fn generate_price_level_targets_with_calibrated_params(
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    calibrated_params: &crate::targets::calibration::PriceLevelParams,
+    calibrated_params: &std::collections::HashMap<
+        String,
+        crate::targets::calibration::PriceLevelParams,
+    >,
 ) -> Result<TargetResult> {
-    log::info!(
-        "🎯 Using calibrated price levels parameters: bandwidth={:.6}, percentiles=[{:.2}, {:.2}], neutral_band_factor={:.2}, momentum_factor={:.2}",
-        calibrated_params.bandwidth,
-        calibrated_params.percentiles[0],
-        calibrated_params.percentiles[1],
-        calibrated_params.neutral_band_factor,
-        calibrated_params.momentum_factor
-    );
+    log::info!("🎯 Generating price level targets with per-horizon calibrated parameters");
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
 
     for horizon in horizons {
+        // Get parameters for this specific horizon
+        let params = calibrated_params.get(horizon).ok_or_else(|| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "No calibrated price level parameters found for horizon: {}",
+                horizon
+            ))
+        })?;
+
+        log::debug!(
+            "  Horizon {}: bandwidth={:.2}, percentiles=[{:.2}, {:.2}]",
+            horizon,
+            params.bandwidth,
+            params.percentiles[0],
+            params.percentiles[1]
+        );
+
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
         let mut horizon_strengths = vec![0.5; sequence_indices.len()];
@@ -144,22 +156,20 @@ pub fn generate_price_level_targets_with_calibrated_params(
             let target_end_idx = sequence_end_idx + horizon_steps;
 
             if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
-                // Sequence-to-horizon data flow (same pattern as direction/volatility)
                 let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
                 let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                // Use enhanced classification with calibrated parameters - capture both class and strength
+                // Use per-horizon calibrated parameters
                 let (target_class, strength) = classify_price_level_with_calibrated_params(
                     sequence_ohlcv,
                     horizon_ohlcv,
-                    calibrated_params,
+                    params,
                 )?;
                 horizon_targets[seq_position] = target_class;
                 horizon_strengths[seq_position] = strength;
             }
         }
 
-        // Analyze and log class distribution (5 classes) - exponentially-weighted approach
         let valid_targets: Vec<i32> = horizon_targets
             .iter()
             .filter(|&&x| x != -1)

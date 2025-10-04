@@ -120,28 +120,33 @@ pub fn generate_volatility_targets_with_calibrated_params(
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    calibrated_params: &crate::targets::calibration::VolatilityParams,
+    calibrated_params: &std::collections::HashMap<
+        String,
+        crate::targets::calibration::VolatilityParams,
+    >,
 ) -> Result<TargetResult> {
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
 
-    // Use pre-calibrated adaptive parameters
-    let calibrated_bandwidth = calibrated_params.bandwidth;
-    log::info!(
-        "🎯 Using pre-calibrated volatility bandwidth: {:.6}",
-        calibrated_bandwidth
-    );
-
-    let extreme_multiplier = calibrated_params.extreme_multiplier;
-
-    log::info!(
-        "🎯 Volatility targets using bandwidth: {:.6}, extreme_multiplier: {:.2}",
-        calibrated_bandwidth,
-        extreme_multiplier
-    );
+    log::info!("🎯 Generating volatility targets with per-horizon calibrated parameters");
 
     for horizon in horizons {
+        // Get parameters for this specific horizon
+        let params = calibrated_params.get(horizon).ok_or_else(|| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "No calibrated volatility parameters found for horizon: {}",
+                horizon
+            ))
+        })?;
+
+        log::debug!(
+            "  Horizon {}: bandwidth={:.6}, extreme_mult={:.2}",
+            horizon,
+            params.bandwidth,
+            params.extreme_multiplier
+        );
+
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
         let mut horizon_strengths = vec![0.5; sequence_indices.len()];
@@ -160,11 +165,11 @@ pub fn generate_volatility_targets_with_calibrated_params(
 
                 // Only classify if we have sufficient data for ATR calculation
                 if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-                    // Use enhanced classification with calibrated adaptive parameters - capture both class and strength
+                    // Use per-horizon calibrated parameters
                     let (volatility_class, strength) = classify_volatility_with_calibrated_params(
                         sequence_candles,
                         horizon_candles,
-                        calibrated_params,
+                        params,
                     )?;
 
                     horizon_targets[seq_position] = volatility_class;

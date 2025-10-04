@@ -107,31 +107,41 @@ pub enum Direction {
     Pump = 4,     // Extreme up movement
 }
 
-/// Generate direction targets with optional adaptive parameters - returns both class and strength
+/// Generate direction targets with per-horizon calibrated parameters
 ///
-/// When adaptive_params is provided, uses the pre-calibrated parameters for consistent
-/// target generation between training and prediction. When None, performs calibration.
+/// When calibrated_params is provided, uses the pre-calibrated parameters for each horizon
+/// for consistent target generation between training and prediction.
 pub fn generate_direction_targets_with_calibrated_params(
     df: &DataFrame,
     horizons: &[String],
     sequence_indices: &[usize],
     sequence_length: usize,
-    calibrated_params: &crate::targets::calibration::DirectionParams,
+    calibrated_params: &std::collections::HashMap<
+        String,
+        crate::targets::calibration::DirectionParams,
+    >,
 ) -> Result<TargetResult> {
     let close_prices = extract_close_prices(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
 
-    // Use pre-calibrated adaptive parameters
-    let calibrated_sensitivity = calibrated_params.sensitivity;
-    log::info!(
-        "🎯 Using pre-calibrated direction sensitivity: {:.6}",
-        calibrated_sensitivity
-    );
-
-    // Remove the old TargetsConfig creation since we use adaptive parameters directly
+    log::info!("🎯 Generating direction targets with per-horizon calibrated parameters");
 
     for horizon in horizons {
+        // Get parameters for this specific horizon
+        let params = calibrated_params.get(horizon).ok_or_else(|| {
+            crate::utils::error::VangaError::ConfigError(format!(
+                "No calibrated direction parameters found for horizon: {}",
+                horizon
+            ))
+        })?;
+
+        log::debug!(
+            "  Horizon {}: sensitivity={:.6}, extreme_mult={:.2}",
+            horizon,
+            params.sensitivity,
+            params.extreme_multiplier
+        );
         let horizon_steps = parse_horizon_to_steps(horizon)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
         let mut horizon_strengths = vec![0.5; sequence_indices.len()];
@@ -166,11 +176,11 @@ pub fn generate_direction_targets_with_calibrated_params(
 
                 // Only classify if we have enough horizon data for momentum calculation
                 if horizon_prices.len() >= 2 {
-                    // Use the adaptive parameters directly for classification - capture both class and strength
+                    // Use per-horizon calibrated parameters
                     let (target_class, strength) = classify_direction_with_calibrated_params(
                         sequence_prices,
                         horizon_prices,
-                        calibrated_params,
+                        params,
                     )?;
 
                     horizon_targets[seq_position] = target_class;

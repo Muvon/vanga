@@ -125,7 +125,7 @@ fn evaluate_sentiment_params(
     }
 
     let total = class_counts.iter().sum::<usize>();
-    
+
     // Use diversity-aware balance calculation
     utils.calculate_balance_with_diversity(
         class_counts.as_ref(),

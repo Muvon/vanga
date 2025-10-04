@@ -254,16 +254,36 @@ impl Predictor {
         log::info!(
             "✅ Using calibrated target parameters for consistent prediction reconstruction"
         );
+
+        // Log per-horizon parameters
+        let horizons = calibrated_params.get_horizons();
         log::debug!(
-            "🎯 Calibrated parameters loaded from model: \
-             direction_sensitivity={:.4}, price_bandwidth={:.4}, volatility_bandwidth={:.4}, \
-             sentiment_sensitivity={:.4}, volume_baseline={:.4}",
-            calibrated_params.direction.sensitivity,
-            calibrated_params.price_levels.bandwidth,
-            calibrated_params.volatility.bandwidth,
-            calibrated_params.sentiment.sensitivity,
-            calibrated_params.volume.bandwidth
+            "🎯 Calibrated parameters loaded for {} horizons: {:?}",
+            horizons.len(),
+            horizons
         );
+
+        // Log first horizon's parameters as example
+        if let Some(first_horizon) = horizons.first() {
+            if let (Some(dir), Some(price), Some(vol), Some(sent), Some(volume)) = (
+                calibrated_params.get_direction(first_horizon),
+                calibrated_params.get_price_levels(first_horizon),
+                calibrated_params.get_volatility(first_horizon),
+                calibrated_params.get_sentiment(first_horizon),
+                calibrated_params.get_volume(first_horizon),
+            ) {
+                log::debug!(
+                    "  Example ({}): direction_sensitivity={:.4}, price_bandwidth={:.4}, \
+                     volatility_bandwidth={:.4}, sentiment_sensitivity={:.4}, volume_bandwidth={:.4}",
+                    first_horizon,
+                    dir.sensitivity,
+                    price.bandwidth,
+                    vol.bandwidth,
+                    sent.sensitivity,
+                    volume.bandwidth
+                );
+            }
+        }
 
         // Determine horizons to process based on configuration
         let horizons_to_process = if self.config.all_horizons {

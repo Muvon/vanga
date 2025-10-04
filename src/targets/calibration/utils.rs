@@ -130,8 +130,7 @@ impl CalibrationUtils {
 
         // 2. Calculate REAL diversity metrics
         let temporal_spread = Self::calculate_temporal_diversity(sample_indices);
-        let feature_diversity =
-            Self::calculate_feature_space_diversity(ohlcv_data, sample_indices);
+        let feature_diversity = Self::calculate_feature_space_diversity(ohlcv_data, sample_indices);
         let market_condition_diversity =
             Self::calculate_market_condition_diversity(ohlcv_data, sample_indices);
 
@@ -249,7 +248,7 @@ impl CalibrationUtils {
 
         // Classify each sample's market condition with better lookback
         let lookback = 10.min(ohlcv_data.len() / 10); // Adaptive lookback
-        
+
         for &idx in sample_indices {
             if idx >= lookback && idx + lookback < ohlcv_data.len() {
                 // Look at trend around sample (more robust)
@@ -289,10 +288,9 @@ impl CalibrationUtils {
         );
 
         let ideal = 1.0 / 3.0;
-        let deviation = ((bull_pct - ideal).abs()
-            + (bear_pct - ideal).abs()
-            + (sideways_pct - ideal).abs())
-            / 3.0;
+        let deviation =
+            ((bull_pct - ideal).abs() + (bear_pct - ideal).abs() + (sideways_pct - ideal).abs())
+                / 3.0;
 
         // Convert deviation to diversity score (0 deviation = 1.0 diversity)
         (1.0 - deviation * 3.0).clamp(0.0, 1.0)

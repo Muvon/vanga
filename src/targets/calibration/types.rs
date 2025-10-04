@@ -3,18 +3,94 @@
 //! This module contains all parameter structures used in the calibration system.
 //! Each target type has its own parameter struct with calibrated values that
 //! ensure balanced 5-class classification across all targets.
+//!
+//! ## PER-HORIZON CALIBRATION
+//!
+//! Parameters are stored per-horizon because different time horizons require
+//! different classification thresholds:
+//! - 1h: High noise, needs higher sensitivity
+//! - 4h: Moderate noise, moderate sensitivity  
+//! - 24h: Low noise, lower sensitivity
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Calibrated parameters for all targets
+/// Calibrated parameters for all targets with PER-HORIZON storage
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CalibratedParameters {
-    pub direction: DirectionParams,
-    pub price_levels: PriceLevelParams,
-    pub volatility: VolatilityParams,
-    pub sentiment: SentimentParams,
-    pub volume: VolumeParams,
+    /// Direction parameters per horizon (e.g., "1h" -> DirectionParams)
+    pub direction: HashMap<String, DirectionParams>,
+    /// Price level parameters per horizon
+    pub price_levels: HashMap<String, PriceLevelParams>,
+    /// Volatility parameters per horizon
+    pub volatility: HashMap<String, VolatilityParams>,
+    /// Sentiment parameters per horizon
+    pub sentiment: HashMap<String, SentimentParams>,
+    /// Volume parameters per horizon
+    pub volume: HashMap<String, VolumeParams>,
+    /// Calibration metadata
     pub metadata: CalibrationMetadata,
+}
+
+impl CalibratedParameters {
+    /// Get direction parameters for specific horizon
+    pub fn get_direction(&self, horizon: &str) -> Option<&DirectionParams> {
+        self.direction.get(horizon)
+    }
+
+    /// Get price level parameters for specific horizon
+    pub fn get_price_levels(&self, horizon: &str) -> Option<&PriceLevelParams> {
+        self.price_levels.get(horizon)
+    }
+
+    /// Get volatility parameters for specific horizon
+    pub fn get_volatility(&self, horizon: &str) -> Option<&VolatilityParams> {
+        self.volatility.get(horizon)
+    }
+
+    /// Get sentiment parameters for specific horizon
+    pub fn get_sentiment(&self, horizon: &str) -> Option<&SentimentParams> {
+        self.sentiment.get(horizon)
+    }
+
+    /// Get volume parameters for specific horizon
+    pub fn get_volume(&self, horizon: &str) -> Option<&VolumeParams> {
+        self.volume.get(horizon)
+    }
+
+    /// Get all calibrated horizons
+    pub fn get_horizons(&self) -> Vec<String> {
+        // Use direction as reference (all targets should have same horizons)
+        self.direction.keys().cloned().collect()
+    }
+
+    /// Validate that all targets have parameters for all horizons
+    pub fn validate(&self) -> Result<(), String> {
+        let horizons = self.get_horizons();
+
+        for horizon in &horizons {
+            if !self.price_levels.contains_key(horizon) {
+                return Err(format!(
+                    "Missing price_levels params for horizon: {}",
+                    horizon
+                ));
+            }
+            if !self.volatility.contains_key(horizon) {
+                return Err(format!(
+                    "Missing volatility params for horizon: {}",
+                    horizon
+                ));
+            }
+            if !self.sentiment.contains_key(horizon) {
+                return Err(format!("Missing sentiment params for horizon: {}", horizon));
+            }
+            if !self.volume.contains_key(horizon) {
+                return Err(format!("Missing volume params for horizon: {}", horizon));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Direction target parameters
@@ -125,7 +201,7 @@ pub type ClassDistributionBalance = ClassBalance;
 pub struct CalibrationMetadata {
     pub data_length: usize,
     pub sequence_length: usize,
-    pub horizon_steps: usize,
+    pub horizons: Vec<String>, // NEW: Track all calibrated horizons
     pub calibration_samples: usize,
     pub calibration_iterations: usize,
     pub optimization_time_ms: u64,
@@ -139,7 +215,7 @@ impl Default for CalibrationMetadata {
         Self {
             data_length: 0,
             sequence_length: 96,
-            horizon_steps: 24,
+            horizons: vec![], // Empty by default
             calibration_samples: 0,
             calibration_iterations: 100,
             optimization_time_ms: 0,
