@@ -228,7 +228,7 @@ impl ParameterCalibrator {
     /// OHLCV data and finds optimal parameters for all target types (direction, price levels,
     /// volatility, sentiment, volume) FOR EACH HORIZON SEPARATELY.
     ///
-    /// **PARALLELIZATION**: 
+    /// **PARALLELIZATION**:
     /// - Level 1: All horizons calibrated in parallel
     /// - Level 2: Within each horizon, all 5 targets calibrated in parallel
     /// - Uses all available CPU cores for maximum performance
@@ -258,7 +258,7 @@ impl ParameterCalibrator {
     ) -> Result<CalibratedParameters> {
         let total_start = std::time::Instant::now();
         let num_cpus = num_cpus::get();
-        
+
         log::info!(
             "🎯 Starting PARALLEL PER-HORIZON calibration for {} horizons: {:?}",
             horizons.len(),
@@ -273,7 +273,7 @@ impl ParameterCalibrator {
 
         // Wrap data in Arc for safe sharing across threads
         let ohlcv_data_arc = Arc::new(ohlcv_data.to_vec());
-        
+
         // Calibrate all horizons in parallel
         let horizon_futures: Vec<_> = horizons
             .iter()
@@ -521,7 +521,9 @@ impl ParameterCalibrator {
         let mut overall_scores = Vec::new();
         let mut total_optimization_time = 0u64;
 
-        for (horizon, direction, price_levels, volatility, sentiment, volume, score, time) in results {
+        for (horizon, direction, price_levels, volatility, sentiment, volume, score, time) in
+            results
+        {
             direction_params.insert(horizon.clone(), direction);
             price_level_params.insert(horizon.clone(), price_levels);
             volatility_params.insert(horizon.clone(), volatility);

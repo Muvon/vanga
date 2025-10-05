@@ -18,17 +18,21 @@ pub async fn calibrate_volume(
 
     let utils = calibrator.get_utils();
 
-    // Define 3D parameter space with WIDE, ADAPTIVE bounds for all market conditions
+    // Define 5D parameter space with ADAPTIVE bounds for all market conditions
     let param_bounds = vec![
-        (0.1, 3.0),  // bandwidth: 0.1-3.0 (narrow to very wide volume ranges)
-        (1.2, 6.0),  // extreme_multiplier: 1.2-6.0 (narrow to very wide extremes)
-        (1.0, 30.0), // smoothing_periods: 1-30 (no smoothing to heavy smoothing)
+        (0.1, 3.0),   // bandwidth: 0.1-3.0 (narrow to very wide volume ranges)
+        (1.2, 6.0),   // extreme_multiplier: 1.2-6.0 (narrow to very wide extremes)
+        (1.0, 30.0),  // smoothing_periods: 1-30 (no smoothing to heavy smoothing)
+        (0.01, 0.15), // percentile_low: 0.01-0.15 (p1 to p15)
+        (0.85, 0.99), // percentile_high: 0.85-0.99 (p85 to p99)
     ];
 
     let param_names = vec![
         "bandwidth".to_string(),
         "extreme_multiplier".to_string(),
         "smoothing_periods".to_string(),
+        "percentile_low".to_string(),
+        "percentile_high".to_string(),
     ];
 
     // Objective function: minimize composite_quality_score
@@ -37,6 +41,8 @@ pub async fn calibrate_volume(
             bandwidth: params[0],
             multiplier: params[1],
             smoothing: params[2].round() as usize, // Round to integer
+            percentile_low: params[3],
+            percentile_high: params[4],
         };
 
         let balance = evaluate_volume_params(&utils, context, &test_params)?;
@@ -51,7 +57,7 @@ pub async fn calibrate_volume(
     };
 
     // Bayesian optimization configuration
-    // Use quality-first Bayesian configuration (default for 3D space)
+    // Use quality-first Bayesian configuration (default for 5D space)
     let bayesian_config = BayesianConfig::default();
 
     // Run Bayesian optimization
@@ -64,6 +70,8 @@ pub async fn calibrate_volume(
         bandwidth: best_params[0],
         multiplier: best_params[1],
         smoothing: best_params[2].round() as usize,
+        percentile_low: best_params[3],
+        percentile_high: best_params[4],
     };
 
     let final_balance = evaluate_volume_params(&utils, context, &final_eval_params)?;
@@ -78,14 +86,18 @@ pub async fn calibrate_volume(
         smoothing_periods: best_params[2].round() as usize,
         min_base_threshold,
         min_extreme_threshold,
+        percentile_low: best_params[3],
+        percentile_high: best_params[4],
         balance: final_balance,
     };
 
     log::info!(
-        "🎯 Volume Calibration Complete!\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Smoothing Periods: {}\n    - Min Base Threshold: {:.4}\n    - Min Extreme Threshold: {:.4}\n  Final Score: {:.4}",
+        "🎯 Volume Calibration Complete!\n  Final Parameters:\n    - Bandwidth: {:.2}\n    - Extreme Multiplier: {:.1}\n    - Smoothing Periods: {}\n    - Percentile Range: p{:.0}-p{:.0}\n    - Min Base Threshold: {:.4}\n    - Min Extreme Threshold: {:.4}\n  Final Score: {:.4}",
         result.bandwidth,
         result.extreme_multiplier,
         result.smoothing_periods,
+        result.percentile_low * 100.0,
+        result.percentile_high * 100.0,
         result.min_base_threshold,
         result.min_extreme_threshold,
         result.balance.composite_quality_score
@@ -103,7 +115,6 @@ fn evaluate_volume_params(
     context: &EvaluationContext,
     params: &VolumeEvalParams,
 ) -> Result<ClassBalance> {
-
     let mut class_counts = [0usize; 5];
     let sample_limit = context.sample_indices.len().min(500); // Limit for performance
 
@@ -127,6 +138,8 @@ fn evaluate_volume_params(
                     &horizon_volumes,
                     params.bandwidth,
                     params.multiplier,
+                    params.percentile_low,
+                    params.percentile_high,
                 ) {
                     Ok(class) => {
                         if (0..5).contains(&class) {
@@ -140,13 +153,11 @@ fn evaluate_volume_params(
     }
 
     let total = class_counts.iter().sum::<usize>();
-    
+
     // CRITICAL: Ensure ALL 5 classes are present before calculating balance
     // Missing classes during Bayesian optimization are NORMAL - they get penalized automatically
-    let missing_classes: Vec<usize> = (0..5)
-        .filter(|&i| class_counts[i] == 0)
-        .collect();
-    
+    let missing_classes: Vec<usize> = (0..5).filter(|&i| class_counts[i] == 0).collect();
+
     if !missing_classes.is_empty() {
         // Return poor score to guide optimization away from these parameters
         // NO LOGGING - this is expected during exploration and just creates noise
@@ -163,7 +174,7 @@ fn evaluate_volume_params(
             composite_quality_score: 10.0,
         });
     }
-    
+
     // Use diversity-aware balance calculation
     utils.calculate_balance_with_diversity(
         class_counts.as_ref(),
@@ -177,11 +188,16 @@ fn evaluate_volume_params(
 ///
 /// This function MUST match classify_volume_regime_with_strength() in volume.rs
 /// to ensure calibration optimizes the correct classification algorithm.
+///
+/// **CRITICAL**: Percentiles are now CALIBRATED parameters (not hardcoded) for
+/// adaptive classification across different volume characteristics.
 fn classify_volume_percentile_based(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
     bandwidth_size: f64,
     _extreme_multiplier: f64, // Not used in percentile-based classification
+    percentile_low: f64,
+    percentile_high: f64,
 ) -> Result<i32> {
     use crate::utils::error::VangaError;
 
@@ -191,16 +207,16 @@ fn classify_volume_percentile_based(
         ));
     }
 
-    // 1. Calculate sequence volume percentiles to establish range
+    // 1. Calculate sequence volume percentiles to establish range (CALIBRATED)
     let mut sorted_seq_volumes = sequence_volumes.to_vec();
     sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let p10_idx = (sorted_seq_volumes.len() as f64 * 0.15).floor() as usize;
-    let p90_idx = ((sorted_seq_volumes.len() as f64 * 0.85).ceil() as usize)
+    let plow_idx = (sorted_seq_volumes.len() as f64 * percentile_low).floor() as usize;
+    let phigh_idx = ((sorted_seq_volumes.len() as f64 * percentile_high).ceil() as usize)
         .min(sorted_seq_volumes.len() - 1);
 
-    let sequence_volume_min = sorted_seq_volumes[p10_idx];
-    let sequence_volume_max = sorted_seq_volumes[p90_idx];
+    let sequence_volume_min = sorted_seq_volumes[plow_idx];
+    let sequence_volume_max = sorted_seq_volumes[phigh_idx];
     let sequence_volume_range = sequence_volume_max - sequence_volume_min;
 
     // 2. Calculate horizon median volume (more robust than mean)

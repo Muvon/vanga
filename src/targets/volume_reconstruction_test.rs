@@ -37,6 +37,8 @@ mod tests {
             min_base_threshold: 0.1,
             min_extreme_threshold: 0.2,
             smoothing_periods: 3,
+            percentile_low: 0.05,  // p5
+            percentile_high: 0.95, // p95
             balance: crate::targets::calibration::ClassBalance::default(),
         };
 
@@ -130,6 +132,8 @@ mod tests {
             min_base_threshold: 0.1,
             min_extreme_threshold: 0.2,
             smoothing_periods: 3,
+            percentile_low: 0.05,  // p5
+            percentile_high: 0.95, // p95
             balance: crate::targets::calibration::ClassBalance::default(),
         };
 

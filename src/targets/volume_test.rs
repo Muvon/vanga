@@ -250,6 +250,8 @@ mod tests {
             smoothing_periods: 3,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.02,
+            percentile_low: 0.05,  // p5
+            percentile_high: 0.95, // p95
             balance: Default::default(),
         };
 
@@ -433,6 +435,8 @@ mod tests {
             smoothing_periods: 3,
             min_base_threshold: 0.01,
             min_extreme_threshold: 0.02,
+            percentile_low: 0.05,  // p5
+            percentile_high: 0.95, // p95
             balance: Default::default(),
         };
 
@@ -499,15 +503,28 @@ mod tests {
         // Test that similar volume patterns produce consistent classifications
         let base_sequence = vec![1000.0, 1100.0, 1200.0];
         let base_horizon = vec![1300.0, 1400.0];
-        let base_class =
-            classify_volume_regime(&base_sequence, &base_horizon, &thresholds, &config).unwrap();
+        let base_class = classify_volume_regime(
+            &base_sequence,
+            &base_horizon,
+            &thresholds,
+            &config,
+            0.05, // percentile_low
+            0.95, // percentile_high
+        )
+        .unwrap();
 
         // Slightly different but similar pattern
         let similar_sequence = vec![1050.0, 1150.0, 1250.0];
         let similar_horizon = vec![1350.0, 1450.0];
-        let similar_class =
-            classify_volume_regime(&similar_sequence, &similar_horizon, &thresholds, &config)
-                .unwrap();
+        let similar_class = classify_volume_regime(
+            &similar_sequence,
+            &similar_horizon,
+            &thresholds,
+            &config,
+            0.05, // percentile_low
+            0.95, // percentile_high
+        )
+        .unwrap();
 
         // Should be the same or adjacent classes
         let class_diff = (base_class - similar_class).abs();

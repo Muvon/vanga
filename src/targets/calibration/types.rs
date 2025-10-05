@@ -154,6 +154,8 @@ pub struct VolumeParams {
     pub smoothing_periods: usize,
     pub min_base_threshold: f64, // NEW: Minimum base threshold for consistency
     pub min_extreme_threshold: f64, // NEW: Minimum extreme threshold for consistency
+    pub percentile_low: f64,     // NEW: Lower percentile for sequence range (e.g., 0.05 for p5)
+    pub percentile_high: f64,    // NEW: Upper percentile for sequence range (e.g., 0.95 for p95)
     pub balance: ClassBalance,
 }
 
@@ -278,4 +280,6 @@ pub struct VolumeEvalParams {
     pub bandwidth: f64,
     pub multiplier: f64,
     pub smoothing: usize,
+    pub percentile_low: f64,  // Lower percentile for sequence range
+    pub percentile_high: f64, // Upper percentile for sequence range
 }

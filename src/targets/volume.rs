@@ -159,6 +159,8 @@ pub fn generate_volume_targets_with_calibrated_params(
                 horizon_volumes,
                 &thresholds,
                 &config,
+                params.percentile_low,
+                params.percentile_high,
             ) {
                 Ok((class, strength)) => {
                     horizon_targets.push(class);
@@ -216,7 +218,14 @@ pub fn classify_volume_with_calibrated_params(
         smoothing_periods: calibrated_params.smoothing_periods,
     };
 
-    classify_volume_regime_with_strength(&sequence_volumes, &horizon_volumes, &thresholds, &config)
+    classify_volume_regime_with_strength(
+        &sequence_volumes,
+        &horizon_volumes,
+        &thresholds,
+        &config,
+        calibrated_params.percentile_low,
+        calibrated_params.percentile_high,
+    )
 }
 
 /// Classify volume regime using PERCENTILE-BASED analysis (like price levels)
@@ -225,7 +234,9 @@ pub fn classify_volume_with_calibrated_params(
 /// similar to price levels for better signal separation and learnability.
 ///
 /// **Logic**:
-/// 1. Calculate sequence volume percentiles (p10, p90) to establish volume range
+/// 1. Calculate sequence volume percentiles using CALIBRATED percentile_low/percentile_high
+///    - CRITICAL: Percentiles are now adaptive parameters (not hardcoded)
+///    - Calibration finds optimal percentile range for balanced class distribution
 /// 2. Calculate horizon median volume as target
 /// 3. Classify target relative to sequence range with bandwidth expansion
 /// 4. This creates clear boundaries similar to price level classification
@@ -234,6 +245,8 @@ pub fn classify_volume_regime_with_strength(
     horizon_volumes: &[f64],
     _thresholds: &LogVolumeThresholds,
     config: &VolumeConfig,
+    percentile_low: f64,
+    percentile_high: f64,
 ) -> Result<(i32, f64)> {
     if sequence_volumes.is_empty() || horizon_volumes.is_empty() {
         return Err(VangaError::DataError(
@@ -243,16 +256,16 @@ pub fn classify_volume_regime_with_strength(
 
     // NEW APPROACH: Percentile-based classification (like price levels)
 
-    // 1. Calculate sequence volume percentiles to establish range
+    // 1. Calculate sequence volume percentiles to establish range (CALIBRATED)
     let mut sorted_seq_volumes = sequence_volumes.to_vec();
     sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let p10_idx = (sorted_seq_volumes.len() as f64 * 0.15).floor() as usize;
-    let p90_idx = ((sorted_seq_volumes.len() as f64 * 0.85).ceil() as usize)
+    let plow_idx = (sorted_seq_volumes.len() as f64 * percentile_low).floor() as usize;
+    let phigh_idx = ((sorted_seq_volumes.len() as f64 * percentile_high).ceil() as usize)
         .min(sorted_seq_volumes.len() - 1);
 
-    let sequence_volume_min = sorted_seq_volumes[p10_idx];
-    let sequence_volume_max = sorted_seq_volumes[p90_idx];
+    let sequence_volume_min = sorted_seq_volumes[plow_idx];
+    let sequence_volume_max = sorted_seq_volumes[phigh_idx];
     let sequence_volume_range = sequence_volume_max - sequence_volume_min;
 
     // 2. Calculate horizon median volume (more robust than mean)
@@ -382,17 +395,22 @@ fn calculate_volume_strength_percentile(
 }
 
 /// Classify volume regime using logarithmic ratio analysis (legacy function for compatibility)
+/// NOTE: This now requires percentile parameters - use classify_volume_with_calibrated_params instead
 pub fn classify_volume_regime(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
     thresholds: &LogVolumeThresholds,
     config: &VolumeConfig,
+    percentile_low: f64,
+    percentile_high: f64,
 ) -> Result<i32> {
     let (class, _strength) = classify_volume_regime_with_strength(
         sequence_volumes,
         horizon_volumes,
         thresholds,
         config,
+        percentile_low,
+        percentile_high,
     )?;
     Ok(class)
 }
@@ -801,16 +819,18 @@ pub fn reconstruct_volume(
     // RECONSTRUCTION MUST MATCH NEW PERCENTILE-BASED TRAINING LOGIC
     // Training now uses: percentile-based boundaries (like price levels)
 
-    // 1. Calculate sequence volume percentiles (same as training)
+    // 1. Calculate sequence volume percentiles (same as training) - CALIBRATED
     let mut sorted_seq_volumes = sequence_volumes.to_vec();
     sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let p10_idx = (sorted_seq_volumes.len() as f64 * 0.15).floor() as usize;
-    let p90_idx = ((sorted_seq_volumes.len() as f64 * 0.85).ceil() as usize)
+    let plow_idx =
+        (sorted_seq_volumes.len() as f64 * calibrated_params.percentile_low).floor() as usize;
+    let phigh_idx = ((sorted_seq_volumes.len() as f64 * calibrated_params.percentile_high).ceil()
+        as usize)
         .min(sorted_seq_volumes.len() - 1);
 
-    let sequence_volume_min = sorted_seq_volumes[p10_idx];
-    let sequence_volume_max = sorted_seq_volumes[p90_idx];
+    let sequence_volume_min = sorted_seq_volumes[plow_idx];
+    let sequence_volume_max = sorted_seq_volumes[phigh_idx];
     let sequence_volume_range = sequence_volume_max - sequence_volume_min;
 
     // 2. Calculate bandwidth (same as training)
