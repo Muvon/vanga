@@ -18,6 +18,13 @@ pub struct ParameterCalibrator {
     // NEW: Diversity optimization weights
     balance_weight: f64,   // Weight for class balance (default: 0.6)
     diversity_weight: f64, // Weight for sample diversity (default: 0.4)
+
+    // Target enablement from config
+    enabled_price_level: bool,
+    enabled_direction: bool,
+    enabled_volatility: bool,
+    enabled_sentiment: bool,
+    enabled_volume: bool,
 }
 
 impl ParameterCalibrator {
@@ -113,7 +120,22 @@ impl ParameterCalibrator {
         Ok(selected)
     }
 
-    /// Create new calibrator with configuration
+    /// Create new calibrator from TargetsConfig
+    pub fn from_config(targets_config: &crate::config::training::TargetsConfig) -> Self {
+        Self {
+            target_balance: 0.2,
+            max_iterations: 100,
+            balance_weight: 0.6,
+            diversity_weight: 0.4,
+            enabled_price_level: targets_config.price_level,
+            enabled_direction: targets_config.direction,
+            enabled_volatility: targets_config.volatility,
+            enabled_sentiment: targets_config.sentiment,
+            enabled_volume: targets_config.volume,
+        }
+    }
+
+    /// Create new calibrator with configuration (all targets enabled by default)
     pub fn new() -> Self {
         Self {
             target_balance: 0.2, // 20% per class target
@@ -122,6 +144,13 @@ impl ParameterCalibrator {
             // NEW: Diversity optimization configuration
             balance_weight: 0.6,   // Prioritize balance but consider diversity
             diversity_weight: 0.4, // Significant weight for diversity
+
+            // All targets enabled by default
+            enabled_price_level: true,
+            enabled_direction: true,
+            enabled_volatility: true,
+            enabled_sentiment: true,
+            enabled_volume: true,
         }
     }
 
@@ -133,6 +162,11 @@ impl ParameterCalibrator {
             max_iterations: 100,
             balance_weight: balance_weight / total, // Normalize weights
             diversity_weight: diversity_weight / total,
+            enabled_price_level: true,
+            enabled_direction: true,
+            enabled_volatility: true,
+            enabled_sentiment: true,
+            enabled_volume: true,
         }
     }
 
@@ -319,10 +353,19 @@ impl ParameterCalibrator {
                     // Validate sample quality
                     calibrator.validate_sample_quality(&ohlcv_data, &sample_indices)?;
 
-                    // Calibrate all 5 targets IN PARALLEL for this horizon using REAL CPU parallelization
-                    log::info!("{} ⚡ Calibrating 5 targets in PARALLEL on separate CPU threads", prefix);
+                    // Count enabled targets
+                    let enabled_count = [
+                        calibrator.enabled_direction,
+                        calibrator.enabled_price_level,
+                        calibrator.enabled_volatility,
+                        calibrator.enabled_sentiment,
+                        calibrator.enabled_volume,
+                    ].iter().filter(|&&x| x).count();
 
-                    // Clone data for each parallel task
+                    // Calibrate ONLY enabled targets IN PARALLEL for this horizon using REAL CPU parallelization
+                    log::info!("{} ⚡ Calibrating {} enabled targets in PARALLEL on separate CPU threads", prefix, enabled_count);
+
+                    // Clone data for each parallel task (only for enabled targets)
                     let ohlcv_clone1 = ohlcv_data.clone();
                     let ohlcv_clone2 = ohlcv_data.clone();
                     let ohlcv_clone3 = ohlcv_data.clone();
@@ -347,145 +390,215 @@ impl ParameterCalibrator {
                     let prefix4 = prefix.clone();
                     let prefix5 = prefix.clone();
 
-                    // Spawn BLOCKING tasks for CPU-intensive work (runs on separate OS threads)
-                    let direction_handle = tokio::task::spawn_blocking(move || {
-                        log::info!("{} [Direction] 🚀 Starting Bayesian optimization on CPU thread...", prefix1);
-                        let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator1.calibrate_direction(
-                            &ohlcv_clone1,
-                            sequence_length,
-                            horizon_steps,
-                            &indices_clone1,
-                            &prefix1,
-                        ));
-                        match &result {
-                            Ok(params) => log::info!(
-                                "{} [Direction] ✅ Complete - score: {:.3}",
-                                prefix1,
-                                params.balance.composite_quality_score
-                            ),
-                            Err(e) => log::error!("{} [Direction] ❌ Failed: {}", prefix1, e),
-                        }
-                        result
-                    });
+                    // Spawn BLOCKING tasks ONLY for enabled targets (runs on separate OS threads)
+                    let direction_handle = if calibrator.enabled_direction {
+                        Some(tokio::task::spawn_blocking(move || {
+                            log::info!("{} [Direction] 🚀 Starting Bayesian optimization on CPU thread...", prefix1);
+                            let rt = tokio::runtime::Handle::current();
+                            let result = rt.block_on(calibrator1.calibrate_direction(
+                                &ohlcv_clone1,
+                                sequence_length,
+                                horizon_steps,
+                                &indices_clone1,
+                                &prefix1,
+                            ));
+                            match &result {
+                                Ok(params) => log::info!(
+                                    "{} [Direction] ✅ Complete - score: {:.3}",
+                                    prefix1,
+                                    params.balance.composite_quality_score
+                                ),
+                                Err(e) => log::error!("{} [Direction] ❌ Failed: {}", prefix1, e),
+                            }
+                            result
+                        }))
+                    } else {
+                        log::info!("{} [Direction] ⏭️  SKIPPED (disabled)", prefix1);
+                        None
+                    };
 
-                    let price_handle = tokio::task::spawn_blocking(move || {
-                        log::info!("{} [PriceLevels] 🚀 Starting Bayesian optimization on CPU thread...", prefix2);
-                        let context = EvaluationContext {
-                            ohlcv_data: &ohlcv_clone2,
-                            sample_indices: &indices_clone2,
-                            sequence_length,
-                            horizon_steps,
-                        };
-                        let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator2.calibrate_price_levels(&context, &prefix2));
-                        match &result {
-                            Ok(params) => log::info!(
-                                "{} [PriceLevels] ✅ Complete - score: {:.3}",
-                                prefix2,
-                                params.balance.composite_quality_score
-                            ),
-                            Err(e) => log::error!("{} [PriceLevels] ❌ Failed: {}", prefix2, e),
-                        }
-                        result
-                    });
+                    let price_handle = if calibrator.enabled_price_level {
+                        Some(tokio::task::spawn_blocking(move || {
+                            log::info!("{} [PriceLevels] 🚀 Starting Bayesian optimization on CPU thread...", prefix2);
+                            let context = EvaluationContext {
+                                ohlcv_data: &ohlcv_clone2,
+                                sample_indices: &indices_clone2,
+                                sequence_length,
+                                horizon_steps,
+                            };
+                            let rt = tokio::runtime::Handle::current();
+                            let result = rt.block_on(calibrator2.calibrate_price_levels(&context, &prefix2));
+                            match &result {
+                                Ok(params) => log::info!(
+                                    "{} [PriceLevels] ✅ Complete - score: {:.3}",
+                                    prefix2,
+                                    params.balance.composite_quality_score
+                                ),
+                                Err(e) => log::error!("{} [PriceLevels] ❌ Failed: {}", prefix2, e),
+                            }
+                            result
+                        }))
+                    } else {
+                        log::info!("{} [PriceLevels] ⏭️  SKIPPED (disabled)", prefix2);
+                        None
+                    };
 
-                    let volatility_handle = tokio::task::spawn_blocking(move || {
-                        log::info!("{} [Volatility] 🚀 Starting Bayesian optimization on CPU thread...", prefix3);
-                        let context = EvaluationContext {
-                            ohlcv_data: &ohlcv_clone3,
-                            sample_indices: &indices_clone3,
-                            sequence_length,
-                            horizon_steps,
-                        };
-                        let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator3.calibrate_volatility(&context, &prefix3));
-                        match &result {
-                            Ok(params) => log::info!(
-                                "{} [Volatility] ✅ Complete - score: {:.3}",
-                                prefix3,
-                                params.balance.composite_quality_score
-                            ),
-                            Err(e) => log::error!("{} [Volatility] ❌ Failed: {}", prefix3, e),
-                        }
-                        result
-                    });
+                    let volatility_handle = if calibrator.enabled_volatility {
+                        Some(tokio::task::spawn_blocking(move || {
+                            log::info!("{} [Volatility] 🚀 Starting Bayesian optimization on CPU thread...", prefix3);
+                            let context = EvaluationContext {
+                                ohlcv_data: &ohlcv_clone3,
+                                sample_indices: &indices_clone3,
+                                sequence_length,
+                                horizon_steps,
+                            };
+                            let rt = tokio::runtime::Handle::current();
+                            let result = rt.block_on(calibrator3.calibrate_volatility(&context, &prefix3));
+                            match &result {
+                                Ok(params) => log::info!(
+                                    "{} [Volatility] ✅ Complete - score: {:.3}",
+                                    prefix3,
+                                    params.balance.composite_quality_score
+                                ),
+                                Err(e) => log::error!("{} [Volatility] ❌ Failed: {}", prefix3, e),
+                            }
+                            result
+                        }))
+                    } else {
+                        log::info!("{} [Volatility] ⏭️  SKIPPED (disabled)", prefix3);
+                        None
+                    };
 
-                    let sentiment_handle = tokio::task::spawn_blocking(move || {
-                        log::info!("{} [Sentiment] 🚀 Starting Bayesian optimization on CPU thread...", prefix4);
-                        let context = EvaluationContext {
-                            ohlcv_data: &ohlcv_clone4,
-                            sample_indices: &indices_clone4,
-                            sequence_length,
-                            horizon_steps,
-                        };
-                        let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator4.calibrate_sentiment(&context, &prefix4));
-                        match &result {
-                            Ok(params) => log::info!(
-                                "{} [Sentiment] ✅ Complete - score: {:.3}",
-                                prefix4,
-                                params.balance.composite_quality_score
-                            ),
-                            Err(e) => log::error!("{} [Sentiment] ❌ Failed: {}", prefix4, e),
-                        }
-                        result
-                    });
+                    let sentiment_handle = if calibrator.enabled_sentiment {
+                        Some(tokio::task::spawn_blocking(move || {
+                            log::info!("{} [Sentiment] 🚀 Starting Bayesian optimization on CPU thread...", prefix4);
+                            let context = EvaluationContext {
+                                ohlcv_data: &ohlcv_clone4,
+                                sample_indices: &indices_clone4,
+                                sequence_length,
+                                horizon_steps,
+                            };
+                            let rt = tokio::runtime::Handle::current();
+                            let result = rt.block_on(calibrator4.calibrate_sentiment(&context, &prefix4));
+                            match &result {
+                                Ok(params) => log::info!(
+                                    "{} [Sentiment] ✅ Complete - score: {:.3}",
+                                    prefix4,
+                                    params.balance.composite_quality_score
+                                ),
+                                Err(e) => log::error!("{} [Sentiment] ❌ Failed: {}", prefix4, e),
+                            }
+                            result
+                        }))
+                    } else {
+                        log::info!("{} [Sentiment] ⏭️  SKIPPED (disabled)", prefix4);
+                        None
+                    };
 
-                    let volume_handle = tokio::task::spawn_blocking(move || {
-                        log::info!("{} [Volume] 🚀 Starting Bayesian optimization on CPU thread...", prefix5);
-                        let context = EvaluationContext {
-                            ohlcv_data: &ohlcv_clone5,
-                            sample_indices: &indices_clone5,
-                            sequence_length,
-                            horizon_steps,
-                        };
-                        let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator5.calibrate_volume(&context, &prefix5));
-                        match &result {
-                            Ok(params) => log::info!(
-                                "{} [Volume] ✅ Complete - score: {:.3}",
-                                prefix5,
-                                params.balance.composite_quality_score
-                            ),
-                            Err(e) => log::error!("{} [Volume] ❌ Failed: {}", prefix5, e),
-                        }
-                        result
-                    });
+                    let volume_handle = if calibrator.enabled_volume {
+                        Some(tokio::task::spawn_blocking(move || {
+                            log::info!("{} [Volume] 🚀 Starting Bayesian optimization on CPU thread...", prefix5);
+                            let context = EvaluationContext {
+                                ohlcv_data: &ohlcv_clone5,
+                                sample_indices: &indices_clone5,
+                                sequence_length,
+                                horizon_steps,
+                            };
+                            let rt = tokio::runtime::Handle::current();
+                            let result = rt.block_on(calibrator5.calibrate_volume(&context, &prefix5));
+                            match &result {
+                                Ok(params) => log::info!(
+                                    "{} [Volume] ✅ Complete - score: {:.3}",
+                                    prefix5,
+                                    params.balance.composite_quality_score
+                                ),
+                                Err(e) => log::error!("{} [Volume] ❌ Failed: {}", prefix5, e),
+                            }
+                            result
+                        }))
+                    } else {
+                        log::info!("{} [Volume] ⏭️  SKIPPED (disabled)", prefix5);
+                        None
+                    };
 
-                    // Wait for all CPU threads to complete
-                    let (direction_res, price_res, volatility_res, sentiment_res, volume_res) = tokio::join!(
-                        direction_handle,
-                        price_handle,
-                        volatility_handle,
-                        sentiment_handle,
-                        volume_handle
-                    );
+                    // Wait for ONLY enabled CPU threads to complete
+                    let direction_res = if let Some(h) = direction_handle { Some(h.await) } else { None };
+                    let price_res = if let Some(h) = price_handle { Some(h.await) } else { None };
+                    let volatility_res = if let Some(h) = volatility_handle { Some(h.await) } else { None };
+                    let sentiment_res = if let Some(h) = sentiment_handle { Some(h.await) } else { None };
+                    let volume_res = if let Some(h) = volume_handle { Some(h.await) } else { None };
 
-                    // Unwrap JoinHandle results and propagate errors
-                    let direction = direction_res.map_err(|e| {
-                        crate::utils::error::VangaError::OptimizationError(format!("Direction task failed: {}", e))
-                    })??;
-                    let price_levels = price_res.map_err(|e| {
-                        crate::utils::error::VangaError::OptimizationError(format!("PriceLevels task failed: {}", e))
-                    })??;
-                    let volatility = volatility_res.map_err(|e| {
-                        crate::utils::error::VangaError::OptimizationError(format!("Volatility task failed: {}", e))
-                    })??;
-                    let sentiment = sentiment_res.map_err(|e| {
-                        crate::utils::error::VangaError::OptimizationError(format!("Sentiment task failed: {}", e))
-                    })??;
-                    let volume = volume_res.map_err(|e| {
-                        crate::utils::error::VangaError::OptimizationError(format!("Volume task failed: {}", e))
-                    })??;
+                    // Unwrap JoinHandle results and propagate errors, or use defaults for disabled targets
+                    let direction = if let Some(res) = direction_res {
+                        res.map_err(|e| {
+                            crate::utils::error::VangaError::OptimizationError(format!("Direction task failed: {}", e))
+                        })??
+                    } else {
+                        DirectionParams::default()
+                    };
 
-                    // Calculate horizon score
-                    let horizon_score = (direction.balance.composite_quality_score
-                        + price_levels.balance.composite_quality_score
-                        + volatility.balance.composite_quality_score
-                        + sentiment.balance.composite_quality_score
-                        + volume.balance.composite_quality_score)
-                        / 5.0;
+                    let price_levels = if let Some(res) = price_res {
+                        res.map_err(|e| {
+                            crate::utils::error::VangaError::OptimizationError(format!("PriceLevels task failed: {}", e))
+                        })??
+                    } else {
+                        PriceLevelParams::default()
+                    };
+
+                    let volatility = if let Some(res) = volatility_res {
+                        res.map_err(|e| {
+                            crate::utils::error::VangaError::OptimizationError(format!("Volatility task failed: {}", e))
+                        })??
+                    } else {
+                        VolatilityParams::default()
+                    };
+
+                    let sentiment = if let Some(res) = sentiment_res {
+                        res.map_err(|e| {
+                            crate::utils::error::VangaError::OptimizationError(format!("Sentiment task failed: {}", e))
+                        })??
+                    } else {
+                        SentimentParams::default()
+                    };
+
+                    let volume = if let Some(res) = volume_res {
+                        res.map_err(|e| {
+                            crate::utils::error::VangaError::OptimizationError(format!("Volume task failed: {}", e))
+                        })??
+                    } else {
+                        VolumeParams::default()
+                    };
+
+                    // Calculate horizon score from ONLY enabled targets
+                    let mut score_sum = 0.0;
+                    let mut score_count = 0;
+                    
+                    if calibrator.enabled_direction {
+                        score_sum += direction.balance.composite_quality_score;
+                        score_count += 1;
+                    }
+                    if calibrator.enabled_price_level {
+                        score_sum += price_levels.balance.composite_quality_score;
+                        score_count += 1;
+                    }
+                    if calibrator.enabled_volatility {
+                        score_sum += volatility.balance.composite_quality_score;
+                        score_count += 1;
+                    }
+                    if calibrator.enabled_sentiment {
+                        score_sum += sentiment.balance.composite_quality_score;
+                        score_count += 1;
+                    }
+                    if calibrator.enabled_volume {
+                        score_sum += volume.balance.composite_quality_score;
+                        score_count += 1;
+                    }
+
+                    let horizon_score = if score_count > 0 {
+                        score_sum / score_count as f64
+                    } else {
+                        0.0
+                    };
 
                     let horizon_time = horizon_start.elapsed().as_millis() as u64;
 
@@ -593,6 +706,11 @@ impl Default for ParameterCalibrator {
             max_iterations: 100,
             balance_weight: 0.6,
             diversity_weight: 0.4,
+            enabled_price_level: true,
+            enabled_direction: true,
+            enabled_volatility: true,
+            enabled_sentiment: true,
+            enabled_volume: true,
         }
     }
 }
