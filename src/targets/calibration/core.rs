@@ -282,7 +282,7 @@ impl ParameterCalibrator {
                 let horizon = horizon.clone();
                 let ohlcv_data = Arc::clone(&ohlcv_data_arc);
                 let calibrator = self.clone();
-                
+
                 async move {
                     let horizon_start = std::time::Instant::now();
                     let prefix = format!("[H{}/{}:{}]", horizon_idx + 1, horizons.len(), horizon);
@@ -321,32 +321,32 @@ impl ParameterCalibrator {
 
                     // Calibrate all 5 targets IN PARALLEL for this horizon using REAL CPU parallelization
                     log::info!("{} ⚡ Calibrating 5 targets in PARALLEL on separate CPU threads", prefix);
-                    
+
                     // Clone data for each parallel task
                     let ohlcv_clone1 = ohlcv_data.clone();
                     let ohlcv_clone2 = ohlcv_data.clone();
                     let ohlcv_clone3 = ohlcv_data.clone();
                     let ohlcv_clone4 = ohlcv_data.clone();
                     let ohlcv_clone5 = ohlcv_data.clone();
-                    
+
                     let indices_clone1 = sample_indices.clone();
                     let indices_clone2 = sample_indices.clone();
                     let indices_clone3 = sample_indices.clone();
                     let indices_clone4 = sample_indices.clone();
                     let indices_clone5 = sample_indices.clone();
-                    
+
                     let calibrator1 = calibrator.clone();
                     let calibrator2 = calibrator.clone();
                     let calibrator3 = calibrator.clone();
                     let calibrator4 = calibrator.clone();
                     let calibrator5 = calibrator.clone();
-                    
+
                     let prefix1 = prefix.clone();
                     let prefix2 = prefix.clone();
                     let prefix3 = prefix.clone();
                     let prefix4 = prefix.clone();
                     let prefix5 = prefix.clone();
-                    
+
                     // Spawn BLOCKING tasks for CPU-intensive work (runs on separate OS threads)
                     let direction_handle = tokio::task::spawn_blocking(move || {
                         log::info!("{} [Direction] 🚀 Starting Bayesian optimization on CPU thread...", prefix1);
@@ -367,7 +367,7 @@ impl ParameterCalibrator {
                         }
                         result
                     });
-                    
+
                     let price_handle = tokio::task::spawn_blocking(move || {
                         log::info!("{} [PriceLevels] 🚀 Starting Bayesian optimization on CPU thread...", prefix2);
                         let context = EvaluationContext {
@@ -388,7 +388,7 @@ impl ParameterCalibrator {
                         }
                         result
                     });
-                    
+
                     let volatility_handle = tokio::task::spawn_blocking(move || {
                         log::info!("{} [Volatility] 🚀 Starting Bayesian optimization on CPU thread...", prefix3);
                         let context = EvaluationContext {
@@ -409,7 +409,7 @@ impl ParameterCalibrator {
                         }
                         result
                     });
-                    
+
                     let sentiment_handle = tokio::task::spawn_blocking(move || {
                         log::info!("{} [Sentiment] 🚀 Starting Bayesian optimization on CPU thread...", prefix4);
                         let context = EvaluationContext {
@@ -430,7 +430,7 @@ impl ParameterCalibrator {
                         }
                         result
                     });
-                    
+
                     let volume_handle = tokio::task::spawn_blocking(move || {
                         log::info!("{} [Volume] 🚀 Starting Bayesian optimization on CPU thread...", prefix5);
                         let context = EvaluationContext {
@@ -451,7 +451,7 @@ impl ParameterCalibrator {
                         }
                         result
                     });
-                    
+
                     // Wait for all CPU threads to complete
                     let (direction_res, price_res, volatility_res, sentiment_res, volume_res) = tokio::join!(
                         direction_handle,
@@ -460,7 +460,7 @@ impl ParameterCalibrator {
                         sentiment_handle,
                         volume_handle
                     );
-                    
+
                     // Unwrap JoinHandle results and propagate errors
                     let direction = direction_res.map_err(|e| {
                         crate::utils::error::VangaError::OptimizationError(format!("Direction task failed: {}", e))

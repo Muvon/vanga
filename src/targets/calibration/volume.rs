@@ -18,13 +18,14 @@ pub async fn calibrate_volume(
 
     let utils = calibrator.get_utils();
 
-    // Define 5D parameter space with ADAPTIVE bounds for all market conditions
+    // Define 5D parameter space with WIDE, ADAPTIVE bounds for all market conditions
+    // CRITICAL: Percentile bounds MUST be wide enough for longer horizons (64h+)
     let param_bounds = vec![
         (0.1, 3.0),   // bandwidth: 0.1-3.0 (narrow to very wide volume ranges)
         (1.2, 6.0),   // extreme_multiplier: 1.2-6.0 (narrow to very wide extremes)
         (1.0, 30.0),  // smoothing_periods: 1-30 (no smoothing to heavy smoothing)
-        (0.01, 0.15), // percentile_low: 0.01-0.15 (p1 to p15)
-        (0.85, 0.99), // percentile_high: 0.85-0.99 (p85 to p99)
+        (0.01, 0.30), // percentile_low: 0.01-0.30 (p1 to p30) - WIDER for longer horizons
+        (0.70, 0.99), // percentile_high: 0.70-0.99 (p70 to p99) - WIDER for longer horizons
     ];
 
     let param_names = vec![
@@ -154,28 +155,9 @@ fn evaluate_volume_params(
 
     let total = class_counts.iter().sum::<usize>();
 
-    // CRITICAL: Ensure ALL 5 classes are present before calculating balance
-    // Missing classes during Bayesian optimization are NORMAL - they get penalized automatically
-    let missing_classes: Vec<usize> = (0..5).filter(|&i| class_counts[i] == 0).collect();
-
-    if !missing_classes.is_empty() {
-        // Return poor score to guide optimization away from these parameters
-        // NO LOGGING - this is expected during exploration and just creates noise
-        return Ok(ClassBalance {
-            class_percentages: [0.0; 5],
-            balance_score: 10.0, // Very poor balance
-            imbalance_ratio: f64::INFINITY,
-            total_samples: total,
-            target_balance: 0.2,
-            diversity_score: 0.0,
-            temporal_spread: 0.0,
-            feature_diversity: 0.0,
-            market_condition_diversity: 0.0,
-            composite_quality_score: 10.0,
-        });
-    }
-
     // Use diversity-aware balance calculation
+    // NOTE: Missing classes are handled gracefully by calculate_balance_with_diversity()
+    // which sets imbalance_ratio = f64::INFINITY and poor balance score automatically
     utils.calculate_balance_with_diversity(
         class_counts.as_ref(),
         total,

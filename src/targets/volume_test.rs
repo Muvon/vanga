@@ -94,16 +94,28 @@ mod tests {
         // Low volume scenario
         let low_volumes = vec![500.0, 600.0, 700.0];
         let low_horizon_volumes = vec![400.0, 500.0];
-        let low_class =
-            classify_volume_regime(&low_volumes, &low_horizon_volumes, &thresholds, &config)
-                .unwrap();
+        let low_class = classify_volume_regime(
+            &low_volumes,
+            &low_horizon_volumes,
+            &thresholds,
+            &config,
+            0.10, // percentile_low (default)
+            0.90, // percentile_high (default)
+        )
+        .unwrap();
 
         // High volume scenario
         let high_volumes = vec![1000.0, 1200.0, 1400.0];
         let high_horizon_volumes = vec![2000.0, 2500.0, 3000.0];
-        let high_class =
-            classify_volume_regime(&high_volumes, &high_horizon_volumes, &thresholds, &config)
-                .unwrap();
+        let high_class = classify_volume_regime(
+            &high_volumes,
+            &high_horizon_volumes,
+            &thresholds,
+            &config,
+            0.10, // percentile_low (default)
+            0.90, // percentile_high (default)
+        )
+        .unwrap();
 
         assert!(
             (0..=4).contains(&low_class),
@@ -345,6 +357,8 @@ mod tests {
             &horizon_volumes,
             &small_thresholds,
             &small_bandwidth_config,
+            0.10, // percentile_low (default)
+            0.90, // percentile_high (default)
         )
         .unwrap();
         let large_class = classify_volume_regime(
@@ -352,6 +366,8 @@ mod tests {
             &horizon_volumes,
             &large_thresholds,
             &large_bandwidth_config,
+            0.10, // percentile_low (default)
+            0.90, // percentile_high (default)
         )
         .unwrap();
 
@@ -401,20 +417,40 @@ mod tests {
         // Test with minimal data
         let minimal_sequence = vec![1000.0];
         let minimal_horizon = vec![1200.0];
-        let result =
-            classify_volume_regime(&minimal_sequence, &minimal_horizon, &thresholds, &config);
+        let result = classify_volume_regime(
+            &minimal_sequence,
+            &minimal_horizon,
+            &thresholds,
+            &config,
+            0.10, // percentile_low (default)
+            0.90, // percentile_high (default)
+        );
         assert!(result.is_ok(), "Should handle minimal data gracefully");
 
         // Test with zero volumes
         let zero_sequence = vec![0.0, 0.0, 0.0];
         let zero_horizon = vec![0.0, 0.0];
-        let result = classify_volume_regime(&zero_sequence, &zero_horizon, &thresholds, &config);
+        let result = classify_volume_regime(
+            &zero_sequence,
+            &zero_horizon,
+            &thresholds,
+            &config,
+            0.10, // percentile_low (default)
+            0.90, // percentile_high (default)
+        );
         assert!(result.is_ok(), "Should handle zero volumes gracefully");
 
         // Test with very high volumes
         let high_sequence = vec![1000000.0, 1100000.0, 1200000.0];
         let high_horizon = vec![1500000.0, 1600000.0];
-        let result = classify_volume_regime(&high_sequence, &high_horizon, &thresholds, &config);
+        let result = classify_volume_regime(
+            &high_sequence,
+            &high_horizon,
+            &thresholds,
+            &config,
+            0.10, // percentile_low (default)
+            0.90, // percentile_high (default)
+        );
         assert!(result.is_ok(), "Should handle very high volumes gracefully");
 
         // Test smoothed volume with insufficient data
