@@ -94,33 +94,18 @@ pub async fn calibrate_volume(
     Ok(result)
 }
 
-/// Evaluate volume parameters using proper volume regime classification
+/// Evaluate volume parameters using PERCENTILE-BASED classification (MATCHES TARGET GENERATION)
+///
+/// CRITICAL: This MUST use the same percentile-based logic as classify_volume_regime_with_strength()
+/// in volume.rs to ensure calibration optimizes the ACTUAL classification algorithm being used.
 fn evaluate_volume_params(
     utils: &super::utils::CalibrationUtils,
     context: &EvaluationContext,
     params: &VolumeEvalParams,
 ) -> Result<ClassBalance> {
-    use crate::targets::volume::{classify_volume_regime, LogVolumeThresholds, VolumeConfig};
 
     let mut class_counts = [0usize; 5];
     let sample_limit = context.sample_indices.len().min(500); // Limit for performance
-
-    let config = VolumeConfig {
-        bandwidth_size: params.bandwidth,
-        extreme_multiplier: params.multiplier,
-        smoothing_periods: params.smoothing,
-    };
-
-    // Create thresholds using same logic as volume.rs
-    let half_bandwidth = params.bandwidth / 2.0;
-    let extreme_bandwidth = params.bandwidth * params.multiplier;
-
-    let thresholds = LogVolumeThresholds {
-        very_low_max: -extreme_bandwidth,
-        low_max: -half_bandwidth,
-        medium_max: half_bandwidth,
-        high_max: extreme_bandwidth,
-    };
 
     for &seq_idx in context.sample_indices.iter().take(sample_limit) {
         let sequence_end_idx = seq_idx + context.sequence_length;
@@ -136,11 +121,12 @@ fn evaluate_volume_params(
                     sequence_data.iter().map(|row| row.volume).collect();
                 let horizon_volumes: Vec<f64> = horizon_data.iter().map(|row| row.volume).collect();
 
-                match classify_volume_regime(
+                // CRITICAL: Use PERCENTILE-BASED classification (same as target generation)
+                match classify_volume_percentile_based(
                     &sequence_volumes,
                     &horizon_volumes,
-                    &thresholds,
-                    &config,
+                    params.bandwidth,
+                    params.multiplier,
                 ) {
                     Ok(class) => {
                         if (0..5).contains(&class) {
@@ -154,6 +140,35 @@ fn evaluate_volume_params(
     }
 
     let total = class_counts.iter().sum::<usize>();
+    
+    // CRITICAL: Ensure ALL 5 classes are present before calculating balance
+    let missing_classes: Vec<usize> = (0..5)
+        .filter(|&i| class_counts[i] == 0)
+        .collect();
+    
+    if !missing_classes.is_empty() {
+        log::warn!(
+            "⚠️  Volume calibration: Missing classes {:?} with params bandwidth={:.2}, multiplier={:.2}, smoothing={}",
+            missing_classes,
+            params.bandwidth,
+            params.multiplier,
+            params.smoothing
+        );
+        // Return poor score to guide optimization away from these parameters
+        return Ok(ClassBalance {
+            class_percentages: [0.0; 5],
+            balance_score: 10.0, // Very poor balance
+            imbalance_ratio: f64::INFINITY,
+            total_samples: total,
+            target_balance: 0.2,
+            diversity_score: 0.0,
+            temporal_spread: 0.0,
+            feature_diversity: 0.0,
+            market_condition_diversity: 0.0,
+            composite_quality_score: 10.0,
+        });
+    }
+    
     // Use diversity-aware balance calculation
     utils.calculate_balance_with_diversity(
         class_counts.as_ref(),
@@ -161,4 +176,74 @@ fn evaluate_volume_params(
         context.ohlcv_data,
         context.sample_indices,
     )
+}
+
+/// Percentile-based volume classification (EXACT COPY of logic from volume.rs)
+///
+/// This function MUST match classify_volume_regime_with_strength() in volume.rs
+/// to ensure calibration optimizes the correct classification algorithm.
+fn classify_volume_percentile_based(
+    sequence_volumes: &[f64],
+    horizon_volumes: &[f64],
+    bandwidth_size: f64,
+    _extreme_multiplier: f64, // Not used in percentile-based classification
+) -> Result<i32> {
+    use crate::utils::error::VangaError;
+
+    if sequence_volumes.is_empty() || horizon_volumes.is_empty() {
+        return Err(VangaError::DataError(
+            "Empty volume data for analysis".to_string(),
+        ));
+    }
+
+    // 1. Calculate sequence volume percentiles to establish range
+    let mut sorted_seq_volumes = sequence_volumes.to_vec();
+    sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let p10_idx = (sorted_seq_volumes.len() as f64 * 0.15).floor() as usize;
+    let p90_idx = ((sorted_seq_volumes.len() as f64 * 0.85).ceil() as usize)
+        .min(sorted_seq_volumes.len() - 1);
+
+    let sequence_volume_min = sorted_seq_volumes[p10_idx];
+    let sequence_volume_max = sorted_seq_volumes[p90_idx];
+    let sequence_volume_range = sequence_volume_max - sequence_volume_min;
+
+    // 2. Calculate horizon median volume (more robust than mean)
+    let mut sorted_hor_volumes = horizon_volumes.to_vec();
+    sorted_hor_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let horizon_median_volume = if sorted_hor_volumes.len() % 2 == 0 {
+        let mid = sorted_hor_volumes.len() / 2;
+        (sorted_hor_volumes[mid - 1] + sorted_hor_volumes[mid]) / 2.0
+    } else {
+        sorted_hor_volumes[sorted_hor_volumes.len() / 2]
+    };
+
+    // 3. Calculate bandwidth for breakout detection (similar to price levels)
+    let bandwidth = sequence_volume_range * bandwidth_size;
+
+    // Handle edge case: flat volume
+    if sequence_volume_range < 1e-10 || bandwidth < 1e-10 {
+        return Ok(2); // Default to medium
+    }
+
+    // 4. Define classification boundaries (5-class system)
+    let boundary_0 = sequence_volume_min - bandwidth; // Strong Down boundary
+    let boundary_1 = sequence_volume_min; // Moderate Down boundary
+    let boundary_2 = sequence_volume_max; // Neutral/Moderate Up boundary
+    let boundary_3 = sequence_volume_max + bandwidth; // Strong Up boundary
+
+    // 5. Classify based on where horizon median falls
+    let class = if horizon_median_volume < boundary_0 {
+        0 // Very Low: Major volume decrease
+    } else if horizon_median_volume < boundary_1 {
+        1 // Low: Moderate volume decrease
+    } else if horizon_median_volume < boundary_2 {
+        2 // Medium: Within sequence range
+    } else if horizon_median_volume < boundary_3 {
+        3 // High: Moderate volume increase
+    } else {
+        4 // Very High: Major volume surge
+    };
+
+    Ok(class)
 }
