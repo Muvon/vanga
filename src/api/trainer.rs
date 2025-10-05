@@ -405,7 +405,8 @@ impl ModelTrainer {
         );
 
         // Use clean calibration interface with PER-HORIZON calibration
-        let calibrator = crate::targets::calibration::ParameterCalibrator::from_config(&self.config.targets);
+        let calibrator =
+            crate::targets::calibration::ParameterCalibrator::from_config(&self.config.targets);
 
         let calibrated_params = calibrator
             .calibrate(

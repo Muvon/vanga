@@ -66,10 +66,31 @@ impl CalibrationUtils {
         let feature_diversity = 0.5;
         let market_condition_diversity = 0.5;
 
-        // Composite quality score combines balance and diversity
+        // CRITICAL: Penalize missing classes HEAVILY (imbalance_ratio = f64::INFINITY)
+        // Missing classes are UNACCEPTABLE for training - must have all 5 classes
+        let missing_class_penalty = if imbalance_ratio.is_infinite() {
+            log::debug!(
+                "⚠️  REJECTED: Parameters produce missing classes (imbalance_ratio=∞) - adding penalty=1000.0"
+            );
+            1000.0 // Massive penalty to reject parameters that eliminate classes
+        } else if imbalance_ratio > 10.0 {
+            // Also penalize severe imbalance (one class 10x another)
+            let penalty = (imbalance_ratio - 10.0) * 10.0;
+            log::debug!(
+                "⚠️  Severe imbalance detected (ratio={:.2}) - adding penalty={:.2}",
+                imbalance_ratio,
+                penalty
+            );
+            penalty
+        } else {
+            0.0
+        };
+
+        // Composite quality score combines balance, diversity, and missing class penalty
         let normalized_balance_penalty = balance_score / 20.0;
         let composite_quality_score = self.balance_weight * normalized_balance_penalty
-            + self.diversity_weight * (1.0 - diversity_score);
+            + self.diversity_weight * (1.0 - diversity_score)
+            + missing_class_penalty; // CRITICAL: Add missing class penalty
 
         Ok(ClassBalance {
             class_percentages,
@@ -139,10 +160,31 @@ impl CalibrationUtils {
             (temporal_spread * 0.4 + feature_diversity * 0.3 + market_condition_diversity * 0.3)
                 .clamp(0.0, 1.0);
 
-        // Composite quality score combines balance and diversity
+        // CRITICAL: Penalize missing classes HEAVILY (imbalance_ratio = f64::INFINITY)
+        // Missing classes are UNACCEPTABLE for training - must have all 5 classes
+        let missing_class_penalty = if imbalance_ratio.is_infinite() {
+            log::debug!(
+                "⚠️  REJECTED: Parameters produce missing classes (imbalance_ratio=∞) - adding penalty=1000.0"
+            );
+            1000.0 // Massive penalty to reject parameters that eliminate classes
+        } else if imbalance_ratio > 10.0 {
+            // Also penalize severe imbalance (one class 10x another)
+            let penalty = (imbalance_ratio - 10.0) * 10.0;
+            log::debug!(
+                "⚠️  Severe imbalance detected (ratio={:.2}) - adding penalty={:.2}",
+                imbalance_ratio,
+                penalty
+            );
+            penalty
+        } else {
+            0.0
+        };
+
+        // Composite quality score combines balance, diversity, and missing class penalty
         let normalized_balance_penalty = balance_score / 20.0;
         let composite_quality_score = self.balance_weight * normalized_balance_penalty
-            + self.diversity_weight * (1.0 - diversity_score);
+            + self.diversity_weight * (1.0 - diversity_score)
+            + missing_class_penalty; // CRITICAL: Add missing class penalty
 
         Ok(ClassBalance {
             class_percentages,

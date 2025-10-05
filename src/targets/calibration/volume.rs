@@ -176,18 +176,17 @@ fn evaluate_volume_params(
     )
 }
 
-/// Percentile-based volume classification (EXACT COPY of logic from volume.rs)
+/// Logarithmic ratio volume classification (MATCHES classify_volume_regime_with_strength)
 ///
 /// This function MUST match classify_volume_regime_with_strength() in volume.rs
 /// to ensure calibration optimizes the correct classification algorithm.
 ///
-/// **CRITICAL**: Percentiles are now CALIBRATED parameters (not hardcoded) for
-/// adaptive classification across different volume characteristics.
+/// **CRITICAL**: Uses logarithmic ratio approach for symmetric classification.
 fn classify_volume_percentile_based(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
     bandwidth_size: f64,
-    _extreme_multiplier: f64, // Not used in percentile-based classification
+    extreme_multiplier: f64,
     percentile_low: f64,
     percentile_high: f64,
 ) -> Result<i32> {
@@ -199,50 +198,68 @@ fn classify_volume_percentile_based(
         ));
     }
 
-    // 1. Calculate sequence volume percentiles to establish range (CALIBRATED)
+    // 1. Calculate sequence median volume (baseline)
     let mut sorted_seq_volumes = sequence_volumes.to_vec();
     sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let sequence_median = if sorted_seq_volumes.len() % 2 == 0 {
+        let mid = sorted_seq_volumes.len() / 2;
+        (sorted_seq_volumes[mid - 1] + sorted_seq_volumes[mid]) / 2.0
+    } else {
+        sorted_seq_volumes[sorted_seq_volumes.len() / 2]
+    };
 
-    let plow_idx = (sorted_seq_volumes.len() as f64 * percentile_low).floor() as usize;
-    let phigh_idx = ((sorted_seq_volumes.len() as f64 * percentile_high).ceil() as usize)
-        .min(sorted_seq_volumes.len() - 1);
-
-    let sequence_volume_min = sorted_seq_volumes[plow_idx];
-    let sequence_volume_max = sorted_seq_volumes[phigh_idx];
-    let sequence_volume_range = sequence_volume_max - sequence_volume_min;
-
-    // 2. Calculate horizon median volume (more robust than mean)
+    // 2. Calculate horizon median volume (target)
     let mut sorted_hor_volumes = horizon_volumes.to_vec();
     sorted_hor_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let horizon_median_volume = if sorted_hor_volumes.len() % 2 == 0 {
+    let horizon_median = if sorted_hor_volumes.len() % 2 == 0 {
         let mid = sorted_hor_volumes.len() / 2;
         (sorted_hor_volumes[mid - 1] + sorted_hor_volumes[mid]) / 2.0
     } else {
         sorted_hor_volumes[sorted_hor_volumes.len() / 2]
     };
 
-    // 3. Calculate bandwidth for breakout detection (similar to price levels)
-    let bandwidth = sequence_volume_range * bandwidth_size;
-
-    // Handle edge case: flat volume
-    if sequence_volume_range < 1e-10 || bandwidth < 1e-10 {
+    // Handle edge case: zero volume
+    if sequence_median < 1e-10 {
         return Ok(2); // Default to medium
     }
 
-    // 4. Define classification boundaries (5-class system)
-    let boundary_0 = sequence_volume_min - bandwidth; // Strong Down boundary
-    let boundary_1 = sequence_volume_min; // Moderate Down boundary
-    let boundary_2 = sequence_volume_max; // Neutral/Moderate Up boundary
-    let boundary_3 = sequence_volume_max + bandwidth; // Strong Up boundary
+    // 3. Calculate volume ratio and apply logarithmic transformation
+    let volume_ratio = horizon_median / sequence_median;
+    let log_ratio = volume_ratio.ln();
 
-    // 5. Classify based on where horizon median falls
-    let class = if horizon_median_volume < boundary_0 {
+    // 4. Calculate adaptive thresholds using percentile-based range
+    let plow_idx = (sorted_seq_volumes.len() as f64 * percentile_low).floor() as usize;
+    let phigh_idx = ((sorted_seq_volumes.len() as f64 * percentile_high).ceil() as usize)
+        .min(sorted_seq_volumes.len() - 1);
+
+    let seq_vol_low = sorted_seq_volumes[plow_idx];
+    let seq_vol_high = sorted_seq_volumes[phigh_idx];
+
+    // Calculate typical log variation within sequence
+    let typical_log_variation = if seq_vol_low > 1e-10 {
+        (seq_vol_high / seq_vol_low).ln()
+    } else {
+        0.693 // Default to ln(2) = ~69% variation
+    };
+
+    // 5. Define symmetric thresholds in log space
+    let base_threshold = typical_log_variation * bandwidth_size;
+    let extreme_threshold = base_threshold * extreme_multiplier;
+
+    // Symmetric boundaries around 0 (log(1.0) = 0)
+    let boundary_0 = -extreme_threshold; // Very Low: Major decrease
+    let boundary_1 = -base_threshold; // Low: Moderate decrease
+    let boundary_2 = base_threshold; // Medium: Similar volume
+    let boundary_3 = extreme_threshold; // High: Moderate increase
+
+    // 6. Classify based on log ratio
+    let class = if log_ratio < boundary_0 {
         0 // Very Low: Major volume decrease
-    } else if horizon_median_volume < boundary_1 {
+    } else if log_ratio < boundary_1 {
         1 // Low: Moderate volume decrease
-    } else if horizon_median_volume < boundary_2 {
-        2 // Medium: Within sequence range
-    } else if horizon_median_volume < boundary_3 {
+    } else if log_ratio < boundary_2 {
+        2 // Medium: Similar volume
+    } else if log_ratio < boundary_3 {
         3 // High: Moderate volume increase
     } else {
         4 // Very High: Major volume surge
