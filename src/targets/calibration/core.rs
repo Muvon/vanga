@@ -7,8 +7,10 @@ use super::types::*;
 use super::utils::CalibrationUtils;
 use crate::data::structures::MarketDataRow;
 use crate::utils::error::Result;
+use std::sync::Arc;
 
 /// Target parameter calibrator - single clean interface with diversity optimization
+#[derive(Clone)]
 pub struct ParameterCalibrator {
     target_balance: f64,
     max_iterations: usize,
@@ -220,11 +222,16 @@ impl ParameterCalibrator {
         Ok(())
     }
 
-    /// PER-HORIZON calibration method - returns parameters for ALL targets × ALL horizons
+    /// PER-HORIZON PARALLEL calibration method - returns parameters for ALL targets × ALL horizons
     ///
     /// This is the main entry point for parameter calibration. It analyzes the provided
     /// OHLCV data and finds optimal parameters for all target types (direction, price levels,
     /// volatility, sentiment, volume) FOR EACH HORIZON SEPARATELY.
+    ///
+    /// **PARALLELIZATION**: 
+    /// - Level 1: All horizons calibrated in parallel
+    /// - Level 2: Within each horizon, all 5 targets calibrated in parallel
+    /// - Uses all available CPU cores for maximum performance
     ///
     /// # Arguments
     /// * `ohlcv_data` - Market data for calibration analysis
@@ -236,9 +243,9 @@ impl ParameterCalibrator {
     /// * `CalibratedParameters` - Optimized parameters per horizon for all target types
     ///
     /// # Algorithm
-    /// 1. For each horizon:
+    /// 1. For each horizon IN PARALLEL:
     ///    a. Generate diverse sample indices
-    ///    b. Calibrate all 5 targets independently
+    ///    b. Calibrate all 5 targets IN PARALLEL
     ///    c. Store parameters in HashMap<horizon, params>
     /// 2. Returns comprehensive results with per-horizon metadata
     pub async fn calibrate(
@@ -249,109 +256,290 @@ impl ParameterCalibrator {
         sample_size: Option<usize>,
         sequence_overlap: f64,
     ) -> Result<CalibratedParameters> {
+        let total_start = std::time::Instant::now();
+        let num_cpus = num_cpus::get();
+        
         log::info!(
-            "🎯 Starting PER-HORIZON calibration for {} horizons: {:?}",
+            "🎯 Starting PARALLEL PER-HORIZON calibration for {} horizons: {:?}",
             horizons.len(),
             horizons
         );
+        log::info!(
+            "⚡ Parallelization: {} CPU cores available, {} horizons × 5 targets = {} parallel tasks",
+            num_cpus,
+            horizons.len(),
+            horizons.len() * 5
+        );
 
+        // Wrap data in Arc for safe sharing across threads
+        let ohlcv_data_arc = Arc::new(ohlcv_data.to_vec());
+        
+        // Calibrate all horizons in parallel
+        let horizon_futures: Vec<_> = horizons
+            .iter()
+            .enumerate()
+            .map(|(horizon_idx, horizon)| {
+                let horizon = horizon.clone();
+                let ohlcv_data = Arc::clone(&ohlcv_data_arc);
+                let calibrator = self.clone();
+                
+                async move {
+                    let horizon_start = std::time::Instant::now();
+                    let prefix = format!("[H{}/{}:{}]", horizon_idx + 1, horizons.len(), horizon);
+
+                    log::info!(
+                        "{} 🕐 Starting horizon calibration",
+                        prefix
+                    );
+
+                    // Parse horizon to steps
+                    let horizon_steps = crate::utils::parser::parse_horizon_to_steps(&horizon)
+                        .map_err(|e| {
+                            crate::utils::error::VangaError::ConfigError(format!(
+                                "Invalid horizon '{}': {}",
+                                horizon, e
+                            ))
+                        })?;
+
+                    // Generate diverse sample indices for this horizon
+                    let sample_indices = calibrator.generate_diverse_calibration_indices(
+                        ohlcv_data.len(),
+                        sequence_length,
+                        horizon_steps,
+                        sample_size,
+                        sequence_overlap,
+                    )?;
+
+                    log::info!(
+                        "{} 📊 Calibrating with {} samples",
+                        prefix,
+                        sample_indices.len()
+                    );
+
+                    // Validate sample quality
+                    calibrator.validate_sample_quality(&ohlcv_data, &sample_indices)?;
+
+                    // Calibrate all 5 targets IN PARALLEL for this horizon using REAL CPU parallelization
+                    log::info!("{} ⚡ Calibrating 5 targets in PARALLEL on separate CPU threads", prefix);
+                    
+                    // Clone data for each parallel task
+                    let ohlcv_clone1 = ohlcv_data.clone();
+                    let ohlcv_clone2 = ohlcv_data.clone();
+                    let ohlcv_clone3 = ohlcv_data.clone();
+                    let ohlcv_clone4 = ohlcv_data.clone();
+                    let ohlcv_clone5 = ohlcv_data.clone();
+                    
+                    let indices_clone1 = sample_indices.clone();
+                    let indices_clone2 = sample_indices.clone();
+                    let indices_clone3 = sample_indices.clone();
+                    let indices_clone4 = sample_indices.clone();
+                    let indices_clone5 = sample_indices.clone();
+                    
+                    let calibrator1 = calibrator.clone();
+                    let calibrator2 = calibrator.clone();
+                    let calibrator3 = calibrator.clone();
+                    let calibrator4 = calibrator.clone();
+                    let calibrator5 = calibrator.clone();
+                    
+                    let prefix1 = prefix.clone();
+                    let prefix2 = prefix.clone();
+                    let prefix3 = prefix.clone();
+                    let prefix4 = prefix.clone();
+                    let prefix5 = prefix.clone();
+                    
+                    // Spawn BLOCKING tasks for CPU-intensive work (runs on separate OS threads)
+                    let direction_handle = tokio::task::spawn_blocking(move || {
+                        log::info!("{} [Direction] 🚀 Starting Bayesian optimization on CPU thread...", prefix1);
+                        let rt = tokio::runtime::Handle::current();
+                        let result = rt.block_on(calibrator1.calibrate_direction(
+                            &ohlcv_clone1,
+                            sequence_length,
+                            horizon_steps,
+                            &indices_clone1,
+                        ));
+                        match &result {
+                            Ok(params) => log::info!(
+                                "{} [Direction] ✅ Complete - score: {:.3}",
+                                prefix1,
+                                params.balance.composite_quality_score
+                            ),
+                            Err(e) => log::error!("{} [Direction] ❌ Failed: {}", prefix1, e),
+                        }
+                        result
+                    });
+                    
+                    let price_handle = tokio::task::spawn_blocking(move || {
+                        log::info!("{} [PriceLevels] 🚀 Starting Bayesian optimization on CPU thread...", prefix2);
+                        let context = EvaluationContext {
+                            ohlcv_data: &ohlcv_clone2,
+                            sample_indices: &indices_clone2,
+                            sequence_length,
+                            horizon_steps,
+                        };
+                        let rt = tokio::runtime::Handle::current();
+                        let result = rt.block_on(calibrator2.calibrate_price_levels(&context));
+                        match &result {
+                            Ok(params) => log::info!(
+                                "{} [PriceLevels] ✅ Complete - score: {:.3}",
+                                prefix2,
+                                params.balance.composite_quality_score
+                            ),
+                            Err(e) => log::error!("{} [PriceLevels] ❌ Failed: {}", prefix2, e),
+                        }
+                        result
+                    });
+                    
+                    let volatility_handle = tokio::task::spawn_blocking(move || {
+                        log::info!("{} [Volatility] 🚀 Starting Bayesian optimization on CPU thread...", prefix3);
+                        let context = EvaluationContext {
+                            ohlcv_data: &ohlcv_clone3,
+                            sample_indices: &indices_clone3,
+                            sequence_length,
+                            horizon_steps,
+                        };
+                        let rt = tokio::runtime::Handle::current();
+                        let result = rt.block_on(calibrator3.calibrate_volatility(&context));
+                        match &result {
+                            Ok(params) => log::info!(
+                                "{} [Volatility] ✅ Complete - score: {:.3}",
+                                prefix3,
+                                params.balance.composite_quality_score
+                            ),
+                            Err(e) => log::error!("{} [Volatility] ❌ Failed: {}", prefix3, e),
+                        }
+                        result
+                    });
+                    
+                    let sentiment_handle = tokio::task::spawn_blocking(move || {
+                        log::info!("{} [Sentiment] 🚀 Starting Bayesian optimization on CPU thread...", prefix4);
+                        let context = EvaluationContext {
+                            ohlcv_data: &ohlcv_clone4,
+                            sample_indices: &indices_clone4,
+                            sequence_length,
+                            horizon_steps,
+                        };
+                        let rt = tokio::runtime::Handle::current();
+                        let result = rt.block_on(calibrator4.calibrate_sentiment(&context));
+                        match &result {
+                            Ok(params) => log::info!(
+                                "{} [Sentiment] ✅ Complete - score: {:.3}",
+                                prefix4,
+                                params.balance.composite_quality_score
+                            ),
+                            Err(e) => log::error!("{} [Sentiment] ❌ Failed: {}", prefix4, e),
+                        }
+                        result
+                    });
+                    
+                    let volume_handle = tokio::task::spawn_blocking(move || {
+                        log::info!("{} [Volume] 🚀 Starting Bayesian optimization on CPU thread...", prefix5);
+                        let context = EvaluationContext {
+                            ohlcv_data: &ohlcv_clone5,
+                            sample_indices: &indices_clone5,
+                            sequence_length,
+                            horizon_steps,
+                        };
+                        let rt = tokio::runtime::Handle::current();
+                        let result = rt.block_on(calibrator5.calibrate_volume(&context));
+                        match &result {
+                            Ok(params) => log::info!(
+                                "{} [Volume] ✅ Complete - score: {:.3}",
+                                prefix5,
+                                params.balance.composite_quality_score
+                            ),
+                            Err(e) => log::error!("{} [Volume] ❌ Failed: {}", prefix5, e),
+                        }
+                        result
+                    });
+                    
+                    // Wait for all CPU threads to complete
+                    let (direction_res, price_res, volatility_res, sentiment_res, volume_res) = tokio::join!(
+                        direction_handle,
+                        price_handle,
+                        volatility_handle,
+                        sentiment_handle,
+                        volume_handle
+                    );
+                    
+                    // Unwrap JoinHandle results and propagate errors
+                    let direction = direction_res.map_err(|e| {
+                        crate::utils::error::VangaError::OptimizationError(format!("Direction task failed: {}", e))
+                    })??;
+                    let price_levels = price_res.map_err(|e| {
+                        crate::utils::error::VangaError::OptimizationError(format!("PriceLevels task failed: {}", e))
+                    })??;
+                    let volatility = volatility_res.map_err(|e| {
+                        crate::utils::error::VangaError::OptimizationError(format!("Volatility task failed: {}", e))
+                    })??;
+                    let sentiment = sentiment_res.map_err(|e| {
+                        crate::utils::error::VangaError::OptimizationError(format!("Sentiment task failed: {}", e))
+                    })??;
+                    let volume = volume_res.map_err(|e| {
+                        crate::utils::error::VangaError::OptimizationError(format!("Volume task failed: {}", e))
+                    })??;
+
+                    // Calculate horizon score
+                    let horizon_score = (direction.balance.composite_quality_score
+                        + price_levels.balance.composite_quality_score
+                        + volatility.balance.composite_quality_score
+                        + sentiment.balance.composite_quality_score
+                        + volume.balance.composite_quality_score)
+                        / 5.0;
+
+                    let horizon_time = horizon_start.elapsed().as_millis() as u64;
+
+                    log::info!(
+                        "{} ✅ Horizon calibrated in {}ms (score: {:.3})",
+                        prefix,
+                        horizon_time,
+                        horizon_score
+                    );
+
+                    Ok::<_, crate::utils::error::VangaError>((
+                        horizon,
+                        direction,
+                        price_levels,
+                        volatility,
+                        sentiment,
+                        volume,
+                        horizon_score,
+                        horizon_time,
+                    ))
+                }
+            })
+            .collect();
+
+        // Wait for all horizons to complete
+        let results = futures::future::try_join_all(horizon_futures).await?;
+
+        // Collect results into HashMaps
         let mut direction_params = std::collections::HashMap::new();
         let mut price_level_params = std::collections::HashMap::new();
         let mut volatility_params = std::collections::HashMap::new();
         let mut sentiment_params = std::collections::HashMap::new();
         let mut volume_params = std::collections::HashMap::new();
-
-        let mut total_optimization_time = 0u64;
         let mut overall_scores = Vec::new();
+        let mut total_optimization_time = 0u64;
 
-        // Calibrate each horizon separately
-        for (horizon_idx, horizon) in horizons.iter().enumerate() {
-            let horizon_start = std::time::Instant::now();
-
-            log::info!(
-                "\n{}\n🕐 HORIZON {}/{}: {} \n{}",
-                "=".repeat(60),
-                horizon_idx + 1,
-                horizons.len(),
-                horizon,
-                "=".repeat(60)
-            );
-
-            // Parse horizon to steps
-            let horizon_steps =
-                crate::utils::parser::parse_horizon_to_steps(horizon).map_err(|e| {
-                    crate::utils::error::VangaError::ConfigError(format!(
-                        "Invalid horizon '{}': {}",
-                        horizon, e
-                    ))
-                })?;
-
-            // Generate diverse sample indices for this horizon
-            let sample_indices = self.generate_diverse_calibration_indices(
-                ohlcv_data.len(),
-                sequence_length,
-                horizon_steps,
-                sample_size,
-                sequence_overlap,
-            )?;
-
-            log::info!(
-                "  📊 Calibrating with {} samples for horizon {}",
-                sample_indices.len(),
-                horizon
-            );
-
-            // Validate sample quality
-            self.validate_sample_quality(ohlcv_data, &sample_indices)?;
-
-            // Calibrate all targets for this horizon
-            let direction = self
-                .calibrate_direction(ohlcv_data, sequence_length, horizon_steps, &sample_indices)
-                .await?;
-
-            let context = EvaluationContext {
-                ohlcv_data,
-                sample_indices: &sample_indices,
-                sequence_length,
-                horizon_steps,
-            };
-
-            let price_levels = self.calibrate_price_levels(&context).await?;
-            let volatility = self.calibrate_volatility(&context).await?;
-            let sentiment = self.calibrate_sentiment(&context).await?;
-            let volume = self.calibrate_volume(&context).await?;
-
-            // Calculate horizon score
-            let horizon_score = (direction.balance.composite_quality_score
-                + price_levels.balance.composite_quality_score
-                + volatility.balance.composite_quality_score
-                + sentiment.balance.composite_quality_score
-                + volume.balance.composite_quality_score)
-                / 5.0;
-
-            overall_scores.push(horizon_score);
-
-            // Store parameters for this horizon
+        for (horizon, direction, price_levels, volatility, sentiment, volume, score, time) in results {
             direction_params.insert(horizon.clone(), direction);
             price_level_params.insert(horizon.clone(), price_levels);
             volatility_params.insert(horizon.clone(), volatility);
             sentiment_params.insert(horizon.clone(), sentiment);
             volume_params.insert(horizon.clone(), volume);
-
-            let horizon_time = horizon_start.elapsed().as_millis() as u64;
-            total_optimization_time += horizon_time;
-
-            log::info!(
-                "  ✅ Horizon {} calibrated in {}ms (score: {:.3})",
-                horizon,
-                horizon_time,
-                horizon_score
-            );
+            overall_scores.push(score);
+            total_optimization_time += time;
         }
 
         // Calculate overall statistics
         let overall_score = overall_scores.iter().sum::<f64>() / overall_scores.len() as f64;
         let success = overall_score < 1.0;
+        let total_elapsed = total_start.elapsed().as_millis() as u64;
+        let speedup = if horizons.len() > 1 {
+            total_optimization_time as f64 / total_elapsed as f64
+        } else {
+            1.0
+        };
 
         let metadata = CalibrationMetadata {
             data_length: ohlcv_data.len(),
@@ -359,16 +547,18 @@ impl ParameterCalibrator {
             horizons: horizons.to_vec(),
             calibration_samples: 0, // Will be set per-horizon
             calibration_iterations: self.max_iterations,
-            optimization_time_ms: total_optimization_time,
+            optimization_time_ms: total_elapsed, // Use actual wall-clock time
             target_balance: self.target_balance,
             overall_balance_score: overall_score,
             calibration_success: success,
         };
 
         log::info!("\n{}", "=".repeat(60));
-        log::info!("🎯 PER-HORIZON CALIBRATION COMPLETE");
+        log::info!("🎯 PARALLEL PER-HORIZON CALIBRATION COMPLETE");
         log::info!("{}", "=".repeat(60));
-        log::info!("  Total time: {}ms", total_optimization_time);
+        log::info!("  Wall-clock time: {}ms", total_elapsed);
+        log::info!("  CPU time (sum): {}ms", total_optimization_time);
+        log::info!("  Speedup: {:.2}x", speedup);
         log::info!("  Overall score: {:.3}", overall_score);
         log::info!("  Success: {}", if success { "✅" } else { "❌" });
         log::info!("{}\n", "=".repeat(60));

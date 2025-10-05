@@ -142,19 +142,14 @@ fn evaluate_volume_params(
     let total = class_counts.iter().sum::<usize>();
     
     // CRITICAL: Ensure ALL 5 classes are present before calculating balance
+    // Missing classes during Bayesian optimization are NORMAL - they get penalized automatically
     let missing_classes: Vec<usize> = (0..5)
         .filter(|&i| class_counts[i] == 0)
         .collect();
     
     if !missing_classes.is_empty() {
-        log::warn!(
-            "⚠️  Volume calibration: Missing classes {:?} with params bandwidth={:.2}, multiplier={:.2}, smoothing={}",
-            missing_classes,
-            params.bandwidth,
-            params.multiplier,
-            params.smoothing
-        );
         // Return poor score to guide optimization away from these parameters
+        // NO LOGGING - this is expected during exploration and just creates noise
         return Ok(ClassBalance {
             class_percentages: [0.0; 5],
             balance_score: 10.0, // Very poor balance
