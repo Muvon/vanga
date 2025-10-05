@@ -137,7 +137,7 @@ impl BayesianOptimizer {
 
     /// Initialize with Enhanced Latin Hypercube Sampling using maximin criterion
     /// This provides superior space coverage compared to basic LHS
-    pub fn initialize_latin_hypercube(&self, n_samples: usize) -> Vec<Vec<f64>> {
+    pub fn initialize_latin_hypercube(&self, n_samples: usize, prefix: &str) -> Vec<Vec<f64>> {
         let mut rng = rand::rng();
         let n_params = self.bounds.len();
 
@@ -183,7 +183,8 @@ impl BayesianOptimizer {
         let (min_dist, avg_dist, max_dist) = self.calculate_distance_statistics(&best_samples);
 
         log::info!(
-            "🎲 Enhanced LHS: {} samples, {} params | Min dist: {:.4}, Avg dist: {:.4}, Max dist: {:.4}",
+            "{} 🎲 Enhanced LHS: {} samples, {} params | Min dist: {:.4}, Avg dist: {:.4}, Max dist: {:.4}",
+            prefix,
             n_samples,
             n_params,
             min_dist,
@@ -464,12 +465,17 @@ impl BayesianOptimizer {
     }
 
     /// Log optimization progress
-    pub fn log_progress(&self, iteration: usize) {
+    pub fn log_progress(&self, iteration: usize, prefix: &str) {
         if let Some((best_params, best_score)) = self.get_best() {
-            log::info!("🔍 Iteration {}: Best Score = {:.6}", iteration, best_score);
+            log::info!(
+                "{} 🔍 Iteration {}: Best Score = {:.6}",
+                prefix,
+                iteration,
+                best_score
+            );
 
             for (name, &value) in self.param_names.iter().zip(best_params.iter()) {
-                log::debug!("    {}: {:.6}", name, value);
+                log::debug!("{}     {}: {:.6}", prefix, name, value);
             }
         }
     }

@@ -11,10 +11,14 @@ use crate::utils::error::Result;
 pub async fn calibrate_volume(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
+    prefix: &str,
 ) -> Result<VolumeParams> {
     use super::bayesian::BayesianConfig;
 
-    log::info!("🔬 Starting Bayesian Optimization for Volume calibration");
+    log::info!(
+        "{} 🔬 Starting Bayesian Optimization for Volume calibration",
+        prefix
+    );
 
     let utils = calibrator.get_utils();
 
@@ -63,7 +67,13 @@ pub async fn calibrate_volume(
 
     // Run Bayesian optimization
     let best_params = calibrator
-        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .calibrate_with_bayesian(
+            param_bounds,
+            param_names,
+            objective_fn,
+            bayesian_config,
+            prefix,
+        )
         .await?;
 
     // Evaluate final parameters to get balance

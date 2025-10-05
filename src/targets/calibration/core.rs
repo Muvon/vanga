@@ -356,6 +356,7 @@ impl ParameterCalibrator {
                             sequence_length,
                             horizon_steps,
                             &indices_clone1,
+                            &prefix1,
                         ));
                         match &result {
                             Ok(params) => log::info!(
@@ -377,7 +378,7 @@ impl ParameterCalibrator {
                             horizon_steps,
                         };
                         let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator2.calibrate_price_levels(&context));
+                        let result = rt.block_on(calibrator2.calibrate_price_levels(&context, &prefix2));
                         match &result {
                             Ok(params) => log::info!(
                                 "{} [PriceLevels] ✅ Complete - score: {:.3}",
@@ -398,7 +399,7 @@ impl ParameterCalibrator {
                             horizon_steps,
                         };
                         let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator3.calibrate_volatility(&context));
+                        let result = rt.block_on(calibrator3.calibrate_volatility(&context, &prefix3));
                         match &result {
                             Ok(params) => log::info!(
                                 "{} [Volatility] ✅ Complete - score: {:.3}",
@@ -419,7 +420,7 @@ impl ParameterCalibrator {
                             horizon_steps,
                         };
                         let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator4.calibrate_sentiment(&context));
+                        let result = rt.block_on(calibrator4.calibrate_sentiment(&context, &prefix4));
                         match &result {
                             Ok(params) => log::info!(
                                 "{} [Sentiment] ✅ Complete - score: {:.3}",
@@ -440,7 +441,7 @@ impl ParameterCalibrator {
                             horizon_steps,
                         };
                         let rt = tokio::runtime::Handle::current();
-                        let result = rt.block_on(calibrator5.calibrate_volume(&context));
+                        let result = rt.block_on(calibrator5.calibrate_volume(&context, &prefix5));
                         match &result {
                             Ok(params) => log::info!(
                                 "{} [Volume] ✅ Complete - score: {:.3}",
@@ -604,6 +605,7 @@ impl ParameterCalibrator {
         sequence_length: usize,
         horizon_steps: usize,
         sample_indices: &[usize],
+        prefix: &str,
     ) -> Result<DirectionParams> {
         super::direction::calibrate_direction(
             self,
@@ -611,6 +613,7 @@ impl ParameterCalibrator {
             sequence_length,
             horizon_steps,
             sample_indices,
+            prefix,
         )
         .await
     }
@@ -618,26 +621,33 @@ impl ParameterCalibrator {
     pub async fn calibrate_price_levels(
         &self,
         context: &EvaluationContext<'_>,
+        prefix: &str,
     ) -> Result<PriceLevelParams> {
-        super::price_levels::calibrate_price_levels(self, context).await
+        super::price_levels::calibrate_price_levels(self, context, prefix).await
     }
 
     pub async fn calibrate_volatility(
         &self,
         context: &EvaluationContext<'_>,
+        prefix: &str,
     ) -> Result<VolatilityParams> {
-        super::volatility::calibrate_volatility(self, context).await
+        super::volatility::calibrate_volatility(self, context, prefix).await
     }
 
     pub async fn calibrate_sentiment(
         &self,
         context: &EvaluationContext<'_>,
+        prefix: &str,
     ) -> Result<SentimentParams> {
-        super::sentiment::calibrate_sentiment(self, context).await
+        super::sentiment::calibrate_sentiment(self, context, prefix).await
     }
 
-    pub async fn calibrate_volume(&self, context: &EvaluationContext<'_>) -> Result<VolumeParams> {
-        super::volume::calibrate_volume(self, context).await
+    pub async fn calibrate_volume(
+        &self,
+        context: &EvaluationContext<'_>,
+        prefix: &str,
+    ) -> Result<VolumeParams> {
+        super::volume::calibrate_volume(self, context, prefix).await
     }
 
     /// Calibrate parameters using Bayesian Optimization
@@ -651,6 +661,7 @@ impl ParameterCalibrator {
     /// * `param_names` - Names for logging
     /// * `objective_fn` - Function to minimize (returns score, lower is better)
     /// * `config` - Bayesian optimization configuration
+    /// * `prefix` - Log prefix for parallel execution tracking
     ///
     /// # Returns
     /// Best parameters found
@@ -660,6 +671,7 @@ impl ParameterCalibrator {
         param_names: Vec<String>,
         objective_fn: F,
         config: super::bayesian::BayesianConfig,
+        prefix: &str,
     ) -> Result<Vec<f64>>
     where
         F: Fn(&[f64]) -> Result<f64>,
@@ -667,11 +679,13 @@ impl ParameterCalibrator {
         use super::bayesian::BayesianOptimizer;
 
         log::info!(
-            "🔬 Starting Bayesian Optimization with {} parameters",
+            "{} 🔬 Starting Bayesian Optimization with {} parameters",
+            prefix,
             param_names.len()
         );
         log::info!(
-            "   Initial samples: {}, Max iterations: {}, Tolerance: {:.6}",
+            "{}    Initial samples: {}, Max iterations: {}, Tolerance: {:.6}",
+            prefix,
             config.n_initial,
             config.max_iterations,
             config.tolerance
@@ -681,16 +695,18 @@ impl ParameterCalibrator {
 
         // Phase 1: Initial random exploration (Latin Hypercube Sampling)
         log::info!(
-            "📊 Phase 1: Initial exploration ({} samples)",
+            "{} 📊 Phase 1: Initial exploration ({} samples)",
+            prefix,
             config.n_initial
         );
-        let initial_samples = optimizer.initialize_latin_hypercube(config.n_initial);
+        let initial_samples = optimizer.initialize_latin_hypercube(config.n_initial, prefix);
 
         for (i, params) in initial_samples.iter().enumerate() {
             let score = objective_fn(params)?;
             optimizer.add_observation(params.clone(), score);
             log::debug!(
-                "  Sample {}/{}: score = {:.6}",
+                "{}   Sample {}/{}: score = {:.6}",
+                prefix,
                 i + 1,
                 config.n_initial,
                 score
@@ -699,7 +715,8 @@ impl ParameterCalibrator {
 
         if let Some((_, best_score)) = optimizer.get_best() {
             log::info!(
-                "  Initial best score: {:.6} (from {} samples)",
+                "{}   Initial best score: {:.6} (from {} samples)",
+                prefix,
                 best_score,
                 config.n_initial
             );
@@ -707,7 +724,8 @@ impl ParameterCalibrator {
 
         // Phase 2: Bayesian optimization iterations with SMART convergence
         log::info!(
-            "📊 Phase 2: Bayesian optimization (up to {} iterations)",
+            "{} 📊 Phase 2: Bayesian optimization (up to {} iterations)",
+            prefix,
             config.max_iterations
         );
 
@@ -727,7 +745,7 @@ impl ParameterCalibrator {
 
             // Log progress every 5 iterations
             if (iteration + 1) % 5 == 0 || iteration == 0 {
-                optimizer.log_progress(optimizer.n_observations());
+                optimizer.log_progress(optimizer.n_observations(), prefix);
             }
 
             // Check convergence (but enforce minimum iterations)
@@ -749,12 +767,14 @@ impl ParameterCalibrator {
 
                         if no_improvement_count >= max_patience {
                             log::info!(
-                                "✅ Converged after {} iterations (no improvement for {} iterations)",
+                                "{} ✅ Converged after {} iterations (no improvement for {} iterations)",
+                                prefix,
                                 iteration + 1,
                                 max_patience
                             );
                             log::info!(
-                                "   Final score: {:.6}, Absolute improvement: {:.6}, Relative: {:.4}%",
+                                "{}    Final score: {:.6}, Absolute improvement: {:.6}, Relative: {:.4}%",
+                                prefix,
                                 best_score,
                                 absolute_improvement,
                                 relative_improvement * 100.0
@@ -766,7 +786,8 @@ impl ParameterCalibrator {
 
                         if absolute_improvement > 0.0 {
                             log::debug!(
-                                "  Improvement: {:.6} ({:.4}% relative)",
+                                "{}   Improvement: {:.6} ({:.4}% relative)",
+                                prefix,
                                 absolute_improvement,
                                 relative_improvement * 100.0
                             );
@@ -785,19 +806,24 @@ impl ParameterCalibrator {
 
         // Return best parameters found
         if let Some((best_params, best_score)) = optimizer.get_best() {
-            log::info!("🎯 Bayesian Optimization Complete!");
-            log::info!("  Total evaluations: {}", optimizer.n_observations());
-            log::info!("  Best Score: {:.6}", best_score);
-            log::info!("  Best Parameters:");
+            log::info!("{} 🎯 Bayesian Optimization Complete!", prefix);
+            log::info!(
+                "{}   Total evaluations: {}",
+                prefix,
+                optimizer.n_observations()
+            );
+            log::info!("{}   Best Score: {:.6}", prefix, best_score);
+            log::info!("{}   Best Parameters:", prefix);
             for (name, &value) in optimizer.param_names.iter().zip(best_params.iter()) {
-                log::info!("    {}: {:.6}", name, value);
+                log::info!("{}     {}: {:.6}", prefix, name, value);
             }
 
             Ok(best_params)
         } else {
-            Err(crate::utils::error::VangaError::ConfigError(
-                "Bayesian optimization failed to find any valid parameters".to_string(),
-            ))
+            Err(crate::utils::error::VangaError::ConfigError(format!(
+                "{} Bayesian optimization failed to find any valid parameters",
+                prefix
+            )))
         }
     }
 }

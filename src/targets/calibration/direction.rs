@@ -15,10 +15,14 @@ pub async fn calibrate_direction(
     sequence_length: usize,
     horizon_steps: usize,
     sample_indices: &[usize],
+    prefix: &str,
 ) -> Result<DirectionParams> {
     use super::bayesian::BayesianConfig;
 
-    log::info!("🔬 Starting Bayesian Optimization for Direction calibration");
+    log::info!(
+        "{} 🔬 Starting Bayesian Optimization for Direction calibration",
+        prefix
+    );
 
     let close_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
     let utils = calibrator.get_utils();
@@ -74,7 +78,13 @@ pub async fn calibrate_direction(
 
     // Run Bayesian optimization
     let best_params = calibrator
-        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .calibrate_with_bayesian(
+            param_bounds,
+            param_names,
+            objective_fn,
+            bayesian_config,
+            prefix,
+        )
         .await?;
 
     // Evaluate final parameters to get balance

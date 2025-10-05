@@ -11,10 +11,14 @@ use crate::utils::error::Result;
 pub async fn calibrate_price_levels(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
+    prefix: &str,
 ) -> Result<PriceLevelParams> {
     use super::bayesian::BayesianConfig;
 
-    log::info!("🔬 Starting Bayesian Optimization for Price Levels calibration");
+    log::info!(
+        "{} 🔬 Starting Bayesian Optimization for Price Levels calibration",
+        prefix
+    );
 
     let utils = calibrator.get_utils();
 
@@ -56,7 +60,13 @@ pub async fn calibrate_price_levels(
 
     // Run Bayesian optimization
     let best_params = calibrator
-        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .calibrate_with_bayesian(
+            param_bounds,
+            param_names,
+            objective_fn,
+            bayesian_config,
+            prefix,
+        )
         .await?;
 
     // Evaluate final parameters to get balance

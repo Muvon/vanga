@@ -11,8 +11,12 @@ use crate::utils::error::Result;
 pub async fn calibrate_sentiment(
     calibrator: &ParameterCalibrator,
     context: &EvaluationContext<'_>,
+    prefix: &str,
 ) -> Result<SentimentParams> {
-    log::info!("🔬 Starting Bayesian Optimization for Real Sentiment Analysis");
+    log::info!(
+        "{} 🔬 Starting Bayesian Optimization for Real Sentiment Analysis",
+        prefix
+    );
 
     // Define 6D parameter space with WIDE, ADAPTIVE bounds for all market conditions
     // These bounds are designed to work across different cryptocurrencies and market regimes
@@ -57,7 +61,13 @@ pub async fn calibrate_sentiment(
     let bayesian_config = super::bayesian::BayesianConfig::for_high_dimensional();
 
     let best_params = calibrator
-        .calibrate_with_bayesian(param_bounds, param_names, objective_fn, bayesian_config)
+        .calibrate_with_bayesian(
+            param_bounds,
+            param_names,
+            objective_fn,
+            bayesian_config,
+            prefix,
+        )
         .await?;
 
     // Evaluate final balance
@@ -76,7 +86,7 @@ pub async fn calibrate_sentiment(
     let final_balance = evaluate_sentiment_params(&utils, context, &final_params)?;
 
     log::info!(
-        "🎯 Final Sentiment Parameters:\\n  Body Weight: {:.3}\\n  Size Weight: {:.3}\\n  Wick Weight: {:.3}\\n  Volume Weight: {:.3}\\n  Sensitivity: {:.4}\\n  Extreme Multiplier: {:.2}",
+        "🎯 Final Sentiment Parameters:\n  Body Weight: {:.3}\n  Size Weight: {:.3}\n  Wick Weight: {:.3}\n  Volume Weight: {:.3}\n  Sensitivity: {:.4}\n  Extreme Multiplier: {:.2}",
         final_params.body_weight,
         final_params.size_weight,
         final_params.wick_weight,
