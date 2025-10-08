@@ -175,15 +175,6 @@ impl ParameterCalibrator {
         Self::default()
     }
 
-    /// Create calibrator with full customization
-    pub fn with_custom_config(
-        balance_weight: f64,
-        diversity_weight: f64,
-        _min_threshold: f64,
-    ) -> Self {
-        Self::with_diversity_weights(balance_weight, diversity_weight)
-    }
-
     /// Validate sample quality to ensure diverse, representative calibration data
     fn validate_sample_quality(
         &self,

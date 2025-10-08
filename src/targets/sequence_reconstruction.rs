@@ -242,7 +242,7 @@ impl SequenceAnalyzer {
     /// Reconstruct probability distribution from sequences (for prediction output)
     pub fn sequences_to_probabilities(
         &self,
-        _sequence_ohlcv: &[MarketDataRow],
+        sequence_ohlcv: &[MarketDataRow],
         model_probabilities: &[f64], // Raw model output probabilities
     ) -> Result<Vec<f64>> {
         // Validate input
@@ -253,7 +253,8 @@ impl SequenceAnalyzer {
         }
 
         // For now, return the model probabilities as-is
-        // Future enhancement: Apply sequence-aware probability adjustments
+        // Future enhancement: Apply sequence-aware probability adjustments using sequence_ohlcv
+        let _ = sequence_ohlcv; // Explicitly mark as intentionally unused for now
         Ok(model_probabilities.to_vec())
     }
 
@@ -298,10 +299,10 @@ impl SequenceReconstructor for SequenceAnalyzer {
 
     fn sequences_to_probabilities(
         &self,
-        _sequence_ohlcv: &[MarketDataRow],
+        sequence_ohlcv: &[MarketDataRow],
         model_probabilities: &[f64],
     ) -> Result<Vec<f64>> {
-        self.sequences_to_probabilities(_sequence_ohlcv, model_probabilities)
+        self.sequences_to_probabilities(sequence_ohlcv, model_probabilities)
     }
 
     fn sequences_to_ranges(

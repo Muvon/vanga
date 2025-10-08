@@ -1163,9 +1163,12 @@ impl OutputFormatter {
                     ))
                 })?;
 
-            match reconstruct_sentiment(&probabilities, self.sequence_ohlcv.as_ref().unwrap(), horizon_params) {
+            match reconstruct_sentiment(
+                &probabilities,
+                self.sequence_ohlcv.as_ref().unwrap(),
+                horizon_params,
+            ) {
                 Ok(reconstruction) => {
-
                     // Use reconstruction results to enhance prediction
                     // The reconstruction provides richer information than basic probabilities
                     log::debug!(

@@ -145,9 +145,6 @@ pub fn generate_volume_targets_with_calibrated_params(
             smoothing_periods: params.smoothing_periods,
         };
 
-        // Calculate logarithmic volume thresholds for this horizon
-        let thresholds = calculate_log_volume_thresholds(&config)?;
-
         let horizon_steps = parse_horizon_steps(horizon)?;
         let mut horizon_targets = Vec::new();
         let mut horizon_strengths = Vec::new();
@@ -167,7 +164,6 @@ pub fn generate_volume_targets_with_calibrated_params(
             match classify_volume_regime_with_strength(
                 sequence_volumes,
                 horizon_volumes,
-                &thresholds,
                 &config,
                 params.percentile_low,
                 params.percentile_high,
@@ -207,20 +203,6 @@ pub fn classify_volume_with_calibrated_params(
     let sequence_volumes: Vec<f64> = sequence_ohlcv.iter().map(|row| row.volume).collect();
     let horizon_volumes: Vec<f64> = horizon_ohlcv.iter().map(|row| row.volume).collect();
 
-    // Create thresholds from calibrated params with minimum thresholds applied
-    let base_threshold = calibrated_params
-        .bandwidth
-        .max(calibrated_params.min_base_threshold);
-    let extreme_threshold = (calibrated_params.extreme_multiplier * calibrated_params.bandwidth)
-        .max(calibrated_params.min_extreme_threshold);
-
-    let thresholds = LogVolumeThresholds {
-        very_low_max: (1.0_f64 - extreme_threshold).ln(),
-        low_max: (1.0_f64 - base_threshold).ln(),
-        medium_max: (1.0_f64 + base_threshold).ln(),
-        high_max: (1.0_f64 + extreme_threshold).ln(),
-    };
-
     // Create config from calibrated params
     let config = VolumeConfig {
         bandwidth_size: calibrated_params.bandwidth,
@@ -231,7 +213,6 @@ pub fn classify_volume_with_calibrated_params(
     classify_volume_regime_with_strength(
         &sequence_volumes,
         &horizon_volumes,
-        &thresholds,
         &config,
         calibrated_params.percentile_low,
         calibrated_params.percentile_high,
@@ -254,7 +235,6 @@ pub fn classify_volume_with_calibrated_params(
 pub fn classify_volume_regime_with_strength(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
-    _thresholds: &LogVolumeThresholds,
     config: &VolumeConfig,
     percentile_low: f64,
     percentile_high: f64,
@@ -498,7 +478,6 @@ fn calculate_volume_strength_percentile(
 pub fn classify_volume_regime(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
-    thresholds: &LogVolumeThresholds,
     config: &VolumeConfig,
     percentile_low: f64,
     percentile_high: f64,
@@ -506,7 +485,6 @@ pub fn classify_volume_regime(
     let (class, _strength) = classify_volume_regime_with_strength(
         sequence_volumes,
         horizon_volumes,
-        thresholds,
         config,
         percentile_low,
         percentile_high,

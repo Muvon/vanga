@@ -89,15 +89,12 @@ mod tests {
             smoothing_periods: 3,
         };
 
-        let thresholds = calculate_log_volume_thresholds(&config).unwrap();
-
         // Low volume scenario
         let low_volumes = vec![500.0, 600.0, 700.0];
         let low_horizon_volumes = vec![400.0, 500.0];
         let low_class = classify_volume_regime(
             &low_volumes,
             &low_horizon_volumes,
-            &thresholds,
             &config,
             0.10, // percentile_low (default)
             0.90, // percentile_high (default)
@@ -110,7 +107,6 @@ mod tests {
         let high_class = classify_volume_regime(
             &high_volumes,
             &high_horizon_volumes,
-            &thresholds,
             &config,
             0.10, // percentile_low (default)
             0.90, // percentile_high (default)
@@ -349,13 +345,9 @@ mod tests {
             smoothing_periods: 3,
         };
 
-        let small_thresholds = calculate_log_volume_thresholds(&small_bandwidth_config).unwrap();
-        let large_thresholds = calculate_log_volume_thresholds(&large_bandwidth_config).unwrap();
-
         let small_class = classify_volume_regime(
             &sequence_volumes,
             &horizon_volumes,
-            &small_thresholds,
             &small_bandwidth_config,
             0.10, // percentile_low (default)
             0.90, // percentile_high (default)
@@ -364,7 +356,6 @@ mod tests {
         let large_class = classify_volume_regime(
             &sequence_volumes,
             &horizon_volumes,
-            &large_thresholds,
             &large_bandwidth_config,
             0.10, // percentile_low (default)
             0.90, // percentile_high (default)
@@ -412,15 +403,12 @@ mod tests {
             smoothing_periods: 3,
         };
 
-        let thresholds = calculate_log_volume_thresholds(&config).unwrap();
-
         // Test with minimal data
         let minimal_sequence = vec![1000.0];
         let minimal_horizon = vec![1200.0];
         let result = classify_volume_regime(
             &minimal_sequence,
             &minimal_horizon,
-            &thresholds,
             &config,
             0.10, // percentile_low (default)
             0.90, // percentile_high (default)
@@ -433,7 +421,6 @@ mod tests {
         let result = classify_volume_regime(
             &zero_sequence,
             &zero_horizon,
-            &thresholds,
             &config,
             0.10, // percentile_low (default)
             0.90, // percentile_high (default)
@@ -446,7 +433,6 @@ mod tests {
         let result = classify_volume_regime(
             &high_sequence,
             &high_horizon,
-            &thresholds,
             &config,
             0.10, // percentile_low (default)
             0.90, // percentile_high (default)
@@ -534,15 +520,12 @@ mod tests {
             smoothing_periods: 3,
         };
 
-        let thresholds = calculate_log_volume_thresholds(&config).unwrap();
-
         // Test that similar volume patterns produce consistent classifications
         let base_sequence = vec![1000.0, 1100.0, 1200.0];
         let base_horizon = vec![1300.0, 1400.0];
         let base_class = classify_volume_regime(
             &base_sequence,
             &base_horizon,
-            &thresholds,
             &config,
             0.05, // percentile_low
             0.95, // percentile_high
@@ -555,7 +538,6 @@ mod tests {
         let similar_class = classify_volume_regime(
             &similar_sequence,
             &similar_horizon,
-            &thresholds,
             &config,
             0.05, // percentile_low
             0.95, // percentile_high
