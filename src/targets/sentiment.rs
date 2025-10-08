@@ -1,27 +1,35 @@
-//! Real Sentiment Analysis using Candle Psychology
+//! Sentiment Analysis using Volume-Price Divergence
 //!
-//! # 🎯 TARGET PURPOSE: "WHAT IS THE MARKET SENTIMENT?"
+//! # 🎯 TARGET PURPOSE: "WHAT IS THE MARKET CONVICTION?"
 //!
-//! This module implements **real candle psychology analysis** for market sentiment detection.
-//! It answers: "Is the market showing fear, greed, or neutral sentiment based on candle patterns?"
+//! This module implements **volume-price divergence analysis** for sentiment detection.
+//! It answers: "Is there accumulation (buying pressure) or distribution (selling pressure)?"
 //!
 //! ## 📊 MATHEMATICAL FOUNDATION
 //!
-//! ### **Core Logic: Candle Body Psychology Analysis**
+//! ### **Core Logic: Volume-Price Divergence Score**
 //! ```
-//! 1. Body Conviction: (close - open) / (high - low) - directional strength
-//! 2. Body Size: abs(close - open) / typical_price - magnitude
-//! 3. Wick Imbalance: (upper_wick - lower_wick) / (high - low) - pressure
-//! 4. Volume Conviction: ln(volume_ratio) * body_conviction - participation
-//! 5. Combine into sentiment score with calibrated weights
+//! 1. Calculate normalized price change: (horizon_price - sequence_price) / sequence_price
+//! 2. Calculate normalized volume change: ln(horizon_volume / sequence_volume)
+//! 3. Compute divergence: volume_change - price_change
+//! 4. Positive divergence = Accumulation (volume > price movement)
+//! 5. Negative divergence = Distribution (volume < price movement)
+//! 6. Classify using adaptive thresholds (sensitivity, extreme_multiplier)
 //! ```
 //!
+//! ### **Why This Works (Orthogonal to Direction Target):**
+//! - **Independent Signal**: Direction measures price momentum, sentiment measures volume-price relationship
+//! - **Accumulation/Distribution**: Classic market theory - volume leads price
+//! - **Learnable Pattern**: Divergence predicts reversals and continuations
+//! - **Market-Grounded**: Based on actual smart money behavior
+//! - **Minimal Parameters**: Only 2 (sensitivity, extreme_multiplier) like volatility
+//!
 //! ### **5-Class Sentiment Classification:**
-//! - **0: STRONG_FEAR** - Large red bodies, long lower wicks, high volume
-//! - **1: MODERATE_FEAR** - Medium red bodies, mixed wicks, moderate bearish
-//! - **2: NEUTRAL** - Small bodies (doji-like), balanced wicks, indecision
-//! - **3: MODERATE_GREED** - Medium green bodies, mixed wicks, moderate bullish
-//! - **4: STRONG_GREED** - Large green bodies, long upper wicks, high volume
+//! - **0: STRONG_DISTRIBUTION** - High volume, price falling (bearish conviction)
+//! - **1: MODERATE_DISTRIBUTION** - Volume exceeds price drop (mild distribution)
+//! - **2: NEUTRAL** - Volume matches price movement (balanced)
+//! - **3: MODERATE_ACCUMULATION** - Volume exceeds price rise (mild accumulation)
+//! - **4: STRONG_ACCUMULATION** - High volume, price rising (bullish conviction)
 
 use crate::data::structures::MarketDataRow;
 use crate::targets::TargetResult;
@@ -29,133 +37,91 @@ use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use std::collections::HashMap;
 
-/// Sentiment features extracted from candle analysis
+/// Volume-price divergence metrics
 #[derive(Debug, Clone)]
-pub struct SentimentFeatures {
-    /// Body conviction: (close - open) / (high - low)
-    /// Range: [-1, 1] where -1 = full red body, +1 = full green body
-    pub body_conviction: f64,
+pub struct VolumePriceDivergence {
+    /// Normalized price change (percentage)
+    pub price_change: f64,
 
-    /// Body size: abs(close - open) / typical_price
-    /// Range: [0, ~0.05] normalized by price
-    pub body_size: f64,
+    /// Normalized volume change (log-ratio)
+    pub volume_change: f64,
 
-    /// Wick imbalance: (upper_wick - lower_wick) / (high - low)
-    /// Range: [-1, 1] where -1 = all lower wick, +1 = all upper wick
-    pub wick_imbalance: f64,
+    /// Divergence score (volume_change - price_change)
+    pub divergence_score: f64,
 
-    /// Volume conviction: ln(volume_ratio) * body_conviction
-    /// Range: [-2, 2] combines volume strength with direction
-    pub volume_conviction: f64,
+    /// Average price for reference
+    pub avg_price: f64,
+
+    /// Average volume for reference
+    pub avg_volume: f64,
 }
 
-/// Calculate sentiment features for a single candle
-pub fn calculate_candle_sentiment_features(
-    candle: &MarketDataRow,
-    _prev_candle: Option<&MarketDataRow>,
-    avg_volume: f64,
-) -> SentimentFeatures {
-    let open = candle.open;
-    let high = candle.high;
-    let low = candle.low;
-    let close = candle.close;
-    let volume = candle.volume;
+/// Calculate volume-price divergence for a period
+/// Returns normalized price change, volume change, and divergence score
+pub fn calculate_period_metrics(candles: &[MarketDataRow]) -> Result<VolumePriceDivergence> {
+    if candles.is_empty() {
+        return Err(VangaError::DataError(
+            "Cannot calculate metrics from empty candles".to_string(),
+        ));
+    }
 
-    // Typical price for normalization
-    let typical_price = (high + low + close) / 3.0;
-    let range = high - low;
+    // Calculate average price (VWAP for better representation)
+    let mut total_volume = 0.0;
+    let mut vwap_sum = 0.0;
 
-    // Avoid division by zero
-    let safe_range = range.max(typical_price * 0.001); // Min 0.1% range
-    let safe_volume = avg_volume.max(1.0);
+    for candle in candles {
+        let typical_price = (candle.high + candle.low + candle.close) / 3.0;
+        vwap_sum += typical_price * candle.volume;
+        total_volume += candle.volume;
+    }
 
-    // 1. Body conviction (directional strength)
-    let body_conviction = (close - open) / safe_range;
+    let safe_volume = total_volume.max(1.0);
+    let avg_price = vwap_sum / safe_volume;
+    let avg_volume = total_volume / candles.len() as f64;
 
-    // 2. Body size (magnitude of conviction)
-    let body_size = if typical_price > 0.0 {
-        (close - open).abs() / typical_price
+    // Calculate price change (percentage)
+    let first_price = (candles[0].open + candles[0].close) / 2.0;
+    let last_price = (candles[candles.len() - 1].open + candles[candles.len() - 1].close) / 2.0;
+    let price_change = if first_price > 0.0 {
+        (last_price - first_price) / first_price
     } else {
         0.0
     };
 
-    // 3. Wick imbalance (buying vs selling pressure)
-    let upper_wick = high - close.max(open);
-    let lower_wick = open.min(close) - low;
-    let wick_imbalance = (upper_wick - lower_wick) / safe_range;
-
-    // 4. Volume conviction (volume-weighted direction)
-    let volume_ratio = volume / safe_volume;
-    let volume_conviction = volume_ratio.ln().clamp(-2.0, 2.0) * body_conviction;
-
-    SentimentFeatures {
-        body_conviction,
-        body_size,
-        wick_imbalance,
-        volume_conviction,
-    }
+    Ok(VolumePriceDivergence {
+        price_change,
+        volume_change: 0.0, // Will be calculated in divergence function
+        divergence_score: 0.0,
+        avg_price,
+        avg_volume,
+    })
 }
 
-/// Aggregate sentiment features across multiple candles with exponential weighting
-pub fn aggregate_sentiment_features(candles: &[MarketDataRow]) -> Result<SentimentFeatures> {
-    if candles.is_empty() {
-        return Err(VangaError::DataError(
-            "Cannot aggregate sentiment from empty candles".to_string(),
-        ));
-    }
-
-    // Calculate average volume for normalization
-    let avg_volume = candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64;
-
-    // Calculate features for each candle
-    let mut all_features = Vec::new();
-    for i in 0..candles.len() {
-        let prev = if i > 0 { Some(&candles[i - 1]) } else { None };
-        let features = calculate_candle_sentiment_features(&candles[i], prev, avg_volume);
-        all_features.push(features);
-    }
-
-    // Aggregate with exponential weighting (recent candles more important)
-    let decay_factor: f64 = 0.9;
-    let mut total_weight = 0.0;
-    let mut weighted_features = SentimentFeatures {
-        body_conviction: 0.0,
-        body_size: 0.0,
-        wick_imbalance: 0.0,
-        volume_conviction: 0.0,
-    };
-
-    for (i, features) in all_features.iter().enumerate() {
-        let weight = decay_factor.powi((all_features.len() - i - 1) as i32);
-        total_weight += weight;
-
-        weighted_features.body_conviction += features.body_conviction * weight;
-        weighted_features.body_size += features.body_size * weight;
-        weighted_features.wick_imbalance += features.wick_imbalance * weight;
-        weighted_features.volume_conviction += features.volume_conviction * weight;
-    }
-
-    // Normalize by total weight
-    if total_weight > 0.0 {
-        weighted_features.body_conviction /= total_weight;
-        weighted_features.body_size /= total_weight;
-        weighted_features.wick_imbalance /= total_weight;
-        weighted_features.volume_conviction /= total_weight;
-    }
-
-    Ok(weighted_features)
-}
-
-/// Calculate composite sentiment score from features
-pub fn calculate_sentiment_score(
-    features: &SentimentFeatures,
-    calibrated_params: &crate::targets::calibration::SentimentParams,
+/// Calculate volume-price divergence between two periods
+/// Returns divergence score: positive = accumulation, negative = distribution
+pub fn calculate_divergence_score(
+    sequence_metrics: &VolumePriceDivergence,
+    horizon_metrics: &VolumePriceDivergence,
 ) -> f64 {
-    // Weighted combination of all features
-    features.body_conviction * calibrated_params.body_weight
-        + features.body_size * calibrated_params.size_weight * features.body_conviction.signum()
-        + features.wick_imbalance * calibrated_params.wick_weight
-        + features.volume_conviction * calibrated_params.volume_weight
+    // Calculate volume ratio (log-space for symmetry)
+    let volume_ratio = horizon_metrics.avg_volume / sequence_metrics.avg_volume.max(1.0);
+    let volume_change = volume_ratio.ln();
+
+    // Price change is already normalized (percentage)
+    let price_change = horizon_metrics.price_change;
+
+    // Divergence score: when volume increases more than price, it's accumulation
+    // When volume decreases or price moves without volume, it's distribution
+    volume_change - price_change
+}
+
+/// Calculate sentiment classification thresholds (like volatility)
+fn calculate_sentiment_thresholds(
+    calibrated_params: &crate::targets::calibration::SentimentParams,
+) -> (f64, f64) {
+    let moderate_threshold = calibrated_params.sensitivity;
+    let extreme_threshold = moderate_threshold * calibrated_params.extreme_multiplier;
+    (moderate_threshold, extreme_threshold)
 }
 
 /// Generate sentiment targets with calibrated parameters - returns both class and strength
@@ -183,9 +149,8 @@ pub fn generate_sentiment_targets_with_calibrated_params(
         })?;
 
         log::debug!(
-            "  Horizon {}: body_weight={:.2}, sensitivity={:.4}",
+            "  Horizon {}: sensitivity={:.4}",
             horizon,
-            params.body_weight,
             params.sensitivity
         );
 
@@ -230,7 +195,7 @@ pub fn generate_sentiment_targets_with_calibrated_params(
     Ok((targets, strengths))
 }
 
-/// Classify sentiment using real candle psychology
+/// Classify sentiment using volume-price divergence
 pub fn classify_sentiment_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
@@ -242,47 +207,49 @@ pub fn classify_sentiment_with_calibrated_params(
         ));
     }
 
-    // Calculate sentiment features for both periods
-    let sequence_features = aggregate_sentiment_features(sequence_ohlcv)?;
-    let horizon_features = aggregate_sentiment_features(horizon_ohlcv)?;
+    // Calculate metrics for both periods
+    let sequence_metrics = calculate_period_metrics(sequence_ohlcv)?;
+    let horizon_metrics = calculate_period_metrics(horizon_ohlcv)?;
 
-    // Calculate sentiment scores
-    let sequence_score = calculate_sentiment_score(&sequence_features, calibrated_params);
-    let horizon_score = calculate_sentiment_score(&horizon_features, calibrated_params);
-
-    // Sentiment change (how sentiment is shifting)
-    let sentiment_change = horizon_score - sequence_score;
+    // Calculate divergence score
+    let divergence_score = calculate_divergence_score(&sequence_metrics, &horizon_metrics);
 
     // Use adaptive thresholds for classification
-    let moderate_threshold = calibrated_params.sensitivity;
-    let extreme_threshold = moderate_threshold * calibrated_params.extreme_multiplier;
+    let (moderate_threshold, extreme_threshold) = calculate_sentiment_thresholds(calibrated_params);
 
-    // Classify based on sentiment change
-    let class = if sentiment_change <= -extreme_threshold {
-        0 // STRONG FEAR: Major sentiment deterioration
-    } else if sentiment_change <= -moderate_threshold {
-        1 // MODERATE FEAR: Sentiment weakening
-    } else if sentiment_change < moderate_threshold {
-        2 // NEUTRAL: Sentiment stable
-    } else if sentiment_change < extreme_threshold {
-        3 // MODERATE GREED: Sentiment improving
+    // Classify based on divergence score
+    // Negative = Distribution (selling pressure), Positive = Accumulation (buying pressure)
+    let class = if divergence_score <= -extreme_threshold {
+        0 // STRONG DISTRIBUTION: High volume, price falling
+    } else if divergence_score <= -moderate_threshold {
+        1 // MODERATE DISTRIBUTION: Volume exceeds price drop
+    } else if divergence_score < moderate_threshold {
+        2 // NEUTRAL: Volume matches price movement
+    } else if divergence_score < extreme_threshold {
+        3 // MODERATE ACCUMULATION: Volume exceeds price rise
     } else {
-        4 // STRONG GREED: Major sentiment improvement
+        4 // STRONG ACCUMULATION: High volume, price rising
     };
 
-    // Calculate classification strength
+    // Calculate classification strength (distance from boundaries)
     let strength = calculate_sentiment_strength(
-        sentiment_change,
+        divergence_score,
         moderate_threshold,
         extreme_threshold,
         class,
     );
 
     log::debug!(
-        "🎭 Real Sentiment: seq_score={:.4}, hor_score={:.4}, change={:.4}, thresholds=[{:.4}, {:.4}] → class={} ({}) strength={:.3}",
-        sequence_score, horizon_score, sentiment_change,
-        moderate_threshold, extreme_threshold,
-        class, ["STRONG_FEAR", "MODERATE_FEAR", "NEUTRAL", "MODERATE_GREED", "STRONG_GREED"][class as usize],
+        "🎭 Sentiment (Divergence): seq_price={:.4}%, hor_price={:.4}%, seq_vol={:.0}, hor_vol={:.0}, divergence={:.4}, thresholds=[{:.4}, {:.4}] → class={} ({}) strength={:.3}",
+        sequence_metrics.price_change * 100.0,
+        horizon_metrics.price_change * 100.0,
+        sequence_metrics.avg_volume,
+        horizon_metrics.avg_volume,
+        divergence_score,
+        moderate_threshold,
+        extreme_threshold,
+        class,
+        ["VERY_BEARISH", "BEARISH", "NEUTRAL", "BULLISH", "VERY_BULLISH"][class as usize],
         strength
     );
 
@@ -291,43 +258,43 @@ pub fn classify_sentiment_with_calibrated_params(
 
 /// Calculate classification strength based on distance from boundaries
 fn calculate_sentiment_strength(
-    sentiment_change: f64,
+    divergence_score: f64,
     moderate_threshold: f64,
     extreme_threshold: f64,
     class: i32,
 ) -> f64 {
     match class {
         0 => {
-            // STRONG FEAR: sentiment_change <= -extreme_threshold
-            let distance_beyond = (-sentiment_change - extreme_threshold).max(0.0);
+            // STRONG DISTRIBUTION: divergence_score <= -extreme_threshold
+            let distance_beyond = (-divergence_score - extreme_threshold).max(0.0);
             let max_distance = extreme_threshold;
             (distance_beyond / max_distance).clamp(0.1, 1.0)
         }
         1 => {
-            // MODERATE FEAR: -extreme_threshold < sentiment_change <= -moderate_threshold
+            // MODERATE DISTRIBUTION: -extreme_threshold < divergence_score <= -moderate_threshold
             let range_center = -(extreme_threshold + moderate_threshold) / 2.0;
             let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
-            let distance_from_center = (sentiment_change - range_center).abs();
+            let distance_from_center = (divergence_score - range_center).abs();
             let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
             strength.max(0.1)
         }
         2 => {
-            // NEUTRAL: -moderate_threshold < sentiment_change < moderate_threshold
-            let distance_from_zero = sentiment_change.abs();
+            // NEUTRAL: -moderate_threshold < divergence_score < moderate_threshold
+            let distance_from_zero = divergence_score.abs();
             let strength = 1.0 - (distance_from_zero / moderate_threshold).min(1.0);
             strength.max(0.1)
         }
         3 => {
-            // MODERATE GREED: moderate_threshold <= sentiment_change < extreme_threshold
+            // MODERATE ACCUMULATION: moderate_threshold <= divergence_score < extreme_threshold
             let range_center = (moderate_threshold + extreme_threshold) / 2.0;
             let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
-            let distance_from_center = (sentiment_change - range_center).abs();
+            let distance_from_center = (divergence_score - range_center).abs();
             let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
             strength.max(0.1)
         }
         4 => {
-            // STRONG GREED: sentiment_change >= extreme_threshold
-            let distance_beyond = (sentiment_change - extreme_threshold).max(0.0);
+            // STRONG ACCUMULATION: divergence_score >= extreme_threshold
+            let distance_beyond = (divergence_score - extreme_threshold).max(0.0);
             let max_distance = extreme_threshold;
             (distance_beyond / max_distance).clamp(0.1, 1.0)
         }
@@ -373,11 +340,11 @@ fn parse_horizon_steps(horizon: &str) -> Result<usize> {
 /// Log sentiment class distribution
 fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
     let class_names = [
-        "STRONG_FEAR",
-        "MODERATE_FEAR",
+        "VERY_BEARISH",
+        "BEARISH",
         "NEUTRAL",
-        "MODERATE_GREED",
-        "STRONG_GREED",
+        "BULLISH",
+        "VERY_BULLISH",
     ];
     let mut class_counts = [0usize; 5];
     let mut valid_targets = 0;
@@ -427,11 +394,11 @@ fn log_sentiment_distribution(targets: &[i32], horizon: &str) {
 /// Get sentiment class names in order
 pub fn get_sentiment_class_names() -> Vec<&'static str> {
     vec![
-        "STRONG_FEAR",
-        "MODERATE_FEAR",
+        "VERY_BEARISH",
+        "BEARISH",
         "NEUTRAL",
-        "MODERATE_GREED",
-        "STRONG_GREED",
+        "BULLISH",
+        "VERY_BULLISH",
     ]
 }
 
@@ -442,16 +409,16 @@ pub fn get_sentiment_class_names() -> Vec<&'static str> {
 /// Reconstruction result for sentiment predictions
 #[derive(Debug, Clone)]
 pub struct SentimentReconstruction {
-    /// Sentiment ranges for each class [lower_bound, upper_bound]
-    pub sentiment_ranges: Vec<[f64; 2]>,
+    /// Divergence score ranges for each class [lower_bound, upper_bound]
+    pub divergence_ranges: Vec<[f64; 2]>,
     /// Class probabilities from model
     pub probabilities: Vec<f64>,
     /// Most likely class index
     pub most_likely_class: usize,
     /// Confidence (probability of most likely class)
     pub confidence: f64,
-    /// Expected sentiment change (weighted average)
-    pub expected_sentiment_change: f64,
+    /// Expected divergence score (weighted average)
+    pub expected_divergence_score: f64,
     /// Sentiment interpretation
     pub sentiment_interpretation: String,
 }
@@ -459,7 +426,7 @@ pub struct SentimentReconstruction {
 /// Reconstruct sentiment from model probabilities
 pub fn reconstruct_sentiment(
     probabilities: &[f64],
-    _sequence_ohlcv: &[MarketDataRow],
+    sequence_ohlcv: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::SentimentParams,
 ) -> Result<SentimentReconstruction> {
     if probabilities.len() != 5 {
@@ -468,12 +435,14 @@ pub fn reconstruct_sentiment(
         ));
     }
 
-    // Use calibrated parameters for threshold calculation
-    let moderate_threshold = calibrated_params.sensitivity;
-    let extreme_threshold = moderate_threshold * calibrated_params.extreme_multiplier;
+    // Use calibrated parameters for threshold calculation (same as classification)
+    let (moderate_threshold, extreme_threshold) = calculate_sentiment_thresholds(calibrated_params);
 
-    // Define sentiment change ranges for each class
-    let sentiment_ranges = [
+    // Calculate actual sequence metrics for real divergence score
+    let sequence_metrics = calculate_period_metrics(sequence_ohlcv)?;
+
+    // Define divergence score ranges for each class (symmetric)
+    let divergence_ranges = [
         [-f64::INFINITY, -extreme_threshold],
         [-extreme_threshold, -moderate_threshold],
         [-moderate_threshold, moderate_threshold],
@@ -481,8 +450,8 @@ pub fn reconstruct_sentiment(
         [extreme_threshold, f64::INFINITY],
     ];
 
-    // Calculate representative sentiment changes for each class (midpoints)
-    let class_sentiment_midpoints = [
+    // Calculate representative divergence scores for each class (midpoints)
+    let class_divergence_midpoints = [
         -extreme_threshold - (extreme_threshold - moderate_threshold) / 2.0,
         -(extreme_threshold + moderate_threshold) / 2.0,
         0.0,
@@ -502,28 +471,30 @@ pub fn reconstruct_sentiment(
     let max_prob = probabilities.iter().fold(0.0_f64, |a, &b| a.max(b));
     let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
-    // Calculate expected sentiment change (weighted average)
-    let expected_sentiment_change = probabilities
+    // Calculate expected divergence score (weighted average)
+    let expected_divergence_score = probabilities
         .iter()
-        .zip(class_sentiment_midpoints.iter())
-        .map(|(prob, sentiment)| prob * sentiment)
+        .zip(class_divergence_midpoints.iter())
+        .map(|(prob, divergence)| prob * divergence)
         .sum::<f64>();
 
-    // Generate interpretation
+    // Generate interpretation with actual sequence context
     let class_names = get_sentiment_class_names();
     let sentiment_interpretation = format!(
-        "{} (confidence: {:.1}%, change: {:.3})",
+        "{} (confidence: {:.1}%, divergence: {:.3}, seq_vol: {:.0}, seq_price: {:.4}%)",
         class_names[most_likely_class],
         confidence * 100.0,
-        class_sentiment_midpoints[most_likely_class]
+        class_divergence_midpoints[most_likely_class],
+        sequence_metrics.avg_volume,
+        sequence_metrics.price_change * 100.0
     );
 
     Ok(SentimentReconstruction {
-        sentiment_ranges: sentiment_ranges.to_vec(),
+        divergence_ranges: divergence_ranges.to_vec(),
         probabilities: probabilities.to_vec(),
         most_likely_class,
         confidence,
-        expected_sentiment_change,
+        expected_divergence_score,
         sentiment_interpretation,
     })
 }

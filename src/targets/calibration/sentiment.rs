@@ -1,7 +1,7 @@
-//! Sentiment Calibration Module (Real Candle Psychology)
+//! Sentiment Calibration Module (Volume-Price Divergence)
 //!
 //! Contains sentiment-specific calibration logic using Bayesian Optimization
-//! for real candle psychology features.
+//! for volume-price divergence analysis.
 
 use super::core::ParameterCalibrator;
 use super::types::*;
@@ -14,42 +14,25 @@ pub async fn calibrate_sentiment(
     prefix: &str,
 ) -> Result<SentimentParams> {
     log::info!(
-        "{} 🔬 Starting Bayesian Optimization for Real Sentiment Analysis",
+        "{} 🔬 Starting Bayesian Optimization for Sentiment (Volume-Price Divergence)",
         prefix
     );
 
-    // Define 6D parameter space with WIDE, ADAPTIVE bounds for all market conditions
-    // These bounds are designed to work across different cryptocurrencies and market regimes
+    // Define 2D parameter space (SIMPLIFIED - like volatility target)
+    // Only 2 parameters needed for momentum ratio classification
     let param_bounds = vec![
-        (0.5, 3.0),   // body_weight: 0.5-3.0 (wide range for different candle importance)
-        (0.05, 1.5),  // size_weight: 0.05-1.5 (from subtle to dominant)
-        (0.05, 1.2),  // wick_weight: 0.05-1.2 (wick pressure importance)
-        (0.05, 1.2),  // volume_weight: 0.05-1.2 (volume confirmation strength)
-        (0.005, 0.2), // sensitivity: 0.005-0.2 (very sensitive to very conservative)
-        (1.2, 5.0),   // extreme_multiplier: 1.2-5.0 (narrow to wide extreme zones)
+        (0.01, 0.5), // sensitivity: 0.01-0.5 (moderate range for log-ratio thresholds)
+        (1.5, 4.0),  // extreme_multiplier: 1.5-4.0 (narrow to wide extreme zones)
     ];
 
-    let param_names = vec![
-        "body_weight".to_string(),
-        "size_weight".to_string(),
-        "wick_weight".to_string(),
-        "volume_weight".to_string(),
-        "sensitivity".to_string(),
-        "extreme_multiplier".to_string(),
-    ];
+    let param_names = vec!["sensitivity".to_string(), "extreme_multiplier".to_string()];
 
     // Define objective function
     let utils = calibrator.get_utils();
     let objective_fn = |params: &[f64]| -> Result<f64> {
         let test_params = SentimentParams {
-            body_weight: params[0],
-            size_weight: params[1],
-            wick_weight: params[2],
-            volume_weight: params[3],
-            sensitivity: params[4],
-            extreme_multiplier: params[5],
-            min_base_threshold: params[4] * 0.1,
-            min_extreme_threshold: params[4] * params[5] * 0.1,
+            sensitivity: params[0],
+            extreme_multiplier: params[1],
             balance: Default::default(),
         };
 
@@ -57,8 +40,8 @@ pub async fn calibrate_sentiment(
         Ok(balance.composite_quality_score)
     };
 
-    // Run Bayesian optimization with high-dimensional config (6D space)
-    let bayesian_config = super::bayesian::BayesianConfig::for_high_dimensional();
+    // Run Bayesian optimization with low-dimensional config (2D space)
+    let bayesian_config = super::bayesian::BayesianConfig::default();
 
     let best_params = calibrator
         .calibrate_with_bayesian(
@@ -72,25 +55,15 @@ pub async fn calibrate_sentiment(
 
     // Evaluate final balance
     let final_params = SentimentParams {
-        body_weight: best_params[0],
-        size_weight: best_params[1],
-        wick_weight: best_params[2],
-        volume_weight: best_params[3],
-        sensitivity: best_params[4],
-        extreme_multiplier: best_params[5],
-        min_base_threshold: best_params[4] * 0.1,
-        min_extreme_threshold: best_params[4] * best_params[5] * 0.1,
+        sensitivity: best_params[0],
+        extreme_multiplier: best_params[1],
         balance: Default::default(),
     };
 
     let final_balance = evaluate_sentiment_params(&utils, context, &final_params)?;
 
     log::info!(
-        "🎯 Final Sentiment Parameters:\n  Body Weight: {:.3}\n  Size Weight: {:.3}\n  Wick Weight: {:.3}\n  Volume Weight: {:.3}\n  Sensitivity: {:.4}\n  Extreme Multiplier: {:.2}",
-        final_params.body_weight,
-        final_params.size_weight,
-        final_params.wick_weight,
-        final_params.volume_weight,
+        "🎯 Final Sentiment Parameters (Divergence):\n  Sensitivity: {:.4}\n  Extreme Multiplier: {:.2}",
         final_params.sensitivity,
         final_params.extreme_multiplier
     );
@@ -101,7 +74,7 @@ pub async fn calibrate_sentiment(
     })
 }
 
-/// Evaluate sentiment parameters using real candle psychology with REAL diversity metrics
+/// Evaluate sentiment parameters using volume-price divergence with REAL diversity metrics
 fn evaluate_sentiment_params(
     utils: &super::utils::CalibrationUtils,
     context: &EvaluationContext,

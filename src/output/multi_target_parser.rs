@@ -399,14 +399,14 @@ impl VolatilityOutput {
     }
 }
 
-/// Sentiment prediction output (5-class system)
+/// Sentiment output structure (5-class system)
 #[derive(Debug, Clone)]
 pub struct SentimentOutput {
-    pub very_bearish_probability: f64, // Class 0: Very bearish sentiment
-    pub bearish_probability: f64,      // Class 1: Bearish sentiment
+    pub very_bearish_probability: f64, // Class 0: Very bearish sentiment (strong distribution)
+    pub bearish_probability: f64,      // Class 1: Bearish sentiment (moderate distribution)
     pub neutral_probability: f64,      // Class 2: Neutral sentiment
-    pub bullish_probability: f64,      // Class 3: Bullish sentiment
-    pub very_bullish_probability: f64, // Class 4: Very bullish sentiment
+    pub bullish_probability: f64,      // Class 3: Bullish sentiment (moderate accumulation)
+    pub very_bullish_probability: f64, // Class 4: Very bullish sentiment (strong accumulation)
 }
 
 impl SentimentOutput {

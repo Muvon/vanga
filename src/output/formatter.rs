@@ -1139,50 +1139,48 @@ impl OutputFormatter {
         prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
 
         // Enhanced reconstruction using calibrated parameters if available
-        if let Some(sequence_ohlcv) = &self.sequence_ohlcv {
-            if self.calibrated_parameters.is_some() {
-                // Prepare probabilities array for reconstruction
-                // Prepare probabilities array for reconstruction
-                let probabilities = vec![
-                    sentiment_output.very_bearish_probability,
-                    sentiment_output.bearish_probability,
-                    sentiment_output.neutral_probability,
-                    sentiment_output.bullish_probability,
-                    sentiment_output.very_bullish_probability,
-                ];
+        if self.sequence_ohlcv.is_some() && self.calibrated_parameters.is_some() {
+            // Prepare probabilities array for reconstruction
+            let probabilities = vec![
+                sentiment_output.very_bearish_probability,
+                sentiment_output.bearish_probability,
+                sentiment_output.neutral_probability,
+                sentiment_output.bullish_probability,
+                sentiment_output.very_bullish_probability,
+            ];
 
-                // Call reconstruction function with calibrated parameters
-                let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
-                let horizon_params = self
-                    .calibrated_parameters
-                    .as_ref()
-                    .unwrap()
-                    .get_sentiment(horizon_str)
-                    .ok_or_else(|| {
-                        VangaError::ConfigError(format!(
-                            "No calibrated sentiment parameters found for horizon: {}",
-                            horizon_str
-                        ))
-                    })?;
+            // Call reconstruction function with calibrated parameters
+            let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
+            let horizon_params = self
+                .calibrated_parameters
+                .as_ref()
+                .unwrap()
+                .get_sentiment(horizon_str)
+                .ok_or_else(|| {
+                    VangaError::ConfigError(format!(
+                        "No calibrated sentiment parameters found for horizon: {}",
+                        horizon_str
+                    ))
+                })?;
 
-                match reconstruct_sentiment(&probabilities, sequence_ohlcv, horizon_params) {
-                    Ok(reconstruction) => {
-                        // Use reconstruction results to enhance prediction
-                        // The reconstruction provides richer information than basic probabilities
-                        log::debug!(
-                        "🎯 Sentiment reconstruction: expected_change={:.4}, confidence={:.3}, interpretation={}",
-                        reconstruction.expected_sentiment_change,
-                        reconstruction.confidence,
-                        reconstruction.sentiment_interpretation
-                    );
+            match reconstruct_sentiment(&probabilities, self.sequence_ohlcv.as_ref().unwrap(), horizon_params) {
+                Ok(reconstruction) => {
 
-                        // Update confidence with reconstruction confidence
-                        prediction.confidence = reconstruction.confidence;
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to reconstruct sentiment: {}", e);
-                        // Fall back to basic prediction without reconstruction
-                    }
+                    // Use reconstruction results to enhance prediction
+                    // The reconstruction provides richer information than basic probabilities
+                    log::debug!(
+                    "🎯 Sentiment reconstruction: expected_divergence={:.4}, confidence={:.3}, interpretation={}",
+                    reconstruction.expected_divergence_score,
+                    reconstruction.confidence,
+                    reconstruction.sentiment_interpretation
+                );
+
+                    // Update confidence with reconstruction confidence
+                    prediction.confidence = reconstruction.confidence;
+                }
+                Err(e) => {
+                    log::warn!("Failed to reconstruct sentiment: {}", e);
+                    // Fall back to basic prediction without reconstruction
                 }
             }
         } else {

@@ -177,7 +177,7 @@ impl ConfidenceCalculator {
 
             // CRYPTO INSIGHT: Extreme sentiment often precedes reversals
             let extreme_sentiment =
-                sentiment.very_bullish_probability + sentiment.very_bearish_probability;
+                sentiment.very_bearish_probability + sentiment.very_bullish_probability;
             if extreme_sentiment > 0.6 {
                 // Extreme sentiment: be cautious (potential reversal)
                 confirmation_confidence += sent_score * 0.7;
@@ -519,6 +519,7 @@ impl ConfidenceCalculator {
         let bullish_agreement = 1.0 - (bullish_sentiment - up_direction).abs();
         let bearish_agreement = 1.0 - (bearish_sentiment - down_direction).abs();
 
+        // Return average agreement
         (bullish_agreement + bearish_agreement) / 2.0
     }
 
@@ -591,7 +592,7 @@ impl ConfidenceCalculator {
         // 4. Check for sentiment extremes (fuel for breakouts)
         if let Some(ref sentiment) = prediction.sentiment {
             let extreme_sentiment =
-                sentiment.very_bullish_probability + sentiment.very_bearish_probability;
+                sentiment.very_bearish_probability + sentiment.very_bullish_probability;
             if extreme_sentiment > 0.4 {
                 breakout_score += extreme_sentiment * 0.6;
                 signal_count += 1;

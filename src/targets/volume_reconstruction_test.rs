@@ -209,8 +209,8 @@ mod tests {
             min_base_threshold: 0.1,
             min_extreme_threshold: 0.2,
             smoothing_periods: 3,
-            percentile_low: 0.1,   // p10
-            percentile_high: 0.9,  // p90
+            percentile_low: 0.1,  // p10
+            percentile_high: 0.9, // p90
             balance: crate::targets::calibration::ClassBalance::default(),
         };
 
@@ -221,15 +221,18 @@ mod tests {
 
         // Test multiple horizon scenarios
         let test_scenarios = vec![
-            ("Very Low", 0.4),   // 40% of sequence median
-            ("Low", 0.7),        // 70% of sequence median
-            ("Medium", 1.0),     // Same as sequence median
-            ("High", 1.5),       // 150% of sequence median
-            ("Very High", 2.5),  // 250% of sequence median
+            ("Very Low", 0.4),  // 40% of sequence median
+            ("Low", 0.7),       // 70% of sequence median
+            ("Medium", 1.0),    // Same as sequence median
+            ("High", 1.5),      // 150% of sequence median
+            ("Very High", 2.5), // 250% of sequence median
         ];
 
         for (scenario_name, volume_factor) in test_scenarios {
-            println!("\n=== Testing scenario: {} (factor={:.2}) ===", scenario_name, volume_factor);
+            println!(
+                "\n=== Testing scenario: {} (factor={:.2}) ===",
+                scenario_name, volume_factor
+            );
 
             // Create horizon volumes based on factor
             let horizon_volumes: Vec<f64> = (0..24)
@@ -241,27 +244,36 @@ mod tests {
 
             // Classify using training logic
             let (class, strength) = classify_volume_with_calibrated_params(
-                &sequence_volumes.iter().map(|&v| MarketDataRow {
-                    timestamp: 0,
-                    open: 100.0,
-                    high: 101.0,
-                    low: 99.0,
-                    close: 100.0,
-                    volume: v,
-                }).collect::<Vec<_>>(),
-                &horizon_volumes.iter().map(|&v| MarketDataRow {
-                    timestamp: 0,
-                    open: 100.0,
-                    high: 101.0,
-                    low: 99.0,
-                    close: 100.0,
-                    volume: v,
-                }).collect::<Vec<_>>(),
+                &sequence_volumes
+                    .iter()
+                    .map(|&v| MarketDataRow {
+                        timestamp: 0,
+                        open: 100.0,
+                        high: 101.0,
+                        low: 99.0,
+                        close: 100.0,
+                        volume: v,
+                    })
+                    .collect::<Vec<_>>(),
+                &horizon_volumes
+                    .iter()
+                    .map(|&v| MarketDataRow {
+                        timestamp: 0,
+                        open: 100.0,
+                        high: 101.0,
+                        low: 99.0,
+                        close: 100.0,
+                        volume: v,
+                    })
+                    .collect::<Vec<_>>(),
                 &calibrated_params,
             )
             .expect("Classification should succeed");
 
-            println!("  Classification: class={}, strength={:.3}", class, strength);
+            println!(
+                "  Classification: class={}, strength={:.3}",
+                class, strength
+            );
 
             // Reconstruct using prediction logic
             let mut probabilities = vec![0.1; 5];

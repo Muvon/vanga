@@ -996,21 +996,18 @@ pub fn reconstruct_volume(
 
     // 6. Calculate representative volume ratios for each class (midpoints in log space)
     let class_representative_log_ratios = [
-        log_boundary_0 - margin / 2.0,                    // Very Low
-        (log_boundary_0 + log_boundary_1) / 2.0,          // Low
-        (log_boundary_1 + log_boundary_2) / 2.0,          // Medium (around 0)
-        (log_boundary_2 + log_boundary_3) / 2.0,          // High
-        log_boundary_3 + margin / 2.0,                    // Very High
+        log_boundary_0 - margin / 2.0,           // Very Low
+        (log_boundary_0 + log_boundary_1) / 2.0, // Low
+        (log_boundary_1 + log_boundary_2) / 2.0, // Medium (around 0)
+        (log_boundary_2 + log_boundary_3) / 2.0, // High
+        log_boundary_3 + margin / 2.0,           // Very High
     ];
 
     // 7. Convert volume ratios to absolute volumes
     let volume_ranges: Vec<[f64; 2]> = volume_ratio_ranges
         .iter()
         .map(|[lower_ratio, upper_ratio]| {
-            [
-                lower_ratio * sequence_median,
-                upper_ratio * sequence_median,
-            ]
+            [lower_ratio * sequence_median, upper_ratio * sequence_median]
         })
         .collect();
 

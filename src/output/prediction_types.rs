@@ -738,7 +738,7 @@ impl SentimentPrediction {
             ("VERY_BULLISH", self.very_bullish_probability),
         ];
 
-        let (regime, max_prob) = probabilities
+        let (regime, _) = probabilities
             .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
@@ -754,7 +754,8 @@ impl SentimentPrediction {
             self.very_bullish_probability,
         ];
 
-        // Calculate entropy-based confidence
+        let max_prob = probs.iter().fold(0.0_f64, |a, &b| a.max(b));
+
         let entropy = probs
             .iter()
             .filter(|&&p| p > 0.0)
@@ -771,7 +772,7 @@ impl SentimentPrediction {
         let combined_confidence = entropy_confidence * 0.5 + deviation_confidence.max(0.0) * 0.5;
 
         // Apply calibration for 5-class system
-        self.confidence = Self::calibrate_sentiment_confidence(combined_confidence, *max_prob);
+        self.confidence = Self::calibrate_sentiment_confidence(combined_confidence, max_prob);
     }
 
     /// Calibrate confidence specifically for sentiment predictions

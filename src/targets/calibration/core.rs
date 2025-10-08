@@ -572,7 +572,7 @@ impl ParameterCalibrator {
                     // Calculate horizon score from ONLY enabled targets
                     let mut score_sum = 0.0;
                     let mut score_count = 0;
-                    
+
                     if calibrator.enabled_direction {
                         score_sum += direction.balance.composite_quality_score;
                         score_count += 1;

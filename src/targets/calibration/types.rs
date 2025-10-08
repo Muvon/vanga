@@ -125,22 +125,12 @@ pub struct VolatilityParams {
     pub balance: ClassBalance,
 }
 
-/// Sentiment target parameters (Real Candle Psychology)
+/// Sentiment target parameters (Simplified to 2 parameters like volatility)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SentimentParams {
-    // Feature weights (calibrated via Bayesian optimization)
-    pub body_weight: f64,   // Weight for body conviction
-    pub size_weight: f64,   // Weight for body size
-    pub wick_weight: f64,   // Weight for wick imbalance
-    pub volume_weight: f64, // Weight for volume conviction
-
-    // Classification thresholds
+    // Classification thresholds (ONLY 2 parameters needed)
     pub sensitivity: f64,        // Base threshold for classification
     pub extreme_multiplier: f64, // Multiplier for extreme classes
-
-    // Derived thresholds
-    pub min_base_threshold: f64,
-    pub min_extreme_threshold: f64,
 
     // Balance metrics
     pub balance: ClassBalance,
