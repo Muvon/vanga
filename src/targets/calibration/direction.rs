@@ -24,7 +24,6 @@ pub async fn calibrate_direction(
         prefix
     );
 
-    let close_prices: Vec<f64> = ohlcv_data.iter().map(|row| row.close).collect();
     let utils = calibrator.get_utils();
 
     // Define 5D parameter space with WIDE, ADAPTIVE bounds for all market conditions
@@ -56,7 +55,6 @@ pub async fn calibrate_direction(
 
         let balance = evaluate_direction_params(
             &utils,
-            &close_prices,
             ohlcv_data,
             sample_indices,
             sequence_length,
@@ -98,7 +96,6 @@ pub async fn calibrate_direction(
 
     let final_balance = evaluate_direction_params(
         &utils,
-        &close_prices,
         ohlcv_data,
         sample_indices,
         sequence_length,
@@ -130,7 +127,6 @@ pub async fn calibrate_direction(
 /// Evaluate direction parameters with REAL diversity metrics
 fn evaluate_direction_params(
     utils: &super::utils::CalibrationUtils,
-    close_prices: &[f64],
     ohlcv_data: &[MarketDataRow],
     sample_indices: &[usize],
     sequence_length: usize,
@@ -144,12 +140,13 @@ fn evaluate_direction_params(
         let seq_end = idx + sequence_length;
         let target_end = seq_end + horizon_steps;
 
-        if target_end <= close_prices.len() {
-            let sequence_prices = &close_prices[idx..seq_end];
-            let horizon_prices = &close_prices[seq_end..target_end];
+        if target_end <= ohlcv_data.len() {
+            // Use OHLCV data for richer momentum analysis (matches training)
+            let sequence_ohlcv = &ohlcv_data[idx..seq_end];
+            let horizon_ohlcv = &ohlcv_data[seq_end..target_end];
 
-            // Use the same logic as the actual direction classification but with calibrated parameters
-            let class = classify_direction_with_params(sequence_prices, horizon_prices, params)?;
+            // Use the same logic as the actual direction classification
+            let class = classify_direction_with_params(sequence_ohlcv, horizon_ohlcv, params)?;
 
             if (0..5).contains(&class) {
                 class_counts[class as usize] += 1;
@@ -164,26 +161,37 @@ fn evaluate_direction_params(
 
 /// Classify direction using calibrated parameters (mirrors actual classification logic)
 fn classify_direction_with_params(
-    sequence_prices: &[f64],
-    horizon_prices: &[f64],
+    sequence_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
     params: &DirectionEvalParams,
 ) -> Result<i32> {
-    if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
+    if sequence_ohlcv.len() < 2 || horizon_ohlcv.len() < 2 {
         return Ok(2); // Default to SIDEWAYS for insufficient data
     }
 
+    // Extract OHLC4 prices (same as training)
+    let sequence_prices: Vec<f64> = sequence_ohlcv
+        .iter()
+        .map(|row| (row.open + row.high + row.low + row.close) / 4.0)
+        .collect();
+
+    let horizon_prices: Vec<f64> = horizon_ohlcv
+        .iter()
+        .map(|row| (row.open + row.high + row.low + row.close) / 4.0)
+        .collect();
+
     // Calculate momentum change (same as actual implementation)
     let (_, _, momentum_change) =
-        calculate_directional_momentum_change(sequence_prices, horizon_prices)?;
+        calculate_directional_momentum_change(&sequence_prices, &horizon_prices)?;
 
     // Calculate sequence trend consistency (same as actual implementation)
-    let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
+    let trend_consistency = calculate_sequence_trend_consistency(&sequence_prices)?;
 
-    // Use calibrated parameters instead of hardcoded values
+    // Use calibrated parameters
     let base_threshold_calc = trend_consistency * params.sensitivity * params.base_multiplier;
     let extreme_threshold_calc = base_threshold_calc * params.extreme_multiplier;
 
-    // Apply calibrated minimum thresholds instead of hardcoded 0.01 and 0.03
+    // Apply calibrated minimum thresholds
     let final_base_threshold = base_threshold_calc.max(params.min_base_threshold);
     let final_extreme_threshold = extreme_threshold_calc.max(params.min_extreme_threshold);
 
@@ -204,37 +212,68 @@ fn classify_direction_with_params(
 }
 
 /// Calculate directional momentum change (helper for calibration)
+/// CRITICAL: Must match direction.rs EXACTLY including volatility normalization
 fn calculate_directional_momentum_change(
     sequence_prices: &[f64],
     horizon_prices: &[f64],
 ) -> Result<(f64, f64, f64)> {
-    // Same logic as in direction.rs - USE PERCENTAGE CHANGE, NOT RAW SLOPE
     if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
         return Ok((0.0, 0.0, 0.0));
     }
 
+    // Calculate sequence momentum (trend strength and direction)
     let seq_start = sequence_prices[0];
     let seq_end = sequence_prices[sequence_prices.len() - 1];
 
-    // Avoid division by zero - use epsilon check
+    // Avoid division by zero - use small epsilon if needed
     let sequence_momentum = if seq_start.abs() < 1e-10 {
-        0.0
+        0.0 // No momentum if starting from near-zero
     } else {
         (seq_end - seq_start) / seq_start
     };
 
-    let hor_start = horizon_prices[0];
+    // Calculate horizon momentum (trend strength and direction)
+    let hor_start = horizon_prices[0]; // This is same as seq_end
     let hor_end = horizon_prices[horizon_prices.len() - 1];
 
-    // Avoid division by zero - use epsilon check
+    // Avoid division by zero - use small epsilon if needed
     let horizon_momentum = if hor_start.abs() < 1e-10 {
-        0.0
+        0.0 // No momentum if starting from near-zero
     } else {
         (hor_end - hor_start) / hor_start
     };
 
-    let momentum_change = horizon_momentum - sequence_momentum;
-    Ok((sequence_momentum, horizon_momentum, momentum_change))
+    // Calculate raw momentum change
+    let raw_momentum_change = horizon_momentum - sequence_momentum;
+
+    // CRITICAL: Normalize by sequence volatility for stability (MUST MATCH direction.rs)
+    // Calculate coefficient of variation (CV) for sequence
+    let sequence_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+    let sequence_variance = sequence_prices
+        .iter()
+        .map(|&p| (p - sequence_mean).powi(2))
+        .sum::<f64>()
+        / sequence_prices.len() as f64;
+    let sequence_std = sequence_variance.sqrt();
+
+    // Coefficient of variation (volatility as percentage of price)
+    let sequence_cv = if sequence_mean.abs() > 1e-10 {
+        sequence_std / sequence_mean
+    } else {
+        0.01 // Default 1% volatility for edge cases
+    };
+
+    // Normalize momentum change by volatility context
+    // Higher volatility = larger normalization factor = smaller normalized signal
+    // This makes momentum changes comparable across different volatility regimes
+    let volatility_normalization_factor = 1.0 + sequence_cv;
+    let normalized_momentum_change = raw_momentum_change / volatility_normalization_factor;
+
+    Ok((
+        sequence_momentum,
+        horizon_momentum,
+        normalized_momentum_change, // Return NORMALIZED value, not raw
+    ))
 }
 
 /// Calculate sequence trend consistency (helper for calibration)

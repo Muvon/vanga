@@ -92,7 +92,7 @@
 use crate::data::structures::MarketDataRow;
 use crate::targets::TargetResult;
 use crate::utils::error::Result;
-use crate::utils::market_data::extract_close_prices;
+use crate::utils::market_data::extract_ohlcv_data;
 use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -121,7 +121,8 @@ pub fn generate_direction_targets_with_calibrated_params(
         crate::targets::calibration::DirectionParams,
     >,
 ) -> Result<TargetResult> {
-    let close_prices = extract_close_prices(df)?;
+    // CRITICAL FIX: Use OHLCV data instead of just close prices for richer momentum analysis
+    let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
 
@@ -157,12 +158,12 @@ pub fn generate_direction_targets_with_calibrated_params(
             let target_end_idx = sequence_end_idx + horizon_steps;
 
             // Check boundaries - need both sequence and horizon data
-            if target_end_idx <= close_prices.len() && sequence_end_idx <= close_prices.len() {
-                // Get INPUT sequence prices (for momentum baseline)
-                let sequence_prices = &close_prices[seq_idx..sequence_end_idx];
+            if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
+                // Get INPUT sequence OHLCV (for momentum baseline)
+                let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
 
-                // Get HORIZON sequence prices (from sequence end to target horizon)
-                let horizon_prices = &close_prices[sequence_end_idx..target_end_idx];
+                // Get HORIZON sequence OHLCV (from sequence end to target horizon)
+                let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
                 log::debug!(
                     "Sequence {}: seq_idx={}, seq_end={}, target_end={}, seq_len={}, hor_len={}",
@@ -170,16 +171,16 @@ pub fn generate_direction_targets_with_calibrated_params(
                     seq_idx,
                     sequence_end_idx,
                     target_end_idx,
-                    sequence_prices.len(),
-                    horizon_prices.len()
+                    sequence_ohlcv.len(),
+                    horizon_ohlcv.len()
                 );
 
                 // Only classify if we have enough horizon data for momentum calculation
-                if horizon_prices.len() >= 2 {
-                    // Use per-horizon calibrated parameters
+                if horizon_ohlcv.len() >= 2 {
+                    // Use per-horizon calibrated parameters with OHLCV data
                     let (target_class, strength) = classify_direction_with_calibrated_params(
-                        sequence_prices,
-                        horizon_prices,
+                        sequence_ohlcv,
+                        horizon_ohlcv,
                         params,
                     )?;
 
@@ -197,40 +198,43 @@ pub fn generate_direction_targets_with_calibrated_params(
     Ok((targets, strengths))
 }
 
-/// Classify direction using momentum change analysis
-///
-/// This is the main classification function that determines the directional class
-/// based on MOMENTUM CHANGES between sequence and horizon periods.
+/// Classify direction using OHLCV data for momentum analysis
 ///
 /// ## Algorithm
-/// 1. **Sequence Momentum**: Calculate overall trend momentum in the sequence
-/// 2. **Horizon Momentum**: Calculate overall trend momentum in the horizon
-/// 3. **Momentum Change**: Measure the change in momentum (acceleration/deceleration)
-/// 4. **Adaptive Thresholds**: Set thresholds based on sequence trend consistency
-/// 5. **Classification**: Classify based on momentum change magnitude and direction
-///
-/// Classify direction using adaptive parameters (NEW VERSION)
-///
-/// This function uses calibrated adaptive parameters directly without creating
-/// the old TargetsConfig structure.
+/// 1. **Extract OHLC4 prices**: Use (O+H+L+C)/4 for better price representation
+/// 2. **Sequence Momentum**: Calculate overall trend momentum in the sequence
+/// 3. **Horizon Momentum**: Calculate overall trend momentum in the horizon
+/// 4. **Momentum Change**: Measure the change in momentum (acceleration/deceleration)
+/// 5. **Adaptive Thresholds**: Set thresholds based on sequence trend consistency
+/// 6. **Classification**: Classify based on momentum change magnitude and direction
 pub fn classify_direction_with_calibrated_params(
-    sequence_prices: &[f64],
-    horizon_prices: &[f64],
+    sequence_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::DirectionParams,
 ) -> Result<(i32, f64)> {
-    if sequence_prices.len() < 2 || horizon_prices.len() < 2 {
+    if sequence_ohlcv.len() < 2 || horizon_ohlcv.len() < 2 {
         return Ok((2, 0.5)); // Default to SIDEWAYS with neutral strength for insufficient data
     }
 
+    // Extract OHLC4 prices for richer representation
+    let sequence_prices: Vec<f64> = sequence_ohlcv
+        .iter()
+        .map(|row| (row.open + row.high + row.low + row.close) / 4.0)
+        .collect();
+
+    let horizon_prices: Vec<f64> = horizon_ohlcv
+        .iter()
+        .map(|row| (row.open + row.high + row.low + row.close) / 4.0)
+        .collect();
+
     // Step 1: Calculate momentum change between sequence and horizon
     let (sequence_momentum, horizon_momentum, momentum_change) =
-        calculate_directional_momentum_change(sequence_prices, horizon_prices)?;
+        calculate_directional_momentum_change(&sequence_prices, &horizon_prices)?;
 
     // Step 2: Calculate sequence trend consistency for adaptive thresholds
-    let trend_consistency = calculate_sequence_trend_consistency(sequence_prices)?;
+    let trend_consistency = calculate_sequence_trend_consistency(&sequence_prices)?;
 
     // Step 3: Set adaptive thresholds based on trend consistency
-    // Use calibrated parameters
     let base_multiplier = calibrated_params.base_multiplier;
     let extreme_multiplier = calibrated_params.extreme_multiplier;
 
@@ -246,15 +250,15 @@ pub fn classify_direction_with_calibrated_params(
 
     // Step 4: Classify based on momentum change magnitude and direction
     let class = if momentum_change <= -final_extreme_threshold {
-        0 // DUMP: Strong momentum reversal (positive to negative or strong weakening)
+        0 // DUMP
     } else if momentum_change <= -final_base_threshold {
-        1 // DOWN: Moderate momentum weakening
+        1 // DOWN
     } else if momentum_change.abs() <= final_base_threshold {
-        2 // SIDEWAYS: Momentum continuation
+        2 // SIDEWAYS
     } else if momentum_change <= final_extreme_threshold {
-        3 // UP: Moderate momentum strengthening
+        3 // UP
     } else {
-        4 // PUMP: Strong momentum acceleration (negative to positive or strong strengthening)
+        4 // PUMP
     };
 
     // Step 5: Calculate classification strength based on distance from boundaries
@@ -266,7 +270,7 @@ pub fn classify_direction_with_calibrated_params(
     );
 
     log::debug!(
-        "🎯 Momentum Direction: seq_momentum={:.6}, hor_momentum={:.6}, momentum_change={:.6}, consistency={:.6}, base_thresh={:.6}, extreme_thresh={:.6} → class={} ({}) strength={:.3}",
+        "🎯 Direction: seq_mom={:.6}, hor_mom={:.6}, change={:.6}, consistency={:.6}, base={:.6}, extreme={:.6} → class={} ({}) strength={:.3}",
         sequence_momentum, horizon_momentum, momentum_change, trend_consistency, final_base_threshold, final_extreme_threshold, class,
         ["DUMP", "DOWN", "SIDEWAYS", "UP", "PUMP"][class as usize], strength
     );
