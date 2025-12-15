@@ -321,7 +321,7 @@ impl LSTMModel {
         log::info!(
             "📊 Batch processing: {} total samples → {} batches of size {} (last batch: {} samples)",
             total_samples, num_batches, batch_size,
-            if total_samples % batch_size == 0 { batch_size } else { total_samples % batch_size }
+            if total_samples.is_multiple_of(batch_size) { batch_size } else { total_samples % batch_size }
         );
 
         Ok(())
@@ -3164,7 +3164,7 @@ impl LSTMModel {
                     optimizer.backward_step(&scaled_loss)?;
 
                     // Log clipping activity (reduced frequency for performance)
-                    if batch_idx % 10 == 0 {
+                    if batch_idx.is_multiple_of(10) {
                         log::debug!(
                             "✂️ Gradient clipped: {:.4} → {:.4} (ratio: {:.4})",
                             grad_norm,
@@ -3201,7 +3201,7 @@ impl LSTMModel {
             }
             None => {
                 // NO GRADIENT CLIPPING: Calculate norm before optimizer step for monitoring
-                let grad_norm = if batch_idx % 100 == 0 {
+                let grad_norm = if batch_idx.is_multiple_of(100) {
                     // Calculate gradient norm for monitoring (before optimizer step)
                     let grads = base_loss.backward()?;
                     let norm = self.calculate_gradstore_norm(&grads)?;

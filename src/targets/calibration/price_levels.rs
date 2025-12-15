@@ -184,5 +184,6 @@ fn evaluate_price_level_params(
         total,
         context.ohlcv_data,
         context.sample_indices,
+        context.sequence_length,
     )
 }

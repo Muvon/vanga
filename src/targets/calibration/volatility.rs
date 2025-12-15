@@ -159,5 +159,6 @@ fn evaluate_volatility_params(
         total,
         context.ohlcv_data,
         context.sample_indices,
+        context.sequence_length,
     )
 }

@@ -79,7 +79,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_classify_direction_with_calibrated_params() {
         let params = DirectionParams {
             sensitivity: 0.4,

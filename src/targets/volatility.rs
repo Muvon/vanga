@@ -276,7 +276,7 @@ pub fn calculate_atr_distribution_stats(atr_series: &[f64]) -> AtrDistributionSt
     sorted_series.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let len = sorted_series.len();
-    let median = if len % 2 == 0 {
+    let median = if len.is_multiple_of(2) {
         (sorted_series[len / 2 - 1] + sorted_series[len / 2]) / 2.0
     } else {
         sorted_series[len / 2]

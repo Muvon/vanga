@@ -150,7 +150,7 @@ impl BayesianOptimizer {
             // Generate one LHS candidate
             let mut samples = vec![vec![0.0; n_params]; n_samples];
 
-            for param_idx in 0..n_params {
+            for (param_idx, &(min, max)) in self.bounds.iter().enumerate() {
                 // Create shuffled indices for this parameter
                 let mut indices: Vec<usize> = (0..n_samples).collect();
                 for i in (1..n_samples).rev() {
@@ -159,7 +159,6 @@ impl BayesianOptimizer {
                 }
 
                 // Assign values within bins
-                let (min, max) = self.bounds[param_idx];
                 let bin_size = (max - min) / n_samples as f64;
 
                 for (sample_idx, &bin_idx) in indices.iter().enumerate() {

@@ -173,6 +173,7 @@ fn evaluate_volume_params(
         total,
         context.ohlcv_data,
         context.sample_indices,
+        context.sequence_length,
     )
 }
 
@@ -201,7 +202,7 @@ fn classify_volume_percentile_based(
     // 1. Calculate sequence median volume (baseline)
     let mut sorted_seq_volumes = sequence_volumes.to_vec();
     sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let sequence_median = if sorted_seq_volumes.len() % 2 == 0 {
+    let sequence_median = if sorted_seq_volumes.len().is_multiple_of(2) {
         let mid = sorted_seq_volumes.len() / 2;
         (sorted_seq_volumes[mid - 1] + sorted_seq_volumes[mid]) / 2.0
     } else {
@@ -211,7 +212,7 @@ fn classify_volume_percentile_based(
     // 2. Calculate horizon median volume (target)
     let mut sorted_hor_volumes = horizon_volumes.to_vec();
     sorted_hor_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let horizon_median = if sorted_hor_volumes.len() % 2 == 0 {
+    let horizon_median = if sorted_hor_volumes.len().is_multiple_of(2) {
         let mid = sorted_hor_volumes.len() / 2;
         (sorted_hor_volumes[mid - 1] + sorted_hor_volumes[mid]) / 2.0
     } else {

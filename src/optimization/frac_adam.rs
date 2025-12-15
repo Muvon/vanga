@@ -286,7 +286,9 @@ impl Optimizer for FracAdam {
             let new_param = old_param.sub(&update)?.contiguous()?;
 
             // Only check parameter updates occasionally and in early steps
-            if (self.step_count <= 5 || self.step_count % 500 == 0) && cfg!(debug_assertions) {
+            if (self.step_count <= 5 || self.step_count.is_multiple_of(500))
+                && cfg!(debug_assertions)
+            {
                 let param_change = old_param
                     .sub(&new_param)?
                     .abs()?

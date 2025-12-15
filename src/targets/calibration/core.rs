@@ -180,6 +180,7 @@ impl ParameterCalibrator {
         &self,
         ohlcv_data: &[MarketDataRow],
         sample_indices: &[usize],
+        sequence_length: usize,
     ) -> Result<()> {
         use super::utils::CalibrationUtils;
 
@@ -214,9 +215,12 @@ impl ParameterCalibrator {
             );
         }
 
-        // 3. Market condition balance check
-        let market_diversity =
-            CalibrationUtils::calculate_market_condition_diversity(ohlcv_data, sample_indices);
+        // 3. Market condition balance check (sequence-aware, adaptive thresholds)
+        let market_diversity = CalibrationUtils::calculate_market_condition_diversity(
+            ohlcv_data,
+            sample_indices,
+            sequence_length,
+        );
         log::info!(
             "  🎯 Market condition diversity: {:.2}%",
             market_diversity * 100.0
@@ -344,7 +348,7 @@ impl ParameterCalibrator {
                     );
 
                     // Validate sample quality
-                    calibrator.validate_sample_quality(&ohlcv_data, &sample_indices)?;
+                    calibrator.validate_sample_quality(&ohlcv_data, &sample_indices, sequence_length)?;
 
                     // Count enabled targets
                     let enabled_count = [

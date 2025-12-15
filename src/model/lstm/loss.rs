@@ -732,7 +732,7 @@ impl LSTMModel {
         data_type: Option<&str>, // NEW: "validation", "test", or None for auto-detection
     ) -> Result<()> {
         // Only calculate detailed metrics every 5 epochs to avoid overhead
-        if epoch < 1 || epoch % 5 != 0 {
+        if epoch < 1 || !epoch.is_multiple_of(5) {
             return Ok(());
         }
 

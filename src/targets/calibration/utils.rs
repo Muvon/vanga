@@ -113,6 +113,7 @@ impl CalibrationUtils {
         total: usize,
         ohlcv_data: &[MarketDataRow],
         sample_indices: &[usize],
+        sequence_length: usize,
     ) -> Result<ClassBalance> {
         if total == 0 || class_counts.len() != 5 {
             return Ok(ClassBalance::default());
@@ -153,7 +154,7 @@ impl CalibrationUtils {
         let temporal_spread = Self::calculate_temporal_diversity(sample_indices);
         let feature_diversity = Self::calculate_feature_space_diversity(ohlcv_data, sample_indices);
         let market_condition_diversity =
-            Self::calculate_market_condition_diversity(ohlcv_data, sample_indices);
+            Self::calculate_market_condition_diversity(ohlcv_data, sample_indices, sequence_length);
 
         // Overall diversity score (weighted average)
         let diversity_score =
@@ -274,61 +275,71 @@ impl CalibrationUtils {
     }
 
     /// Calculate market condition diversity (bull/bear/sideways distribution)
+    /// Uses ADAPTIVE percentile-based thresholds for symbol-agnostic classification
     /// Returns 0.0 (poor) to 1.0 (excellent condition balance)
     pub fn calculate_market_condition_diversity(
         ohlcv_data: &[MarketDataRow],
         sample_indices: &[usize],
+        sequence_length: usize,
     ) -> f64 {
         if sample_indices.len() < 10 || ohlcv_data.len() < 20 {
             return 0.0;
         }
 
-        let mut bull_count = 0;
-        let mut bear_count = 0;
-        let mut sideways_count = 0;
-        let mut valid_samples = 0;
-
-        // Classify each sample's market condition with better lookback
-        let lookback = 10.min(ohlcv_data.len() / 10); // Adaptive lookback
-
+        // Step 1: Calculate ALL sequence trends to find adaptive thresholds
+        let mut all_changes: Vec<f64> = Vec::new();
         for &idx in sample_indices {
-            if idx >= lookback && idx + lookback < ohlcv_data.len() {
-                // Look at trend around sample (more robust)
-                let start_price = ohlcv_data[idx - lookback].close;
-                let end_price = ohlcv_data[idx + lookback].close;
+            if idx + sequence_length <= ohlcv_data.len() {
+                let start_price = ohlcv_data[idx].close;
+                let end_price = ohlcv_data[idx + sequence_length - 1].close;
                 let change_pct = (end_price - start_price) / start_price;
-
-                // More sensitive thresholds for better classification
-                if change_pct > 0.01 {
-                    bull_count += 1;
-                } else if change_pct < -0.01 {
-                    bear_count += 1;
-                } else {
-                    sideways_count += 1;
-                }
-                valid_samples += 1;
+                all_changes.push(change_pct);
             }
         }
 
-        if valid_samples == 0 {
+        if all_changes.is_empty() {
             return 0.0;
         }
 
-        let total = valid_samples as f64;
+        // Step 2: Find adaptive thresholds using percentiles (33rd and 67th)
+        all_changes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p33_idx = (all_changes.len() as f64 * 0.33) as usize;
+        let p67_idx = (all_changes.len() as f64 * 0.67) as usize;
 
-        // Calculate distribution balance (ideal: 33.3% each)
+        let bear_threshold = all_changes[p33_idx]; // Bottom 33% = bear
+        let bull_threshold = all_changes[p67_idx]; // Top 33% = bull
+
+        // Step 3: Classify using adaptive thresholds
+        let mut bull_count = 0;
+        let mut bear_count = 0;
+        let mut sideways_count = 0;
+
+        for &change_pct in &all_changes {
+            if change_pct >= bull_threshold {
+                bull_count += 1;
+            } else if change_pct <= bear_threshold {
+                bear_count += 1;
+            } else {
+                sideways_count += 1;
+            }
+        }
+
+        let total = all_changes.len() as f64;
         let bull_pct = bull_count as f64 / total;
         let bear_pct = bear_count as f64 / total;
         let sideways_pct = sideways_count as f64 / total;
 
         log::debug!(
-            "Market conditions: Bull={:.1}%, Bear={:.1}%, Sideways={:.1}% (from {} samples)",
+            "Market conditions (adaptive): Bull={:.1}%, Bear={:.1}%, Sideways={:.1}% (thresholds: bear<{:.4}, bull>{:.4}, {} samples)",
             bull_pct * 100.0,
             bear_pct * 100.0,
             sideways_pct * 100.0,
-            valid_samples
+            bear_threshold,
+            bull_threshold,
+            all_changes.len()
         );
 
+        // Step 4: Calculate diversity (ideal: 33.3% each)
         let ideal = 1.0 / 3.0;
         let deviation =
             ((bull_pct - ideal).abs() + (bear_pct - ideal).abs() + (sideways_pct - ideal).abs())

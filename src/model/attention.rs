@@ -115,12 +115,12 @@ impl MultiHeadAttention {
         for (pos, _) in (0..(max_length * 2 - 1)).enumerate() {
             let relative_pos = pos as f64 - (max_length - 1) as f64;
 
-            for i in 0..head_dim {
+            for (i, embedding_val) in embeddings[pos].iter_mut().enumerate().take(head_dim) {
                 if i % 2 == 0 {
-                    embeddings[pos][i] =
+                    *embedding_val =
                         (relative_pos / 10000.0_f64.powf(i as f64 / head_dim as f64)).sin();
                 } else {
-                    embeddings[pos][i] =
+                    *embedding_val =
                         (relative_pos / 10000.0_f64.powf((i - 1) as f64 / head_dim as f64)).cos();
                 }
             }

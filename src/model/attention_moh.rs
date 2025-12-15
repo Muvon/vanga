@@ -320,7 +320,7 @@ impl MixtureOfHeadAttention {
             }
 
             // Periodically compact memory to reduce fragmentation
-            if self.step_count % 1000 == 0 {
+            if self.step_count.is_multiple_of(1000) {
                 self.routing_history.shrink_to_fit();
             }
         }

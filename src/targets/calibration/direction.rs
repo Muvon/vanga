@@ -156,7 +156,13 @@ fn evaluate_direction_params(
     }
 
     // Use diversity-aware balance calculation
-    utils.calculate_balance_with_diversity(&class_counts, total, ohlcv_data, sample_indices)
+    utils.calculate_balance_with_diversity(
+        &class_counts,
+        total,
+        ohlcv_data,
+        sample_indices,
+        sequence_length,
+    )
 }
 
 /// Classify direction using calibrated parameters (mirrors actual classification logic)
