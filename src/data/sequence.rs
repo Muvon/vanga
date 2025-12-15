@@ -57,7 +57,7 @@ impl SequenceGenerator {
         // Validate DataFrame for multi-horizon processing
         self.validate_dataframe_for_horizons(&df, horizons)?;
 
-        // Get basic info
+        let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(&df)?;
         let total_records = df.height();
         let sequence_length = match &training_config.model.sequence_length {
             crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
@@ -74,6 +74,7 @@ impl SequenceGenerator {
             sequence_length,
             horizons,
             feature_config,
+            timeframe_minutes,
         )?;
 
         // Extract feature columns (exclude timestamp and target columns)
@@ -326,10 +327,14 @@ impl SequenceGenerator {
 
     /// Validate DataFrame structure for multi-horizon processing
     fn validate_dataframe_for_horizons(&self, df: &DataFrame, horizons: &[String]) -> Result<()> {
+        let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
+
         // Check minimum data requirements for all horizons
         let min_required_rows = horizons
             .iter()
-            .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
+            .map(|h| {
+                crate::utils::parser::parse_horizon_to_steps(h, timeframe_minutes).unwrap_or(1)
+            })
             .max()
             .unwrap_or(1)
             * 2; // At least 2x the largest horizon for reliable training
@@ -388,12 +393,14 @@ impl SequenceGenerator {
         sequence_length: usize,
         horizons: &[String],
         feature_config: &crate::config::FeatureConfig,
+        timeframe_minutes: usize,
     ) -> Result<()> {
         // Use proper feature window calculation
         let requirements = crate::utils::feature_window::calculate_min_data_requirements(
             feature_config,
             sequence_length,
             horizons,
+            timeframe_minutes,
         )?;
 
         // Validate using the proper requirements
@@ -518,10 +525,14 @@ impl SequenceGenerator {
         crate::targets::PreparedTargets,
         Vec<(usize, usize)>,
     )> {
+        let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
+
         // Calculate maximum horizon steps
         let max_horizon_steps = horizons
             .iter()
-            .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
+            .map(|h| {
+                crate::utils::parser::parse_horizon_to_steps(h, timeframe_minutes).unwrap_or(1)
+            })
             .max()
             .unwrap_or(1);
 

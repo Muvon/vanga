@@ -105,7 +105,6 @@ use crate::data::structures::MarketDataRow;
 use crate::targets::TargetResult;
 use crate::utils::error::Result;
 use crate::utils::market_data::extract_ohlcv_data;
-use crate::utils::parser::parse_horizon_to_steps;
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -125,6 +124,7 @@ pub fn generate_volatility_targets_with_calibrated_params(
         crate::targets::calibration::VolatilityParams,
     >,
 ) -> Result<TargetResult> {
+    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
@@ -132,7 +132,6 @@ pub fn generate_volatility_targets_with_calibrated_params(
     log::info!("🎯 Generating volatility targets with per-horizon calibrated parameters");
 
     for horizon in horizons {
-        // Get parameters for this specific horizon
         let params = calibrated_params.get(horizon).ok_or_else(|| {
             crate::utils::error::VangaError::ConfigError(format!(
                 "No calibrated volatility parameters found for horizon: {}",
@@ -147,7 +146,8 @@ pub fn generate_volatility_targets_with_calibrated_params(
             params.extreme_multiplier
         );
 
-        let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let horizon_steps =
+            crate::utils::parser::parse_horizon_to_steps(horizon, timeframe_minutes)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
         let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 

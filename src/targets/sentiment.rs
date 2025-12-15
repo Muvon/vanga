@@ -136,6 +136,7 @@ pub fn generate_sentiment_targets_with_calibrated_params(
     >,
 ) -> Result<TargetResult> {
     log::info!("🎯 Generating sentiment targets with per-horizon calibrated parameters");
+    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
@@ -154,7 +155,8 @@ pub fn generate_sentiment_targets_with_calibrated_params(
             params.sensitivity
         );
 
-        let horizon_steps = parse_horizon_steps(horizon)?;
+        let horizon_steps =
+            crate::utils::parser::parse_horizon_to_steps(horizon, timeframe_minutes)?;
         let mut horizon_targets = Vec::new();
         let mut horizon_strengths = Vec::new();
 
@@ -327,14 +329,6 @@ fn extract_ohlcv_data(df: &DataFrame) -> Result<Vec<MarketDataRow>> {
     }
 
     Ok(ohlcv_data)
-}
-
-/// Parse horizon string to steps
-fn parse_horizon_steps(horizon: &str) -> Result<usize> {
-    let horizon_clean = horizon.trim_end_matches('h');
-    horizon_clean
-        .parse::<usize>()
-        .map_err(|_| VangaError::DataError(format!("Invalid horizon format: {}", horizon)))
 }
 
 /// Log sentiment class distribution

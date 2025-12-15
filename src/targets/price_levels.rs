@@ -126,12 +126,12 @@ pub fn generate_price_level_targets_with_calibrated_params(
     >,
 ) -> Result<TargetResult> {
     log::info!("🎯 Generating price level targets with per-horizon calibrated parameters");
+    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
 
     for horizon in horizons {
-        // Get parameters for this specific horizon
         let params = calibrated_params.get(horizon).ok_or_else(|| {
             crate::utils::error::VangaError::ConfigError(format!(
                 "No calibrated price level parameters found for horizon: {}",
@@ -147,7 +147,7 @@ pub fn generate_price_level_targets_with_calibrated_params(
             params.percentiles[1]
         );
 
-        let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let horizon_steps = parse_horizon_to_steps(horizon, timeframe_minutes)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
         let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 

@@ -381,3 +381,8 @@ mod attention_integration_tests {
 mod metrics_tests {
     include!("utils/metrics_test.rs");
 }
+
+#[cfg(test)]
+mod parser_tests {
+    include!("utils/parser_test.rs");
+}

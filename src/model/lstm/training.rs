@@ -423,10 +423,14 @@ impl LSTMModel {
         // ADDED: Validate dataset size for proper training with gap
         let sequence_length = self.config.sequence_length;
         let max_horizon_steps = if !config.horizons.is_empty() {
+            // Assume 1h timeframe for validation calculations (actual targets use detected timeframe)
+            let assumed_timeframe = 60;
             config
                 .horizons
                 .iter()
-                .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
+                .map(|h| {
+                    crate::utils::parser::parse_horizon_to_steps(h, assumed_timeframe).unwrap_or(1)
+                })
                 .max()
                 .unwrap_or(72)
         } else {
@@ -567,18 +571,20 @@ impl LSTMModel {
             );
 
             // FIXED: Calculate proper gap size to prevent data leakage
-            // Gap must be sequence_length + max_horizon_steps to ensure no overlap between
-            // the last training sequence and first validation target
             let max_horizon_steps = if !config.horizons.is_empty() {
-                // Calculate max horizon steps from training config horizons
+                // Assume 1h timeframe for validation calculations (actual targets use detected timeframe)
+                let assumed_timeframe = 60;
                 config
                     .horizons
                     .iter()
-                    .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
+                    .map(|h| {
+                        crate::utils::parser::parse_horizon_to_steps(h, assumed_timeframe)
+                            .unwrap_or(1)
+                    })
                     .max()
                     .unwrap_or(72)
             } else {
-                72 // Fallback to 3d horizon if no horizons specified
+                72
             };
 
             // CRITICAL FIX: Proper gap calculation

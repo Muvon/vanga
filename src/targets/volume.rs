@@ -115,6 +115,7 @@ pub fn generate_volume_targets_with_calibrated_params(
         crate::targets::calibration::VolumeParams,
     >,
 ) -> Result<TargetResult> {
+    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
     let volume_data = extract_volume_data(df)?;
 
     log::info!("🎯 Generating volume targets with per-horizon calibrated parameters");
@@ -123,7 +124,6 @@ pub fn generate_volume_targets_with_calibrated_params(
     let mut strengths = HashMap::new();
 
     for horizon in horizons {
-        // Get parameters for this specific horizon
         let params = calibrated_params.get(horizon).ok_or_else(|| {
             crate::utils::error::VangaError::ConfigError(format!(
                 "No calibrated volume parameters found for horizon: {}",
@@ -145,7 +145,8 @@ pub fn generate_volume_targets_with_calibrated_params(
             smoothing_periods: params.smoothing_periods,
         };
 
-        let horizon_steps = parse_horizon_steps(horizon)?;
+        let horizon_steps =
+            crate::utils::parser::parse_horizon_to_steps(horizon, timeframe_minutes)?;
         let mut horizon_targets = Vec::new();
         let mut horizon_strengths = Vec::new();
 
@@ -680,14 +681,6 @@ fn extract_volume_data(df: &DataFrame) -> Result<Vec<f64>> {
     let volumes: Vec<f64> = volume_data.into_iter().map(|v| v.unwrap_or(0.0)).collect();
 
     Ok(volumes)
-}
-
-/// Parse horizon string to steps
-fn parse_horizon_steps(horizon: &str) -> Result<usize> {
-    let horizon_clean = horizon.trim_end_matches('h');
-    horizon_clean
-        .parse::<usize>()
-        .map_err(|_| VangaError::DataError(format!("Invalid horizon format: {}", horizon)))
 }
 
 /// Log volume class distribution with logarithmic ratio analysis

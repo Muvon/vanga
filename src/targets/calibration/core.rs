@@ -280,6 +280,7 @@ impl ParameterCalibrator {
         horizons: &[String],
         sample_size: Option<usize>,
         sequence_overlap: f64,
+        timeframe_minutes: usize,
     ) -> Result<CalibratedParameters> {
         let total_start = std::time::Instant::now();
         let num_cpus = num_cpus::get();
@@ -317,14 +318,15 @@ impl ParameterCalibrator {
                         prefix
                     );
 
-                    // Parse horizon to steps
-                    let horizon_steps = crate::utils::parser::parse_horizon_to_steps(&horizon)
+                    // Parse horizon to steps using detected timeframe
+                    let horizon_steps = crate::utils::parser::parse_horizon_to_steps(&horizon, timeframe_minutes)
                         .map_err(|e| {
                             crate::utils::error::VangaError::ConfigError(format!(
                                 "Invalid horizon '{}': {}",
                                 horizon, e
                             ))
                         })?;
+
 
                     // Generate diverse sample indices for this horizon
                     let sample_indices = calibrator.generate_diverse_calibration_indices(

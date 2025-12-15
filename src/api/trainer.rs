@@ -378,6 +378,10 @@ impl ModelTrainer {
         log::info!("🎯 Calibrating target parameters for balanced class distributions...");
         let data_loader = crate::data::DataLoader::new();
         let raw_data = data_loader.load_csv(&self.config.data_path).await?;
+
+        // Detect timeframe from input data
+        let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(&raw_data)?;
+
         let ohlcv_data = crate::utils::market_data::extract_ohlcv_data(&raw_data)?;
 
         // Get ACTUAL sequence length from config
@@ -415,6 +419,7 @@ impl ModelTrainer {
                 &self.config.horizons, // Pass ALL horizons
                 None,                  // Use all available samples
                 self.config.data.sequence_overlap,
+                timeframe_minutes, // Pass detected timeframe
             )
             .await?;
 

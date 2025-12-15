@@ -190,13 +190,14 @@ pub fn calculate_min_data_requirements(
     config: &FeatureConfig,
     sequence_length: usize,
     horizons: &[String],
+    timeframe_minutes: usize,
 ) -> Result<MinDataRequirements> {
     let max_feature_window = calculate_max_feature_window(config);
 
     // Calculate maximum horizon steps
     let max_horizon_steps = horizons
         .iter()
-        .map(|h| crate::utils::parser::parse_horizon_to_steps(h).unwrap_or(1))
+        .map(|h| crate::utils::parser::parse_horizon_to_steps(h, timeframe_minutes).unwrap_or(1))
         .max()
         .unwrap_or(1);
 
@@ -379,9 +380,11 @@ mod tests {
 
         let horizons = vec!["1h".to_string()];
         let sequence_length = 60;
+        let timeframe_minutes = 60; // 1h candles
 
         let requirements =
-            calculate_min_data_requirements(&config, sequence_length, &horizons).unwrap();
+            calculate_min_data_requirements(&config, sequence_length, &horizons, timeframe_minutes)
+                .unwrap();
 
         assert_eq!(requirements.max_feature_window, 20);
         assert_eq!(requirements.sequence_length, 60);

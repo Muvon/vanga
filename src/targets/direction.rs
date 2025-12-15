@@ -121,7 +121,7 @@ pub fn generate_direction_targets_with_calibrated_params(
         crate::targets::calibration::DirectionParams,
     >,
 ) -> Result<TargetResult> {
-    // CRITICAL FIX: Use OHLCV data instead of just close prices for richer momentum analysis
+    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
     let ohlcv_data = extract_ohlcv_data(df)?;
     let mut targets = HashMap::new();
     let mut strengths = HashMap::new();
@@ -129,7 +129,6 @@ pub fn generate_direction_targets_with_calibrated_params(
     log::info!("🎯 Generating direction targets with per-horizon calibrated parameters");
 
     for horizon in horizons {
-        // Get parameters for this specific horizon
         let params = calibrated_params.get(horizon).ok_or_else(|| {
             crate::utils::error::VangaError::ConfigError(format!(
                 "No calibrated direction parameters found for horizon: {}",
@@ -143,7 +142,7 @@ pub fn generate_direction_targets_with_calibrated_params(
             params.sensitivity,
             params.extreme_multiplier
         );
-        let horizon_steps = parse_horizon_to_steps(horizon)?;
+        let horizon_steps = parse_horizon_to_steps(horizon, timeframe_minutes)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
         let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 
