@@ -29,13 +29,17 @@ pub struct ParamsFracNAdam {
 impl Default for ParamsFracNAdam {
     fn default() -> Self {
         Self {
-            lr: 0.002,
+            lr: 0.001, // REDUCED from 0.002 for stability
             beta_1: 0.9,
             beta_2: 0.999,
             eps: 1e-8,
             weight_decay: None,
             momentum_decay: 0.004, // Standard NAdam momentum decay
-            fractional: FractionalConfig::default(),
+            fractional: FractionalConfig {
+                alpha: 0.5,        // REDUCED from 0.7 for less aggressive memory
+                memory_window: 20, // REDUCED from 30 for faster adaptation
+                step_size: 1.0,
+            },
         }
     }
 }

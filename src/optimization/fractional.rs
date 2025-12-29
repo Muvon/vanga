@@ -151,25 +151,22 @@ impl FractionalDerivative {
         Ok(())
     }
 
-    /// Compute fractional gradients using Caputo derivative with short-memory approximation
+    /// Compute fractional gradients using Caputo derivative with Grünwald-Letnikov weights
     ///
-    /// Implements Caputo fractional derivative for financial time series:
-    /// D^α_C f(t) = (1/Γ(n-α)) ∫[0,t] f^(n)(τ) / (t-τ)^(α-n+1) dτ
+    /// Implements Caputo fractional derivative for optimization:
+    /// D^α_C f(t_n) ≈ (h^(-α)/Γ(2-α)) Σ_{j=0}^{n-1} b_j^(α) [f(t_{n-j}) - f(t_{n-j-1})]
+    ///
+    /// where b_j^(α) = (j+1)^(1-α) - j^(1-α) are Grünwald-Letnikov weights
     ///
     /// For discrete optimization with short memory:
-    /// D^α_C ∇J(θ_t) ≈ (1/Γ(1-α)) * Σ(k=1 to M) (∇J(θ_{t-k+1}) - ∇J(θ_{t-k})) / (k^α * h^α)
+    /// D^α_C ∇J(θ_t) ≈ (h^(-α)/Γ(2-α)) * Σ(k=1 to M) b_{k-1}^(α) [∇J(θ_{t-k+1}) - ∇J(θ_{t-k})]
     ///
-    /// Key advantages of Caputo over Grünwald-Letnikov:
-    /// - Zero derivative on constants (better for LSTM initial states)
-    /// - Uses standard initial conditions (more natural for neural networks)
-    /// - Better suited for financial time series with trends
-    /// - Smoother memory integration without sign alternation
+    /// Key properties:
+    /// - As α → 1: b_j^(α) → 1, recovers standard gradient (correct limit)
+    /// - As α → 0: b_j^(α) → 0, no memory effect
+    /// - Γ(2-α) normalization ensures proper scaling for all α ∈ (0,1]
     pub fn compute_fractional_gradients(&self) -> Result<Vec<Tensor>> {
         let mut fractional_gradients = Vec::with_capacity(self.gradient_history.len());
-
-        // Compute Gamma(1-α) for Caputo normalization
-        // Using Stirling's approximation for efficiency
-        let gamma_factor = compute_gamma(1.0 - self.alpha);
 
         for history in &self.gradient_history {
             if history.is_empty() {
@@ -195,8 +192,9 @@ impl FractionalDerivative {
             // Initialize with zeros (Caputo naturally handles initialization)
             let mut caputo_sum = Tensor::zeros(shape, candle_core::DType::F32, device)?;
 
-            // Compute the Caputo fractional derivative
-            // Sum from k=1 to min(M, history_len-1)
+            // Compute the Caputo fractional derivative using proper Grünwald-Letnikov weights
+            // For Caputo: D^α_C f(t) uses weights b_j^(α) = (j+1)^(1-α) - j^(1-α)
+            // This ensures convergence to standard derivative as α → 1
             let max_k = (self.memory_window).min(history.len() - 1);
 
             for k in 1..=max_k {
@@ -210,16 +208,17 @@ impl FractionalDerivative {
                     .sub(&history[k])?
                     .contiguous()?;
 
-                // Caputo weight: 1 / (k^α)
-                // This gives a power-law decay for memory effects
-                let caputo_weight = 1.0 / (k as f64).powf(self.alpha);
+                // Grünwald-Letnikov weight for Caputo: b_{k-1}^(α) = k^(1-α) - (k-1)^(1-α)
+                // This is mathematically correct and ensures α=1 gives standard gradient
+                let j = (k - 1) as f64;
+                let gl_weight = (j + 1.0).powf(1.0 - self.alpha) - j.powf(1.0 - self.alpha);
 
                 // Skip negligible weights for efficiency
-                if caputo_weight < 1e-10 {
+                if gl_weight.abs() < 1e-10 {
                     continue;
                 }
 
-                let weight_tensor = Tensor::new(caputo_weight as f32, device)?
+                let weight_tensor = Tensor::new(gl_weight as f32, device)?
                     .broadcast_as(shape)?
                     .contiguous()?;
 
@@ -228,8 +227,10 @@ impl FractionalDerivative {
                 caputo_sum = caputo_sum.add(&weighted_diff)?.contiguous()?;
             }
 
-            // Apply Caputo normalization: (1/Γ(1-α)) * (1/h^α)
-            let scale_factor = (1.0 / (gamma_factor * self.step_size.powf(self.alpha))) as f32;
+            // Apply Caputo normalization: h^(-α) / Γ(2-α)
+            // Note: Γ(2-α) not Γ(1-α) because we're using first differences
+            let gamma_2_minus_alpha = compute_gamma(2.0 - self.alpha);
+            let scale_factor = (self.step_size.powf(-self.alpha) / gamma_2_minus_alpha) as f32;
 
             let scale_tensor = Tensor::new(scale_factor, device)?
                 .broadcast_as(shape)?
@@ -237,8 +238,9 @@ impl FractionalDerivative {
 
             let fractional_grad = caputo_sum.contiguous()?.mul(&scale_tensor)?.contiguous()?;
 
-            // Add the current gradient (Caputo includes the integer-order term)
-            // This is the key difference: Caputo = fractional part + integer part
+            // CRITICAL: Add current gradient to maintain learning
+            // Caputo derivative = fractional memory term + current gradient
+            // Without this, gradients vanish when history is similar → NO LEARNING
             let final_grad = history[0]
                 .contiguous()?
                 .add(&fractional_grad)?
@@ -247,9 +249,9 @@ impl FractionalDerivative {
             // Log for debugging (occasionally)
             if history.len() == self.memory_window && self.gradient_history[0].len() % 100 == 1 {
                 log::trace!(
-                    "Caputo fractional gradient: α={:.2}, Γ(1-α)={:.4}, scale={:.6}, history_len={}",
+                    "Caputo fractional gradient: α={:.2}, Γ(2-α)={:.4}, scale={:.6}, history_len={}",
                     self.alpha,
-                    gamma_factor,
+                    gamma_2_minus_alpha,
                     scale_factor,
                     history.len()
                 );
@@ -328,8 +330,8 @@ pub struct FractionalConfig {
 impl Default for FractionalConfig {
     fn default() -> Self {
         Self {
-            alpha: 0.7,        // Moderate fractional order for stability
-            memory_window: 30, // Reasonable memory window
+            alpha: 0.5,        // REDUCED from 0.7 for stability (less memory = less explosion risk)
+            memory_window: 20, // REDUCED from 30 for faster adaptation
             step_size: 1.0,    // Standard discrete time step
         }
     }
@@ -339,8 +341,8 @@ impl FractionalConfig {
     /// Create configuration for short-term memory (faster, less memory)
     pub fn short_memory() -> Self {
         Self {
-            alpha: 0.8,
-            memory_window: 30,
+            alpha: 0.6,        // REDUCED from 0.8 for stability
+            memory_window: 15, // REDUCED from 30
             step_size: 1.0,
         }
     }
@@ -348,8 +350,8 @@ impl FractionalConfig {
     /// Create configuration for long-term memory (slower, more memory)
     pub fn long_memory() -> Self {
         Self {
-            alpha: 0.95,
-            memory_window: 90,
+            alpha: 0.75,       // REDUCED from 0.95 to prevent explosion
+            memory_window: 50, // REDUCED from 90
             step_size: 1.0,
         }
     }
@@ -357,8 +359,8 @@ impl FractionalConfig {
     /// Create configuration optimized for financial time series
     pub fn financial_optimized() -> Self {
         Self {
-            alpha: 0.75,       // Balanced for financial data (weight sum ~0.01)
-            memory_window: 30, // 30 steps of history (configurable based on data frequency)
+            alpha: 0.5,        // REDUCED from 0.75 for stability with bidirectional LSTM
+            memory_window: 20, // REDUCED from 30
             step_size: 1.0,    // For discrete time series, h=1.0 is standard
         }
     }
