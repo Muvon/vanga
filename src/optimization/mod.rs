@@ -22,6 +22,7 @@ pub mod fractional;
 pub mod hyperparameter;
 pub mod objective;
 pub mod optimizer_selector;
+pub mod prodigy;
 
 // Re-export main optimization components
 pub use feature_selection::{
@@ -36,6 +37,7 @@ pub use optimizer_selector::{
     apply_optimizer_recommendation, recommend_optimizer_for_data, DataCharacteristics,
     MarketRegime, OptimizerRecommendation, OptimizerSelector, PerformanceExpectation,
 };
+pub use prodigy::{ParamsProdigy, Prodigy};
 
 use crate::utils::error::Result;
 use polars::prelude::*;

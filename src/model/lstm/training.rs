@@ -2388,6 +2388,64 @@ impl LSTMModel {
                     )?,
                 ))
             }
+            crate::config::training::OptimizerType::Prodigy {
+                d_coef,
+                growth_rate,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                safeguard_warmup,
+            } => {
+                log::info!("🚀 Using Prodigy optimizer (ICLR 2024) - Learning-Rate-Free!");
+                log::info!(
+                    "   • Automatic LR adaptation: lr={:.1} (will auto-adjust)",
+                    learning_rate
+                );
+                log::info!(
+                    "   • D estimate coefficient: {:.3}, growth_rate: {}",
+                    d_coef,
+                    if growth_rate.is_infinite() {
+                        "unlimited".to_string()
+                    } else {
+                        format!("{:.2}", growth_rate)
+                    }
+                );
+                log::info!(
+                    "   • Adam-like parameters: beta1={:.3}, beta2={:.3}, eps={:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+                log::info!(
+                    "   • Weight decay: {:.4}, safeguard_warmup: {}",
+                    weight_decay,
+                    safeguard_warmup
+                );
+                log::info!("   • Paper: https://arxiv.org/abs/2306.06101");
+
+                let params = crate::optimization::ParamsProdigy {
+                    lr: learning_rate,
+                    d_coef: *d_coef,
+                    growth_rate: *growth_rate,
+                    beta1: *beta1,
+                    beta2: *beta2,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    safeguard_warmup: *safeguard_warmup,
+                };
+
+                Ok(OptimizerWrapper::Prodigy(
+                    crate::optimization::Prodigy::new(self.varmap.all_vars(), params).map_err(
+                        |e| {
+                            VangaError::ModelError(format!(
+                                "Prodigy optimizer creation failed: {}",
+                                e
+                            ))
+                        },
+                    )?,
+                ))
+            }
         }
     }
     pub fn apply_xavier_initialization(&mut self) -> Result<()> {

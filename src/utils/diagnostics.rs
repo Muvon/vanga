@@ -250,6 +250,42 @@ impl TrainingDiagnostics {
                 Self::log_optional_weight_decay(weight_decay);
                 log::info!("   💡 FracNAdam combines Nesterov acceleration with fractional memory for fast convergence");
             }
+            OptimizerType::Prodigy {
+                d_coef,
+                growth_rate,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                safeguard_warmup,
+            } => {
+                log::info!("   🔧 Optimizer: Prodigy (ICLR 2024) - Learning-Rate-Free!");
+                log::info!(
+                    "   🚀 Automatic LR adaptation: lr={:.1} (will auto-adjust)",
+                    learning_rate
+                );
+                log::info!(
+                    "   📊 D estimate: coef={:.3}, growth_rate={}",
+                    d_coef,
+                    if growth_rate.is_infinite() {
+                        "unlimited".to_string()
+                    } else {
+                        format!("{:.2}", growth_rate)
+                    }
+                );
+                log::info!(
+                    "   📊 Adam-like params: β1={:.3}, β2={:.3}, ε={:.2e}",
+                    beta1,
+                    beta2,
+                    eps
+                );
+                log::info!("   🏋️ Weight decay: {:.4}", weight_decay);
+                log::info!("   🔥 Safeguard warmup: {}", safeguard_warmup);
+                log::info!(
+                    "   💡 Prodigy automatically finds optimal learning rate - no tuning needed!"
+                );
+                log::info!("   📄 Paper: https://arxiv.org/abs/2306.06101");
+            }
         }
     }
 
@@ -441,6 +477,7 @@ impl TrainingDiagnostics {
             OptimizerType::RMSprop { .. } => "RMSprop",
             OptimizerType::FracAdam { .. } => "FracAdam",
             OptimizerType::FracNAdam { .. } => "FracNAdam",
+            OptimizerType::Prodigy { .. } => "Prodigy",
         }
     }
 
@@ -475,6 +512,7 @@ impl TrainingDiagnostics {
             OptimizerType::RMSprop { weight_decay, .. } => *weight_decay,
             OptimizerType::FracAdam { weight_decay, .. } => *weight_decay,
             OptimizerType::FracNAdam { weight_decay, .. } => *weight_decay,
+            OptimizerType::Prodigy { weight_decay, .. } => Some(*weight_decay),
         }
     }
 }

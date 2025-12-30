@@ -280,6 +280,17 @@ pub enum OptimizerType {
         memory_window: usize, // Memory window size (30-90 recommended)
         step_size: f64,       // Discretization step size (typically 1.0)
     },
+    /// Prodigy: Learning-rate-free optimizer (ICLR 2024)
+    /// Set learning_rate = 1.0 in config, Prodigy handles automatic adaptation
+    Prodigy {
+        d_coef: f64,            // D estimate coefficient (default: 1.0)
+        growth_rate: f64,       // Max D growth rate (default: inf)
+        beta1: f64,             // First moment decay (default: 0.9)
+        beta2: f64,             // Second moment decay (default: 0.999)
+        eps: f64,               // Numerical stability (default: 1e-8)
+        weight_decay: f64,      // L2 regularization (default: 0.0)
+        safeguard_warmup: bool, // Enable warmup (default: false)
+    },
 }
 
 impl OptimizerType {
@@ -357,6 +368,15 @@ impl OptimizerType {
                 alpha: 0.9,        // Good balance between memory and stability
                 memory_window: 60, // Moderate memory window
                 step_size: 1.0,    // Standard discrete step
+            },
+            "Prodigy" => OptimizerType::Prodigy {
+                d_coef: 1.0,
+                growth_rate: f64::INFINITY,
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.0,
+                safeguard_warmup: false,
             },
             _ => OptimizerType::AdamW {
                 weight_decay: 0.01,
@@ -929,10 +949,56 @@ impl TrainingParams {
                     )));
                 }
             }
+            OptimizerType::Prodigy {
+                d_coef,
+                growth_rate,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                safeguard_warmup: _,
+            } => {
+                if *d_coef <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Prodigy d_coef must be positive, got: {}",
+                        d_coef
+                    )));
+                }
+                if growth_rate.is_finite() && *growth_rate <= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Prodigy growth_rate must be > 1.0 or infinite, got: {}",
+                        growth_rate
+                    )));
+                }
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Prodigy beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Prodigy beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Prodigy eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+                if *weight_decay < 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "Prodigy weight_decay must be non-negative, got: {}",
+                        weight_decay
+                    )));
+                }
+                log::info!("✅ Prodigy optimizer validated (learning-rate-free)");
+            }
         }
         Ok(())
     }
-
     /// Validate batch size configuration parameters
     fn validate_batch_size(&self) -> Result<()> {
         match &self.batch_size {
