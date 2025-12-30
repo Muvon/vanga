@@ -286,6 +286,97 @@ impl TrainingDiagnostics {
                 );
                 log::info!("   📄 Paper: https://arxiv.org/abs/2306.06101");
             }
+            OptimizerType::FracProdigy {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+                d_coef,
+                growth_rate,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                log::info!("   🔧 Optimizer: FracProdigy - Fractional Memory + Automatic LR!");
+                log::info!(
+                    "   🚀 Automatic LR adaptation: lr={:.1} (will auto-adjust)",
+                    learning_rate
+                );
+
+                // Validate fractional parameters
+                if *alpha <= 0.0 || *alpha > 1.0 {
+                    log::error!(
+                        "   ❌ Invalid fractional order α={:.2} (must be in (0, 1])",
+                        alpha
+                    );
+                }
+                if *memory_window == 0 || *memory_window > 200 {
+                    log::warn!(
+                        "   ⚠️ Memory window {} is outside recommended range [1, 200]",
+                        memory_window
+                    );
+                }
+                if *d_coef <= 0.0 {
+                    log::error!("   ❌ Invalid d_coef={:.3} (must be > 0)", d_coef);
+                }
+                if *growth_rate <= 0.0 && growth_rate.is_finite() {
+                    log::error!(
+                        "   ❌ Invalid growth_rate={:.3} (must be > 0 or infinite)",
+                        growth_rate
+                    );
+                }
+
+                // Warn if learning_rate != 1.0 for Prodigy-based optimizer
+                if (learning_rate - 1.0).abs() > 0.01 {
+                    log::warn!(
+                        "   ⚠️ Learning rate {:.3} != 1.0 - Prodigy works best with lr=1.0",
+                        learning_rate
+                    );
+                }
+
+                log::info!(
+                    "   🧮 Fractional memory: α={:.2}, window={}, step={:.1}",
+                    alpha,
+                    memory_window,
+                    step_size
+                );
+                log::info!(
+                    "   📊 Prodigy D-estimate: coef={:.3}, growth_rate={}",
+                    d_coef,
+                    if growth_rate.is_infinite() {
+                        "unlimited".to_string()
+                    } else {
+                        format!("{:.2}", growth_rate)
+                    }
+                );
+                log::info!(
+                    "   📊 NAdam params: β1={:.3}, β2={:.3}, momentum_decay={:.4}, ε={:.2e}",
+                    beta1,
+                    beta2,
+                    momentum_decay,
+                    eps
+                );
+
+                if let Some(wd) = weight_decay {
+                    log::info!("   🏋️ Weight decay: {:.4}", wd);
+                    Self::log_weight_decay_warnings(*wd);
+                } else {
+                    log::info!("   🏋️ Weight decay: DISABLED");
+                }
+
+                // Memory usage estimate
+                let estimated_tensors = memory_window * 2; // First + second moments
+                log::info!(
+                    "   💾 Estimated memory: ~{} gradient tensors in history",
+                    estimated_tensors
+                );
+
+                log::info!(
+                    "   💡 FracProdigy combines fractional memory with automatic LR - best of both worlds!"
+                );
+                log::info!("   📄 Combines: FracNAdam memory + Prodigy automatic LR");
+            }
         }
     }
 
@@ -478,6 +569,7 @@ impl TrainingDiagnostics {
             OptimizerType::FracAdam { .. } => "FracAdam",
             OptimizerType::FracNAdam { .. } => "FracNAdam",
             OptimizerType::Prodigy { .. } => "Prodigy",
+            OptimizerType::FracProdigy { .. } => "FracProdigy",
         }
     }
 
@@ -513,6 +605,7 @@ impl TrainingDiagnostics {
             OptimizerType::FracAdam { weight_decay, .. } => *weight_decay,
             OptimizerType::FracNAdam { weight_decay, .. } => *weight_decay,
             OptimizerType::Prodigy { weight_decay, .. } => Some(*weight_decay),
+            OptimizerType::FracProdigy { weight_decay, .. } => *weight_decay,
         }
     }
 }

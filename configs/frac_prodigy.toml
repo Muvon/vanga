@@ -1,0 +1,258 @@
+# FracProdigy Optimizer Configuration - Fractional Memory + Automatic LR
+# Combines FracNAdam's long-term memory with Prodigy's automatic learning rate adaptation
+# Best for: Volatile crypto markets with long-term dependencies + no manual LR tuning
+
+symbol = "BTCUSDT"
+data_path = "data/BTCUSDT_1h.csv"
+fresh_training = true
+continue_training = false
+horizons = ["1h", "4h", "1d"]
+
+[features]
+enabled = true
+technical_indicators = true
+cross_asset_features = false
+market_microstructure = false
+
+[model]
+hidden_sizes = [256, 128]
+num_layers = 2
+dropout = 0.2
+bidirectional = false
+use_attention = false
+
+[training]
+device = "auto"
+
+# CRITICAL: Set learning_rate = 1.0 for FracProdigy
+# Prodigy component automatically adapts the learning rate during training
+learning_rate = 1.0
+
+# FracProdigy optimizer configuration
+# Combines:
+# - Fractional derivatives (FracNAdam) for long-term memory
+# - Automatic LR adaptation (Prodigy) for parameter-free training
+# - Nesterov acceleration (NAdam) for faster convergence
+optimizer = { FracProdigy = {
+    # NAdam momentum parameters
+    beta1 = 0.9,               # First moment decay (momentum)
+    beta2 = 0.999,             # Second moment decay (variance)
+    eps = 1e-8,                # Numerical stability epsilon
+    weight_decay = 0.0,        # L2 regularization (None or 0.0-0.1 range)
+    momentum_decay = 0.004,    # NAdam momentum decay (standard value)
+    
+    # Prodigy automatic LR parameters
+    d_coef = 1.0,              # D estimate coefficient (0.5-2.0 range, 1.0 recommended)
+    growth_rate = "inf",       # Unlimited D growth (recommended for best adaptation)
+    
+    # Fractional derivative parameters (long-term memory)
+    alpha = 0.5,               # Fractional order (0 < α ≤ 1)
+                               # 0.5 = balanced memory (recommended for stability)
+                               # 0.7-0.9 = more aggressive memory (for strong trends)
+                               # 0.3-0.4 = conservative memory (for volatile markets)
+    memory_window = 20,        # Memory window size (10-50 range)
+                               # 20 = efficient, fast adaptation
+                               # 30-50 = longer memory, slower adaptation
+    step_size = 1.0            # Discretization step (always 1.0 for discrete optimization)
+}}
+
+# Epochs configuration
+epochs = { Auto = { patience = 20, min_epochs = 10, max_epochs = 300 }}
+
+# Batch size
+batch_size = { Auto = { min_size = 16, max_size = 128, target_memory_usage = 0.8 }}
+
+# NO warmup needed for FracProdigy (Prodigy adapts automatically)
+warmup_epochs = 0
+
+# NO learning schedule needed (Prodigy handles everything)
+# learning_schedule is omitted - Prodigy auto-adjusts LR
+
+# Validation configuration
+validation_split = 0.2
+validation_gap = "0"
+test_split = 0.1
+
+# Early stopping (FracProdigy converges efficiently)
+[training.early_stopping]
+patience = 15
+min_delta = 0.001
+
+# Gradient clipping (optional, FracProdigy is stable)
+gradient_clip = 5.0
+
+# Progress logging
+print_every = 1
+
+# Walk-forward training parameters
+window_decay = 1.0
+min_train_ratio = 0.4
+min_increment_ratio = 0.3
+
+# Random seed for reproducibility
+seed = 42
+
+[data]
+normalization = "zscore"
+sequence_length = 60
+outlier_method = "iqr"
+outlier_threshold = 3.0
+
+[optimization]
+enabled = false
+
+[targets]
+price_levels = true
+direction = true
+volatility = true
+volume = true
+sentiment = true
+
+# ============================================================================
+# WHEN TO USE FRACPRODIGY
+# ============================================================================
+#
+# ✅ USE FracProdigy when:
+# - Volatile crypto markets with long-term trend persistence
+# - You want automatic LR tuning (no manual learning rate search)
+# - Long-term dependencies are important (fractional memory helps)
+# - You need stable convergence without LR scheduling
+# - Training data has complex temporal patterns
+#
+# ❌ DON'T USE FracProdigy when:
+# - You have very short sequences (< 30 timesteps)
+# - Memory is extremely limited (fractional history uses more RAM)
+# - You need the absolute fastest training (fractional computation adds overhead)
+# - Simple patterns without long-term dependencies
+#
+# ============================================================================
+# COMPARISON WITH OTHER OPTIMIZERS
+# ============================================================================
+#
+# FracProdigy vs FracNAdam:
+# - FracProdigy: Automatic LR (set lr=1.0), no manual tuning
+# - FracNAdam: Manual LR tuning required (lr=0.001-0.002)
+# - Both: Same fractional memory for long-term dependencies
+# - Winner: FracProdigy for ease of use, FracNAdam for fine control
+#
+# FracProdigy vs Prodigy:
+# - FracProdigy: Long-term memory via fractional derivatives
+# - Prodigy: Memoryless (standard Adam-like)
+# - Both: Automatic LR adaptation
+# - Winner: FracProdigy for crypto trends, Prodigy for general tasks
+#
+# FracProdigy vs AdamW:
+# - FracProdigy: Automatic LR + long-term memory
+# - AdamW: Manual LR + no memory
+# - Winner: FracProdigy for complex crypto patterns
+#
+# ============================================================================
+# PARAMETER TUNING GUIDE
+# ============================================================================
+#
+# Fractional Order (alpha):
+# - 0.3-0.4: Conservative, volatile markets, short-term focus
+# - 0.5: Balanced (RECOMMENDED), good for most crypto pairs
+# - 0.7-0.9: Aggressive, strong trends, long-term focus
+# - Never use α > 0.95 (numerical instability)
+#
+# Memory Window:
+# - 10-15: Fast adaptation, short-term patterns
+# - 20: Balanced (RECOMMENDED), efficient memory usage
+# - 30-50: Long-term patterns, more memory usage
+# - Never use > 100 (excessive memory, diminishing returns)
+#
+# D Coefficient (d_coef):
+# - 0.5: Conservative LR adaptation (slower convergence)
+# - 1.0: Standard (RECOMMENDED), balanced adaptation
+# - 1.5-2.0: Aggressive LR adaptation (faster but less stable)
+#
+# Growth Rate:
+# - "inf": Unlimited (RECOMMENDED), best adaptation
+# - 1.5-2.0: Limited growth, more conservative
+#
+# Weight Decay:
+# - 0.0: No regularization (use with dropout)
+# - 0.01: Light regularization (RECOMMENDED)
+# - 0.05-0.1: Strong regularization (for overfitting)
+#
+# ============================================================================
+# EXPECTED BEHAVIOR
+# ============================================================================
+#
+# Training Dynamics:
+# - First 3 steps: Uses regular gradients (building fractional history)
+# - Steps 4+: Fractional gradients with automatic LR
+# - D-estimate: Grows initially, then stabilizes
+# - Effective LR: Decreases as D-estimate grows and steps increase
+# - Convergence: Faster than FracNAdam, more stable than Prodigy
+#
+# Logging Output:
+# - "🚀 Using FracProdigy optimizer - Fractional Memory + Automatic LR!"
+# - Fractional parameters: α, memory_window, step_size
+# - Prodigy D-estimate: d_coef, growth_rate
+# - NAdam parameters: beta1, beta2, momentum_decay
+# - Every 100 steps: D-estimate updates and effective LR
+#
+# Performance:
+# - Memory usage: ~20-50 gradient tensors in history
+# - Speed: Slightly slower than Prodigy (fractional computation)
+# - Convergence: Better than FracNAdam (automatic LR)
+# - Stability: Excellent (combines best of both worlds)
+#
+# ============================================================================
+# TROUBLESHOOTING
+# ============================================================================
+#
+# If training is unstable:
+# - Reduce alpha (0.5 → 0.3)
+# - Reduce memory_window (20 → 15)
+# - Reduce d_coef (1.0 → 0.5)
+# - Add gradient clipping (gradient_clip = 5.0)
+#
+# If convergence is too slow:
+# - Increase alpha (0.5 → 0.7)
+# - Increase d_coef (1.0 → 1.5)
+# - Ensure learning_rate = 1.0 (not lower!)
+#
+# If memory usage is too high:
+# - Reduce memory_window (20 → 10)
+# - Use smaller batch_size
+# - Reduce model size (hidden_sizes)
+#
+# If loss plateaus early:
+# - Increase memory_window (20 → 30)
+# - Increase alpha (0.5 → 0.7)
+# - Check if data has long-term patterns
+#
+# ============================================================================
+# USAGE EXAMPLES
+# ============================================================================
+#
+# Basic training:
+# cargo run -- train --symbol BTCUSDT --data data.csv --config configs/frac_prodigy.toml
+#
+# With custom alpha (more aggressive):
+# Edit: alpha = 0.7, memory_window = 30
+#
+# With custom alpha (more conservative):
+# Edit: alpha = 0.3, memory_window = 15
+#
+# For multiple symbols:
+# cargo run -- train --symbol BTCUSDT,ETHUSDT --data data/ --config configs/frac_prodigy.toml --batch
+#
+# ============================================================================
+# REFERENCES
+# ============================================================================
+#
+# Prodigy Paper:
+# - "Prodigy: An Expeditiously Adaptive Parameter-Free Learner" (ICLR 2024)
+# - https://arxiv.org/abs/2306.06101
+#
+# Fractional Derivatives:
+# - Caputo fractional derivative for optimization
+# - Grünwald-Letnikov weights for discrete approximation
+#
+# NAdam:
+# - Nesterov-accelerated Adam with momentum decay
+# - Combines momentum with adaptive learning rates

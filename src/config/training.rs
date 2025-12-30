@@ -291,6 +291,21 @@ pub enum OptimizerType {
         weight_decay: f64,      // L2 regularization (default: 0.0)
         safeguard_warmup: bool, // Enable warmup (default: false)
     },
+    /// FracProdigy: Fractional Prodigy with long-term memory
+    /// Combines fractional derivatives (FracNAdam) with automatic LR (Prodigy)
+    /// Set learning_rate = 1.0 in config, Prodigy handles automatic adaptation
+    FracProdigy {
+        beta1: f64,                // First moment decay (default: 0.9)
+        beta2: f64,                // Second moment decay (default: 0.999)
+        eps: f64,                  // Numerical stability (default: 1e-8)
+        weight_decay: Option<f64>, // L2 regularization (default: None)
+        momentum_decay: f64,       // NAdam momentum decay (default: 0.004)
+        d_coef: f64,               // D estimate coefficient (default: 1.0)
+        growth_rate: f64,          // Max D growth rate (default: inf)
+        alpha: f64,                // Fractional order (0 < α ≤ 1, default: 0.5)
+        memory_window: usize,      // Memory window size (default: 20)
+        step_size: f64,            // Discretization step size (default: 1.0)
+    },
 }
 
 impl OptimizerType {
@@ -377,6 +392,18 @@ impl OptimizerType {
                 eps: 1e-8,
                 weight_decay: 0.0,
                 safeguard_warmup: false,
+            },
+            "FracProdigy" => OptimizerType::FracProdigy {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: None,
+                momentum_decay: 0.004,
+                d_coef: 1.0,
+                growth_rate: f64::INFINITY,
+                alpha: 0.5,        // Balanced memory (less aggressive than FracNAdam)
+                memory_window: 20, // Efficient memory window
+                step_size: 1.0,    // Standard discrete step
             },
             _ => OptimizerType::AdamW {
                 weight_decay: 0.01,
@@ -995,6 +1022,95 @@ impl TrainingParams {
                     )));
                 }
                 log::info!("✅ Prodigy optimizer validated (learning-rate-free)");
+            }
+            OptimizerType::FracProdigy {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+                d_coef,
+                growth_rate,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                // Validate fractional parameters
+                if *alpha <= 0.0 || *alpha > 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy alpha must be in (0, 1], got: {}",
+                        alpha
+                    )));
+                }
+                if *memory_window == 0 {
+                    return Err(VangaError::ConfigError(
+                        "FracProdigy memory_window must be positive".to_string(),
+                    ));
+                }
+                if *memory_window > 200 {
+                    log::warn!(
+                        "⚠️ FracProdigy memory_window {} is very large (recommended: 10-50)",
+                        memory_window
+                    );
+                }
+                if *step_size <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy step_size must be positive, got: {}",
+                        step_size
+                    )));
+                }
+
+                // Validate Prodigy parameters
+                if *d_coef <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy d_coef must be positive, got: {}",
+                        d_coef
+                    )));
+                }
+                if growth_rate.is_finite() && *growth_rate <= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy growth_rate must be > 1.0 or infinite, got: {}",
+                        growth_rate
+                    )));
+                }
+
+                // Validate NAdam parameters
+                if *beta1 <= 0.0 || *beta1 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy beta1 must be between 0.0 and 1.0, got: {}",
+                        beta1
+                    )));
+                }
+                if *beta2 <= 0.0 || *beta2 >= 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy beta2 must be between 0.0 and 1.0, got: {}",
+                        beta2
+                    )));
+                }
+                if *momentum_decay < 0.0 || *momentum_decay > 1.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy momentum_decay must be between 0.0 and 1.0, got: {}",
+                        momentum_decay
+                    )));
+                }
+                if *eps <= 0.0 {
+                    return Err(VangaError::ConfigError(format!(
+                        "FracProdigy eps must be positive, got: {}",
+                        eps
+                    )));
+                }
+
+                // Validate weight decay
+                if let Some(wd) = weight_decay {
+                    if *wd < 0.0 {
+                        return Err(VangaError::ConfigError(format!(
+                            "FracProdigy weight_decay must be non-negative, got: {}",
+                            wd
+                        )));
+                    }
+                }
+
+                log::info!("✅ FracProdigy optimizer validated (fractional memory + automatic LR)");
             }
         }
         Ok(())

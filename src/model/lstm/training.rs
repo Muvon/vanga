@@ -2446,6 +2446,78 @@ impl LSTMModel {
                     )?,
                 ))
             }
+            crate::config::training::OptimizerType::FracProdigy {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                momentum_decay,
+                d_coef,
+                growth_rate,
+                alpha,
+                memory_window,
+                step_size,
+            } => {
+                log::info!("🚀 Using FracProdigy optimizer - Fractional Memory + Automatic LR!");
+                log::info!(
+                    "   • Automatic LR adaptation: lr={:.1} (will auto-adjust)",
+                    learning_rate
+                );
+                log::info!(
+                    "   • Fractional memory: α={:.2}, window={}, step={:.1}",
+                    alpha,
+                    memory_window,
+                    step_size
+                );
+                log::info!(
+                    "   • Prodigy D-estimate: d_coef={:.3}, growth_rate={}",
+                    d_coef,
+                    if growth_rate.is_infinite() {
+                        "unlimited".to_string()
+                    } else {
+                        format!("{:.2}", growth_rate)
+                    }
+                );
+                log::info!(
+                    "   • NAdam parameters: beta1={:.3}, beta2={:.3}, momentum_decay={:.4}, eps={:.2e}",
+                    beta1,
+                    beta2,
+                    momentum_decay,
+                    eps
+                );
+                log::info!(
+                    "   • Weight decay: {}",
+                    weight_decay.map_or("None".to_string(), |wd| format!("{:.4}", wd))
+                );
+                log::info!("   • Combines: FracNAdam memory + Prodigy automatic LR");
+
+                let params = crate::optimization::ParamsFracProdigy {
+                    lr: learning_rate,
+                    beta1: *beta1,
+                    beta2: *beta2,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    momentum_decay: *momentum_decay,
+                    d_coef: *d_coef,
+                    growth_rate: *growth_rate,
+                    fractional: crate::optimization::FractionalConfig {
+                        alpha: *alpha,
+                        memory_window: *memory_window,
+                        step_size: *step_size,
+                    },
+                };
+
+                Ok(OptimizerWrapper::FracProdigy(
+                    crate::optimization::FracProdigy::new(self.varmap.all_vars(), params).map_err(
+                        |e| {
+                            VangaError::ModelError(format!(
+                                "FracProdigy optimizer creation failed: {}",
+                                e
+                            ))
+                        },
+                    )?,
+                ))
+            }
         }
     }
     pub fn apply_xavier_initialization(&mut self) -> Result<()> {

@@ -205,6 +205,8 @@ pub enum OptimizerWrapper {
     FracNAdam(crate::optimization::FracNAdam),
     // Prodigy: Learning-rate-free optimizer (ICLR 2024)
     Prodigy(crate::optimization::Prodigy),
+    // FracProdigy: Fractional Prodigy with long-term memory
+    FracProdigy(crate::optimization::FracProdigy),
 }
 
 /// Macro to eliminate code duplication in OptimizerWrapper method dispatch
@@ -237,6 +239,7 @@ macro_rules! optimizer_dispatch {
             OptimizerWrapper::FracAdam(opt) => opt.$method($($args),*),
             OptimizerWrapper::FracNAdam(opt) => opt.$method($($args),*),
             OptimizerWrapper::Prodigy(opt) => opt.$method($($args),*),
+            OptimizerWrapper::FracProdigy(opt) => opt.$method($($args),*),
         }
     };
 }
@@ -256,6 +259,7 @@ impl OptimizerWrapper {
             OptimizerWrapper::FracAdam(frac_adam) => frac_adam.set_learning_rate(lr),
             OptimizerWrapper::FracNAdam(frac_nadam) => frac_nadam.set_learning_rate(lr),
             OptimizerWrapper::Prodigy(prodigy) => prodigy.set_learning_rate(lr),
+            OptimizerWrapper::FracProdigy(frac_prodigy) => frac_prodigy.set_learning_rate(lr),
         }
     }
 

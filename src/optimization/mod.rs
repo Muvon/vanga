@@ -18,6 +18,7 @@ mod frac_integration_test;
 pub mod frac_nadam;
 #[cfg(test)]
 mod frac_nadam_test;
+pub mod frac_prodigy;
 pub mod fractional;
 pub mod hyperparameter;
 pub mod objective;
@@ -30,6 +31,7 @@ pub use feature_selection::{
 };
 pub use frac_adam::{FracAdam, ParamsFracAdam};
 pub use frac_nadam::{FracNAdam, ParamsFracNAdam};
+pub use frac_prodigy::{FracProdigy, ParamsFracProdigy};
 pub use fractional::{FractionalConfig, FractionalDerivative};
 pub use hyperparameter::{HyperparameterOptimizer, OptimizationMethod, SearchSpace};
 pub use objective::{ObjectiveFunction, OptimizationMetric};
