@@ -1001,7 +1001,7 @@ impl LSTMModel {
                         "🔥 Warmup epoch {}/{}: learning rate = {:.6}",
                         epoch + 1,
                         warmup_epochs,
-                        warmup_lr
+                        optimizer.learning_rate()
                     );
                 }
             } else {
@@ -1646,9 +1646,13 @@ impl LSTMModel {
                         }
                     }
 
-                    // Check learning rate
-                    if current_lr > 0.001 {
-                        log::warn!("   📈 Learning rate: {:.6} (consider reducing)", current_lr);
+                    // Check learning rate (use actual effective LR from optimizer)
+                    let effective_lr = optimizer.learning_rate();
+                    if effective_lr > 0.001 {
+                        log::warn!(
+                            "   📈 Learning rate: {:.6} (consider reducing)",
+                            effective_lr
+                        );
                     }
 
                     // Check gradient norm
@@ -1665,8 +1669,8 @@ impl LSTMModel {
                     log::warn!("   2. Increase weight decay (0.01 → 0.05-0.1)");
                     log::warn!(
                         "   3. Reduce learning rate ({:.6} → {:.6})",
-                        current_lr,
-                        current_lr * 0.5
+                        effective_lr,
+                        effective_lr * 0.5
                     );
                     log::warn!("   4. Add early stopping with smaller patience");
                     log::warn!("   5. Use gradient clipping (< 1.0)");
@@ -1755,6 +1759,11 @@ impl LSTMModel {
 
             // Enhanced logging with learning rate tracking
             if epoch % self.training_config.print_every == 0 {
+                // Get actual effective learning rate from optimizer
+                // For Prodigy/FracProdigy, this returns the dynamically calculated LR
+                // For other optimizers, this returns the configured LR
+                let effective_lr = optimizer.learning_rate();
+
                 let warmup_status = if epoch < warmup_epochs as usize {
                     " (warmup)"
                 } else {
@@ -1841,7 +1850,7 @@ impl LSTMModel {
                         val_loss,
                         loss_ratio,
                         ratio_status,
-                        current_lr,
+                        effective_lr,
                         avg_grad_norm,
                         warmup_status,
                         schedule_status,
@@ -1863,7 +1872,7 @@ impl LSTMModel {
                         self.training_config.epochs,
                         avg_train_loss,
                         num_batches,
-                        current_lr,
+                        effective_lr,
                         warmup_status,
                         schedule_status
                     );

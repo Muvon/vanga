@@ -245,6 +245,29 @@ macro_rules! optimizer_dispatch {
 }
 
 impl OptimizerWrapper {
+    /// Get the current effective learning rate from the optimizer
+    ///
+    /// For adaptive optimizers like Prodigy/FracProdigy, this returns the dynamically
+    /// calculated effective learning rate. For other optimizers, returns the configured LR.
+    pub fn learning_rate(&self) -> f64 {
+        use candle_nn::optim::Optimizer;
+        match self {
+            OptimizerWrapper::Sgd(opt) => opt.learning_rate(),
+            OptimizerWrapper::AdamW(opt) => opt.learning_rate(),
+            OptimizerWrapper::Adam(opt) => opt.learning_rate(),
+            OptimizerWrapper::AdaDelta(opt) => opt.learning_rate(),
+            OptimizerWrapper::AdaGrad(opt) => opt.learning_rate(),
+            OptimizerWrapper::AdaMax(opt) => opt.learning_rate(),
+            OptimizerWrapper::NAdam(opt) => opt.learning_rate(),
+            OptimizerWrapper::RAdam(opt) => opt.learning_rate(),
+            OptimizerWrapper::RMSprop(opt) => opt.learning_rate(),
+            OptimizerWrapper::FracAdam(opt) => opt.learning_rate(),
+            OptimizerWrapper::FracNAdam(opt) => opt.learning_rate(),
+            OptimizerWrapper::Prodigy(opt) => opt.learning_rate(),
+            OptimizerWrapper::FracProdigy(opt) => opt.learning_rate(),
+        }
+    }
+
     pub fn set_learning_rate(&mut self, lr: f64) {
         match self {
             OptimizerWrapper::Sgd(sgd) => sgd.set_learning_rate(lr),
