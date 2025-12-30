@@ -181,6 +181,33 @@ enum Commands {
         #[command(subcommand)]
         action: ModelCommands,
     },
+
+    /// Auto-tune hyperparameters (learning rate, sequence length, horizons)
+    Tune {
+        /// Trading symbol
+        #[arg(short, long)]
+        symbol: String,
+
+        /// Path to CSV data file
+        #[arg(short, long)]
+        data: PathBuf,
+
+        /// Number of trials for Bayesian optimization
+        #[arg(long, default_value = "50")]
+        trials: usize,
+
+        /// Training configuration file (base config - only LR, seq_len, horizons will be tuned)
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Device to use (auto, cpu, gpu:0, metal:0)
+        #[arg(long, default_value = "auto")]
+        device: String,
+
+        /// Export results to CSV
+        #[arg(long)]
+        export: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -337,6 +364,15 @@ async fn main() -> Result<()> {
         }
 
         Commands::Models { action } => handle_model_commands(action).await,
+
+        Commands::Tune {
+            symbol,
+            data,
+            trials,
+            config,
+            device,
+            export,
+        } => handle_tune_command(symbol, data, trials, config, device, export).await,
     }
 }
 
@@ -1285,4 +1321,243 @@ impl Drop for PerformanceMonitor {
             elapsed.as_secs_f64()
         );
     }
+}
+
+/// Handle tune command - auto-tune hyperparameters
+async fn handle_tune_command(
+    symbol: String,
+    data: PathBuf,
+    trials: usize,
+    config: Option<PathBuf>,
+    device: String,
+    export: Option<PathBuf>,
+) -> Result<()> {
+    use vanga::data::DataPipeline;
+    use vanga::optimization::{BayesianOptimizer, TunerSearchSpace};
+
+    log::info!("🎯 Starting hyperparameter tuning for {}", symbol);
+    log::info!("📊 Data: {:?}", data);
+    log::info!("🔬 Trials: {}", trials);
+
+    // Resolve data file path (handle directories like train does)
+    let data_file_path = if data.is_dir() {
+        match file_discovery::resolve_symbol_data_path(&data, &symbol) {
+            Ok(path) => {
+                log::info!("📂 Resolved data file: {}", path.display());
+                path
+            }
+            Err(e) => {
+                return Err(VangaError::DataError(format!(
+                    "❌ Failed to resolve data file for {}: {}",
+                    symbol, e
+                )));
+            }
+        }
+    } else {
+        data.clone()
+    };
+
+    // Create training config - EXACT same pattern as train command
+    let mut base_config = if let Some(config_path) = config {
+        log::info!("🔧 Loading training config from: {:?}", config_path);
+        match TrainingConfig::default()
+            .symbol(symbol.clone())
+            .data_path(data_file_path.clone())
+            .with_config_from_file(&config_path)
+        {
+            Ok(file_config) => file_config,
+            Err(e) => {
+                log::error!("Failed to load config file: {}", e);
+                log::info!("Falling back to default configuration");
+                TrainingConfig::default()
+                    .symbol(symbol.clone())
+                    .data_path(data_file_path.clone())
+            }
+        }
+    } else {
+        log::info!("🔧 Using default intelligent training configuration");
+        TrainingConfig::default()
+            .symbol(symbol.clone())
+            .data_path(data_file_path.clone())
+    };
+    
+    // Apply device configuration
+    base_config = base_config.with_device_config(&device)?;
+
+    log::info!("📥 Loading and preparing data...");
+    
+    // CRITICAL: Calibrate target parameters BEFORE data pipeline (same as train)
+    log::info!("🎯 Calibrating target parameters for balanced class distributions...");
+    let data_loader = vanga::data::DataLoader::new();
+    let raw_data = data_loader.load_csv(&data_file_path).await?;
+    
+    // Detect timeframe from input data
+    let timeframe_minutes = vanga::utils::parser::detect_timeframe_minutes(&raw_data)?;
+    let ohlcv_data = vanga::utils::market_data::extract_ohlcv_data(&raw_data)?;
+    
+    // Get sequence length from config
+    let sequence_length = match &base_config.model.sequence_length {
+        vanga::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
+        vanga::config::model::SequenceLengthConfig::Auto { min_length, max_length } => {
+            ((min_length + max_length) / 2) as usize
+        }
+        vanga::config::model::SequenceLengthConfig::Adaptive => 60,
+    };
+    
+    log::info!(
+        "🎯 Calibrating with sequence_length={} for {} horizons: {:?}",
+        sequence_length,
+        base_config.horizons.len(),
+        base_config.horizons
+    );
+    
+    // Calibrate parameters
+    let calibrator = vanga::targets::calibration::ParameterCalibrator::from_config(&base_config.targets);
+    let calibrated_params = calibrator
+        .calibrate(
+            &ohlcv_data,
+            sequence_length,
+            &base_config.horizons,
+            None,
+            base_config.data.sequence_overlap,
+            timeframe_minutes,
+        )
+        .await?;
+    
+    log::info!(
+        "✅ Per-horizon parameters calibrated successfully for {} horizons",
+        base_config.horizons.len()
+    );
+    
+    // Prepare training data using the real pipeline WITH calibrated params
+    let pipeline = DataPipeline::new();
+    let target_windows = pipeline
+        .prepare_training_data_with_calibrated_params(
+            &data_file_path,
+            &base_config,
+            Some(&calibrated_params),
+        )
+        .await?;
+
+    // Get first window for tuning (use first target for simplicity)
+    let first_target_key = target_windows
+        .windows_by_target
+        .keys()
+        .next()
+        .ok_or_else(|| VangaError::DataError("No target windows available".to_string()))?;
+    
+    let first_window_list = &target_windows.windows_by_target[first_target_key];
+    
+    if first_window_list.is_empty() {
+        return Err(VangaError::DataError(
+            "No training windows available for tuning".to_string(),
+        ));
+    }
+
+    // Use first window for tuning
+    let window = &first_window_list[0];
+    
+    log::info!(
+        "📊 Using {} training samples and {} validation samples for tuning",
+        window.train_samples,
+        window.val_samples
+    );
+
+    // Extract targets as Array2 using the same logic as trainer
+    let train_targets = extract_targets_array(&window.train_data.targets)?;
+    let val_targets = extract_targets_array(&window.val_data.targets)?;
+
+    // Run Bayesian optimization with real training data
+    let mut optimizer = BayesianOptimizer::new(TunerSearchSpace::default());
+
+    let best_trial_config = optimizer
+        .optimize(
+            trials,
+            &window.train_data.sequences,
+            &train_targets,
+            Some(&window.val_data.sequences),
+            Some(&val_targets),
+            &base_config,
+        )
+        .await?;
+
+    // Export results if requested
+    if let Some(export_path) = export {
+        optimizer.export_results(export_path.to_str().unwrap())?;
+    }
+
+    log::info!("🎉 Tuning complete!");
+    log::info!("📝 Best configuration:");
+    log::info!("   Learning rate: {:.6}", best_trial_config.learning_rate);
+    log::info!("   Sequence length: {}", best_trial_config.sequence_length);
+    log::info!("   Horizons: {:?}", best_trial_config.horizons);
+    log::info!("");
+    log::info!("💡 To use these parameters, update your config file or use:");
+    log::info!(
+        "   vanga train --symbol {} --data {:?} --lr {} --horizons {}",
+        symbol,
+        data,
+        best_trial_config.learning_rate,
+        best_trial_config.horizons.join(",")
+    );
+
+    Ok(())
+}
+
+/// Extract targets as Array2 for tuning (simplified version of extract_targets_for_multi_model)
+fn extract_targets_array(targets: &vanga::targets::PreparedTargets) -> Result<ndarray::Array2<f64>> {
+    use ndarray::Array2;
+    
+    let num_samples = targets.valid_indices.len();
+    let target_names = &targets.target_names;
+    let num_targets = target_names.len();
+
+    if num_samples == 0 {
+        return Err(VangaError::DataError(
+            "No valid samples for target extraction".to_string(),
+        ));
+    }
+
+    if num_targets == 0 {
+        return Err(VangaError::DataError(
+            "No target names provided".to_string(),
+        ));
+    }
+
+    let mut training_array = Array2::<f64>::zeros((num_samples, num_targets));
+
+    // Extract targets in the order specified by target_names
+    for (target_idx, target_name) in target_names.iter().enumerate() {
+        let parts: Vec<&str> = target_name.split('_').collect();
+        
+        let (target_type, horizon) = if parts.len() == 3 && parts[0] == "price" && parts[1] == "level" {
+            ("price_level", parts[2])
+        } else if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            return Err(VangaError::DataError(format!(
+                "Invalid target name format '{}'",
+                target_name
+            )));
+        };
+
+        let target_data = match target_type {
+            "price_level" => targets.price_levels.get(horizon),
+            "direction" => targets.direction.get(horizon),
+            "volatility" => targets.volatility.get(horizon),
+            "sentiment" => targets.sentiment.get(horizon),
+            "volume" => targets.volume.get(horizon),
+            _ => None,
+        };
+
+        let data = target_data.ok_or_else(|| {
+            VangaError::DataError(format!("Target data not found for '{}'", target_name))
+        })?;
+
+        for (sample_idx, &data_idx) in targets.valid_indices.iter().enumerate() {
+            training_array[[sample_idx, target_idx]] = data[data_idx] as f64;
+        }
+    }
+
+    Ok(training_array)
 }

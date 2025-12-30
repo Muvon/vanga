@@ -9,6 +9,7 @@
 //! - Crypto-specific loss functions
 //! - Data-driven architecture selection
 
+pub mod auto_tuner;
 pub mod feature_selection;
 pub mod frac_adam;
 #[cfg(test)]
@@ -24,6 +25,9 @@ pub mod objective;
 pub mod optimizer_selector;
 
 // Re-export main optimization components
+pub use auto_tuner::{
+    BayesianOptimizer, SearchSpace as TunerSearchSpace, TrialConfig, TrialResult,
+};
 pub use feature_selection::{
     CorrelationMatrix, FeatureSelector, ImportanceMethod, ImportanceScores,
 };
