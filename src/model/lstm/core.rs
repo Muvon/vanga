@@ -223,20 +223,9 @@ impl LSTMModel {
             final_hidden_sizes.truncate(num_layers);
         }
 
-        // Use sequence_length for LSTM configuration if needed - SAME logic
-        let adjusted_hidden_sizes = if sequence_length > 100 {
-            // Adjust all layer sizes based on sequence length
-            final_hidden_sizes
-                .iter()
-                .map(|&size| size + (sequence_length / 10))
-                .collect()
-        } else {
-            final_hidden_sizes
-        };
-
         let lstm_config = LSTMConfig {
             input_size,
-            hidden_sizes: adjusted_hidden_sizes,
+            hidden_sizes: final_hidden_sizes,
             output_size,
             sequence_length,      // Use actual sequence length from config
             learning_rate: 0.001, // Default learning rate
@@ -360,20 +349,9 @@ impl LSTMModel {
             final_hidden_sizes.truncate(num_layers);
         }
 
-        // Use sequence_length for LSTM configuration if needed - SAME logic
-        let adjusted_hidden_sizes = if sequence_length > 100 {
-            // Adjust all layer sizes based on sequence length
-            final_hidden_sizes
-                .iter()
-                .map(|&size| size + (sequence_length / 10))
-                .collect()
-        } else {
-            final_hidden_sizes
-        };
-
         let lstm_config = LSTMConfig {
             input_size,
-            hidden_sizes: adjusted_hidden_sizes,
+            hidden_sizes: final_hidden_sizes,
             output_size,
             sequence_length,      // Use actual sequence length from config
             learning_rate: 0.001, // Default learning rate
