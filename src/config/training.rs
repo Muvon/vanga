@@ -1452,6 +1452,36 @@ impl TrainingParams {
             }
         }
 
+        // CRITICAL: Warn about incompatible learning schedules with Prodigy/FracProdigy
+        if let Some(schedule) = &self.learning_schedule {
+            let is_lr_free_optimizer = matches!(
+                &self.optimizer,
+                OptimizerType::Prodigy { .. } | OptimizerType::FracProdigy { .. }
+            );
+
+            if is_lr_free_optimizer && !matches!(schedule, LearningScheduleConfig::Constant) {
+                let optimizer_name = match &self.optimizer {
+                    OptimizerType::Prodigy { .. } => "Prodigy",
+                    OptimizerType::FracProdigy { .. } => "FracProdigy",
+                    _ => unreachable!(),
+                };
+
+                log::warn!(
+                    "⚠️ Learning rate schedule {:?} will be IGNORED for {} optimizer",
+                    schedule,
+                    optimizer_name
+                );
+                log::warn!(
+                    "💡 {} is a learning-rate-free optimizer that automatically adapts LR using D-estimate",
+                    optimizer_name
+                );
+                log::warn!(
+                    "💡 Recommendation: Remove learning_schedule or set it to 'Constant' for {} optimizer",
+                    optimizer_name
+                );
+            }
+        }
+
         Ok(())
     }
 }

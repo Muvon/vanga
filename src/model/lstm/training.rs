@@ -986,44 +986,100 @@ impl LSTMModel {
                 );
             }
 
+            // Check if optimizer is learning-rate-free (Prodigy/FracProdigy)
+            let is_lr_free_optimizer = matches!(
+                &config.training.optimizer,
+                crate::config::training::OptimizerType::Prodigy { .. }
+                    | crate::config::training::OptimizerType::FracProdigy { .. }
+            );
+
             // Calculate warmup learning rate for current epoch
             if epoch < warmup_epochs as usize {
                 // Linear warmup from 0 to target_lr
                 let warmup_progress = (epoch + 1) as f64 / (warmup_epochs as f64);
                 let warmup_lr = target_lr * warmup_progress;
 
-                // Update optimizer learning rate for warmup
-                optimizer.set_learning_rate(warmup_lr);
-                current_lr = warmup_lr;
+                // CRITICAL: Skip LR updates for learning-rate-free optimizers
+                // Prodigy/FracProdigy manage their own learning rates automatically
+                if !is_lr_free_optimizer {
+                    optimizer.set_learning_rate(warmup_lr);
+                    current_lr = warmup_lr;
+                } else {
+                    // For Prodigy/FracProdigy, just track the effective LR
+                    current_lr = optimizer.learning_rate();
+                }
 
                 if epoch == 0 || epoch == (warmup_epochs as usize) - 1 {
-                    log::info!(
-                        "🔥 Warmup epoch {}/{}: learning rate = {:.6}",
-                        epoch + 1,
-                        warmup_epochs,
-                        optimizer.learning_rate()
-                    );
+                    if is_lr_free_optimizer {
+                        log::info!(
+                            "🔥 Warmup epoch {}/{}: effective learning rate = {:.6} (auto-managed by {})",
+                            epoch + 1,
+                            warmup_epochs,
+                            optimizer.learning_rate(),
+                            if matches!(&config.training.optimizer, crate::config::training::OptimizerType::Prodigy { .. }) {
+                                "Prodigy"
+                            } else {
+                                "FracProdigy"
+                            }
+                        );
+                    } else {
+                        log::info!(
+                            "🔥 Warmup epoch {}/{}: learning rate = {:.6}",
+                            epoch + 1,
+                            warmup_epochs,
+                            optimizer.learning_rate()
+                        );
+                    }
                 }
             } else {
                 // Apply learning schedule after warmup phase (if configured)
                 if let Some(schedule_config) = &config.training.learning_schedule {
-                    let epoch_after_warmup = epoch - warmup_epochs as usize;
-                    let total_epochs = match &config.training.epochs {
-                        crate::config::training::EpochConfig::Fixed(n) => *n as usize,
-                        crate::config::training::EpochConfig::Auto { max_epochs } => {
-                            *max_epochs as usize
+                    // CRITICAL: Skip schedule for learning-rate-free optimizers
+                    if is_lr_free_optimizer {
+                        // Prodigy/FracProdigy ignore external schedules - they manage LR automatically
+                        current_lr = optimizer.learning_rate();
+
+                        if epoch == warmup_epochs as usize {
+                            log::warn!(
+                                "⚠️ Learning rate schedule {:?} is IGNORED for {} optimizer",
+                                schedule_config,
+                                if matches!(
+                                    &config.training.optimizer,
+                                    crate::config::training::OptimizerType::Prodigy { .. }
+                                ) {
+                                    "Prodigy"
+                                } else {
+                                    "FracProdigy"
+                                }
+                            );
+                            log::info!(
+                                "💡 {} automatically adapts learning rate using D-estimate: lr_eff = base_lr / (D × √t)",
+                                if matches!(&config.training.optimizer, crate::config::training::OptimizerType::Prodigy { .. }) {
+                                    "Prodigy"
+                                } else {
+                                    "FracProdigy"
+                                }
+                            );
                         }
-                    };
+                    } else {
+                        let epoch_after_warmup = epoch - warmup_epochs as usize;
+                        let total_epochs = match &config.training.epochs {
+                            crate::config::training::EpochConfig::Fixed(n) => *n as usize,
+                            crate::config::training::EpochConfig::Auto { max_epochs } => {
+                                *max_epochs as usize
+                            }
+                        };
 
-                    let scheduled_lr = Self::calculate_scheduled_learning_rate(
-                        schedule_config,
-                        epoch_after_warmup,
-                        target_lr,
-                        total_epochs.saturating_sub(warmup_epochs as usize),
-                    );
+                        let scheduled_lr = Self::calculate_scheduled_learning_rate(
+                            schedule_config,
+                            epoch_after_warmup,
+                            target_lr,
+                            total_epochs.saturating_sub(warmup_epochs as usize),
+                        );
 
-                    optimizer.set_learning_rate(scheduled_lr);
-                    current_lr = scheduled_lr;
+                        optimizer.set_learning_rate(scheduled_lr);
+                        current_lr = scheduled_lr;
+                    }
                 }
             }
 
@@ -1680,7 +1736,8 @@ impl LSTMModel {
 
             // Adaptive learning rate adjustment after warmup
             // NOTE: This runs AFTER schedule updates, so adaptive LR can override schedule if needed
-            if epoch >= warmup_epochs as usize {
+            // CRITICAL: Skip for learning-rate-free optimizers (Prodigy/FracProdigy)
+            if epoch >= warmup_epochs as usize && !is_lr_free_optimizer {
                 if let Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
                     ..
                 }) = &config.training.learning_schedule
