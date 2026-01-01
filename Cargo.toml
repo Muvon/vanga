@@ -5,6 +5,11 @@ edition = "2021"
 description = "LSTM-based cryptocurrency forecasting system with automatic feature engineering"
 license = "MIT"
 
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+cudnn = ["cuda", "candle-core/cudnn", "candle-nn/cudnn"]
+
 [dependencies]
 # LSTM and ML - Migrated to Candle (latest stable)
 candle-core = "0.9"
