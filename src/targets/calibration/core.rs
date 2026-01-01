@@ -19,6 +19,9 @@ pub struct ParameterCalibrator {
     balance_weight: f64,   // Weight for class balance (default: 0.6)
     diversity_weight: f64, // Weight for sample diversity (default: 0.4)
 
+    // Random seed for reproducible calibration (None = random, Some(0) = random, Some(n) = seeded)
+    seed: Option<u64>,
+
     // Target enablement from config
     enabled_price_level: bool,
     enabled_direction: bool,
@@ -127,6 +130,26 @@ impl ParameterCalibrator {
             max_iterations: 100,
             balance_weight: 0.6,
             diversity_weight: 0.4,
+            seed: None, // Will be set via from_config_with_seed if needed
+            enabled_price_level: targets_config.price_level,
+            enabled_direction: targets_config.direction,
+            enabled_volatility: targets_config.volatility,
+            enabled_sentiment: targets_config.sentiment,
+            enabled_volume: targets_config.volume,
+        }
+    }
+
+    /// Create new calibrator from TargetsConfig with seed for reproducible calibration
+    pub fn from_config_with_seed(
+        targets_config: &crate::config::training::TargetsConfig,
+        seed: Option<u64>,
+    ) -> Self {
+        Self {
+            target_balance: 0.2,
+            max_iterations: 100,
+            balance_weight: 0.6,
+            diversity_weight: 0.4,
+            seed,
             enabled_price_level: targets_config.price_level,
             enabled_direction: targets_config.direction,
             enabled_volatility: targets_config.volatility,
@@ -145,6 +168,9 @@ impl ParameterCalibrator {
             balance_weight: 0.6,   // Prioritize balance but consider diversity
             diversity_weight: 0.4, // Significant weight for diversity
 
+            // Random seed for reproducibility
+            seed: None, // None = random initialization
+
             // All targets enabled by default
             enabled_price_level: true,
             enabled_direction: true,
@@ -162,6 +188,7 @@ impl ParameterCalibrator {
             max_iterations: 100,
             balance_weight: balance_weight / total, // Normalize weights
             diversity_weight: diversity_weight / total,
+            seed: None,
             enabled_price_level: true,
             enabled_direction: true,
             enabled_volatility: true,
@@ -172,7 +199,18 @@ impl ParameterCalibrator {
 
     /// Create calibrator with custom diversity threshold (deprecated - kept for compatibility)
     pub fn with_diversity_threshold(_threshold: f64) -> Self {
-        Self::default()
+        Self {
+            target_balance: 0.2,
+            max_iterations: 100,
+            balance_weight: 0.6,
+            diversity_weight: 0.4,
+            seed: None,
+            enabled_price_level: true,
+            enabled_direction: true,
+            enabled_volatility: true,
+            enabled_sentiment: true,
+            enabled_volume: true,
+        }
     }
 
     /// Validate sample quality to ensure diverse, representative calibration data
@@ -703,6 +741,7 @@ impl Default for ParameterCalibrator {
             max_iterations: 100,
             balance_weight: 0.6,
             diversity_weight: 0.4,
+            seed: None, // Random by default
             enabled_price_level: true,
             enabled_direction: true,
             enabled_volatility: true,
@@ -806,7 +845,7 @@ impl ParameterCalibrator {
             config.tolerance
         );
 
-        let mut optimizer = BayesianOptimizer::new(param_bounds, param_names, &config);
+        let mut optimizer = BayesianOptimizer::new(param_bounds, param_names, &config, self.seed);
 
         // Phase 1: Initial random exploration (Latin Hypercube Sampling)
         log::info!(

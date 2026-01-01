@@ -55,9 +55,24 @@ impl DeviceManager {
                     "🎲 Setting device seed to {} for reproducible training",
                     seed_value
                 );
-                device.set_seed(seed_value).map_err(|e| {
-                    VangaError::ModelError(format!("Failed to set device seed: {}", e))
-                })?;
+                // Handle CPU seeding limitation gracefully (Candle doesn't support CPU seeding)
+                match device.set_seed(seed_value) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let error_msg = format!("{}", e);
+                        if error_msg.contains("cannot seed the CPU rng") {
+                            log::warn!("⚠️  CPU device seeding not supported in Candle - using random initialization");
+                            log::warn!("   For reproducible training, use CUDA or Metal devices");
+                            // Continue with random initialization - this is OK for CPU
+                        } else {
+                            // Real error on GPU/Metal - propagate it
+                            return Err(VangaError::ModelError(format!(
+                                "Failed to set device seed: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
             }
         }
 

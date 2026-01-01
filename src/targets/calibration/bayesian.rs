@@ -19,7 +19,8 @@
 
 use crate::utils::error::{Result, VangaError};
 use ndarray::{Array1, Array2};
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 /// Bayesian Optimizer for target calibration
@@ -37,6 +38,8 @@ pub struct BayesianOptimizer {
     gp_noise: f64,
     /// Acquisition function type
     acquisition: AcquisitionFunction,
+    /// Random seed for reproducible optimization (None = random, Some(0) = random, Some(n) = seeded)
+    seed: Option<u64>,
 }
 
 /// Acquisition function types for Bayesian optimization
@@ -123,7 +126,12 @@ impl BayesianConfig {
 
 impl BayesianOptimizer {
     /// Create new Bayesian optimizer with parameter bounds
-    pub fn new(bounds: Vec<(f64, f64)>, param_names: Vec<String>, config: &BayesianConfig) -> Self {
+    pub fn new(
+        bounds: Vec<(f64, f64)>,
+        param_names: Vec<String>,
+        config: &BayesianConfig,
+        seed: Option<u64>,
+    ) -> Self {
         Self {
             bounds,
             param_names,
@@ -132,13 +140,30 @@ impl BayesianOptimizer {
             gp_length_scale: config.gp_length_scale,
             gp_noise: config.gp_noise,
             acquisition: config.acquisition.clone(),
+            seed,
         }
     }
 
     /// Initialize with Enhanced Latin Hypercube Sampling using maximin criterion
     /// This provides superior space coverage compared to basic LHS
     pub fn initialize_latin_hypercube(&self, n_samples: usize, prefix: &str) -> Vec<Vec<f64>> {
-        let mut rng = rand::rng();
+        // Use seeded RNG if seed is provided, otherwise random
+        let mut rng: Box<dyn rand::RngCore> = match self.seed {
+            Some(0) | None => {
+                // seed=0 or None means random
+                Box::new(rand::rng())
+            }
+            Some(seed_value) => {
+                // Use seeded RNG for reproducibility
+                log::debug!(
+                    "{} 🎲 Using seeded RNG (seed={}) for reproducible LHS",
+                    prefix,
+                    seed_value
+                );
+                Box::new(StdRng::seed_from_u64(seed_value))
+            }
+        };
+
         let n_params = self.bounds.len();
 
         // Generate multiple LHS candidates and select best using maximin criterion
@@ -318,7 +343,19 @@ impl BayesianOptimizer {
     /// Optimize acquisition function to find next best point with QUALITY-FIRST approach
     /// Uses 250k evaluations (50 restarts × 5000 candidates) for thorough exploration
     fn optimize_acquisition(&self, gp: &GaussianProcess) -> Result<Vec<f64>> {
-        let mut rng = rand::rng();
+        // Use seeded RNG if seed is provided, otherwise random
+        let mut rng: Box<dyn rand::RngCore> = match self.seed {
+            Some(0) | None => {
+                // seed=0 or None means random
+                Box::new(rand::rng())
+            }
+            Some(seed_value) => {
+                // Use seeded RNG for reproducibility
+                // Add offset to avoid same samples as LHS
+                Box::new(StdRng::seed_from_u64(seed_value.wrapping_add(1000)))
+            }
+        };
+
         let n_restarts = 50; // Increased from 10 for quality
         let n_candidates = 5000; // Increased from 2000 for quality
 
