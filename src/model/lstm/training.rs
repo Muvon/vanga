@@ -3341,22 +3341,25 @@ impl LSTMModel {
         match clip_value {
             Some(threshold) => {
                 // GRADIENT CLIPPING PATH
-                // Due to Candle's immutable GradStore design, we cannot modify gradients directly.
-                // We must check the norm first, then scale the loss if needed.
-                // This is unavoidable with current Candle architecture.
+                // CRITICAL FIX: We must compute gradients ONCE, check norm, then either:
+                // 1. Scale gradients and apply (if clipping needed)
+                // 2. Apply gradients directly (if no clipping needed)
+                // We CANNOT call backward() and then backward_step() - this causes accumulation!
 
-                // Step 1: Compute gradients and check norm
+                // Step 1: Compute gradients ONCE
                 let grads = base_loss.backward()?;
                 let grad_norm = self.calculate_gradstore_norm(&grads)?;
 
                 if grad_norm > threshold {
-                    // CLIPPING REQUIRED: Must recompute with scaled loss
-                    // This is the only way to achieve gradient clipping in Candle
+                    // CLIPPING REQUIRED: Scale the loss and recompute
+                    // CRITICAL: We must drop the first gradients before recomputing
+                    drop(grads); // Explicitly drop to ensure no accumulation
+
                     let clip_ratio = threshold / grad_norm;
                     let clip_ratio_tensor = Tensor::new(clip_ratio as f32, &self.device)?;
                     let scaled_loss = base_loss.mul(&clip_ratio_tensor)?;
 
-                    // Second backward pass with scaled loss (unavoidable)
+                    // Recompute with scaled loss (this is the ONLY backward pass that applies)
                     optimizer.backward_step(&scaled_loss)?;
 
                     // Log clipping activity (reduced frequency for performance)
@@ -3380,9 +3383,10 @@ impl LSTMModel {
 
                     Ok(threshold)
                 } else {
-                    // NO CLIPPING NEEDED: Use backward_step to prevent gradient accumulation
-                    // CRITICAL FIX: Must use backward_step, not step, to clear gradients
-                    optimizer.backward_step(base_loss)?;
+                    // NO CLIPPING NEEDED: Use the already-computed gradients
+                    // CRITICAL FIX: Use step() with existing grads, NOT backward_step()
+                    // backward_step() would compute gradients AGAIN, causing accumulation
+                    optimizer.step(&grads)?;
 
                     // First batch logging
                     if epoch == 0 && batch_idx == 0 {
@@ -3396,16 +3400,14 @@ impl LSTMModel {
                 }
             }
             None => {
-                // NO GRADIENT CLIPPING: Calculate norm before optimizer step for monitoring
+                // NO GRADIENT CLIPPING: Direct backward_step (optimal path)
                 let grad_norm = if batch_idx.is_multiple_of(100) {
-                    // Calculate gradient norm for monitoring (before optimizer step)
+                    // Calculate gradient norm for monitoring
                     let grads = base_loss.backward()?;
                     let norm = self.calculate_gradstore_norm(&grads)?;
 
-                    // CRITICAL: Must clear gradients - use backward_step with original loss
-                    // We already computed gradients for monitoring, but we still need to
-                    // use backward_step to ensure proper gradient clearing
-                    optimizer.backward_step(base_loss)?;
+                    // Use the already-computed gradients
+                    optimizer.step(&grads)?;
 
                     if batch_idx == 0 {
                         log::debug!("📊 Gradient monitoring enabled (every 100 batches)");
