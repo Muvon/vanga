@@ -937,8 +937,8 @@ pub fn calibrate_5_class_confidence(max_probability: f64) -> f64 {
         0.70 + (max_probability - 0.35) * 1.4285714286
     } else if max_probability >= 0.30 {
         // GOOD: Top 30% of predictions, significantly better than random
-        // Maps: 0.30→0.58, 0.35→0.70
-        0.58 + (max_probability - 0.30) * 2.40
+        // Maps: 0.30→0.55, 0.35→0.70 (continuous with 0.25-0.30 range)
+        0.55 + (max_probability - 0.30) * 3.0
     } else if max_probability >= 0.25 {
         // MODERATE: Better than random, tradeable signal
         // Maps: 0.25→0.42, 0.30→0.55
