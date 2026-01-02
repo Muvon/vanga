@@ -299,7 +299,6 @@ impl Backtester {
                 seed: 0,                  // Random seed for backtesting diversity
             },
             data: crate::config::training::DataConfig::default(),
-            optimization: crate::config::training::OptimizationConfig::default(),
         })
     }
 

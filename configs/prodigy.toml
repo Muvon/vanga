@@ -81,9 +81,6 @@ remove_outliers = true
 outlier_method = "iqr"
 outlier_threshold = 3.0
 
-[optimization]
-enabled = false            # No hyperparameter optimization needed with Prodigy!
-
 [targets]
 price_levels = true
 direction = true

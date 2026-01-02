@@ -261,6 +261,3 @@ enabled = true
 method = "ModifiedZScore"
 threshold = 3.5
 
-[optimization]
-enabled = false
-method = "None"

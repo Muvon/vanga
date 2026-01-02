@@ -447,13 +447,41 @@ enabled = true
 min_periods = 50                  # Minimum periods for correlation calculation
 correlation_window = 20           # Rolling window for correlation
 
-# Optimization configuration
-[optimization]
-enabled = false
-method = "None"
-n_trials = 100
-timeout_seconds = 3600
-metric = "MAE"
+# ============================================================================
+# HYPERPARAMETER OPTIMIZATION - Automatic parameter tuning
+# ============================================================================
+# Automatically finds optimal sequence_length, hidden_units, num_layers, 
+# dropout, batch_size, and learning_schedule based on your data characteristics
+#
+# WHEN TO USE:
+# - New trading pairs: Let optimizer find best parameters for your data
+# - Poor performance: Optimizer may find better hyperparameters
+# - Large datasets: More data = better optimization results
+# - Time available: Optimization takes 10-60 minutes depending on trials
+#
+# WHEN NOT TO USE:
+# - Quick testing: Use manual config for faster iteration
+# - Known good config: If you already have working parameters
+# - Small datasets: < 1000 samples may not optimize well
+#
+# METHOD RECOMMENDATIONS:
+# - "Bayesian": Best for most cases, intelligent search (50-200 trials recommended)
+# - "Grid": Exhaustive search, use for small parameter spaces (20-50 trials)
+# - "Random": Quick baseline, good for initial exploration (20-50 trials)
+# - "None": Skip optimization, use manual config below
+
+# EXAMPLE CONFIGURATIONS:
+# Quick optimization (5-10 minutes):
+#   enabled = true, method = "Random", n_trials = 20
+# 
+# Balanced optimization (20-30 minutes):
+#   enabled = true, method = "Bayesian", n_trials = 50
+#
+# Thorough optimization (1-2 hours):
+#   enabled = true, method = "Bayesian", n_trials = 200
+#
+# Production optimization (2-4 hours):
+#   enabled = true, method = "Bayesian", n_trials = 500
 
 # ============================================================================
 # TARGET CONFIGURATION - Enable/disable specific targets

@@ -47,5 +47,3 @@ min_delta = 0.001
 normalization = "Robust"
 sequence_overlap = 0.8
 
-[optimization]
-method = "None"  # Disable optimization for faster testing

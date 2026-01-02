@@ -66,9 +66,3 @@ enabled = false
 [features.cross_asset]
 enabled = false
 
-[optimization]
-enabled = false
-method = "None"
-n_trials = 10
-timeout_seconds = 300
-metric = "MAE"

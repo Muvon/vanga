@@ -346,15 +346,6 @@ threshold = 3.5           # Outlier threshold (higher = less sensitive)
 # Controls hyperparameter optimization and model tuning
 # ============================================================================
 
-[optimization]
-enabled = false            # Disable optimization for single-asset training (use defaults)
-method = "None"           # No optimization method
-n_trials = 100            # Number of optimization trials (if enabled)
-timeout_seconds = 3600    # Optimization timeout (1 hour)
-metric = "MAE"            # Optimization metric (MAE, MSE, RMSE)
-# TUNING: Enable for production models, use Bayesian method for efficiency
-# EFFECT: Optimization can improve performance but significantly increases training time
-
 # ============================================================================
 # PARAMETER TUNING GUIDELINES
 # ============================================================================

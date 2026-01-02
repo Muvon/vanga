@@ -98,9 +98,6 @@ sequence_length = 60
 outlier_method = "iqr"
 outlier_threshold = 3.0
 
-[optimization]
-enabled = false
-
 [targets]
 price_levels = true
 direction = true

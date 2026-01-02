@@ -195,8 +195,3 @@ enabled = true
 method = "ModifiedZScore"
 threshold = 3.5
 
-[optimization]
-method = "Bayesian"
-n_trials = 100
-timeout_seconds = 3600
-metric = "MAE"

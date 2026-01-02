@@ -123,6 +123,3 @@ enabled = true
 method = "ModifiedZScore"
 threshold = 3.5
 
-[optimization]
-enabled = false  # Disabled for quick start
-method = "None"

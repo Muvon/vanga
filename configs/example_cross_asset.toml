@@ -319,15 +319,6 @@ threshold = 4.0                 # Higher threshold for cross-asset outliers
 # Recommended for cross-asset models due to complexity
 # ============================================================================
 
-[optimization]
-enabled = true                  # RECOMMENDED for cross-asset models
-method = "Bayesian"            # Bayesian optimization for cross-asset complexity
-n_trials = 150                 # More trials for cross-asset optimization
-timeout_seconds = 7200         # Longer timeout (2 hours) for cross-asset
-metric = "SharpeRatio"         # Use Sharpe ratio for cross-asset performance
-# TUNING: Increase n_trials to 200-300 for production cross-asset models
-# EFFECT: Optimization finds best parameters for complex cross-asset relationships
-
 # ============================================================================
 # CROSS-ASSET TRAINING GUIDELINES
 # ============================================================================

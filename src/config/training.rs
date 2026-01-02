@@ -34,9 +34,6 @@ pub struct TrainingConfig {
     /// Data preprocessing configuration
     pub data: DataConfig,
 
-    /// Optimization configuration
-    pub optimization: OptimizationConfig,
-
     /// Target configuration (enable/disable targets)
     pub targets: TargetsConfig,
 }
@@ -158,20 +155,6 @@ pub struct DataConfig {
     pub feature_selection: FeatureSelectionConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationConfig {
-    /// Hyperparameter optimization method
-    pub method: OptimizationMethod,
-
-    /// Number of optimization trials
-    pub n_trials: u32,
-
-    /// Optimization timeout in seconds
-    pub timeout_seconds: Option<u64>,
-
-    /// Optimization metric to maximize
-    pub metric: OptimizationMetric,
-}
 #[derive(Eq, Ord, PartialEq, PartialOrd, Debug, Clone, Serialize, Deserialize)]
 pub enum EpochConfig {
     Auto { max_epochs: u32 },
@@ -518,17 +501,6 @@ pub struct FeatureSelectionConfig {
     pub correlation_threshold: f64,
     pub importance_threshold: f64,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum OptimizationMethod {
-    Bayesian,
-    Grid,
-    Random,
-    None,
-}
-
-// Re-export OptimizationMetric from objective module to avoid duplication
-pub use crate::optimization::objective::OptimizationMetric;
 
 impl TrainingParams {
     /// Validate training parameters for correctness
@@ -1486,29 +1458,6 @@ impl TrainingParams {
     }
 }
 
-impl OptimizationConfig {
-    /// Validate optimization configuration parameters
-    pub fn validate(&self) -> Result<()> {
-        // Validate number of trials
-        if self.n_trials == 0 {
-            return Err(crate::utils::error::VangaError::ConfigError(
-                "n_trials must be greater than 0".to_string(),
-            ));
-        }
-
-        // Validate timeout
-        if let Some(timeout) = self.timeout_seconds {
-            if timeout == 0 {
-                return Err(crate::utils::error::VangaError::ConfigError(
-                    "timeout_seconds must be greater than 0".to_string(),
-                ));
-            }
-        }
-
-        Ok(())
-    }
-}
-
 impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
@@ -1516,13 +1465,12 @@ impl Default for TrainingConfig {
             data_path: PathBuf::new(),
             fresh_training: false,
             continue_training: false,
-            horizons: vec!["1h".to_string()], // FIXED: Default to single horizon instead of multiple
+            horizons: vec!["1h".to_string()],
             features: FeatureConfig::default(),
             model: ModelConfig::default(),
             training: TrainingParams::default(),
             data: DataConfig::default(),
-            optimization: OptimizationConfig::default(),
-            targets: TargetsConfig::default(), // Add targets config with all enabled by default
+            targets: TargetsConfig::default(),
         }
     }
 }
@@ -1585,17 +1533,6 @@ impl Default for DataConfig {
                 correlation_threshold: 0.95,
                 importance_threshold: 0.001,
             },
-        }
-    }
-}
-
-impl Default for OptimizationConfig {
-    fn default() -> Self {
-        Self {
-            method: OptimizationMethod::Bayesian,
-            n_trials: 100,
-            timeout_seconds: Some(3600),     // 1 hour
-            metric: OptimizationMetric::MAE, // Use MAE for hyperparameter optimization
         }
     }
 }
@@ -1769,7 +1706,6 @@ impl TrainingConfig {
 
         // Validate configuration parameters
         config.training.validate()?;
-        config.optimization.validate()?;
 
         log::info!(
             "✅ Configuration loaded and validated from: {}",
@@ -1824,18 +1760,6 @@ impl TrainingConfig {
                 crate::utils::error::VangaError::ConfigError(format!("Failed to parse data: {}", e))
             })?;
             self.data = data_config;
-        }
-
-        // Load optimization section if present
-        if let Some(optimization_value) = parsed.get("optimization") {
-            let optimization: OptimizationConfig =
-                optimization_value.clone().try_into().map_err(|e| {
-                    crate::utils::error::VangaError::ConfigError(format!(
-                        "Failed to parse optimization: {}",
-                        e
-                    ))
-                })?;
-            self.optimization = optimization;
         }
 
         // Load features section if present

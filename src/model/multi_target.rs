@@ -483,17 +483,6 @@ impl MultiTargetLSTMModel {
                     val_seq.shape()[0]
                 );
             }
-            log::info!(
-                "   • Optimization: {}",
-                if config.optimization.method != crate::config::training::OptimizationMethod::None {
-                    format!(
-                        "{:?} with {} trials",
-                        config.optimization.method, config.optimization.n_trials
-                    )
-                } else {
-                    "Disabled (using default parameters)".to_string()
-                }
-            );
 
             // Extract target-specific validation sequences using balanced indices
             let (target_val_sequences, target_val_targets) =

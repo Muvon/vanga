@@ -84,14 +84,6 @@ max_features = 100                          # Limit total features for performan
 correlation_threshold = 0.95               # Remove highly correlated features
 importance_threshold = 0.001               # Minimum feature importance to keep
 
-[optimization]
-# Hyperparameter optimization settings
-enabled = false                             # Enable automatic hyperparameter tuning
-method = "Bayesian"                         # Bayesian, Random, Grid
-n_trials = 50                              # Number of optimization trials (renamed from trials)
-timeout_seconds = 3600                     # Optimization timeout in seconds (1 hour)
-metric = "MAE"                             # MAE, RMSE, MAPE, SharpeRatio, MaxDrawdown, DirectionalAccuracy
-
 # USAGE EXAMPLES:
 #
 # 1. ATTENTION-ENABLED TRAINING (NEW - RECOMMENDED for crypto):
