@@ -31,6 +31,19 @@ confidence_adjustment = 1.0
 # true = show detailed class-by-class breakdown
 # false = show concise single-line summary (recommended for cleaner logs)
 print_info = false
+
+# Use ensemble calibration instead of LinearBiasCorrector
+# true = use EnsembleCalibrator (temperature scaling + label smoothing + mixup)
+#        - Temperature scaling: Per-class temperature adjustment for calibration
+#        - Label smoothing: Adaptive smoothing to prevent overconfidence
+#        - Mixup: Data augmentation for better generalization
+#        - Provides comprehensive calibration with ECE (Expected Calibration Error) tracking
+# false = use LinearBiasCorrector (class-specific bias correction)
+#        - Simpler, more interpretable class-specific bias factors
+#        - Direct correction of class imbalances
+# Recommended: true for EnsembleCalibrator (more sophisticated, better calibration)
+use_ensemble_calibration = true
+
 # NEW: Training Integration Parameters (FULLY ADAPTIVE)
 # Ramp-up epochs for gradual integration into training
 # The correction strength gradually increases from 0 to adaptive maximum over these epochs

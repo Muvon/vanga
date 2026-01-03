@@ -1158,6 +1158,49 @@ impl LSTMModel {
                     } else {
                         predictions.clone()
                     }
+                } else if epoch > 5 && self.ensemble_calibrator.is_some() {
+                    let ensemble_cal = self.ensemble_calibrator.as_ref().unwrap();
+                    if ensemble_cal.is_calibrated {
+                        // Apply temperature scaling to logits
+                        // Convert tensor to ndarray for ensemble calibrator
+                        let logits_shape = predictions.shape();
+                        let logits_vec = predictions.flatten_all()?.to_vec1::<f64>()?;
+                        let logits_array = ndarray::Array2::from_shape_vec(
+                            (logits_shape.dims()[0], logits_shape.dims()[1]),
+                            logits_vec,
+                        )
+                        .map_err(|e| {
+                            VangaError::ModelError(format!(
+                                "Failed to convert logits to ndarray: {}",
+                                e
+                            ))
+                        })?;
+
+                        // Apply temperature scaling
+                        let calibrated_logits = ensemble_cal.apply_to_logits(&logits_array)?;
+
+                        // Convert back to tensor
+                        let calibrated_vec: Vec<f64> = calibrated_logits.iter().copied().collect();
+                        let calibrated_tensor = Tensor::from_vec(
+                            calibrated_vec,
+                            (logits_shape.dims()[0], logits_shape.dims()[1]),
+                            &self.device,
+                        )?;
+
+                        // Log impact periodically
+                        if epoch % 10 == 0 && batch_idx == 0 {
+                            let metrics = ensemble_cal.get_calibration_metrics();
+                            log::info!(
+                                "📊 Ensemble calibration active at epoch {}: ECE={:.6}",
+                                epoch + 1,
+                                metrics.overall_ece
+                            );
+                        }
+
+                        calibrated_tensor
+                    } else {
+                        predictions.clone()
+                    }
                 } else {
                     predictions.clone()
                 };
@@ -1516,10 +1559,49 @@ impl LSTMModel {
                                 log::debug!("ℹ️ Bias corrector already calibrated - skipping initial calibration");
                             }
                         }
+                    } else if let Some(ref mut ensemble_cal) = self.ensemble_calibrator {
+                        // Ensemble calibration - initial setup
+                        if !ensemble_cal.is_calibrated {
+                            log::info!("🎯 Starting initial ensemble calibration...");
+
+                            // Ensure predictions are 5-class format
+                            if total_val_predictions.shape()[1] != 5 {
+                                log::warn!(
+                                    "⚠️ Unexpected prediction shape for ensemble calibration: [{}, {}], expected [*, 5]",
+                                    total_val_predictions.shape()[0],
+                                    total_val_predictions.shape()[1]
+                                );
+                            } else {
+                                // Convert targets to one-hot if needed
+                                let val_targets_for_ensemble = if total_val_targets.shape()[1] == 1
+                                {
+                                    let num_samples = total_val_targets.shape()[0];
+                                    let mut one_hot =
+                                        ndarray::Array2::<f64>::zeros((num_samples, 5));
+                                    for (i, class_idx) in total_val_targets.iter().enumerate() {
+                                        let class_index = (*class_idx as usize).min(4);
+                                        one_hot[[i, class_index]] = 1.0;
+                                    }
+                                    one_hot
+                                } else if total_val_targets.shape()[1] == 5 {
+                                    total_val_targets.clone()
+                                } else {
+                                    total_val_targets.slice(s![.., 0..5]).to_owned()
+                                };
+
+                                ensemble_cal.calibrate_from_validation(
+                                    &total_val_predictions,
+                                    &val_targets_for_ensemble,
+                                )?;
+                            }
+                        }
                     } else {
-                        log::info!("ℹ️ No bias corrector available - bias correction disabled");
+                        log::info!(
+                            "ℹ️ No bias correction mechanism available - bias correction disabled"
+                        );
                     }
                 }
+
                 // Progressive bias correction recalibration during training
                 if epoch > 0 && self.bias_corrector.is_some() {
                     let recalib_freq = self
@@ -1611,6 +1693,71 @@ impl LSTMModel {
                                         );
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Ensemble calibrator recalibration during training
+                if epoch > 0
+                    && epoch % 5 == 0
+                    && self.ensemble_calibrator.is_some()
+                    && !all_val_predictions.is_empty()
+                {
+                    if let Some(ref mut ensemble_cal) = self.ensemble_calibrator {
+                        let total_val_predictions = ndarray::concatenate(
+                            ndarray::Axis(0),
+                            &all_val_predictions
+                                .iter()
+                                .map(|arr| arr.view())
+                                .collect::<Vec<_>>(),
+                        )
+                        .map_err(|e| {
+                            VangaError::ModelError(format!(
+                                "Failed to concatenate validation predictions for ensemble recalibration: {}",
+                                e
+                            ))
+                        })?;
+
+                        let total_val_targets = ndarray::concatenate(
+                            ndarray::Axis(0),
+                            &all_val_targets
+                                .iter()
+                                .map(|arr| arr.view())
+                                .collect::<Vec<_>>(),
+                        )
+                        .map_err(|e| {
+                            VangaError::ModelError(format!(
+                                "Failed to concatenate validation targets for ensemble recalibration: {}",
+                                e
+                            ))
+                        })?;
+
+                        if total_val_predictions.shape()[1] == 5 {
+                            let val_targets_for_ensemble = if total_val_targets.shape()[1] == 1 {
+                                let num_samples = total_val_targets.shape()[0];
+                                let mut one_hot = ndarray::Array2::<f64>::zeros((num_samples, 5));
+                                for (i, class_idx) in total_val_targets.iter().enumerate() {
+                                    let class_index = (*class_idx as usize).min(4);
+                                    one_hot[[i, class_index]] = 1.0;
+                                }
+                                one_hot
+                            } else {
+                                total_val_targets.clone()
+                            };
+
+                            ensemble_cal.calibrate_from_validation(
+                                &total_val_predictions,
+                                &val_targets_for_ensemble,
+                            )?;
+
+                            if ensemble_cal.is_calibrated {
+                                let metrics = ensemble_cal.get_calibration_metrics();
+                                log::info!(
+                                    "🔄 Ensemble calibration recalibrated at epoch {}: {}",
+                                    epoch + 1,
+                                    metrics.summary()
+                                );
                             }
                         }
                     }

@@ -928,7 +928,9 @@ impl ParameterCalibrator {
                         // First restart: Quick escape from local optima (iteration 8)
                         // Second restart: Deeper exploration (iteration 16)
                         // Maximum 2 restarts to avoid infinite loops
-                        if (no_improvement_count == 8 || no_improvement_count == 16) && restart_count < 2 {
+                        if (no_improvement_count == 8 || no_improvement_count == 16)
+                            && restart_count < 2
+                        {
                             restart_count += 1;
                             log::info!(
                                 "{} 🔄 No improvement for {} iterations, injecting exploration samples (restart {}/2)...",
@@ -970,11 +972,14 @@ impl ParameterCalibrator {
                                 optimizer.add_observation(random_params, score);
                             }
                             log::info!("{} ✨ Added 5 exploration samples (deterministic)", prefix);
-                            
+
                             // CRITICAL: Reset patience counter after restart
                             // Research shows restarts need fresh exploitation window
                             no_improvement_count = 0;
-                            log::debug!("{} 🔄 Reset patience counter for post-restart exploitation", prefix);
+                            log::debug!(
+                                "{} 🔄 Reset patience counter for post-restart exploitation",
+                                prefix
+                            );
                         }
 
                         if no_improvement_count >= max_patience {
