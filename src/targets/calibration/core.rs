@@ -127,7 +127,7 @@ impl ParameterCalibrator {
     pub fn from_config(targets_config: &crate::config::training::TargetsConfig) -> Self {
         Self {
             target_balance: 0.2,
-            max_iterations: 100,
+            max_iterations: 200,
             balance_weight: 0.6,
             diversity_weight: 0.4,
             seed: None, // Will be set via from_config_with_seed if needed
