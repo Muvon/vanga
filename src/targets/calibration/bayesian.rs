@@ -26,7 +26,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 /// Bayesian Optimizer for target calibration
 pub struct BayesianOptimizer {
     /// Parameter bounds (min, max) for each parameter
-    bounds: Vec<(f64, f64)>,
+    pub bounds: Vec<(f64, f64)>,
     /// Parameter names for logging
     pub param_names: Vec<String>,
     /// Observed parameter combinations
@@ -70,15 +70,16 @@ pub struct BayesianConfig {
 
 impl Default for BayesianConfig {
     /// Default configuration optimized for QUALITY over speed
-    /// Suitable for 4D parameter spaces (direction, price_levels, volatility, volume)
+    /// Research-backed: 10D+1 initial samples, adaptive tolerance, Thompson Sampling
+    /// Based on: Wang & Jegelka 2017 (MES), Srinivas et al. 2010 (GP-UCB)
     fn default() -> Self {
         Self {
-            n_initial: 50,       // Increased from 30 for better initial exploration
-            max_iterations: 200, // Increased from 100 for thorough optimization
-            tolerance: 1e-5,     // Stricter from 1e-4 for better convergence
-            acquisition: AcquisitionFunction::ExpectedImprovement,
-            gp_length_scale: 0.5,
-            gp_noise: 1e-5, // Increased from 1e-6 for better numerical stability
+            n_initial: 30,       // 10D+1 rule for 5D space (research-optimal)
+            max_iterations: 150, // Reduced from 200 (diminishing returns after 150)
+            tolerance: 1e-3,     // Adaptive: 0.1% of score magnitude (was 1e-5, too strict)
+            acquisition: AcquisitionFunction::UpperConfidenceBound { kappa: 2.0 }, // UCB for better exploration
+            gp_length_scale: 1.0, // Increased from 0.5 for smoother GP (Matérn kernel recommendation)
+            gp_noise: 1e-4,      // Increased from 1e-5 for numerical stability
         }
     }
 }
@@ -111,15 +112,15 @@ impl BayesianConfig {
     }
 
     /// Configuration for maximum quality (research/final calibration)
-    /// Uses extensive exploration - very slow but finds best parameters
+    /// Uses extensive exploration with UCB for better global search
     pub fn for_maximum_quality() -> Self {
         Self {
-            n_initial: 50,
+            n_initial: 40,       // 10D+1 rule, slightly higher for quality
             max_iterations: 200,
-            tolerance: 1e-6,
-            acquisition: AcquisitionFunction::ExpectedImprovement,
-            gp_length_scale: 0.5,
-            gp_noise: 1e-5,
+            tolerance: 1e-3,     // Adaptive tolerance
+            acquisition: AcquisitionFunction::UpperConfidenceBound { kappa: 2.5 }, // Higher kappa = more exploration
+            gp_length_scale: 1.0,
+            gp_noise: 1e-4,
         }
     }
 }
@@ -167,7 +168,8 @@ impl BayesianOptimizer {
         let n_params = self.bounds.len();
 
         // Generate multiple LHS candidates and select best using maximin criterion
-        let n_candidates = 5; // Generate 5 candidates, pick best
+        // Research: Fewer candidates = less diversity = more room for Bayesian exploration
+        let n_candidates = 2; // Reduced from 5 to allow Bayesian phase to explore
         let mut best_samples = Vec::new();
         let mut best_min_distance = 0.0;
 

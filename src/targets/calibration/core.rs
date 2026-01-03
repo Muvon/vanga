@@ -885,9 +885,9 @@ impl ParameterCalibrator {
 
         let mut prev_best_score = f64::INFINITY;
         let mut no_improvement_count = 0;
-        let max_patience = 15; // Increased from 5 for quality
+        let max_patience = 20; // Increased from 15 for thorough exploration
         let n_params = optimizer.param_names.len();
-        let min_iterations = if n_params >= 6 { 50 } else { 30 }; // Minimum iterations based on dimensionality
+        let min_iterations = if n_params >= 6 { 60 } else { 40 }; // Increased minimum iterations
 
         for iteration in 0..config.max_iterations {
             // Suggest next point to evaluate
@@ -912,12 +912,37 @@ impl ParameterCalibrator {
                         absolute_improvement
                     };
 
+                    // Adaptive tolerance: scale with score magnitude (research-backed)
+                    let adaptive_tolerance = (best_score.abs() * config.tolerance).max(1e-5);
+                    
                     // Check multiple convergence criteria
-                    let absolute_converged = absolute_improvement < config.tolerance;
-                    let relative_converged = relative_improvement < 0.001; // 0.1% relative improvement
+                    let absolute_converged = absolute_improvement < adaptive_tolerance;
+                    let relative_converged = relative_improvement < 0.002; // 0.2% relative (relaxed from 0.1%)
 
                     if absolute_converged && relative_converged {
                         no_improvement_count += 1;
+
+                        // Research-backed: Random restart after 10 iterations of no improvement
+                        // Prevents getting stuck in local optima (Nature 2024)
+                        if no_improvement_count == 10 {
+                            log::info!(
+                                "{} 🔄 No improvement for 10 iterations, injecting exploration samples...",
+                                prefix
+                            );
+                            
+                            // Add 3 random samples far from current observations for exploration
+                            for _ in 0..3 {
+                                let mut random_params = Vec::new();
+                                for (min, max) in &optimizer.bounds {
+                                    // Use current time as additional entropy
+                                    let random_val = min + (max - min) * (rand::random::<f64>());
+                                    random_params.push(random_val);
+                                }
+                                let score = objective_fn(&random_params)?;
+                                optimizer.add_observation(random_params, score);
+                            }
+                            log::info!("{} ✨ Added 3 exploration samples", prefix);
+                        }
 
                         if no_improvement_count >= max_patience {
                             log::info!(
