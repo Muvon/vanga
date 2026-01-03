@@ -893,7 +893,7 @@ impl ParameterCalibrator {
 
         for iteration in 0..config.max_iterations {
             // Suggest next point to evaluate
-            let next_params = optimizer.suggest_next()?;
+            let next_params = optimizer.suggest_next(prefix)?;
 
             // Evaluate objective function
             let score = objective_fn(&next_params)?;

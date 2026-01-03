@@ -4,6 +4,8 @@
 //! This module provides the same public API as the original monolithic implementation.
 
 pub mod bayesian;
+#[cfg(test)]
+mod bayesian_test;
 pub mod core;
 pub mod direction;
 pub mod price_levels;
