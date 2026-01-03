@@ -118,7 +118,7 @@ impl AdaptiveLabelSmoothing {
                 0.5
             };
 
-            self.epsilons[class_idx] = (confidence_gap * scaling_factor).max(0.0).min(0.3);
+            self.epsilons[class_idx] = (confidence_gap * scaling_factor).clamp(0.0, 0.3);
         }
 
         self.is_calibrated = true;

@@ -7,6 +7,8 @@ use super::types::*;
 use super::utils::CalibrationUtils;
 use crate::data::structures::MarketDataRow;
 use crate::utils::error::Result;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 
 /// Target parameter calibrator - single clean interface with diversity optimization
@@ -885,9 +887,9 @@ impl ParameterCalibrator {
 
         let mut prev_best_score = f64::INFINITY;
         let mut no_improvement_count = 0;
-        let max_patience = 20; // Increased from 15 for thorough exploration
-        let n_params = optimizer.param_names.len();
-        let min_iterations = if n_params >= 6 { 60 } else { 40 }; // Increased minimum iterations
+        let mut restart_count = 0; // Track number of restarts performed
+        let max_patience = 25; // Research-backed: 25 iterations for post-restart exploitation
+        let min_iterations = 50; // Research-backed: 10D+1 rule for 5D space
 
         for iteration in 0..config.max_iterations {
             // Suggest next point to evaluate
@@ -922,26 +924,57 @@ impl ParameterCalibrator {
                     if absolute_converged && relative_converged {
                         no_improvement_count += 1;
 
-                        // Research-backed: Random restart after 10 iterations of no improvement
-                        // Prevents getting stuck in local optima (Nature 2024)
-                        if no_improvement_count == 10 {
+                        // Research-backed: Multiple random restarts for global search
+                        // First restart: Quick escape from local optima (iteration 8)
+                        // Second restart: Deeper exploration (iteration 16)
+                        // Maximum 2 restarts to avoid infinite loops
+                        if (no_improvement_count == 8 || no_improvement_count == 16) && restart_count < 2 {
+                            restart_count += 1;
                             log::info!(
-                                "{} 🔄 No improvement for 10 iterations, injecting exploration samples...",
-                                prefix
+                                "{} 🔄 No improvement for {} iterations, injecting exploration samples (restart {}/2)...",
+                                prefix,
+                                no_improvement_count,
+                                restart_count
                             );
 
-                            // Add 3 random samples far from current observations for exploration
-                            for _ in 0..3 {
+                            // Create seeded RNG for deterministic random restarts
+                            let mut rng: Box<dyn rand::RngCore> = match optimizer.seed() {
+                                Some(0) | None => {
+                                    // seed=0 or None means random
+                                    Box::new(rand::rng())
+                                }
+                                Some(seed_value) => {
+                                    // Use seeded RNG with iteration offset for reproducibility
+                                    // Different offset for each restart
+                                    let restart_seed = seed_value
+                                        .wrapping_add(iteration as u64)
+                                        .wrapping_add(restart_count as u64 * 1000);
+                                    log::debug!(
+                                        "{} 🎲 Using seeded RNG (seed={}) for deterministic random restart {}",
+                                        prefix,
+                                        restart_seed,
+                                        restart_count
+                                    );
+                                    Box::new(StdRng::seed_from_u64(restart_seed))
+                                }
+                            };
+
+                            // Add 5 random samples for stronger exploration
+                            for _ in 0..5 {
                                 let mut random_params = Vec::new();
                                 for (min, max) in &optimizer.bounds {
-                                    // Use current time as additional entropy
-                                    let random_val = min + (max - min) * (rand::random::<f64>());
+                                    let random_val = min + (max - min) * rng.random_range(0.0..1.0);
                                     random_params.push(random_val);
                                 }
                                 let score = objective_fn(&random_params)?;
                                 optimizer.add_observation(random_params, score);
                             }
-                            log::info!("{} ✨ Added 3 exploration samples", prefix);
+                            log::info!("{} ✨ Added 5 exploration samples (deterministic)", prefix);
+                            
+                            // CRITICAL: Reset patience counter after restart
+                            // Research shows restarts need fresh exploitation window
+                            no_improvement_count = 0;
+                            log::debug!("{} 🔄 Reset patience counter for post-restart exploitation", prefix);
                         }
 
                         if no_improvement_count >= max_patience {

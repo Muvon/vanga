@@ -69,17 +69,17 @@ pub struct BayesianConfig {
 }
 
 impl Default for BayesianConfig {
-    /// Default configuration optimized for QUALITY over speed
-    /// Research-backed: 10D+1 initial samples, adaptive tolerance, Thompson Sampling
+    /// Default configuration optimized for SPEED + QUALITY balance
+    /// Research-backed: 5D optimal, adaptive tolerance, UCB with high kappa
     /// Based on: Wang & Jegelka 2017 (MES), Srinivas et al. 2010 (GP-UCB)
     fn default() -> Self {
         Self {
-            n_initial: 30,       // 10D+1 rule for 5D space (research-optimal)
-            max_iterations: 150, // Reduced from 200 (diminishing returns after 150)
-            tolerance: 1e-3,     // Adaptive: 0.1% of score magnitude (was 1e-5, too strict)
-            acquisition: AcquisitionFunction::UpperConfidenceBound { kappa: 2.0 }, // UCB for better exploration
-            gp_length_scale: 1.0, // Increased from 0.5 for smoother GP (Matérn kernel recommendation)
-            gp_noise: 1e-4,       // Increased from 1e-5 for numerical stability
+            n_initial: 25,       // 5D optimal (reduced from 30 for speed)
+            max_iterations: 100, // Reduced from 150 (you converge around 100)
+            tolerance: 1e-3,     // Adaptive: 0.1% of score magnitude
+            acquisition: AcquisitionFunction::UpperConfidenceBound { kappa: 2.5 }, // Higher kappa = more exploration
+            gp_length_scale: 1.0,
+            gp_noise: 1e-4,
         }
     }
 }
@@ -143,6 +143,11 @@ impl BayesianOptimizer {
             acquisition: config.acquisition.clone(),
             seed,
         }
+    }
+
+    /// Get the random seed for reproducibility
+    pub fn seed(&self) -> Option<u64> {
+        self.seed
     }
 
     /// Initialize with Enhanced Latin Hypercube Sampling using maximin criterion
@@ -358,8 +363,8 @@ impl BayesianOptimizer {
             }
         };
 
-        let n_restarts = 50; // Increased from 10 for quality
-        let n_candidates = 5000; // Increased from 2000 for quality
+        let n_restarts = 20; // Reduced from 50 for speed (diminishing returns)
+        let n_candidates = 2000; // Reduced from 5000 for speed (still thorough)
 
         let mut best_params = Vec::new();
         let mut best_acquisition_value = f64::NEG_INFINITY;
