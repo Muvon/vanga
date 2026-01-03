@@ -66,8 +66,9 @@ impl AdaptiveLabelSmoothing {
             let mut accuracy_sum = 0.0;
             let mut class_count = 0;
 
-            for (pred_row, target_row) in
-                predictions.axis_iter(Axis(0)).zip(targets.axis_iter(Axis(0)))
+            for (pred_row, target_row) in predictions
+                .axis_iter(Axis(0))
+                .zip(targets.axis_iter(Axis(0)))
             {
                 let confidence = pred_row[class_idx];
                 let is_true_class = target_row[class_idx] > 0.5;

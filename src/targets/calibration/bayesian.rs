@@ -79,7 +79,7 @@ impl Default for BayesianConfig {
             tolerance: 1e-3,     // Adaptive: 0.1% of score magnitude (was 1e-5, too strict)
             acquisition: AcquisitionFunction::UpperConfidenceBound { kappa: 2.0 }, // UCB for better exploration
             gp_length_scale: 1.0, // Increased from 0.5 for smoother GP (Matérn kernel recommendation)
-            gp_noise: 1e-4,      // Increased from 1e-5 for numerical stability
+            gp_noise: 1e-4,       // Increased from 1e-5 for numerical stability
         }
     }
 }
@@ -115,9 +115,9 @@ impl BayesianConfig {
     /// Uses extensive exploration with UCB for better global search
     pub fn for_maximum_quality() -> Self {
         Self {
-            n_initial: 40,       // 10D+1 rule, slightly higher for quality
+            n_initial: 40, // 10D+1 rule, slightly higher for quality
             max_iterations: 200,
-            tolerance: 1e-3,     // Adaptive tolerance
+            tolerance: 1e-3, // Adaptive tolerance
             acquisition: AcquisitionFunction::UpperConfidenceBound { kappa: 2.5 }, // Higher kappa = more exploration
             gp_length_scale: 1.0,
             gp_noise: 1e-4,

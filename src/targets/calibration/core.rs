@@ -914,7 +914,7 @@ impl ParameterCalibrator {
 
                     // Adaptive tolerance: scale with score magnitude (research-backed)
                     let adaptive_tolerance = (best_score.abs() * config.tolerance).max(1e-5);
-                    
+
                     // Check multiple convergence criteria
                     let absolute_converged = absolute_improvement < adaptive_tolerance;
                     let relative_converged = relative_improvement < 0.002; // 0.2% relative (relaxed from 0.1%)
@@ -929,7 +929,7 @@ impl ParameterCalibrator {
                                 "{} 🔄 No improvement for 10 iterations, injecting exploration samples...",
                                 prefix
                             );
-                            
+
                             // Add 3 random samples far from current observations for exploration
                             for _ in 0..3 {
                                 let mut random_params = Vec::new();

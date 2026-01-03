@@ -48,7 +48,10 @@ pub fn calculate_ece(predictions: &Array2<f64>, targets: &Array2<f64>) -> Result
     let mut bins: Vec<(f64, f64, usize)> = vec![(0.0, 0.0, 0); NUM_BINS];
 
     // Assign samples to bins
-    for (pred_row, target_row) in predictions.axis_iter(Axis(0)).zip(targets.axis_iter(Axis(0))) {
+    for (pred_row, target_row) in predictions
+        .axis_iter(Axis(0))
+        .zip(targets.axis_iter(Axis(0)))
+    {
         // Get predicted class and confidence
         let (pred_class, max_conf) = pred_row
             .iter()
@@ -112,8 +115,9 @@ pub fn calculate_per_class_ece(
         let mut bins: Vec<(f64, f64, usize)> = vec![(0.0, 0.0, 0); NUM_BINS];
 
         // Assign samples to bins (only for this class)
-        for (pred_row, target_row) in
-            predictions.axis_iter(Axis(0)).zip(targets.axis_iter(Axis(0)))
+        for (pred_row, target_row) in predictions
+            .axis_iter(Axis(0))
+            .zip(targets.axis_iter(Axis(0)))
         {
             let confidence = pred_row[class_idx];
             let is_true_class = target_row[class_idx] > 0.5;
@@ -168,7 +172,10 @@ pub fn generate_reliability_diagram(
     let mut bins: Vec<(f64, f64, usize)> = vec![(0.0, 0.0, 0); NUM_BINS];
 
     // Assign samples to bins
-    for (pred_row, target_row) in predictions.axis_iter(Axis(0)).zip(targets.axis_iter(Axis(0))) {
+    for (pred_row, target_row) in predictions
+        .axis_iter(Axis(0))
+        .zip(targets.axis_iter(Axis(0)))
+    {
         let (pred_class, max_conf) = pred_row
             .iter()
             .enumerate()

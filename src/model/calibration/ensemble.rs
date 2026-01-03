@@ -2,7 +2,9 @@
 //!
 //! Combines temperature scaling, label smoothing, and mixup for optimal calibration.
 
-use super::ece::{calculate_ece, calculate_per_class_ece, generate_reliability_diagram, ReliabilityDiagram};
+use super::ece::{
+    calculate_ece, calculate_per_class_ece, generate_reliability_diagram, ReliabilityDiagram,
+};
 use super::label_smoothing::AdaptiveLabelSmoothing;
 use super::mixup::AdaptiveMixup;
 use super::temperature::AdaptiveTemperatureScaling;
@@ -174,7 +176,12 @@ impl EnsembleCalibrator {
             "   Temperatures: {:?}",
             self.temperature_scaling.get_temperatures()
         );
-        for (class_idx, &temp) in self.temperature_scaling.get_temperatures().iter().enumerate() {
+        for (class_idx, &temp) in self
+            .temperature_scaling
+            .get_temperatures()
+            .iter()
+            .enumerate()
+        {
             let status = if temp < 0.9 {
                 "sharpening (more confident)"
             } else if temp > 1.1 {
@@ -186,10 +193,7 @@ impl EnsembleCalibrator {
         }
 
         log::info!("🎯 Label Smoothing:");
-        log::info!(
-            "   Epsilons: {:?}",
-            self.label_smoothing.get_epsilons()
-        );
+        log::info!("   Epsilons: {:?}", self.label_smoothing.get_epsilons());
         if self.label_smoothing.has_significant_smoothing() {
             for (class_idx, &eps) in self.label_smoothing.get_epsilons().iter().enumerate() {
                 if eps > 0.05 {
@@ -226,7 +230,10 @@ impl EnsembleCalibrator {
         } else {
             "Needs improvement"
         };
-        log::info!("   Quality: {} (ECE < 0.05 = excellent)", calibration_quality);
+        log::info!(
+            "   Quality: {} (ECE < 0.05 = excellent)",
+            calibration_quality
+        );
 
         log::info!("📊 ═══════════════════════════════════════════════════════════");
     }

@@ -23,7 +23,7 @@ pub struct AdaptiveMixup {
 impl Default for AdaptiveMixup {
     fn default() -> Self {
         Self {
-            alpha: 0.2, // Conservative starting point
+            alpha: 0.2,                     // Conservative starting point
             enabled_for_classes: [true; 5], // Enable for all initially
             current_ece: 0.0,
             is_calibrated: false,
@@ -66,7 +66,11 @@ impl AdaptiveMixup {
 
         self.is_calibrated = true;
 
-        log::info!("   Mixup alpha: {:.3} (ECE: {:.4})", self.alpha, overall_ece);
+        log::info!(
+            "   Mixup alpha: {:.3} (ECE: {:.4})",
+            self.alpha,
+            overall_ece
+        );
         log::info!(
             "   Enabled for classes: {:?}",
             self.enabled_for_classes
@@ -142,7 +146,8 @@ impl AdaptiveMixup {
             // Mix sequences: lambda * seq_i + (1 - lambda) * seq_j
             for seq_idx in 0..sequences.shape()[1] {
                 for feat_idx in 0..sequences.shape()[2] {
-                    mixed_sequences[[i, seq_idx, feat_idx]] = lambda * sequences[[i, seq_idx, feat_idx]]
+                    mixed_sequences[[i, seq_idx, feat_idx]] = lambda
+                        * sequences[[i, seq_idx, feat_idx]]
                         + (1.0 - lambda) * sequences[[j, seq_idx, feat_idx]];
                 }
             }
