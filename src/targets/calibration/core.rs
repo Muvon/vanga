@@ -924,16 +924,19 @@ impl ParameterCalibrator {
                     if absolute_converged && relative_converged {
                         no_improvement_count += 1;
 
-                        // Research-backed: Multiple random restarts for global search
-                        // First restart: Quick escape from local optima (iteration 8)
-                        // Second restart: Deeper exploration (iteration 16)
-                        // Maximum 2 restarts to avoid infinite loops
-                        if (no_improvement_count == 8 || no_improvement_count == 16)
-                            && restart_count < 2
+                        // AGGRESSIVE early exploration to avoid wasting iterations in local minima
+                        // First restart: Quick escape (iteration 5)
+                        // Second restart: Deeper exploration (iteration 10)
+                        // Third restart: Last chance (iteration 15)
+                        // Maximum 3 restarts with more samples per restart
+                        if (no_improvement_count == 5
+                            || no_improvement_count == 10
+                            || no_improvement_count == 15)
+                            && restart_count < 3
                         {
                             restart_count += 1;
                             log::info!(
-                                "{} 🔄 No improvement for {} iterations, injecting exploration samples (restart {}/2)...",
+                                "{} 🔄 No improvement for {} iterations, injecting exploration samples (restart {}/3)...",
                                 prefix,
                                 no_improvement_count,
                                 restart_count
@@ -961,8 +964,8 @@ impl ParameterCalibrator {
                                 }
                             };
 
-                            // Add 5 random samples for stronger exploration
-                            for _ in 0..5 {
+                            // Add 10 random samples for AGGRESSIVE exploration (doubled from 5)
+                            for _ in 0..10 {
                                 let mut random_params = Vec::new();
                                 for (min, max) in &optimizer.bounds {
                                     let random_val = min + (max - min) * rng.random_range(0.0..1.0);
@@ -971,7 +974,10 @@ impl ParameterCalibrator {
                                 let score = objective_fn(&random_params)?;
                                 optimizer.add_observation(random_params, score);
                             }
-                            log::info!("{} ✨ Added 5 exploration samples (deterministic)", prefix);
+                            log::info!(
+                                "{} ✨ Added 10 exploration samples (deterministic)",
+                                prefix
+                            );
 
                             // CRITICAL: Reset patience counter after restart
                             // Research shows restarts need fresh exploitation window

@@ -316,8 +316,8 @@ impl BayesianOptimizer {
         let n_params = self.bounds.len();
 
         // Generate multiple LHS candidates and select best using maximin criterion
-        // Research: Fewer candidates = less diversity = more room for Bayesian exploration
-        let n_candidates = 2; // Reduced from 5 to allow Bayesian phase to explore
+        // CRITICAL: More candidates = better initial coverage = faster convergence
+        let n_candidates = 5; // Increased from 2 to ensure good initial coverage
         let mut best_samples = Vec::new();
         let mut best_min_distance = 0.0;
 
