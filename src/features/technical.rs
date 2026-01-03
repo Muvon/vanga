@@ -829,8 +829,12 @@ fn add_crypto_specific_indicators(
     if advanced_config.enabled {
         let hurst_values = calculate_hurst_exponent(close, advanced_config.hurst_window);
         let fractal_dims = calculate_fractal_dimension(close, advanced_config.fractal_window);
-        let regime_values =
-            calculate_regime_indicator(close, volume, advanced_config.regime_window, timeframe_multiplier);
+        let regime_values = calculate_regime_indicator(
+            close,
+            volume,
+            advanced_config.regime_window,
+            timeframe_multiplier,
+        );
         let clustering_values =
             calculate_volatility_clustering(close, advanced_config.clustering_window);
         let reversion_values =
@@ -1172,7 +1176,12 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
 
 /// Calculate Regime Indicator combining volatility, trend, and volume signals
 /// Returns 0-3 scale: 0=stable/ranging, 3=high volatility/trending/high volume
-fn calculate_regime_indicator(prices: &[f64], volume: &[f64], window: usize, _timeframe_multiplier: f64) -> Vec<f64> {
+fn calculate_regime_indicator(
+    prices: &[f64],
+    volume: &[f64],
+    window: usize,
+    _timeframe_multiplier: f64,
+) -> Vec<f64> {
     let mut regime_values = vec![f64::NAN; prices.len()];
 
     if prices.len() < window || volume.len() != prices.len() || window < 5 {
@@ -1188,19 +1197,19 @@ fn calculate_regime_indicator(prices: &[f64], volume: &[f64], window: usize, _ti
     // Calculate historical statistics for adaptive thresholds
     let mut all_volatilities = Vec::new();
     let mut all_trend_strengths = Vec::new();
-    
+
     for i in window..prices.len() {
         let price_window = &prices[i - window..i];
-        
+
         let returns: Vec<f64> = price_window
             .windows(2)
             .map(|w| (w[1] / w[0]).ln())
             .collect();
-        
+
         if !returns.is_empty() {
             let volatility = returns.iter().map(|r| r.powi(2)).sum::<f64>() / returns.len() as f64;
             all_volatilities.push(volatility);
-            
+
             let price_start = price_window[0];
             let price_end = price_window[price_window.len() - 1];
             let price_change = (price_end - price_start) / price_start;

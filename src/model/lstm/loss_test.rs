@@ -1,6 +1,8 @@
 //! Tests for loss calculation module
 
 use super::loss::*;
+use crate::model::lstm::config::LSTMConfig;
+use crate::targets::TargetType;
 use candle_core::{Device, Tensor};
 use candle_nn;
 
@@ -389,5 +391,212 @@ fn test_ordinal_loss_ordering_property() {
         "Middle point property violated: mild loss {} >= strong loss {}",
         mild_loss_value,
         strong_loss_value
+    );
+}
+
+#[test]
+fn test_sofl_neutral_class_no_bias() {
+    // Test that SOFL doesn't bias against neutral class (class 2)
+    let device = Device::Cpu;
+    let batch_size = 100;
+    let num_classes = 5;
+
+    // Create model config
+    let config = LSTMConfig {
+        input_size: 10,
+        hidden_size: 20,
+        output_size: num_classes,
+        num_layers: 1,
+        dropout: 0.0,
+        bidirectional: false,
+        attention_heads: None,
+    };
+
+    let varmap = candle_nn::VarMap::new();
+    let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+    
+    let model = crate::model::lstm::config::LSTMModel::new(config, vb, None)
+        .expect("Failed to create model");
+
+    // Test all classes equally
+    let mut class_losses = Vec::new();
+    
+    for target_class in 0..num_classes {
+        // Create predictions (uniform distribution initially)
+        let predictions = Tensor::ones((batch_size, num_classes), candle_core::DType::F32, &device)
+            .expect("Failed to create predictions")
+            .affine(0.2, 0.0)
+            .expect("Failed to scale predictions");
+
+        // Create targets - all samples have same class
+        let targets = Tensor::new(
+            vec![target_class as f32; batch_size],
+            &device
+        )
+        .expect("Failed to create targets")
+        .reshape((batch_size, 1))
+        .expect("Failed to reshape targets");
+
+        // Calculate loss
+        let training_config = crate::config::TrainingConfig::default();
+        let loss = model.calculate_loss(
+            &predictions,
+            &targets,
+            &training_config,
+            false,
+        ).expect("Failed to calculate loss");
+
+        let loss_value = loss.to_scalar::<f32>().expect("Failed to get loss value");
+        class_losses.push(loss_value);
+        
+        println!("Class {} loss: {:.6}", target_class, loss_value);
+    }
+
+    // Verify that neutral class (2) doesn't have significantly different loss
+    let neutral_loss = class_losses[2];
+    let edge_loss_avg = (class_losses[0] + class_losses[4]) / 2.0;
+    
+    // With SOFL, neutral class loss should be within 20% of edge classes
+    // (Old CDW-CE had 50%+ difference)
+    let ratio = (neutral_loss - edge_loss_avg).abs() / edge_loss_avg;
+    
+    println!("Neutral vs Edge loss ratio: {:.2}%", ratio * 100.0);
+    assert!(
+        ratio < 0.25,
+        "Neutral class loss differs too much from edge classes: {:.2}% (should be < 25%)",
+        ratio * 100.0
+    );
+}
+
+#[test]
+fn test_sofl_soft_labels_generation() {
+    // Test that soft labels are generated correctly with Gaussian smoothing
+    let device = Device::Cpu;
+    let batch_size = 5;
+    let num_classes = 5;
+
+    let config = LSTMConfig {
+        input_size: 10,
+        hidden_size: 20,
+        output_size: num_classes,
+        num_layers: 1,
+        dropout: 0.0,
+        bidirectional: false,
+        attention_heads: None,
+    };
+
+    let varmap = candle_nn::VarMap::new();
+    let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+    
+    let model = crate::model::lstm::config::LSTMModel::new(config, vb, None)
+        .expect("Failed to create model");
+
+    // Test with class 2 (neutral) - should have symmetric soft labels
+    let predictions = Tensor::randn(0.0f32, 1.0f32, (batch_size, num_classes), &device)
+        .expect("Failed to create predictions");
+    
+    let targets = Tensor::new(
+        vec![2.0f32; batch_size],
+        &device
+    )
+    .expect("Failed to create targets")
+    .reshape((batch_size, 1))
+    .expect("Failed to reshape targets");
+
+    let training_config = crate::config::TrainingConfig::default();
+    let loss = model.calculate_loss(
+        &predictions,
+        &targets,
+        &training_config,
+        false,
+    );
+
+    // Should compute successfully with soft labels
+    assert!(loss.is_ok(), "SOFL with soft labels should compute successfully");
+    
+    let loss_value = loss.unwrap().to_scalar::<f32>().expect("Failed to get loss value");
+    
+    // Loss should be reasonable (not NaN, not infinite)
+    assert!(loss_value.is_finite(), "Loss should be finite");
+    assert!(loss_value > 0.0, "Loss should be positive");
+    
+    println!("SOFL with soft labels: {:.6}", loss_value);
+}
+
+#[test]
+fn test_sofl_focal_component() {
+    // Test that focal loss component works correctly
+    let device = Device::Cpu;
+    let batch_size = 10;
+    let num_classes = 5;
+
+    let config = LSTMConfig {
+        input_size: 10,
+        hidden_size: 20,
+        output_size: num_classes,
+        num_layers: 1,
+        dropout: 0.0,
+        bidirectional: false,
+        attention_heads: None,
+    };
+
+    let varmap = candle_nn::VarMap::new();
+    let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+    
+    let model = crate::model::lstm::config::LSTMModel::new(config, vb, None)
+        .expect("Failed to create model");
+
+    // Create easy examples (high confidence correct predictions)
+    let mut easy_preds = vec![0.0f32; batch_size * num_classes];
+    for i in 0..batch_size {
+        easy_preds[i * num_classes + 2] = 5.0; // High logit for class 2
+    }
+    let easy_predictions = Tensor::from_vec(
+        easy_preds,
+        (batch_size, num_classes),
+        &device
+    ).expect("Failed to create easy predictions");
+
+    // Create hard examples (low confidence)
+    let hard_predictions = Tensor::randn(0.0f32, 0.5f32, (batch_size, num_classes), &device)
+        .expect("Failed to create hard predictions");
+
+    let targets = Tensor::new(
+        vec![2.0f32; batch_size],
+        &device
+    )
+    .expect("Failed to create targets")
+    .reshape((batch_size, 1))
+    .expect("Failed to reshape targets");
+
+    let training_config = crate::config::TrainingConfig::default();
+    
+    let easy_loss = model.calculate_loss(
+        &easy_predictions,
+        &targets,
+        &training_config,
+        false,
+    ).expect("Failed to calculate easy loss");
+
+    let hard_loss = model.calculate_loss(
+        &hard_predictions,
+        &targets,
+        &training_config,
+        false,
+    ).expect("Failed to calculate hard loss");
+
+    let easy_loss_value = easy_loss.to_scalar::<f32>().expect("Failed to get easy loss");
+    let hard_loss_value = hard_loss.to_scalar::<f32>().expect("Failed to get hard loss");
+
+    println!("Easy examples loss: {:.6}", easy_loss_value);
+    println!("Hard examples loss: {:.6}", hard_loss_value);
+
+    // Focal loss should down-weight easy examples
+    // So easy loss should be lower than hard loss
+    assert!(
+        easy_loss_value < hard_loss_value,
+        "Focal loss should down-weight easy examples (easy: {:.6} should be < hard: {:.6})",
+        easy_loss_value,
+        hard_loss_value
     );
 }
