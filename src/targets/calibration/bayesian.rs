@@ -73,8 +73,8 @@ impl Default for BayesianConfig {
     /// Suitable for 4D parameter spaces (direction, price_levels, volatility, volume)
     fn default() -> Self {
         Self {
-            n_initial: 30,       // Increased from 15 for better initial exploration
-            max_iterations: 100, // Increased from 50 for thorough optimization
+            n_initial: 50,       // Increased from 30 for better initial exploration
+            max_iterations: 200, // Increased from 100 for thorough optimization
             tolerance: 1e-5,     // Stricter from 1e-4 for better convergence
             acquisition: AcquisitionFunction::ExpectedImprovement,
             gp_length_scale: 0.5,

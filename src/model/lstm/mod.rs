@@ -52,6 +52,9 @@ mod hidden_state_test;
 #[cfg(test)]
 mod inference_test;
 
+#[cfg(test)]
+mod loss_test;
+
 // Re-export main types for backward compatibility
 pub use config::{
     LSTMConfig, LSTMModel, ModelState, OptimizerWrapper, TargetFormat, TrainingConfig,
@@ -149,7 +152,6 @@ mod tests {
                 seed: 42,                 // Fixed seed for reproducible tests
             },
             data: crate::config::training::DataConfig::default(),
-            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         // Test that early stopping training completes without errors
@@ -215,6 +217,7 @@ mod tests {
             features: crate::config::FeatureConfig::default(),
             model: crate::config::ModelConfig::default(),
             targets: crate::config::training::TargetsConfig::default(),
+            data: crate::config::training::DataConfig::default(),
             training: TrainingParams {
                 epochs: EpochConfig::Fixed(5), // Fixed epochs - should bypass early stopping
                 batch_size: crate::config::training::BatchSizeConfig::Fixed(32),
@@ -243,8 +246,6 @@ mod tests {
 
                 seed: 42, // Fixed seed for reproducible tests
             },
-            data: crate::config::training::DataConfig::default(),
-            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         // Test that fixed epochs training completes without errors
@@ -337,7 +338,6 @@ mod tests {
             },
 
             data: crate::config::training::DataConfig::default(),
-            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         model
@@ -461,7 +461,6 @@ mod tests {
                 seed: 42,                 // Fixed seed for reproducible tests
             },
             data: crate::config::training::DataConfig::default(),
-            optimization: crate::config::training::OptimizationConfig::default(),
         };
 
         // Test multi-layer training
