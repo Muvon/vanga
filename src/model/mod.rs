@@ -9,6 +9,7 @@ pub mod attention_viz;
 pub mod bias_correction;
 #[cfg(test)]
 pub mod bias_correction_integration_test;
+pub mod calibration;
 
 pub mod lstm;
 pub mod lstm_simple;
@@ -32,6 +33,10 @@ pub use attention_optimizer::{
 };
 pub use attention_viz::{AttentionAnalysis, AttentionVisualizationConfig, AttentionVisualizer};
 pub use bias_correction::{BiasCorrection, LinearBiasCorrector};
+pub use calibration::{
+    AdaptiveLabelSmoothing, AdaptiveMixup, AdaptiveTemperatureScaling, EnsembleCalibrator,
+    ReliabilityDiagram,
+};
 pub use lstm::{LSTMConfig, LSTMModel}; // Use new modular LSTM
 pub use lstm_simple::*; // Backward compatibility
 pub use multi_target::MultiTargetLSTMModel;

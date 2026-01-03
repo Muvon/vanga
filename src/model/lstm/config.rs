@@ -172,6 +172,9 @@ pub struct LSTMModel {
 
     /// Full linear bias corrector (replaces simple factors)
     pub bias_corrector: Option<crate::model::bias_correction::LinearBiasCorrector>,
+
+    /// Ensemble calibrator (temperature scaling + label smoothing + mixup)
+    pub ensemble_calibrator: Option<crate::model::calibration::EnsembleCalibrator>,
 }
 
 /// Serializable model state for persistence - Enhanced with adaptive parameters

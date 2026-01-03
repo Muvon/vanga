@@ -73,9 +73,18 @@ impl LSTMModel {
             optimizer: None,            // No optimizer initially (created during training)
             bias_correction_factors: None, // No bias correction initially
             bias_correction_config: bias_correction_config.clone(), // Use provided bias correction config
-            bias_corrector: Some(crate::model::bias_correction::LinearBiasCorrector::new(
-                bias_correction_config,
-            )), // Initialize full corrector
+            bias_corrector: if bias_correction_config.use_ensemble_calibration {
+                None // Use ensemble calibrator instead
+            } else {
+                Some(crate::model::bias_correction::LinearBiasCorrector::new(
+                    bias_correction_config.clone(),
+                ))
+            },
+            ensemble_calibrator: if bias_correction_config.use_ensemble_calibration {
+                Some(crate::model::calibration::EnsembleCalibrator::new())
+            } else {
+                None
+            },
         })
     }
 

@@ -4,7 +4,6 @@ use ndarray::{Array2, Axis};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for bias correction system
-/// Configuration for bias correction system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiasCorrection {
     /// Enable/disable bias correction
@@ -29,6 +28,10 @@ pub struct BiasCorrection {
     /// Recalibration frequency (epochs between recalibration, 0 = no recalibration)
     #[serde(default = "default_recalibration_frequency")]
     pub recalibration_frequency: usize,
+
+    /// Use ensemble calibration (temperature scaling + label smoothing + mixup)
+    #[serde(default = "default_use_ensemble")]
+    pub use_ensemble_calibration: bool,
 }
 
 fn default_print_info() -> bool {
@@ -43,17 +46,22 @@ fn default_recalibration_frequency() -> usize {
     5
 }
 
+fn default_use_ensemble() -> bool {
+    true
+}
+
 impl Default for BiasCorrection {
     fn default() -> Self {
         Self {
             enabled: true,
-            smoothing_factor: 0.3, // Increased from 0.1 for faster adaptation
-            correction_bounds: [0.5, 2.0], // Tighter bounds for ordinal classification
+            smoothing_factor: 0.3,
+            correction_bounds: [0.5, 2.0],
             min_samples: 100,
             confidence_adjustment: 1.0,
             print_info: false,
             ramp_up_epochs: default_ramp_up_epochs(),
             recalibration_frequency: default_recalibration_frequency(),
+            use_ensemble_calibration: default_use_ensemble(),
         }
     }
 }
