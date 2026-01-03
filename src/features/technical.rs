@@ -22,6 +22,10 @@ pub async fn generate_technical_indicators(
 ) -> Result<DataFrame> {
     log::info!("Generating comprehensive technical indicators with parallel processing...");
 
+    // Detect timeframe for window adjustments
+    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(&df)? as f64;
+    let timeframe_multiplier = timeframe_minutes / 60.0; // Relative to 1h baseline
+
     // Extract OHLCV data for calculations - PARALLEL EXTRACTION
     let close_prices = extract_numeric_column(&df, "close")?;
     let high_prices = extract_numeric_column(&df, "high")?;
@@ -198,12 +202,15 @@ pub async fn generate_technical_indicators(
     // Cryptocurrency-specific indicators (always enabled for crypto markets)
     df = add_crypto_specific_indicators(
         df,
-        &open_prices,
-        &high_prices,
-        &low_prices,
-        &close_prices,
-        &volume,
-        &config.trend.advanced,
+        CryptoIndicatorParams {
+            open: &open_prices,
+            high: &high_prices,
+            low: &low_prices,
+            close: &close_prices,
+            volume: &volume,
+            advanced_config: &config.trend.advanced,
+            timeframe_multiplier,
+        },
     )?;
 
     log::info!("Generated {} technical indicators", df.width() - 6); // Subtract OHLCV + timestamp
@@ -739,16 +746,31 @@ fn add_keltner_channels(
     Ok(df)
 }
 
+/// Parameters for cryptocurrency-specific indicators
+struct CryptoIndicatorParams<'a> {
+    open: &'a [f64],
+    high: &'a [f64],
+    low: &'a [f64],
+    close: &'a [f64],
+    volume: &'a [f64],
+    advanced_config: &'a crate::config::features::AdvancedIndicatorsConfig,
+    timeframe_multiplier: f64,
+}
+
 /// Add cryptocurrency-specific indicators
 fn add_crypto_specific_indicators(
     mut df: DataFrame,
-    open: &[f64],
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    volume: &[f64],
-    advanced_config: &crate::config::features::AdvancedIndicatorsConfig,
+    params: CryptoIndicatorParams,
 ) -> Result<DataFrame> {
+    let CryptoIndicatorParams {
+        open,
+        high,
+        low,
+        close,
+        volume,
+        advanced_config,
+        timeframe_multiplier,
+    } = params;
     // Price velocity (rate of change)
     let mut price_velocity = vec![f64::NAN; close.len()];
     for i in 1..close.len() {
@@ -808,7 +830,7 @@ fn add_crypto_specific_indicators(
         let hurst_values = calculate_hurst_exponent(close, advanced_config.hurst_window);
         let fractal_dims = calculate_fractal_dimension(close, advanced_config.fractal_window);
         let regime_values =
-            calculate_regime_indicator(close, volume, advanced_config.regime_window);
+            calculate_regime_indicator(close, volume, advanced_config.regime_window, timeframe_multiplier);
         let clustering_values =
             calculate_volatility_clustering(close, advanced_config.clustering_window);
         let reversion_values =
@@ -1150,12 +1172,55 @@ fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
 
 /// Calculate Regime Indicator combining volatility, trend, and volume signals
 /// Returns 0-3 scale: 0=stable/ranging, 3=high volatility/trending/high volume
-fn calculate_regime_indicator(prices: &[f64], volume: &[f64], window: usize) -> Vec<f64> {
+fn calculate_regime_indicator(prices: &[f64], volume: &[f64], window: usize, _timeframe_multiplier: f64) -> Vec<f64> {
     let mut regime_values = vec![f64::NAN; prices.len()];
 
     if prices.len() < window || volume.len() != prices.len() || window < 5 {
+        log::error!(
+            "Insufficient data for regime indicator: prices={}, volume={}, window={}, min_window=5",
+            prices.len(),
+            volume.len(),
+            window
+        );
         return regime_values;
     }
+
+    // Calculate historical statistics for adaptive thresholds
+    let mut all_volatilities = Vec::new();
+    let mut all_trend_strengths = Vec::new();
+    
+    for i in window..prices.len() {
+        let price_window = &prices[i - window..i];
+        
+        let returns: Vec<f64> = price_window
+            .windows(2)
+            .map(|w| (w[1] / w[0]).ln())
+            .collect();
+        
+        if !returns.is_empty() {
+            let volatility = returns.iter().map(|r| r.powi(2)).sum::<f64>() / returns.len() as f64;
+            all_volatilities.push(volatility);
+            
+            let price_start = price_window[0];
+            let price_end = price_window[price_window.len() - 1];
+            let price_change = (price_end - price_start) / price_start;
+            all_trend_strengths.push(price_change.abs());
+        }
+    }
+
+    if all_volatilities.is_empty() || all_trend_strengths.is_empty() {
+        log::error!("Failed to calculate regime statistics: no valid returns computed");
+        return regime_values;
+    }
+
+    // Use 75th percentile as threshold (adaptive to market conditions)
+    let mut sorted_vols = all_volatilities.clone();
+    sorted_vols.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let vol_threshold = sorted_vols[(sorted_vols.len() as f64 * 0.75) as usize];
+
+    let mut sorted_trends = all_trend_strengths.clone();
+    sorted_trends.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let trend_threshold = sorted_trends[(sorted_trends.len() as f64 * 0.75) as usize];
 
     for i in window..prices.len() {
         let price_window = &prices[i - window..i];
@@ -1173,7 +1238,6 @@ fn calculate_regime_indicator(prices: &[f64], volume: &[f64], window: usize) -> 
 
         // 1. Volatility regime (high/low volatility)
         let volatility = returns.iter().map(|r| r.powi(2)).sum::<f64>() / returns.len() as f64;
-        let vol_threshold = 0.0004; // Crypto-optimized threshold
         let vol_regime = if volatility > vol_threshold { 1.0 } else { 0.0 };
 
         // 2. Trend regime (trending/ranging)
@@ -1181,17 +1245,18 @@ fn calculate_regime_indicator(prices: &[f64], volume: &[f64], window: usize) -> 
         let price_end = price_window[price_window.len() - 1];
         let price_change = (price_end - price_start) / price_start;
         let trend_strength = price_change.abs();
-        let trend_threshold = 0.02; // 2% threshold for crypto
         let trend_regime = if trend_strength > trend_threshold {
             1.0
         } else {
             0.0
         };
 
-        // 3. Volume regime (high/low volume)
-        let avg_volume = volume_window.iter().sum::<f64>() / volume_window.len() as f64;
+        // 3. Volume regime (high/low volume) - use median instead of mean for robustness
+        let mut sorted_volume = volume_window.to_vec();
+        sorted_volume.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median_volume = sorted_volume[sorted_volume.len() / 2];
         let recent_volume = volume_window[volume_window.len() - 1];
-        let volume_regime = if recent_volume > avg_volume * 1.5 {
+        let volume_regime = if recent_volume > median_volume * 1.5 {
             1.0
         } else {
             0.0
