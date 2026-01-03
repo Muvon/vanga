@@ -388,7 +388,9 @@ impl BayesianOptimizer {
                         self.expected_improvement(mean, std, best_y)
                     }
                     AcquisitionFunction::UpperConfidenceBound { kappa } => {
-                        mean - kappa * std // Minimize, so negative UCB
+                        // For MINIMIZATION: we want to explore low mean with high uncertainty
+                        // Negate to convert to maximization problem for acquisition
+                        -(mean - kappa * std)
                     }
                 };
 
