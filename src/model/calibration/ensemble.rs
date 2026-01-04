@@ -9,6 +9,7 @@ use super::label_smoothing::AdaptiveLabelSmoothing;
 use super::mixup::AdaptiveMixup;
 use super::temperature::AdaptiveTemperatureScaling;
 use crate::utils::error::{Result, VangaError};
+use candle_core::{Device, Tensor};
 use ndarray::{Array2, Array3};
 use serde::{Deserialize, Serialize};
 
@@ -252,6 +253,18 @@ impl EnsembleCalibrator {
     /// Check if calibration is active
     pub fn is_active(&self) -> bool {
         self.is_calibrated
+    }
+
+    /// Apply temperature scaling to tensor logits (preserves gradients for training)
+    /// 
+    /// This method applies temperature scaling directly to tensors without
+    /// converting to ndarray, preserving gradient flow for backpropagation.
+    pub fn apply_to_tensor(&self, logits: &Tensor, device: &Device) -> Result<Tensor> {
+        if !self.is_calibrated {
+            return Ok(logits.clone());
+        }
+
+        self.temperature_scaling.apply_to_tensor(logits, device)
     }
 }
 

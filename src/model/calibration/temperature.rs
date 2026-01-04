@@ -5,6 +5,7 @@
 
 use super::ece::{calculate_ece, calculate_per_class_ece};
 use crate::utils::error::{Result, VangaError};
+use candle_core::{Device, Tensor};
 use ndarray::{Array2, Axis};
 use serde::{Deserialize, Serialize};
 
@@ -210,5 +211,36 @@ impl AdaptiveTemperatureScaling {
         self.ece_history.clear();
         self.per_class_ece = [0.0; 5];
         self.is_optimized = false;
+    }
+
+    /// Apply temperature scaling to tensor logits (preserves gradients)
+    /// 
+    /// This applies per-class temperature scaling directly to tensors,
+    /// preserving gradient flow for training.
+    pub fn apply_to_tensor(&self, logits: &Tensor, device: &Device) -> Result<Tensor> {
+        if !self.is_optimized {
+            return Ok(logits.clone());
+        }
+
+        let shape = logits.shape();
+        if shape.dims().len() != 2 || shape.dims()[1] != 5 {
+            return Err(VangaError::ModelError(format!(
+                "Expected logits shape [batch, 5], got {:?}",
+                shape.dims()
+            )));
+        }
+
+        // Create temperature tensor [1, 5] for broadcasting
+        let temps_f32: Vec<f32> = self.temperatures.iter().map(|&t| t as f32).collect();
+        let temp_tensor = Tensor::from_vec(temps_f32, (1, 5), device)?;
+
+        // Broadcast temperature to match logits shape and ensure contiguous
+        let temp_broadcast = temp_tensor.broadcast_as(shape.dims())?.contiguous()?;
+        let logits_contiguous = logits.contiguous()?;
+
+        // Apply temperature scaling: logits / temperature
+        let scaled_logits = logits_contiguous.broadcast_div(&temp_broadcast)?.contiguous()?;
+
+        Ok(scaled_logits)
     }
 }
