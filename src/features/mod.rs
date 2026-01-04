@@ -11,6 +11,8 @@ pub mod volatility;
 mod feature_validation_test;
 #[cfg(test)]
 mod ta_tests;
+#[cfg(test)]
+mod technical_math_test;
 
 use crate::config::FeatureConfig;
 use crate::utils::error::Result;
