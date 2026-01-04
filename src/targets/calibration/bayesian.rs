@@ -255,19 +255,19 @@ pub struct BayesianConfig {
 impl Default for BayesianConfig {
     /// Default configuration with STATE-OF-THE-ART 2024-2025 research
     /// Based on: Epsilon-Greedy TS (2024), TuRBO (NeurIPS 2019), Trust Regions (2024)
-    /// Optimized for BALANCED SPEED + QUALITY with smart early stopping
-    /// Expected: 2-3x faster than previous default, same quality
+    /// QUALITY-FIRST with smart optimizations (caching, incremental GP, adaptive budgets)
+    /// Uses all performance improvements WITHOUT sacrificing exploration quality
     fn default() -> Self {
         Self {
-            n_initial: 30,       // Sufficient for 5-6D spaces (reduced from 50)
-            max_iterations: 100, // Reduced from 150 (early stopping handles convergence)
+            n_initial: 50,       // Full initial exploration for quality (6D optimal: 5*D + 5)
+            max_iterations: 150, // Allow thorough exploration (early stopping prevents waste)
             tolerance: 1e-4,     // Adaptive tolerance
             acquisition: AcquisitionFunction::EpsilonGreedyThompsonSampling { epsilon: 0.3 }, // 30% exploration
             gp_length_scale: 0.8, // Slightly shorter for local structure
             gp_noise: 1e-5,       // Lower noise for deterministic objectives
             enable_trust_regions: true,
             enable_adaptive_restart: true,
-            stagnation_window: 10, // Reduced from 15 (faster detection)
+            stagnation_window: 15, // Original value for quality
             batch_size: 1,         // Sequential by default
         }
     }
@@ -291,20 +291,21 @@ impl BayesianConfig {
         }
     }
 
-    /// Configuration for balanced speed and quality
-    /// Faster than default with minimal quality trade-off
-    /// Expected: 1.5-2x faster than default
+    /// Configuration for faster calibration with good quality
+    /// Reduces initial samples and max iterations for speed
+    /// Still uses all smart optimizations (caching, adaptive budgets)
+    /// Expected: 1.5-2x faster than default with minimal quality trade-off
     pub fn for_balanced_speed() -> Self {
         Self {
-            n_initial: 25,      // Slightly fewer initial samples
-            max_iterations: 80, // Reduced iterations
+            n_initial: 30,       // Reduced initial exploration
+            max_iterations: 100, // Fewer max iterations
             tolerance: 1e-4,
-            acquisition: AcquisitionFunction::EpsilonGreedyThompsonSampling { epsilon: 0.25 },
+            acquisition: AcquisitionFunction::EpsilonGreedyThompsonSampling { epsilon: 0.3 },
             gp_length_scale: 0.8,
             gp_noise: 1e-5,
             enable_trust_regions: true,
             enable_adaptive_restart: true,
-            stagnation_window: 8, // Faster stagnation detection
+            stagnation_window: 10, // Faster stagnation detection
             batch_size: 1,
         }
     }
