@@ -64,14 +64,11 @@ impl AdaptiveTemperatureScaling {
             )));
         }
 
-        log::info!("🌡️ Optimizing per-class temperatures via NLL minimization...");
+        log::info!("🌡️ Optimizing temperatures (NLL minimization)...");
 
         // Calculate initial NLL and ECE
         let predictions_initial = self.apply_temperature_to_logits(logits, &[1.0; 5])?;
         let initial_nll = self.calculate_nll(&predictions_initial, targets)?;
-        let initial_ece = calculate_ece(&predictions_initial, targets)?;
-        log::info!("   Initial NLL (T=1.0 for all): {:.6}", initial_nll);
-        log::info!("   Initial ECE (T=1.0 for all): {:.6}", initial_ece);
 
         // Optimize temperature for each class independently using binary search on NLL
         for class_idx in 0..5 {
@@ -91,17 +88,13 @@ impl AdaptiveTemperatureScaling {
 
         self.is_optimized = true;
 
-        log::info!("   Final NLL (optimized): {:.6}", final_nll);
-        log::info!("   Final ECE (optimized): {:.6}", final_ece);
+        let nll_reduction = ((initial_nll - final_nll) / initial_nll * 100.0).max(0.0);
         log::info!(
-            "   NLL improvement: {:.6} → {:.6} ({:.2}% reduction)",
+            "   NLL: {:.4} → {:.4} ({:.1}% reduction)",
             initial_nll,
             final_nll,
-            ((initial_nll - final_nll) / initial_nll * 100.0).max(0.0)
+            nll_reduction
         );
-        log::info!("   ECE improvement: {:.6} → {:.6}", initial_ece, final_ece);
-        log::info!("   Optimized temperatures: {:?}", self.temperatures);
-        log::info!("   Per-class ECE: {:?}", self.per_class_ece);
 
         Ok(())
     }

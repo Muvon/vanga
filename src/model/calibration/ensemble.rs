@@ -76,10 +76,10 @@ impl EnsembleCalibrator {
             )));
         }
 
-        log::info!("🎯 ═══════════════════════════════════════════════════════════");
-        log::info!("🎯 ENSEMBLE CALIBRATION: Optimizing all components");
-        log::info!("🎯 ═══════════════════════════════════════════════════════════");
-        log::info!("📊 Validation samples: {}", num_samples);
+        log::info!(
+            "🎯 Ensemble calibration starting ({} samples)...",
+            num_samples
+        );
 
         // Step 1: Optimize temperature scaling
         self.temperature_scaling
@@ -108,11 +108,7 @@ impl EnsembleCalibrator {
         self.is_calibrated = true;
 
         // Log comprehensive summary
-        self.log_calibration_summary(overall_ece, &per_class_ece);
-
-        log::info!("🎯 ═══════════════════════════════════════════════════════════");
-        log::info!("✅ Ensemble calibration completed successfully");
-        log::info!("🎯 ═══════════════════════════════════════════════════════════");
+        self.log_calibration_summary(overall_ece);
 
         Ok(())
     }
@@ -167,61 +163,7 @@ impl EnsembleCalibrator {
     }
 
     /// Log comprehensive calibration summary
-    fn log_calibration_summary(&self, overall_ece: f64, per_class_ece: &[f64; 5]) {
-        log::info!("📊 ═══════════════════════════════════════════════════════════");
-        log::info!("📊 CALIBRATION SUMMARY");
-        log::info!("📊 ═══════════════════════════════════════════════════════════");
-
-        log::info!("🌡️ Temperature Scaling:");
-        log::info!(
-            "   Temperatures: {:?}",
-            self.temperature_scaling.get_temperatures()
-        );
-        for (class_idx, &temp) in self
-            .temperature_scaling
-            .get_temperatures()
-            .iter()
-            .enumerate()
-        {
-            let status = if temp < 0.9 {
-                "sharpening (more confident)"
-            } else if temp > 1.1 {
-                "softening (less confident)"
-            } else {
-                "well-calibrated"
-            };
-            log::info!("   Class {}: T={:.3} ({})", class_idx, temp, status);
-        }
-
-        log::info!("🎯 Label Smoothing:");
-        log::info!("   Epsilons: {:?}", self.label_smoothing.get_epsilons());
-        if self.label_smoothing.has_significant_smoothing() {
-            for (class_idx, &eps) in self.label_smoothing.get_epsilons().iter().enumerate() {
-                if eps > 0.05 {
-                    log::info!("   Class {}: ε={:.3} (overconfident)", class_idx, eps);
-                }
-            }
-        } else {
-            log::info!("   No significant overconfidence detected");
-        }
-
-        log::info!("🔀 Mixup Augmentation:");
-        log::info!("   Alpha: {:.3}", self.mixup.get_alpha());
-        log::info!(
-            "   Enabled for classes: {:?}",
-            self.mixup
-                .enabled_for_classes
-                .iter()
-                .enumerate()
-                .filter(|(_, &enabled)| enabled)
-                .map(|(idx, _)| idx)
-                .collect::<Vec<_>>()
-        );
-
-        log::info!("📈 Calibration Quality:");
-        log::info!("   Overall ECE: {:.6}", overall_ece);
-        log::info!("   Per-class ECE: {:?}", per_class_ece);
-
+    fn log_calibration_summary(&self, overall_ece: f64) {
         let calibration_quality = if overall_ece < 0.05 {
             "Excellent"
         } else if overall_ece < 0.10 {
@@ -231,12 +173,57 @@ impl EnsembleCalibrator {
         } else {
             "Needs improvement"
         };
+
         log::info!(
-            "   Quality: {} (ECE < 0.05 = excellent)",
+            "✅ Calibration complete: ECE={:.4} ({})",
+            overall_ece,
             calibration_quality
         );
 
-        log::info!("📊 ═══════════════════════════════════════════════════════════");
+        // Temperature scaling summary
+        let temps = self.temperature_scaling.get_temperatures();
+        let temp_range = (
+            temps.iter().copied().fold(f64::INFINITY, f64::min),
+            temps.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
+        log::info!(
+            "   🌡️  Temperatures: [{:.2}..{:.2}]",
+            temp_range.0,
+            temp_range.1
+        );
+
+        // Label smoothing summary (only if significant)
+        if self.label_smoothing.has_significant_smoothing() {
+            let overconfident_classes: Vec<usize> = self
+                .label_smoothing
+                .get_epsilons()
+                .iter()
+                .enumerate()
+                .filter(|(_, &eps)| eps > 0.05)
+                .map(|(idx, _)| idx)
+                .collect();
+            log::info!(
+                "   🎯 Label smoothing: classes {:?} overconfident",
+                overconfident_classes
+            );
+        }
+
+        // Mixup summary (only if enabled)
+        if self.mixup.is_enabled() {
+            let enabled_classes: Vec<usize> = self
+                .mixup
+                .enabled_for_classes
+                .iter()
+                .enumerate()
+                .filter(|(_, &enabled)| enabled)
+                .map(|(idx, _)| idx)
+                .collect();
+            log::info!(
+                "   🔀 Mixup α={:.2}: enabled for classes {:?}",
+                self.mixup.get_alpha(),
+                enabled_classes
+            );
+        }
     }
 
     /// Reset all calibration state

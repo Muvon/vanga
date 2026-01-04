@@ -41,7 +41,7 @@ impl AdaptiveMixup {
     /// Higher ECE → more aggressive mixup (higher alpha)
     /// Per-class enable based on per-class ECE
     pub fn calibrate_from_ece(&mut self, overall_ece: f64, per_class_ece: &[f64; 5]) -> Result<()> {
-        log::info!("🔀 Calibrating adaptive mixup from ECE...");
+        log::info!("🔀 Calibrating mixup...");
 
         self.current_ece = overall_ece;
 
@@ -66,22 +66,12 @@ impl AdaptiveMixup {
 
         self.is_calibrated = true;
 
+        let enabled_count = self.enabled_for_classes.iter().filter(|&&x| x).count();
         log::info!(
-            "   Mixup alpha: {:.3} (ECE: {:.4})",
+            "   α={:.2}, enabled for {}/5 classes",
             self.alpha,
-            overall_ece
+            enabled_count
         );
-        log::info!(
-            "   Enabled for classes: {:?}",
-            self.enabled_for_classes
-                .iter()
-                .enumerate()
-                .filter(|(_, &enabled)| enabled)
-                .map(|(idx, _)| idx)
-                .collect::<Vec<_>>()
-        );
-        log::info!("   Per-class ECE: {:?}", per_class_ece);
-        log::info!("   Median ECE threshold: {:.4}", median_ece);
 
         Ok(())
     }

@@ -58,7 +58,7 @@ impl AdaptiveLabelSmoothing {
             )));
         }
 
-        log::info!("🎯 Calculating adaptive label smoothing factors...");
+        log::info!("🎯 Calculating label smoothing...");
 
         // Calculate per-class statistics
         for class_idx in 0..5 {
@@ -123,21 +123,10 @@ impl AdaptiveLabelSmoothing {
 
         self.is_calibrated = true;
 
-        log::info!("   Per-class smoothing factors: {:?}", self.epsilons);
-        log::info!("   Avg confidences: {:?}", self.avg_confidences);
-        log::info!("   Avg accuracies: {:?}", self.avg_accuracies);
-
-        // Log overconfident classes
-        for class_idx in 0..5 {
-            if self.epsilons[class_idx] > 0.05 {
-                log::info!(
-                    "   Class {}: overconfident (conf={:.3}, acc={:.3}) → smoothing={:.3}",
-                    class_idx,
-                    self.avg_confidences[class_idx],
-                    self.avg_accuracies[class_idx],
-                    self.epsilons[class_idx]
-                );
-            }
+        // Log only overconfident classes
+        let overconfident_count = self.epsilons.iter().filter(|&&eps| eps > 0.05).count();
+        if overconfident_count > 0 {
+            log::info!("   {} overconfident classes detected", overconfident_count);
         }
 
         Ok(())
