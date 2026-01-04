@@ -11,10 +11,11 @@ mod tests {
 
     #[test]
     fn test_bias_correction_integration() {
-        // Create bias correction config
+        // Create bias correction config (disable ensemble to use bias corrector)
         let bias_config = BiasCorrection {
             enabled: true,
-            min_samples: 10, // Lower for testing
+            min_samples: 10,                 // Lower for testing
+            use_ensemble_calibration: false, // Use bias corrector, not ensemble
             ..Default::default()
         };
 
@@ -30,13 +31,45 @@ mod tests {
 
         let model = LSTMModel::new_with_bias_config(lstm_config, bias_config).unwrap();
 
-        // Verify bias corrector is initialized
+        // Verify bias corrector is initialized (not ensemble)
         assert!(model.bias_corrector.is_some());
+        assert!(model.ensemble_calibrator.is_none());
         let corrector = model.bias_corrector.as_ref().unwrap();
         assert!(corrector.config.enabled);
         assert!(!corrector.is_calibrated); // Not calibrated yet
 
         println!("✅ Bias correction integration test passed");
+    }
+
+    #[test]
+    fn test_ensemble_calibration_integration() {
+        // Create bias correction config with ensemble enabled
+        let bias_config = BiasCorrection {
+            enabled: true,
+            min_samples: 10,
+            use_ensemble_calibration: true, // Use ensemble calibrator
+            ..Default::default()
+        };
+
+        // Create LSTM model with ensemble calibration
+        let lstm_config = LSTMConfig {
+            input_size: 10,
+            hidden_sizes: vec![32],
+            output_size: 5,
+            sequence_length: 20,
+            learning_rate: 0.001,
+            num_layers: 1,
+        };
+
+        let model = LSTMModel::new_with_bias_config(lstm_config, bias_config).unwrap();
+
+        // Verify ensemble calibrator is initialized (not bias corrector)
+        assert!(model.ensemble_calibrator.is_some());
+        assert!(model.bias_corrector.is_none());
+        let ensemble = model.ensemble_calibrator.as_ref().unwrap();
+        assert!(!ensemble.is_calibrated); // Not calibrated yet
+
+        println!("✅ Ensemble calibration integration test passed");
     }
 
     #[test]

@@ -1127,19 +1127,19 @@ impl LSTMModel {
                 // This prevents hidden state contamination between batches
                 let predictions = self.forward(&input_tensor, true)?;
 
-                // NEW: Apply bias correction during training if calibrated
-                // CRITICAL: Apply to LOGITS, not probabilities, to work with ordinal loss
+                // Apply bias correction or ensemble calibration during training if enabled
                 let predictions_for_loss = if epoch > 5 && self.bias_corrector.is_some() {
                     let corrector = self.bias_corrector.as_ref().unwrap();
-                    if corrector.is_calibrated && corrector.config.enabled {
+                    if corrector.is_calibrated
+                        && corrector.config.enabled
+                        && !corrector.config.use_ensemble_calibration
+                    {
                         // Apply bias correction to RAW LOGITS (before softmax)
-                        // This preserves gradient flow and works correctly with ordinal loss
                         let corrected =
                             corrector.apply_correction_to_logits(&predictions, epoch)?;
 
                         // Log correction impact periodically
                         if epoch % 10 == 0 && batch_idx == 0 {
-                            // For monitoring, we need to compare probabilities
                             let original_probs = candle_nn::ops::softmax(&predictions, 1)?;
                             let corrected_probs = candle_nn::ops::softmax(&corrected, 1)?;
 
@@ -1161,8 +1161,31 @@ impl LSTMModel {
                 } else if epoch > 5 && self.ensemble_calibrator.is_some() {
                     let ensemble_cal = self.ensemble_calibrator.as_ref().unwrap();
                     if ensemble_cal.is_calibrated {
-                        // Apply temperature scaling directly to tensor (preserves gradients)
-                        let calibrated = ensemble_cal.apply_to_tensor(&predictions, &self.device)?;
+                        // Apply temperature scaling to logits
+                        // Convert tensor to ndarray for ensemble calibrator
+                        let logits_shape = predictions.shape();
+                        let logits_vec = predictions.flatten_all()?.to_vec1::<f64>()?;
+                        let logits_array = ndarray::Array2::from_shape_vec(
+                            (logits_shape.dims()[0], logits_shape.dims()[1]),
+                            logits_vec,
+                        )
+                        .map_err(|e| {
+                            VangaError::ModelError(format!(
+                                "Failed to convert logits to ndarray: {}",
+                                e
+                            ))
+                        })?;
+
+                        // Apply temperature scaling (now uses NLL optimization)
+                        let calibrated_logits = ensemble_cal.apply_to_logits(&logits_array)?;
+
+                        // Convert back to tensor
+                        let calibrated_vec: Vec<f64> = calibrated_logits.iter().copied().collect();
+                        let calibrated_tensor = Tensor::from_vec(
+                            calibrated_vec,
+                            (logits_shape.dims()[0], logits_shape.dims()[1]),
+                            &self.device,
+                        )?;
 
                         // Log impact periodically
                         if epoch % 10 == 0 && batch_idx == 0 {
@@ -1175,11 +1198,10 @@ impl LSTMModel {
                             );
                         }
 
-                        calibrated
+                        calibrated_tensor
                     } else {
                         predictions.clone()
                     }
-
                 } else {
                     predictions.clone()
                 };
@@ -1677,9 +1699,18 @@ impl LSTMModel {
                     }
                 }
 
-                // Ensemble calibrator recalibration during training
-                if epoch > 0
-                    && epoch % 5 == 0
+                // Ensemble calibrator recalibration during training (if enabled in config)
+                // CRITICAL: This is for MONITORING calibration quality, NOT for modifying training
+                let should_recalibrate = if let Some(ref corrector) = self.bias_corrector {
+                    corrector.config.use_ensemble_calibration
+                        && corrector.config.recalibration_frequency > 0
+                        && epoch > 0
+                        && epoch % corrector.config.recalibration_frequency == 0
+                } else {
+                    false
+                };
+
+                if should_recalibrate
                     && self.ensemble_calibrator.is_some()
                     && !all_val_predictions.is_empty()
                 {

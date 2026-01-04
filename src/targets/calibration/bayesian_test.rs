@@ -924,14 +924,8 @@ fn test_no_false_stagnation_on_progress() -> Result<()> {
 
     // Should find good solution without excessive restarts
     assert!(best_score < 0.01, "Should find near-optimal solution");
-    assert!(
-        (best_params[0] - 0.7).abs() < 0.1,
-        "Should find x near 0.7"
-    );
-    assert!(
-        (best_params[1] - 0.3).abs() < 0.1,
-        "Should find y near 0.3"
-    );
+    assert!((best_params[0] - 0.7).abs() < 0.1, "Should find x near 0.7");
+    assert!((best_params[1] - 0.3).abs() < 0.1, "Should find y near 0.3");
 
     // With the fix, the algorithm should make consistent progress
     // and find the optimal solution efficiently

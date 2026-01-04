@@ -463,7 +463,7 @@ impl BayesianOptimizer {
         // We want to detect when there's no IMPROVEMENT, not when there's no CHANGE
         // Negative values mean the score got worse (which is NOT improvement)
         let improvement = (oldest_recent - best_recent) / oldest_recent.max(1e-10);
-        
+
         // Stagnation if improvement < 0.1% in last N iterations
         // This correctly handles:
         // - improvement > 0.001: Making progress, no stagnation

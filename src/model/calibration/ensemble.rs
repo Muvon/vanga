@@ -256,7 +256,7 @@ impl EnsembleCalibrator {
     }
 
     /// Apply temperature scaling to tensor logits (preserves gradients for training)
-    /// 
+    ///
     /// This method applies temperature scaling directly to tensors without
     /// converting to ndarray, preserving gradient flow for backpropagation.
     pub fn apply_to_tensor(&self, logits: &Tensor, device: &Device) -> Result<Tensor> {

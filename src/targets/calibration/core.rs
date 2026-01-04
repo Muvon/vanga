@@ -922,7 +922,6 @@ impl ParameterCalibrator {
                     if has_no_improvement {
                         no_improvement_count += 1;
 
-
                         // AGGRESSIVE early exploration to avoid wasting iterations in local minima
                         // First restart: Quick escape (iteration 5)
                         // Second restart: Deeper exploration (iteration 10)
