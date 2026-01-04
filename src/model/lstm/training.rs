@@ -1161,31 +1161,9 @@ impl LSTMModel {
                 } else if epoch > 5 && self.ensemble_calibrator.is_some() {
                     let ensemble_cal = self.ensemble_calibrator.as_ref().unwrap();
                     if ensemble_cal.is_calibrated {
-                        // Apply temperature scaling to logits
-                        // Convert tensor to ndarray for ensemble calibrator
-                        let logits_shape = predictions.shape();
-                        let logits_vec = predictions.flatten_all()?.to_vec1::<f64>()?;
-                        let logits_array = ndarray::Array2::from_shape_vec(
-                            (logits_shape.dims()[0], logits_shape.dims()[1]),
-                            logits_vec,
-                        )
-                        .map_err(|e| {
-                            VangaError::ModelError(format!(
-                                "Failed to convert logits to ndarray: {}",
-                                e
-                            ))
-                        })?;
-
-                        // Apply temperature scaling (now uses NLL optimization)
-                        let calibrated_logits = ensemble_cal.apply_to_logits(&logits_array)?;
-
-                        // Convert back to tensor
-                        let calibrated_vec: Vec<f64> = calibrated_logits.iter().copied().collect();
-                        let calibrated_tensor = Tensor::from_vec(
-                            calibrated_vec,
-                            (logits_shape.dims()[0], logits_shape.dims()[1]),
-                            &self.device,
-                        )?;
+                        // Apply temperature scaling directly to tensor (preserves gradients, handles F32)
+                        let calibrated_tensor =
+                            ensemble_cal.apply_to_tensor(&predictions, &self.device)?;
 
                         // Log impact periodically
                         if epoch % 10 == 0 && batch_idx == 0 {
