@@ -1164,7 +1164,14 @@ impl LSTMModel {
                         // Apply temperature scaling to logits
                         // Convert tensor to ndarray for ensemble calibrator
                         let logits_shape = predictions.shape();
-                        let logits_vec = predictions.flatten_all()?.to_vec1::<f64>()?;
+
+                        // CRITICAL: Ensure tensor is contiguous and convert f32 -> f64
+                        let predictions_contiguous = predictions.contiguous()?;
+                        let logits_vec_f32 =
+                            predictions_contiguous.flatten_all()?.to_vec1::<f32>()?;
+                        let logits_vec: Vec<f64> =
+                            logits_vec_f32.iter().map(|&x| x as f64).collect();
+
                         let logits_array = ndarray::Array2::from_shape_vec(
                             (logits_shape.dims()[0], logits_shape.dims()[1]),
                             logits_vec,
@@ -1179,10 +1186,11 @@ impl LSTMModel {
                         // Apply temperature scaling
                         let calibrated_logits = ensemble_cal.apply_to_logits(&logits_array)?;
 
-                        // Convert back to tensor
-                        let calibrated_vec: Vec<f64> = calibrated_logits.iter().copied().collect();
+                        // Convert back to tensor: f64 -> f32
+                        let calibrated_vec_f32: Vec<f32> =
+                            calibrated_logits.iter().map(|&x| x as f32).collect();
                         let calibrated_tensor = Tensor::from_vec(
-                            calibrated_vec,
+                            calibrated_vec_f32,
                             (logits_shape.dims()[0], logits_shape.dims()[1]),
                             &self.device,
                         )?;
