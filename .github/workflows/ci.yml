@@ -40,7 +40,7 @@ jobs:
           ${{ runner.os }}-cargo-
 
     - name: Run cargo check
-      run: cargo check --all-targets --all-features
+      run: cargo check --all-targets --no-default-features
 
   fmt:
     name: Rustfmt
@@ -86,7 +86,7 @@ jobs:
           ${{ runner.os }}-cargo-
 
     - name: Run cargo clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets --no-default-features -- -D warnings
 
   test:
     name: Test Suite

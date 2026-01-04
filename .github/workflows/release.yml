@@ -203,7 +203,8 @@ jobs:
           cargo build --release --target ${{ matrix.target }} --no-default-features
         else
           # Native build for other platforms (macOS)
-          cargo build --release --target ${{ matrix.target }}
+          # Disable default features to avoid ONNX Runtime issues (consistent with Linux/Windows)
+          cargo build --release --target ${{ matrix.target }} --no-default-features
         fi
 
     - name: Create archive directory

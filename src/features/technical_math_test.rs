@@ -127,7 +127,7 @@ async fn test_mfi_calculation_through_api() {
     for i in 3..mfi_series.len() {
         let val = mfi_series.get(i).unwrap();
         assert!(
-            val >= 0.0 && val <= 100.0,
+            (0.0..=100.0).contains(&val),
             "MFI at index {} = {} is out of range [0, 100]",
             i,
             val
@@ -168,7 +168,7 @@ async fn test_advanced_indicators_range() {
             if let Some(val) = hurst_series.get(i) {
                 if !val.is_nan() {
                     assert!(
-                        val >= 0.1 && val <= 0.9,
+                        (0.1..=0.9).contains(&val),
                         "Hurst exponent at index {} = {} is out of range [0.1, 0.9]",
                         i,
                         val
@@ -185,7 +185,7 @@ async fn test_advanced_indicators_range() {
             if let Some(val) = fractal_series.get(i) {
                 if !val.is_nan() {
                     assert!(
-                        val >= 1.0 && val <= 2.0,
+                        (1.0..=2.0).contains(&val),
                         "Fractal dimension at index {} = {} is out of range [1.0, 2.0]",
                         i,
                         val
@@ -202,7 +202,7 @@ async fn test_advanced_indicators_range() {
             if let Some(val) = regime_series.get(i) {
                 if !val.is_nan() {
                     assert!(
-                        val >= 0.0 && val <= 3.0,
+                        (0.0..=3.0).contains(&val),
                         "Regime indicator at index {} = {} is out of range [0.0, 3.0]",
                         i,
                         val
@@ -219,7 +219,7 @@ async fn test_advanced_indicators_range() {
             if let Some(val) = clustering_series.get(i) {
                 if !val.is_nan() {
                     assert!(
-                        val >= -1.0 && val <= 1.0,
+                        (-1.0..=1.0).contains(&val),
                         "Volatility clustering at index {} = {} is out of range [-1.0, 1.0]",
                         i,
                         val
@@ -236,7 +236,7 @@ async fn test_advanced_indicators_range() {
             if let Some(val) = reversion_series.get(i) {
                 if !val.is_nan() {
                     assert!(
-                        val >= 0.0 && val <= 1.0,
+                        (0.0..=1.0).contains(&val),
                         "Mean reversion strength at index {} = {} is out of range [0.0, 1.0]",
                         i,
                         val
@@ -407,7 +407,7 @@ async fn test_indicators_with_real_data_patterns() {
         if let Some(val) = rsi_series.get(i) {
             if !val.is_nan() {
                 assert!(
-                    val >= 0.0 && val <= 100.0,
+                    (0.0..=100.0).contains(&val),
                     "RSI at index {} = {} is out of range [0, 100]",
                     i,
                     val
