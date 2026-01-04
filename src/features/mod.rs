@@ -2,12 +2,15 @@ pub mod cross_asset;
 pub mod custom;
 pub mod engineering;
 pub mod microstructure;
-pub mod ta_helpers; // TA crate integration helpers
-#[cfg(test)]
-pub mod ta_tests; // Tests for TA crate integration
+pub mod ta_helpers;
 pub mod technical;
-pub mod validation; // Input validation and edge case handling
+pub mod validation;
 pub mod volatility;
+
+#[cfg(test)]
+mod feature_validation_test;
+#[cfg(test)]
+mod ta_tests;
 
 use crate::config::FeatureConfig;
 use crate::utils::error::Result;

@@ -792,29 +792,29 @@ fn add_crypto_specific_indicators(
         }
     }
 
-    // Price gaps (difference between current open and previous close)
-    // Improved to handle edge cases and provide more meaningful values
+    // Price gaps in basis points (1 bps = 0.01%)
+    // This captures small gaps in continuous trading better than percentages
     let mut price_gaps = vec![0.0; close.len()];
     for i in 1..close.len() {
         if close[i - 1] > 0.0 {
-            // Avoid division by zero
-            let gap = (open[i] - close[i - 1]) / close[i - 1] * 100.0;
-            // Clamp extreme gaps to reasonable range (-50% to +50%)
-            price_gaps[i] = gap.clamp(-50.0, 50.0);
+            // Gap in basis points: (open - prev_close) / prev_close * 10000
+            let gap_bps = (open[i] - close[i - 1]) / close[i - 1] * 10000.0;
+            price_gaps[i] = gap_bps;
         }
     }
 
-    // Add gap volatility as additional feature to make it more informative
+    // Gap volatility (rolling std of gaps)
+    let gap_window = 20;
     let mut gap_volatility = vec![0.0; close.len()];
-    if close.len() > 20 {
-        for i in 20..close.len() {
-            let recent_gaps = &price_gaps[i - 19..i + 1];
-            let mean_gap = recent_gaps.iter().sum::<f64>() / 20.0;
+    if close.len() > gap_window {
+        for i in gap_window..close.len() {
+            let recent_gaps = &price_gaps[i - gap_window + 1..i + 1];
+            let mean_gap = recent_gaps.iter().sum::<f64>() / gap_window as f64;
             let variance = recent_gaps
                 .iter()
                 .map(|&x| (x - mean_gap).powi(2))
                 .sum::<f64>()
-                / 20.0;
+                / gap_window as f64;
             gap_volatility[i] = variance.sqrt();
         }
     }
@@ -828,7 +828,8 @@ fn add_crypto_specific_indicators(
     // Advanced mathematical indicators (completing AUTO_INDICATORS)
     if advanced_config.enabled {
         let hurst_values = calculate_hurst_exponent(close, advanced_config.hurst_window);
-        let fractal_dims = calculate_fractal_dimension(close, advanced_config.fractal_window);
+        let fractal_dims =
+            calculate_fractal_dimension_higuchi(close, advanced_config.fractal_window);
         let regime_values = calculate_regime_indicator(
             close,
             volume,
@@ -1083,92 +1084,76 @@ fn calculate_hurst_exponent(prices: &[f64], window: usize) -> Vec<f64> {
     hurst_values
 }
 
-/// Calculate Fractal Dimension using box-counting method
-/// Higher values indicate more complex, chaotic price movements
-fn calculate_fractal_dimension(prices: &[f64], window: usize) -> Vec<f64> {
-    let mut fractal_dims = vec![f64::NAN; prices.len()]; // Start with NaN for filtering
+/// Calculate Fractal Dimension using Higuchi method
+/// Better suited for time series than box-counting
+/// Returns values typically in range [1.0, 2.0]
+fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec<f64> {
+    let mut fractal_dims = vec![f64::NAN; prices.len()];
 
-    if prices.len() < window || window < 10 {
-        log::warn!(
-            "Fractal dimension: insufficient data (len={}, window={}, min_window=10)",
-            prices.len(),
-            window
-        );
+    if prices.len() < max_window || max_window < 10 {
         return fractal_dims;
     }
 
-    for i in window..prices.len() {
-        let price_window = &prices[i - window..i];
+    let k_max = 8; // Number of intervals to test
 
-        // Find price range
-        let min_price = price_window.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_price = price_window
-            .iter()
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let price_range = max_price - min_price;
+    for idx in max_window..prices.len() {
+        let window = &prices[idx - max_window..idx];
+        let n = window.len();
 
-        // Handle constant prices with small random variation to avoid zero range
-        let effective_range = if price_range <= 1e-10 {
-            // For constant prices, use a small fraction of the price level as range
-            let avg_price = price_window.iter().sum::<f64>() / price_window.len() as f64;
-            avg_price * 1e-6 // 0.0001% of price as minimum range
-        } else {
-            price_range
-        };
+        let mut lk_values = Vec::new();
+        let mut log_k_values = Vec::new();
 
-        // Box-counting method with multiple scales (increased from 7 to 12 scales)
-        let mut scales = Vec::new();
-        let mut counts = Vec::new();
+        for k in 1..=k_max {
+            let mut lm_sum = 0.0;
 
-        for scale_exp in 1..13 {
-            let scale = effective_range / (2_f64.powi(scale_exp));
-            if scale <= 0.0 {
-                continue;
+            for m in 0..k {
+                let mut length = 0.0;
+                let max_i = ((n - m - 1) as f64 / k as f64).floor() as usize;
+
+                for i in 1..=max_i {
+                    let idx1 = m + i * k;
+                    let idx2 = m + (i - 1) * k;
+                    if idx1 < window.len() && idx2 < window.len() {
+                        length += (window[idx1] - window[idx2]).abs();
+                    }
+                }
+
+                // Normalize
+                let norm_factor = (n - 1) as f64 / (max_i as f64 * k as f64);
+                length *= norm_factor / k as f64;
+                lm_sum += length;
             }
 
-            let boxes = (effective_range / scale).ceil() as usize;
-            if boxes == 0 {
-                continue;
-            }
-
-            let mut occupied_boxes = std::collections::HashSet::new();
-            for &price in price_window {
-                let box_index = ((price - min_price) / scale).floor() as usize;
-                occupied_boxes.insert(box_index.min(boxes - 1));
-            }
-
-            if !occupied_boxes.is_empty() {
-                scales.push(scale.ln());
-                counts.push((occupied_boxes.len() as f64).ln());
+            let lk = lm_sum / k as f64;
+            if lk > 0.0 {
+                lk_values.push(lk.ln());
+                log_k_values.push((k as f64).ln());
             }
         }
 
-        // Linear regression to find fractal dimension
-        if scales.len() >= 4 {
-            // Require at least 4 points for better regression
-            let n = scales.len() as f64;
-            let sum_x = scales.iter().sum::<f64>();
-            let sum_y = counts.iter().sum::<f64>();
-            let sum_xy = scales
+        // Linear regression: ln(L(k)) vs ln(k)
+        // Slope = -D (fractal dimension)
+        if lk_values.len() >= 3 {
+            let n = lk_values.len() as f64;
+            let sum_x = log_k_values.iter().sum::<f64>();
+            let sum_y = lk_values.iter().sum::<f64>();
+            let sum_xy = log_k_values
                 .iter()
-                .zip(counts.iter())
+                .zip(lk_values.iter())
                 .map(|(x, y)| x * y)
                 .sum::<f64>();
-            let sum_x2 = scales.iter().map(|x| x * x).sum::<f64>();
+            let sum_x2 = log_k_values.iter().map(|x| x * x).sum::<f64>();
 
             let denominator = n * sum_x2 - sum_x * sum_x;
             if denominator.abs() > 1e-10 {
                 let slope = (n * sum_xy - sum_x * sum_y) / denominator;
-                // Fractal dimension is negative slope, clamped to [1.0, 2.0]
-                let fractal_dim = (-slope).clamp(1.0, 2.0);
+                let fractal_dim = -slope;
 
-                // Validate the result
-                if fractal_dim.is_finite() {
-                    fractal_dims[i] = fractal_dim;
+                if fractal_dim.is_finite() && fractal_dim >= 1.0 && fractal_dim <= 2.0 {
+                    fractal_dims[idx] = fractal_dim;
                 }
             }
         }
-        // If regression fails, keep NaN for filtering
     }
 
     fractal_dims
