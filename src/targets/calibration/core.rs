@@ -876,6 +876,66 @@ impl ParameterCalibrator {
                 best_score,
                 config.n_initial
             );
+
+            // CRITICAL: Check for zero variance (indicates flat objective landscape)
+            let scores: Vec<f64> = optimizer.get_observation_scores().to_vec();
+            let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+            let variance =
+                scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
+            let std_dev = variance.sqrt();
+
+            log::info!(
+                "{}   Score statistics: mean={:.6}, std={:.6}, variance={:.6}",
+                prefix,
+                mean,
+                std_dev,
+                variance
+            );
+
+            // Early termination if parameters have no effect
+            if variance < 1e-6 {
+                log::warn!(
+                    "{} ⚠️  ZERO VARIANCE DETECTED (variance={:.9}) - parameters have NO EFFECT on objective!",
+                    prefix,
+                    variance
+                );
+                log::warn!("{}    This indicates:", prefix);
+                log::warn!("{}      1. Parameter bounds may be too narrow", prefix);
+                log::warn!(
+                    "{}      2. Evaluation function may be insensitive to parameters",
+                    prefix
+                );
+                log::warn!(
+                    "{}      3. All samples may have similar characteristics",
+                    prefix
+                );
+                log::warn!(
+                    "{}    Returning best parameters from initial exploration.",
+                    prefix
+                );
+
+                if let Some((best_params, _)) = optimizer.get_best() {
+                    return Ok(best_params);
+                } else {
+                    return Err(crate::utils::error::VangaError::ConfigError(format!(
+                        "{} Failed to find any valid parameters",
+                        prefix
+                    )));
+                }
+            }
+
+            // Warn if variance is very low but not zero
+            if variance < 1e-4 {
+                log::warn!(
+                    "{} ⚠️  LOW VARIANCE (variance={:.6}) - limited parameter sensitivity",
+                    prefix,
+                    variance
+                );
+                log::warn!(
+                    "{}    Optimization may struggle to find improvements.",
+                    prefix
+                );
+            }
         }
 
         // Phase 2: Bayesian optimization iterations with SMART convergence

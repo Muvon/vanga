@@ -50,22 +50,6 @@ pub async fn calibrate_price_levels(
 
         let balance = evaluate_price_level_params(&utils, context, &test_params)?;
 
-        // Log parameter exploration for diagnostics
-        log::debug!(
-            "  Params: bw={:.3}, pct=[{:.3},{:.3}], nb={:.3}, mf={:.3} → score={:.4}, dist=[{:.1}%,{:.1}%,{:.1}%,{:.1}%,{:.1}%]",
-            test_params.bandwidth,
-            test_params.percentiles[0],
-            test_params.percentiles[1],
-            test_params.neutral_band,
-            test_params.momentum_factor,
-            balance.balance_score,
-            balance.class_percentages[0],
-            balance.class_percentages[1],
-            balance.class_percentages[2],
-            balance.class_percentages[3],
-            balance.class_percentages[4]
-        );
-
         // Price levels use balance_score, not composite_quality_score
         Ok(balance.balance_score)
     };
@@ -127,13 +111,6 @@ fn evaluate_price_level_params(
 
     let mut class_counts = [0usize; 5];
 
-    let samples_to_test = context.sample_indices.len();
-    log::debug!("Testing price level params on {} samples (bandwidth={:.2}, percentiles=[{:.2},{:.2}], neutral={:.2}, momentum={:.2})",
-        samples_to_test, params.bandwidth, params.percentiles[0], params.percentiles[1],
-        params.neutral_band, params.momentum_factor);
-
-    let mut samples_processed = 0;
-
     for &seq_idx in context.sample_indices.iter() {
         let sequence_end_idx = seq_idx + context.sequence_length;
         let target_end_idx = sequence_end_idx + context.horizon_steps;
@@ -143,8 +120,6 @@ fn evaluate_price_level_params(
             let horizon_ohlcv = &context.ohlcv_data[sequence_end_idx..target_end_idx];
 
             if sequence_ohlcv.len() >= 2 && horizon_ohlcv.len() >= 2 {
-                samples_processed += 1;
-
                 // Calculate target exponentially-weighted close
                 let target_weighted_price = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
@@ -174,7 +149,7 @@ fn evaluate_price_level_params(
 
                 // Classify using centralized logic
                 let class = boundaries.classify_price(target_weighted_price);
-                if (0..5).contains(&class) {
+                if (0..=4).contains(&class) {
                     class_counts[class as usize] += 1;
                 }
             }
@@ -182,27 +157,6 @@ fn evaluate_price_level_params(
     }
 
     let total = class_counts.iter().sum::<usize>();
-
-    // Calculate class percentages for detailed logging
-    let class_percentages: Vec<f64> = class_counts
-        .iter()
-        .map(|&count| (count as f64 / total as f64) * 100.0)
-        .collect();
-
-    log::debug!(
-        "  Processed {}/{} samples, distribution: {:?}",
-        samples_processed,
-        samples_to_test,
-        class_counts
-    );
-    log::debug!(
-        "  Class percentages: [{:.1}%, {:.1}%, {:.1}%, {:.1}%, {:.1}%]",
-        class_percentages[0],
-        class_percentages[1],
-        class_percentages[2],
-        class_percentages[3],
-        class_percentages[4]
-    );
 
     if total == 0 {
         log::warn!("  WARNING: No valid samples processed!");

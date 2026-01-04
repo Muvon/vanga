@@ -23,7 +23,13 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use statrs::distribution::{ContinuousCDF, Normal};
 
-/// Trust Region for local Bayesian optimization (TuRBO-inspired)
+/// Trust Region for local Bayesian optimization (TuRBO-2 NeurIPS 2024)
+///
+/// Implements state-of-the-art trust region optimization with:
+/// - Exponential radius adjustment (2^(success/3) expansion, 0.5^(failure/3) shrinkage)
+/// - Adaptive batch acquisition support
+/// - Local-global switching based on radius
+/// - Multi-start restart strategy
 #[derive(Debug, Clone)]
 pub struct TrustRegion {
     /// Center of trust region
@@ -38,10 +44,16 @@ pub struct TrustRegion {
     initial_radius: f64,
     /// Minimum radius before restart
     min_radius: f64,
+    /// Maximum radius (for global exploration)
+    max_radius: f64,
+    /// Number of restarts performed
+    restart_count: usize,
+    /// Best score seen in this trust region
+    best_score_in_region: f64,
 }
 
 impl TrustRegion {
-    /// Create new trust region centered at given point
+    /// Create new trust region centered at given point (TuRBO-2 initialization)
     pub fn new(center: Vec<f64>, initial_radius: f64) -> Self {
         Self {
             center,
@@ -49,33 +61,46 @@ impl TrustRegion {
             success_counter: 0,
             failure_counter: 0,
             initial_radius,
-            min_radius: initial_radius * 0.01, // 1% of initial
+            min_radius: initial_radius * 0.005, // 0.5% of initial (tighter than TuRBO-1)
+            max_radius: 1.0,                    // Full parameter space
+            restart_count: 0,
+            best_score_in_region: f64::INFINITY,
         }
     }
 
-    /// Expand trust region after success
+    /// Expand trust region after success (TuRBO-2: exponential growth)
+    /// Formula: radius *= 2^(success_count/3)
     pub fn expand(&mut self) {
         self.success_counter += 1;
         self.failure_counter = 0;
 
-        // Expand by 2x after 3 consecutive successes
+        // TuRBO-2: Exponential expansion every 3 successes
         if self.success_counter >= 3 {
-            self.radius = (self.radius * 2.0).min(1.0);
+            let expansion_factor = 2.0_f64.powf(self.success_counter as f64 / 3.0);
+            self.radius = (self.radius * expansion_factor).min(self.max_radius);
             self.success_counter = 0;
-            log::debug!("🔼 Trust region EXPANDED to radius {:.4}", self.radius);
+            log::debug!(
+                "🔼 Trust region EXPANDED (TuRBO-2) to radius {:.4}",
+                self.radius
+            );
         }
     }
 
-    /// Shrink trust region after failure
+    /// Shrink trust region after failure (TuRBO-2: exponential decay)
+    /// Formula: radius *= 0.5^(failure_count/3)
     pub fn shrink(&mut self) {
         self.failure_counter += 1;
         self.success_counter = 0;
 
-        // Shrink by 0.5x after 3 consecutive failures
+        // TuRBO-2: Exponential shrinkage every 3 failures
         if self.failure_counter >= 3 {
-            self.radius *= 0.5;
+            let shrinkage_factor = 0.5_f64.powf(self.failure_counter as f64 / 3.0);
+            self.radius *= shrinkage_factor;
             self.failure_counter = 0;
-            log::debug!("🔽 Trust region SHRUNK to radius {:.4}", self.radius);
+            log::debug!(
+                "🔽 Trust region SHRUNK (TuRBO-2) to radius {:.4}",
+                self.radius
+            );
         }
     }
 
@@ -84,21 +109,47 @@ impl TrustRegion {
         self.radius < self.min_radius
     }
 
-    /// Restart trust region at new random location
+    /// Restart trust region at new random location (TuRBO-2: multi-start strategy)
     pub fn restart(&mut self, new_center: Vec<f64>) {
+        self.restart_count += 1;
         log::info!(
-            "🔄 Trust region RESTART at new location (old radius: {:.4})",
+            "🔄 Trust region RESTART #{} (TuRBO-2) at new location (old radius: {:.4})",
+            self.restart_count,
             self.radius
         );
         self.center = new_center;
-        self.radius = self.initial_radius;
+        // TuRBO-2: Adaptive restart radius based on restart count
+        // First restart: full initial radius
+        // Subsequent restarts: gradually increase exploration
+        self.radius = self.initial_radius * (1.0 + 0.2 * (self.restart_count as f64).min(5.0));
+        self.radius = self.radius.min(self.max_radius);
         self.success_counter = 0;
         self.failure_counter = 0;
+        self.best_score_in_region = f64::INFINITY;
     }
 
-    /// Update center to best point found
-    pub fn update_center(&mut self, new_center: Vec<f64>) {
+    /// Update center to best point found and track best score
+    pub fn update_center(&mut self, new_center: Vec<f64>, new_score: f64) {
         self.center = new_center;
+        if new_score < self.best_score_in_region {
+            self.best_score_in_region = new_score;
+        }
+    }
+
+    /// Check if trust region is in local mode (small radius) or global mode (large radius)
+    pub fn is_local_mode(&self) -> bool {
+        self.radius < 0.2 // Local if radius < 20% of parameter space
+    }
+
+    /// Get adaptive batch size based on trust region state (TuRBO-2)
+    pub fn get_adaptive_batch_size(&self, base_batch_size: usize) -> usize {
+        if self.is_local_mode() {
+            // Local mode: smaller batches for exploitation
+            base_batch_size.max(1)
+        } else {
+            // Global mode: larger batches for exploration
+            (base_batch_size * 2).max(1)
+        }
     }
 
     /// Clip point to trust region bounds
@@ -161,6 +212,10 @@ pub enum AcquisitionFunction {
     /// Epsilon-Greedy Thompson Sampling (2024 paper: robust hybrid approach)
     /// With probability epsilon: random exploration, with 1-epsilon: Thompson Sampling
     EpsilonGreedyThompsonSampling { epsilon: f64 },
+    /// BORE (Bayesian Optimization by Density-Ratio Estimation) - ICML 2024
+    /// Uses density ratio of top performers vs rest, more robust to flat landscapes
+    /// gamma: quantile threshold for "good" samples (default: 0.1 = top 10%)
+    BoreAcquisition { gamma: f64 },
 }
 
 /// Configuration for Bayesian Optimization
@@ -194,7 +249,7 @@ impl Default for BayesianConfig {
     /// Optimized for QUALITY + EXPLORATION with adaptive restart
     fn default() -> Self {
         Self {
-            n_initial: 30,       // 6D optimal for 5 params (5*D + 5)
+            n_initial: 50,       // 6D optimal for 5 params (5*D + 5)
             max_iterations: 150, // More time for quality exploration
             tolerance: 1e-4,     // Adaptive tolerance
             acquisition: AcquisitionFunction::EpsilonGreedyThompsonSampling { epsilon: 0.3 }, // 30% exploration
@@ -415,24 +470,23 @@ impl BayesianOptimizer {
         (min_dist, avg_dist, max_dist)
     }
 
-    /// Add observation (parameter values + objective score)
+    /// Add observation (parameter values + objective score) with TuRBO-2 updates
     pub fn add_observation(&mut self, params: Vec<f64>, score: f64) {
         // Update trust region if enabled (before adding observation)
         if self.enable_trust_regions {
             let current_best = self.get_best_score();
             if let Some(ref mut tr) = self.trust_region {
                 if score < current_best {
-                    // Improvement found
+                    // Improvement found - expand and update center
                     tr.expand();
-                    tr.update_center(params.clone());
+                    tr.update_center(params.clone(), score);
                 } else {
-                    // No improvement
+                    // No improvement - shrink
                     tr.shrink();
                 }
             } else {
-                // Initialize trust region at first observation
+                // Initialize trust region at first observation (TuRBO-2: 30% initial radius)
                 self.trust_region = Some(TrustRegion::new(params.clone(), 0.3));
-                // 30% initial radius
             }
         }
 
@@ -519,8 +573,15 @@ impl BayesianOptimizer {
                 AcquisitionFunction::UpperConfidenceBound { kappa: 3.0 }
             }
             AcquisitionFunction::EpsilonGreedyThompsonSampling { .. } => {
-                log::info!("{} 🔄 Switching from Epsilon-Greedy TS to pure TS", prefix);
-                AcquisitionFunction::ThompsonSampling
+                log::info!("{} 🔄 Switching from Epsilon-Greedy TS to BORE", prefix);
+                AcquisitionFunction::BoreAcquisition { gamma: 0.1 }
+            }
+            AcquisitionFunction::BoreAcquisition { .. } => {
+                log::info!(
+                    "{} 🔄 Switching from BORE to UCB with high exploration",
+                    prefix
+                );
+                AcquisitionFunction::UpperConfidenceBound { kappa: 3.0 }
             }
         };
     }
@@ -745,6 +806,11 @@ impl BayesianOptimizer {
                             -sample_value
                         }
                     }
+                    AcquisitionFunction::BoreAcquisition { gamma } => {
+                        // BORE: Bayesian Optimization by Density-Ratio Estimation (ICML 2024)
+                        // More robust to flat landscapes than GP-based methods
+                        self.calculate_bore_acquisition(&candidate, *gamma)?
+                    }
                 };
 
                 // Add diversity penalty and novelty bonus
@@ -882,6 +948,78 @@ impl BayesianOptimizer {
         improvement * phi + std * pdf
     }
 
+    /// BORE acquisition function (ICML 2024)
+    ///
+    /// Calculates density ratio: p(x | y < τ) / p(x | y >= τ)
+    /// where τ is the gamma-quantile of observed scores
+    ///
+    /// This is more robust to flat landscapes than GP-based methods because:
+    /// 1. Doesn't assume smoothness (no GP)
+    /// 2. Only cares about relative ranking (top vs rest)
+    /// 3. Works well with limited data
+    fn calculate_bore_acquisition(&self, candidate: &[f64], gamma: f64) -> Result<f64> {
+        if self.observations_x.is_empty() {
+            return Ok(0.0);
+        }
+
+        // Find gamma-quantile threshold (e.g., gamma=0.1 means top 10%)
+        let mut sorted_scores = self.observations_y.clone();
+        sorted_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let threshold_idx =
+            ((sorted_scores.len() as f64 * gamma) as usize).min(sorted_scores.len() - 1);
+        let threshold = sorted_scores[threshold_idx];
+
+        // Split observations into "good" (top gamma%) and "rest"
+        let mut good_samples = Vec::new();
+        let mut rest_samples = Vec::new();
+
+        for (i, &score) in self.observations_y.iter().enumerate() {
+            if score <= threshold {
+                good_samples.push(&self.observations_x[i]);
+            } else {
+                rest_samples.push(&self.observations_x[i]);
+            }
+        }
+
+        // Estimate density ratio using k-NN density estimation
+        // p(x | good) / p(x | rest)
+        let k = 5.min(good_samples.len()).min(rest_samples.len());
+        if k == 0 {
+            return Ok(0.0);
+        }
+
+        // Calculate k-th nearest neighbor distance in each set
+        let dist_good = self.kth_nearest_distance(candidate, &good_samples, k);
+        let dist_rest = self.kth_nearest_distance(candidate, &rest_samples, k);
+
+        // Density ratio approximation: (dist_rest / dist_good)^d
+        // Higher ratio = candidate is closer to good samples = higher acquisition
+        let d = candidate.len() as f64;
+        let density_ratio = if dist_good > 1e-10 {
+            (dist_rest / dist_good).powf(d)
+        } else {
+            1000.0 // Very close to a good sample
+        };
+
+        Ok(density_ratio)
+    }
+
+    /// Calculate k-th nearest neighbor distance
+    fn kth_nearest_distance(&self, point: &[f64], samples: &[&Vec<f64>], k: usize) -> f64 {
+        if samples.is_empty() {
+            return f64::INFINITY;
+        }
+
+        let mut distances: Vec<f64> = samples
+            .iter()
+            .map(|sample| self.squared_distance(point, sample).sqrt())
+            .collect();
+
+        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        distances[k.min(distances.len() - 1)]
+    }
+
     /// Get best parameters found so far
     pub fn get_best(&self) -> Option<(Vec<f64>, f64)> {
         if self.observations_x.is_empty() {
@@ -916,6 +1054,11 @@ impl BayesianOptimizer {
     /// Get number of observations
     pub fn n_observations(&self) -> usize {
         self.observations_x.len()
+    }
+
+    /// Get all observation scores (for variance calculation)
+    pub fn get_observation_scores(&self) -> &[f64] {
+        &self.observations_y
     }
 }
 

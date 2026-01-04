@@ -1149,7 +1149,7 @@ fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec
                 let slope = (n * sum_xy - sum_x * sum_y) / denominator;
                 let fractal_dim = -slope;
 
-                if fractal_dim.is_finite() && fractal_dim >= 1.0 && fractal_dim <= 2.0 {
+                if fractal_dim.is_finite() && (1.0..=2.0).contains(&fractal_dim) {
                     fractal_dims[idx] = fractal_dim;
                 }
             }
