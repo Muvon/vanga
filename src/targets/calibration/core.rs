@@ -1094,6 +1094,14 @@ impl ParameterCalibrator {
                 optimizer.n_observations()
             );
             log::info!("{}   Best Score: {:.6}", prefix, best_score);
+
+            // Log performance metrics
+            let perf_summary = optimizer.get_performance_summary(
+                optimizer.n_observations() - config.n_initial,
+                config.max_iterations,
+            );
+            log::info!("{}   {}", prefix, perf_summary);
+
             log::info!("{}   Best Parameters:", prefix);
             for (name, &value) in optimizer.param_names.iter().zip(best_params.iter()) {
                 log::info!("{}     {}: {:.6}", prefix, name, value);
