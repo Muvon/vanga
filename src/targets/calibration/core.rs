@@ -914,15 +914,14 @@ impl ParameterCalibrator {
                         absolute_improvement
                     };
 
-                    // Adaptive tolerance: scale with score magnitude (research-backed)
-                    let adaptive_tolerance = (best_score.abs() * config.tolerance).max(1e-5);
+                    // CRITICAL FIX: Only count as "no improvement" when there's ZERO or NEGATIVE improvement
+                    // Small positive improvements should NOT increment the stagnation counter
+                    // This prevents premature convergence when the algorithm is still making progress
+                    let has_no_improvement = absolute_improvement <= 1e-10; // Essentially zero or negative
 
-                    // Check multiple convergence criteria
-                    let absolute_converged = absolute_improvement < adaptive_tolerance;
-                    let relative_converged = relative_improvement < 0.002; // 0.2% relative (relaxed from 0.1%)
-
-                    if absolute_converged && relative_converged {
+                    if has_no_improvement {
                         no_improvement_count += 1;
+
 
                         // AGGRESSIVE early exploration to avoid wasting iterations in local minima
                         // First restart: Quick escape (iteration 5)

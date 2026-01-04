@@ -459,8 +459,16 @@ impl BayesianOptimizer {
         let best_recent = recent_scores.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let oldest_recent = recent_scores[0];
 
+        // CRITICAL FIX: Calculate POSITIVE improvement only (oldest - best, not abs)
+        // We want to detect when there's no IMPROVEMENT, not when there's no CHANGE
+        // Negative values mean the score got worse (which is NOT improvement)
+        let improvement = (oldest_recent - best_recent) / oldest_recent.max(1e-10);
+        
         // Stagnation if improvement < 0.1% in last N iterations
-        let improvement = (oldest_recent - best_recent).abs() / oldest_recent.max(1e-10);
+        // This correctly handles:
+        // - improvement > 0.001: Making progress, no stagnation
+        // - improvement ≈ 0: No change, stagnation detected
+        // - improvement < 0: Getting worse, stagnation detected
         improvement < 0.001
     }
 
