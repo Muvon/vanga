@@ -1160,23 +1160,76 @@ impl LSTMModel {
                     }
                 } else if epoch > 5 && self.ensemble_calibrator.is_some() {
                     let ensemble_cal = self.ensemble_calibrator.as_ref().unwrap();
+
+                    // Apply ensemble calibration with ramp-up (like bias corrector)
                     if ensemble_cal.is_calibrated {
-                        // Apply temperature scaling directly to tensor (preserves gradients, handles F32)
-                        let calibrated_tensor =
-                            ensemble_cal.apply_to_tensor(&predictions, &self.device)?;
+                        // Get ramp-up configuration from bias corrector config
+                        let ramp_up_epochs = if let Some(ref corrector) = self.bias_corrector {
+                            corrector.config.ramp_up_epochs
+                        } else {
+                            10 // Default value if no bias corrector
+                        };
 
-                        // Log impact periodically
-                        if epoch % 10 == 0 && batch_idx == 0 {
-                            let metrics = ensemble_cal.get_calibration_metrics();
-                            log::info!(
-                                "📊 Ensemble calibration active at epoch {}: ECE={:.6}, Temps={:?}",
-                                epoch + 1,
-                                metrics.overall_ece,
-                                metrics.temperatures
-                            );
+                        // Gradual ramp-up to prevent training instability (same as bias corrector)
+                        // Start ramping from epoch 6 (after warmup), reach full strength at epoch 6 + ramp_up_epochs
+                        let epochs_since_start = epoch.saturating_sub(5);
+                        let ramp_factor = if epochs_since_start < ramp_up_epochs {
+                            epochs_since_start as f64 / ramp_up_epochs as f64
+                        } else {
+                            1.0
+                        };
+
+                        // Apply temperature scaling with ramp-up strength
+                        if ramp_factor > 0.01 {
+                            // Get temperatures and apply with ramp factor
+                            let temps = ensemble_cal.temperature_scaling.temperatures;
+
+                            // Interpolate between 1.0 (no scaling) and actual temperature
+                            let ramped_temps: Vec<f32> = temps
+                                .iter()
+                                .map(|&t| (1.0 + (t - 1.0) * ramp_factor) as f32)
+                                .collect();
+
+                            // Create temperature tensor with ramped values (F32 to match predictions)
+                            let temp_tensor =
+                                Tensor::from_slice(&ramped_temps, (1, 5), &self.device).map_err(
+                                    |e| {
+                                        VangaError::ModelError(format!(
+                                            "Failed to create temperature tensor: {}",
+                                            e
+                                        ))
+                                    },
+                                )?;
+
+                            // Apply ramped temperature scaling: logits / ramped_temp
+                            let temp_broadcast = temp_tensor.broadcast_as(predictions.shape())?;
+                            let calibrated =
+                                predictions.broadcast_div(&temp_broadcast)?.contiguous()?;
+
+                            // Log calibration impact periodically
+                            if epoch % 10 == 0 && batch_idx == 0 {
+                                let metrics = ensemble_cal.get_calibration_metrics();
+                                log::info!(
+                                    "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, Temps=[{:.3},{:.3},{:.3},{:.3},{:.3}], Ramped=[{:.3},{:.3},{:.3},{:.3},{:.3}]",
+                                    ramp_factor,
+                                    metrics.overall_ece,
+                                    metrics.temperatures[0],
+                                    metrics.temperatures[1],
+                                    metrics.temperatures[2],
+                                    metrics.temperatures[3],
+                                    metrics.temperatures[4],
+                                    ramped_temps[0],
+                                    ramped_temps[1],
+                                    ramped_temps[2],
+                                    ramped_temps[3],
+                                    ramped_temps[4]
+                                );
+                            }
+
+                            calibrated
+                        } else {
+                            predictions.clone()
                         }
-
-                        calibrated_tensor
                     } else {
                         predictions.clone()
                     }
