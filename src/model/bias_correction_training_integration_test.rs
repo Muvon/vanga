@@ -112,6 +112,41 @@ fn test_recalibration_frequency() {
     }
 }
 
+#[test]
+fn test_print_info_configuration() {
+    // Test with print_info enabled
+    let mut config_with_print = BiasCorrection::default();
+    config_with_print.print_info = true;
+    config_with_print.recalibration_frequency = 5;
+    config_with_print.use_ensemble_calibration = true;
+
+    assert!(config_with_print.print_info);
+    assert_eq!(config_with_print.recalibration_frequency, 5);
+    assert!(config_with_print.use_ensemble_calibration);
+
+    // Test with print_info disabled (default)
+    let config_without_print = BiasCorrection::default();
+    assert!(!config_without_print.print_info);
+    assert_eq!(config_without_print.recalibration_frequency, 5); // default value
+
+    // Test recalibration logic with print_info
+    for epoch in 1..=20 {
+        let should_recalibrate = config_with_print.use_ensemble_calibration
+            && config_with_print.recalibration_frequency > 0
+            && epoch > 0
+            && epoch % config_with_print.recalibration_frequency == 0;
+
+        if should_recalibrate {
+            // Recalibration happens at epochs 5, 10, 15, 20
+            assert_eq!(epoch % 5, 0);
+            // Print info should only be shown if print_info is true
+            if config_with_print.print_info {
+                println!("Epoch {}: Recalibrating with print info", epoch);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_training_integration_with_bias_correction() {
     // Create a simple LSTM model with bias correction enabled

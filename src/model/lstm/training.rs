@@ -1128,9 +1128,11 @@ impl LSTMModel {
                 let predictions = self.forward(&input_tensor, true)?;
 
                 // Apply bias correction or ensemble calibration during training if enabled
-                let predictions_for_loss = if epoch > 5 && self.bias_corrector.is_some() {
-                    let corrector = self.bias_corrector.as_ref().unwrap();
-                    if corrector.is_calibrated
+                let predictions_for_loss = if let Some(ref corrector) = self.bias_corrector {
+                    let ramp_up_epochs = corrector.config.ramp_up_epochs;
+
+                    if epoch > ramp_up_epochs
+                        && corrector.is_calibrated
                         && corrector.config.enabled
                         && !corrector.config.use_ensemble_calibration
                     {
@@ -1138,8 +1140,12 @@ impl LSTMModel {
                         let corrected =
                             corrector.apply_correction_to_logits(&predictions, epoch)?;
 
-                        // Log correction impact periodically
-                        if epoch % 10 == 0 && batch_idx == 0 {
+                        // Log correction impact periodically (use recalibration_frequency for print frequency)
+                        if corrector.config.print_info
+                            && corrector.config.recalibration_frequency > 0
+                            && epoch % corrector.config.recalibration_frequency == 0
+                            && batch_idx == 0
+                        {
                             let original_probs = candle_nn::ops::softmax(&predictions, 1)?;
                             let corrected_probs = candle_nn::ops::softmax(&corrected, 1)?;
 
@@ -1155,78 +1161,75 @@ impl LSTMModel {
                         }
 
                         corrected
-                    } else {
-                        predictions.clone()
-                    }
-                } else if epoch > 5 && self.ensemble_calibrator.is_some() {
-                    let ensemble_cal = self.ensemble_calibrator.as_ref().unwrap();
+                    } else if epoch > ramp_up_epochs && self.ensemble_calibrator.is_some() {
+                        let ensemble_cal = self.ensemble_calibrator.as_ref().unwrap();
 
-                    // Apply ensemble calibration with ramp-up (like bias corrector)
-                    if ensemble_cal.is_calibrated {
-                        // Get ramp-up configuration from bias corrector config
-                        let ramp_up_epochs = if let Some(ref corrector) = self.bias_corrector {
-                            corrector.config.ramp_up_epochs
-                        } else {
-                            10 // Default value if no bias corrector
-                        };
+                        // Apply ensemble calibration with ramp-up (like bias corrector)
+                        if ensemble_cal.is_calibrated {
+                            // Gradual ramp-up to prevent training instability (same as bias corrector)
+                            // Start ramping from epoch after ramp_up_epochs, reach full strength at epoch ramp_up_epochs * 2
+                            let epochs_since_start = epoch.saturating_sub(ramp_up_epochs);
+                            let ramp_factor = if epochs_since_start < ramp_up_epochs {
+                                epochs_since_start as f64 / ramp_up_epochs as f64
+                            } else {
+                                1.0
+                            };
 
-                        // Gradual ramp-up to prevent training instability (same as bias corrector)
-                        // Start ramping from epoch 6 (after warmup), reach full strength at epoch 6 + ramp_up_epochs
-                        let epochs_since_start = epoch.saturating_sub(5);
-                        let ramp_factor = if epochs_since_start < ramp_up_epochs {
-                            epochs_since_start as f64 / ramp_up_epochs as f64
-                        } else {
-                            1.0
-                        };
+                            // Apply temperature scaling with ramp-up strength
+                            if ramp_factor > 0.01 {
+                                // Get temperatures and apply with ramp factor
+                                let temps = ensemble_cal.temperature_scaling.temperatures;
 
-                        // Apply temperature scaling with ramp-up strength
-                        if ramp_factor > 0.01 {
-                            // Get temperatures and apply with ramp factor
-                            let temps = ensemble_cal.temperature_scaling.temperatures;
+                                // Interpolate between 1.0 (no scaling) and actual temperature
+                                let ramped_temps: Vec<f32> = temps
+                                    .iter()
+                                    .map(|&t| (1.0 + (t - 1.0) * ramp_factor) as f32)
+                                    .collect();
 
-                            // Interpolate between 1.0 (no scaling) and actual temperature
-                            let ramped_temps: Vec<f32> = temps
-                                .iter()
-                                .map(|&t| (1.0 + (t - 1.0) * ramp_factor) as f32)
-                                .collect();
+                                // Create temperature tensor with ramped values (F32 to match predictions)
+                                let temp_tensor =
+                                    Tensor::from_slice(&ramped_temps, (1, 5), &self.device)
+                                        .map_err(|e| {
+                                            VangaError::ModelError(format!(
+                                                "Failed to create temperature tensor: {}",
+                                                e
+                                            ))
+                                        })?;
 
-                            // Create temperature tensor with ramped values (F32 to match predictions)
-                            let temp_tensor =
-                                Tensor::from_slice(&ramped_temps, (1, 5), &self.device).map_err(
-                                    |e| {
-                                        VangaError::ModelError(format!(
-                                            "Failed to create temperature tensor: {}",
-                                            e
-                                        ))
-                                    },
-                                )?;
+                                // Apply ramped temperature scaling: logits / ramped_temp
+                                let temp_broadcast =
+                                    temp_tensor.broadcast_as(predictions.shape())?;
+                                let calibrated =
+                                    predictions.broadcast_div(&temp_broadcast)?.contiguous()?;
 
-                            // Apply ramped temperature scaling: logits / ramped_temp
-                            let temp_broadcast = temp_tensor.broadcast_as(predictions.shape())?;
-                            let calibrated =
-                                predictions.broadcast_div(&temp_broadcast)?.contiguous()?;
+                                // Log calibration impact periodically (use recalibration_frequency for print frequency)
+                                if corrector.config.print_info
+                                    && corrector.config.recalibration_frequency > 0
+                                    && epoch % corrector.config.recalibration_frequency == 0
+                                    && batch_idx == 0
+                                {
+                                    let metrics = ensemble_cal.get_calibration_metrics();
+                                    log::info!(
+                                        "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, Temps=[{:.3},{:.3},{:.3},{:.3},{:.3}], Ramped=[{:.3},{:.3},{:.3},{:.3},{:.3}]",
+                                        ramp_factor,
+                                        metrics.overall_ece,
+                                        metrics.temperatures[0],
+                                        metrics.temperatures[1],
+                                        metrics.temperatures[2],
+                                        metrics.temperatures[3],
+                                        metrics.temperatures[4],
+                                        ramped_temps[0],
+                                        ramped_temps[1],
+                                        ramped_temps[2],
+                                        ramped_temps[3],
+                                        ramped_temps[4]
+                                    );
+                                }
 
-                            // Log calibration impact periodically
-                            if epoch % 10 == 0 && batch_idx == 0 {
-                                let metrics = ensemble_cal.get_calibration_metrics();
-                                log::info!(
-                                    "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, Temps=[{:.3},{:.3},{:.3},{:.3},{:.3}], Ramped=[{:.3},{:.3},{:.3},{:.3},{:.3}]",
-                                    ramp_factor,
-                                    metrics.overall_ece,
-                                    metrics.temperatures[0],
-                                    metrics.temperatures[1],
-                                    metrics.temperatures[2],
-                                    metrics.temperatures[3],
-                                    metrics.temperatures[4],
-                                    ramped_temps[0],
-                                    ramped_temps[1],
-                                    ramped_temps[2],
-                                    ramped_temps[3],
-                                    ramped_temps[4]
-                                );
+                                calibrated
+                            } else {
+                                predictions.clone()
                             }
-
-                            calibrated
                         } else {
                             predictions.clone()
                         }
@@ -1793,12 +1796,17 @@ impl LSTMModel {
                             )?;
 
                             if ensemble_cal.is_calibrated {
-                                let metrics = ensemble_cal.get_calibration_metrics();
-                                log::info!(
-                                    "🔄 Ensemble calibration recalibrated at epoch {}: {}",
-                                    epoch + 1,
-                                    metrics.summary()
-                                );
+                                // Only print if print_info is enabled in config
+                                if let Some(ref corrector) = self.bias_corrector {
+                                    if corrector.config.print_info {
+                                        let metrics = ensemble_cal.get_calibration_metrics();
+                                        log::info!(
+                                            "🔄 Ensemble calibration recalibrated at epoch {}: {}",
+                                            epoch + 1,
+                                            metrics.summary()
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -1830,7 +1838,14 @@ impl LSTMModel {
                 let loss_ratio = val_loss / avg_train_loss;
 
                 // ENHANCED DIAGNOSTIC: Detect problematic patterns with detailed analysis
-                if loss_ratio > 1.15 && epoch % 5 == 0 {
+                // Use recalibration_frequency for diagnostic print frequency (if available)
+                let diagnostic_frequency = if let Some(ref corrector) = self.bias_corrector {
+                    corrector.config.recalibration_frequency.max(1)
+                } else {
+                    5 // Default fallback
+                };
+
+                if loss_ratio > 1.15 && epoch % diagnostic_frequency == 0 {
                     log::warn!(
                         "\n🚨 VALIDATION LOSS DIVERGENCE DETECTED at epoch {}:",
                         epoch + 1
