@@ -65,10 +65,12 @@ pub struct FractionalDerivative {
     alpha: f64,
     /// Memory window size M (typically 30-90 for efficiency)
     memory_window: usize,
-    /// Step size h (typically 1.0 for discrete optimization)
-    step_size: f64,
     /// Gradient history buffer for each parameter
     gradient_history: Vec<VecDeque<Tensor>>,
+    /// Pre-computed Grünwald-Letnikov weights for performance
+    gl_weights: Vec<f64>,
+    /// Pre-computed scale factor (h^(-α) / Γ(2-α))
+    scale_factor: f64,
 }
 
 impl FractionalDerivative {
@@ -109,11 +111,25 @@ impl FractionalDerivative {
             .map(|_| VecDeque::with_capacity(memory_window))
             .collect();
 
+        // Pre-compute Grünwald-Letnikov weights for performance
+        // b_j^(α) = (j+1)^(1-α) - j^(1-α)
+        let mut gl_weights = Vec::with_capacity(memory_window);
+        for k in 1..=memory_window {
+            let j = (k - 1) as f64;
+            let weight = (j + 1.0).powf(1.0 - alpha) - j.powf(1.0 - alpha);
+            gl_weights.push(weight);
+        }
+
+        // Pre-compute scale factor: h^(-α) / Γ(2-α)
+        let gamma_2_minus_alpha = compute_gamma(2.0 - alpha);
+        let scale_factor = step_size.powf(-alpha) / gamma_2_minus_alpha;
+
         Ok(Self {
             alpha,
             memory_window,
-            step_size,
             gradient_history,
+            gl_weights,
+            scale_factor,
         })
     }
 
@@ -192,9 +208,7 @@ impl FractionalDerivative {
             // Initialize with zeros (Caputo naturally handles initialization)
             let mut caputo_sum = Tensor::zeros(shape, candle_core::DType::F32, device)?;
 
-            // Compute the Caputo fractional derivative using proper Grünwald-Letnikov weights
-            // For Caputo: D^α_C f(t) uses weights b_j^(α) = (j+1)^(1-α) - j^(1-α)
-            // This ensures convergence to standard derivative as α → 1
+            // Compute the Caputo fractional derivative using pre-computed weights
             let max_k = (self.memory_window).min(history.len() - 1);
 
             for k in 1..=max_k {
@@ -202,57 +216,37 @@ impl FractionalDerivative {
                     break;
                 }
 
-                // Compute gradient difference: ∇J(θ_{t-k+1}) - ∇J(θ_{t-k})
-                let grad_diff = history[k - 1]
-                    .contiguous()?
-                    .sub(&history[k])?
-                    .contiguous()?;
-
-                // Grünwald-Letnikov weight for Caputo: b_{k-1}^(α) = k^(1-α) - (k-1)^(1-α)
-                // This is mathematically correct and ensures α=1 gives standard gradient
-                let j = (k - 1) as f64;
-                let gl_weight = (j + 1.0).powf(1.0 - self.alpha) - j.powf(1.0 - self.alpha);
+                // Use pre-computed Grünwald-Letnikov weight
+                let gl_weight = self.gl_weights[k - 1];
 
                 // Skip negligible weights for efficiency
                 if gl_weight.abs() < 1e-10 {
                     continue;
                 }
 
-                let weight_tensor = Tensor::new(gl_weight as f32, device)?
-                    .broadcast_as(shape)?
-                    .contiguous()?;
+                // Compute gradient difference: ∇J(θ_{t-k+1}) - ∇J(θ_{t-k})
+                let grad_diff = (&history[k - 1] - &history[k])?;
 
-                let weighted_diff = grad_diff.contiguous()?.mul(&weight_tensor)?.contiguous()?;
+                // Apply weight using affine (more efficient than broadcasting)
+                let weighted_diff = grad_diff.affine(gl_weight, 0.0)?;
 
-                caputo_sum = caputo_sum.add(&weighted_diff)?.contiguous()?;
+                caputo_sum = (&caputo_sum + &weighted_diff)?;
             }
 
-            // Apply Caputo normalization: h^(-α) / Γ(2-α)
-            // Note: Γ(2-α) not Γ(1-α) because we're using first differences
-            let gamma_2_minus_alpha = compute_gamma(2.0 - self.alpha);
-            let scale_factor = (self.step_size.powf(-self.alpha) / gamma_2_minus_alpha) as f32;
-
-            let scale_tensor = Tensor::new(scale_factor, device)?
-                .broadcast_as(shape)?
-                .contiguous()?;
-
-            let fractional_grad = caputo_sum.contiguous()?.mul(&scale_tensor)?.contiguous()?;
+            // Apply pre-computed scale factor using affine
+            let fractional_grad = caputo_sum.affine(self.scale_factor, 0.0)?;
 
             // CRITICAL: Add current gradient to maintain learning
             // Caputo derivative = fractional memory term + current gradient
             // Without this, gradients vanish when history is similar → NO LEARNING
-            let final_grad = history[0]
-                .contiguous()?
-                .add(&fractional_grad)?
-                .contiguous()?;
+            let final_grad = (&history[0] + &fractional_grad)?;
 
             // Log for debugging (occasionally)
             if history.len() == self.memory_window && self.gradient_history[0].len() % 100 == 1 {
                 log::trace!(
-                    "Caputo fractional gradient: α={:.2}, Γ(2-α)={:.4}, scale={:.6}, history_len={}",
+                    "Caputo fractional gradient: α={:.2}, scale={:.6}, history_len={}",
                     self.alpha,
-                    gamma_2_minus_alpha,
-                    scale_factor,
+                    self.scale_factor,
                     history.len()
                 );
             }

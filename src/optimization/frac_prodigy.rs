@@ -20,6 +20,22 @@ use std::collections::HashMap;
 
 use super::fractional::{FractionalConfig, FractionalDerivative};
 
+/// Helper function to convert tensor scalar to f64
+#[inline]
+fn tensor_to_f64_scalar(tensor: &Tensor) -> Result<f64> {
+    match tensor.dtype() {
+        candle_core::DType::F32 => {
+            let val: f32 = tensor.to_scalar()?;
+            Ok(val as f64)
+        }
+        candle_core::DType::F64 => tensor.to_scalar(),
+        other => Err(candle_core::Error::Msg(format!(
+            "Expected F32 or F64 for scalar conversion, got {:?}",
+            other
+        ))),
+    }
+}
+
 /// FracProdigy optimizer parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParamsFracProdigy {
@@ -208,38 +224,10 @@ impl Optimizer for FracProdigy {
 
         for (var, frac_grad) in self.vars.iter().zip(fractional_grads.iter()) {
             // Gradient norm (fractional gradient)
-            let grad_sq_tensor = frac_grad.sqr()?.sum_all()?;
-            let grad_sq_sum: f64 = match grad_sq_tensor.dtype() {
-                candle_core::DType::F32 => {
-                    let val: f32 = grad_sq_tensor.to_scalar()?;
-                    val as f64
-                }
-                candle_core::DType::F64 => grad_sq_tensor.to_scalar()?,
-                other => {
-                    return Err(candle_core::Error::Msg(format!(
-                        "Expected F32 or F64 for gradient norm, got {:?}",
-                        other
-                    )));
-                }
-            };
-            grad_norm_sq += grad_sq_sum;
+            grad_norm_sq += tensor_to_f64_scalar(&frac_grad.sqr()?.sum_all()?)?;
 
             // Parameter norm
-            let param_sq_tensor = var.as_tensor().sqr()?.sum_all()?;
-            let param_sq_sum: f64 = match param_sq_tensor.dtype() {
-                candle_core::DType::F32 => {
-                    let val: f32 = param_sq_tensor.to_scalar()?;
-                    val as f64
-                }
-                candle_core::DType::F64 => param_sq_tensor.to_scalar()?,
-                other => {
-                    return Err(candle_core::Error::Msg(format!(
-                        "Expected F32 or F64 for parameter norm, got {:?}",
-                        other
-                    )));
-                }
-            };
-            param_norm_sq += param_sq_sum;
+            param_norm_sq += tensor_to_f64_scalar(&var.as_tensor().sqr()?.sum_all()?)?;
         }
 
         // Update D estimate (Prodigy's key innovation)
@@ -315,132 +303,47 @@ impl Optimizer for FracProdigy {
         for (i, (var, frac_grad)) in self.vars.iter().zip(fractional_grads.iter()).enumerate() {
             // Apply weight decay to fractional gradient if specified
             let grad_with_decay = if let Some(weight_decay) = self.params.weight_decay {
-                let weight_decay_tensor = Tensor::new(weight_decay as f32, var.device())?
-                    .broadcast_as(var.as_tensor().shape())?
-                    .contiguous()?;
-                let var_tensor = var.as_tensor().contiguous()?;
-                frac_grad
-                    .contiguous()?
-                    .add(&var_tensor.mul(&weight_decay_tensor)?.contiguous()?)?
-                    .contiguous()?
+                (frac_grad + (var.as_tensor() * weight_decay)?)?
             } else {
-                frac_grad.contiguous()?
+                frac_grad.clone()
             };
 
             // Update first moment (momentum)
-            let beta1_tensor = Tensor::new(self.params.beta1 as f32, var.device())?
-                .broadcast_as(grad_with_decay.shape())?
-                .contiguous()?;
-            let one_minus_beta1 = Tensor::new((1.0 - self.params.beta1) as f32, var.device())?
-                .broadcast_as(grad_with_decay.shape())?
-                .contiguous()?;
-
             let first_moment = if let Some(prev_m) = self.first_moments.get(&i) {
-                prev_m
-                    .contiguous()?
-                    .mul(&beta1_tensor)?
-                    .contiguous()?
-                    .add(
-                        &grad_with_decay
-                            .contiguous()?
-                            .mul(&one_minus_beta1)?
-                            .contiguous()?,
-                    )?
-                    .contiguous()?
+                ((prev_m * self.params.beta1)? + (&grad_with_decay * (1.0 - self.params.beta1))?)?
             } else {
-                grad_with_decay
-                    .contiguous()?
-                    .mul(&one_minus_beta1)?
-                    .contiguous()?
+                (&grad_with_decay * (1.0 - self.params.beta1))?
             };
 
             // Update second moment (variance)
-            let beta2_tensor = Tensor::new(self.params.beta2 as f32, var.device())?
-                .broadcast_as(grad_with_decay.shape())?
-                .contiguous()?;
-            let one_minus_beta2 = Tensor::new((1.0 - self.params.beta2) as f32, var.device())?
-                .broadcast_as(grad_with_decay.shape())?
-                .contiguous()?;
-            let grad_squared = grad_with_decay.contiguous()?.sqr()?.contiguous()?;
-
+            let grad_squared = grad_with_decay.sqr()?;
             let second_moment = if let Some(prev_v) = self.second_moments.get(&i) {
-                prev_v
-                    .contiguous()?
-                    .mul(&beta2_tensor)?
-                    .contiguous()?
-                    .add(
-                        &grad_squared
-                            .contiguous()?
-                            .mul(&one_minus_beta2)?
-                            .contiguous()?,
-                    )?
-                    .contiguous()?
+                ((prev_v * self.params.beta2)? + (&grad_squared * (1.0 - self.params.beta2))?)?
             } else {
-                grad_squared
-                    .contiguous()?
-                    .mul(&one_minus_beta2)?
-                    .contiguous()?
+                (&grad_squared * (1.0 - self.params.beta2))?
             };
 
             // Bias correction
-            let bias_corr1_tensor = Tensor::new(bias_correction1 as f32, var.device())?
-                .broadcast_as(first_moment.shape())?
-                .contiguous()?;
-            let bias_corr2_tensor = Tensor::new(bias_correction2 as f32, var.device())?
-                .broadcast_as(second_moment.shape())?
-                .contiguous()?;
-
-            let corrected_first_moment = first_moment
-                .contiguous()?
-                .div(&bias_corr1_tensor)?
-                .contiguous()?;
-            let corrected_second_moment = second_moment
-                .contiguous()?
-                .div(&bias_corr2_tensor)?
-                .contiguous()?;
+            let corrected_first_moment = (&first_moment / bias_correction1)?;
+            let corrected_second_moment = (&second_moment / bias_correction2)?;
 
             // Nesterov acceleration term (NAdam)
-            let nesterov_term = corrected_first_moment
-                .contiguous()?
-                .mul(&beta1_tensor)?
-                .contiguous()?
-                .add(
-                    &grad_with_decay
-                        .contiguous()?
-                        .mul(&one_minus_beta1)?
-                        .contiguous()?,
-                )?
-                .contiguous()?;
+            let nesterov_term = ((&corrected_first_moment * self.params.beta1)?
+                + (&grad_with_decay * (1.0 - self.params.beta1))?)?;
 
-            let eps_tensor = Tensor::new(self.params.eps as f32, var.device())?
-                .broadcast_as(corrected_second_moment.shape())?
-                .contiguous()?;
-            let lr_tensor = Tensor::new(auto_lr as f32, var.device())?
-                .broadcast_as(corrected_first_moment.shape())?
-                .contiguous()?;
-
-            let denominator = corrected_second_moment
-                .contiguous()?
-                .sqrt()?
-                .contiguous()?
-                .add(&eps_tensor)?
-                .contiguous()?;
-            let update = nesterov_term
-                .contiguous()?
-                .div(&denominator)?
-                .contiguous()?
-                .mul(&lr_tensor)?
-                .contiguous()?;
+            // Compute update: auto_lr * nesterov_term / (sqrt(corrected_second_moment) + eps)
+            let denominator = (corrected_second_moment.sqrt()? + self.params.eps)?;
+            let update = ((&nesterov_term / &denominator)? * auto_lr)?;
 
             // Update parameter
-            let old_param = var.as_tensor().contiguous()?;
-            let new_param = old_param.sub(&update)?.contiguous()?;
+            let new_param = var.as_tensor().sub(&update)?;
 
             // Diagnostic logging (early steps only)
             if (self.step_count <= 5 || self.step_count.is_multiple_of(500))
                 && cfg!(debug_assertions)
             {
-                let param_change = old_param
+                let param_change = var
+                    .as_tensor()
                     .sub(&new_param)?
                     .abs()?
                     .mean_all()?
@@ -466,15 +369,8 @@ impl Optimizer for FracProdigy {
 
             var.set(&new_param)?;
 
-            // Memory management: properly drop old moments before inserting new ones
-            if self.first_moments.contains_key(&i) {
-                self.first_moments.remove(&i);
-            }
-            if self.second_moments.contains_key(&i) {
-                self.second_moments.remove(&i);
-            }
-
             // Store updated moments (detached from computation graph)
+            // Clone before detaching to avoid borrow issues
             self.first_moments.insert(i, first_moment.detach());
             self.second_moments.insert(i, second_moment.detach());
         }

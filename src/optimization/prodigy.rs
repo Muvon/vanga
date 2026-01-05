@@ -14,6 +14,22 @@
 use candle_core::{Result, Tensor, Var};
 use candle_nn::optim::Optimizer;
 
+/// Helper function to convert tensor scalar to f64
+#[inline]
+fn tensor_to_f64_scalar(tensor: &Tensor) -> Result<f64> {
+    match tensor.dtype() {
+        candle_core::DType::F32 => {
+            let val: f32 = tensor.to_scalar()?;
+            Ok(val as f64)
+        }
+        candle_core::DType::F64 => tensor.to_scalar(),
+        other => Err(candle_core::Error::Msg(format!(
+            "Expected F32 or F64 for scalar conversion, got {:?}",
+            other
+        ))),
+    }
+}
+
 /// Prodigy optimizer configuration
 #[derive(Debug, Clone)]
 pub struct ParamsProdigy {
@@ -115,38 +131,10 @@ impl Optimizer for Prodigy {
         for (idx, var) in self.vars.iter().enumerate() {
             if let Some(grad) = grads.get(var) {
                 // CRITICAL FIX: Compute gradient norm BEFORE momentum smoothing
-                let grad_sq_tensor = grad.sqr()?.sum_all()?;
-                let grad_sq_sum: f64 = match grad_sq_tensor.dtype() {
-                    candle_core::DType::F32 => {
-                        let val: f32 = grad_sq_tensor.to_scalar()?;
-                        val as f64
-                    }
-                    candle_core::DType::F64 => grad_sq_tensor.to_scalar()?,
-                    other => {
-                        return Err(candle_core::Error::Msg(format!(
-                            "Expected F32 or F64 for gradient norm, got {:?}",
-                            other
-                        )));
-                    }
-                };
-                grad_norm_sq += grad_sq_sum;
+                grad_norm_sq += tensor_to_f64_scalar(&grad.sqr()?.sum_all()?)?;
 
                 // Compute parameter norm
-                let param_sq_tensor = var.as_tensor().sqr()?.sum_all()?;
-                let param_sq_sum: f64 = match param_sq_tensor.dtype() {
-                    candle_core::DType::F32 => {
-                        let val: f32 = param_sq_tensor.to_scalar()?;
-                        val as f64
-                    }
-                    candle_core::DType::F64 => param_sq_tensor.to_scalar()?,
-                    other => {
-                        return Err(candle_core::Error::Msg(format!(
-                            "Expected F32 or F64 for parameter norm, got {:?}",
-                            other
-                        )));
-                    }
-                };
-                param_norm_sq += param_sq_sum;
+                param_norm_sq += tensor_to_f64_scalar(&var.as_tensor().sqr()?.sum_all()?)?;
 
                 // Apply weight decay
                 let grad_with_decay = if self.params.weight_decay > 0.0 {
