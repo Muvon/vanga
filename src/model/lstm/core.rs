@@ -147,7 +147,8 @@ impl LSTMModel {
         seed: Option<u64>,
         bias_correction_config: crate::model::bias_correction::BiasCorrection,
     ) -> Result<Self> {
-        let mut model = Self::new_with_bias_config(config, bias_correction_config)?;
+        let mut model =
+            Self::new_with_bias_config_and_device(config, bias_correction_config, None)?;
         model.seed = seed;
 
         if let Some(seed_value) = seed {
@@ -278,7 +279,12 @@ impl LSTMModel {
             num_layers,
         };
 
-        let mut model = Self::new_with_seed(config, seed, device)?;
+        let mut model = Self::new_with_bias_config_and_device(
+            config,
+            model_config.bias_correction.clone(),
+            device,
+        )?;
+        model.seed = seed;
         model.architecture = Some(model_config.architecture.clone());
         model.dropout_config = Some(model_config.dropout.clone());
         model.attention_config = Some(model_config.attention.clone());

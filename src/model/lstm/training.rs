@@ -1134,7 +1134,7 @@ impl LSTMModel {
                     if let Some(ref corrector) = self.bias_corrector {
                         let ramp_up_epochs = corrector.config.ramp_up_epochs;
 
-                        if epoch > ramp_up_epochs
+                        if epoch >= ramp_up_epochs
                             && corrector.is_calibrated
                             && corrector.config.enabled
                         {
@@ -1174,7 +1174,7 @@ impl LSTMModel {
                     if let Some(ref ensemble_cal) = self.ensemble_calibrator {
                         let ramp_up_epochs = self.bias_correction_config.ramp_up_epochs;
 
-                        if epoch > ramp_up_epochs && ensemble_cal.is_calibrated {
+                        if epoch >= ramp_up_epochs && ensemble_cal.is_calibrated {
                             // Gradual ramp-up to prevent training instability
                             let epochs_since_start = epoch.saturating_sub(ramp_up_epochs);
                             let ramp_factor = if epochs_since_start < ramp_up_epochs {
