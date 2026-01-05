@@ -1128,46 +1128,54 @@ impl LSTMModel {
                 let predictions = self.forward(&input_tensor, true)?;
 
                 // Apply bias correction or ensemble calibration during training if enabled
-                let predictions_for_loss = if let Some(ref corrector) = self.bias_corrector {
-                    let ramp_up_epochs = corrector.config.ramp_up_epochs;
+                let predictions_for_loss = if !self.bias_correction_config.use_ensemble_calibration
+                {
+                    // Use LinearBiasCorrector (normal bias correction)
+                    if let Some(ref corrector) = self.bias_corrector {
+                        let ramp_up_epochs = corrector.config.ramp_up_epochs;
 
-                    if epoch > ramp_up_epochs
-                        && corrector.is_calibrated
-                        && corrector.config.enabled
-                        && !corrector.config.use_ensemble_calibration
-                    {
-                        // Apply bias correction to RAW LOGITS (before softmax)
-                        let corrected =
-                            corrector.apply_correction_to_logits(&predictions, epoch)?;
-
-                        // Log correction impact periodically (use recalibration_frequency for print frequency)
-                        if corrector.config.print_info
-                            && corrector.config.recalibration_frequency > 0
-                            && epoch % corrector.config.recalibration_frequency == 0
-                            && batch_idx == 0
+                        if epoch > ramp_up_epochs
+                            && corrector.is_calibrated
+                            && corrector.config.enabled
                         {
-                            let original_probs = candle_nn::ops::softmax(&predictions, 1)?;
-                            let corrected_probs = candle_nn::ops::softmax(&corrected, 1)?;
+                            // Apply bias correction to RAW LOGITS (before softmax)
+                            let corrected =
+                                corrector.apply_correction_to_logits(&predictions, epoch)?;
 
-                            if let Ok(kl_div) = corrector
-                                .calculate_correction_impact(&original_probs, &corrected_probs)
+                            // Log correction impact periodically
+                            if corrector.config.print_info
+                                && corrector.config.recalibration_frequency > 0
+                                && epoch % corrector.config.recalibration_frequency == 0
+                                && batch_idx == 0
                             {
-                                log::info!(
-                                    "📊 Bias correction impact at epoch {} (KL divergence): {:.6}",
-                                    epoch + 1,
-                                    kl_div
-                                );
+                                let original_probs = candle_nn::ops::softmax(&predictions, 1)?;
+                                let corrected_probs = candle_nn::ops::softmax(&corrected, 1)?;
+
+                                if let Ok(kl_div) = corrector
+                                    .calculate_correction_impact(&original_probs, &corrected_probs)
+                                {
+                                    log::info!(
+                                        "📊 Bias correction impact at epoch {} (KL divergence): {:.6}",
+                                        epoch + 1,
+                                        kl_div
+                                    );
+                                }
                             }
+
+                            corrected
+                        } else {
+                            predictions.clone()
                         }
+                    } else {
+                        predictions.clone()
+                    }
+                } else {
+                    // Use EnsembleCalibrator (temperature scaling + label smoothing + mixup)
+                    if let Some(ref ensemble_cal) = self.ensemble_calibrator {
+                        let ramp_up_epochs = self.bias_correction_config.ramp_up_epochs;
 
-                        corrected
-                    } else if epoch > ramp_up_epochs && self.ensemble_calibrator.is_some() {
-                        let ensemble_cal = self.ensemble_calibrator.as_ref().unwrap();
-
-                        // Apply ensemble calibration with ramp-up (like bias corrector)
-                        if ensemble_cal.is_calibrated {
-                            // Gradual ramp-up to prevent training instability (same as bias corrector)
-                            // Start ramping from epoch after ramp_up_epochs, reach full strength at epoch ramp_up_epochs * 2
+                        if epoch > ramp_up_epochs && ensemble_cal.is_calibrated {
+                            // Gradual ramp-up to prevent training instability
                             let epochs_since_start = epoch.saturating_sub(ramp_up_epochs);
                             let ramp_factor = if epochs_since_start < ramp_up_epochs {
                                 epochs_since_start as f64 / ramp_up_epochs as f64
@@ -1202,10 +1210,11 @@ impl LSTMModel {
                                 let calibrated =
                                     predictions.broadcast_div(&temp_broadcast)?.contiguous()?;
 
-                                // Log calibration impact periodically (use recalibration_frequency for print frequency)
-                                if corrector.config.print_info
-                                    && corrector.config.recalibration_frequency > 0
-                                    && epoch % corrector.config.recalibration_frequency == 0
+                                // Log calibration impact periodically
+                                if self.bias_correction_config.print_info
+                                    && self.bias_correction_config.recalibration_frequency > 0
+                                    && epoch % self.bias_correction_config.recalibration_frequency
+                                        == 0
                                     && batch_idx == 0
                                 {
                                     let metrics = ensemble_cal.get_calibration_metrics();
@@ -1236,8 +1245,6 @@ impl LSTMModel {
                     } else {
                         predictions.clone()
                     }
-                } else {
-                    predictions.clone()
                 };
 
                 // Calculate loss using potentially corrected predictions
@@ -1594,7 +1601,10 @@ impl LSTMModel {
                                 log::debug!("ℹ️ Bias corrector already calibrated - skipping initial calibration");
                             }
                         }
-                    } else if let Some(ref mut ensemble_cal) = self.ensemble_calibrator {
+                    } else if self.bias_correction_config.use_ensemble_calibration
+                        && self.ensemble_calibrator.is_some()
+                    {
+                        let ensemble_cal = self.ensemble_calibrator.as_mut().unwrap();
                         // Ensemble calibration - initial setup
                         if !ensemble_cal.is_calibrated {
                             log::info!("🎯 Starting initial ensemble calibration...");

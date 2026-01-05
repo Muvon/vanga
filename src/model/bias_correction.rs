@@ -47,7 +47,7 @@ fn default_recalibration_frequency() -> usize {
 }
 
 fn default_use_ensemble() -> bool {
-    true
+    false
 }
 
 impl Default for BiasCorrection {
