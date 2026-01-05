@@ -33,9 +33,18 @@ impl LSTMModel {
     }
 
     /// Create a new LSTM model with bias correction configuration
-    pub fn new_with_bias_config(
+    fn new_with_bias_config(
         config: LSTMConfig,
         bias_correction_config: crate::model::bias_correction::BiasCorrection,
+    ) -> Result<Self> {
+        Self::new_with_bias_config_and_device(config, bias_correction_config, None)
+    }
+
+    /// Create a new LSTM model with bias correction configuration and optional device
+    fn new_with_bias_config_and_device(
+        config: LSTMConfig,
+        bias_correction_config: crate::model::bias_correction::BiasCorrection,
+        device: Option<Device>,
     ) -> Result<Self> {
         let training_config = TrainingConfig {
             epochs: 1, // Placeholder - will be set by configure_training()
@@ -43,6 +52,8 @@ impl LSTMModel {
             clip_gradient: Some(1.0),
             batch_size: 32, // Default batch size
         };
+
+        let actual_device = device.unwrap_or(Device::Cpu);
 
         Ok(Self {
             config,
@@ -52,7 +63,7 @@ impl LSTMModel {
             attention_module: None, // Initialize attention as None
             attention_config: None, // Initialize attention config as None
             use_attention: false,   // Attention disabled by default
-            device: Device::Cpu,
+            device: actual_device,  // CRITICAL FIX: Use provided device from the start
             varmap: VarMap::new(),
             training_config,
             trained: false,
@@ -89,12 +100,27 @@ impl LSTMModel {
     }
 
     /// Create a new LSTM model with specified seed for reproducible training
-    pub fn new_with_seed(config: LSTMConfig, seed: Option<u64>) -> Result<Self> {
-        let mut model = Self::new_with_bias_config(
+    pub fn new_with_seed(
+        config: LSTMConfig,
+        seed: Option<u64>,
+        device: Option<Device>,
+    ) -> Result<Self> {
+        // CRITICAL FIX: Pass device to new_with_bias_config_and_device so it's set from the start
+        let mut model = Self::new_with_bias_config_and_device(
             config,
             crate::model::bias_correction::BiasCorrection::default(),
+            device.clone(),
         )?;
         model.seed = seed;
+
+        if let Some(ref dev) = device {
+            let device_name = match dev {
+                Device::Cpu => "CPU",
+                Device::Cuda(_) => "CUDA GPU",
+                Device::Metal(_) => "Metal GPU",
+            };
+            log::info!("🔧 LSTMModel created with device: {}", device_name);
+        }
 
         if let Some(seed_value) = seed {
             log::info!("🎲 Created LSTMModel with seed: {}", seed_value);
@@ -141,123 +167,7 @@ impl LSTMModel {
         input_size: usize,
         output_size: usize,
     ) -> Result<Self> {
-        // Extract sequence length from config - SAME logic
-        let sequence_length = match &model_config.sequence_length {
-            crate::config::model::SequenceLengthConfig::Fixed(len) => *len as usize,
-            crate::config::model::SequenceLengthConfig::Auto {
-                min_length,
-                max_length: _,
-            } => *min_length as usize,
-            crate::config::model::SequenceLengthConfig::Adaptive => 60,
-        };
-
-        // Extract number of layers from architecture config - MOVED UP
-        let num_layers = Self::extract_num_layers_from_architecture(&model_config.architecture);
-
-        // Extract hidden units from config - ENHANCED to use full array
-        let hidden_sizes = match &model_config.hidden_units {
-            crate::config::model::HiddenUnitsConfig::Fixed(units) => {
-                // Use the full array instead of just the first value
-                units.iter().map(|&u| u as usize).collect::<Vec<usize>>()
-            }
-            crate::config::model::HiddenUnitsConfig::Auto {
-                min_units,
-                max_units: _,
-            } => {
-                // For auto config, create a single-layer configuration
-                vec![*min_units as usize]
-            }
-            crate::config::model::HiddenUnitsConfig::Pyramid {
-                base_units,
-                reduction_factor,
-            } => {
-                // Generate pyramid architecture: base_units, base_units * reduction_factor, etc.
-                let mut sizes = Vec::new();
-                let mut current_size = *base_units as f64;
-
-                for _ in 0..num_layers {
-                    sizes.push(current_size as usize);
-                    current_size *= reduction_factor;
-                    // Ensure minimum size of 8 units
-                    if current_size < 8.0 {
-                        current_size = 8.0;
-                    }
-                }
-                sizes
-            }
-        };
-
-        // Validate hidden_sizes array consistency
-        if hidden_sizes.is_empty() {
-            return Err(VangaError::ModelError(
-                "Hidden units configuration resulted in empty array".to_string(),
-            ));
-        }
-
-        // Validate reasonable hidden sizes
-        for (i, &size) in hidden_sizes.iter().enumerate() {
-            if size == 0 {
-                return Err(VangaError::ModelError(format!(
-                    "Layer {} has zero hidden units",
-                    i
-                )));
-            }
-            if size > 2048 {
-                log::warn!(
-                    "⚠️ Layer {} has very large hidden size ({}). This may cause memory issues.",
-                    i,
-                    size
-                );
-            }
-        }
-
-        // Extend hidden_sizes if needed to match num_layers
-        let mut final_hidden_sizes = hidden_sizes;
-        if final_hidden_sizes.len() < num_layers {
-            let last_size = final_hidden_sizes.last().copied().unwrap_or(128);
-            log::info!(
-                "🔧 Extending hidden_sizes from {} to {} layers using last size ({})",
-                final_hidden_sizes.len(),
-                num_layers,
-                last_size
-            );
-            final_hidden_sizes.resize(num_layers, last_size);
-        } else if final_hidden_sizes.len() > num_layers {
-            log::warn!(
-                "⚠️ hidden_sizes array length ({}) > num_layers ({}). Truncating to {} layers.",
-                final_hidden_sizes.len(),
-                num_layers,
-                num_layers
-            );
-            final_hidden_sizes.truncate(num_layers);
-        }
-
-        let lstm_config = LSTMConfig {
-            input_size,
-            hidden_sizes: final_hidden_sizes,
-            output_size,
-            sequence_length,      // Use actual sequence length from config
-            learning_rate: 0.001, // Default learning rate
-            num_layers,           // Now properly extracted from architecture
-        };
-
-        // Validate the configuration
-        lstm_config.validate()?;
-
-        let mut model =
-            Self::new_with_bias_config(lstm_config, model_config.bias_correction.clone())?;
-
-        // Configure attention if enabled
-        model.configure_attention(&model_config.attention, None)?;
-
-        // Configure dropout
-        model.configure_dropout(&model_config.dropout);
-
-        // Loss function is now hardcoded to NLL - no configuration needed
-        // Store architecture information for bidirectional detection
-        model.architecture = Some(model_config.architecture.clone());
-
-        Ok(model)
+        Self::from_model_config_with_seed(model_config, input_size, output_size, None, None)
     }
 
     /// Create LSTM model from ModelConfig with seed for reproducible training
@@ -266,6 +176,7 @@ impl LSTMModel {
         input_size: usize,
         output_size: usize,
         seed: Option<u64>,
+        device: Option<Device>,
     ) -> Result<Self> {
         // Extract sequence length from config - SAME logic
         let sequence_length = match &model_config.sequence_length {
@@ -358,30 +269,29 @@ impl LSTMModel {
             final_hidden_sizes.truncate(num_layers);
         }
 
-        let lstm_config = LSTMConfig {
+        let config = LSTMConfig {
             input_size,
             hidden_sizes: final_hidden_sizes,
             output_size,
-            sequence_length,      // Use actual sequence length from config
+            sequence_length,
             learning_rate: 0.001, // Default learning rate
-            num_layers,           // Now properly extracted from architecture
+            num_layers,
         };
 
-        // Validate the configuration
-        lstm_config.validate()?;
-
-        let mut model =
-            Self::new_with_seed_and_bias(lstm_config, seed, model_config.bias_correction.clone())?;
-
-        // Configure attention if enabled
-        model.configure_attention(&model_config.attention, None)?;
-
-        // Configure dropout
-        model.configure_dropout(&model_config.dropout);
-
-        // Loss function is now hardcoded to NLL - no configuration needed
-        // Store architecture information for bidirectional detection
+        let mut model = Self::new_with_seed(config, seed, device)?;
         model.architecture = Some(model_config.architecture.clone());
+        model.dropout_config = Some(model_config.dropout.clone());
+        model.attention_config = Some(model_config.attention.clone());
+        model.use_attention = model_config.attention.enabled;
+
+        // Initialize XGBoost model if enabled
+        if model_config.xgboost.enabled {
+            log::info!("🚀 Initializing XGBoost model for hybrid prediction");
+            model.xgboost_model = Some(crate::model::xgboost::XGBoostRegressor::new(
+                model_config.xgboost.clone(),
+                model.device.clone(),
+            ));
+        }
 
         Ok(model)
     }
@@ -534,8 +444,15 @@ impl LSTMModel {
 
         let skip_weights = skip_weight_init.unwrap_or(false);
 
+        let device_str = match &self.device {
+            Device::Cpu => "CPU",
+            Device::Cuda(_) => "CUDA GPU",
+            Device::Metal(_) => "Metal GPU",
+        };
+
         log::info!(
-            "Initializing multi-layer LSTM network with config: {:?}",
+            "🔧 Initializing multi-layer LSTM network on device: {} (config: {:?})",
+            device_str,
             self.config
         );
 
@@ -557,6 +474,8 @@ impl LSTMModel {
             log::info!("🔄 Initializing Bidirectional LSTM with forward and backward layers");
         }
 
+        // CRITICAL: Verify device is correct before creating VarBuilder
+        log::info!("🔧 Creating VarBuilder with device: {}", device_str);
         let vs = VarBuilder::from_varmap(&self.varmap, DType::F32, &self.device);
         let num_layers = self.config.num_layers;
 
@@ -789,11 +708,24 @@ impl LSTMModel {
         std::fs::write(&config_path, encoded)
             .map_err(|e| VangaError::IoError(format!("Failed to write config file: {}", e)))?;
 
-        // Save XGBoost model if present (hybrid model persistence)
+        // Save XGBoost model if present AND trained (hybrid model persistence)
         if let Some(xgb_model) = &self.xgboost_model {
-            // Use the base path directly - SmartCore will add its own extensions
-            xgb_model.save_model(&path.to_string_lossy())?;
-            log::debug!("XGBoost model saved to: {}", path.display());
+            // Only save if XGBoost model is trained
+            if xgb_model.is_trained() {
+                // Use the base path directly - SmartCore will add its own extensions
+                match xgb_model.save_model(&path.to_string_lossy()) {
+                    Ok(_) => {
+                        log::debug!("XGBoost model saved to: {}", path.display());
+                    }
+                    Err(e) => {
+                        // Log but don't fail - XGBoost model is optional
+                        log::warn!("⚠️  Failed to save XGBoost model (non-fatal): {}", e);
+                        log::warn!("   Continuing with LSTM-only model save");
+                    }
+                }
+            } else {
+                log::debug!("XGBoost model exists but not trained yet, skipping save");
+            }
         }
 
         log::debug!(

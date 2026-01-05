@@ -18,13 +18,13 @@ async fn test_seed_parameter_flow() {
     };
 
     // Test seed parameter storage
-    let model_with_seed = LSTMModel::new_with_seed(config.clone(), Some(42)).unwrap();
+    let model_with_seed = LSTMModel::new_with_seed(config.clone(), Some(42), None).unwrap();
     assert_eq!(model_with_seed.seed, Some(42));
 
     let model_without_seed = LSTMModel::new(config.clone()).unwrap();
     assert_eq!(model_without_seed.seed, None);
 
-    let model_zero_seed = LSTMModel::new_with_seed(config, Some(0)).unwrap();
+    let model_zero_seed = LSTMModel::new_with_seed(config, Some(0), None).unwrap();
     assert_eq!(model_zero_seed.seed, Some(0));
 }
 
@@ -42,7 +42,7 @@ async fn test_seed_initialization_logging() {
     };
 
     // Test that initialization completes without errors
-    let mut model = LSTMModel::new_with_seed(config, Some(123)).unwrap();
+    let mut model = LSTMModel::new_with_seed(config, Some(123), None).unwrap();
 
     // This should trigger all the seeding logic and logging
     let result = model.initialize_network(None); // Default behavior (with weight init)
@@ -69,6 +69,7 @@ async fn test_multi_target_seed_flow() {
         vec!["price_levels".to_string()], // target_names
         vec!["1h".to_string()],           // trained_horizons
         Some(456),                        // seed
+        None,                             // device
     );
     assert!(
         model.is_ok(),
@@ -98,7 +99,7 @@ async fn test_seed_validation_logic() {
     ];
 
     for (seed, description) in test_cases {
-        let mut model = LSTMModel::new_with_seed(config.clone(), seed).unwrap();
+        let mut model = LSTMModel::new_with_seed(config.clone(), seed, None).unwrap();
         let result = model.initialize_network(None); // Default behavior (with weight init)
         assert!(
             result.is_ok(),
@@ -131,7 +132,7 @@ async fn test_weight_tensor_access() {
         learning_rate: 0.001,
         num_layers: 1,
     };
-    let mut model = LSTMModel::new_with_seed(config, Some(789)).unwrap();
+    let mut model = LSTMModel::new_with_seed(config, Some(789), None).unwrap();
     model.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model.mark_as_trained_for_testing(); // Allow predictions if needed
 
@@ -170,7 +171,7 @@ async fn test_backward_compatibility() {
     );
 
     // Test that new constructor with None works the same
-    let model_new = LSTMModel::new_with_seed(config, None);
+    let model_new = LSTMModel::new_with_seed(config, None, None);
     assert!(model_new.is_ok(), "New constructor with None should work");
     assert_eq!(
         model_new.unwrap().seed,
@@ -195,8 +196,8 @@ async fn test_seed_consistency_attempt() {
     let seed = 999u64;
 
     // Create two models with the same seed
-    let mut model1 = LSTMModel::new_with_seed(config.clone(), Some(seed)).unwrap();
-    let mut model2 = LSTMModel::new_with_seed(config, Some(seed)).unwrap();
+    let mut model1 = LSTMModel::new_with_seed(config.clone(), Some(seed), None).unwrap();
+    let mut model2 = LSTMModel::new_with_seed(config, Some(seed), None).unwrap();
 
     model1.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model2.initialize_network(None).unwrap(); // Default behavior (with weight init)

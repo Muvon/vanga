@@ -157,16 +157,18 @@ impl MultiTargetLSTMModel {
             target_names,
             trained_horizons,
             None,
+            None,
         )
     }
 
-    /// Create new multi-target LSTM model with seed for reproducible training
+    /// Create new multi-target LSTM model with seed and device for reproducible training
     pub fn new_with_seed(
         model_config: &ModelConfig,
         input_size: usize,
         target_names: Vec<String>,
         trained_horizons: Vec<String>,
         seed: Option<u64>,
+        device: Option<candle_core::Device>,
     ) -> Result<Self> {
         let num_targets = target_names.len();
 
@@ -174,6 +176,20 @@ impl MultiTargetLSTMModel {
             "🏗️  Creating multi-target LSTM model with {} targets",
             num_targets
         );
+
+        // Log device information
+        if let Some(ref dev) = device {
+            log::info!(
+                "🔧 Multi-target model using device: {}",
+                match dev {
+                    candle_core::Device::Cpu => "CPU",
+                    candle_core::Device::Cuda(_) => "NVIDIA CUDA GPU",
+                    candle_core::Device::Metal(_) => "Apple Metal GPU",
+                }
+            );
+        } else {
+            log::info!("🔧 Multi-target model using default device (CPU)");
+        }
 
         if let Some(seed_value) = seed {
             log::info!("🎲 Multi-target model using seed: {}", seed_value);
@@ -197,6 +213,7 @@ impl MultiTargetLSTMModel {
             let target_seed = seed.and_then(|s| if s == 0 { None } else { Some(s + i as u64) });
 
             // Create model with proper output size for target type and seed
+            // Create model with proper output size for target type and seed
             let mut model = if let Some(target_seed_value) = target_seed {
                 log::debug!(
                     "🎲 Target '{}' using seed: {}",
@@ -208,16 +225,53 @@ impl MultiTargetLSTMModel {
                     input_size,
                     output_size,
                     Some(target_seed_value),
+                    device.clone(),
                 )?
             } else {
-                LSTMModel::from_model_config(model_config, input_size, output_size)?
+                LSTMModel::from_model_config_with_seed(
+                    model_config,
+                    input_size,
+                    output_size,
+                    None,
+                    device.clone(),
+                )?
             };
 
             // CRITICAL: Verify the model was created with correct output_size
             let actual_output_size = model.get_output_size();
 
+            // CRITICAL: Verify the device was set correctly
+            let model_device_str = match &model.device {
+                candle_core::Device::Cpu => "CPU",
+                candle_core::Device::Cuda(_) => "CUDA GPU",
+                candle_core::Device::Metal(_) => "Metal GPU",
+            };
+            log::info!(
+                "🔍 VERIFY: Target '{}' model.device = {}",
+                target_name,
+                model_device_str
+            );
+
             // Set target context for proper loss calculation
             model.set_target_context(target_name.clone(), target_type);
+
+            if let Some(ref dev) = device {
+                let device_str = match dev {
+                    candle_core::Device::Cpu => "CPU".to_string(),
+                    candle_core::Device::Cuda(_) => "CUDA GPU".to_string(),
+                    candle_core::Device::Metal(_) => "Metal GPU".to_string(),
+                };
+                log::info!(
+                    "🔧 Target '{}' initialized on device: {}",
+                    target_name,
+                    device_str
+                );
+            } else {
+                log::warn!(
+                    "⚠️  Target '{}' using default CPU device (no device provided)",
+                    target_name
+                );
+            }
 
             // Compact structured logging per target
             let config_info = match target_type {

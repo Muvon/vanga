@@ -46,6 +46,14 @@ impl LSTMModel {
             }
         }
 
+        // CRITICAL: Log device being used for tensor creation
+        let device_name = match &self.device {
+            candle_core::Device::Cpu => "CPU",
+            candle_core::Device::Cuda(_) => "CUDA GPU",
+            candle_core::Device::Metal(_) => "Metal GPU",
+        };
+        log::debug!("🔧 Creating sequence tensor on device: {}", device_name);
+
         let seq_tensor = Tensor::from_vec(seq_data, (batch_size, seq_len, features), &self.device)
             .map_err(|e| {
                 VangaError::ModelError(format!("Sequence tensor conversion failed: {}", e))
@@ -91,6 +99,7 @@ impl LSTMModel {
             );
         }
 
+        log::debug!("🔧 Creating target tensor on device: {}", device_name);
         let target_tensor =
             Tensor::from_vec(target_data, (batch_size, 1), &self.device).map_err(|e| {
                 VangaError::ModelError(format!("Target tensor conversion failed: {}", e))
@@ -112,6 +121,23 @@ impl LSTMModel {
     /// - training=true: Apply dropout for regularization during training
     /// - training=false: NO dropout for consistent validation behavior
     pub fn forward(&self, input: &Tensor, training: bool) -> Result<Tensor> {
+        // CRITICAL: Verify device before forward pass
+        let device_name = match &self.device {
+            candle_core::Device::Cpu => "CPU",
+            candle_core::Device::Cuda(_) => "CUDA GPU",
+            candle_core::Device::Metal(_) => "Metal GPU",
+        };
+        let input_device_name = match input.device() {
+            candle_core::Device::Cpu => "CPU",
+            candle_core::Device::Cuda(_) => "CUDA GPU",
+            candle_core::Device::Metal(_) => "Metal GPU",
+        };
+        log::debug!(
+            "🔍 Forward pass - model.device: {}, input.device: {}",
+            device_name,
+            input_device_name
+        );
+
         let forward_lstm_layers = self.lstm_layers.as_ref().ok_or_else(|| {
             VangaError::ModelError("Forward LSTM layers not initialized".to_string())
         })?;

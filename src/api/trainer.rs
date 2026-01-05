@@ -585,7 +585,13 @@ impl ModelTrainer {
                         horizon
                     );
                     let new_model = self
-                        .train_window_from_scratch(window, window_idx, *target_type, horizon)
+                        .train_window_from_scratch(
+                            window,
+                            window_idx,
+                            *target_type,
+                            horizon,
+                            &device,
+                        )
                         .await?;
                     target_models.insert(target_key, new_model);
                 } else {
@@ -740,6 +746,7 @@ impl ModelTrainer {
         window_id: usize,
         target_type: crate::targets::TargetType,
         horizon: &str,
+        device: &candle_core::Device,
     ) -> Result<MultiTargetLSTMModel> {
         log::info!(
             "🎯 Training {:?} {} with target-specific balanced sequences ({} samples)",
@@ -779,7 +786,7 @@ impl ModelTrainer {
         );
 
         let mut model = self
-            .get_or_create_multi_target_model(input_size, &target_names)
+            .get_or_create_multi_target_model(input_size, &target_names, device)
             .await?;
 
         // Extract single target data using helper function
@@ -1017,15 +1024,26 @@ impl ModelTrainer {
         &self,
         input_size: usize,
         target_names: &[String],
+        device: &candle_core::Device,
     ) -> Result<MultiTargetLSTMModel> {
         // Create new model since we're not loading from file anymore
         // The caller (main.rs) will handle loading/saving based on training config
         log::info!("🆕 Creating new multi-target model for training");
-        MultiTargetLSTMModel::new(
+
+        // Get seed from config
+        let seed = if self.config.training.seed == 0 {
+            None
+        } else {
+            Some(self.config.training.seed)
+        };
+
+        MultiTargetLSTMModel::new_with_seed(
             &self.config.model,
             input_size,
             target_names.to_vec(),
             self.config.horizons.clone(),
+            seed,
+            Some(device.clone()),
         )
     }
 

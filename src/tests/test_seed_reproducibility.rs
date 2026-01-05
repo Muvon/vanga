@@ -32,7 +32,7 @@ async fn test_seed_reproducibility() {
         println!("\n🔄 Test run {}/{}", i + 1, num_tests);
 
         // Create model with seed
-        let mut model = LSTMModel::new_with_seed(config.clone(), Some(test_seed)).unwrap();
+        let mut model = LSTMModel::new_with_seed(config.clone(), Some(test_seed), None).unwrap();
 
         // Initialize the network (this is where seeding should take effect)
         model.initialize_network(None).unwrap(); // Default behavior (with weight init)
@@ -103,7 +103,7 @@ async fn test_seed_reproducibility() {
 
     // Test with different seed to ensure it produces different results
     println!("\n🔄 Testing with different seed (123) to ensure randomness works...");
-    let mut model_different = LSTMModel::new_with_seed(config.clone(), Some(123)).unwrap();
+    let mut model_different = LSTMModel::new_with_seed(config.clone(), Some(123), None).unwrap();
     model_different.initialize_network(None).unwrap(); // Default behavior (with weight init)
     model_different.mark_as_trained_for_testing(); // Allow predictions if needed
 

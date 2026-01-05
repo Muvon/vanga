@@ -458,7 +458,7 @@ impl SmartCoreRegressor {
         let has_dt = self.decision_tree.is_some();
         let result = has_rf || has_dt;
 
-        log::debug!(
+        log::trace!(
             "🔍 SmartCore model status: RandomForest={}, DecisionTree={}, is_trained={}",
             has_rf,
             has_dt,

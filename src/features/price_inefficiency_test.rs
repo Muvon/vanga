@@ -62,13 +62,9 @@ async fn test_price_inefficiency_with_real_data() {
     );
 
     // Get some sample values
-    let sample_gaps: Vec<f64> = price_gaps.into_iter().filter_map(|v| v).take(20).collect();
+    let sample_gaps: Vec<f64> = price_gaps.into_iter().flatten().take(20).collect();
 
-    let sample_vol: Vec<f64> = gap_volatility
-        .into_iter()
-        .filter_map(|v| v)
-        .take(20)
-        .collect();
+    let sample_vol: Vec<f64> = gap_volatility.into_iter().flatten().take(20).collect();
 
     println!("Sample price_gaps values: {:?}", sample_gaps);
     println!("Sample wick imbalance values: {:?}", sample_vol);
