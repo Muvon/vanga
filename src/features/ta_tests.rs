@@ -55,32 +55,113 @@ fn test_fixed_fractal_dimension() {
 
 #[test]
 fn test_fixed_price_gaps() {
-    println!("Testing fixed price gaps calculation...");
+    println!("Testing body-to-range ratio (price inefficiency)...");
 
-    // Create sample OHLC data
-    let open = [100.0, 101.0, 102.0, 103.0, 104.0];
-    let close = [100.5, 101.5, 102.5, 103.5, 104.5];
+    // Test various candle patterns
+    // Format: [open, high, low, close]
+    let test_cases: Vec<(f64, f64, f64, f64, f64)> = vec![
+        // Full bullish candle (no wicks) - should be +100
+        (100.0, 101.0, 100.0, 101.0, 100.0),
+        // Full bearish candle (no wicks) - should be -100
+        (101.0, 101.0, 100.0, 100.0, -100.0),
+        // Doji (all wicks, no body) - should be 0
+        (100.5, 101.0, 100.0, 100.5, 0.0),
+        // Bullish with wicks - should be positive but < 100
+        (100.0, 102.0, 99.0, 101.0, 33.33),
+        // Bearish with wicks - should be negative but > -100
+        (101.0, 102.0, 99.0, 100.0, -33.33),
+    ];
 
-    // Test price gaps calculation (this would be called from technical.rs)
-    let mut price_gaps = vec![0.0; close.len()];
-    for i in 1..close.len() {
-        if close[i - 1] > 0.0 {
-            let gap: f64 = (open[i] - close[i - 1]) / close[i - 1] * 100.0;
-            price_gaps[i] = gap.clamp(-50.0, 50.0);
-        }
-    }
+    for (open, high, low, close, expected) in test_cases {
+        let range = high - low;
+        let body_to_range = if range > 0.0 {
+            let body = close - open;
+            let ratio = body / range * 100.0;
+            ratio.clamp(-100.0, 100.0)
+        } else {
+            0.0
+        };
 
-    println!("Price gaps: {:?}", price_gaps);
+        println!(
+            "O:{} H:{} L:{} C:{} => Body/Range: {:.2}% (expected ~{:.2}%)",
+            open, high, low, close, body_to_range, expected
+        );
 
-    // Should have reasonable values
-    assert!(price_gaps[0] == 0.0, "First gap should be 0");
-    for &gap in &price_gaps[1..] {
-        assert!(gap.is_finite(), "All gaps should be finite");
+        assert!(body_to_range.is_finite(), "Body-to-range should be finite");
         assert!(
-            (-50.0..=50.0).contains(&gap),
-            "Gaps should be clamped to [-50, 50]"
+            (-100.0..=100.0).contains(&body_to_range),
+            "Body-to-range should be in [-100, 100]"
+        );
+        assert!(
+            (body_to_range - expected).abs() < 1.0,
+            "Body-to-range {:.2} should be close to expected {:.2}",
+            body_to_range,
+            expected
         );
     }
+
+    println!("✓ Body-to-range ratio working correctly for crypto 24/7 markets");
+}
+
+#[test]
+fn test_wick_imbalance() {
+    println!("Testing wick imbalance calculation...");
+
+    // Test various wick patterns
+    // Format: [open, high, low, close, expected_imbalance]
+    let test_cases: Vec<(f64, f64, f64, f64, f64)> = vec![
+        // All upper wick (strong selling rejection) - should be +100
+        (100.0, 102.0, 100.0, 100.0, 100.0),
+        // All lower wick (strong buying rejection) - should be -100
+        (100.0, 100.0, 98.0, 100.0, -100.0),
+        // Balanced wicks - should be ~0
+        (100.0, 101.0, 99.0, 100.0, 0.0),
+        // Upper wick dominant: O:100, H:103, L:99, C:101
+        // body_top=101, body_bottom=100, upper=2, lower=1, total=3
+        // imbalance = (2-1)/3*100 = 33.33%
+        (100.0, 103.0, 99.0, 101.0, 33.33),
+        // Lower wick dominant: O:101, H:102, L:98, C:100
+        // body_top=101, body_bottom=100, upper=1, lower=2, total=3
+        // imbalance = (1-2)/3*100 = -33.33%
+        (101.0, 102.0, 98.0, 100.0, -33.33),
+    ];
+
+    for (open, high, low, close, expected) in test_cases {
+        let body_top = open.max(close);
+        let body_bottom = open.min(close);
+        let upper_wick = high - body_top;
+        let lower_wick = body_bottom - low;
+        let total_wick = upper_wick + lower_wick;
+
+        let wick_imbalance = if total_wick > 0.0 {
+            let imbalance = (upper_wick - lower_wick) / total_wick * 100.0;
+            imbalance.clamp(-100.0, 100.0)
+        } else {
+            0.0
+        };
+
+        println!(
+            "O:{} H:{} L:{} C:{} => Wick Imbalance: {:.2}% (expected ~{:.2}%)",
+            open, high, low, close, wick_imbalance, expected
+        );
+
+        assert!(
+            wick_imbalance.is_finite(),
+            "Wick imbalance should be finite"
+        );
+        assert!(
+            (-100.0..=100.0).contains(&wick_imbalance),
+            "Wick imbalance should be in [-100, 100]"
+        );
+        assert!(
+            (wick_imbalance - expected).abs() < 1.0,
+            "Wick imbalance {:.2} should be close to expected {:.2}",
+            wick_imbalance,
+            expected
+        );
+    }
+
+    println!("✓ Wick imbalance working correctly");
 }
 
 #[test]

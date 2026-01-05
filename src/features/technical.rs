@@ -792,30 +792,38 @@ fn add_crypto_specific_indicators(
         }
     }
 
-    // Price gaps in basis points (1 bps = 0.01%)
-    // This captures small gaps in continuous trading better than percentages
+    // Price inefficiency: Body-to-Range ratio (measures directional strength vs rejection)
+    // For 24/7 crypto markets, inter-candle gaps don't exist (open[i] == close[i-1])
+    // Instead, measure intrabar inefficiency: how much of the range was directional movement
+    // Range: -100 to +100 (negative = bearish body, positive = bullish body)
     let mut price_gaps = vec![0.0; close.len()];
-    for i in 1..close.len() {
-        if close[i - 1] > 0.0 {
-            // Gap in basis points: (open - prev_close) / prev_close * 10000
-            let gap_bps = (open[i] - close[i - 1]) / close[i - 1] * 10000.0;
-            price_gaps[i] = gap_bps;
+    for i in 0..close.len() {
+        let range = high[i] - low[i];
+        if range > 0.0 {
+            let body = close[i] - open[i];
+            // Body-to-range ratio as percentage: (body / range) * 100
+            // +100 = full bullish candle (no wicks), -100 = full bearish candle
+            // 0 = doji or all wicks (high rejection)
+            price_gaps[i] = (body / range * 100.0).clamp(-100.0, 100.0);
         }
     }
 
-    // Gap volatility (rolling std of gaps)
-    let gap_window = 20;
+    // Wick imbalance: measures buying vs selling pressure rejection
+    // Positive = upper wick dominance (selling pressure), Negative = lower wick dominance (buying pressure)
     let mut gap_volatility = vec![0.0; close.len()];
-    if close.len() > gap_window {
-        for i in gap_window..close.len() {
-            let recent_gaps = &price_gaps[i - gap_window + 1..i + 1];
-            let mean_gap = recent_gaps.iter().sum::<f64>() / gap_window as f64;
-            let variance = recent_gaps
-                .iter()
-                .map(|&x| (x - mean_gap).powi(2))
-                .sum::<f64>()
-                / gap_window as f64;
-            gap_volatility[i] = variance.sqrt();
+    for i in 0..close.len() {
+        let body_top = open[i].max(close[i]);
+        let body_bottom = open[i].min(close[i]);
+        let upper_wick = high[i] - body_top;
+        let lower_wick = body_bottom - low[i];
+        let total_wick = upper_wick + lower_wick;
+
+        if total_wick > 0.0 {
+            // Wick imbalance: (upper - lower) / total * 100
+            // +100 = all upper wick (strong selling rejection)
+            // -100 = all lower wick (strong buying rejection)
+            gap_volatility[i] =
+                ((upper_wick - lower_wick) / total_wick * 100.0).clamp(-100.0, 100.0);
         }
     }
 

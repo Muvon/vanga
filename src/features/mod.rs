@@ -10,6 +10,8 @@ pub mod volatility;
 #[cfg(test)]
 mod feature_validation_test;
 #[cfg(test)]
+mod price_inefficiency_test;
+#[cfg(test)]
 mod ta_tests;
 #[cfg(test)]
 mod technical_math_test;
