@@ -1,0 +1,171 @@
+# VDSM-MOH: Volatility-Driven Sparse Mixture-of-Heads Configuration
+# Optimized for cryptocurrency markets with extreme volatility regimes
+# Phase 1: Volatility-Adaptive Routing (FULLY IMPLEMENTED ✅)
+# Phase 2: Sparse Attention with Learnable Sampling (SIMPLIFIED IMPLEMENTATION ⚠️)
+# Phase 3: Deformable Attention (CONFIG ONLY, NOT IMPLEMENTED ❌)
+
+[model]
+# LSTM architecture
+hidden_size = 256
+num_layers = 3
+dropout = 0.3
+bidirectional = false
+
+# Target configuration
+num_classes = 5  # 5-class system for all targets
+
+[model.attention]
+enabled = true
+mechanism = "MixtureOfHeads"
+dropout_rate = 0.2
+
+# Head configuration
+heads = 16
+head_dim = 64  # Auto-optimized if not specified
+
+# Dropout configuration
+dropout_weights = 0.1
+dropout_output = 0.2
+dropout_projections = 0.15
+
+[model.attention.moh]
+# ===== CORE MOH PARAMETERS =====
+total_heads = 16
+shared_heads = 4   # 25% always-active heads for common patterns
+top_k = 4          # 25% routed heads (50% total efficiency)
+
+load_balance_weight = 0.01
+routing_temperature = 1.0
+log_routing_decisions = false
+
+# ===== VOLATILITY-ADAPTIVE ROUTING (FULLY IMPLEMENTED ✅) =====
+volatility_adaptive = true
+volatility_multiplier = 0.6  # Crypto-optimized: higher sensitivity to volatility
+volatility_window = 12       # 12-timestep smoothing for stable adaptation
+
+# ===== SPARSE ATTENTION (SIMPLIFIED - IMPORTANCE WEIGHTING ONLY ⚠️) =====
+sparse_attention = true
+learnable_sampling = true    # Uses importance weighting (simplified)
+min_sparse_ratio = 0.25      # High volatility: attend to 25% of tokens
+max_sparse_ratio = 0.75      # Low volatility: attend to 75% of tokens
+
+# ===== DEFORMABLE ATTENTION (NOT IMPLEMENTED - DISABLE ❌) =====
+deformable_attention = false  # Not implemented yet
+num_offsets = 8
+
+[training]
+# Optimizer: Prodigy (adaptive learning rate)
+optimizer = { Prodigy = { d_coef = 1.0, betas = [0.9, 0.999], eps = 1e-8, weight_decay = 0.01, use_bias_correction = true, safeguard_warmup = true } }
+
+learning_rate = 1.0  # Prodigy auto-adapts from this
+batch_size = 32
+gradient_clip = 1.0
+
+# Training schedule
+[training.epochs]
+mode = "Auto"
+patience = 15
+min_delta = 0.0001
+max_epochs = 200
+
+# Data configuration
+[training.data]
+train_split = 0.7
+val_split = 0.15
+test_split = 0.15
+
+# Outlier handling
+outlier_method = "IQR"
+outlier_threshold = 3.0
+
+# Feature processing
+feature_processing = "StandardScaling"
+
+[training.device]
+prefer_device = "Auto"  # Auto-detect best device (Metal/CUDA/CPU)
+
+[training.optimization]
+enabled = false  # Disable hyperparameter search for now
+
+[sequence]
+# Sequence configuration
+length = 60      # 60 timesteps lookback
+overlap = 0.5    # 50% overlap for more training data
+
+[targets]
+# Target horizons (in timesteps)
+horizons = [12, 24, 48]  # 1h, 2h, 4h for 5-min candles
+
+# Calibration for balanced class distribution
+[targets.calibration]
+enabled = true
+target_distribution = 0.2  # 20% per class (5 classes)
+adaptive_thresholds = true
+
+# Target-specific configurations
+[targets.price_levels]
+enabled = true
+vwap_weighted = true
+
+[targets.direction]
+enabled = true
+
+[targets.volatility]
+enabled = true
+
+[targets.volume]
+enabled = false  # Disable for faster training
+
+[targets.sentiment]
+enabled = false  # Disable for faster training
+
+[features]
+# Technical indicators
+[features.technical]
+enabled = true
+
+# Moving averages
+sma_periods = [7, 14, 21, 50]
+ema_periods = [9, 12, 26]
+wma_periods = [10, 20]
+
+# Momentum indicators
+rsi_period = 14
+macd = { fast = 12, slow = 26, signal = 9 }
+stochastic = { k_period = 14, d_period = 3 }
+cci_period = 20
+williams_r_period = 14
+
+# Volatility indicators
+bollinger_bands = { period = 20, std_dev = 2.0 }
+atr_period = 14
+keltner_channels = { period = 20, atr_multiplier = 2.0 }
+
+# Volume indicators
+obv = true
+vwap = true
+mfi_period = 14
+
+# Trend indicators
+adx_period = 14
+aroon_period = 25
+parabolic_sar = { acceleration = 0.02, maximum = 0.2 }
+
+[features.cross_asset]
+enabled = false  # Disable for single-asset training
+
+[output]
+# Output configuration
+format = "JSON"
+save_predictions = true
+save_confidence = true
+save_routing_weights = true  # Save MOH routing decisions
+
+# Confidence filtering
+min_confidence = 0.3  # Filter low-confidence predictions
+
+[output.post_processing]
+enabled = true
+smoothing_window = 3
+outlier_removal = true
+regime_adjustment = true

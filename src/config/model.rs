@@ -228,6 +228,62 @@ pub struct MoHConfig {
     pub routing_temperature: f64,
     /// Enable routing score logging for analysis
     pub log_routing_decisions: bool,
+
+    // ===== VOLATILITY-ADAPTIVE ROUTING =====
+    /// Enable volatility-adaptive routing temperature
+    #[serde(default)]
+    pub volatility_adaptive: bool,
+
+    /// Volatility multiplier for temperature scaling (default: 0.5)
+    #[serde(default = "default_volatility_multiplier")]
+    pub volatility_multiplier: f64,
+
+    /// Volatility smoothing window (default: 10 timesteps)
+    #[serde(default = "default_volatility_window")]
+    pub volatility_window: usize,
+
+    // ===== SPARSE ATTENTION =====
+    /// Enable sparse attention mechanism
+    #[serde(default)]
+    pub sparse_attention: bool,
+
+    /// Minimum sparsity ratio in high volatility (default: 0.3 = 30% tokens)
+    #[serde(default = "default_min_sparse_ratio")]
+    pub min_sparse_ratio: f32,
+
+    /// Maximum sparsity ratio in low volatility (default: 0.7 = 70% tokens)
+    #[serde(default = "default_max_sparse_ratio")]
+    pub max_sparse_ratio: f32,
+
+    // ===== DEFORMABLE ATTENTION =====
+    /// Enable deformable attention with learnable offsets
+    #[serde(default)]
+    pub deformable_attention: bool,
+
+    /// Number of learnable offset positions per head (default: 8)
+    #[serde(default = "default_num_offsets")]
+    pub num_offsets: usize,
+
+    /// Enable importance-based token sampling
+    #[serde(default)]
+    pub learnable_sampling: bool,
+}
+
+// Default value functions
+fn default_volatility_multiplier() -> f64 {
+    0.5
+}
+fn default_volatility_window() -> usize {
+    10
+}
+fn default_min_sparse_ratio() -> f32 {
+    0.3
+}
+fn default_max_sparse_ratio() -> f32 {
+    0.7
+}
+fn default_num_offsets() -> usize {
+    8
 }
 
 impl Default for MoHConfig {
@@ -239,6 +295,19 @@ impl Default for MoHConfig {
             load_balance_weight: 0.01,    // Standard β from paper
             routing_temperature: 1.0,     // Standard temperature
             log_routing_decisions: false, // Disabled by default for performance
+
+            // Advanced features disabled by default for backward compatibility
+            volatility_adaptive: false,
+            volatility_multiplier: 0.5,
+            volatility_window: 10,
+
+            sparse_attention: false,
+            min_sparse_ratio: 0.3,
+            max_sparse_ratio: 0.7,
+
+            deformable_attention: false,
+            num_offsets: 8,
+            learnable_sampling: false,
         }
     }
 }
@@ -246,6 +315,7 @@ impl Default for MoHConfig {
 impl MoHConfig {
     /// Validate MoH configuration parameters
     pub fn validate(&self) -> Result<(), String> {
+        // Existing validations
         if self.shared_heads + self.top_k > self.total_heads {
             return Err(format!(
                 "shared_heads ({}) + top_k ({}) cannot exceed total_heads ({})",
@@ -271,7 +341,51 @@ impl MoHConfig {
             ));
         }
 
+        // New validations for advanced features
+        if self.volatility_multiplier < 0.0 || self.volatility_multiplier > 2.0 {
+            return Err(format!(
+                "volatility_multiplier must be in [0, 2], got {}",
+                self.volatility_multiplier
+            ));
+        }
+
+        if self.volatility_window < 2 {
+            return Err(format!(
+                "volatility_window must be >= 2, got {}",
+                self.volatility_window
+            ));
+        }
+
+        if self.min_sparse_ratio < 0.1 || self.min_sparse_ratio > 1.0 {
+            return Err(format!(
+                "min_sparse_ratio must be in [0.1, 1.0], got {}",
+                self.min_sparse_ratio
+            ));
+        }
+
+        if self.max_sparse_ratio < self.min_sparse_ratio || self.max_sparse_ratio > 1.0 {
+            return Err(format!(
+                "max_sparse_ratio must be in [min_sparse_ratio, 1.0], got {}",
+                self.max_sparse_ratio
+            ));
+        }
+
+        if self.deformable_attention && self.num_offsets < 2 {
+            return Err(format!(
+                "num_offsets must be >= 2 when deformable_attention enabled, got {}",
+                self.num_offsets
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Check if any advanced features are enabled
+    pub fn has_advanced_features(&self) -> bool {
+        self.volatility_adaptive
+            || self.sparse_attention
+            || self.deformable_attention
+            || self.learnable_sampling
     }
 
     /// Get the total number of active heads (shared + routed)
