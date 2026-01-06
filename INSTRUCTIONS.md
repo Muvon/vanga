@@ -305,13 +305,20 @@ src/
 │   │   ├── core.rs        # Model lifecycle and initialization
 │   │   ├── training.rs    # THE unified training method (MAIN LOGIC)
 │   │   ├── inference.rs   # Prediction and forward pass
-│   │   ├── loss.rs        # Loss calculation and metrics
+│   │   ├── loss.rs        # SOFL, CDW-CE, weighted cross-entropy
 │   │   └── mod.rs         # Public API and re-exports
 │   ├── lstm_simple.rs # Compatibility layer: `pub use crate::model::lstm::*;`
 │   ├── multi_target.rs # Multi-target wrapper
 │   ├── attention.rs   # Multi-head attention mechanisms
+│   ├── attention_moh.rs # Mixture-of-Head attention (volatility-driven sparse)
 │   ├── xgboost.rs     # XGBoost integration for hybrid models
-│   └── bias_correction.rs # Bias correction and calibration
+│   ├── bias_correction.rs # Bias correction (linear/ensemble modes)
+│   └── calibration/   # Ensemble calibration system (NEW)
+│       ├── ensemble.rs    # Orchestrates all calibration methods
+│       ├── temperature.rs # Temperature scaling with Bayesian optimization
+│       ├── label_smoothing.rs # Adaptive label smoothing
+│       ├── mixup.rs       # ECE-based mixup augmentation
+│       └── ece.rs         # Expected Calibration Error calculation
 ├── features/      # Feature engineering
 │   ├── technical.rs   # 50+ technical indicators
 │   ├── cross_asset.rs # Cross-asset features
@@ -628,6 +635,16 @@ pub async fn train_with_early_stopping() { ... }
 pub async fn train_with_custom_lr() { ... }
 ```
 
+### Auto-Optimizer Usage (REMOVED)
+```rust
+// ❌ NEVER DO THIS - Auto-optimizer was removed in commit 3bb9eb6
+use crate::optimization::auto_optimizer::AutoOptimizer;
+
+// ✅ DO THIS INSTEAD - Use explicit optimizer selection
+use crate::optimization::prodigy::Prodigy;  // Or FracProdigy, FracAdam, etc.
+let optimizer = OptimizerWrapper::Prodigy { ... };
+```
+
 ### Hidden Variables
 ```rust
 // ❌ NEVER DO THIS
@@ -725,10 +742,12 @@ let loss_tensor = predictions.sub(targets)?.sqr()?.mean_all()?;
 
 #### Training Problems
 - **Main logic**: `src/model/lstm/training.rs::train()` (NEW LOCATION)
-- **Loss functions**: `src/model/lstm/loss.rs` (tensor broadcasting, class weights)
+- **Loss functions**: `src/model/lstm/loss.rs` (SOFL, CDW-CE, tensor broadcasting, class weights)
+- **Ensemble calibration**: `src/model/calibration/ensemble.rs` (temperature scaling, NLL tuning)
 - **Configuration**: `src/model/lstm/config.rs` + `src/config/training.rs`
 - **Multi-target**: `src/model/multi_target.rs`
 - **Data loading**: `src/data/loader.rs`
+- **Optimizers**: `src/optimization/` (Prodigy, FracProdigy, FracAdam, FracNAdam)
 
 #### Tensor Broadcasting Issues (CRITICAL)
 - **LSTM loss functions**: `src/model/lstm/loss.rs::calculate_weighted_soft_crossentropy_loss()` (NEW LOCATION)
@@ -969,12 +988,12 @@ src/
 ```
 
 ### Configuration Files (`configs/`)
-- **`training.toml`**: Main training configuration with all 9 optimizers
+- **`training.toml`**: Main training configuration with all 11+ optimizers
 - **`prediction.toml`**: Prediction pipeline configuration
 - **`realtime.toml`**: Real-time streaming settings
-- **`optimizer_examples/`**: 9 optimizer-specific configurations
+- **`optimizer_examples/`**: 11+ optimizer-specific configurations (including Prodigy, FracProdigy, FracAdam, FracNAdam)
 - **`quick_start.toml`**: Beginner-friendly minimal setup
-- **30+ specialized configs**: Various training scenarios and optimizations
+- **30+ specialized configs**: Various training scenarios, calibration settings, and optimizations
 
 ## 🚀 Entry Points & Command Interface
 

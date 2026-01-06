@@ -17,8 +17,11 @@ This guide covers VANGA's **unified training pipeline** with adaptive target cal
 - **Training-Prediction Consistency**: Same calibrated parameters used in both phases
 - **Multi-Target Coordination**: Separate calibration for each target type
 
-### ✅ **Advanced Optimizer System (11 Optimizers)**
-- **11 Advanced Optimizers**: AdamW, FracAdam, FracNAdam, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
+### ✅ **Advanced Optimizer System (13+ Optimizers)**
+- **13+ Advanced Optimizers**: AdamW, FracAdam, FracNAdam, Prodigy, FracProdigy, RMSprop, NAdam, RAdam, Adam, AdaMax, AdaDelta, SGD, AdaGrad
+- **Prodigy Optimizers (NEW)**: Parameter-free adaptive learning rate optimizers
+  - **Prodigy**: Automatically adapts learning rate without manual tuning
+  - **FracProdigy**: Fractional derivative variant for better memory of past gradients
 - **Fractional Memory Optimizers**: FracAdam and FracNAdam for volatile market conditions
 - **Empirical Performance Data**: Based on 50-run benchmarks across crypto datasets
 - **Crypto-Optimized Defaults**: AdamW with weight decay for cryptocurrency volatility patterns
@@ -30,15 +33,31 @@ This guide covers VANGA's **unified training pipeline** with adaptive target cal
 ### ✅ **Modular LSTM Architecture with Unified Training**
 - **Unified Training Method**: Single `train()` method in `src/model/lstm/training.rs` handles all scenarios
 - **Modular Structure**: LSTM implementation with focused modules:
-  - `src/model/lstm/config.rs` - LSTMConfig, OptimizerWrapper (11 optimizers), TargetFormat
+  - `src/model/lstm/config.rs` - LSTMConfig, OptimizerWrapper (13+ optimizers), TargetFormat
   - `src/model/lstm/core.rs` - Model lifecycle, initialization, Xavier initialization
   - `src/model/lstm/training.rs` - **Unified training with all optimizers and adaptive calibration**
   - `src/model/lstm/inference.rs` - Prediction pipeline and forward pass
-  - `src/model/lstm/loss.rs` - **Loss calculation, validation metrics, gradient clipping**
+  - `src/model/lstm/loss.rs` - **SOFL, CDW-CE, weighted cross-entropy, validation metrics, gradient clipping**
   - `src/model/lstm/seeded_weights.rs` - Orthogonal weight initialization for recurrent layers
 - **Backward Compatibility**: All existing APIs preserved through `src/model/lstm_simple.rs` compatibility layer
-- **Enhanced Loss Functions**: Tensor broadcasting fixes and proper class weighting in `src/model/lstm/loss.rs`
+- **Enhanced Loss Functions**: SOFL (Soft Ordinal Focal Loss), CDW-CE (Class Distance Weighted Cross Entropy) for ordinal targets
 - **Multi-Target Coordination**: `src/model/multi_target.rs` manages separate models per target×horizon combination
+
+### ✅ **Ensemble Calibration System (NEW)**
+- **Temperature Scaling**: Bayesian optimization (TuRBO-2, BORE) for optimal temperature parameter
+- **Label Smoothing**: Adaptive smoothing based on per-class overconfidence
+- **Mixup Augmentation**: ECE-based alpha tuning for data augmentation
+- **ECE Tracking**: Expected Calibration Error with 15-bin standard
+- **Reliability Diagrams**: Visualization of calibration quality
+- **Ramp-up Behavior**: Gradual calibration application during training
+- **Tensor-based**: Preserves gradient flow for end-to-end training
+- **Configuration**: Enable/disable via `enable_ensemble_calibration` in training config
+
+### ✅ **Bias Correction Modes**
+- **Linear Mode**: Simple linear bias correction for quick adjustments
+- **Ensemble Mode**: Full ensemble calibration with temperature scaling and NLL optimization
+- **Ramp-up**: Gradual application over configurable number of epochs
+- **Configuration**: Select mode via `bias_correction_mode` in training config
 
 ### ✅ **Configuration Templates**
 - **Quick Start**: `configs/quick_start.toml` - Minimal but effective

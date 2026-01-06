@@ -50,6 +50,42 @@ optimizer = { FracNAdam = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay
 - Excellent for trend following with memory effects
 - Superior performance on momentum-driven crypto patterns
 
+### **Prodigy - Parameter-Free Adaptive Learning Rate (NEW)**
+```toml
+optimizer = { Prodigy = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, d_coef = 1.0 } }
+```
+**Use when:**
+- You want to avoid manual learning rate tuning
+- Training multiple models with different architectures
+- Need automatic adaptation to model complexity
+- Working with varying dataset sizes
+
+**Benefits:**
+- **No learning rate tuning required** - automatically adapts
+- Estimates optimal learning rate from gradient statistics
+- Robust across different model architectures and datasets
+- Skips manual LR schedule configuration
+
+**How it works:**
+- Automatically estimates distance to optimum (d_coef parameter)
+- Adapts learning rate based on gradient magnitude and direction
+- No need for ReduceLROnPlateau or manual LR schedules
+
+### **FracProdigy - Fractional Derivative Prodigy (NEW)**
+```toml
+optimizer = { FracProdigy = { beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.01, d_coef = 1.0, fractional_order = 0.8 } }
+```
+**Use when:**
+- Need parameter-free optimization with long-term memory
+- Training on crypto data with strong temporal dependencies
+- Want Prodigy benefits plus fractional memory adaptation
+
+**Benefits:**
+- Combines Prodigy's automatic LR with fractional derivatives
+- Better memory of past gradients for crypto patterns
+- Improved convergence on volatile markets with trends
+- No manual LR tuning + fractional memory advantages
+
 ## 🚀 **Traditional Optimizers for Specific Scenarios**
 
 ### **RMSprop - For Highly Volatile Markets**
@@ -317,16 +353,25 @@ learning_rate = 0.002
 
 ### Preset Configurations
 
-VANGA provides three optimized presets located under `configs/optimizer_examples/`:
+VANGA provides optimized presets located under `configs/optimizer_examples/`:
 
+**Fractional Memory Optimizers:**
 - `frac_adam_financial.toml` — Financial Optimized (Conservative): α=0.9, memory_window=60, lr=0.0005
 - `frac_nadam_aggressive.toml` — Aggressive (Fast Trading): α=0.8, memory_window=30, lr=0.005, Nesterov enabled
 - `frac_adam_stable.toml` — Stable (Maximum Memory): α=0.95, memory_window=90, lr=0.0001
 
+**Prodigy Optimizers (Parameter-Free):**
+- `prodigy_default.toml` — Default Prodigy: No LR tuning required, automatic adaptation
+- `frac_prodigy_crypto.toml` — FracProdigy for Crypto: Combines parameter-free LR with fractional memory
+
 Use examples:
 
 ```bash
+# Fractional optimizer
 cargo run -- train --symbol BTCUSDT --data data.csv --config configs/optimizer_examples/frac_adam_financial.toml
+
+# Prodigy (no LR tuning needed)
+cargo run -- train --symbol BTCUSDT --data data.csv --config configs/optimizer_examples/prodigy_default.toml
 ```
 
 ### Parameter Tuning Guide

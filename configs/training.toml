@@ -450,7 +450,7 @@ correlation_window = 20           # Rolling window for correlation
 # ============================================================================
 # HYPERPARAMETER OPTIMIZATION - Automatic parameter tuning
 # ============================================================================
-# Automatically finds optimal sequence_length, hidden_units, num_layers, 
+# Automatically finds optimal sequence_length, hidden_units, num_layers,
 # dropout, batch_size, and learning_schedule based on your data characteristics
 #
 # WHEN TO USE:
@@ -473,7 +473,7 @@ correlation_window = 20           # Rolling window for correlation
 # EXAMPLE CONFIGURATIONS:
 # Quick optimization (5-10 minutes):
 #   enabled = true, method = "Random", n_trials = 20
-# 
+#
 # Balanced optimization (20-30 minutes):
 #   enabled = true, method = "Bayesian", n_trials = 50
 #

@@ -40,11 +40,11 @@ optimizer = { FracProdigy = {
     eps = 1e-8,                # Numerical stability epsilon
     weight_decay = 0.0,        # L2 regularization (None or 0.0-0.1 range)
     momentum_decay = 0.004,    # NAdam momentum decay (standard value)
-    
+
     # Prodigy automatic LR parameters
     d_coef = 1.0,              # D estimate coefficient (0.5-2.0 range, 1.0 recommended)
     growth_rate = "inf",       # Unlimited D growth (recommended for best adaptation)
-    
+
     # Fractional derivative parameters (long-term memory)
     alpha = 0.5,               # Fractional order (0 < α ≤ 1)
                                # 0.5 = balanced memory (recommended for stability)
