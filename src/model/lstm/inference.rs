@@ -9,7 +9,7 @@ use crate::utils::error::{Result, VangaError};
 
 use candle_core::Tensor;
 use candle_nn::{Module, RNN};
-use ndarray::{Array2, Array3};
+use ndarray::{s, Array2, Array3};
 
 // Import deterministic dropout
 use super::seeded_weights::SeededTensorUtils;
@@ -1059,30 +1059,96 @@ impl LSTMModel {
     /// # Returns
     /// * `Result<Tensor>` - LSTM features tensor [batch_size, feature_dim]
     pub fn extract_all_lstm_features(&self, sequences: &Array3<f64>) -> Result<Tensor> {
-        log::info!(
-            "🔄 Extracting LSTM features for {} sequences",
-            sequences.shape()[0]
-        );
-
-        // Convert ndarray to tensor
-        let batch_size = sequences.shape()[0];
+        let total_sequences = sequences.shape()[0];
         let seq_len = sequences.shape()[1];
         let features = sequences.shape()[2];
 
-        let mut seq_data: Vec<f32> = Vec::with_capacity(batch_size * seq_len * features);
-        for batch_idx in 0..batch_size {
-            for seq_idx in 0..seq_len {
-                for feature_idx in 0..features {
-                    seq_data.push(sequences[[batch_idx, seq_idx, feature_idx]] as f32);
+        log::info!(
+            "🔄 Extracting LSTM features for {} sequences (batched processing)",
+            total_sequences
+        );
+
+        // CRITICAL FIX: Process in batches to avoid CUDA OOM
+        // Use configured batch size from training config for consistency
+        let batch_size = self.training_config.batch_size;
+        let num_batches = total_sequences.div_ceil(batch_size);
+
+        log::info!(
+            "📦 Processing {} sequences in {} batches of size {} (from config)",
+            total_sequences,
+            num_batches,
+            batch_size
+        );
+
+        let mut all_features = Vec::new();
+
+        for batch_idx in 0..num_batches {
+            let start_idx = batch_idx * batch_size;
+            let end_idx = std::cmp::min(start_idx + batch_size, total_sequences);
+            let current_batch_size = end_idx - start_idx;
+
+            log::debug!(
+                "🔄 Processing batch {}/{}: sequences {}-{} ({} sequences)",
+                batch_idx + 1,
+                num_batches,
+                start_idx,
+                end_idx,
+                current_batch_size
+            );
+
+            // Extract batch slice
+            let batch_sequences = sequences.slice(s![start_idx..end_idx, .., ..]);
+
+            // Convert batch to tensor
+            let mut seq_data: Vec<f32> =
+                Vec::with_capacity(current_batch_size * seq_len * features);
+            for batch_idx in 0..current_batch_size {
+                for seq_idx in 0..seq_len {
+                    for feature_idx in 0..features {
+                        seq_data.push(batch_sequences[[batch_idx, seq_idx, feature_idx]] as f32);
+                    }
                 }
             }
-        }
 
-        let seq_tensor = Tensor::from_vec(seq_data, (batch_size, seq_len, features), &self.device)
+            let seq_tensor = Tensor::from_vec(
+                seq_data,
+                (current_batch_size, seq_len, features),
+                &self.device,
+            )
             .map_err(|e| VangaError::model(format!("Failed to create sequence tensor: {}", e)))?;
 
-        // Extract features using the single-batch method
-        self.extract_lstm_features(&seq_tensor)
+            // Extract features for this batch
+            let batch_features = self.extract_lstm_features(&seq_tensor)?;
+
+            // Convert to CPU and store (to free GPU memory immediately)
+            let batch_features_cpu = batch_features.to_device(&candle_core::Device::Cpu)?;
+            all_features.push(batch_features_cpu);
+
+            log::debug!(
+                "✅ Batch {}/{} completed, features shape: {:?}",
+                batch_idx + 1,
+                num_batches,
+                batch_features.shape()
+            );
+        }
+
+        // Concatenate all batch features on CPU first
+        log::info!(
+            "🔗 Concatenating {} batches of features...",
+            all_features.len()
+        );
+        let concatenated_cpu = Tensor::cat(&all_features, 0)?;
+
+        // Move final result back to original device
+        let final_features = concatenated_cpu.to_device(&self.device)?;
+
+        log::info!(
+            "✅ Extracted LSTM features for all {} sequences, final shape: {:?}",
+            total_sequences,
+            final_features.shape()
+        );
+
+        Ok(final_features)
     }
 
     /// Get expected XGBoost feature dimension from configuration
