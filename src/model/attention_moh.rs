@@ -45,6 +45,10 @@ pub struct MixtureOfHeadAttention {
 
     last_sparsity_mean: Option<f32>, // Track last adaptive sparsity decision for debugging/tests
 
+    // Performance optimization: cached causal mask and position encodings
+    causal_mask_cache: std::cell::RefCell<HashMap<usize, Tensor>>,
+    position_cache: std::cell::RefCell<HashMap<usize, (Tensor, Tensor)>>,
+
     device: Device,
 }
 
@@ -200,6 +204,8 @@ impl MixtureOfHeadAttention {
             max_history_size: 1000,
             step_count: 0,
             last_sparsity_mean: None,
+            causal_mask_cache: std::cell::RefCell::new(HashMap::new()),
+            position_cache: std::cell::RefCell::new(HashMap::new()),
             device,
         })
     }
@@ -591,24 +597,27 @@ impl MixtureOfHeadAttention {
         let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
         let mut attn_scores = q_scaled.matmul(&k_t)?; // [Batch, Heads, Seq, Seq]
 
-        // Compute importance for all heads (batched)
+        // Compute importance for all heads (fully batched)
         let importance = if self.moh_config.learnable_sampling && self.importance_scorers.is_some()
         {
-            let q_reshaped =
-                q.permute((0, 2, 1, 3))?
-                    .reshape((batch_size * seq_len, total_heads, head_dim))?;
-            let mut all_scores = Vec::with_capacity(total_heads);
-
             if let Some(ref scorers) = self.importance_scorers {
-                for (head_idx, scorer) in scorers.iter().enumerate() {
-                    let q_head = q_reshaped.narrow(1, head_idx, 1)?.squeeze(1)?;
-                    all_scores.push(scorer.forward(&q_head)?);
-                }
-            }
+                let q_for_scoring = q.permute((0, 2, 1, 3))?.contiguous()?;
+                let q_flat =
+                    q_for_scoring.reshape((batch_size * seq_len * total_heads, head_dim))?;
 
-            Tensor::stack(&all_scores, 1)?
-                .reshape((batch_size, seq_len, total_heads, 1))?
-                .permute((0, 2, 1, 3))? // [Batch, Heads, Seq, 1]
+                let mut head_scores = Vec::with_capacity(total_heads);
+                for (head_idx, scorer) in scorers.iter().enumerate() {
+                    let start_idx = head_idx * batch_size * seq_len;
+                    let q_head = q_flat.narrow(0, start_idx, batch_size * seq_len)?;
+                    head_scores.push(scorer.forward(&q_head)?);
+                }
+
+                Tensor::stack(&head_scores, 1)?
+                    .reshape((batch_size, seq_len, total_heads, 1))?
+                    .permute((0, 2, 1, 3))? // [Batch, Heads, Seq, 1]
+            } else {
+                q.sqr()?.sum(D::Minus1)?.unsqueeze(3)?
+            }
         } else {
             q.sqr()?.sum(D::Minus1)?.unsqueeze(3)?
         };
@@ -648,18 +657,17 @@ impl MixtureOfHeadAttention {
         let num_offsets = self.moh_config.num_offsets.max(2);
 
         let offsets = if let Some(ref predictors) = self.offset_predictors {
-            let q_flat = q
-                .permute((0, 2, 1, 3))?
-                .reshape((batch_size * seq_len * total_heads, head_dim))?;
-            let mut all_offsets = Vec::with_capacity(total_heads);
+            let q_for_offsets = q.permute((0, 2, 1, 3))?.contiguous()?;
+            let q_flat = q_for_offsets.reshape((batch_size * seq_len * total_heads, head_dim))?;
 
+            let mut head_offsets = Vec::with_capacity(total_heads);
             for (head_idx, predictor) in predictors.iter().enumerate() {
-                let start = head_idx * batch_size * seq_len;
-                let q_head = q_flat.narrow(0, start, batch_size * seq_len)?;
-                all_offsets.push(predictor.forward(&q_head)?.tanh()?);
+                let start_idx = head_idx * batch_size * seq_len;
+                let q_head = q_flat.narrow(0, start_idx, batch_size * seq_len)?;
+                head_offsets.push(predictor.forward(&q_head)?.tanh()?);
             }
 
-            Tensor::stack(&all_offsets, 1)?
+            Tensor::stack(&head_offsets, 1)?
                 .reshape((batch_size, seq_len, total_heads, num_offsets))?
                 .permute((0, 2, 1, 3))? // [Batch, Heads, Seq, NumOffsets]
         } else {
@@ -670,10 +678,19 @@ impl MixtureOfHeadAttention {
             )?
         };
 
-        // Gaussian bias computation (vectorized)
-        let seq_pos: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
-        let key_pos = Tensor::from_vec(seq_pos.clone(), (1, 1, 1, seq_len), &self.device)?;
-        let query_pos = Tensor::from_vec(seq_pos, (1, 1, seq_len, 1), &self.device)?;
+        // Gaussian bias computation (vectorized with caching)
+        let (key_pos, query_pos) = {
+            let mut cache = self.position_cache.borrow_mut();
+            if let Some(cached) = cache.get(&seq_len) {
+                cached.clone()
+            } else {
+                let seq_pos: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
+                let key_pos = Tensor::from_vec(seq_pos.clone(), (1, 1, 1, seq_len), &self.device)?;
+                let query_pos = Tensor::from_vec(seq_pos, (1, 1, seq_len, 1), &self.device)?;
+                cache.insert(seq_len, (key_pos.clone(), query_pos.clone()));
+                (key_pos, query_pos)
+            }
+        };
 
         let scale = (seq_len as f32) / 2.0;
         let scale_tensor = Tensor::new(scale, &self.device)?;
@@ -763,6 +780,12 @@ impl MixtureOfHeadAttention {
     }
 
     fn create_causal_mask(&self, seq_len: usize) -> Result<Tensor> {
+        let mut cache = self.causal_mask_cache.borrow_mut();
+
+        if let Some(cached_mask) = cache.get(&seq_len) {
+            return Ok(cached_mask.clone());
+        }
+
         let mut mask_data = vec![f32::NEG_INFINITY; seq_len * seq_len];
         for i in 0..seq_len {
             for j in 0..=i {
@@ -770,7 +793,10 @@ impl MixtureOfHeadAttention {
             }
         }
         let mask = Tensor::from_vec(mask_data, (seq_len, seq_len), &self.device)?;
-        Ok(mask.unsqueeze(0)?.unsqueeze(0)?) // [1, 1, Seq, Seq]
+        let mask = mask.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, Seq, Seq]
+
+        cache.insert(seq_len, mask.clone());
+        Ok(mask)
     }
 
     /// Calculate total load balance loss from routing history

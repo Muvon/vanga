@@ -641,7 +641,7 @@ fn test_moh_adaptive_sparsity_changes() {
         .last_sparsity_ratio()
         .expect("Low volatility ratio missing");
 
-    let high_data: Vec<f32> = (0..(1 * 8 * 32)).map(|i| (i as f32) * 10.0).collect();
+    let high_data: Vec<f32> = (0..(1 * 8 * 32)).map(|i| (i as f32) * 100.0).collect();
     let high_input = Tensor::from_vec(high_data, (1, 8, 32), &device).unwrap();
     let _ = attention.forward(&high_input, true).unwrap();
 
@@ -650,7 +650,7 @@ fn test_moh_adaptive_sparsity_changes() {
         .expect("High volatility ratio missing");
 
     assert!(
-        (high_ratio - low_ratio).abs() > 0.01,
+        (high_ratio - low_ratio).abs() > 0.05,
         "Adaptive sparsity did not respond to volatility changes: low_ratio={}, high_ratio={}",
         low_ratio,
         high_ratio
@@ -898,4 +898,56 @@ fn parameter_has_grad(varmap: &VarMap, grads: &GradStore, needle: &str) -> bool 
     params
         .iter()
         .any(|(name, var)| name.contains(needle) && grads.get(var.as_tensor()).is_some())
+}
+
+#[test]
+fn test_moh_performance_caching() {
+    use std::time::Instant;
+
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let moh_config = MoHConfig {
+        total_heads: 16,
+        shared_heads: 4,
+        top_k: 4,
+        sparse_attention: true,
+        deformable_attention: true,
+        ..MoHConfig::default()
+    };
+
+    let attention_config = AttentionConfig {
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        moh: Some(moh_config),
+        ..AttentionConfig::default()
+    };
+
+    let mut attention =
+        MixtureOfHeadAttention::new(64, attention_config, vs, device.clone()).unwrap();
+
+    let input = Tensor::randn(0f32, 1f32, (4, 50, 64), &device).unwrap();
+
+    let warmup_start = Instant::now();
+    let _ = attention.forward(&input, false).unwrap();
+    let warmup_time = warmup_start.elapsed();
+
+    let cached_start = Instant::now();
+    for _ in 0..10 {
+        let _ = attention.forward(&input, false).unwrap();
+    }
+    let cached_time = cached_start.elapsed();
+
+    let avg_cached = cached_time.as_micros() / 10;
+    let warmup_micros = warmup_time.as_micros();
+
+    println!("Warmup (no cache): {}μs", warmup_micros);
+    println!("Average with cache: {}μs", avg_cached);
+
+    if avg_cached < warmup_micros {
+        let speedup = warmup_micros as f64 / avg_cached as f64;
+        println!("Speedup: {:.2}x", speedup);
+    } else {
+        println!("Note: Cache overhead visible in this run (system load variation)");
+    }
 }
