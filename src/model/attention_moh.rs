@@ -342,8 +342,11 @@ impl MixtureOfHeadAttention {
     fn compute_routing_scores(&self, token: &Tensor, training: bool) -> Result<(Vec<f32>, f32)> {
         let batch_size = token.dim(0)?;
 
+        // CRITICAL: Ensure token is contiguous before Linear layers (CUDA requirement)
+        let token = token.contiguous()?;
+
         // Stage 1: Head type routing (α1, α2) - Equation 6
-        let head_type_logits = self.head_type_router.forward(token)?;
+        let head_type_logits = self.head_type_router.forward(&token)?;
 
         // CRITICAL FIX: Stop gradient for routing decisions during training (as per paper)
         // This prevents the routing mechanism from affecting the gradient flow
@@ -360,7 +363,7 @@ impl MixtureOfHeadAttention {
         let alpha2 = head_type_vec.iter().map(|row| row[1]).sum::<f32>() / batch_size as f32;
 
         // Stage 2: Individual head routing
-        let shared_logits = self.shared_router.forward(token)?;
+        let shared_logits = self.shared_router.forward(&token)?;
 
         // OPTIMIZATION: Detach shared routing during training
         let shared_probs = if training {
@@ -370,14 +373,14 @@ impl MixtureOfHeadAttention {
         };
 
         // Calculate adaptive temperature (used for logging even if no routed heads)
-        let adaptive_temperature = self.calculate_adaptive_temperature(token)?;
+        let adaptive_temperature = self.calculate_adaptive_temperature(&token)?;
 
         // Handle edge case where there are no routed heads
         let num_routed_heads =
             (self.moh_config.total_heads - self.moh_config.shared_heads) as usize;
 
         let routed_scores = if num_routed_heads > 0 {
-            let routed_logits = self.routed_router.forward(token)?;
+            let routed_logits = self.routed_router.forward(&token)?;
 
             // Apply temperature scaling to routed probabilities
             let temperature_tensor = Tensor::new(adaptive_temperature, &self.device)?;
