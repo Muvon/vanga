@@ -53,7 +53,7 @@ pub async fn generate_volatility_features(
 
     // Add volatility features to DataFrame one by one
     df = df
-        .with_column(Series::new("realized_volatility", realized_vol))
+        .with_column(Series::new("realized_volatility".into(), realized_vol).into_column())
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add realized_volatility column: {}",
@@ -62,7 +62,7 @@ pub async fn generate_volatility_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("range_volatility", range_vol))
+        .with_column(Series::new("range_volatility".into(), range_vol).into_column())
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add range_volatility column: {}",
@@ -71,7 +71,7 @@ pub async fn generate_volatility_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("volatility_of_volatility", vol_of_vol))
+        .with_column(Series::new("volatility_of_volatility".into(), vol_of_vol).into_column())
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add volatility_of_volatility column: {}",
@@ -80,7 +80,7 @@ pub async fn generate_volatility_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("garch_volatility", garch_vol))
+        .with_column(Series::new("garch_volatility".into(), garch_vol).into_column())
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add garch_volatility column: {}",

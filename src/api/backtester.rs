@@ -224,7 +224,7 @@ impl Backtester {
         })?;
 
         // Get column names for header
-        let columns: Vec<&str> = df.get_column_names();
+        let columns: Vec<&str> = df.get_column_names().iter().map(|s| s.as_str()).collect();
         writeln!(file, "{}", columns.join(","))
             .map_err(|e| VangaError::DataError(format!("Failed to write CSV header: {}", e)))?;
 

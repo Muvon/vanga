@@ -81,14 +81,14 @@ impl SequenceGenerator {
         let feature_columns: Vec<String> = df
             .get_column_names()
             .iter()
-            .filter(|&col| {
+            .filter(|col| {
                 ![
                     "timestamp",
                     "target_price",
                     "target_direction",
                     "target_volatility",
                 ]
-                .contains(col)
+                .contains(&col.as_str())
             })
             .map(|s| s.to_string())
             .collect();
@@ -201,7 +201,7 @@ impl SequenceGenerator {
         let feature_columns: Vec<String> = df
             .get_column_names()
             .iter()
-            .filter(|&col| !exclude_columns.contains(col))
+            .filter(|&col| !exclude_columns.contains(&col.as_str()))
             .map(|&col| col.to_string())
             .collect();
 
@@ -423,7 +423,7 @@ impl SequenceGenerator {
             .collect();
 
         // 🚀 PARALLEL COLUMN PROCESSING: Process each column independently in parallel
-        let normalized_columns: Result<Vec<Series>> = column_names
+        let normalized_columns: Result<Vec<Column>> = column_names
             .par_iter() // ← PARALLEL PROCESSING: Each column on different thread
             .map(|column_name| {
                 if column_name == "timestamp" {
@@ -432,7 +432,8 @@ impl SequenceGenerator {
                 } else if let Ok(series) = window_df.column(column_name) {
                     if series.dtype().is_numeric() {
                         // Normalize using only THIS WINDOW's data
-                        self.normalize_column_in_window(series)
+                        self.normalize_column_in_window(&series.as_materialized_series().clone())
+                            .map(|s| s.into())
                     } else {
                         Ok(series.clone())
                     }
@@ -474,7 +475,7 @@ impl SequenceGenerator {
             // If only one unique value, return zeros (normalized constant)
             if values.len() == 1 {
                 let zeros: Vec<Option<f64>> = (0..float_series.len()).map(|_| Some(0.0)).collect();
-                return Ok(Series::new(series.name(), zeros));
+                return Ok(Series::new(series.name().clone().into(), zeros));
             }
 
             // Calculate mean and std from finite values only
@@ -501,7 +502,7 @@ impl SequenceGenerator {
                 })
                 .collect();
 
-            Ok(Series::new(series.name(), normalized_values))
+            Ok(Series::new(series.name().clone().into(), normalized_values))
         } else {
             Ok(series.clone())
         }
@@ -730,7 +731,7 @@ impl SequenceGenerator {
             let timestamp_i64 = match timestamp {
                 polars::prelude::AnyValue::Datetime(dt, _, _) => dt / 1_000_000, // Convert microseconds to seconds
                 polars::prelude::AnyValue::Int64(ts) => ts,
-                polars::prelude::AnyValue::Utf8(s) => {
+                polars::prelude::AnyValue::String(s) => {
                     // Parse ISO timestamp string
                     chrono::DateTime::parse_from_rfc3339(s)
                         .map_err(|e| {
@@ -815,7 +816,7 @@ impl SequenceGenerator {
                     i + 1
                 )))
                 }
-                polars::prelude::AnyValue::Utf8(s) => {
+                polars::prelude::AnyValue::String(s) => {
                     // Try to parse string as number
                     s.parse::<f64>().map_err(|_| {
                         VangaError::DataError(format!(

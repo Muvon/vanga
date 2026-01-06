@@ -48,7 +48,7 @@ pub async fn generate_microstructure_features(
 
     // Add microstructure features to DataFrame one by one
     df = df
-        .with_column(Series::new("spread", spread))
+        .with_column(Series::new("spread".into(), spread).into_column())
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add spread column: {}",
@@ -57,7 +57,7 @@ pub async fn generate_microstructure_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("volume_weighted_spread", vw_spread))
+        .with_column(Series::new("volume_weighted_spread".into(), vw_spread).into_column())
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add volume_weighted_spread column: {}",
@@ -66,7 +66,7 @@ pub async fn generate_microstructure_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("price_impact", price_impact))
+        .with_column(Series::new("price_impact".into(), price_impact).into_column())
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add price_impact column: {}",

@@ -12,19 +12,17 @@ mod tests {
         let ts: Vec<_> = (0..n)
             .map(|i| format!("2024-01-01T00:{:02}:00Z", i))
             .collect();
-        let open = Series::new("open", vec![42000.0; n]);
-        let high = Series::new("high", vec![42500.0; n]);
-        let low = Series::new("low", vec![41800.0; n]);
-        let close = Series::new("close", vec![42300.0; n]);
-        let volume = Series::new("volume", vec![1000.0; n]);
-        DataFrame::new(vec![
-            Series::new("timestamp", ts),
-            open,
-            high,
-            low,
-            close,
-            volume,
-        ])
+        let open = Series::new("open".into(), vec![42000.0; n]).into_column();
+        let high = Series::new("high".into(), vec![42500.0; n]).into_column();
+        let low = Series::new("low".into(), vec![41800.0; n]).into_column();
+        let close = Series::new("close".into(), vec![42300.0; n]).into_column();
+        let volume = Series::new("volume".into(), vec![1000.0; n]).into_column();
+        DataFrame::new(vec![Series::new("timestamp".into(), ts),
+        open,
+        high,
+        low,
+        close,
+        volume,].into_iter().map(|s| s.into_column()).collect())
         .unwrap()
     }
 

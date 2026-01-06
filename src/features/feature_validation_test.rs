@@ -4,11 +4,11 @@ use polars::prelude::*;
 
 #[tokio::test]
 async fn test_fractal_and_gaps_fixed() {
-    let df = CsvReader::from_path("data/BTCUSDT.csv")
+    let df = CsvReadOptions::default().with_has_header(true).try_into_reader_with_file_path(Some("data/BTCUSDT.csv".into()))
         .expect("Failed to load data")
-        .has_header(true)
         .finish()
         .expect("Failed to parse CSV");
+
 
     let mut config = TechnicalIndicatorsConfig::default();
     config.trend.advanced.enabled = true;

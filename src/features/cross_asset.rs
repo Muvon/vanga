@@ -452,7 +452,7 @@ impl CrossAssetFeatureGenerator {
 
         if self.config.btc_dominance_enabled {
             df = df
-                .with_column(Series::new("cross_btc_dominance", btc_dominance_values))
+                .with_column(Series::new("cross_btc_dominance".into(), btc_dominance_values).into_column())
                 .map_err(|e| {
                     VangaError::FeatureError(format!("Failed to add cross_btc_dominance: {}", e))
                 })?
@@ -462,10 +462,7 @@ impl CrossAssetFeatureGenerator {
         // Only add cross_market_sentiment if sentiment analysis is enabled
         if self.config.sentiment_analysis.enabled {
             df = df
-                .with_column(Series::new(
-                    "cross_market_sentiment",
-                    market_sentiment_values,
-                ))
+                .with_column(Series::new("cross_market_sentiment".into(), market_sentiment_values).into_column())
                 .map_err(|e| {
                     VangaError::FeatureError(format!("Failed to add cross_market_sentiment: {}", e))
                 })?
@@ -473,32 +470,26 @@ impl CrossAssetFeatureGenerator {
         }
         if self.config.eth_btc_ratio_enabled {
             df = df
-                .with_column(Series::new("cross_eth_btc_ratio", eth_btc_ratio_values))
+                .with_column(Series::new("cross_eth_btc_ratio".into(), eth_btc_ratio_values).into_column())
                 .map_err(|e| {
                     VangaError::FeatureError(format!("Failed to add cross_eth_btc_ratio: {}", e))
                 })?
                 .clone();
         }
         df = df
-            .with_column(Series::new(
-                "cross_price_correlation",
-                price_correlation_values,
-            ))
+            .with_column(Series::new("cross_price_correlation".into(), price_correlation_values).into_column())
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add cross_price_correlation: {}", e))
             })?
             .clone();
         df = df
-            .with_column(Series::new("cross_market_momentum", market_momentum_values))
+            .with_column(Series::new("cross_market_momentum".into(), market_momentum_values).into_column())
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add cross_market_momentum: {}", e))
             })?
             .clone();
         df = df
-            .with_column(Series::new(
-                "cross_volatility_clustering",
-                volatility_clustering_values,
-            ))
+            .with_column(Series::new("cross_volatility_clustering".into(), volatility_clustering_values).into_column())
             .map_err(|e| {
                 VangaError::FeatureError(format!(
                     "Failed to add cross_volatility_clustering: {}",

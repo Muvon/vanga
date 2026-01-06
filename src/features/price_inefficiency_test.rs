@@ -7,11 +7,11 @@ async fn test_price_inefficiency_with_real_data() {
     println!("Testing price inefficiency features with real BTCUSDT data...");
 
     // Load real data
-    let df = CsvReader::from_path("data/BTCUSDT.csv")
+    let df = CsvReadOptions::default().with_has_header(true).try_into_reader_with_file_path(Some("data/BTCUSDT.csv".into()))
         .expect("Failed to load BTCUSDT.csv")
-        .has_header(true)
         .finish()
         .expect("Failed to parse CSV");
+
 
     println!("Loaded {} rows of data", df.height());
 

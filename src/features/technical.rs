@@ -353,7 +353,7 @@ fn add_sma_indicators(
 
     // Add all computed SMAs to DataFrame
     for (column_name, sma_values) in sma_results {
-        let series = Series::new(&column_name, sma_values);
+        let series = Series::new(column_name.clone().into(), sma_values).into_column();
         df = df
             .with_column(series)
             .map_err(|e| {
@@ -387,7 +387,7 @@ fn add_ema_indicators(
 
     // Add all computed EMAs to DataFrame
     for (column_name, ema_values) in ema_results {
-        let series = Series::new(&column_name, ema_values);
+        let series = Series::new(column_name.clone().into(), ema_values).into_column();
         df = df
             .with_column(series)
             .map_err(|e| {
@@ -415,17 +415,17 @@ fn add_macd_indicators(
             });
 
     df = df
-        .with_column(Series::new("macd", macd_line))
+        .with_column(Series::new("macd".into(), macd_line).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add MACD column: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("macd_signal", signal_line))
+        .with_column(Series::new("macd_signal".into(), signal_line).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add MACD signal column: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("macd_histogram", histogram))
+        .with_column(Series::new("macd_histogram".into(), histogram).into_column())
         .map_err(|e| {
             VangaError::FeatureError(format!("Failed to add MACD histogram column: {}", e))
         })?
@@ -449,21 +449,21 @@ fn add_bollinger_bands(
         });
 
     df = df
-        .with_column(Series::new("bb_upper", upper))
+        .with_column(Series::new("bb_upper".into(), upper).into_column())
         .map_err(|e| {
             VangaError::FeatureError(format!("Failed to add Bollinger upper band: {}", e))
         })?
         .clone();
 
     df = df
-        .with_column(Series::new("bb_middle", middle))
+        .with_column(Series::new("bb_middle".into(), middle).into_column())
         .map_err(|e| {
             VangaError::FeatureError(format!("Failed to add Bollinger middle band: {}", e))
         })?
         .clone();
 
     df = df
-        .with_column(Series::new("bb_lower", lower))
+        .with_column(Series::new("bb_lower".into(), lower).into_column())
         .map_err(|e| {
             VangaError::FeatureError(format!("Failed to add Bollinger lower band: {}", e))
         })?
@@ -517,7 +517,7 @@ fn add_rsi_indicators(
 
     // Add all computed RSIs to DataFrame
     for (column_name, rsi_values) in rsi_results {
-        let series = Series::new(&column_name, rsi_values);
+        let series = Series::new(column_name.clone().into(), rsi_values).into_column();
         df = df
             .with_column(series)
             .map_err(|e| {
@@ -552,12 +552,12 @@ fn add_stochastic_indicators(
     });
 
     df = df
-        .with_column(Series::new("stoch_k", k_values))
+        .with_column(Series::new("stoch_k".into(), k_values).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add Stochastic %K: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("stoch_d", d_values))
+        .with_column(Series::new("stoch_d".into(), d_values).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add Stochastic %D: {}", e)))?
         .clone();
 
@@ -578,7 +578,7 @@ fn add_williams_r(
             vec![-50.0; close.len()] // Default to neutral value
         });
     df = df
-        .with_column(Series::new("williams_r", williams_r_values))
+        .with_column(Series::new("williams_r".into(), williams_r_values).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add Williams %R: {}", e)))?
         .clone();
     Ok(df)
@@ -600,8 +600,9 @@ fn add_cci_indicator(
             vec![f64::NAN; close.len()] // Use NaN for filtering
         });
     let column_name = format!("cci_{}", period);
+    let series = Series::new(column_name.clone().into(), cci_values).into_column();
     df = df
-        .with_column(Series::new(&column_name, cci_values))
+        .with_column(series)
         .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
         .clone();
     Ok(df)
@@ -617,16 +618,18 @@ fn add_volume_indicators(
     for &period in periods {
         let volume_sma = calculate_sma(volume, period as usize);
         let column_name = format!("volume_sma_{}", period);
+        let series = Series::new(column_name.clone().into(), volume_sma).into_column();
         df = df
-            .with_column(Series::new(&column_name, volume_sma))
+            .with_column(series)
             .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
             .clone();
 
         // Add price-volume correlation indicator
         let pv_correlation = calculate_price_volume_correlation(close, volume, period as usize);
         let corr_column_name = format!("pv_correlation_{}", period);
+        let series = Series::new(corr_column_name.clone().into(), pv_correlation).into_column();
         df = df
-            .with_column(Series::new(&corr_column_name, pv_correlation))
+            .with_column(series)
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add {}: {}", corr_column_name, e))
             })?
@@ -635,8 +638,9 @@ fn add_volume_indicators(
         // Add volume-weighted price indicator
         let vwap = calculate_volume_weighted_average_price(close, volume, period as usize);
         let vwap_column_name = format!("vwap_{}", period);
+        let series = Series::new(vwap_column_name.clone().into(), vwap).into_column();
         df = df
-            .with_column(Series::new(&vwap_column_name, vwap))
+            .with_column(series)
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add {}: {}", vwap_column_name, e))
             })?
@@ -649,7 +653,7 @@ fn add_volume_indicators(
 fn add_obv_indicator(mut df: DataFrame, close: &[f64], volume: &[f64]) -> Result<DataFrame> {
     let obv_values = calculate_obv(close, volume);
     df = df
-        .with_column(Series::new("obv", obv_values))
+        .with_column(Series::new("obv".into(), obv_values).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add OBV: {}", e)))?
         .clone();
     Ok(df)
@@ -666,8 +670,9 @@ fn add_mfi_indicator(
 ) -> Result<DataFrame> {
     let mfi_values = calculate_mfi(high, low, close, volume, period as usize);
     let column_name = format!("mfi_{}", period);
+    let series = Series::new(column_name.clone().into(), mfi_values).into_column();
     df = df
-        .with_column(Series::new(&column_name, mfi_values))
+        .with_column(series)
         .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
         .clone();
     Ok(df)
@@ -690,8 +695,9 @@ fn add_atr_indicators(
                 vec![f64::NAN; close.len()] // Use NaN for filtering
             });
         let column_name = format!("atr_{}", period);
+        let series = Series::new(column_name.clone().into(), atr_values).into_column();
         df = df
-            .with_column(Series::new(&column_name, atr_values))
+            .with_column(series)
             .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
             .clone();
     }
@@ -734,12 +740,12 @@ fn add_keltner_channels(
     }
 
     df = df
-        .with_column(Series::new("keltner_upper", keltner_upper))
+        .with_column(Series::new("keltner_upper".into(), keltner_upper).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add Keltner upper: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("keltner_lower", keltner_lower))
+        .with_column(Series::new("keltner_lower".into(), keltner_lower).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add Keltner lower: {}", e)))?
         .clone();
 
@@ -851,33 +857,33 @@ fn add_crypto_specific_indicators(
 
         // Add advanced mathematical indicators to DataFrame
         df = df
-            .with_column(Series::new("hurst_exponent", hurst_values))
+            .with_column(Series::new("hurst_exponent".into(), hurst_values).into_column())
             .map_err(|e| VangaError::FeatureError(format!("Failed to add hurst_exponent: {}", e)))?
             .clone();
 
         df = df
-            .with_column(Series::new("fractal_dimension", fractal_dims))
+            .with_column(Series::new("fractal_dimension".into(), fractal_dims).into_column())
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add fractal_dimension: {}", e))
             })?
             .clone();
 
         df = df
-            .with_column(Series::new("regime_indicator", regime_values))
+            .with_column(Series::new("regime_indicator".into(), regime_values).into_column())
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add regime_indicator: {}", e))
             })?
             .clone();
 
         df = df
-            .with_column(Series::new("volatility_clustering", clustering_values))
+            .with_column(Series::new("volatility_clustering".into(), clustering_values).into_column())
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add volatility_clustering: {}", e))
             })?
             .clone();
 
         df = df
-            .with_column(Series::new("mean_reversion_strength", reversion_values))
+            .with_column(Series::new("mean_reversion_strength".into(), reversion_values).into_column())
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add mean_reversion_strength: {}", e))
             })?
@@ -888,27 +894,27 @@ fn add_crypto_specific_indicators(
 
     // Add indicators
     df = df
-        .with_column(Series::new("price_velocity", price_velocity))
+        .with_column(Series::new("price_velocity".into(), price_velocity).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add price velocity: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("vwap", vwap))
+        .with_column(Series::new("vwap".into(), vwap).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add VWAP: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("price_gaps", price_gaps))
+        .with_column(Series::new("price_gaps".into(), price_gaps).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add price gaps: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("gap_volatility", gap_volatility))
+        .with_column(Series::new("gap_volatility".into(), gap_volatility).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add gap volatility: {}", e)))?
         .clone();
 
     df = df
-        .with_column(Series::new("intraday_range", intraday_range))
+        .with_column(Series::new("intraday_range".into(), intraday_range).into_column())
         .map_err(|e| VangaError::FeatureError(format!("Failed to add intraday range: {}", e)))?
         .clone();
 

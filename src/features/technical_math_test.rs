@@ -13,21 +13,20 @@ fn create_test_df(
     volume: Vec<f64>,
 ) -> DataFrame {
     let timestamp_len = close.len();
-    DataFrame::new(vec![
-        Series::new("open", open),
-        Series::new("high", high),
-        Series::new("low", low),
-        Series::new("close", close),
-        Series::new("volume", volume),
-        Series::new(
-            "timestamp",
-            (0..timestamp_len)
-                .map(|i| i as i64 * 3600)
-                .collect::<Vec<_>>(),
-        ),
-    ])
+    DataFrame::new(vec![Series::new("open".into(), open),
+    Series::new("high".into(), high),
+    Series::new("low".into(), low),
+    Series::new("close".into(), close),
+    Series::new("volume".into(), volume),
+    Series::new(
+        "timestamp".into(),
+        (0..timestamp_len)
+            .map(|i| i as i64 * 3600)
+            .collect::<Vec<_>>(),
+    ),].into_iter().map(|s| s.into_column()).collect())
     .unwrap()
 }
+
 
 #[tokio::test]
 async fn test_sma_calculation_through_api() {

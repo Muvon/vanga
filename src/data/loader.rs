@@ -38,15 +38,27 @@ impl DataLoader {
                     )));
                 }
 
-                // Load CSV with validation - Read as strings then cast to Float64
-                let mut df = polars::prelude::CsvReader::from_path(path)
+                // Load CSV with validation - Use Polars 0.51 API with proper header handling
+                let path_buf = path.to_path_buf();
+                let mut df = CsvReadOptions::default()
+                    .with_has_header(true)
+                    .try_into_reader_with_file_path(Some(path_buf))
                     .map_err(|e| {
                         VangaError::DataError(format!("Failed to create CSV reader: {}", e))
                     })?
-                    .has_header(true)
-                    .infer_schema(Some(0)) // Read all columns as strings
                     .finish()
                     .map_err(|e| VangaError::DataError(format!("Failed to read CSV: {}", e)))?;
+
+                // CRITICAL FIX for Polars 0.51: Check first row for null values before casting
+                if df.height() > 0 {
+                    let has_null_first_row = df.get_columns().iter().any(|col| {
+                        matches!(col.get(0), Ok(polars::prelude::AnyValue::Null))
+                    });
+                    
+                    if has_null_first_row {
+                        df = df.slice(1, df.height() - 1);
+                    }
+                }
 
                 // Cast all columns except timestamp to Float64
                 let column_names: Vec<String> = df
@@ -63,7 +75,9 @@ impl DataLoader {
                     // Try to cast to Float64 - if it fails, leave as is
                     if let Ok(col) = df.column(&col_name) {
                         if let Ok(casted) = col.cast(&DataType::Float64) {
-                            let _ = df.replace(&col_name, casted);
+                            if let Ok(new_df) = df.with_column(casted.into_column()) {
+                                df = new_df.clone();
+                            }
                         }
                     }
                 }
@@ -120,19 +134,32 @@ impl DataLoader {
         // Read CSV - Simple solution: read everything as strings first, then cast numeric columns to Float64
         log::info!("📂 Loading CSV file: {}", path.display());
 
-        // Read CSV with no schema inference (all columns as strings)
-        let mut df = CsvReader::from_path(path)
+        // Read CSV with proper schema inference using Polars 0.51 API
+        let path_buf = path.to_path_buf();
+        let mut df = CsvReadOptions::default()
+            .with_has_header(true)
+            .try_into_reader_with_file_path(Some(path_buf))
             .map_err(|e| VangaError::DataError(format!(
-                "❌ Failed to create CSV reader for file: {}\n🔍 Error: {}\n💡 Check if the file is a valid CSV format.",
+                "❌ Failed to create CSV reader: {}\n🔍 Error: {}\n💡 Check if the file exists and is readable.",
                 path.display(), e
             )))?
-            .has_header(true)
-            .infer_schema(Some(0))  // This makes all columns read as strings
             .finish()
             .map_err(|e| VangaError::DataError(format!(
                 "❌ Failed to read CSV file: {}\n🔍 Error: {}\n💡 Check if the file contains valid CSV data with proper headers.",
                 path.display(), e
             )))?;
+
+        // CRITICAL FIX for Polars 0.51: Check first row for null values before casting
+        if df.height() > 0 {
+            let has_null_first_row = df.get_columns().iter().any(|col| {
+                matches!(col.get(0), Ok(polars::prelude::AnyValue::Null))
+            });
+            
+            if has_null_first_row {
+                log::debug!("Dropping first row with null values (header remnant)");
+                df = df.slice(1, df.height() - 1);
+            }
+        }
 
         // Now cast all columns except timestamp to Float64
         let column_names: Vec<String> = df
@@ -149,7 +176,9 @@ impl DataLoader {
             // Try to cast to Float64 - if it fails, leave as is (might be a string column)
             if let Ok(col) = df.column(&col_name) {
                 if let Ok(casted) = col.cast(&DataType::Float64) {
-                    let _ = df.replace(&col_name, casted);
+                    if let Ok(new_df) = df.with_column(casted.into_column()) {
+                        df = new_df.clone();
+                    }
                 }
             }
         }
@@ -161,11 +190,28 @@ impl DataLoader {
         let df = self.standardize_columns(df)?;
 
         // Sort by timestamp
-        let df = df
+        let mut df = df
             .lazy()
-            .sort("timestamp", SortOptions::default())
+            .sort(["timestamp"], SortMultipleOptions::default())
             .collect()
             .map_err(|e| VangaError::DataError(format!("Failed to sort data: {}", e)))?;
+
+        // CRITICAL FIX for Polars 0.51: After sorting, null values may appear first
+        // Drop any rows with null timestamp values
+        if df.height() > 0 {
+            if let Ok(timestamp_col) = df.column("timestamp") {
+                if matches!(timestamp_col.get(0), Ok(polars::prelude::AnyValue::Null)) {
+                    log::warn!("🔧 Dropping null timestamp rows after sort (Polars 0.51 bug)");
+                    // Filter out null timestamps
+                    df = df
+                        .lazy()
+                        .filter(col("timestamp").is_not_null())
+                        .collect()
+                        .map_err(|e| VangaError::DataError(format!("Failed to filter nulls: {}", e)))?;
+                }
+            }
+        }
+
 
         // Debug: Check for timestamp uniqueness after loading and sorting
         if let Ok(timestamp_col) = df.column("timestamp") {
@@ -238,7 +284,7 @@ impl DataLoader {
             if old_name != new_name {
                 df = df
                     .lazy()
-                    .rename([&old_name], [&new_name])
+                    .rename([&old_name], [&new_name], true)
                     .collect()
                     .map_err(|e| {
                         VangaError::DataError(format!("Failed to rename column: {}", e))
@@ -322,14 +368,25 @@ impl DataLoader {
 
         // Get timestamp range if available
         let (start_time, end_time) = if let Ok(timestamp_col) = df.column("timestamp") {
-            let timestamps = timestamp_col.datetime().unwrap();
-            let start = timestamps
-                .min()
-                .and_then(chrono::DateTime::from_timestamp_millis);
-            let end = timestamps
-                .max()
-                .and_then(chrono::DateTime::from_timestamp_millis);
-            (start, end)
+            if let Ok(timestamps) = timestamp_col.datetime() {
+                let start = timestamps
+                    .as_datetime_iter()
+                    .flatten()
+                    .min()
+                    .and_then(|ts| {
+                        chrono::DateTime::from_timestamp_millis(ts.and_utc().timestamp_millis())
+                    });
+                let end = timestamps
+                    .as_datetime_iter()
+                    .flatten()
+                    .max()
+                    .and_then(|ts| {
+                        chrono::DateTime::from_timestamp_millis(ts.and_utc().timestamp_millis())
+                    });
+                (start, end)
+            } else {
+                (None, None)
+            }
         } else {
             (None, None)
         };
