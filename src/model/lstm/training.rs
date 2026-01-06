@@ -1807,15 +1807,13 @@ impl LSTMModel {
 
                             if ensemble_cal.is_calibrated {
                                 // Only print if print_info is enabled in config
-                                if let Some(ref corrector) = self.bias_corrector {
-                                    if corrector.config.print_info {
-                                        let metrics = ensemble_cal.get_calibration_metrics();
-                                        log::info!(
-                                            "🔄 Ensemble calibration recalibrated at epoch {}: {}",
-                                            epoch + 1,
-                                            metrics.summary()
-                                        );
-                                    }
+                                if self.bias_correction_config.print_info {
+                                    let metrics = ensemble_cal.get_calibration_metrics();
+                                    log::info!(
+                                        "🔄 Ensemble calibration recalibrated at epoch {}: {}",
+                                        epoch + 1,
+                                        metrics.summary()
+                                    );
                                 }
                             }
                         }
