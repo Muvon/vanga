@@ -88,13 +88,24 @@ impl AdaptiveTemperatureScaling {
 
         self.is_optimized = true;
 
-        let nll_reduction = ((initial_nll - final_nll) / initial_nll * 100.0).max(0.0);
-        log::info!(
-            "   NLL: {:.4} → {:.4} ({:.1}% reduction)",
-            initial_nll,
-            final_nll,
-            nll_reduction
-        );
+        // Calculate NLL change (negative = improvement, positive = degradation)
+        let nll_change_pct = (final_nll - initial_nll) / initial_nll * 100.0;
+
+        if nll_change_pct < 0.0 {
+            log::info!(
+                "   NLL: {:.4} → {:.4} ({:.1}% reduction)",
+                initial_nll,
+                final_nll,
+                -nll_change_pct
+            );
+        } else {
+            log::info!(
+                "   NLL: {:.4} → {:.4} ({:.1}% increase - no improvement)",
+                initial_nll,
+                final_nll,
+                nll_change_pct
+            );
+        }
 
         Ok(())
     }
