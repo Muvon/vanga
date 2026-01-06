@@ -10,10 +10,8 @@ fn test_detect_timeframe_minutes_1h() {
         1609466400i64, // 2021-01-01 02:00:00
         1609470000i64, // 2021-01-01 03:00:00
     ];
-    let df = DataFrame::new(vec![
-        Series::new("timestamp", timestamps),
-    ]).unwrap();
-    
+    let df = DataFrame::new(vec![Series::new("timestamp", timestamps)]).unwrap();
+
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 60); // 1 hour = 60 minutes
 }
@@ -27,10 +25,8 @@ fn test_detect_timeframe_minutes_5m() {
         1609459800i64, // 2021-01-01 00:10:00
         1609460100i64, // 2021-01-01 00:15:00
     ];
-    let df = DataFrame::new(vec![
-        Series::new("timestamp", timestamps),
-    ]).unwrap();
-    
+    let df = DataFrame::new(vec![Series::new("timestamp", timestamps)]).unwrap();
+
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 5); // 5 minutes
 }
@@ -44,10 +40,8 @@ fn test_detect_timeframe_minutes_15m() {
         1609461000i64, // 2021-01-01 00:30:00
         1609461900i64, // 2021-01-01 00:45:00
     ];
-    let df = DataFrame::new(vec![
-        Series::new("timestamp", timestamps),
-    ]).unwrap();
-    
+    let df = DataFrame::new(vec![Series::new("timestamp", timestamps)]).unwrap();
+
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 15); // 15 minutes
 }
@@ -62,10 +56,8 @@ fn test_detect_timeframe_minutes_6m_microseconds() {
         1609459920000000i64, // 2021-01-01 00:12:00 in microseconds
         1609460280000000i64, // 2021-01-01 00:18:00 in microseconds
     ];
-    let df = DataFrame::new(vec![
-        Series::new("timestamp", timestamps),
-    ]).unwrap();
-    
+    let df = DataFrame::new(vec![Series::new("timestamp", timestamps)]).unwrap();
+
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 6); // 6 minutes (360000000 µs diff / 60000000 = 6)
 }
@@ -77,7 +69,7 @@ fn test_parse_horizon_to_steps_hours() {
     assert_eq!(parse_horizon_to_steps("4h", 60).unwrap(), 4);
     assert_eq!(parse_horizon_to_steps("8h", 60).unwrap(), 8);
     assert_eq!(parse_horizon_to_steps("16h", 60).unwrap(), 16);
-    
+
     // 5-minute timeframe
     assert_eq!(parse_horizon_to_steps("1h", 5).unwrap(), 12); // 60/5 = 12 steps
     assert_eq!(parse_horizon_to_steps("4h", 5).unwrap(), 48); // 240/5 = 48 steps
@@ -88,7 +80,7 @@ fn test_parse_horizon_to_steps_days() {
     // 1-hour timeframe
     assert_eq!(parse_horizon_to_steps("1d", 60).unwrap(), 24); // 24 hours
     assert_eq!(parse_horizon_to_steps("2d", 60).unwrap(), 48); // 48 hours
-    
+
     // 5-minute timeframe
     assert_eq!(parse_horizon_to_steps("1d", 5).unwrap(), 288); // 1440/5 = 288 steps
 }
@@ -99,7 +91,7 @@ fn test_parse_horizon_to_steps_minutes() {
     assert_eq!(parse_horizon_to_steps("5m", 1).unwrap(), 5);
     assert_eq!(parse_horizon_to_steps("15m", 1).unwrap(), 15);
     assert_eq!(parse_horizon_to_steps("30m", 1).unwrap(), 30);
-    
+
     // 5-minute timeframe
     assert_eq!(parse_horizon_to_steps("15m", 5).unwrap(), 3); // 15/5 = 3 steps
     assert_eq!(parse_horizon_to_steps("30m", 5).unwrap(), 6); // 30/5 = 6 steps

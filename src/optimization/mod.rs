@@ -5,7 +5,7 @@
 //!
 //! Key Features:
 //! - FracAdam: Fractional-order Adam optimizer
-//! - FracNAdam: Fractional-order NAdam optimizer  
+//! - FracNAdam: Fractional-order NAdam optimizer
 //! - Prodigy: Learning-rate-free optimizer with D-adaptation
 //! - FracProdigy: Fractional-order Prodigy optimizer
 

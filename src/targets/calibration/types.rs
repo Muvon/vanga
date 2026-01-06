@@ -9,7 +9,7 @@
 //! Parameters are stored per-horizon because different time horizons require
 //! different classification thresholds:
 //! - 1h: High noise, needs higher sensitivity
-//! - 4h: Moderate noise, moderate sensitivity  
+//! - 4h: Moderate noise, moderate sensitivity
 //! - 24h: Low noise, lower sensitivity
 
 use serde::{Deserialize, Serialize};

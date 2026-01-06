@@ -1,5 +1,5 @@
 // Tests for Mixture-of-Head Attention (MoH) implementation
-use crate::config::model::{AttentionConfig, AttentionMechanism, MoHConfig};
+use crate::config::model::{AttentionConfig, AttentionMechanism, MoHConfig, VisualizationConfig};
 use crate::model::attention_moh::MixtureOfHeadAttention;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{VarBuilder, VarMap};
@@ -14,6 +14,15 @@ fn test_moh_config_validation() {
         load_balance_weight: 0.01,
         routing_temperature: 1.0,
         log_routing_decisions: false,
+        volatility_adaptive: false,
+        volatility_multiplier: 0.5,
+        volatility_window: 10,
+        sparse_attention: false,
+        min_sparse_ratio: 0.3,
+        max_sparse_ratio: 0.7,
+        deformable_attention: false,
+        num_offsets: 8,
+        learnable_sampling: false,
     };
     assert!(valid_config.validate().is_ok());
 
@@ -180,8 +189,8 @@ async fn test_moh_forward_pass() {
     // Check output shape
     assert_eq!(output.dims(), &[2, 10, 64]);
 
-    // Check routing scores shape: [batch=1, seq_len=10, num_heads=8]
-    assert_eq!(routing_scores.dims(), &[1, 10, 8]);
+    // Check routing scores shape: [batch=2, seq_len=10, num_heads=8]
+    assert_eq!(routing_scores.dims(), &[2, 10, 8]);
 
     // Verify routing statistics
     let stats = attention.get_routing_stats();
@@ -437,6 +446,15 @@ fn test_moh_gradient_flow() {
         load_balance_weight: 0.01,
         routing_temperature: 1.0,
         log_routing_decisions: false,
+        volatility_adaptive: false,
+        volatility_multiplier: 0.5,
+        volatility_window: 10,
+        sparse_attention: false,
+        min_sparse_ratio: 0.3,
+        max_sparse_ratio: 0.7,
+        deformable_attention: false,
+        num_offsets: 8,
+        learnable_sampling: false,
     };
 
     let attention_config = AttentionConfig {
@@ -515,4 +533,240 @@ fn test_moh_gradient_flow() {
     );
 
     println!("✅ Gradient flow test passed! Routing mechanism is learning.");
+}
+
+#[test]
+fn test_moh_all_improvements_enabled() {
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let input_dim = 16;
+    let batch_size = 4;
+    let seq_len = 20;
+
+    let moh_config = MoHConfig {
+        total_heads: 8,
+        shared_heads: 2,
+        top_k: 3,
+        load_balance_weight: 0.01,
+        routing_temperature: 1.0,
+        log_routing_decisions: false,
+        volatility_adaptive: true, // Enable all 3
+        volatility_multiplier: 0.5,
+        volatility_window: 5,
+        sparse_attention: true,
+        min_sparse_ratio: 0.3,
+        max_sparse_ratio: 0.7,
+        deformable_attention: true,
+        num_offsets: 8,
+        learnable_sampling: true,
+    };
+
+    let config = AttentionConfig {
+        enabled: true,
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        heads: 8,
+        head_dim: Some(16),
+        dropout_rate: 0.1,
+        dropout_weights: false,
+        dropout_output: false,
+        dropout_projections: false,
+        dropout_scores: false,
+        temperature_scaling: 1.0,
+        use_relative_position: false,
+        visualization: VisualizationConfig::default(),
+        moh: Some(moh_config),
+    };
+
+    let mut moh = MixtureOfHeadAttention::new(input_dim, config, vs, device.clone())
+        .expect("Failed to create MoH attention with all improvements");
+
+    let input = Tensor::randn(0.0f32, 1.0, (batch_size, seq_len, input_dim), &device)
+        .expect("Failed to create input tensor");
+
+    // Verify input is valid
+    let input_sum = input.sum_all().unwrap().to_scalar::<f32>().unwrap();
+    assert!(input_sum.is_finite(), "Input tensor contains NaN or Inf");
+
+    let result = moh.forward(&input, true);
+    assert!(
+        result.is_ok(),
+        "Forward pass failed with all improvements enabled: {:?}",
+        result.err()
+    );
+
+    let (output, routing_weights) = result.unwrap();
+
+    assert_eq!(
+        output.dims(),
+        &[batch_size, seq_len, input_dim],
+        "Output shape mismatch"
+    );
+    assert_eq!(
+        routing_weights.dims(),
+        &[batch_size, seq_len, 8],
+        "Routing weights shape mismatch"
+    );
+
+    let output_sum = output.sum_all().unwrap().to_scalar::<f32>().unwrap();
+    let output_mean = output.mean_all().unwrap().to_scalar::<f32>().unwrap();
+    let output_std = output
+        .flatten_all()
+        .unwrap()
+        .var(0)
+        .unwrap()
+        .sqrt()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+
+    println!(
+        "Output stats: sum={}, mean={}, std={}",
+        output_sum, output_mean, output_std
+    );
+
+    assert!(
+        output_sum.is_finite() && output_mean.is_finite() && output_std.is_finite(),
+        "Output contains NaN or Inf values: sum={}, mean={}, std={}",
+        output_sum,
+        output_mean,
+        output_std
+    );
+
+    println!("✅ All improvements test passed! Volatility-adaptive + Sparse + Deformable attention working correctly.");
+}
+
+#[test]
+fn test_moh_deformable_attention_shapes() {
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let input_dim = 32;
+    let batch_size = 8;
+    let seq_len = 50;
+
+    let moh_config = MoHConfig {
+        total_heads: 12,
+        shared_heads: 4,
+        top_k: 4,
+        load_balance_weight: 0.01,
+        routing_temperature: 1.0,
+        log_routing_decisions: false,
+        volatility_adaptive: false,
+        volatility_multiplier: 0.5,
+        volatility_window: 5,
+        sparse_attention: false,
+        min_sparse_ratio: 0.3,
+        max_sparse_ratio: 0.7,
+        deformable_attention: true,
+        num_offsets: 16,
+        learnable_sampling: false,
+    };
+
+    let config = AttentionConfig {
+        enabled: true,
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        heads: 12,
+        head_dim: Some(32),
+        dropout_rate: 0.0,
+        dropout_weights: false,
+        dropout_output: false,
+        dropout_projections: false,
+        dropout_scores: false,
+        temperature_scaling: 1.0,
+        use_relative_position: false,
+        visualization: VisualizationConfig::default(),
+        moh: Some(moh_config),
+    };
+
+    let mut moh = MixtureOfHeadAttention::new(input_dim, config, vs, device.clone())
+        .expect("Failed to create MoH attention with deformable attention");
+
+    let input = Tensor::randn(0.0f32, 1.0, (batch_size, seq_len, input_dim), &device)
+        .expect("Failed to create input tensor");
+
+    let result = moh.forward(&input, false);
+    assert!(
+        result.is_ok(),
+        "Deformable attention forward pass failed: {:?}",
+        result.err()
+    );
+
+    let (output, _) = result.unwrap();
+    assert_eq!(
+        output.dims(),
+        &[batch_size, seq_len, input_dim],
+        "Deformable attention output shape mismatch"
+    );
+
+    println!("✅ Deformable attention shape test passed!");
+}
+
+#[test]
+fn test_moh_sparse_attention_shapes() {
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let input_dim = 24;
+    let batch_size = 6;
+    let seq_len = 40;
+
+    let moh_config = MoHConfig {
+        total_heads: 10,
+        shared_heads: 3,
+        top_k: 3,
+        load_balance_weight: 0.01,
+        routing_temperature: 1.0,
+        log_routing_decisions: false,
+        volatility_adaptive: false,
+        volatility_multiplier: 0.5,
+        volatility_window: 5,
+        sparse_attention: true,
+        min_sparse_ratio: 0.4,
+        max_sparse_ratio: 0.6,
+        deformable_attention: false,
+        num_offsets: 8,
+        learnable_sampling: true,
+    };
+
+    let config = AttentionConfig {
+        enabled: true,
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        heads: 10,
+        head_dim: Some(24),
+        dropout_rate: 0.0,
+        dropout_weights: false,
+        dropout_output: false,
+        dropout_projections: false,
+        dropout_scores: false,
+        temperature_scaling: 1.0,
+        use_relative_position: false,
+        visualization: VisualizationConfig::default(),
+        moh: Some(moh_config),
+    };
+
+    let mut moh = MixtureOfHeadAttention::new(input_dim, config, vs, device.clone())
+        .expect("Failed to create MoH attention with sparse attention");
+
+    let input = Tensor::randn(0.0f32, 1.0, (batch_size, seq_len, input_dim), &device)
+        .expect("Failed to create input tensor");
+
+    let result = moh.forward(&input, false);
+    assert!(
+        result.is_ok(),
+        "Sparse attention forward pass failed: {:?}",
+        result.err()
+    );
+
+    let (output, _) = result.unwrap();
+    assert_eq!(
+        output.dims(),
+        &[batch_size, seq_len, input_dim],
+        "Sparse attention output shape mismatch"
+    );
+
+    println!("✅ Sparse attention shape test passed!");
 }

@@ -663,7 +663,10 @@ impl MixtureOfHeadAttention {
     ) -> Result<Tensor> {
         let (batch_size, seq_len, head_dim) = q.dims3()?;
         let scale = (head_dim as f64).sqrt();
-        let num_offsets = sparse_k.min(self.moh_config.num_offsets);
+
+        // Always use config num_offsets for prediction, then limit by sparse_k if needed
+        let predicted_offsets = self.moh_config.num_offsets;
+        let num_offsets = sparse_k.min(predicted_offsets).max(1);
 
         // Predict temporal offsets for each query position
         let offsets = if let Some(ref predictors) = self.offset_predictors {
@@ -673,8 +676,15 @@ impl MixtureOfHeadAttention {
             let abs_logits = offset_logits.abs()?;
             let ones = Tensor::ones_like(&abs_logits)?;
             let denominator = (abs_logits + ones)?;
-            let offsets = (offset_logits * 2.0)?.broadcast_div(&denominator)?;
-            offsets.reshape((batch_size, seq_len, num_offsets))?
+            let normalized_offsets = (offset_logits * 2.0)?.broadcast_div(&denominator)?;
+            let reshaped = normalized_offsets.reshape((batch_size, seq_len, predicted_offsets))?;
+
+            // If we need fewer offsets than predicted, slice
+            if num_offsets < predicted_offsets {
+                reshaped.narrow(2, 0, num_offsets)?
+            } else {
+                reshaped
+            }
         } else {
             // Fallback: learnable uniform offsets
             Tensor::zeros((batch_size, seq_len, num_offsets), q.dtype(), &self.device)?
@@ -689,8 +699,9 @@ impl MixtureOfHeadAttention {
 
         // Compute attention on sampled positions
         let q_scaled = (q / scale)?;
-        let k_t = k_sampled.transpose(1, 2)?.contiguous()?;
-        let attn_scores = q_scaled.matmul(&k_t)?; // [Batch, Seq, num_offsets]
+        let k_t = k_sampled.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+        let q_unsqueezed = q_scaled.unsqueeze(2)?;
+        let attn_scores = q_unsqueezed.matmul(&k_t)?.squeeze(2)?;
 
         // Apply causal mask for sampled positions
         let causal_mask = self.create_sampled_causal_mask(&sampled_indices, seq_len)?;
@@ -707,9 +718,13 @@ impl MixtureOfHeadAttention {
         };
 
         // Apply to sampled V
-        attn_weights.matmul(&v_sampled).map_err(|e| {
-            VangaError::ModelError(format!("Deformable attention matmul failed: {}", e))
-        })
+        attn_weights
+            .unsqueeze(2)?
+            .matmul(&v_sampled)?
+            .squeeze(2)
+            .map_err(|e| {
+                VangaError::ModelError(format!("Deformable attention matmul failed: {}", e))
+            })
     }
 
     /// Calculate adaptive sparsity K based on volatility
@@ -795,9 +810,8 @@ impl MixtureOfHeadAttention {
                     // Convert normalized offset [-1, 1] to absolute index
                     // Center around current query position
                     let relative_offset = (offset * (seq_len as f32 / 2.0)) as i64;
-                    let abs_idx = (q as i64 + relative_offset)
-                        .max(0)
-                        .min((seq_len - 1) as i64);
+                    // CAUSAL: Only allow attending to past and current positions
+                    let abs_idx = (q as i64 + relative_offset).max(0).min(q as i64); // Causal constraint: can't attend to future
 
                     indices_data.push(abs_idx);
                 }
