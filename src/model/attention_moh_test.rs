@@ -1,7 +1,7 @@
 // Tests for Mixture-of-Head Attention (MoH) implementation
 use crate::config::model::{AttentionConfig, AttentionMechanism, MoHConfig, VisualizationConfig};
 use crate::model::attention_moh::MixtureOfHeadAttention;
-use candle_core::{DType, Device, Tensor};
+use candle_core::{backprop::GradStore, DType, Device, Tensor};
 use candle_nn::{VarBuilder, VarMap};
 
 #[test]
@@ -506,33 +506,160 @@ fn test_moh_gradient_flow() {
     let loss = output.sum_all().unwrap();
 
     // Backward pass to compute gradients
-    loss.backward().unwrap();
+    let grads = loss.backward().unwrap();
 
-    // CRITICAL: Verify gradients exist for routing parameters
-    // Check shared_router weights
-    let shared_router_grads = varmap.data().lock().unwrap();
-    let has_routing_grads = shared_router_grads.iter().any(|(name, _)| {
-        name.contains("shared_router")
-            || name.contains("routed_router")
-            || name.contains("head_type_router")
-    });
-
+    let routing_has_grad = ["shared_router", "routed_router", "head_type_router"]
+        .iter()
+        .any(|needle| parameter_has_grad(&varmap, &grads, needle));
     assert!(
-        has_routing_grads,
+        routing_has_grad,
         "No gradients found for routing parameters! Gradient flow is broken."
     );
 
-    // Verify Q, K, V projection gradients exist
-    let has_qkv_grads = shared_router_grads.iter().any(|(name, _)| {
-        name.contains("q_proj") || name.contains("k_proj") || name.contains("v_proj")
-    });
-
+    let projection_has_grad = ["q_proj", "k_proj", "v_proj"]
+        .iter()
+        .any(|needle| parameter_has_grad(&varmap, &grads, needle));
     assert!(
-        has_qkv_grads,
+        projection_has_grad,
         "No gradients found for Q/K/V projections! Gradient flow is broken."
     );
+}
+#[test]
+fn test_moh_volatility_estimator_gradients() {
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
-    println!("✅ Gradient flow test passed! Routing mechanism is learning.");
+    let moh_config = MoHConfig {
+        volatility_adaptive: true,
+        sparse_attention: true,
+        ..MoHConfig::default()
+    };
+
+    let attention_config = AttentionConfig {
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        moh: Some(moh_config),
+        ..AttentionConfig::default()
+    };
+
+    let mut attention =
+        MixtureOfHeadAttention::new(32, attention_config, vs, device.clone()).unwrap();
+    let input = Tensor::randn(0.0f32, 1.0, (2, 8, 32), &device).unwrap();
+    let (output, _) = attention.forward(&input, true).unwrap();
+    let grads = output.mean_all().unwrap().backward().unwrap();
+
+    assert!(
+        parameter_has_grad(&varmap, &grads, "volatility_estimator"),
+        "Volatility estimator did not receive gradients"
+    );
+}
+
+#[test]
+fn test_moh_sparse_importance_gradients() {
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let moh_config = MoHConfig {
+        sparse_attention: true,
+        learnable_sampling: true,
+        ..MoHConfig::default()
+    };
+
+    let attention_config = AttentionConfig {
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        moh: Some(moh_config),
+        ..AttentionConfig::default()
+    };
+
+    let mut attention =
+        MixtureOfHeadAttention::new(48, attention_config, vs, device.clone()).unwrap();
+    let input = Tensor::randn(0.0f32, 1.0, (2, 6, 48), &device).unwrap();
+    let (output, _) = attention.forward(&input, true).unwrap();
+    let grads = output.mean_all().unwrap().backward().unwrap();
+
+    assert!(
+        parameter_has_grad(&varmap, &grads, "importance_scorer"),
+        "Importance scorers did not receive gradients"
+    );
+}
+
+#[test]
+fn test_moh_deformable_offset_gradients() {
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let moh_config = MoHConfig {
+        sparse_attention: true,
+        deformable_attention: true,
+        ..MoHConfig::default()
+    };
+
+    let attention_config = AttentionConfig {
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        moh: Some(moh_config),
+        ..AttentionConfig::default()
+    };
+
+    let mut attention =
+        MixtureOfHeadAttention::new(40, attention_config, vs, device.clone()).unwrap();
+    let input = Tensor::randn(0.0f32, 1.0, (2, 6, 40), &device).unwrap();
+    let (output, _) = attention.forward(&input, true).unwrap();
+    let grads = output.mean_all().unwrap().backward().unwrap();
+
+    assert!(
+        parameter_has_grad(&varmap, &grads, "offset_predictor"),
+        "Offset predictors did not receive gradients"
+    );
+}
+
+#[test]
+fn test_moh_adaptive_sparsity_changes() {
+    let device = Device::Cpu;
+    let varmap_low = VarMap::new();
+    let vs_low = VarBuilder::from_varmap(&varmap_low, DType::F32, &device);
+
+    let moh_config = MoHConfig {
+        volatility_adaptive: true,
+        sparse_attention: true,
+        ..MoHConfig::default()
+    };
+
+    let attention_config = AttentionConfig {
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        moh: Some(moh_config),
+        ..AttentionConfig::default()
+    };
+
+    let mut attention_low =
+        MixtureOfHeadAttention::new(32, attention_config.clone(), vs_low, device.clone()).unwrap();
+
+    let low_input = Tensor::zeros((1, 8, 32), DType::F32, &device).unwrap();
+    let _ = attention_low.forward(&low_input, true).unwrap();
+    let low_ratio = attention_low
+        .last_sparsity_ratio()
+        .expect("Low volatility ratio missing");
+
+    let varmap_high = VarMap::new();
+    let vs_high = VarBuilder::from_varmap(&varmap_high, DType::F32, &device);
+    let mut attention_high =
+        MixtureOfHeadAttention::new(32, attention_config, vs_high, device.clone()).unwrap();
+
+    let high_data: Vec<f32> = (0..(1 * 8 * 32)).map(|i| i as f32).collect();
+    let high_input = Tensor::from_vec(high_data, (1, 8, 32), &device).unwrap();
+    let _ = attention_high.forward(&high_input, true).unwrap();
+
+    let high_ratio = attention_high
+        .last_sparsity_ratio()
+        .expect("High volatility ratio missing");
+
+    assert!(
+        high_ratio > low_ratio + 0.01,
+        "Adaptive sparsity did not respond to volatility changes: low_ratio={}, high_ratio={}",
+        low_ratio,
+        high_ratio
+    );
 }
 
 #[test]
@@ -769,4 +896,11 @@ fn test_moh_sparse_attention_shapes() {
     );
 
     println!("✅ Sparse attention shape test passed!");
+}
+
+fn parameter_has_grad(varmap: &VarMap, grads: &GradStore, needle: &str) -> bool {
+    let params = varmap.data().lock().unwrap();
+    params
+        .iter()
+        .any(|(name, var)| name.contains(needle) && grads.get(var.as_tensor()).is_some())
 }
