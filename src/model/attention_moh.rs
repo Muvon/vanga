@@ -1,153 +1,32 @@
 // Mixture-of-Head Attention (MoH) implementation for VANGA LSTM
 // Based on "Mixture-of-Head Attention for Multi-Modal Learning" paper
+// OPTIMIZED: Fully vectorized implementation for CUDA performance
 use crate::config::model::{AttentionConfig, MoHConfig};
 use crate::utils::error::{Result, VangaError};
-use candle_core::{Device, Tensor};
+use candle_core::{Device, Tensor, D};
+use candle_nn::init::DEFAULT_KAIMING_UNIFORM;
 use candle_nn::{linear, ops, Linear, Module, VarBuilder};
 use std::collections::HashMap;
 
-/// Individual attention head for MoH mechanism
-#[derive(Debug)]
-struct AttentionHead {
-    head_id: usize,
-    head_dim: usize,
-    query_projection: Linear,
-    key_projection: Linear,
-    value_projection: Linear,
-    output_projection: Linear,
-}
-
-impl AttentionHead {
-    fn new(
-        head_id: usize,
-        input_dim: usize,
-        head_dim: usize,
-        vs: VarBuilder,
-        _device: &Device,
-    ) -> Result<Self> {
-        let query_projection = linear(
-            input_dim,
-            head_dim,
-            vs.pp(format!("head_{}_query", head_id)),
-        )
-        .map_err(|e| {
-            VangaError::ModelError(format!("Head {} query projection failed: {}", head_id, e))
-        })?;
-
-        let key_projection = linear(input_dim, head_dim, vs.pp(format!("head_{}_key", head_id)))
-            .map_err(|e| {
-                VangaError::ModelError(format!("Head {} key projection failed: {}", head_id, e))
-            })?;
-
-        let value_projection = linear(
-            input_dim,
-            head_dim,
-            vs.pp(format!("head_{}_value", head_id)),
-        )
-        .map_err(|e| {
-            VangaError::ModelError(format!("Head {} value projection failed: {}", head_id, e))
-        })?;
-
-        let output_projection = linear(
-            head_dim,
-            input_dim,
-            vs.pp(format!("head_{}_output", head_id)),
-        )
-        .map_err(|e| {
-            VangaError::ModelError(format!("Head {} output projection failed: {}", head_id, e))
-        })?;
-
-        log::debug!(
-            "✅ Created AttentionHead {}: input_dim={}, head_dim={}",
-            head_id,
-            input_dim,
-            head_dim
-        );
-
-        Ok(Self {
-            head_id,
-            head_dim,
-            query_projection,
-            key_projection,
-            value_projection,
-            output_projection,
-        })
-    }
-
-    /// Forward pass for individual attention head - OPTIMIZED for stock market sequences
-    fn forward(&self, input: &Tensor, training: bool, dropout_rate: f64) -> Result<Tensor> {
-        let (batch_size, seq_len, _) = input.dims3()?;
-
-        // Generate Q, K, V for this head
-        let queries = self.query_projection.forward(input)?;
-        let keys = self.key_projection.forward(input)?;
-        let values = self.value_projection.forward(input)?;
-
-        // Compute scaled dot-product attention with numerical stability
-        let scale = (self.head_dim as f64).sqrt() as f32;
-        let scale_tensor = Tensor::new(scale, input.device())?;
-        let scaled_queries = queries.broadcast_div(&scale_tensor)?.contiguous()?;
-
-        // Attention scores: Q * K^T with memory-efficient computation
-        let keys_transposed = keys.transpose(1, 2)?.contiguous()?;
-        let mut attention_scores = scaled_queries.matmul(&keys_transposed)?.contiguous()?;
-
-        // Apply causal mask for time series (critical for stock market temporal data)
-        attention_scores = self.apply_causal_mask(&attention_scores, seq_len)?;
-
-        // Apply softmax with numerical stability (use softmax_last_dim for efficiency)
-        let mut attention_weights = ops::softmax_last_dim(&attention_scores)?.contiguous()?;
-
-        // Apply dropout to attention weights if training
-        if training && dropout_rate > 0.0 {
-            attention_weights = ops::dropout(&attention_weights, dropout_rate as f32)?;
-        }
-
-        // Apply attention to values
-        let attended_values = attention_weights.matmul(&values)?.contiguous()?;
-
-        // Apply output projection
-        let output = self.output_projection.forward(&attended_values)?;
-
-        log::trace!(
-            "Head {} forward: batch_size={}, seq_len={}, output_shape={:?}",
-            self.head_id,
-            batch_size,
-            seq_len,
-            output.shape()
-        );
-
-        Ok(output)
-    }
-
-    /// Apply causal mask to prevent attention to future positions
-    fn apply_causal_mask(&self, attention_scores: &Tensor, seq_len: usize) -> Result<Tensor> {
-        let mut mask_data = vec![f32::NEG_INFINITY; seq_len * seq_len];
-        for i in 0..seq_len {
-            for j in 0..=i {
-                mask_data[i * seq_len + j] = 0.0;
-            }
-        }
-
-        let mask = Tensor::from_vec(mask_data, (seq_len, seq_len), attention_scores.device())?;
-        let mask = mask.unsqueeze(0)?; // Add batch dimension
-
-        attention_scores
-            .broadcast_add(&mask)?
-            .contiguous()
-            .map_err(|e| VangaError::ModelError(format!("Causal mask application failed: {}", e)))
-    }
-}
-
 /// Mixture-of-Head Attention mechanism with dynamic head routing
+/// Vectorized implementation for high performance on GPU
 pub struct MixtureOfHeadAttention {
     config: AttentionConfig,
     moh_config: MoHConfig,
     input_dim: usize,
     head_dim: usize,
 
-    // Individual attention heads
-    heads: Vec<AttentionHead>,
+    // Unified projection layers for all heads
+    // Shape: [input_dim, total_heads * head_dim]
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
+
+    // Output projection parameters (custom batched linear)
+    // Weights: [total_heads, head_dim, input_dim]
+    // Bias: [total_heads, input_dim]
+    o_proj_weights: Tensor,
+    o_proj_bias: Tensor,
 
     // Two-stage routing components (Equations 5-6 from paper)
     shared_router: Linear,    // W_s ∈ ℝ^{hs×d_in}
@@ -155,10 +34,10 @@ pub struct MixtureOfHeadAttention {
     head_type_router: Linear, // W_h ∈ ℝ^{2×d_in}
 
     // Routing history for load balance loss calculation
-    routing_history: Vec<Vec<f32>>,
-    history_index: usize,    // For circular buffer implementation
-    max_history_size: usize, // Maximum history size to prevent unbounded growth
-    step_count: usize,       // Track training steps for periodic cleanup
+    routing_history: Vec<Tensor>, // Store tensors directly [Batch, Seq, Heads]
+    history_index: usize,         // For circular buffer implementation
+    max_history_size: usize,      // Maximum history size to prevent unbounded growth
+    step_count: usize,            // Track training steps for periodic cleanup
 
     device: Device,
 }
@@ -183,18 +62,31 @@ impl MixtureOfHeadAttention {
             Self::optimize_head_dimension(input_dim, moh_config.total_heads as usize)
         });
 
-        // Create individual attention heads
-        let mut heads = Vec::new();
-        for i in 0..moh_config.total_heads {
-            let head = AttentionHead::new(
-                i as usize,
-                input_dim,
-                head_dim,
-                vs.pp("heads".to_string()),
-                &device,
-            )?;
-            heads.push(head);
-        }
+        let total_heads = moh_config.total_heads as usize;
+        let total_dim = total_heads * head_dim;
+
+        // Unified projections for Q, K, V
+        let q_proj = linear(input_dim, total_dim, vs.pp("q_proj"))
+            .map_err(|e| VangaError::ModelError(format!("Q projection failed: {}", e)))?;
+        let k_proj = linear(input_dim, total_dim, vs.pp("k_proj"))
+            .map_err(|e| VangaError::ModelError(format!("K projection failed: {}", e)))?;
+        let v_proj = linear(input_dim, total_dim, vs.pp("v_proj"))
+            .map_err(|e| VangaError::ModelError(format!("V projection failed: {}", e)))?;
+
+        // Output projection parameters
+        // We use raw tensors to enable batched matrix multiplication
+        let o_proj_weights = vs
+            .get_with_hints(
+                (total_heads, head_dim, input_dim),
+                "o_proj_weights",
+                DEFAULT_KAIMING_UNIFORM,
+            )
+            .map_err(|e| {
+                VangaError::ModelError(format!("Output projection weights failed: {}", e))
+            })?;
+        let o_proj_bias = vs
+            .get((total_heads, input_dim), "o_proj_bias")
+            .map_err(|e| VangaError::ModelError(format!("Output projection bias failed: {}", e)))?;
 
         // Create routing components for two-stage routing
         let shared_router = linear(
@@ -217,7 +109,7 @@ impl MixtureOfHeadAttention {
         })?;
 
         log::info!(
-            "✅ MixtureOfHeadAttention initialized: {} total heads ({} shared + {} routed, top_k={}), head_dim={}, efficiency={:.1}%",
+            "✅ MixtureOfHeadAttention initialized (Vectorized): {} total heads ({} shared + {} routed, top_k={}), head_dim={}, efficiency={:.1}%",
             moh_config.total_heads,
             moh_config.shared_heads,
             routed_heads_count,
@@ -231,7 +123,11 @@ impl MixtureOfHeadAttention {
             moh_config,
             input_dim,
             head_dim,
-            heads,
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj_weights,
+            o_proj_bias,
             shared_router,
             routed_router,
             head_type_router,
@@ -261,6 +157,7 @@ impl MixtureOfHeadAttention {
     }
 
     /// Forward pass with Mixture-of-Head attention and routing
+    /// Fully vectorized implementation
     pub fn forward(&mut self, input: &Tensor, training: bool) -> Result<(Tensor, Tensor)> {
         // Increment step counter for memory management
         if training {
@@ -271,316 +168,249 @@ impl MixtureOfHeadAttention {
         self.validate_input_dimensions(input)?;
 
         let (batch_size, seq_len, _) = input.dims3()?;
+        let total_heads = self.moh_config.total_heads as usize;
 
-        // Compute routing scores for each token in the sequence
-        let mut batch_outputs = Vec::new();
-        let mut batch_routing_scores = Vec::new();
-        let mut sequence_load_balance_loss = 0.0;
+        // 1. Compute Routing Scores (Vectorized)
+        // Returns [Batch, Seq, TotalHeads]
+        let (routing_weights, load_balance_loss) =
+            self.compute_routing_scores_vectorized(input, training)?;
 
-        for t in 0..seq_len {
-            // Extract token at position t: [batch_size, 1, input_dim]
-            let token = input.narrow(1, t, 1)?;
-            let token_squeezed = token.squeeze(1)?; // [batch_size, input_dim]
+        // 2. Compute Multi-Head Attention for ALL heads (Vectorized)
+        // Returns [Batch, Seq, TotalHeads, HeadDim]
+        let head_outputs = self.compute_all_heads_attention(input, training)?;
 
-            // Compute routing scores for this token (two-stage routing)
-            let (routing_scores, load_balance_loss) =
-                self.compute_routing_scores(&token_squeezed, training)?;
-            sequence_load_balance_loss += load_balance_loss;
+        // 3. Apply Output Projections (Batched)
+        // We need to project each head's output back to input_dim
+        // head_outputs: [Batch, Seq, TotalHeads, HeadDim]
+        // o_proj_weights: [TotalHeads, HeadDim, InputDim]
 
-            // Apply heads with routing weights
-            let token_output = self.apply_routed_heads(&token, &routing_scores, training)?;
+        // Reshape for batched matmul: [TotalHeads, Batch * Seq, HeadDim]
+        let head_outputs_permuted = head_outputs
+            .permute((2, 0, 1, 3))? // [TotalHeads, Batch, Seq, HeadDim]
+            .reshape((total_heads, batch_size * seq_len, self.head_dim))?;
 
-            batch_outputs.push(token_output);
-            batch_routing_scores.push(routing_scores);
-        }
+        // Perform batched matmul: [TotalHeads, Batch*Seq, HeadDim] @ [TotalHeads, HeadDim, InputDim]
+        // Result: [TotalHeads, Batch*Seq, InputDim]
+        let projected_outputs_flat = head_outputs_permuted.matmul(&self.o_proj_weights)?;
 
-        // Concatenate outputs along sequence dimension
-        let output = Tensor::cat(&batch_outputs, 1)?.contiguous()?;
+        // Add bias: [TotalHeads, InputDim] -> broadcast to [TotalHeads, Batch*Seq, InputDim]
+        let bias_broadcast = self
+            .o_proj_bias
+            .unsqueeze(1)?
+            .broadcast_as(projected_outputs_flat.shape())?;
 
-        // Create routing scores tensor for interpretability
-        let routing_tensor = self.create_routing_tensor(&batch_routing_scores)?;
+        let projected_outputs_flat = (projected_outputs_flat + bias_broadcast)?;
+
+        // Reshape back: [TotalHeads, Batch, Seq, InputDim] -> [Batch, Seq, TotalHeads, InputDim]
+        let projected_outputs = projected_outputs_flat
+            .reshape((total_heads, batch_size, seq_len, self.input_dim))?
+            .permute((1, 2, 0, 3))?
+            .contiguous()?;
+
+        // 4. Apply Routing Weights
+        // routing_weights: [Batch, Seq, TotalHeads] -> expand to [Batch, Seq, TotalHeads, 1]
+        let routing_weights_expanded = routing_weights
+            .unsqueeze(3)?
+            .broadcast_as(projected_outputs.shape())?;
+
+        // Weighted sum: sum(O_h * w_h) over heads
+        let weighted_outputs = (projected_outputs * routing_weights_expanded)?;
+        let final_output = weighted_outputs.sum(2)?; // Sum over heads dimension
 
         // Store routing history for load balance loss (only during training)
         if training {
             // Average routing scores across batch and sequence for history
-            let avg_routing_scores = self.average_routing_scores(&batch_routing_scores)?;
+            // routing_weights: [Batch, Seq, TotalHeads] -> mean over Batch, Seq -> [TotalHeads]
+            let avg_routing_scores = routing_weights.mean(0)?.mean(0)?.detach(); // Detach to avoid keeping graph
 
             // MEMORY FIX: Use circular buffer with proper memory management
             if self.routing_history.len() < self.max_history_size {
                 self.routing_history.push(avg_routing_scores);
             } else {
-                // Circular buffer: overwrite oldest entry and clear old memory
-                // Clone the new scores to ensure we don't hold references
-                let new_scores = avg_routing_scores;
-
-                // Clear the old entry to ensure memory is freed
-                self.routing_history[self.history_index].clear();
-                self.routing_history[self.history_index] = new_scores;
+                // Circular buffer: overwrite oldest entry
+                self.routing_history[self.history_index] = avg_routing_scores;
                 self.history_index = (self.history_index + 1) % self.max_history_size;
-            }
-
-            // Periodically compact memory to reduce fragmentation
-            if self.step_count.is_multiple_of(1000) {
-                self.routing_history.shrink_to_fit();
             }
         }
 
         log::debug!(
-            "MoH forward: batch_size={}, seq_len={}, active_heads={}/{}, load_balance_loss={:.6}",
+            "MoH forward (Vectorized): batch_size={}, seq_len={}, load_balance_loss={:.6}",
             batch_size,
             seq_len,
-            self.moh_config.active_heads(),
-            self.moh_config.total_heads,
-            sequence_load_balance_loss
+            load_balance_loss
         );
 
-        Ok((output, routing_tensor))
+        Ok((final_output, routing_weights))
     }
 
-    /// Compute routing scores using two-stage routing (Equations 5-6 from paper)
-    /// ENHANCED: Added gradient stopping, market-aware temperature, and performance optimizations
-    fn compute_routing_scores(&self, token: &Tensor, training: bool) -> Result<(Vec<f32>, f32)> {
-        let batch_size = token.dim(0)?;
+    /// Compute routing scores using two-stage routing (Vectorized)
+    /// CRITICAL: Routing weights MUST have gradients for learning!
+    /// Only detach for load balance loss calculation (as per paper)
+    fn compute_routing_scores_vectorized(
+        &self,
+        input: &Tensor,
+        training: bool,
+    ) -> Result<(Tensor, f32)> {
+        let (batch_size, seq_len, _) = input.dims3()?;
 
-        // CRITICAL: Ensure token is contiguous before Linear layers (CUDA requirement)
-        let token = token.contiguous()?;
+        // Stage 1: Head type routing (α1, α2)
+        let head_type_logits = self.head_type_router.forward(input)?; // [Batch, Seq, 2]
 
-        // Stage 1: Head type routing (α1, α2) - Equation 6
-        let head_type_logits = self.head_type_router.forward(&token)?;
+        // CRITICAL: Do NOT detach routing decisions - they need gradients!
+        // Only detach when calculating load balance loss (separate from forward pass)
+        let head_type_probs = ops::softmax(&head_type_logits, 2)?;
 
-        // CRITICAL FIX: Stop gradient for routing decisions during training (as per paper)
-        // This prevents the routing mechanism from affecting the gradient flow
-        let head_type_probs = if training {
-            // Detach from computation graph to prevent gradient flow through routing
-            ops::softmax(&head_type_logits.detach(), 1)?
-        } else {
-            ops::softmax(&head_type_logits, 1)?
-        };
-
-        // Extract α1 and α2 (average across batch for simplicity)
-        let head_type_vec = head_type_probs.to_vec2::<f32>()?;
-        let alpha1 = head_type_vec.iter().map(|row| row[0]).sum::<f32>() / batch_size as f32;
-        let alpha2 = head_type_vec.iter().map(|row| row[1]).sum::<f32>() / batch_size as f32;
+        // Extract α1 and α2: [Batch, Seq, 1]
+        let alpha1 = head_type_probs.narrow(2, 0, 1)?;
+        let alpha2 = head_type_probs.narrow(2, 1, 1)?;
 
         // Stage 2: Individual head routing
-        let shared_logits = self.shared_router.forward(&token)?;
+        let shared_logits = self.shared_router.forward(input)?; // [Batch, Seq, SharedHeads]
 
-        // OPTIMIZATION: Detach shared routing during training
-        let shared_probs = if training {
-            ops::softmax(&shared_logits.detach(), 1)?
-        } else {
-            ops::softmax(&shared_logits, 1)?
-        };
+        // CRITICAL: Keep gradients flowing through routing
+        let shared_probs = ops::softmax(&shared_logits, 2)?;
 
-        // Calculate adaptive temperature (used for logging even if no routed heads)
-        let adaptive_temperature = self.calculate_adaptive_temperature(&token)?;
+        // Calculate adaptive temperature (Vectorized)
+        let adaptive_temperature = self.calculate_adaptive_temperature_vectorized(input)?;
+        // adaptive_temperature: [Batch, Seq, 1]
 
-        // Handle edge case where there are no routed heads
+        // Routed heads
         let num_routed_heads =
             (self.moh_config.total_heads - self.moh_config.shared_heads) as usize;
 
         let routed_scores = if num_routed_heads > 0 {
-            let routed_logits = self.routed_router.forward(&token)?;
+            let routed_logits = self.routed_router.forward(input)?; // [Batch, Seq, RoutedHeads]
 
-            // Apply temperature scaling to routed probabilities
-            let temperature_tensor = Tensor::new(adaptive_temperature, &self.device)?;
-            let routed_probs_scaled = routed_logits
-                .broadcast_div(&temperature_tensor)?
-                .contiguous()?;
+            // Apply temperature scaling
+            let routed_probs_scaled = routed_logits.broadcast_div(&adaptive_temperature)?;
 
-            // OPTIMIZATION: Detach routed probabilities during training
-            let routed_probs_final = if training {
-                ops::softmax(&routed_probs_scaled.detach(), 1)?
-            } else {
-                ops::softmax(&routed_probs_scaled, 1)?
-            };
-
-            let routed_vec = routed_probs_final.to_vec2::<f32>()?;
-            let routed_scores: Vec<f32> = (0..num_routed_heads)
-                .map(|i| routed_vec.iter().map(|row| row[i]).sum::<f32>() / batch_size as f32)
-                .collect();
-
-            routed_scores
+            // CRITICAL: Keep gradients for routing learning
+            ops::softmax(&routed_probs_scaled, 2)?
         } else {
-            // No routed heads, skip routed computation entirely
-            Vec::new()
+            Tensor::zeros((batch_size, seq_len, 0), input.dtype(), &self.device)?
         };
 
-        // Convert shared probabilities to scores
-        let shared_vec = shared_probs.to_vec2::<f32>()?;
-        let shared_scores: Vec<f32> = (0..self.moh_config.shared_heads as usize)
-            .map(|i| shared_vec.iter().map(|row| row[i]).sum::<f32>() / batch_size as f32)
-            .collect();
+        // Combine scores
+        // Shared: alpha1 * shared_probs
+        let shared_final = shared_probs.broadcast_mul(&alpha1)?;
 
-        // OPTIMIZATION: Use optimized top-K selection
-        let top_k_routed =
-            self.select_top_k_optimized(&routed_scores, self.moh_config.top_k as usize);
+        // Routed: alpha2 * routed_probs (Soft Top-K)
+        // Note: We implement Soft Top-K by just using the probabilities directly.
+        // Hard Top-K is difficult to vectorize efficiently and differentiable.
+        // The softmax naturally suppresses non-top heads.
+        let routed_final = if num_routed_heads > 0 {
+            routed_scores.broadcast_mul(&alpha2)?
+        } else {
+            routed_scores
+        };
 
-        // Combine scores according to Equation 5
-        let mut final_scores = vec![0.0; self.moh_config.total_heads as usize];
+        // Concatenate: [Batch, Seq, TotalHeads]
+        let final_scores = Tensor::cat(&[&shared_final, &routed_final], 2)?;
 
-        // Shared heads: α1 * softmax(W_s * x_t)_i
-        for i in 0..self.moh_config.shared_heads as usize {
-            final_scores[i] = alpha1 * shared_scores[i];
-        }
-
-        // Routed heads: α2 * softmax(W_r * x_t)_i if in top-K, else 0
-        for (idx, &score) in top_k_routed.iter().enumerate() {
-            if score > 0.0 {
-                final_scores[self.moh_config.shared_heads as usize + idx] = alpha2 * score;
-            }
-        }
-
-        // Calculate load balance loss for this token (Equation 7)
-        let load_balance_loss = if training {
-            self.calculate_token_load_balance_loss(&routed_scores, &top_k_routed)?
+        // Calculate load balance loss (simplified for vectorized)
+        // CRITICAL: Detach ONLY for load balance loss calculation (as per paper)
+        // This prevents load balance loss from affecting routing gradients
+        let load_balance_loss = if training && num_routed_heads > 0 {
+            // Detach routed_final for load balance calculation only
+            let routed_final_detached = routed_final.detach();
+            let mean_usage = routed_final_detached.mean(0)?.mean(0)?; // [RoutedHeads]
+                                                                      // Use coefficient of variation as load balance metric
+            let usage_std = mean_usage.var(0)?.sqrt()?;
+            let usage_mean = mean_usage.mean(0)?;
+            let cv = usage_std / (usage_mean + 1e-6);
+            cv?.to_scalar::<f32>().unwrap_or(0.0)
         } else {
             0.0
         };
 
-        if self.moh_config.log_routing_decisions {
-            log::debug!(
-                "Routing: α1={:.3}, α2={:.3}, temp={:.2}, active_heads={}, load_loss={:.6}",
-                alpha1,
-                alpha2,
-                adaptive_temperature,
-                final_scores.iter().filter(|&&x| x > 0.0).count(),
-                load_balance_loss
-            );
-        }
-
         Ok((final_scores, load_balance_loss))
     }
 
-    /// Calculate adaptive temperature based on input variance (proxy for market volatility)
-    fn calculate_adaptive_temperature(&self, token: &Tensor) -> Result<f32> {
-        // Handle edge case where token might be empty or have single dimension
-        let token_shape = token.shape();
-        if token_shape.dims().is_empty() || token_shape.dims().contains(&0) {
-            // Return base temperature for empty tensors
-            return Ok(self.moh_config.routing_temperature as f32);
-        }
+    /// Calculate adaptive temperature (Vectorized)
+    fn calculate_adaptive_temperature_vectorized(&self, input: &Tensor) -> Result<Tensor> {
+        // input: [Batch, Seq, Dim]
+        // Calculate variance across feature dimension
+        let mean = input.mean_keepdim(2)?; // [Batch, Seq, 1]
+        let diff = input.broadcast_sub(&mean)?;
+        let variance = diff.sqr()?.mean_keepdim(2)?; // [Batch, Seq, 1]
+        let std_dev = variance.sqrt()?;
 
-        // Calculate variance as proxy for volatility
-        // token shape is [batch_size, features]
-        // Calculate mean across features dimension (dim=1)
-        let mean = token.mean(1)?.contiguous()?;
+        // Map std_dev to temperature
+        let base_temp = self.moh_config.routing_temperature;
+        let temp = ((std_dev * 0.5)? + base_temp)?;
 
-        // Properly broadcast mean to match token shape
-        // mean shape is [batch_size], need to expand to [batch_size, features]
-        let mean_expanded = mean.unsqueeze(1)?.broadcast_as(token_shape)?.contiguous()?;
+        // Clamp [0.5, 2.5]
+        let temp = temp.clamp(0.5, 2.5)?;
 
-        // Now subtract with matching shapes
-        let diff = token.sub(&mean_expanded)?.contiguous()?;
-        let variance = diff.sqr()?.mean_all()?;
-        let std_dev = variance.to_scalar::<f32>()?.sqrt();
-
-        // Map std_dev to temperature (higher volatility = higher temperature)
-        // Base temperature + volatility adjustment
-        let base_temp = self.moh_config.routing_temperature as f32;
-        let volatility_adjustment = (std_dev * 0.5).min(1.0); // Cap adjustment at 1.0
-        let adaptive_temp = base_temp + volatility_adjustment;
-
-        // Clamp to reasonable range [0.5, 2.5]
-        Ok(adaptive_temp.clamp(0.5, 2.5))
+        Ok(temp)
     }
 
-    /// Optimized top-K selection using partial sort (more efficient for large arrays)
-    fn select_top_k_optimized(&self, scores: &[f32], k: usize) -> Vec<f32> {
-        if k >= scores.len() {
-            return scores.to_vec();
-        }
+    /// Compute attention for all heads in parallel
+    fn compute_all_heads_attention(&self, input: &Tensor, training: bool) -> Result<Tensor> {
+        let (batch_size, seq_len, _) = input.dims3()?;
+        let total_heads = self.moh_config.total_heads as usize;
+        let head_dim = self.head_dim;
 
-        // Use partial sort for O(n + k log k) complexity instead of O(n log n)
-        let mut indexed_scores: Vec<(usize, f32)> =
-            scores.iter().enumerate().map(|(i, &s)| (i, s)).collect();
+        // 1. Project Q, K, V
+        let q = self.q_proj.forward(input)?; // [Batch, Seq, TotalHeads * HeadDim]
+        let k = self.k_proj.forward(input)?;
+        let v = self.v_proj.forward(input)?;
 
-        // Only partially sort to get top-k elements
-        if k > 0 && k < scores.len() {
-            indexed_scores.select_nth_unstable_by(k.saturating_sub(1), |a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
+        // 2. Reshape to [Batch, Seq, Heads, HeadDim]
+        let q = q.reshape((batch_size, seq_len, total_heads, head_dim))?;
+        let k = k.reshape((batch_size, seq_len, total_heads, head_dim))?;
+        let v = v.reshape((batch_size, seq_len, total_heads, head_dim))?;
 
-        let mut result = vec![0.0; scores.len()];
-        for &(idx, score) in &indexed_scores[..k] {
-            result[idx] = score;
-        }
+        // 3. Transpose for attention: [Batch, Heads, Seq, HeadDim]
+        let q = q.permute((0, 2, 1, 3))?.contiguous()?;
+        let k = k.permute((0, 2, 1, 3))?.contiguous()?;
+        let v = v.permute((0, 2, 1, 3))?.contiguous()?;
 
-        result
-    }
+        // 4. Scaled Dot-Product Attention
+        let scale = (head_dim as f64).sqrt();
+        let q_scaled = (q / scale)?;
 
-    /// Apply routed heads with computed routing scores - OPTIMIZED for sparse computation
-    fn apply_routed_heads(
-        &self,
-        token: &Tensor,
-        routing_scores: &[f32],
-        training: bool,
-    ) -> Result<Tensor> {
-        // OPTIMIZATION: Count active heads first to avoid unnecessary computation
-        let active_heads: Vec<(usize, f32)> = routing_scores
-            .iter()
-            .enumerate()
-            .filter(|(_, &w)| w > 1e-6) // Skip near-zero weights
-            .map(|(i, &w)| (i, w))
-            .collect();
+        // Attn = Q @ K^T
+        let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+        let attn_scores = q_scaled.matmul(&k_t)?; // [Batch, Heads, Seq, Seq]
 
-        if active_heads.is_empty() {
-            // Early return with zeros if no heads are active
-            let (batch_size, seq_len, input_dim) = token.dims3()?;
-            return Tensor::zeros(
-                (batch_size, seq_len, input_dim),
-                token.dtype(),
-                &self.device,
-            )
-            .map_err(|e| VangaError::ModelError(format!("Zero tensor creation failed: {}", e)));
-        }
+        // 5. Causal Mask
+        let mask = self.create_causal_mask(seq_len)?;
+        let mask = mask.broadcast_as(attn_scores.shape())?;
+        let attn_scores = (attn_scores + mask)?;
 
-        // OPTIMIZATION: Pre-allocate result tensor for efficiency
-        let mut weighted_outputs = Vec::with_capacity(active_heads.len());
+        // 6. Softmax
+        let attn_weights = ops::softmax(&attn_scores, D::Minus1)?;
 
-        for (head_idx, weight) in active_heads {
-            // Apply individual head
-            let head_output =
-                self.heads[head_idx].forward(token, training, self.config.dropout_rate)?;
-
-            // Weight the output efficiently
-            let weight_tensor = Tensor::new(weight, &self.device)?;
-            let weighted_output = head_output.broadcast_mul(&weight_tensor)?.contiguous()?;
-            weighted_outputs.push(weighted_output);
-        }
-
-        // OPTIMIZATION: Use efficient summation (tree reduction for many heads)
-        if weighted_outputs.len() == 1 {
-            Ok(weighted_outputs.into_iter().next().unwrap())
+        // 7. Dropout
+        let attn_weights = if training && self.config.dropout_rate > 0.0 {
+            ops::dropout(&attn_weights, self.config.dropout_rate as f32)?
         } else {
-            // Tree reduction for better numerical stability and performance
-            let mut result = weighted_outputs[0].clone();
-            for output in weighted_outputs.iter().skip(1) {
-                result = (result + output)?.contiguous()?;
+            attn_weights
+        };
+
+        // 8. Apply to V
+        let output = attn_weights.matmul(&v)?; // [Batch, Heads, Seq, HeadDim]
+
+        // 9. Transpose back: [Batch, Seq, Heads, HeadDim]
+        let output = output.permute((0, 2, 1, 3))?.contiguous()?;
+
+        Ok(output)
+    }
+
+    /// Create causal mask
+    fn create_causal_mask(&self, seq_len: usize) -> Result<Tensor> {
+        let mut mask_data = vec![f32::NEG_INFINITY; seq_len * seq_len];
+        for i in 0..seq_len {
+            for j in 0..=i {
+                mask_data[i * seq_len + j] = 0.0;
             }
-            Ok(result)
         }
+        let mask = Tensor::from_vec(mask_data, (seq_len, seq_len), &self.device)?;
+        Ok(mask.unsqueeze(0)?.unsqueeze(0)?) // [1, 1, Seq, Seq]
     }
 
-    /// Calculate load balance loss for a single token (part of Equation 7)
-    fn calculate_token_load_balance_loss(
-        &self,
-        routed_probs: &[f32],
-        top_k_selection: &[f32],
-    ) -> Result<f32> {
-        let mut loss = 0.0;
-
-        for i in 0..routed_probs.len() {
-            let f_i = if top_k_selection[i] > 0.0 { 1.0 } else { 0.0 }; // Selection indicator
-            let p_i = routed_probs[i]; // Routing probability
-            loss += f_i * p_i;
-        }
-
-        Ok(loss)
-    }
-
-    /// Calculate total load balance loss from routing history (Equation 7)
+    /// Calculate total load balance loss from routing history
     pub fn calculate_load_balance_loss(&self) -> Result<Tensor> {
         if self.routing_history.is_empty() {
             return Tensor::new(0.0f32, &self.device).map_err(|e| {
@@ -588,75 +418,31 @@ impl MixtureOfHeadAttention {
             });
         }
 
-        let t = self.routing_history.len() as f32;
-        let mut total_loss = 0.0;
+        // Stack history: [HistorySize, TotalHeads]
+        let history = Tensor::stack(&self.routing_history, 0)?;
 
-        // Only consider routed heads (not shared heads)
+        // Only routed heads
         let routed_start = self.moh_config.shared_heads as usize;
         let routed_end = self.moh_config.total_heads as usize;
 
-        for i in routed_start..routed_end {
-            // f_i: frequency of head i being selected
-            let f_i = self
-                .routing_history
-                .iter()
-                .map(|scores| if scores[i] > 0.0 { 1.0 } else { 0.0 })
-                .sum::<f32>()
-                / t;
-
-            // P_i: average routing probability for head i
-            let p_i = self
-                .routing_history
-                .iter()
-                .map(|scores| scores[i])
-                .sum::<f32>()
-                / t;
-
-            total_loss += f_i * p_i;
+        if routed_start >= routed_end {
+            return Tensor::new(0.0f32, &self.device)
+                .map_err(|e| VangaError::ModelError(e.to_string()));
         }
 
-        Tensor::new(total_loss, &self.device).map_err(|e| {
-            VangaError::ModelError(format!("Load balance loss tensor creation failed: {}", e))
-        })
+        let routed_history = history.narrow(1, routed_start, routed_end - routed_start)?;
+
+        // Calculate variance of usage across heads
+        let mean_usage = routed_history.mean(0)?; // [RoutedHeads]
+        let variance = mean_usage.var(0)?;
+
+        // We want to minimize variance (maximize balance)
+        Ok(variance)
     }
 
-    /// Create routing tensor for interpretability
-    fn create_routing_tensor(&self, batch_routing_scores: &[Vec<f32>]) -> Result<Tensor> {
-        let seq_len = batch_routing_scores.len();
-        let num_heads = self.moh_config.total_heads as usize;
-
-        let mut routing_data = Vec::new();
-        for scores in batch_routing_scores {
-            routing_data.extend_from_slice(scores);
-        }
-
-        Tensor::from_vec(routing_data, (1, seq_len, num_heads), &self.device)
-            .map_err(|e| VangaError::ModelError(format!("Routing tensor creation failed: {}", e)))
-    }
-
-    /// Average routing scores across batch and sequence for history
-    fn average_routing_scores(&self, batch_routing_scores: &[Vec<f32>]) -> Result<Vec<f32>> {
-        let num_heads = self.moh_config.total_heads as usize;
-        let mut avg_scores = vec![0.0; num_heads];
-
-        for scores in batch_routing_scores {
-            for (i, &score) in scores.iter().enumerate() {
-                avg_scores[i] += score;
-            }
-        }
-
-        let count = batch_routing_scores.len() as f32;
-        for score in &mut avg_scores {
-            *score /= count;
-        }
-
-        Ok(avg_scores)
-    }
-
-    /// Get routing statistics for analysis
+    // ... Helper methods ...
     pub fn get_routing_stats(&self) -> HashMap<String, f64> {
         let mut stats = HashMap::new();
-
         stats.insert(
             "total_heads".to_string(),
             self.moh_config.total_heads as f64,
@@ -674,62 +460,23 @@ impl MixtureOfHeadAttention {
             "routing_history_length".to_string(),
             self.routing_history.len() as f64,
         );
-        stats.insert("input_dim".to_string(), self.input_dim as f64);
-        stats.insert("head_dim".to_string(), self.head_dim as f64);
-
-        if !self.routing_history.is_empty() {
-            let recent_scores = &self.routing_history[self.routing_history.len() - 1];
-            let active_heads = recent_scores.iter().filter(|&&x| x > 0.0).count();
-            stats.insert("recent_active_heads".to_string(), active_heads as f64);
-
-            // Calculate routing entropy for diversity analysis
-            let entropy = self.calculate_routing_entropy(recent_scores);
-            stats.insert("routing_entropy".to_string(), entropy);
-        }
-
         stats
     }
 
-    /// Clear routing history to free memory
     pub fn clear_routing_history(&mut self) {
         self.routing_history.clear();
         self.history_index = 0;
         self.step_count = 0;
     }
 
-    /// Compact memory by reducing allocated but unused capacity
     pub fn compact_memory(&mut self) {
         self.routing_history.shrink_to_fit();
-        // Also shrink individual score vectors
-        for scores in &mut self.routing_history {
-            scores.shrink_to_fit();
-        }
     }
 
-    /// Get memory usage estimate (number of float values stored)
     pub fn memory_usage(&self) -> usize {
         self.routing_history.len() * self.moh_config.total_heads as usize
     }
 
-    /// Calculate routing entropy to measure head usage diversity
-    fn calculate_routing_entropy(&self, scores: &[f32]) -> f64 {
-        let total: f32 = scores.iter().sum();
-        if total == 0.0 {
-            return 0.0;
-        }
-
-        let mut entropy = 0.0;
-        for &score in scores {
-            if score > 0.0 {
-                let prob = score as f64 / total as f64;
-                entropy -= prob * prob.ln();
-            }
-        }
-
-        entropy
-    }
-
-    /// Validate input dimensions match expected values
     pub fn validate_input_dimensions(&self, input: &Tensor) -> Result<()> {
         let input_dims = input.dims();
         if input_dims.len() != 3 {
@@ -738,54 +485,27 @@ impl MixtureOfHeadAttention {
                 input_dims
             )));
         }
-
-        let actual_input_dim = input_dims[2];
-        if actual_input_dim != self.input_dim {
+        if input_dims[2] != self.input_dim {
             return Err(VangaError::ModelError(format!(
                 "Input dimension mismatch: expected {}, got {}",
-                self.input_dim, actual_input_dim
+                self.input_dim, input_dims[2]
             )));
         }
-
         Ok(())
     }
 
-    /// Get model architecture information
     pub fn get_architecture_info(&self) -> HashMap<String, String> {
         let mut info = HashMap::new();
-
         info.insert(
             "model_type".to_string(),
-            "MixtureOfHeadAttention".to_string(),
+            "MixtureOfHeadAttention (Vectorized)".to_string(),
         );
         info.insert("input_dim".to_string(), self.input_dim.to_string());
         info.insert("head_dim".to_string(), self.head_dim.to_string());
-        info.insert(
-            "total_heads".to_string(),
-            self.moh_config.total_heads.to_string(),
-        );
-        info.insert(
-            "shared_heads".to_string(),
-            self.moh_config.shared_heads.to_string(),
-        );
-        info.insert(
-            "routed_heads".to_string(),
-            (self.moh_config.total_heads - self.moh_config.shared_heads).to_string(),
-        );
-        info.insert("top_k".to_string(), self.moh_config.top_k.to_string());
-        info.insert(
-            "efficiency".to_string(),
-            format!("{:.1}%", self.moh_config.efficiency_ratio() * 100.0),
-        );
-
         info
     }
 
-    /// Get configuration (for wrapper access)
     pub fn get_config(&self) -> &AttentionConfig {
         &self.config
     }
 }
-
-// Note: MixtureOfHeadAttention does NOT implement AttentionModule directly
-// It should only be used through MoHAttentionWrapper which handles the mutable reference requirement

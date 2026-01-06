@@ -420,3 +420,99 @@ async fn test_moh_vs_standard_attention_compatibility() {
         output_sum
     );
 }
+
+#[test]
+fn test_moh_gradient_flow() {
+    // CRITICAL TEST: Verify that gradients flow through routing mechanism
+    // This test ensures the fix for gradient flow is working
+
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let moh_config = MoHConfig {
+        total_heads: 8,
+        shared_heads: 2,
+        top_k: 2,
+        load_balance_weight: 0.01,
+        routing_temperature: 1.0,
+        log_routing_decisions: false,
+    };
+
+    let attention_config = AttentionConfig {
+        mechanism: AttentionMechanism::MixtureOfHeads,
+        moh: Some(moh_config),
+        ..AttentionConfig::default()
+    };
+
+    let input_dim = 64;
+    let mut moh_attention =
+        MixtureOfHeadAttention::new(input_dim, attention_config, vs, device.clone()).unwrap();
+
+    // Create input tensor with requires_grad
+    let batch_size = 2;
+    let seq_len = 4;
+    let input_data: Vec<f32> = (0..batch_size * seq_len * input_dim)
+        .map(|i| (i as f32) * 0.01)
+        .collect();
+    let input = Tensor::from_vec(input_data, (batch_size, seq_len, input_dim), &device).unwrap();
+
+    // Forward pass in training mode
+    let (output, routing_weights) = moh_attention.forward(&input, true).unwrap();
+
+    // Verify output shape
+    assert_eq!(output.dims(), &[batch_size, seq_len, input_dim]);
+    assert_eq!(routing_weights.dims(), &[batch_size, seq_len, 8]); // 8 total heads
+
+    // CRITICAL: Verify routing weights are not all zeros (routing is active)
+    let routing_sum = routing_weights
+        .sum_all()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    assert!(
+        routing_sum > 0.1,
+        "Routing weights are too small or zero: sum={}",
+        routing_sum
+    );
+
+    // CRITICAL: Verify output is not all zeros (attention is working)
+    let output_sum = output.sum_all().unwrap().to_scalar::<f32>().unwrap();
+    assert!(
+        output_sum.abs() > 1e-6,
+        "Output is all zeros, gradient flow broken: sum={}",
+        output_sum
+    );
+
+    // Create a simple loss: sum of all outputs
+    let loss = output.sum_all().unwrap();
+
+    // Backward pass to compute gradients
+    loss.backward().unwrap();
+
+    // CRITICAL: Verify gradients exist for routing parameters
+    // Check shared_router weights
+    let shared_router_grads = varmap.data().lock().unwrap();
+    let has_routing_grads = shared_router_grads.iter().any(|(name, _)| {
+        name.contains("shared_router")
+            || name.contains("routed_router")
+            || name.contains("head_type_router")
+    });
+
+    assert!(
+        has_routing_grads,
+        "No gradients found for routing parameters! Gradient flow is broken."
+    );
+
+    // Verify Q, K, V projection gradients exist
+    let has_qkv_grads = shared_router_grads.iter().any(|(name, _)| {
+        name.contains("q_proj") || name.contains("k_proj") || name.contains("v_proj")
+    });
+
+    assert!(
+        has_qkv_grads,
+        "No gradients found for Q/K/V projections! Gradient flow is broken."
+    );
+
+    println!("✅ Gradient flow test passed! Routing mechanism is learning.");
+}

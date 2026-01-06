@@ -33,7 +33,7 @@ impl LSTMModel {
     }
 
     /// Create a new LSTM model with bias correction configuration
-    fn new_with_bias_config(
+    pub fn new_with_bias_config(
         config: LSTMConfig,
         bias_correction_config: crate::model::bias_correction::BiasCorrection,
     ) -> Result<Self> {
