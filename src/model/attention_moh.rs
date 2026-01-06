@@ -445,7 +445,7 @@ impl MixtureOfHeadAttention {
             .to_scalar::<f32>()
             .unwrap_or(1.0)
             .max(1e-3);
-        let norm_factor = Tensor::new((1.0 / mean_std) as f32, &self.device)?;
+        let norm_factor = Tensor::new(1.0 / mean_std, &self.device)?;
         let norm_factor = norm_factor.broadcast_as(std_dev.shape())?;
         let normalized = std_dev.broadcast_mul(&norm_factor)?;
         let volatility_signal = normalized.tanh()?.clamp(0.0, 1.0)?;
@@ -570,6 +570,7 @@ impl MixtureOfHeadAttention {
     }
 
     /// Compute sparse and/or deformable attention
+    /// OPTIMIZED: Batched processing for all heads simultaneously
     fn compute_sparse_deformable_attention(
         &mut self,
         q: &Tensor, // [Batch, Heads, Seq, HeadDim]
@@ -579,43 +580,147 @@ impl MixtureOfHeadAttention {
         volatility_signal: Option<&Tensor>,
         routing_weights: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let (batch_size, total_heads, seq_len, _) = q.dims4()?;
+        let (batch_size, total_heads, seq_len, head_dim) = q.dims4()?;
+        let scale = (head_dim as f64).sqrt();
 
         let sparsity_ratio =
             self.compute_sparsity_signal(batch_size, seq_len, volatility_signal, routing_weights)?;
 
-        let mut head_outputs = Vec::with_capacity(total_heads);
+        // OPTIMIZATION: Compute attention for ALL heads at once
+        let q_scaled = (q / scale)?;
+        let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+        let mut attn_scores = q_scaled.matmul(&k_t)?; // [Batch, Heads, Seq, Seq]
 
-        for head_idx in 0..total_heads {
-            let q_head = q.narrow(1, head_idx, 1)?.squeeze(1)?; // [Batch, Seq, HeadDim]
-            let k_head = k.narrow(1, head_idx, 1)?.squeeze(1)?;
-            let v_head = v.narrow(1, head_idx, 1)?.squeeze(1)?;
+        // Compute importance for all heads (batched)
+        let importance = if self.moh_config.learnable_sampling && self.importance_scorers.is_some()
+        {
+            let q_reshaped =
+                q.permute((0, 2, 1, 3))?
+                    .reshape((batch_size * seq_len, total_heads, head_dim))?;
+            let mut all_scores = Vec::with_capacity(total_heads);
 
-            let head_output = if self.moh_config.deformable_attention {
-                self.compute_deformable_head_attention(
-                    &q_head,
-                    &k_head,
-                    &v_head,
-                    head_idx,
-                    &sparsity_ratio,
-                    training,
-                )?
-            } else {
-                self.compute_sparse_head_attention(
-                    &q_head,
-                    &k_head,
-                    &v_head,
-                    head_idx,
-                    &sparsity_ratio,
-                    training,
-                )?
-            };
+            if let Some(ref scorers) = self.importance_scorers {
+                for (head_idx, scorer) in scorers.iter().enumerate() {
+                    let q_head = q_reshaped.narrow(1, head_idx, 1)?.squeeze(1)?;
+                    all_scores.push(scorer.forward(&q_head)?);
+                }
+            }
 
-            head_outputs.push(head_output.unsqueeze(1)?); // [Batch, 1, Seq, HeadDim]
+            Tensor::stack(&all_scores, 1)?
+                .reshape((batch_size, seq_len, total_heads, 1))?
+                .permute((0, 2, 1, 3))? // [Batch, Heads, Seq, 1]
+        } else {
+            q.sqr()?.sum(D::Minus1)?.unsqueeze(3)?
+        };
+
+        // Add deformable bias if enabled (batched)
+        if self.moh_config.deformable_attention {
+            let deform_bias = self.compute_deformable_bias_batched(q, seq_len)?;
+            attn_scores = (attn_scores + deform_bias)?;
         }
 
-        Tensor::cat(&head_outputs, 1)
-            .map_err(|e| VangaError::ModelError(format!("Failed to stack head outputs: {}", e)))
+        // Apply sparse mask (batched)
+        let sparse_logits =
+            self.apply_sparse_mask_batched(&attn_scores, &importance, &sparsity_ratio)?;
+
+        // Causal mask (batched)
+        let mask = self.create_causal_mask(seq_len)?;
+        let mask = mask.broadcast_as(sparse_logits.shape())?;
+        let masked_scores = (sparse_logits + mask)?;
+
+        // Softmax + dropout (batched)
+        let attn_weights = ops::softmax(&masked_scores, D::Minus1)?;
+        let attn_weights = if training && self.config.dropout_rate > 0.0 {
+            ops::dropout(&attn_weights, self.config.dropout_rate as f32)?
+        } else {
+            attn_weights
+        };
+
+        // Apply to V (batched)
+        attn_weights
+            .matmul(v)
+            .map_err(|e| VangaError::ModelError(format!("Batched attention failed: {}", e)))
+    }
+
+    /// Compute deformable bias for all heads (batched)
+    fn compute_deformable_bias_batched(&self, q: &Tensor, seq_len: usize) -> Result<Tensor> {
+        let (batch_size, total_heads, _, head_dim) = q.dims4()?;
+        let num_offsets = self.moh_config.num_offsets.max(2);
+
+        let offsets = if let Some(ref predictors) = self.offset_predictors {
+            let q_flat = q
+                .permute((0, 2, 1, 3))?
+                .reshape((batch_size * seq_len * total_heads, head_dim))?;
+            let mut all_offsets = Vec::with_capacity(total_heads);
+
+            for (head_idx, predictor) in predictors.iter().enumerate() {
+                let start = head_idx * batch_size * seq_len;
+                let q_head = q_flat.narrow(0, start, batch_size * seq_len)?;
+                all_offsets.push(predictor.forward(&q_head)?.tanh()?);
+            }
+
+            Tensor::stack(&all_offsets, 1)?
+                .reshape((batch_size, seq_len, total_heads, num_offsets))?
+                .permute((0, 2, 1, 3))? // [Batch, Heads, Seq, NumOffsets]
+        } else {
+            Tensor::zeros(
+                (batch_size, total_heads, seq_len, num_offsets),
+                q.dtype(),
+                &self.device,
+            )?
+        };
+
+        // Gaussian bias computation (vectorized)
+        let seq_pos: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
+        let key_pos = Tensor::from_vec(seq_pos.clone(), (1, 1, 1, seq_len), &self.device)?;
+        let query_pos = Tensor::from_vec(seq_pos, (1, 1, seq_len, 1), &self.device)?;
+
+        let scale = (seq_len as f32) / 2.0;
+        let scale_tensor = Tensor::new(scale, &self.device)?;
+        let scale_broadcast = scale_tensor.broadcast_as(offsets.shape())?;
+        let scaled_offsets = offsets.broadcast_mul(&scale_broadcast)?;
+        let target_pos =
+            (query_pos.broadcast_as((batch_size, total_heads, seq_len, num_offsets))?
+                - scaled_offsets)?;
+        let target_pos = target_pos.unsqueeze(4)?;
+
+        let key_grid =
+            key_pos.broadcast_as((batch_size, total_heads, seq_len, num_offsets, seq_len))?;
+        let target_grid =
+            target_pos.broadcast_as((batch_size, total_heads, seq_len, num_offsets, seq_len))?;
+
+        let diff = (key_grid - target_grid)?;
+        let bandwidth = (seq_len as f32 / num_offsets as f32).max(1.0);
+        let denom = Tensor::new(2.0f32 * bandwidth * bandwidth, &self.device)?
+            .broadcast_as(diff.shape())?;
+        let gaussian = diff.sqr()?.broadcast_div(&denom)?.neg()?.exp()?;
+        let mask = gaussian.mean(3)?;
+
+        let mask_sum = mask.sum(D::Minus1)?.unsqueeze(3)?;
+        let normalized = mask.broadcast_div(&(mask_sum + 1e-6)?)?;
+        Ok((normalized + 1e-6)?.log()?)
+    }
+    /// Apply sparse mask (batched)
+    fn apply_sparse_mask_batched(
+        &self,
+        attn_scores: &Tensor,
+        importance: &Tensor,
+        sparsity_ratio: &Tensor,
+    ) -> Result<Tensor> {
+        let sparsity_expanded = sparsity_ratio
+            .unsqueeze(1)?
+            .broadcast_as(attn_scores.shape())?;
+        let clipped = sparsity_expanded.clamp(0.05, 1.0)?;
+
+        let ones = Tensor::ones_like(attn_scores)?;
+        let deficit = (ones.clone() - &clipped)?;
+        let sharpness = (ones + (deficit * 8.0)?)?;
+
+        let mut logits = attn_scores.broadcast_mul(&sharpness)?;
+        let importance_bias = importance.broadcast_as(attn_scores.shape())?;
+        logits = (logits + (importance_bias * 0.1)?)?;
+
+        Ok(logits)
     }
 
     /// Compute sparse attention for a single head with top-K selection
@@ -634,7 +739,7 @@ impl MixtureOfHeadAttention {
             let entropy_term = safe.broadcast_mul(&log_safe)?;
             let entropy = entropy_term.neg()?.sum(D::Minus1)?.unsqueeze(2)?;
             let max_entropy = (weights.dim(2)? as f32).ln().max(1e-6);
-            let norm = Tensor::new((1.0 / max_entropy) as f32, &self.device)?;
+            let norm = Tensor::new(1.0 / max_entropy, &self.device)?;
             let norm = norm.broadcast_as(entropy.shape())?;
             let normalized_entropy = entropy.broadcast_mul(&norm)?;
             normalized_entropy.clamp(0.0, 1.0)?
@@ -645,10 +750,9 @@ impl MixtureOfHeadAttention {
         let min_ratio = self.moh_config.min_sparse_ratio;
         let max_ratio = self.moh_config.max_sparse_ratio;
         let base_shape = base_signal.shape();
-        let min_tensor =
-            Tensor::new(min_ratio as f32, &self.device)?.broadcast_as(base_shape.clone())?;
-        let range_tensor = Tensor::new((max_ratio - min_ratio) as f32, &self.device)?
-            .broadcast_as(base_shape.clone())?;
+        let min_tensor = Tensor::new(min_ratio, &self.device)?.broadcast_as(base_shape.clone())?;
+        let range_tensor =
+            Tensor::new(max_ratio - min_ratio, &self.device)?.broadcast_as(base_shape.clone())?;
         let scaled = base_signal.broadcast_mul(&range_tensor)?;
         let ratio = (scaled + min_tensor)?;
 
@@ -656,212 +760,6 @@ impl MixtureOfHeadAttention {
         self.last_sparsity_mean = Some(mean_ratio);
 
         Ok(ratio)
-    }
-
-    fn compute_sparse_head_attention(
-        &self,
-        q: &Tensor, // [Batch, Seq, HeadDim]
-        k: &Tensor,
-        v: &Tensor,
-        head_idx: usize,
-        sparsity_ratio: &Tensor,
-        training: bool,
-    ) -> Result<Tensor> {
-        let (_, seq_len, head_dim) = q.dims3()?;
-        let scale = (head_dim as f64).sqrt();
-
-        // Compute importance scores for token selection
-        let importance_scores = if self.moh_config.learnable_sampling {
-            if let Some(ref scorers) = self.importance_scorers {
-                let (batch_size, seq_len, head_dim) = q.dims3()?;
-                let q_flat = q.reshape((batch_size * seq_len, head_dim))?;
-                let scores = scorers[head_idx].forward(&q_flat)?;
-                scores.reshape((batch_size, seq_len, 1))?
-            } else {
-                self.compute_query_importance(q)?
-            }
-        } else {
-            self.compute_query_importance(q)?
-        };
-
-        // Compute attention scores
-        let q_scaled = (q / scale)?;
-        let k_t = k.transpose(1, 2)?.contiguous()?;
-        let attn_scores = q_scaled.matmul(&k_t)?; // [Batch, Seq, Seq]
-
-        let sparse_logits = self.apply_differentiable_sparse_mask(
-            &attn_scores,
-            &importance_scores,
-            sparsity_ratio,
-            None,
-        )?;
-
-        // Apply causal mask
-        let mask = self.create_causal_mask(seq_len)?;
-        let mask = mask.squeeze(0)?.squeeze(0)?; // [Seq, Seq]
-        let mask = mask.broadcast_as(sparse_logits.shape())?;
-        let masked_scores = (sparse_logits + mask)?;
-
-        // Softmax
-        let attn_weights = ops::softmax(&masked_scores, D::Minus1)?;
-
-        // Dropout
-        let attn_weights = if training && self.config.dropout_rate > 0.0 {
-            ops::dropout(&attn_weights, self.config.dropout_rate as f32)?
-        } else {
-            attn_weights
-        };
-
-        // Apply to V
-        attn_weights
-            .matmul(v)
-            .map_err(|e| VangaError::ModelError(format!("Sparse attention matmul failed: {}", e)))
-    }
-
-    /// Compute deformable attention with learnable temporal offsets
-    fn compute_deformable_head_attention(
-        &self,
-        q: &Tensor, // [Batch, Seq, HeadDim]
-        k: &Tensor,
-        v: &Tensor,
-        head_idx: usize,
-        sparsity_ratio: &Tensor,
-        training: bool,
-    ) -> Result<Tensor> {
-        let (batch_size, seq_len, head_dim) = q.dims3()?;
-        let scale = (head_dim as f64).sqrt();
-
-        let num_offsets = self.moh_config.num_offsets.max(2);
-
-        let offsets = if let Some(ref predictors) = self.offset_predictors {
-            let q_flat = q.reshape((batch_size * seq_len, head_dim))?;
-            let offset_logits = predictors[head_idx].forward(&q_flat)?;
-            offset_logits
-                .tanh()?
-                .reshape((batch_size, seq_len, num_offsets))?
-        } else {
-            Tensor::zeros((batch_size, seq_len, num_offsets), q.dtype(), &self.device)?
-        };
-
-        let deform_bias = self.build_deformable_bias(&offsets, seq_len)?;
-
-        let importance_scores = if self.moh_config.learnable_sampling {
-            if let Some(ref scorers) = self.importance_scorers {
-                let q_flat = q.reshape((batch_size * seq_len, head_dim))?;
-                let scores = scorers[head_idx].forward(&q_flat)?;
-                scores.reshape((batch_size, seq_len, 1))?
-            } else {
-                self.compute_query_importance(q)?
-            }
-        } else {
-            self.compute_query_importance(q)?
-        };
-
-        let q_scaled = (q / scale)?;
-        let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
-        let attn_scores = q_scaled.matmul(&k_t)?;
-
-        let sparse_logits = self.apply_differentiable_sparse_mask(
-            &attn_scores,
-            &importance_scores,
-            sparsity_ratio,
-            Some(&deform_bias),
-        )?;
-
-        let mask = self.create_causal_mask(seq_len)?;
-        let mask = mask.squeeze(0)?.squeeze(0)?;
-        let mask = mask.broadcast_as(sparse_logits.shape())?;
-        let masked_scores = (sparse_logits + mask)?;
-
-        let attn_weights = ops::softmax(&masked_scores, D::Minus1)?;
-        let attn_weights = if training && self.config.dropout_rate > 0.0 {
-            ops::dropout(&attn_weights, self.config.dropout_rate as f32)?
-        } else {
-            attn_weights
-        };
-
-        attn_weights.matmul(v).map_err(|e| {
-            VangaError::ModelError(format!("Deformable attention matmul failed: {}", e))
-        })
-    }
-
-    fn compute_query_importance(&self, q: &Tensor) -> Result<Tensor> {
-        let importance = q.sqr()?.sum(D::Minus1)?;
-        importance.unsqueeze(2).map_err(|e| {
-            VangaError::ModelError(format!("Query importance computation failed: {}", e))
-        })
-    }
-
-    fn apply_differentiable_sparse_mask(
-        &self,
-        attn_scores: &Tensor,
-        importance: &Tensor,
-        sparsity_ratio: &Tensor,
-        deform_bias: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let clipped = sparsity_ratio.clamp(0.05, 1.0)?;
-        let ratio_full = clipped.broadcast_as(attn_scores.shape())?;
-        let ones = Tensor::ones_like(attn_scores)?;
-        let intensity = Tensor::new(8.0f32, &self.device)?;
-        let intensity = intensity.broadcast_as(attn_scores.shape())?;
-        let deficit = ones.broadcast_sub(&ratio_full)?;
-        let scaled_deficit = deficit.broadcast_mul(&intensity)?;
-        let sharpness = (ones + scaled_deficit)?;
-        let mut logits = attn_scores.broadcast_mul(&sharpness)?;
-
-        let importance_bias = importance.broadcast_as(attn_scores.shape())?;
-        let importance_gain = Tensor::new(0.1f32, &self.device)?;
-        let importance_gain = importance_gain.broadcast_as(attn_scores.shape())?;
-        let importance_term = importance_bias.broadcast_mul(&importance_gain)?;
-        logits = (logits + importance_term)?;
-
-        if let Some(bias) = deform_bias {
-            let bias = bias.broadcast_as(attn_scores.shape())?;
-            logits = (logits + bias)?;
-        }
-
-        Ok(logits)
-    }
-
-    fn build_deformable_bias(&self, offsets: &Tensor, seq_len: usize) -> Result<Tensor> {
-        let (batch, query_len, sample_count_raw) = offsets.dims3()?;
-        let sample_count = sample_count_raw.max(1);
-        let seq_positions: Vec<f32> = (0..seq_len).map(|idx| idx as f32).collect();
-        let key_positions = Tensor::from_vec(seq_positions.clone(), (1, 1, seq_len), &self.device)?;
-        let query_positions = Tensor::from_vec(seq_positions, (1, query_len, 1), &self.device)?;
-
-        let scale = Tensor::new((seq_len.max(1) as f32) / 2.0, &self.device)?;
-        let scale = scale.broadcast_as(offsets.shape())?;
-        let scaled_offsets = offsets.broadcast_mul(&scale)?;
-
-        let mut target_positions =
-            query_positions.broadcast_as((batch, query_len, sample_count))?;
-        target_positions = (target_positions - scaled_offsets)?;
-        let target_positions = target_positions.unsqueeze(3)?;
-
-        let key_grid =
-            key_positions
-                .unsqueeze(0)?
-                .broadcast_as((batch, query_len, sample_count, seq_len))?;
-        let target_grid =
-            target_positions.broadcast_as((batch, query_len, sample_count, seq_len))?;
-        let diff = (key_grid - target_grid)?;
-
-        let bandwidth = (seq_len.max(1) as f32 / sample_count as f32).max(1.0);
-        let denom = Tensor::new(2.0f32 * bandwidth * bandwidth, &self.device)?
-            .broadcast_as(diff.shape())?;
-        let gaussian = (diff.sqr()? / denom)?.neg()?.exp()?;
-        let mask = gaussian.mean(2)?;
-
-        let mask_sum = mask.sum(D::Minus1)?.unsqueeze(2)?;
-        let epsilon_scalar = Tensor::new(1e-6f32, &self.device)?;
-        let epsilon_sum = epsilon_scalar.broadcast_as(mask_sum.shape())?;
-        let denominator = (mask_sum + epsilon_sum.clone())?;
-        let denominator = denominator.broadcast_as(mask.shape())?;
-        let normalized = (mask / denominator)?;
-
-        let epsilon_logits = epsilon_scalar.broadcast_as(normalized.shape())?;
-        Ok((normalized + epsilon_logits)?.log()?)
     }
 
     fn create_causal_mask(&self, seq_len: usize) -> Result<Tensor> {
