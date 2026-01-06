@@ -26,7 +26,7 @@ impl CryptoDataSchema {
         let columns = df.get_column_names();
         let missing_columns: Vec<_> = GlobalConfig::REQUIRED_COLUMNS
             .iter()
-            .filter(|&col| !columns.contains(col))
+            .filter(|&col| !columns.iter().any(|c| c.as_str() == *col))
             .collect();
 
         if !missing_columns.is_empty() {
@@ -47,7 +47,10 @@ impl CryptoDataSchema {
         // Timestamp should be datetime or string (parseable to datetime)
         if let Some(timestamp_dtype) = schema.get("timestamp") {
             match timestamp_dtype {
-                DataType::Datetime(_, _) | DataType::Utf8 | DataType::Int64 | DataType::UInt64 => {}
+                DataType::Datetime(_, _)
+                | DataType::String
+                | DataType::Int64
+                | DataType::UInt64 => {}
                 _ => {
                     return Err(VangaError::DataValidation(
                         DataValidationError::InvalidDataType {
@@ -84,7 +87,8 @@ impl CryptoDataSchema {
         for &price_col in &["open", "high", "low", "close"] {
             if let Ok(col) = df.column(price_col) {
                 if let Ok(series) = col.cast(&DataType::Float64) {
-                    if let Some(min_val) = series.min::<f64>() {
+                    let series_materialized = series.as_materialized_series();
+                    if let Ok(Some(min_val)) = series_materialized.min::<f64>() {
                         if min_val < 0.0 {
                             return Err(VangaError::DataValidation(
                                 DataValidationError::InvalidData {
@@ -101,7 +105,8 @@ impl CryptoDataSchema {
         // Check for negative volume
         if let Ok(volume_col) = df.column("volume") {
             if let Ok(series) = volume_col.cast(&DataType::Float64) {
-                if let Some(min_val) = series.min::<f64>() {
+                let series_materialized = series.as_materialized_series();
+                if let Ok(Some(min_val)) = series_materialized.min::<f64>() {
                     if min_val < 0.0 {
                         return Err(VangaError::DataValidation(
                             DataValidationError::InvalidData {
@@ -182,7 +187,7 @@ impl CryptoDataSchema {
             let df_with_index = df
                 .clone()
                 .lazy()
-                .with_row_count("row_index", Some(1)) // 1-based indexing
+                .with_row_index("row_index", Some(1)) // 1-based indexing
                 .collect()
                 .map_err(|e| {
                     VangaError::DataValidation(DataValidationError::InvalidData {
@@ -200,7 +205,7 @@ impl CryptoDataSchema {
                     col("row_index").count().alias("count"),
                 ])
                 .filter(col("count").gt(lit(1)))
-                .sort("timestamp", SortOptions::default())
+                .sort(["timestamp"], SortMultipleOptions::default())
                 .collect()
                 .map_err(|e| {
                     VangaError::DataValidation(DataValidationError::InvalidData {

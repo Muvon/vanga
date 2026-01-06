@@ -29,7 +29,7 @@ pub async fn process_custom_features(
 
     // Add custom features to DataFrame one by one
     df = df
-        .with_column(Series::new("momentum_3", momentum_3))
+        .with_column(Series::new("momentum_3".into(), momentum_3))
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add momentum_3 column: {}",
@@ -38,7 +38,7 @@ pub async fn process_custom_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("momentum_7", momentum_7))
+        .with_column(Series::new("momentum_7".into(), momentum_7))
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add momentum_7 column: {}",
@@ -47,7 +47,7 @@ pub async fn process_custom_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("momentum_14", momentum_14))
+        .with_column(Series::new("momentum_14".into(), momentum_14))
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add momentum_14 column: {}",
@@ -56,7 +56,7 @@ pub async fn process_custom_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("volume_price_trend", vpt))
+        .with_column(Series::new("volume_price_trend".into(), vpt))
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add volume_price_trend column: {}",
@@ -65,7 +65,7 @@ pub async fn process_custom_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("price_acceleration", price_acceleration))
+        .with_column(Series::new("price_acceleration".into(), price_acceleration))
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add price_acceleration column: {}",
@@ -74,7 +74,7 @@ pub async fn process_custom_features(
         })?
         .clone();
     df = df
-        .with_column(Series::new("volume_momentum", volume_momentum))
+        .with_column(Series::new("volume_momentum".into(), volume_momentum))
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add volume_momentum column: {}",

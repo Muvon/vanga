@@ -613,7 +613,7 @@ impl DataPreprocessor {
                                 "Column '{}' has no valid values, skipping outlier processing",
                                 column_name
                             );
-                            processed_columns.push(series.clone());
+                            processed_columns.push(series.clone().into_column());
                             continue;
                         }
 
@@ -626,7 +626,7 @@ impl DataPreprocessor {
 
                         if iqr == 0.0 {
                             log::warn!("Column '{}' has zero IQR (constant values), skipping outlier processing", column_name);
-                            processed_columns.push(series.clone());
+                            processed_columns.push(series.clone().into_column());
                             continue;
                         }
 
@@ -643,7 +643,7 @@ impl DataPreprocessor {
                             q3,
                         )?;
 
-                        processed_columns.push(processed_series);
+                        processed_columns.push(processed_series.into_column());
 
                         if outlier_count > 0 {
                             outlier_stats.push(format!(
@@ -659,11 +659,11 @@ impl DataPreprocessor {
                         log::debug!("Column '{}': Q1={:.4}, Q3={:.4}, IQR={:.4}, bounds=[{:.4}, {:.4}], {} outliers replaced",
                                    column_name, q1, q3, iqr, lower_bound, upper_bound, outlier_count);
                     } else {
-                        processed_columns.push(series.clone());
+                        processed_columns.push(series.clone().into_column());
                     }
                 } else {
                     // Keep non-numeric columns and protected columns as-is
-                    processed_columns.push(series.clone());
+                    processed_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -721,7 +721,7 @@ impl DataPreprocessor {
                                 "Column '{}' has no valid values, skipping outlier processing",
                                 column_name
                             );
-                            processed_columns.push(series.clone());
+                            processed_columns.push(series.clone().into_column());
                             continue;
                         }
 
@@ -732,7 +732,7 @@ impl DataPreprocessor {
 
                         if std_dev == 0.0 {
                             log::warn!("Column '{}' has zero standard deviation (constant values), skipping outlier processing", column_name);
-                            processed_columns.push(series.clone());
+                            processed_columns.push(series.clone().into_column());
                             continue;
                         }
 
@@ -746,7 +746,7 @@ impl DataPreprocessor {
                                 threshold,
                             )?;
 
-                        processed_columns.push(processed_series);
+                        processed_columns.push(processed_series.into_column());
 
                         if outlier_count > 0 {
                             outlier_stats.push(format!(
@@ -762,11 +762,11 @@ impl DataPreprocessor {
                         log::debug!("Column '{}': mean={:.4}, std={:.4}, threshold={:.2}, {} outliers replaced",
                                    column_name, mean, std_dev, threshold, outlier_count);
                     } else {
-                        processed_columns.push(series.clone());
+                        processed_columns.push(series.clone().into_column());
                     }
                 } else {
                     // Keep non-numeric columns and protected columns as-is
-                    processed_columns.push(series.clone());
+                    processed_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -828,7 +828,7 @@ impl DataPreprocessor {
                                 "Column '{}' has no valid values, skipping outlier processing",
                                 column_name
                             );
-                            processed_columns.push(series.clone());
+                            processed_columns.push(series.clone().into_column());
                             continue;
                         }
 
@@ -844,7 +844,7 @@ impl DataPreprocessor {
 
                         if mad == 0.0 {
                             log::warn!("Column '{}' has zero MAD (constant values), skipping outlier processing", column_name);
-                            processed_columns.push(series.clone());
+                            processed_columns.push(series.clone().into_column());
                             continue;
                         }
 
@@ -858,7 +858,7 @@ impl DataPreprocessor {
                                 threshold,
                             )?;
 
-                        processed_columns.push(processed_series);
+                        processed_columns.push(processed_series.into_column());
 
                         if outlier_count > 0 {
                             outlier_stats.push(format!(
@@ -874,11 +874,11 @@ impl DataPreprocessor {
                         log::debug!("Column '{}': median={:.4}, MAD={:.4}, threshold={:.2}, {} outliers replaced",
                                    column_name, median, mad, threshold, outlier_count);
                     } else {
-                        processed_columns.push(series.clone());
+                        processed_columns.push(series.clone().into_column());
                     }
                 } else {
                     // Keep non-numeric columns and protected columns as-is
-                    processed_columns.push(series.clone());
+                    processed_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -974,7 +974,7 @@ impl DataPreprocessor {
             })
             .collect();
 
-        let processed_series = Series::new(column_name, processed_values);
+        let processed_series = Series::new(column_name.into(), processed_values);
         Ok((processed_series, outlier_count))
     }
 
@@ -1028,7 +1028,7 @@ impl DataPreprocessor {
             })
             .collect();
 
-        let processed_series = Series::new(column_name, processed_values);
+        let processed_series = Series::new(column_name.into(), processed_values);
         Ok((processed_series, outlier_count))
     }
 
@@ -1084,7 +1084,7 @@ impl DataPreprocessor {
             })
             .collect();
 
-        let processed_series = Series::new(column_name, processed_values);
+        let processed_series = Series::new(column_name.into(), processed_values);
         Ok((processed_series, outlier_count))
     }
 
@@ -1444,8 +1444,8 @@ impl DataPreprocessor {
                             }
                         };
 
-                        let normalized_series = Series::new(column_name, normalized_values);
-                        normalized_columns.push(normalized_series);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
+                        normalized_columns.push(normalized_series.into_column());
                         stats_index += 1;
 
                         log::debug!(
@@ -1456,7 +1456,7 @@ impl DataPreprocessor {
                     }
                 } else {
                     // Keep non-numeric columns as-is
-                    normalized_columns.push(series.clone());
+                    normalized_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -1486,6 +1486,7 @@ impl DataPreprocessor {
                     false
                 }
             })
+            .map(|name| name.as_str())
             .collect();
 
         if numeric_columns.len() != stats.means.len() {
@@ -1542,8 +1543,9 @@ impl DataPreprocessor {
                             // Keep original values instead of skipping column to maintain feature count consistency
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
-                            let normalized_series = Series::new(column_name, original_values);
-                            normalized_columns.push(normalized_series);
+                            let normalized_series =
+                                Series::new(column_name.clone(), original_values);
+                            normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
 
@@ -1553,15 +1555,15 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - median) / iqr))
                             .collect();
 
-                        let normalized_series = Series::new(column_name, normalized_values);
-                        normalized_columns.push(normalized_series);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
+                        normalized_columns.push(normalized_series.into_column());
 
                         log::debug!("Column '{}': median={:.4}, Q1={:.4}, Q3={:.4}, IQR={:.4} - normalized for time-series stability",
                                    column_name, median, q1, q3, iqr);
                     }
                 } else {
                     // Keep non-numeric columns as-is
-                    normalized_columns.push(series.clone());
+                    normalized_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -1610,8 +1612,9 @@ impl DataPreprocessor {
                             // Keep original values instead of skipping column to maintain feature count consistency
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
-                            let normalized_series = Series::new(column_name, original_values);
-                            normalized_columns.push(normalized_series);
+                            let normalized_series =
+                                Series::new(column_name.clone(), original_values);
+                            normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
 
@@ -1621,8 +1624,8 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - min_val) / range))
                             .collect();
 
-                        let normalized_series = Series::new(column_name, normalized_values);
-                        normalized_columns.push(normalized_series);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
+                        normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
                             "Column '{}': min={:.4}, max={:.4}, range={:.4}",
@@ -1634,7 +1637,7 @@ impl DataPreprocessor {
                     }
                 } else {
                     // Keep non-numeric columns as-is
-                    normalized_columns.push(series.clone());
+                    normalized_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -1681,8 +1684,9 @@ impl DataPreprocessor {
                             // Keep original values instead of skipping column to maintain feature count consistency
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
-                            let normalized_series = Series::new(column_name, original_values);
-                            normalized_columns.push(normalized_series);
+                            let normalized_series =
+                                Series::new(column_name.clone(), original_values);
+                            normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
 
@@ -1692,8 +1696,8 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - mean) / std_dev))
                             .collect();
 
-                        let normalized_series = Series::new(column_name, normalized_values);
-                        normalized_columns.push(normalized_series);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
+                        normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
                             "Column '{}': mean={:.4}, std={:.4}",
@@ -1704,7 +1708,7 @@ impl DataPreprocessor {
                     }
                 } else {
                     // Keep non-numeric columns as-is
-                    normalized_columns.push(series.clone());
+                    normalized_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -1764,8 +1768,8 @@ impl DataPreprocessor {
                             })
                             .collect();
 
-                        let normalized_series = Series::new(column_name, normalized_values);
-                        normalized_columns.push(normalized_series);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
+                        normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
                             "Column '{}': quantile transformation applied with {} unique values",
@@ -1775,7 +1779,7 @@ impl DataPreprocessor {
                     }
                 } else {
                     // Keep non-numeric columns as-is
-                    normalized_columns.push(series.clone());
+                    normalized_columns.push(series.clone().into_column());
                 }
             }
         }
@@ -1801,11 +1805,15 @@ impl DataPreprocessor {
 
         // Validate that required columns exist for the symbol
         let required_columns = ["open", "high", "low", "close", "volume"];
-        let available_columns: Vec<&str> = df.get_column_names();
+        let available_columns: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut missing_columns = Vec::new();
 
         for col in required_columns {
-            if !available_columns.contains(&col) {
+            if !available_columns.iter().any(|c| c == col) {
                 missing_columns.push(col);
             }
         }
@@ -2216,7 +2224,7 @@ mod tests {
 
         // Create test series: [1.0, 2.0, OUTLIER, 4.0, 5.0]
         let values = vec![Some(1.0), Some(2.0), Some(100.0), Some(4.0), Some(5.0)];
-        let series = Series::new("test", values).f64().unwrap().clone();
+        let series = Series::new("test".into(), values).f64().unwrap().clone();
 
         // Test interpolation at index 2 (outlier value 100.0)
         let interpolated = preprocessor.interpolate_outlier_value(&series, 2, 100.0, 3.0);

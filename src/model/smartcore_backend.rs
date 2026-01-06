@@ -139,7 +139,8 @@ impl SmartCoreRegressor {
             .map(|row| row.iter().map(|&x| x as f64).collect())
             .collect();
 
-        let x = DenseMatrix::from_2d_vec(&features_vec2d);
+        let x = DenseMatrix::from_2d_vec(&features_vec2d)
+            .map_err(|e| VangaError::ModelError(format!("Failed to create DenseMatrix: {}", e)))?;
         let y: Vec<i32> = targets_array.iter().map(|&x| x as i32).collect();
 
         log::info!(
@@ -246,7 +247,9 @@ impl SmartCoreRegressor {
                 .outer_iter()
                 .map(|row| row.iter().map(|&x| x as f64).collect())
                 .collect();
-            let val_x = DenseMatrix::from_2d_vec(&val_features_vec2d);
+            let val_x = DenseMatrix::from_2d_vec(&val_features_vec2d).map_err(|e| {
+                VangaError::ModelError(format!("Failed to create validation DenseMatrix: {}", e))
+            })?;
             let val_y: Vec<i32> = val_targets_array.iter().map(|&x| x as i32).collect();
 
             self.test_model_predictions(&val_x, &val_y)?;
@@ -363,7 +366,9 @@ impl SmartCoreRegressor {
             .outer_iter()
             .map(|row| row.iter().map(|&x| x as f64).collect())
             .collect();
-        let x = DenseMatrix::from_2d_vec(&features_vec2d);
+        let x = DenseMatrix::from_2d_vec(&features_vec2d).map_err(|e| {
+            VangaError::ModelError(format!("Failed to create prediction DenseMatrix: {}", e))
+        })?;
 
         // Make predictions using available model - TRY PROBABILITIES FIRST, FALLBACK TO CLASSIFICATIONS
         let probabilities_result = if let Some(ref rf_model) = self.model {
@@ -950,7 +955,9 @@ impl SmartCoreRegressor {
             test_data.push(row);
         }
 
-        let test_x = DenseMatrix::from_2d_vec(&test_data);
+        let test_x = DenseMatrix::from_2d_vec(&test_data).map_err(|e| {
+            VangaError::ModelError(format!("Failed to create test DenseMatrix: {}", e))
+        })?;
 
         let predictions = if let Some(ref rf_model) = self.model {
             rf_model
@@ -1085,7 +1092,9 @@ impl SmartCoreRegressor {
                 row[feature_idx] = feature_values[i];
             }
 
-            let permuted_x = DenseMatrix::from_2d_vec(&permuted_data);
+            let permuted_x = DenseMatrix::from_2d_vec(&permuted_data).map_err(|e| {
+                VangaError::ModelError(format!("Failed to create permuted DenseMatrix: {}", e))
+            })?;
 
             // Get predictions with permuted feature
             let permuted_predictions = if let Some(ref rf_model) = self.model {

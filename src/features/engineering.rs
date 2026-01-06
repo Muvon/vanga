@@ -24,7 +24,7 @@ pub async fn apply_feature_engineering(
             .collect();
 
         df = df
-            .with_column(Series::new("price_volume_ratio", price_volume_ratio))
+            .with_column(Series::new("price_volume_ratio".into(), price_volume_ratio))
             .map_err(|e| {
                 crate::utils::error::VangaError::DataError(format!(
                     "Failed to add price_volume_ratio column: {}",
@@ -43,7 +43,7 @@ pub async fn apply_feature_engineering(
             .collect();
 
         df = df
-            .with_column(Series::new("price_squared", price_squared))
+            .with_column(Series::new("price_squared".into(), price_squared))
             .map_err(|e| {
                 crate::utils::error::VangaError::DataError(format!(
                     "Failed to add price_squared column: {}",
@@ -53,7 +53,7 @@ pub async fn apply_feature_engineering(
             .clone();
 
         df = df
-            .with_column(Series::new("price_log", price_log))
+            .with_column(Series::new("price_log".into(), price_log))
             .map_err(|e| {
                 crate::utils::error::VangaError::DataError(format!(
                     "Failed to add price_log column: {}",
@@ -73,9 +73,10 @@ pub async fn apply_feature_engineering(
                 for &lag_period in &config.lag_features.lag_periods {
                     let lag_feature = create_lag_feature(&column_data, lag_period as usize);
                     let lag_column_name = format!("{}_lag_{}", feature_name, lag_period);
+                    let series = Series::new(lag_column_name.clone().into(), lag_feature);
 
                     df = df
-                        .with_column(Series::new(&lag_column_name, lag_feature))
+                        .with_column(series)
                         .map_err(|e| {
                             crate::utils::error::VangaError::DataError(format!(
                                 "Failed to add {} column: {}",
@@ -101,7 +102,7 @@ pub async fn apply_feature_engineering(
 
             df = df
                 .with_column(Series::new(
-                    &format!("price_rolling_mean_{}", window_size),
+                    format!("price_rolling_mean_{}", window_size).into(),
                     price_rolling_mean,
                 ))
                 .map_err(|e| {
@@ -114,7 +115,7 @@ pub async fn apply_feature_engineering(
 
             df = df
                 .with_column(Series::new(
-                    &format!("price_rolling_std_{}", window_size),
+                    format!("price_rolling_std_{}", window_size).into(),
                     price_rolling_std,
                 ))
                 .map_err(|e| {
@@ -135,7 +136,7 @@ pub async fn apply_feature_engineering(
         .collect();
 
     df = df
-        .with_column(Series::new("high_low_ratio", high_low_ratio))
+        .with_column(Series::new("high_low_ratio".into(), high_low_ratio))
         .map_err(|e| {
             crate::utils::error::VangaError::DataError(format!(
                 "Failed to add high_low_ratio column: {}",

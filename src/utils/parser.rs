@@ -44,7 +44,7 @@ pub fn detect_timeframe_minutes(df: &DataFrame) -> Result<usize> {
                 })?
                 .clone()
         }
-        DataType::Utf8 => {
+        DataType::String => {
             log::debug!("Parsing string timestamps to datetime");
             // Try to parse as datetime string
             timestamp_col

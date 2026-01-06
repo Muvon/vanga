@@ -2,6 +2,7 @@ use crate::config::GlobalConfig;
 use crate::utils::error::{Result, VangaError};
 use polars::prelude::*;
 use rayon::prelude::*;
+use std::fs::File;
 use std::path::Path;
 
 /// Data loader for CSV files with automatic schema detection
@@ -38,13 +39,11 @@ impl DataLoader {
                     )));
                 }
 
-                // Load CSV with validation - Read as strings then cast to Float64
-                let mut df = polars::prelude::CsvReader::from_path(path)
-                    .map_err(|e| {
-                        VangaError::DataError(format!("Failed to create CSV reader: {}", e))
-                    })?
-                    .has_header(true)
-                    .infer_schema(Some(0)) // Read all columns as strings
+                // Load CSV with validation - Infer schema properly
+                let file = File::open(path).map_err(|e| {
+                    VangaError::DataError(format!("Failed to open CSV file: {}", e))
+                })?;
+                let mut df = polars::prelude::CsvReader::new(file)
                     .finish()
                     .map_err(|e| VangaError::DataError(format!("Failed to read CSV: {}", e)))?;
 
@@ -63,7 +62,9 @@ impl DataLoader {
                     // Try to cast to Float64 - if it fails, leave as is
                     if let Ok(col) = df.column(&col_name) {
                         if let Ok(casted) = col.cast(&DataType::Float64) {
-                            let _ = df.replace(&col_name, casted);
+                            if let Ok(new_df) = df.with_column(casted.into_column()) {
+                                df = new_df.clone();
+                            }
                         }
                     }
                 }
@@ -120,14 +121,13 @@ impl DataLoader {
         // Read CSV - Simple solution: read everything as strings first, then cast numeric columns to Float64
         log::info!("📂 Loading CSV file: {}", path.display());
 
-        // Read CSV with no schema inference (all columns as strings)
-        let mut df = CsvReader::from_path(path)
+        // Read CSV with proper schema inference
+        let file = File::open(path)
             .map_err(|e| VangaError::DataError(format!(
-                "❌ Failed to create CSV reader for file: {}\n🔍 Error: {}\n💡 Check if the file is a valid CSV format.",
+                "❌ Failed to open CSV file: {}\n🔍 Error: {}\n💡 Check if the file exists and is readable.",
                 path.display(), e
-            )))?
-            .has_header(true)
-            .infer_schema(Some(0))  // This makes all columns read as strings
+            )))?;
+        let mut df = CsvReader::new(file)
             .finish()
             .map_err(|e| VangaError::DataError(format!(
                 "❌ Failed to read CSV file: {}\n🔍 Error: {}\n💡 Check if the file contains valid CSV data with proper headers.",
@@ -149,7 +149,9 @@ impl DataLoader {
             // Try to cast to Float64 - if it fails, leave as is (might be a string column)
             if let Ok(col) = df.column(&col_name) {
                 if let Ok(casted) = col.cast(&DataType::Float64) {
-                    let _ = df.replace(&col_name, casted);
+                    if let Ok(new_df) = df.with_column(casted.into_column()) {
+                        df = new_df.clone();
+                    }
                 }
             }
         }
@@ -163,7 +165,7 @@ impl DataLoader {
         // Sort by timestamp
         let df = df
             .lazy()
-            .sort("timestamp", SortOptions::default())
+            .sort(["timestamp"], SortMultipleOptions::default())
             .collect()
             .map_err(|e| VangaError::DataError(format!("Failed to sort data: {}", e)))?;
 
@@ -238,7 +240,7 @@ impl DataLoader {
             if old_name != new_name {
                 df = df
                     .lazy()
-                    .rename([&old_name], [&new_name])
+                    .rename([&old_name], [&new_name], true)
                     .collect()
                     .map_err(|e| {
                         VangaError::DataError(format!("Failed to rename column: {}", e))
@@ -322,14 +324,25 @@ impl DataLoader {
 
         // Get timestamp range if available
         let (start_time, end_time) = if let Ok(timestamp_col) = df.column("timestamp") {
-            let timestamps = timestamp_col.datetime().unwrap();
-            let start = timestamps
-                .min()
-                .and_then(chrono::DateTime::from_timestamp_millis);
-            let end = timestamps
-                .max()
-                .and_then(chrono::DateTime::from_timestamp_millis);
-            (start, end)
+            if let Ok(timestamps) = timestamp_col.datetime() {
+                let start = timestamps
+                    .as_datetime_iter()
+                    .flatten()
+                    .min()
+                    .and_then(|ts| {
+                        chrono::DateTime::from_timestamp_millis(ts.and_utc().timestamp_millis())
+                    });
+                let end = timestamps
+                    .as_datetime_iter()
+                    .flatten()
+                    .max()
+                    .and_then(|ts| {
+                        chrono::DateTime::from_timestamp_millis(ts.and_utc().timestamp_millis())
+                    });
+                (start, end)
+            } else {
+                (None, None)
+            }
         } else {
             (None, None)
         };

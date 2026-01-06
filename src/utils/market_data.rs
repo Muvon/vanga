@@ -50,7 +50,7 @@ pub fn extract_ohlcv_data(df: &DataFrame) -> Result<Vec<MarketDataRow>> {
         })? {
             polars::prelude::AnyValue::Datetime(dt, _, _) => dt / 1_000_000, // Convert microseconds to seconds
             polars::prelude::AnyValue::Int64(ts) => ts,
-            polars::prelude::AnyValue::Utf8(s) => chrono::DateTime::parse_from_rfc3339(s)
+            polars::prelude::AnyValue::String(s) => chrono::DateTime::parse_from_rfc3339(s)
                 .map_err(|e| {
                     crate::utils::error::VangaError::DataError(format!(
                         "Failed to parse timestamp '{}': {}",
@@ -58,10 +58,18 @@ pub fn extract_ohlcv_data(df: &DataFrame) -> Result<Vec<MarketDataRow>> {
                     ))
                 })?
                 .timestamp(),
-            _ => {
+            polars::prelude::AnyValue::StringOwned(s) => chrono::DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| {
+                    crate::utils::error::VangaError::DataError(format!(
+                        "Failed to parse timestamp '{}': {}",
+                        s, e
+                    ))
+                })?
+                .timestamp(),
+            other => {
                 return Err(crate::utils::error::VangaError::DataError(format!(
-                    "Unsupported timestamp type at row {}",
-                    i
+                    "Unsupported timestamp type at row {}: {:?}",
+                    i, other
                 )))
             }
         };
@@ -157,7 +165,16 @@ fn extract_f64_value(
             "NULL value in {} column at row {} (CSV row {}). Check your data file for missing values.",
             column_name, row, row + 1
         ))),
-        polars::prelude::AnyValue::Utf8(s) => {
+        polars::prelude::AnyValue::String(s) => {
+            // Try to parse string as number
+            s.parse::<f64>().map_err(|_| {
+                crate::utils::error::VangaError::DataError(format!(
+                    "Cannot parse {} value '{}' as number at row {} (CSV row {})",
+                    column_name, s, row, row + 1
+                ))
+            })
+        }
+        polars::prelude::AnyValue::StringOwned(s) => {
             // Try to parse string as number
             s.parse::<f64>().map_err(|_| {
                 crate::utils::error::VangaError::DataError(format!(

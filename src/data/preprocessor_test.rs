@@ -7,12 +7,12 @@ mod tests {
     use super::*;
 
     fn make_df_with_missing() -> DataFrame {
-        let ts = Series::new("timestamp", &["2024-01-01T00:00:00Z"]);
-        let open = Series::new("open", &[Some(42000.0), None]);
-        let high = Series::new("high", &[42500.0, 42600.0]);
-        let low = Series::new("low", &[41800.0, 41900.0]);
-        let close = Series::new("close", &[42300.0, 42400.0]);
-        let volume = Series::new("volume", &[1000.0, 1200.0]);
+        let ts = Series::new("timestamp".into(), &["2024-01-01T00:00:00Z"]);
+        let open = Series::new("open".into(), &[Some(42000.0), None]);
+        let high = Series::new("high".into(), &[42500.0, 42600.0]);
+        let low = Series::new("low".into(), &[41800.0, 41900.0]);
+        let close = Series::new("close".into(), &[42300.0, 42400.0]);
+        let volume = Series::new("volume".into(), &[1000.0, 1200.0]);
         DataFrame::new(vec![ts, open, high, low, close, volume]).unwrap()
     }
 
