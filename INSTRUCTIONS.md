@@ -59,6 +59,10 @@ Chronological Splitting (Train/Validation/Test by time) → src/data/loader.rs
     ↓
 Multi-Model Training (Separate LSTM per target×horizon) → src/model/multi_target.rs
     ↓
+Ensemble Calibration (Temperature scaling, NLL tuning) → src/model/calibration/
+    ↓
+Bias Correction (Linear or ensemble mode) → src/model/bias_correction.rs
+    ↓
 Model Persistence (Save trained models + calibration params)
 ```
 
@@ -340,15 +344,19 @@ src/
 │   ├── stream.rs      # CSV streaming and parsing
 │   └── watcher.rs     # File watching for new data
 ├── config/        # Configuration management
-│   ├── training.rs    # TrainingConfig, TrainingParams, 9 optimizers
+│   ├── training.rs    # TrainingConfig, TrainingParams, 11+ optimizers
 │   ├── prediction.rs  # PredictionConfig, OutputConfig
 │   ├── features.rs    # Feature configurations
 │   ├── model.rs       # Model architecture configurations
 │   └── mod.rs         # Configuration coordination
 ├── optimization/  # Optimization and feature selection
 │   ├── feature_selection.rs # Feature selection algorithms
-│   ├── hyperparameter.rs # Hyperparameter optimization
-│   └── fractional.rs # Fractional optimization methods
+│   ├── hyperparameter.rs # Hyperparameter optimization (Bayesian with TuRBO-2, BORE)
+│   ├── fractional.rs # Fractional optimization methods
+│   ├── prodigy.rs     # Prodigy optimizer (parameter-free adaptive LR)
+│   ├── frac_prodigy.rs # FracProdigy (fractional derivative variant)
+│   ├── frac_adam.rs   # FracAdam (fractional memory Adam)
+│   └── frac_nadam.rs  # FracNAdam (fractional memory NAdam)
 └── utils/         # Utilities and error handling
     ├── error.rs       # VangaError types and handling
     ├── metrics.rs     # Evaluation metrics
@@ -433,10 +441,10 @@ Live Data Stream → Feature Buffer → Sliding Window → Prediction Pipeline �
 
 #### `src/model/lstm/` - SINGLE LSTM MODEL (Core Implementation)
 - **training.rs**: `pub async fn train(&mut self, sequences: &Array3<f64>, targets: &Array2<f64>, config: &TrainingConfig, val_sequences: Option<&Array3<f64>>, val_targets: Option<&Array2<f64>>) -> Result<()>` - THE unified training method
-- **config.rs**: `LSTMConfig`, `OptimizerWrapper` (9 optimizers), `TargetFormat` - Single model configuration
+- **config.rs**: `LSTMConfig`, `OptimizerWrapper` (11+ optimizers), `TargetFormat` - Single model configuration
 - **core.rs**: Model lifecycle, initialization, persistence, Xavier initialization
 - **inference.rs**: `predict()` method - Single model prediction
-- **loss.rs**: Loss calculation with weighted cross-entropy for single target
+- **loss.rs**: Loss calculation with SOFL (Soft Ordinal Focal Loss), CDW-CE (Class Distance Weighted Cross Entropy), weighted cross-entropy
 - **Limitation**: Can only handle ONE target at a time (hence the wrapper)
 
 #### `src/model/multi_target.rs` - MULTI-LSTM WRAPPER
@@ -477,11 +485,12 @@ Live Data Stream → Feature Buffer → Sliding Window → Prediction Pipeline �
 
 #### `src/config/training.rs` - TRAINING CONFIGURATION
 - **TrainingConfig**: Complete pipeline configuration coordinator
-- **TrainingParams**: 9 optimizers (AdamW, SGD, Adam, AdaDelta, AdaGrad, AdaMax, NAdam, RAdam, RMSprop)
+- **TrainingParams**: 11+ optimizers (AdamW, SGD, Adam, AdaDelta, AdaGrad, AdaMax, NAdam, RAdam, RMSprop, Prodigy, FracProdigy, FracAdam, FracNAdam)
 - **DataConfig**: Outlier handling, feature processing configuration
-- **OptimizationConfig**: Hyperparameter optimization settings
-- **DeviceConfig**: CPU/GPU device selection
+- **OptimizationConfig**: Hyperparameter optimization settings (removed auto-optimizer)
+- **DeviceConfig**: CPU/GPU/Metal device selection with propagation
 - **EpochConfig**: Auto early stopping or fixed epochs
+- **CalibrationConfig**: Ensemble calibration settings (temperature scaling, NLL optimization, Bayesian tuning)
 
 #### `src/data/preprocessor.rs` - DATA PROCESSING
 - **process_features_only()**: Feature engineering without global normalization
