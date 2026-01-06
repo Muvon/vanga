@@ -142,26 +142,44 @@ impl AdaptiveLabelSmoothing {
 
         let mut smoothed = targets.clone();
 
+        // OPTIMIZATION: Pre-calculate epsilon / 5 for all classes
+        const INV_5: f64 = 0.2; // 1.0 / 5.0
+        let eps_div_5: [f64; 5] = [
+            self.epsilons[0] * INV_5,
+            self.epsilons[1] * INV_5,
+            self.epsilons[2] * INV_5,
+            self.epsilons[3] * INV_5,
+            self.epsilons[4] * INV_5,
+        ];
+
         for (i, mut target_row) in smoothed.axis_iter_mut(Axis(0)).enumerate() {
-            // Find true class
+            // OPTIMIZATION: Use fold for efficient argmax
             let true_class = targets
                 .row(i)
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx)
-                .unwrap();
+                .fold((0, 0.0), |(max_idx, max_val), (idx, &val)| {
+                    if val > max_val {
+                        (idx, val)
+                    } else {
+                        (max_idx, max_val)
+                    }
+                })
+                .0;
 
             let epsilon = self.epsilons[true_class];
 
             if epsilon > 0.0 {
-                // Apply smoothing: (1 - epsilon) * one_hot + epsilon / 5
+                // OPTIMIZATION: Use pre-calculated epsilon / 5
+                let eps_div_5_val = eps_div_5[true_class];
+                let one_minus_eps = 1.0 - epsilon;
+
                 for j in 0..5 {
-                    if j == true_class {
-                        target_row[j] = (1.0 - epsilon) + epsilon / 5.0;
+                    target_row[j] = if j == true_class {
+                        one_minus_eps + eps_div_5_val
                     } else {
-                        target_row[j] = epsilon / 5.0;
-                    }
+                        eps_div_5_val
+                    };
                 }
             }
         }

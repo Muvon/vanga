@@ -94,15 +94,21 @@ impl AdaptiveMixup {
             return Ok((sequences.clone(), targets.clone()));
         }
 
-        // Check if any samples should be mixed based on their class
+        // OPTIMIZATION: Check if any samples should be mixed based on their class
         let mut should_mix = vec![false; batch_size];
         for (i, target_row) in targets.axis_iter(Axis(0)).enumerate() {
+            // OPTIMIZATION: Use fold for efficient argmax
             let true_class = target_row
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx)
-                .unwrap();
+                .fold((0, 0.0), |(max_idx, max_val), (idx, &val)| {
+                    if val > max_val {
+                        (idx, val)
+                    } else {
+                        (max_idx, max_val)
+                    }
+                })
+                .0;
 
             should_mix[i] = self.enabled_for_classes[true_class];
         }
@@ -119,6 +125,10 @@ impl AdaptiveMixup {
         let mut shuffled_indices: Vec<usize> = (0..batch_size).collect();
         self.shuffle_indices(&mut shuffled_indices, rng_state);
 
+        // OPTIMIZATION: Get shape dimensions once
+        let seq_len = sequences.shape()[1];
+        let feat_len = sequences.shape()[2];
+
         // Apply mixup to samples that should be mixed
         for i in 0..batch_size {
             if !should_mix[i] {
@@ -132,20 +142,21 @@ impl AdaptiveMixup {
 
             // Sample lambda from Beta(alpha, alpha)
             let lambda = self.sample_beta(self.alpha, self.alpha, rng_state);
+            let one_minus_lambda = 1.0 - lambda;
 
-            // Mix sequences: lambda * seq_i + (1 - lambda) * seq_j
-            for seq_idx in 0..sequences.shape()[1] {
-                for feat_idx in 0..sequences.shape()[2] {
+            // OPTIMIZATION: Mix sequences in single pass with pre-calculated complement
+            for seq_idx in 0..seq_len {
+                for feat_idx in 0..feat_len {
                     mixed_sequences[[i, seq_idx, feat_idx]] = lambda
                         * sequences[[i, seq_idx, feat_idx]]
-                        + (1.0 - lambda) * sequences[[j, seq_idx, feat_idx]];
+                        + one_minus_lambda * sequences[[j, seq_idx, feat_idx]];
                 }
             }
 
-            // Mix targets: lambda * target_i + (1 - lambda) * target_j
+            // OPTIMIZATION: Mix targets in single pass
             for class_idx in 0..5 {
                 mixed_targets[[i, class_idx]] =
-                    lambda * targets[[i, class_idx]] + (1.0 - lambda) * targets[[j, class_idx]];
+                    lambda * targets[[i, class_idx]] + one_minus_lambda * targets[[j, class_idx]];
             }
         }
 

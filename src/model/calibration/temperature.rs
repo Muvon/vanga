@@ -197,22 +197,39 @@ impl AdaptiveTemperatureScaling {
         let num_samples = logits.nrows();
         let mut predictions = Array2::zeros((num_samples, 5));
 
-        for (i, logit_row) in logits.axis_iter(Axis(0)).enumerate() {
-            // Apply per-class temperature scaling
-            let scaled_logits: Vec<f64> = logit_row
-                .iter()
-                .enumerate()
-                .map(|(j, &x)| x / temperatures[j])
-                .collect();
+        // OPTIMIZATION: Pre-calculate inverse temperatures to avoid repeated division
+        let inv_temps: [f64; 5] = [
+            1.0 / temperatures[0],
+            1.0 / temperatures[1],
+            1.0 / temperatures[2],
+            1.0 / temperatures[3],
+            1.0 / temperatures[4],
+        ];
 
-            // Softmax with numerical stability
+        for (i, logit_row) in logits.axis_iter(Axis(0)).enumerate() {
+            // OPTIMIZATION: Apply per-class temperature scaling with pre-calculated inverses
+            let mut scaled_logits = [0.0; 5];
+            for j in 0..5 {
+                scaled_logits[j] = logit_row[j] * inv_temps[j];
+            }
+
+            // OPTIMIZATION: Find max in single pass
             let max_logit = scaled_logits
                 .iter()
                 .fold(f64::NEG_INFINITY, |max, &val| max.max(val));
-            let exp_sum: f64 = scaled_logits.iter().map(|&x| (x - max_logit).exp()).sum();
 
+            // OPTIMIZATION: Calculate exp and sum in single pass
+            let mut exp_values = [0.0; 5];
+            let mut exp_sum = 0.0;
             for j in 0..5 {
-                predictions[[i, j]] = ((scaled_logits[j] - max_logit).exp()) / exp_sum;
+                exp_values[j] = (scaled_logits[j] - max_logit).exp();
+                exp_sum += exp_values[j];
+            }
+
+            // OPTIMIZATION: Use pre-calculated inverse for division
+            let inv_exp_sum = 1.0 / exp_sum;
+            for j in 0..5 {
+                predictions[[i, j]] = exp_values[j] * inv_exp_sum;
             }
         }
 

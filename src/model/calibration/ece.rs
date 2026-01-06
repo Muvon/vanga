@@ -47,42 +47,59 @@ pub fn calculate_ece(predictions: &Array2<f64>, targets: &Array2<f64>) -> Result
     // Initialize bins
     let mut bins: Vec<(f64, f64, usize)> = vec![(0.0, 0.0, 0); NUM_BINS];
 
+    // OPTIMIZATION: Pre-calculate NUM_BINS as f64 to avoid repeated casting
+    const NUM_BINS_F64: f64 = NUM_BINS as f64;
+
     // Assign samples to bins
     for (pred_row, target_row) in predictions
         .axis_iter(Axis(0))
         .zip(targets.axis_iter(Axis(0)))
     {
-        // Get predicted class and confidence
-        let (pred_class, max_conf) = pred_row
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap();
+        // OPTIMIZATION: Use fold for efficient argmax (faster than max_by)
+        let (pred_class, max_conf) =
+            pred_row
+                .iter()
+                .enumerate()
+                .fold((0, 0.0), |(max_idx, max_val), (idx, &val)| {
+                    if val > max_val {
+                        (idx, val)
+                    } else {
+                        (max_idx, max_val)
+                    }
+                });
 
-        // Get true class
+        // OPTIMIZATION: Use fold for true class argmax
         let true_class = target_row
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(idx, _)| idx)
-            .unwrap();
+            .fold((0, 0.0), |(max_idx, max_val), (idx, &val)| {
+                if val > max_val {
+                    (idx, val)
+                } else {
+                    (max_idx, max_val)
+                }
+            })
+            .0;
 
-        // Determine bin index
-        let bin_idx = ((max_conf * NUM_BINS as f64) as usize).min(NUM_BINS - 1);
+        // OPTIMIZATION: Use pre-calculated constant and avoid min() with direct clamp
+        let bin_idx = ((max_conf * NUM_BINS_F64) as usize).min(NUM_BINS - 1);
 
-        // Update bin statistics
-        bins[bin_idx].0 += max_conf; // Sum confidence
-        bins[bin_idx].1 += if pred_class == true_class { 1.0 } else { 0.0 }; // Sum accuracy
-        bins[bin_idx].2 += 1; // Count
+        // Update bin statistics in single pass
+        bins[bin_idx].0 += max_conf;
+        bins[bin_idx].1 += (pred_class == true_class) as u8 as f64;
+        bins[bin_idx].2 += 1;
     }
 
-    // Calculate ECE
+    // OPTIMIZATION: Calculate ECE with pre-calculated inverse
+    let inv_num_samples = 1.0 / num_samples as f64;
     let mut ece = 0.0;
+
     for (conf_sum, acc_sum, count) in bins {
         if count > 0 {
-            let avg_conf = conf_sum / count as f64;
-            let avg_acc = acc_sum / count as f64;
-            let weight = count as f64 / num_samples as f64;
+            let inv_count = 1.0 / count as f64;
+            let avg_conf = conf_sum * inv_count;
+            let avg_acc = acc_sum * inv_count;
+            let weight = count as f64 * inv_num_samples;
             ece += weight * (avg_conf - avg_acc).abs();
         }
     }
@@ -110,6 +127,9 @@ pub fn calculate_per_class_ece(
 
     let mut per_class_ece = [0.0; 5];
 
+    // OPTIMIZATION: Pre-calculate NUM_BINS as f64
+    const NUM_BINS_F64: f64 = NUM_BINS as f64;
+
     for class_idx in 0..5 {
         // Initialize bins for this class
         let mut bins: Vec<(f64, f64, usize)> = vec![(0.0, 0.0, 0); NUM_BINS];
@@ -122,13 +142,13 @@ pub fn calculate_per_class_ece(
             let confidence = pred_row[class_idx];
             let is_true_class = target_row[class_idx] > 0.5;
 
-            // Determine bin index
-            let bin_idx = ((confidence * NUM_BINS as f64) as usize).min(NUM_BINS - 1);
+            // OPTIMIZATION: Use pre-calculated constant
+            let bin_idx = ((confidence * NUM_BINS_F64) as usize).min(NUM_BINS - 1);
 
             // Update bin statistics
-            bins[bin_idx].0 += confidence; // Sum confidence
-            bins[bin_idx].1 += if is_true_class { 1.0 } else { 0.0 }; // Sum accuracy
-            bins[bin_idx].2 += 1; // Count
+            bins[bin_idx].0 += confidence;
+            bins[bin_idx].1 += is_true_class as u8 as f64;
+            bins[bin_idx].2 += 1;
         }
 
         // Calculate ECE for this class
@@ -136,11 +156,13 @@ pub fn calculate_per_class_ece(
         let total_count: usize = bins.iter().map(|(_, _, count)| count).sum();
 
         if total_count > 0 {
+            let inv_total = 1.0 / total_count as f64;
             for (conf_sum, acc_sum, count) in bins {
                 if count > 0 {
-                    let avg_conf = conf_sum / count as f64;
-                    let avg_acc = acc_sum / count as f64;
-                    let weight = count as f64 / total_count as f64;
+                    let inv_count = 1.0 / count as f64;
+                    let avg_conf = conf_sum * inv_count;
+                    let avg_acc = acc_sum * inv_count;
+                    let weight = count as f64 * inv_total;
                     class_ece += weight * (avg_conf - avg_acc).abs();
                 }
             }
