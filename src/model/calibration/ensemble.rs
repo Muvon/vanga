@@ -57,21 +57,24 @@ impl EnsembleCalibrator {
     /// 2. Optimize temperatures via gradient descent
     /// 3. Calculate adaptive label smoothing factors
     /// 4. Tune mixup alpha from ECE
+    ///
+    /// **CRITICAL**: Accepts PROBABILITIES (after softmax), not logits!
+    /// Converts probabilities to logits internally for temperature optimization.
     pub fn calibrate_from_validation(
         &mut self,
-        logits: &Array2<f64>,
+        probabilities: &Array2<f64>,
         targets: &Array2<f64>,
     ) -> Result<()> {
-        let num_samples = logits.nrows();
+        let num_samples = probabilities.nrows();
         if num_samples == 0 {
             log::warn!("⚠️ No validation samples for calibration");
             return Ok(());
         }
 
-        if logits.ncols() != 5 || targets.ncols() != 5 {
+        if probabilities.ncols() != 5 || targets.ncols() != 5 {
             return Err(VangaError::DataError(format!(
-                "Expected 5 classes, got logits: {}, targets: {}",
-                logits.ncols(),
+                "Expected 5 classes, got probabilities: {}, targets: {}",
+                probabilities.ncols(),
                 targets.ncols()
             )));
         }
@@ -81,12 +84,28 @@ impl EnsembleCalibrator {
             num_samples
         );
 
+        // Convert probabilities back to logits for temperature optimization
+        // logit = log(p / (1 - p)) but for multi-class we use log(p) - log(sum(p))
+        let mut logits = Array2::zeros((num_samples, 5));
+        for i in 0..num_samples {
+            let mut row_logits = [0.0; 5];
+            for j in 0..5 {
+                let p = probabilities[[i, j]].max(1e-10).min(1.0 - 1e-10); // Clamp to avoid log(0)
+                row_logits[j] = p.ln();
+            }
+            // Normalize logits (subtract mean for numerical stability)
+            let mean_logit = row_logits.iter().sum::<f64>() / 5.0;
+            for j in 0..5 {
+                logits[[i, j]] = row_logits[j] - mean_logit;
+            }
+        }
+
         // Step 1: Optimize temperature scaling
         self.temperature_scaling
-            .optimize_temperatures(logits, targets)?;
+            .optimize_temperatures(&logits, targets)?;
 
         // Get calibrated predictions for subsequent steps
-        let calibrated_logits = self.temperature_scaling.apply_to_logits(logits)?;
+        let calibrated_logits = self.temperature_scaling.apply_to_logits(&logits)?;
 
         // Step 2: Calculate label smoothing factors
         self.label_smoothing
