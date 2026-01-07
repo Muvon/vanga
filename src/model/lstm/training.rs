@@ -28,6 +28,75 @@ use candle_optimisers::{
 use ndarray::{s, Array2, Array3};
 use std::collections::hash_map::DefaultHasher;
 
+/// Unified ReduceOnPlateau scheduler with proper state management.
+/// Unlike epoch-based schedulers that only need config, ReduceOnPlateau needs to track
+/// loss history across epochs to make reduction decisions.
+#[derive(Debug, Clone)]
+pub struct ReduceOnPlateauScheduler {
+    /// Current learning rate
+    pub current_lr: f64,
+    /// Best loss observed so far
+    best_loss: f64,
+    /// Number of epochs since last improvement
+    patience_counter: u32,
+    /// Number of epochs to wait before reducing LR
+    patience: u32,
+    /// Factor to multiply LR by when reducing
+    factor: f64,
+    /// Whether this is the first step (no previous loss to compare)
+    is_first_step: bool,
+}
+
+impl ReduceOnPlateauScheduler {
+    /// Create a new scheduler with the given initial LR and config
+    pub fn new(initial_lr: f64, patience: u32, factor: f64) -> Self {
+        Self {
+            current_lr: initial_lr,
+            best_loss: f64::INFINITY,
+            patience_counter: 0,
+            patience,
+            factor,
+            is_first_step: true,
+        }
+    }
+
+    /// Step the scheduler with the current loss.
+    /// Returns the new learning rate (may be reduced if patience exceeded).
+    /// Also returns whether a reduction occurred (for logging).
+    pub fn step(&mut self, loss: f64) -> (f64, bool) {
+        let was_reduced = if self.is_first_step {
+            // First step: just record the loss, no reduction yet
+            self.is_first_step = false;
+            self.best_loss = loss;
+            false
+        } else if loss < self.best_loss {
+            // Improvement: reset patience, keep current LR
+            self.best_loss = loss;
+            self.patience_counter = 0;
+            false
+        } else {
+            // No improvement: increment patience
+            self.patience_counter += 1;
+
+            if self.patience_counter >= self.patience {
+                // Patience exceeded: reduce LR
+                self.current_lr *= self.factor;
+                self.patience_counter = 0;
+                true
+            } else {
+                false
+            }
+        };
+
+        (self.current_lr, was_reduced)
+    }
+
+    /// Get the current learning rate without stepping
+    pub fn current_lr(&self) -> f64 {
+        self.current_lr
+    }
+}
+
 /// Deterministic shuffle using Fisher-Yates algorithm with linear congruential generator
 /// This is the same robust shuffling algorithm used in validation to ensure consistency
 pub fn shuffle_indices_deterministic(indices: &mut [usize], seed_components: &[u64]) -> u64 {
@@ -799,19 +868,17 @@ impl LSTMModel {
 
         // Extract warmup configuration
         let warmup_epochs = config.training.warmup_epochs;
-        let mut current_lr = target_lr;
 
-        // Initialize adaptive learning rate variables from learning_schedule
-        let mut best_loss = f64::INFINITY;
-        let mut patience_counter = 0;
-        let (adaptive_patience, adaptive_factor) = match &config.training.learning_schedule {
-            Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
-                patience,
-                factor,
-                ..
-            }) => (*patience, *factor),
-            _ => (10, 0.5), // Default values for non-adaptive modes
-        };
+        // Initialize ReduceOnPlateau scheduler if configured (unified with other schedulers)
+        let mut reduce_on_plateau_scheduler: Option<ReduceOnPlateauScheduler> =
+            match &config.training.learning_schedule {
+                Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
+                    patience,
+                    factor,
+                    ..
+                }) => Some(ReduceOnPlateauScheduler::new(target_lr, *patience, *factor)),
+                _ => None,
+            };
 
         // Initialize early stopping variables (only used with validation)
         let mut best_val_loss = f64::INFINITY;
@@ -850,8 +917,14 @@ impl LSTMModel {
         log::info!("  - Epochs: {}", self.training_config.epochs);
         log::info!("  - Batch size: {}", batch_size);
         log::info!("  - Warmup epochs: {}", warmup_epochs);
-        log::info!("  - Adaptive patience: {}", adaptive_patience);
-        log::info!("  - Adaptive factor: {:.3}", adaptive_factor);
+        // Log ReduceOnPlateau config if configured
+        if let Some(ref scheduler) = reduce_on_plateau_scheduler {
+            log::info!(
+                "  - ReduceOnPlateau: patience={}, factor={:.3}",
+                scheduler.patience,
+                scheduler.factor
+            );
+        }
         log::info!("  - Target learning rate: {:.6}", target_lr);
 
         // 🔍 COMPREHENSIVE MODEL DIAGNOSTICS - Log model capacity and configuration
@@ -949,6 +1022,9 @@ impl LSTMModel {
             let mut epoch_grad_norm = 0.0; // Track gradient norm for epoch logging
             let mut batch_count = 0;
 
+            // Track previous epoch's loss for ReduceOnPlateau scheduler (None for first epoch)
+            let mut previous_epoch_loss: Option<f64> = None;
+
             // CRITICAL FIX: Shuffle training data indices each epoch to prevent overfitting to batch order
             let mut sample_indices: Vec<usize> = (0..total_train_samples).collect();
 
@@ -1003,10 +1079,9 @@ impl LSTMModel {
                 // Prodigy/FracProdigy manage their own learning rates automatically
                 if !is_lr_free_optimizer {
                     optimizer.set_learning_rate(warmup_lr);
-                    current_lr = warmup_lr;
                 } else {
                     // For Prodigy/FracProdigy, just track the effective LR
-                    current_lr = optimizer.learning_rate();
+                    let _ = optimizer.learning_rate();
                 }
 
                 if epoch == 0 || epoch == (warmup_epochs as usize) - 1 {
@@ -1037,7 +1112,7 @@ impl LSTMModel {
                     // CRITICAL: Skip schedule for learning-rate-free optimizers
                     if is_lr_free_optimizer {
                         // Prodigy/FracProdigy ignore external schedules - they manage LR automatically
-                        current_lr = optimizer.learning_rate();
+                        let _ = optimizer.learning_rate();
 
                         if epoch == warmup_epochs as usize {
                             log::warn!(
@@ -1062,23 +1137,43 @@ impl LSTMModel {
                             );
                         }
                     } else {
-                        let epoch_after_warmup = epoch - warmup_epochs as usize;
-                        let total_epochs = match &config.training.epochs {
-                            crate::config::training::EpochConfig::Fixed(n) => *n as usize,
-                            crate::config::training::EpochConfig::Auto { max_epochs } => {
-                                *max_epochs as usize
+                        // Handle ReduceOnPlateau using unified scheduler (called at epoch start)
+                        if let Some(ref mut scheduler) = reduce_on_plateau_scheduler {
+                            // Use the previous epoch's loss (passed from epoch end)
+                            // If no previous loss yet (first epoch), just use initial LR
+                            if let Some(previous_loss) = previous_epoch_loss {
+                                let (new_lr, was_reduced) = scheduler.step(previous_loss);
+                                if was_reduced {
+                                    log::info!(
+                                        "🔄 Adaptive learning rate reduced to: {:.6} (patience exceeded)",
+                                        new_lr
+                                    );
+                                }
+                                optimizer.set_learning_rate(new_lr);
+                            } else {
+                                // First epoch: just set initial LR
+                                let initial_lr = scheduler.current_lr();
+                                optimizer.set_learning_rate(initial_lr);
                             }
-                        };
+                        } else {
+                            // Non-ReduceOnPlateau schedules: use epoch-based calculation
+                            let epoch_after_warmup = epoch - warmup_epochs as usize;
+                            let total_epochs = match &config.training.epochs {
+                                crate::config::training::EpochConfig::Fixed(n) => *n as usize,
+                                crate::config::training::EpochConfig::Auto { max_epochs } => {
+                                    *max_epochs as usize
+                                }
+                            };
 
-                        let scheduled_lr = Self::calculate_scheduled_learning_rate(
-                            schedule_config,
-                            epoch_after_warmup,
-                            target_lr,
-                            total_epochs.saturating_sub(warmup_epochs as usize),
-                        );
+                            let scheduled_lr = Self::calculate_scheduled_learning_rate(
+                                schedule_config,
+                                epoch_after_warmup,
+                                target_lr,
+                                total_epochs.saturating_sub(warmup_epochs as usize),
+                            );
 
-                        optimizer.set_learning_rate(scheduled_lr);
-                        current_lr = scheduled_lr;
+                            optimizer.set_learning_rate(scheduled_lr);
+                        }
                     }
                 }
             }
@@ -1945,40 +2040,13 @@ impl LSTMModel {
                 }
             }
 
-            // Adaptive learning rate adjustment after warmup
-            // NOTE: This runs AFTER schedule updates, so adaptive LR can override schedule if needed
-            // CRITICAL: Skip for learning-rate-free optimizers (Prodigy/FracProdigy)
-            if epoch >= warmup_epochs as usize && !is_lr_free_optimizer {
-                if let Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
-                    ..
-                }) = &config.training.learning_schedule
-                {
-                    // Use validation loss if available, otherwise use training loss
-                    let loss_for_adaptation = avg_val_loss
-                        .map(|v| v as f64)
-                        .unwrap_or(avg_train_loss as f64);
-
-                    // Check if we should reduce learning rate
-                    if loss_for_adaptation < best_loss {
-                        best_loss = loss_for_adaptation;
-                        patience_counter = 0;
-                    } else {
-                        patience_counter += 1;
-
-                        if patience_counter >= adaptive_patience {
-                            // Reduce learning rate
-                            current_lr *= adaptive_factor;
-                            optimizer.set_learning_rate(current_lr);
-                            patience_counter = 0;
-
-                            log::info!(
-                                "🔄 Adaptive learning rate reduced to: {:.6} (patience exceeded)",
-                                current_lr
-                            );
-                        }
-                    }
-                }
-            }
+            // Record this epoch's loss for ReduceOnPlateau scheduler (used at next epoch start)
+            // Use validation loss if available, otherwise use training loss
+            let loss_for_scheduler = avg_val_loss
+                .map(|v| v as f64)
+                .unwrap_or(avg_train_loss as f64);
+            // Store for next epoch's ReduceOnPlateau scheduler
+            let _ = previous_epoch_loss.insert(loss_for_scheduler);
 
             // Early stopping check with min_delta threshold (only with validation)
             if let Some(val_loss) = avg_val_loss {
@@ -2146,17 +2214,13 @@ impl LSTMModel {
                     );
                 }
 
-                // Additional adaptive learning rate status
-                if matches!(
-                    &config.training.learning_schedule,
-                    Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau { .. })
-                ) && epoch >= warmup_epochs as usize
-                {
+                // Additional adaptive learning rate status for ReduceOnPlateau
+                if let Some(ref scheduler) = reduce_on_plateau_scheduler {
                     log::debug!(
-                        "📊 Adaptive LR status - Best loss: {:.6}, Patience: {}/{}",
-                        best_loss,
-                        patience_counter,
-                        adaptive_patience
+                        "📊 ReduceOnPlateau status - Best loss: {:.6}, Patience: {}/{}",
+                        scheduler.best_loss,
+                        scheduler.patience_counter,
+                        scheduler.patience
                     );
                 }
             }
