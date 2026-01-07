@@ -1444,7 +1444,8 @@ impl DataPreprocessor {
                             }
                         };
 
-                        let normalized_series = Series::new(column_name.clone().into(), normalized_values);
+                        let normalized_series =
+                            Series::new(column_name.clone().into(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
                         stats_index += 1;
 
@@ -1543,7 +1544,8 @@ impl DataPreprocessor {
                             // Keep original values instead of skipping column to maintain feature count consistency
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
-                            let normalized_series = Series::new(column_name.clone().into(), original_values);
+                            let normalized_series =
+                                Series::new(column_name.clone().into(), original_values);
                             normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
@@ -1554,7 +1556,8 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - median) / iqr))
                             .collect();
 
-                        let normalized_series = Series::new(column_name.clone().into(), normalized_values);
+                        let normalized_series =
+                            Series::new(column_name.clone().into(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!("Column '{}': median={:.4}, Q1={:.4}, Q3={:.4}, IQR={:.4} - normalized for time-series stability",
@@ -1611,7 +1614,8 @@ impl DataPreprocessor {
                             // Keep original values instead of skipping column to maintain feature count consistency
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
-                            let normalized_series = Series::new(column_name.clone().into(), original_values);
+                            let normalized_series =
+                                Series::new(column_name.clone().into(), original_values);
                             normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
@@ -1622,7 +1626,8 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - min_val) / range))
                             .collect();
 
-                        let normalized_series = Series::new(column_name.clone().into(), normalized_values);
+                        let normalized_series =
+                            Series::new(column_name.clone().into(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
@@ -1682,7 +1687,8 @@ impl DataPreprocessor {
                             // Keep original values instead of skipping column to maintain feature count consistency
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
-                            let normalized_series = Series::new(column_name.clone().into(), original_values);
+                            let normalized_series =
+                                Series::new(column_name.clone().into(), original_values);
                             normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
@@ -1693,7 +1699,8 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - mean) / std_dev))
                             .collect();
 
-                        let normalized_series = Series::new(column_name.clone().into(), normalized_values);
+                        let normalized_series =
+                            Series::new(column_name.clone().into(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
@@ -1765,7 +1772,8 @@ impl DataPreprocessor {
                             })
                             .collect();
 
-                        let normalized_series = Series::new(column_name.clone().into(), normalized_values);
+                        let normalized_series =
+                            Series::new(column_name.clone().into(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
@@ -2221,7 +2229,11 @@ mod tests {
 
         // Create test series: [1.0, 2.0, OUTLIER, 4.0, 5.0]
         let values = vec![Some(1.0), Some(2.0), Some(100.0), Some(4.0), Some(5.0)];
-        let series = Series::new("test".into(), values).into_column().f64().unwrap().clone();
+        let series = Series::new("test".into(), values)
+            .into_column()
+            .f64()
+            .unwrap()
+            .clone();
 
         // Test interpolation at index 2 (outlier value 100.0)
         let interpolated = preprocessor.interpolate_outlier_value(&series, 2, 100.0, 3.0);
@@ -2249,8 +2261,15 @@ mod tests {
             9.0,
             10.0, // 10 rows
         ];
-        let df = DataFrame::new(vec![Series::new("price".into(), data),
-        Series::new("volume".into(), vec![100.0; 10]),].into_iter().map(|s| s.into_column()).collect())
+        let df = DataFrame::new(
+            vec![
+                Series::new("price".into(), data),
+                Series::new("volume".into(), vec![100.0; 10]),
+            ]
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect(),
+        )
         .unwrap();
 
         // Extract 5 most recent clean rows
@@ -2270,7 +2289,13 @@ mod tests {
         let preprocessor = DataPreprocessor::new();
 
         // Create test data with only 3 rows
-        let df = DataFrame::new(vec![Series::new("price".into(), vec![1.0, 2.0, 3.0])].into_iter().map(|s| s.into_column()).collect()).unwrap();
+        let df = DataFrame::new(
+            vec![Series::new("price".into(), vec![1.0, 2.0, 3.0])]
+                .into_iter()
+                .map(|s| s.into_column())
+                .collect(),
+        )
+        .unwrap();
 
         // Try to extract 5 rows - should fail
         let result = preprocessor.extract_recent_clean_data(df, 5);

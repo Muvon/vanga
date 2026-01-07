@@ -51,10 +51,11 @@ impl DataLoader {
 
                 // CRITICAL FIX for Polars 0.51: Check first row for null values before casting
                 if df.height() > 0 {
-                    let has_null_first_row = df.get_columns().iter().any(|col| {
-                        matches!(col.get(0), Ok(polars::prelude::AnyValue::Null))
-                    });
-                    
+                    let has_null_first_row = df
+                        .get_columns()
+                        .iter()
+                        .any(|col| matches!(col.get(0), Ok(polars::prelude::AnyValue::Null)));
+
                     if has_null_first_row {
                         df = df.slice(1, df.height() - 1);
                     }
@@ -151,10 +152,11 @@ impl DataLoader {
 
         // CRITICAL FIX for Polars 0.51: Check first row for null values before casting
         if df.height() > 0 {
-            let has_null_first_row = df.get_columns().iter().any(|col| {
-                matches!(col.get(0), Ok(polars::prelude::AnyValue::Null))
-            });
-            
+            let has_null_first_row = df
+                .get_columns()
+                .iter()
+                .any(|col| matches!(col.get(0), Ok(polars::prelude::AnyValue::Null)));
+
             if has_null_first_row {
                 log::debug!("Dropping first row with null values (header remnant)");
                 df = df.slice(1, df.height() - 1);
@@ -207,11 +209,12 @@ impl DataLoader {
                         .lazy()
                         .filter(col("timestamp").is_not_null())
                         .collect()
-                        .map_err(|e| VangaError::DataError(format!("Failed to filter nulls: {}", e)))?;
+                        .map_err(|e| {
+                            VangaError::DataError(format!("Failed to filter nulls: {}", e))
+                        })?;
                 }
             }
         }
-
 
         // Debug: Check for timestamp uniqueness after loading and sorting
         if let Ok(timestamp_col) = df.column("timestamp") {

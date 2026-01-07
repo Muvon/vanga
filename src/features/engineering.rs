@@ -73,7 +73,8 @@ pub async fn apply_feature_engineering(
                 for &lag_period in &config.lag_features.lag_periods {
                     let lag_feature = create_lag_feature(&column_data, lag_period as usize);
                     let lag_column_name = format!("{}_lag_{}", feature_name, lag_period);
-                    let series = Series::new(lag_column_name.clone().into(), lag_feature).into_column();
+                    let series =
+                        Series::new(lag_column_name.clone().into(), lag_feature).into_column();
 
                     df = df
                         .with_column(series)
@@ -101,7 +102,13 @@ pub async fn apply_feature_engineering(
             let price_rolling_std = calculate_rolling_std(&close_prices, window_size as usize);
 
             df = df
-                .with_column(Series::new(format!("price_rolling_mean_{}", window_size).into(), price_rolling_mean).into_column())
+                .with_column(
+                    Series::new(
+                        format!("price_rolling_mean_{}", window_size).into(),
+                        price_rolling_mean,
+                    )
+                    .into_column(),
+                )
                 .map_err(|e| {
                     crate::utils::error::VangaError::DataError(format!(
                         "Failed to add price_rolling_mean_{} column: {}",
@@ -111,7 +118,13 @@ pub async fn apply_feature_engineering(
                 .clone();
 
             df = df
-                .with_column(Series::new(format!("price_rolling_std_{}", window_size).into(), price_rolling_std).into_column())
+                .with_column(
+                    Series::new(
+                        format!("price_rolling_std_{}", window_size).into(),
+                        price_rolling_std,
+                    )
+                    .into_column(),
+                )
                 .map_err(|e| {
                     crate::utils::error::VangaError::DataError(format!(
                         "Failed to add price_rolling_std_{} column: {}",

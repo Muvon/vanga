@@ -18,12 +18,19 @@ mod tests {
         let closes: Vec<f64> = ohlcv_data.iter().map(|(_, _, _, c, _)| *c).collect();
         let volumes: Vec<f64> = ohlcv_data.iter().map(|(_, _, _, _, v)| *v).collect();
 
-        DataFrame::new(vec![Series::new("timestamp".into(), timestamps),
-        Series::new("open".into(), opens),
-        Series::new("high".into(), highs),
-        Series::new("low".into(), lows),
-        Series::new("close".into(), closes),
-        Series::new("volume".into(), volumes),].into_iter().map(|s| s.into_column()).collect())
+        DataFrame::new(
+            vec![
+                Series::new("timestamp".into(), timestamps),
+                Series::new("open".into(), opens),
+                Series::new("high".into(), highs),
+                Series::new("low".into(), lows),
+                Series::new("close".into(), closes),
+                Series::new("volume".into(), volumes),
+            ]
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect(),
+        )
         .unwrap()
     }
 

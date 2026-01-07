@@ -876,14 +876,18 @@ fn add_crypto_specific_indicators(
             .clone();
 
         df = df
-            .with_column(Series::new("volatility_clustering".into(), clustering_values).into_column())
+            .with_column(
+                Series::new("volatility_clustering".into(), clustering_values).into_column(),
+            )
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add volatility_clustering: {}", e))
             })?
             .clone();
 
         df = df
-            .with_column(Series::new("mean_reversion_strength".into(), reversion_values).into_column())
+            .with_column(
+                Series::new("mean_reversion_strength".into(), reversion_values).into_column(),
+            )
             .map_err(|e| {
                 VangaError::FeatureError(format!("Failed to add mean_reversion_strength: {}", e))
             })?
