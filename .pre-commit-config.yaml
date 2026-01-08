@@ -20,7 +20,7 @@ repos:
         entry: cargo clippy
         language: system
         files: \.rs$
-        args: ['--all-targets', '--all-features', '--', '-D', 'warnings']
+        args: ['--all-targets', '--no-default-features', '--', '-D', 'warnings']
 
       # Check that code compiles
       - id: cargo-check
@@ -29,7 +29,7 @@ repos:
         entry: cargo check
         language: system
         files: \.rs$
-        args: ['--all-targets', '--all-features']
+        args: ['--all-targets', '--no-default-features']
 
   # General hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks

@@ -13,7 +13,13 @@ mod tests {
         let low = Series::new("low".into(), &[41800.0, 41900.0]).into_column();
         let close = Series::new("close".into(), &[42300.0, 42400.0]).into_column();
         let volume = Series::new("volume".into(), &[1000.0, 1200.0]).into_column();
-        DataFrame::new(vec![ts, open, high, low, close, volume].into_iter().map(|s| s.into_column()).collect()).unwrap()
+        DataFrame::new(
+            vec![ts, open, high, low, close, volume]
+                .into_iter()
+                .map(|s| s.into_column())
+                .collect(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]

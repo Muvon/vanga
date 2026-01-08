@@ -16,7 +16,7 @@ fn test_ensemble_calibrator_default() {
     let calibrator = EnsembleCalibrator::default();
 
     assert!(!calibrator.is_calibrated);
-    assert_eq!(calibrator.temperature_scaling.temperatures, [1.0; 5]);
+    assert_eq!(calibrator.temperature_scaling.temperatures(), [1.0; 5]);
     assert_eq!(calibrator.label_smoothing.epsilons, [0.0; 5]);
     assert!(!calibrator.mixup.is_calibrated);
 }
@@ -219,7 +219,7 @@ fn test_reset_calibration() {
     assert!(calibrator.ece_history.is_empty());
     assert!(calibrator.per_class_ece_history.is_empty());
     assert!(calibrator.reliability_diagram.is_none());
-    assert_eq!(calibrator.temperature_scaling.temperatures, [1.0; 5]);
+    assert_eq!(calibrator.temperature_scaling.temperatures(), [1.0; 5]);
 }
 
 #[test]

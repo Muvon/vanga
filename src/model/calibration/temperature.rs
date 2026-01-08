@@ -1,10 +1,9 @@
-//! Adaptive per-class temperature scaling
+//! Adaptive temperature scaling
 //!
-//! Optimizes temperature per class to minimize NLL (Negative Log-Likelihood).
-//! Temperature scaling: softmax(logits / T) where T is learned per class.
+//! Optimizes single shared temperature to minimize NLL (Negative Log-Likelihood).
+//! Temperature scaling: softmax(logits / T) where T is learned from validation data.
 //!
-//! **CRITICAL**: Based on Guo et al. 2017 "On Calibration of Modern Neural Networks",
-//! temperature scaling should minimize NLL on validation set, NOT ECE.
+//! Uses single shared temperature for all classes (standard calibration approach).
 
 use super::ece::{calculate_ece, calculate_per_class_ece};
 use crate::utils::error::{Result, VangaError};
@@ -12,23 +11,23 @@ use candle_core::{Device, Tensor};
 use ndarray::{Array2, Axis};
 use serde::{Deserialize, Serialize};
 
-/// Adaptive temperature scaling with per-class optimization
+/// Adaptive temperature scaling with single shared temperature
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveTemperatureScaling {
-    /// Per-class temperatures (learned from validation data)
-    pub temperatures: [f64; 5],
+    /// Single shared temperature for all classes (learned from validation data)
+    pub temperature: f64,
     /// ECE history for convergence tracking
     pub ece_history: Vec<f64>,
     /// Per-class ECE values
     pub per_class_ece: [f64; 5],
-    /// Whether temperatures have been optimized
+    /// Whether temperature has been optimized
     pub is_optimized: bool,
 }
 
 impl Default for AdaptiveTemperatureScaling {
     fn default() -> Self {
         Self {
-            temperatures: [1.0; 5], // Start with no scaling
+            temperature: 1.0, // Start with no scaling
             ece_history: Vec::new(),
             per_class_ece: [0.0; 5],
             is_optimized: false,
@@ -41,11 +40,15 @@ impl AdaptiveTemperatureScaling {
         Self::default()
     }
 
-    /// Optimize temperatures to minimize NLL (Negative Log-Likelihood)
+    /// Get temperatures as array for compatibility (returns same T for all classes)
+    pub fn temperatures(&self) -> [f64; 5] {
+        [self.temperature; 5]
+    }
+
+    /// Optimize single shared temperature to minimize NLL (Negative Log-Likelihood)
     ///
-    /// **CRITICAL**: Temperature scaling should minimize NLL, NOT ECE.
-    /// Research papers (Guo et al. 2017) show NLL minimization is the correct approach.
-    /// Uses binary search per class to find optimal temperature that minimizes NLL.
+    /// Uses single shared temperature for all classes (standard calibration approach).
+    /// Temperature scaling should minimize NLL on validation set, NOT ECE.
     pub fn optimize_temperatures(
         &mut self,
         logits: &Array2<f64>,
@@ -64,69 +67,74 @@ impl AdaptiveTemperatureScaling {
             )));
         }
 
-        log::info!("🌡️ Optimizing temperatures (NLL minimization)...");
+        log::info!("🌡️ Optimizing single shared temperature (NLL minimization)...");
 
         // Calculate initial NLL and ECE
-        let predictions_initial = self.apply_temperature_to_logits(logits, &[1.0; 5])?;
+        let predictions_initial = self.apply_temperature_to_logits(logits, 1.0)?;
         let initial_nll = self.calculate_nll(&predictions_initial, targets)?;
+        let initial_ece = calculate_ece(&predictions_initial, targets)?;
 
-        // Optimize temperature for each class independently using binary search on NLL
-        for class_idx in 0..5 {
-            let optimal_temp =
-                self.find_optimal_temperature_binary_search_nll(logits, targets, class_idx)?;
-            self.temperatures[class_idx] = optimal_temp;
-        }
+        log::info!("   Initial: NLL={:.6}, ECE={:.6}", initial_nll, initial_ece);
 
-        // Calculate final NLL and ECE with optimized temperatures
-        let predictions_final = self.apply_temperature_to_logits(logits, &self.temperatures)?;
+        // Find optimal single shared temperature using binary search
+        let optimal_temp = self.find_optimal_temperature_binary_search(logits, targets)?;
+        self.temperature = optimal_temp;
+
+        // Calculate final NLL and ECE with optimized temperature
+        let predictions_final = self.apply_temperature_to_logits(logits, self.temperature)?;
         let final_nll = self.calculate_nll(&predictions_final, targets)?;
         let final_ece = calculate_ece(&predictions_final, targets)?;
-        self.ece_history.push(final_ece);
 
         // Calculate per-class ECE
         self.per_class_ece = calculate_per_class_ece(&predictions_final, targets)?;
-
-        self.is_optimized = true;
 
         // Calculate NLL change (negative = improvement, positive = degradation)
         let nll_change_pct = (final_nll - initial_nll) / initial_nll * 100.0;
 
         if nll_change_pct < 0.0 {
             log::info!(
-                "   NLL: {:.4} → {:.4} ({:.1}% reduction)",
+                "   T={:.4}: NLL {:.4} → {:.4} ({:.1}% reduction), ECE={:.6}",
+                self.temperature,
                 initial_nll,
                 final_nll,
-                -nll_change_pct
+                -nll_change_pct,
+                final_ece
             );
         } else {
             log::info!(
-                "   NLL: {:.4} → {:.4} ({:.1}% increase - no improvement)",
+                "   T={:.4}: NLL {:.4} → {:.4} ({:.1}% increase - no improvement), ECE={:.6}",
+                self.temperature,
                 initial_nll,
                 final_nll,
-                nll_change_pct
+                nll_change_pct,
+                final_ece
             );
         }
+
+        self.ece_history.push(final_ece);
+        self.is_optimized = true;
 
         Ok(())
     }
 
-    /// Find optimal temperature for a class using binary search on NLL
-    fn find_optimal_temperature_binary_search_nll(
+    /// Find optimal single shared temperature using binary search on NLL
+    fn find_optimal_temperature_binary_search(
         &self,
         logits: &Array2<f64>,
         targets: &Array2<f64>,
-        class_idx: usize,
     ) -> Result<f64> {
-        let mut low = 0.1; // Minimum temperature (sharper predictions)
-        let mut high = 5.0; // Maximum temperature (softer predictions)
-        let tolerance = 0.01;
-        let max_iterations = 50;
+        const TEMP_MIN: f64 = 0.5;
+        const TEMP_MAX: f64 = 5.0;
+        const PRECISION: f64 = 0.01;
+        const MAX_ITERATIONS: u32 = 50;
 
+        let mut low = TEMP_MIN;
+        let mut high = TEMP_MAX;
         let mut best_temp = 1.0;
-        let mut best_nll = f64::MAX;
+        let mut best_nll = f64::INFINITY;
 
-        for _ in 0..max_iterations {
-            if (high - low) < tolerance {
+        for _ in 0..MAX_ITERATIONS {
+            if high - low < PRECISION {
                 break;
             }
 
@@ -135,10 +143,7 @@ impl AdaptiveTemperatureScaling {
             let temps = [low, mid, high];
 
             for &temp in &temps {
-                let mut test_temps = self.temperatures;
-                test_temps[class_idx] = temp;
-
-                let predictions = self.apply_temperature_to_logits(logits, &test_temps)?;
+                let predictions = self.apply_temperature_to_logits(logits, temp)?;
                 let nll = self.calculate_nll(&predictions, targets)?;
 
                 if nll < best_nll {
@@ -148,26 +153,30 @@ impl AdaptiveTemperatureScaling {
             }
 
             // Narrow search range around best temperature
-            if (best_temp - low).abs() < tolerance {
+            if (best_temp - low).abs() < PRECISION {
                 high = mid;
-            } else if (best_temp - high).abs() < tolerance {
+            } else if (best_temp - high).abs() < PRECISION {
                 low = mid;
             } else {
                 // Best is in middle, narrow both sides
                 let range = (high - low) / 4.0;
-                low = (best_temp - range).max(0.1);
-                high = (best_temp + range).min(5.0);
+                low = (best_temp - range).max(TEMP_MIN);
+                high = (best_temp + range).min(TEMP_MAX);
             }
         }
 
         Ok(best_temp)
     }
 
-    /// Calculate Negative Log-Likelihood (NLL) loss
+    /// Calculate Negative Log-Likelihood (NLL) loss (pub(crate) for testing)
     ///
     /// This is the correct loss function for temperature scaling optimization.
     /// NLL = -Σ log(p_correct) where p_correct is the predicted probability of the true class.
-    fn calculate_nll(&self, predictions: &Array2<f64>, targets: &Array2<f64>) -> Result<f64> {
+    pub(crate) fn calculate_nll(
+        &self,
+        predictions: &Array2<f64>,
+        targets: &Array2<f64>,
+    ) -> Result<f64> {
         let num_samples = predictions.nrows();
         if num_samples == 0 {
             return Ok(0.0);
@@ -199,37 +208,31 @@ impl AdaptiveTemperatureScaling {
         Ok(total_nll / num_samples as f64)
     }
 
-    /// Apply temperature scaling to logits and return probabilities
-    fn apply_temperature_to_logits(
+    /// Apply temperature scaling to logits and return probabilities (pub(crate) for testing)
+    pub(crate) fn apply_temperature_to_logits(
         &self,
         logits: &Array2<f64>,
-        temperatures: &[f64; 5],
+        temperature: f64,
     ) -> Result<Array2<f64>> {
         let num_samples = logits.nrows();
         let mut predictions = Array2::zeros((num_samples, 5));
 
-        // OPTIMIZATION: Pre-calculate inverse temperatures to avoid repeated division
-        let inv_temps: [f64; 5] = [
-            1.0 / temperatures[0],
-            1.0 / temperatures[1],
-            1.0 / temperatures[2],
-            1.0 / temperatures[3],
-            1.0 / temperatures[4],
-        ];
+        // Pre-calculate inverse temperature to avoid repeated division
+        let inv_temp = 1.0 / temperature;
 
         for (i, logit_row) in logits.axis_iter(Axis(0)).enumerate() {
-            // OPTIMIZATION: Apply per-class temperature scaling with pre-calculated inverses
+            // Apply temperature scaling with pre-calculated inverse
             let mut scaled_logits = [0.0; 5];
             for j in 0..5 {
-                scaled_logits[j] = logit_row[j] * inv_temps[j];
+                scaled_logits[j] = logit_row[j] * inv_temp;
             }
 
-            // OPTIMIZATION: Find max in single pass
+            // Find max for numerical stability (softmax trick)
             let max_logit = scaled_logits
                 .iter()
                 .fold(f64::NEG_INFINITY, |max, &val| max.max(val));
 
-            // OPTIMIZATION: Calculate exp and sum in single pass
+            // Calculate exp and sum in single pass
             let mut exp_values = [0.0; 5];
             let mut exp_sum = 0.0;
             for j in 0..5 {
@@ -237,10 +240,9 @@ impl AdaptiveTemperatureScaling {
                 exp_sum += exp_values[j];
             }
 
-            // OPTIMIZATION: Use pre-calculated inverse for division
-            let inv_exp_sum = 1.0 / exp_sum;
+            // Normalize to get probabilities
             for j in 0..5 {
-                predictions[[i, j]] = exp_values[j] * inv_exp_sum;
+                predictions[[i, j]] = exp_values[j] / exp_sum;
             }
         }
 
@@ -254,12 +256,12 @@ impl AdaptiveTemperatureScaling {
             return Ok(logits.clone());
         }
 
-        self.apply_temperature_to_logits(logits, &self.temperatures)
+        self.apply_temperature_to_logits(logits, self.temperature)
     }
 
-    /// Get current temperatures
-    pub fn get_temperatures(&self) -> [f64; 5] {
-        self.temperatures
+    /// Get current temperature
+    pub fn get_temperature(&self) -> f64 {
+        self.temperature
     }
 
     /// Get per-class ECE values
@@ -274,7 +276,7 @@ impl AdaptiveTemperatureScaling {
 
     /// Reset optimization state
     pub fn reset(&mut self) {
-        self.temperatures = [1.0; 5];
+        self.temperature = 1.0;
         self.ece_history.clear();
         self.per_class_ece = [0.0; 5];
         self.is_optimized = false;
@@ -282,7 +284,7 @@ impl AdaptiveTemperatureScaling {
 
     /// Apply temperature scaling to tensor logits (preserves gradients)
     ///
-    /// This applies per-class temperature scaling directly to tensors,
+    /// This applies single shared temperature scaling directly to tensors,
     /// preserving gradient flow for training.
     pub fn apply_to_tensor(&self, logits: &Tensor, device: &Device) -> Result<Tensor> {
         if !self.is_optimized {
@@ -297,9 +299,9 @@ impl AdaptiveTemperatureScaling {
             )));
         }
 
-        // Create temperature tensor [1, 5] for broadcasting
-        let temps_f32: Vec<f32> = self.temperatures.iter().map(|&t| t as f32).collect();
-        let temp_tensor = Tensor::from_vec(temps_f32, (1, 5), device)?;
+        // Create temperature tensor [1, 5] with same temperature for all classes
+        let temp_f32 = self.temperature as f32;
+        let temp_tensor = Tensor::from_vec(vec![temp_f32; 5], (1, 5), device)?;
 
         // Broadcast temperature to match logits shape and ensure contiguous
         let temp_broadcast = temp_tensor.broadcast_as(shape.dims())?.contiguous()?;

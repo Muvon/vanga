@@ -90,7 +90,7 @@ impl EnsembleCalibrator {
         for i in 0..num_samples {
             let mut row_logits = [0.0; 5];
             for j in 0..5 {
-                let p = probabilities[[i, j]].max(1e-10).min(1.0 - 1e-10); // Clamp to avoid log(0)
+                let p = probabilities[[i, j]].clamp(1e-10, 1.0 - 1e-10); // Clamp to avoid log(0)
                 row_logits[j] = p.ln();
             }
             // Normalize logits (subtract mean for numerical stability)
@@ -174,7 +174,7 @@ impl EnsembleCalibrator {
                 .last()
                 .copied()
                 .unwrap_or([0.0; 5]),
-            temperatures: self.temperature_scaling.get_temperatures(),
+            temperatures: self.temperature_scaling.temperatures(),
             label_smoothing_epsilons: self.label_smoothing.get_epsilons(),
             mixup_alpha: self.mixup.get_alpha(),
             mixup_enabled_classes: self.mixup.enabled_for_classes,
@@ -200,15 +200,9 @@ impl EnsembleCalibrator {
         );
 
         // Temperature scaling summary
-        let temps = self.temperature_scaling.get_temperatures();
-        let temp_range = (
-            temps.iter().copied().fold(f64::INFINITY, f64::min),
-            temps.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        );
         log::info!(
-            "   🌡️  Temperatures: [{:.2}..{:.2}]",
-            temp_range.0,
-            temp_range.1
+            "   🌡️  Temperature: {:.4}",
+            self.temperature_scaling.temperature
         );
 
         // Label smoothing summary (only if significant)

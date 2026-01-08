@@ -10,7 +10,13 @@ fn test_detect_timeframe_minutes_1h() {
         1609466400i64, // 2021-01-01 02:00:00
         1609470000i64, // 2021-01-01 03:00:00
     ];
-    let df = DataFrame::new(vec![Series::new("timestamp".into(), timestamps)].into_iter().map(|s| s.into_column()).collect()).unwrap();
+    let df = DataFrame::new(
+        vec![Series::new("timestamp".into(), timestamps)]
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect(),
+    )
+    .unwrap();
 
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 60); // 1 hour = 60 minutes
@@ -25,7 +31,13 @@ fn test_detect_timeframe_minutes_5m() {
         1609459800i64, // 2021-01-01 00:10:00
         1609460100i64, // 2021-01-01 00:15:00
     ];
-    let df = DataFrame::new(vec![Series::new("timestamp".into(), timestamps)].into_iter().map(|s| s.into_column()).collect()).unwrap();
+    let df = DataFrame::new(
+        vec![Series::new("timestamp".into(), timestamps)]
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect(),
+    )
+    .unwrap();
 
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 5); // 5 minutes
@@ -40,7 +52,13 @@ fn test_detect_timeframe_minutes_15m() {
         1609461000i64, // 2021-01-01 00:30:00
         1609461900i64, // 2021-01-01 00:45:00
     ];
-    let df = DataFrame::new(vec![Series::new("timestamp".into(), timestamps)].into_iter().map(|s| s.into_column()).collect()).unwrap();
+    let df = DataFrame::new(
+        vec![Series::new("timestamp".into(), timestamps)]
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect(),
+    )
+    .unwrap();
 
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 15); // 15 minutes
@@ -56,7 +74,13 @@ fn test_detect_timeframe_minutes_6m_microseconds() {
         1609459920000000i64, // 2021-01-01 00:12:00 in microseconds
         1609460280000000i64, // 2021-01-01 00:18:00 in microseconds
     ];
-    let df = DataFrame::new(vec![Series::new("timestamp".into(), timestamps)].into_iter().map(|s| s.into_column()).collect()).unwrap();
+    let df = DataFrame::new(
+        vec![Series::new("timestamp".into(), timestamps)]
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect(),
+    )
+    .unwrap();
 
     let result = detect_timeframe_minutes(&df).unwrap();
     assert_eq!(result, 6); // 6 minutes (360000000 µs diff / 60000000 = 6)

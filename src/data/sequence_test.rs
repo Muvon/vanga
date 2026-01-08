@@ -17,12 +17,19 @@ mod tests {
         let low = Series::new("low".into(), vec![41800.0; n]).into_column();
         let close = Series::new("close".into(), vec![42300.0; n]).into_column();
         let volume = Series::new("volume".into(), vec![1000.0; n]).into_column();
-        DataFrame::new(vec![Series::new("timestamp".into(), ts),
-        open,
-        high,
-        low,
-        close,
-        volume,].into_iter().map(|s| s.into_column()).collect())
+        DataFrame::new(
+            vec![
+                Series::new("timestamp".into(), ts),
+                open,
+                high,
+                low,
+                close,
+                volume,
+            ]
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect(),
+        )
         .unwrap()
     }
 

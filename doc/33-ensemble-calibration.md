@@ -5,9 +5,9 @@
 The Ensemble Calibration System is a comprehensive post-training calibration framework that improves model confidence estimates and prediction reliability through multiple complementary techniques.
 
 ### Key Components
-- **Temperature Scaling**: Bayesian-optimized temperature parameter for logit calibration
+- **Temperature Scaling**: Single shared temperature optimized via NLL minimization
 - **Label Smoothing**: Adaptive smoothing based on per-class overconfidence
-- **Mixup Augmentation**: ECE-based data augmentation during training
+- **Mixup Augmentation**: ECE-based data augmentation during training (uniform application)
 - **ECE Tracking**: Expected Calibration Error monitoring with 15-bin standard
 - **Reliability Diagrams**: Visualization of calibration quality
 
@@ -16,7 +16,7 @@ The Ensemble Calibration System is a comprehensive post-training calibration fra
 - ✅ **Reduced Overconfidence**: Prevents model from being overly confident on uncertain predictions
 - ✅ **Better Generalization**: Regularization through label smoothing and mixup
 - ✅ **Gradient-Preserving**: Tensor-based operations maintain end-to-end differentiability
-- ✅ **Automatic Tuning**: Bayesian optimization finds optimal calibration parameters
+- ✅ **Stable Training**: Single shared temperature prevents class distribution distortion
 
 ## 🏗️ Architecture
 
@@ -29,11 +29,11 @@ Validation Set Predictions
     ↓
 ECE Calculation (15-bin standard)
     ↓
-Temperature Scaling (Bayesian optimization: TuRBO-2, BORE)
+Temperature Scaling (NLL minimization with binary search)
     ↓
 Label Smoothing (per-class adaptive)
     ↓
-Mixup Alpha Tuning (ECE-based)
+Mixup Alpha Tuning (ECE-based, uniform application)
     ↓
 Calibrated Model
 ```
@@ -43,9 +43,9 @@ Calibrated Model
 ```
 src/model/calibration/
 ├── ensemble.rs         # Orchestrates all calibration methods
-├── temperature.rs      # Temperature scaling with Bayesian optimization
+├── temperature.rs      # Single shared temperature with NLL optimization
 ├── label_smoothing.rs  # Adaptive label smoothing
-├── mixup.rs           # ECE-based mixup augmentation
+├── mixup.rs           # ECE-based mixup augmentation (uniform)
 └── ece.rs             # Expected Calibration Error calculation
 ```
 
@@ -56,9 +56,6 @@ src/model/calibration/
 ```toml
 [training.calibration]
 enable_ensemble_calibration = true
-calibration_iterations = 50          # Bayesian optimization iterations
-exploration_factor = 0.1             # Exploration vs exploitation balance
-temperature_range = [0.5, 3.0]       # Search range for temperature
 ramp_up_epochs = 10                  # Gradual calibration application
 ```
 
@@ -67,15 +64,7 @@ ramp_up_epochs = 10                  # Gradual calibration application
 ```toml
 [training.calibration]
 enable_ensemble_calibration = true
-calibration_iterations = 100
-exploration_factor = 0.15
-temperature_range = [0.3, 5.0]
 ramp_up_epochs = 15
-
-# Bayesian optimization settings
-bayesian_method = "TuRBO-2"          # Options: "TuRBO-2", "BORE", "Standard"
-early_stopping_patience = 10
-min_improvement = 0.001
 
 # Label smoothing
 adaptive_label_smoothing = true
@@ -96,17 +85,17 @@ Temperature scaling adjusts the softmax temperature to calibrate confidence:
 Calibrated Probabilities = softmax(logits / T)
 ```
 
-Where `T` is the temperature parameter optimized via Bayesian optimization.
+Where `T` is a **single shared temperature** parameter optimized via NLL minimization.
 
-**Bayesian Optimization Methods:**
-- **TuRBO-2**: Trust Region Bayesian Optimization with multiple trust regions
-- **BORE**: Bayesian Optimization by Density-Ratio Estimation
-- **Standard**: Traditional Gaussian Process-based optimization
+**Optimization Method:**
+- Uses binary search on Negative Log-Likelihood (NLL) loss
+- Single shared temperature for all classes (standard approach from calibration research)
+- Search range: [0.5, 5.0] with precision 0.01
 
-**Optimization Process:**
-1. Evaluate ECE on validation set for different temperature values
-2. Use Bayesian optimization to find temperature that minimizes ECE
-3. Apply optimal temperature to logits during inference
+**Why NLL Instead of ECE?**
+- NLL is a proper scoring rule that directly optimizes probability estimates
+- For perfectly balanced 5-class datasets, NLL optimization is the mathematically correct approach
+- ECE is used for monitoring, not optimization
 
 ### Label Smoothing
 
@@ -130,6 +119,11 @@ Mixed Target = λ * target_i + (1 - λ) * target_j
 ```
 
 Where `λ ~ Beta(α, α)` and α is tuned based on ECE.
+
+**Key Design Decision:**
+- Mixup applies **uniformly to all samples** (not class-selective)
+- This ensures consistent regularization across all classes
+- Prevents training instability from inconsistent class treatment
 
 ### Expected Calibration Error (ECE)
 
@@ -175,11 +169,7 @@ optimizer = { AdamW = { weight_decay = 0.01 } }
 
 [training.calibration]
 enable_ensemble_calibration = true
-calibration_iterations = 50
-exploration_factor = 0.1
-temperature_range = [0.5, 3.0]
 ramp_up_epochs = 10
-bayesian_method = "TuRBO-2"
 adaptive_label_smoothing = true
 enable_mixup = true
 ```
@@ -196,16 +186,15 @@ let mut calibrator = EnsembleCalibrator::new();
 calibrator.calibrate_from_validation(
     &val_predictions,
     &val_targets,
-    50,  // iterations
 )?;
 
-// Apply to inference logits
+// Apply to inference logits (uses single shared temperature)
 let calibrated_logits = calibrator.apply_to_logits(&raw_logits)?;
 
 // Apply to training targets
 let smoothed_targets = calibrator.apply_label_smoothing(&targets)?;
 
-// Apply mixup to training batch
+// Apply mixup to training batch (uniform application)
 let (mixed_sequences, mixed_targets) = calibrator.apply_mixup(
     &sequences,
     &targets,
@@ -237,19 +226,17 @@ During calibration, you'll see:
 ```
 🎯 Starting ensemble calibration...
 📊 Initial ECE: 0.1234
-🌡️  Optimizing temperature (TuRBO-2)...
-   Iteration 10/50: ECE = 0.0987
-   Iteration 20/50: ECE = 0.0756
-   Iteration 30/50: ECE = 0.0623
-✅ Optimal temperature: 1.45 (ECE: 0.0623)
+🌡️  Optimizing single shared temperature (NLL minimization)...
+   Initial: NLL=1.2345, ECE=0.1234
+   T=1.4500: NLL 1.2345 → 1.0890 (11.8% reduction), ECE=0.0987
+✅ Optimal temperature: 1.4500 (NLL: 1.0890, ECE: 0.0987)
 🏷️  Calibrating label smoothing...
-   Class 0: ε = 0.05 (overconfident)
-   Class 1: ε = 0.02 (well-calibrated)
-   ...
+   Optimal ε = 0.10 (adaptive per class)
 🔀 Tuning mixup alpha...
    Optimal α = 0.25
 ✅ Ensemble calibration complete!
-   Final ECE: 0.0489 (Excellent)
+    Final ECE: 0.0890 (Good)
+    Final NLL: 1.0890 (11.8% improvement)
 ```
 
 ## 🔧 Troubleshooting

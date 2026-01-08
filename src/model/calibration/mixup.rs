@@ -38,9 +38,13 @@ impl AdaptiveMixup {
 
     /// Calibrate mixup parameters from ECE
     ///
-    /// Higher ECE → more aggressive mixup (higher alpha)
-    /// Per-class enable based on per-class ECE
-    pub fn calibrate_from_ece(&mut self, overall_ece: f64, per_class_ece: &[f64; 5]) -> Result<()> {
+    /// Mixup applies uniformly to all samples with lambda sampled from Beta(alpha, alpha).
+    /// Higher ECE → more aggressive mixup (higher alpha).
+    pub fn calibrate_from_ece(
+        &mut self,
+        overall_ece: f64,
+        _per_class_ece: &[f64; 5],
+    ) -> Result<()> {
         log::info!("🔀 Calibrating mixup...");
 
         self.current_ece = overall_ece;
@@ -54,24 +58,13 @@ impl AdaptiveMixup {
         // Clamp alpha to reasonable range
         self.alpha = self.alpha.clamp(0.1, 0.5);
 
-        // Calculate median ECE for threshold
-        let mut sorted_ece = *per_class_ece;
-        sorted_ece.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median_ece = sorted_ece[2]; // Middle value of 5
-
-        // Enable mixup only for classes with ECE above median
-        for (class_idx, &class_ece) in per_class_ece.iter().enumerate() {
-            self.enabled_for_classes[class_idx] = class_ece > median_ece;
-        }
+        // Enable mixup for all classes uniformly (standard approach)
+        // This ensures consistent training behavior across all classes
+        self.enabled_for_classes = [true; 5];
 
         self.is_calibrated = true;
 
-        let enabled_count = self.enabled_for_classes.iter().filter(|&&x| x).count();
-        log::info!(
-            "   α={:.2}, enabled for {}/5 classes",
-            self.alpha,
-            enabled_count
-        );
+        log::info!("   α={:.2}, enabled for all classes", self.alpha);
 
         Ok(())
     }

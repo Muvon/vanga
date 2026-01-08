@@ -1302,26 +1302,27 @@ impl LSTMModel {
 
                             // Apply temperature scaling with ramp-up strength
                             if ramp_factor > 0.01 {
-                                // Get temperatures and apply with ramp factor
-                                let temps = ensemble_cal.temperature_scaling.temperatures;
+                                // Get single shared temperature and apply with ramp factor
+                                let temp = ensemble_cal.temperature_scaling.temperature;
 
                                 // Interpolate between 1.0 (no scaling) and actual temperature
-                                let ramped_temps: Vec<f32> = temps
-                                    .iter()
-                                    .map(|&t| (1.0 + (t - 1.0) * ramp_factor) as f32)
-                                    .collect();
+                                let ramped_temp = 1.0 + (temp - 1.0) * ramp_factor;
 
-                                // Create temperature tensor with ramped values (F32 to match predictions)
-                                let temp_tensor =
-                                    Tensor::from_slice(&ramped_temps, (1, 5), &self.device)
-                                        .map_err(|e| {
-                                            VangaError::ModelError(format!(
-                                                "Failed to create temperature tensor: {}",
-                                                e
-                                            ))
-                                        })?;
+                                // Create temperature tensor [1, 5] with same temperature for all classes
+                                let temp_f32 = ramped_temp as f32;
+                                let temp_tensor = Tensor::from_vec(
+                                    vec![temp_f32, temp_f32, temp_f32, temp_f32, temp_f32],
+                                    (1, 5),
+                                    &self.device,
+                                )
+                                .map_err(|e| {
+                                    VangaError::ModelError(format!(
+                                        "Failed to create temperature tensor: {}",
+                                        e
+                                    ))
+                                })?;
 
-                                // Apply ramped temperature scaling: logits / ramped_temp
+                                // Apply temperature scaling: logits / ramped_temp
                                 let temp_broadcast =
                                     temp_tensor.broadcast_as(predictions.shape())?;
                                 let calibrated =
@@ -1976,27 +1977,16 @@ impl LSTMModel {
                             let current_ece =
                                 calculate_ece(&total_val_predictions, &val_targets_one_hot)?;
 
-                            // Get temperatures and calculate ramped values
-                            let temps = ensemble_cal.temperature_scaling.temperatures;
-                            let ramped_temps: Vec<f32> = temps
-                                .iter()
-                                .map(|&t| (1.0 + (t - 1.0) * ramp_factor) as f32)
-                                .collect();
+                            // Get single shared temperature and calculate ramped value
+                            let temp = ensemble_cal.temperature_scaling.temperature;
+                            let ramped_temp = 1.0 + (temp - 1.0) * ramp_factor;
 
                             log::info!(
-                                "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, Temps=[{:.3},{:.3},{:.3},{:.3},{:.3}], Ramped=[{:.3},{:.3},{:.3},{:.3},{:.3}]",
+                                "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, T={:.3}, Ramped={:.3}",
                                 ramp_factor,
                                 current_ece,
-                                temps[0],
-                                temps[1],
-                                temps[2],
-                                temps[3],
-                                temps[4],
-                                ramped_temps[0],
-                                ramped_temps[1],
-                                ramped_temps[2],
-                                ramped_temps[3],
-                                ramped_temps[4]
+                                temp,
+                                ramped_temp
                             );
                         }
                     }
