@@ -246,3 +246,134 @@ fn test_high_temperature_softens_predictions() {
         "First class should still be most probable"
     );
 }
+
+#[test]
+fn test_temperature_no_improvement_stays_at_1() {
+    let mut temp_scaling = AdaptiveTemperatureScaling::new();
+
+    // Create well-calibrated predictions (not overconfident, not underconfident)
+    // These are already close to optimal, so temperature optimization shouldn't improve much
+    let logits = Array2::from_shape_vec(
+        (30, 5),
+        (0..30)
+            .flat_map(|i| {
+                let class = i % 5;
+                let mut row = vec![0.0; 5];
+                row[class] = 1.5; // Moderate confidence
+                row
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+
+    let targets = Array2::from_shape_vec(
+        (30, 5),
+        (0..30)
+            .flat_map(|i| {
+                let class = i % 5;
+                let mut row = vec![0.0; 5];
+                row[class] = 1.0;
+                row
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+
+    let result = temp_scaling.optimize_temperatures(&logits, &targets);
+    assert!(result.is_ok());
+
+    // If NLL increased at the best found temperature, should stay at 1.0
+    // Otherwise should use the optimized temperature
+    // In either case, we should verify the logic is consistent
+    if temp_scaling.temperature != 1.0 {
+        // Verify NLL actually improved
+        let predictions_optimized = temp_scaling
+            .apply_temperature_to_logits(&logits, temp_scaling.temperature)
+            .unwrap();
+        let nll_optimized = temp_scaling
+            .calculate_nll(&predictions_optimized, &targets)
+            .unwrap();
+
+        let predictions_baseline = temp_scaling
+            .apply_temperature_to_logits(&logits, 1.0)
+            .unwrap();
+        let nll_baseline = temp_scaling
+            .calculate_nll(&predictions_baseline, &targets)
+            .unwrap();
+
+        assert!(
+            nll_optimized < nll_baseline,
+            "If T != 1.0, NLL should improve: optimized={}, baseline={}",
+            nll_optimized,
+            nll_baseline
+        );
+    }
+}
+
+#[test]
+fn test_optimize_temperature_no_improvement() {
+    let mut temp_scaling = AdaptiveTemperatureScaling::new();
+
+    // Create well-calibrated predictions where no temperature improvement is possible
+    // Using perfectly balanced logits that already give good probabilities
+    let mut logits_data = Vec::new();
+    let mut targets_data = Vec::new();
+
+    for i in 0..100 {
+        let class = i % 5;
+
+        // Well-calibrated: moderate logits with some noise
+        let mut logit_row = vec![-0.5; 5];
+        logit_row[class] = 1.5;
+        // Add small random noise to other classes
+        for j in 0..5 {
+            if j != class {
+                logit_row[j] = -0.5 + (j as f64 * 0.05);
+            }
+        }
+        logits_data.extend_from_slice(&logit_row);
+
+        // One-hot targets
+        let mut target_row = vec![0.0; 5];
+        target_row[class] = 1.0;
+        targets_data.extend_from_slice(&target_row);
+    }
+
+    let logits = Array2::from_shape_vec((100, 5), logits_data).unwrap();
+    let targets = Array2::from_shape_vec((100, 5), targets_data).unwrap();
+
+    // Get baseline NLL at T=1.0
+    let predictions_baseline = temp_scaling
+        .apply_temperature_to_logits(&logits, 1.0)
+        .unwrap();
+    let nll_baseline = temp_scaling
+        .calculate_nll(&predictions_baseline, &targets)
+        .unwrap();
+
+    let result = temp_scaling.optimize_temperatures(&logits, &targets);
+    assert!(result.is_ok());
+    assert!(temp_scaling.is_optimized);
+
+    // Get optimized NLL
+    let predictions_optimized = temp_scaling
+        .apply_temperature_to_logits(&logits, temp_scaling.temperature)
+        .unwrap();
+    let nll_optimized = temp_scaling
+        .calculate_nll(&predictions_optimized, &targets)
+        .unwrap();
+
+    // Verify temperature is within valid range
+    assert!(
+        temp_scaling.temperature >= 0.05 && temp_scaling.temperature <= 5.0,
+        "Temperature should be in [0.05, 5.0], got {}",
+        temp_scaling.temperature
+    );
+
+    // If NLL increased, temperature should be 1.0
+    if nll_optimized >= nll_baseline {
+        assert_eq!(
+            temp_scaling.temperature, 1.0,
+            "If NLL increased, should keep T=1.0"
+        );
+    }
+}

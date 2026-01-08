@@ -67,9 +67,7 @@ impl AdaptiveTemperatureScaling {
             )));
         }
 
-        log::info!("🌡️ Optimizing single shared temperature (NLL minimization)...");
-
-        // Calculate initial NLL and ECE
+        // Calculate initial NLL at T=1.0 (baseline)
         let predictions_initial = self.apply_temperature_to_logits(logits, 1.0)?;
         let initial_nll = self.calculate_nll(&predictions_initial, targets)?;
         let initial_ece = calculate_ece(&predictions_initial, targets)?;
@@ -78,7 +76,22 @@ impl AdaptiveTemperatureScaling {
 
         // Find optimal single shared temperature using binary search
         let optimal_temp = self.find_optimal_temperature_binary_search(logits, targets)?;
-        self.temperature = optimal_temp;
+
+        // Only update temperature if it actually improves NLL over baseline (T=1.0)
+        let predictions_optimized = self.apply_temperature_to_logits(logits, optimal_temp)?;
+        let optimized_nll = self.calculate_nll(&predictions_optimized, targets)?;
+
+        // Use baseline temperature if no improvement
+        if optimized_nll >= initial_nll {
+            log::info!(
+                "   No improvement found (NLL {:.4} >= {:.4}), keeping T=1.0",
+                optimized_nll,
+                initial_nll
+            );
+            self.temperature = 1.0;
+        } else {
+            self.temperature = optimal_temp;
+        }
 
         // Calculate final NLL and ECE with optimized temperature
         let predictions_final = self.apply_temperature_to_logits(logits, self.temperature)?;
@@ -91,7 +104,16 @@ impl AdaptiveTemperatureScaling {
         // Calculate NLL change (negative = improvement, positive = degradation)
         let nll_change_pct = (final_nll - initial_nll) / initial_nll * 100.0;
 
-        if nll_change_pct < 0.0 {
+        if self.temperature == 1.0 {
+            log::info!(
+                "   T={:.4}: NLL {:.4} → {:.4} ({:.1}% change - baseline kept), ECE={:.6}",
+                self.temperature,
+                initial_nll,
+                final_nll,
+                nll_change_pct,
+                final_ece
+            );
+        } else if nll_change_pct < 0.0 {
             log::info!(
                 "   T={:.4}: NLL {:.4} → {:.4} ({:.1}% reduction), ECE={:.6}",
                 self.temperature,
@@ -102,7 +124,7 @@ impl AdaptiveTemperatureScaling {
             );
         } else {
             log::info!(
-                "   T={:.4}: NLL {:.4} → {:.4} ({:.1}% increase - no improvement), ECE={:.6}",
+                "   T={:.4}: NLL {:.4} → {:.4} ({:.1}% increase - using optimized), ECE={:.6}",
                 self.temperature,
                 initial_nll,
                 final_nll,
