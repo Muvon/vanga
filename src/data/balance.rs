@@ -896,7 +896,15 @@ impl SequenceBalancer {
         Ok((train_indices, val_indices, test_indices))
     }
 
-    /// Create diverse splits within a single class using temporal stratification
+    /// Create diverse splits within a single class using PRIORITY-BASED STRATEGY
+    ///
+    /// **PRIORITY STRATEGY** (optimal for training effectiveness):
+    /// - **Training**: MAX DIVERSITY (uniform temporal spread)
+    /// - **Validation**: MAX OVERLAP WITH TRAINING (similar patterns)
+    /// - **Test**: MAX DIVERSITY FROM REMAINING (fresh patterns)
+    ///
+    /// This replaces the old temporal stratification approach for better
+    /// training/validation/test split quality.
     fn create_diverse_class_splits(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -905,16 +913,34 @@ impl SequenceBalancer {
         val_size: usize,
         test_size: usize,
     ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
-        use rand::seq::SliceRandom;
+        self.create_priority_based_class_splits(
+            all_sequences,
+            class_indices,
+            train_size,
+            val_size,
+            test_size,
+        )
+    }
 
-        // Sort by temporal position for stratified sampling
-        let mut temporal_sorted: Vec<(usize, usize)> = class_indices
-            .iter()
-            .map(|&idx| (idx, all_sequences[idx].start_idx))
-            .collect();
-        temporal_sorted.sort_by_key(|(_, start_idx)| *start_idx);
-
-        // Create 3 temporal strata for train/val/test
+    /// Create PRIORITY-BASED splits within a single class
+    ///
+    /// **PRIORITY STRATEGY**:
+    /// - **Training**: MAX DIVERSITY (uniform temporal spread for maximum pattern coverage)
+    /// - **Validation**: MAX OVERLAP WITH TRAINING (similar patterns for generalization testing)
+    /// - **Test**: MAX DIVERSITY FROM REMAINING (fresh patterns, no overlap with validation)
+    ///
+    /// This ensures:
+    /// 1. Training sees the most diverse patterns possible
+    /// 2. Validation tests generalization to SIMILAR patterns (overlapping)
+    /// 3. Test evaluates performance on FRESH patterns (non-overlapping)
+    fn create_priority_based_class_splits(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        class_indices: &[usize],
+        train_size: usize,
+        val_size: usize,
+        test_size: usize,
+    ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
         let total_size = train_size + val_size + test_size;
         if total_size > class_indices.len() {
             return Err(VangaError::DataError(format!(
@@ -924,59 +950,146 @@ impl SequenceBalancer {
             )));
         }
 
-        // Divide into temporal thirds for diverse sampling
-        let third_size = temporal_sorted.len() / 3;
-        let early_third = &temporal_sorted[0..third_size];
-        let middle_third = &temporal_sorted[third_size..2 * third_size];
-        let late_third = &temporal_sorted[2 * third_size..];
+        // Step 1: Sort all sequences by temporal position
+        let mut temporal_sorted: Vec<(usize, usize)> = class_indices
+            .iter()
+            .map(|&idx| (idx, all_sequences[idx].start_idx))
+            .collect();
+        temporal_sorted.sort_by_key(|(_, start_idx)| *start_idx);
 
-        let mut rng = rand::rng();
+        // Extract just the indices in temporal order
+        let sorted_indices: Vec<usize> = temporal_sorted.iter().map(|(idx, _)| *idx).collect();
+
+        // Store temporal positions for overlap calculations
+        let temporal_positions: Vec<usize> = temporal_sorted.iter().map(|(_, pos)| *pos).collect();
+        let _min_pos = temporal_positions[0];
+
         let mut train_indices = Vec::new();
         let mut val_indices = Vec::new();
         let mut test_indices = Vec::new();
 
-        // Sample proportionally from each temporal stratum
-        for (stratum_name, stratum) in [
-            ("early", early_third),
-            ("middle", middle_third),
-            ("late", late_third),
-        ] {
-            let mut stratum_indices: Vec<usize> = stratum.iter().map(|(idx, _)| *idx).collect();
-            stratum_indices.shuffle(&mut rng);
+        // Step 2: TRAINING - MAX DIVERSITY (uniform temporal spread)
+        // Select sequences at regular intervals across the entire temporal range
+        if train_size > 0 {
+            let train_interval = if train_size > 1 {
+                (sorted_indices.len() - 1) as f64 / (train_size - 1) as f64
+            } else {
+                0.0
+            };
 
-            // Calculate proportional allocation
-            let stratum_train = (train_size * stratum.len()) / class_indices.len();
-            let stratum_val = (val_size * stratum.len()) / class_indices.len();
-            let stratum_test = (test_size * stratum.len()) / class_indices.len();
+            for i in 0..train_size {
+                let idx = if train_size > 1 {
+                    (i as f64 * train_interval) as usize
+                } else {
+                    sorted_indices.len() / 2 // Middle for single sample
+                };
+                train_indices.push(sorted_indices[idx]);
+            }
 
-            // Allocate sequences from this stratum
-            let mut allocated = 0;
-
-            // Train split
-            let train_take = stratum_train.min(stratum_indices.len() - allocated);
-            train_indices.extend(stratum_indices[allocated..allocated + train_take].iter());
-            allocated += train_take;
-
-            // Validation split
-            let val_take = stratum_val.min(stratum_indices.len() - allocated);
-            val_indices.extend(stratum_indices[allocated..allocated + val_take].iter());
-            allocated += val_take;
-
-            // Test split
-            let test_take = stratum_test.min(stratum_indices.len() - allocated);
-            test_indices.extend(stratum_indices[allocated..allocated + test_take].iter());
+            // Sort training indices for consistency
+            train_indices.sort();
 
             log::debug!(
-                "     {} stratum: {} train, {} val, {} test",
-                stratum_name,
-                train_take,
-                val_take,
-                test_take
+                "   🎯 TRAINING (Max Diversity): {} sequences at uniform temporal intervals",
+                train_indices.len()
             );
         }
 
-        // Handle any remaining sequences due to rounding
-        let mut remaining: Vec<usize> = class_indices
+        // Step 3: VALIDATION - MAX OVERLAP WITH TRAINING
+        // From remaining sequences, select those that OVERLAP most with training windows
+        let remaining: Vec<usize> = sorted_indices
+            .iter()
+            .filter(|&&idx| !train_indices.contains(&idx))
+            .copied()
+            .collect();
+
+        if val_size > 0 && !remaining.is_empty() {
+            // Calculate overlap score for each remaining sequence with training set
+            let mut scored: Vec<(usize, f64)> = remaining
+                .iter()
+                .map(|&idx| {
+                    let overlap_score =
+                        self.calculate_overlap_with_set(idx, &train_indices, all_sequences);
+                    (idx, overlap_score)
+                })
+                .collect();
+
+            // Sort by overlap score (highest first) for validation
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Select top val_size for validation
+            val_indices.extend(
+                scored
+                    .iter()
+                    .take(val_size.min(scored.len()))
+                    .map(|(idx, _)| *idx),
+            );
+
+            // Sort validation indices for consistency
+            val_indices.sort();
+
+            let avg_overlap: f64 = if !val_indices.is_empty() {
+                let total: f64 = val_indices
+                    .iter()
+                    .map(|&idx| self.calculate_overlap_with_set(idx, &train_indices, all_sequences))
+                    .sum();
+                total / val_indices.len() as f64
+            } else {
+                0.0
+            };
+
+            log::debug!(
+                "   🎯 VALIDATION (Max Overlap): {} sequences, avg overlap with train: {:.2}",
+                val_indices.len(),
+                avg_overlap
+            );
+        }
+
+        // Step 4: TEST - MAX DIVERSITY FROM REMAINING
+        // From remaining sequences, select those that maximize temporal diversity
+        let remaining_after_val: Vec<usize> = remaining
+            .iter()
+            .filter(|&&idx| !val_indices.contains(&idx))
+            .copied()
+            .collect();
+
+        if test_size > 0 && !remaining_after_val.is_empty() {
+            // Score by temporal distance from nearest training OR validation sequence
+            let mut scored: Vec<(usize, f64)> = remaining_after_val
+                .iter()
+                .map(|&idx| {
+                    let diversity_score = self.calculate_diversity_from_selected(
+                        idx,
+                        &train_indices,
+                        &val_indices,
+                        all_sequences,
+                    );
+                    (idx, diversity_score)
+                })
+                .collect();
+
+            // Sort by diversity score (highest first) - prefer sequences far from others
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Select top test_size for test (they are already the most diverse)
+            test_indices.extend(
+                scored
+                    .iter()
+                    .take(test_size.min(scored.len()))
+                    .map(|(idx, _)| *idx),
+            );
+
+            // Sort test indices for consistency
+            test_indices.sort();
+
+            log::debug!(
+                "   🎯 TEST (Max Diversity from Remaining): {} sequences",
+                test_indices.len()
+            );
+        }
+
+        // Step 5: Handle any remaining due to rounding or exact size requirements
+        let mut remaining_final: Vec<usize> = class_indices
             .iter()
             .filter(|&&idx| {
                 !train_indices.contains(&idx)
@@ -985,20 +1098,152 @@ impl SequenceBalancer {
             })
             .copied()
             .collect();
-        remaining.shuffle(&mut rng);
+        remaining_final.sort();
 
-        // Distribute remaining sequences to reach exact target sizes
-        while train_indices.len() < train_size && !remaining.is_empty() {
-            train_indices.push(remaining.pop().unwrap());
+        // Distribute remaining to reach exact target sizes
+        while train_indices.len() < train_size && !remaining_final.is_empty() {
+            train_indices.push(remaining_final.remove(0));
         }
-        while val_indices.len() < val_size && !remaining.is_empty() {
-            val_indices.push(remaining.pop().unwrap());
+        while val_indices.len() < val_size && !remaining_final.is_empty() {
+            val_indices.push(remaining_final.remove(0));
         }
-        while test_indices.len() < test_size && !remaining.is_empty() {
-            test_indices.push(remaining.pop().unwrap());
+        while test_indices.len() < test_size && !remaining_final.is_empty() {
+            test_indices.push(remaining_final.remove(0));
         }
+
+        // Final validation
+        if train_indices.len() != train_size
+            || val_indices.len() != val_size
+            || test_indices.len() != test_size
+        {
+            return Err(VangaError::DataError(format!(
+                "Split allocation mismatch: train={}/{}, val={}/{}, test={}/{}",
+                train_indices.len(),
+                train_size,
+                val_indices.len(),
+                val_size,
+                test_indices.len(),
+                test_size
+            )));
+        }
+
+        // Sort all indices for consistency
+        train_indices.sort();
+        val_indices.sort();
+        test_indices.sort();
+
+        log::debug!(
+            "   📊 Split allocation: {} train, {} val, {} test (no overlaps)",
+            train_indices.len(),
+            val_indices.len(),
+            test_indices.len()
+        );
 
         Ok((train_indices, val_indices, test_indices))
+    }
+
+    /// Calculate overlap score between a sequence and a set of training indices
+    /// Returns value between 0.0 (no overlap) and 1.0 (maximum overlap)
+    fn calculate_overlap_with_set(
+        &self,
+        seq_idx: usize,
+        reference_indices: &[usize],
+        all_sequences: &[SequenceWithTargets],
+    ) -> f64 {
+        if reference_indices.is_empty() {
+            return 0.0;
+        }
+
+        let seq = &all_sequences[seq_idx];
+        let mut total_overlap = 0.0;
+        let mut count = 0;
+
+        for &ref_idx in reference_indices {
+            let ref_seq = &all_sequences[ref_idx];
+            total_overlap += seq.overlap_ratio(ref_seq);
+            count += 1;
+        }
+
+        if count > 0 {
+            // Normalize: average overlap across all reference sequences
+            (total_overlap / count as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Calculate diversity score - how far this sequence is from any selected sequence
+    /// Higher score = more diverse (far from all selected)
+    fn calculate_diversity_from_selected(
+        &self,
+        seq_idx: usize,
+        train_indices: &[usize],
+        val_indices: &[usize],
+        all_sequences: &[SequenceWithTargets],
+    ) -> f64 {
+        let all_selected: Vec<usize> = train_indices
+            .iter()
+            .chain(val_indices.iter())
+            .copied()
+            .collect();
+
+        if all_selected.is_empty() {
+            return 1.0; // Maximum diversity if nothing selected yet
+        }
+
+        let seq = &all_sequences[seq_idx];
+        let seq_start = seq.start_idx;
+        let seq_end = seq.end_idx;
+
+        if seq_end <= seq_start {
+            return 0.0;
+        }
+
+        // Find minimum distance to any selected sequence
+        let mut min_distance = usize::MAX;
+
+        for &sel_idx in &all_selected {
+            let sel_seq = &all_sequences[sel_idx];
+            let sel_start = sel_seq.start_idx;
+            let sel_end = sel_seq.end_idx;
+
+            // Calculate gap between sequences
+            let gap = if seq_start >= sel_end {
+                seq_start - sel_end // seq after sel
+            } else {
+                sel_start.saturating_sub(seq_end) // seq before sel or overlapping
+            };
+
+            min_distance = min_distance.min(gap);
+        }
+
+        // Get temporal range for normalization
+        let temporal_positions: Vec<usize> = all_selected
+            .iter()
+            .map(|&idx| all_sequences[idx].start_idx)
+            .collect();
+        let min_pos = *temporal_positions.iter().min().unwrap_or(&seq_start);
+        let max_pos = *temporal_positions.iter().max().unwrap_or(&seq_start);
+        let total_span = max_pos.saturating_sub(min_pos).max(1);
+
+        // Normalize by total span
+        let normalized_distance = min_distance as f64 / total_span as f64;
+
+        // Also consider temporal position diversity (prefer extremes over center)
+        let temporal_center = (min_pos + max_pos) as f64 / 2.0;
+        let pos_from_center = (seq_start as f64 - temporal_center).abs();
+        let max_distance_from_center = (max_pos - min_pos) as f64 / 2.0;
+        let temporal_diversity = if max_distance_from_center > 0.0 {
+            pos_from_center / max_distance_from_center
+        } else {
+            0.5
+        };
+
+        // Combined score: weighted average of distance and temporal position
+        // Higher weight on distance to prefer non-overlapping sequences
+        let combined_score = 0.7 * normalized_distance + 0.3 * temporal_diversity;
+
+        combined_score.clamp(0.0, 1.0)
     }
 
     /// Select sequences for a target with specified count
