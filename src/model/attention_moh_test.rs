@@ -641,7 +641,7 @@ fn test_moh_adaptive_sparsity_changes() {
         .last_sparsity_ratio()
         .expect("Low volatility ratio missing");
 
-    let high_data: Vec<f32> = (0..(1 * 8 * 32)).map(|i| (i as f32) * 100.0).collect();
+    let high_data: Vec<f32> = (0..256).map(|i| (i as f32) * 100.0).collect();
     let high_input = Tensor::from_vec(high_data, (1, 8, 32), &device).unwrap();
     let _ = attention.forward(&high_input, true).unwrap();
 

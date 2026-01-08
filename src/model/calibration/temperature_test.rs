@@ -211,11 +211,10 @@ fn test_apply_to_logits_without_optimization() {
 
 #[test]
 fn test_high_temperature_softens_predictions() {
-    let mut temp_scaling = AdaptiveTemperatureScaling::new();
+    let temp_scaling = AdaptiveTemperatureScaling::new();
 
     // Create highly confident predictions
     let logits = Array2::from_shape_vec((1, 5), vec![10.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
-    let targets = Array2::from_shape_vec((1, 5), vec![1.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
 
     // Apply with high temperature (T=5.0)
     let soft_predictions = temp_scaling

@@ -70,9 +70,9 @@ fn test_full_calibration_pipeline() {
         // Create logits with some noise
         let mut logit_row = vec![0.0; 5];
         logit_row[class] = 2.0 + (i as f64 * 0.01);
-        for j in 0..5 {
+        for (j, slot) in logit_row.iter_mut().enumerate() {
             if j != class {
-                logit_row[j] = -0.5 + (j as f64 * 0.1);
+                *slot = -0.5 + (j as f64 * 0.1);
             }
         }
         logits_data.extend_from_slice(&logit_row);

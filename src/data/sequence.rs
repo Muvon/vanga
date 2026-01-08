@@ -475,7 +475,7 @@ impl SequenceGenerator {
             // If only one unique value, return zeros (normalized constant)
             if values.len() == 1 {
                 let zeros: Vec<Option<f64>> = (0..float_series.len()).map(|_| Some(0.0)).collect();
-                return Ok(Series::new(series.name().clone().into(), zeros));
+                return Ok(Series::new(series.name().clone(), zeros));
             }
 
             // Calculate mean and std from finite values only
@@ -502,7 +502,7 @@ impl SequenceGenerator {
                 })
                 .collect();
 
-            Ok(Series::new(series.name().clone().into(), normalized_values))
+            Ok(Series::new(series.name().clone(), normalized_values))
         } else {
             Ok(series.clone())
         }

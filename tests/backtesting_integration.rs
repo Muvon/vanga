@@ -31,9 +31,7 @@ async fn test_single_symbol_backtest() {
     }
 
     // If we get here, either the test succeeded or failed for a different reason
-    if result.is_ok() {
-        let backtest_result = result.unwrap();
-
+    if let Ok(backtest_result) = result {
         assert_eq!(backtest_result.symbol, "BTCUSDT");
         assert_eq!(backtest_result.model_type, "MultiTargetLSTM");
         assert!(backtest_result.train_samples > 0);

@@ -1445,7 +1445,7 @@ impl DataPreprocessor {
                         };
 
                         let normalized_series =
-                            Series::new(column_name.clone().into(), normalized_values);
+                            Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
                         stats_index += 1;
 
@@ -1545,7 +1545,7 @@ impl DataPreprocessor {
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
                             let normalized_series =
-                                Series::new(column_name.clone().into(), original_values);
+                                Series::new(column_name.clone(), original_values);
                             normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
@@ -1557,7 +1557,7 @@ impl DataPreprocessor {
                             .collect();
 
                         let normalized_series =
-                            Series::new(column_name.clone().into(), normalized_values);
+                            Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!("Column '{}': median={:.4}, Q1={:.4}, Q3={:.4}, IQR={:.4} - normalized for time-series stability",
@@ -1615,7 +1615,7 @@ impl DataPreprocessor {
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
                             let normalized_series =
-                                Series::new(column_name.clone().into(), original_values);
+                                Series::new(column_name.clone(), original_values);
                             normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
@@ -1627,7 +1627,7 @@ impl DataPreprocessor {
                             .collect();
 
                         let normalized_series =
-                            Series::new(column_name.clone().into(), normalized_values);
+                            Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
@@ -1688,7 +1688,7 @@ impl DataPreprocessor {
                             let original_values: Vec<Option<f64>> =
                                 float_series.into_iter().collect();
                             let normalized_series =
-                                Series::new(column_name.clone().into(), original_values);
+                                Series::new(column_name.clone(), original_values);
                             normalized_columns.push(normalized_series.into_column());
                             continue;
                         }
@@ -1700,7 +1700,7 @@ impl DataPreprocessor {
                             .collect();
 
                         let normalized_series =
-                            Series::new(column_name.clone().into(), normalized_values);
+                            Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
@@ -1772,8 +1772,8 @@ impl DataPreprocessor {
                             })
                             .collect();
 
-                        let normalized_series =
-                            Series::new(column_name.clone().into(), normalized_values);
+                         let normalized_series =
+                            Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
