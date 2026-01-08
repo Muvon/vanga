@@ -1271,12 +1271,14 @@ impl LSTMModel {
                     if let Some(ref ensemble_cal) = self.ensemble_calibrator {
                         let ramp_up_epochs = self.bias_correction_config.ramp_up_epochs;
 
-                        if epoch >= ramp_up_epochs && ensemble_cal.is_calibrated {
-                            // Gradual ramp-up to prevent training instability
-                            let epochs_since_start = epoch.saturating_sub(ramp_up_epochs);
-                            let ramp_factor = if epochs_since_start < ramp_up_epochs {
-                                epochs_since_start as f64 / ramp_up_epochs as f64
+                        // CRITICAL FIX: Start ramping from epoch 0, not after ramp_up_epochs
+                        // Ramp factor gradually increases from 0.0 to 1.0 over ramp_up_epochs
+                        if ensemble_cal.is_calibrated {
+                            let ramp_factor = if epoch < ramp_up_epochs {
+                                // Gradual ramp-up: 0.0 at epoch 0 → 1.0 at ramp_up_epochs
+                                epoch as f64 / ramp_up_epochs as f64
                             } else {
+                                // Full strength after ramp-up period
                                 1.0
                             };
 
@@ -1306,31 +1308,6 @@ impl LSTMModel {
                                     temp_tensor.broadcast_as(predictions.shape())?;
                                 let calibrated =
                                     predictions.broadcast_div(&temp_broadcast)?.contiguous()?;
-
-                                // Log calibration impact periodically
-                                if self.bias_correction_config.print_info
-                                    && self.bias_correction_config.recalibration_frequency > 0
-                                    && epoch % self.bias_correction_config.recalibration_frequency
-                                        == 0
-                                    && batch_idx == 0
-                                {
-                                    let metrics = ensemble_cal.get_calibration_metrics();
-                                    log::info!(
-                                        "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, Temps=[{:.3},{:.3},{:.3},{:.3},{:.3}], Ramped=[{:.3},{:.3},{:.3},{:.3},{:.3}]",
-                                        ramp_factor,
-                                        metrics.overall_ece,
-                                        metrics.temperatures[0],
-                                        metrics.temperatures[1],
-                                        metrics.temperatures[2],
-                                        metrics.temperatures[3],
-                                        metrics.temperatures[4],
-                                        ramped_temps[0],
-                                        ramped_temps[1],
-                                        ramped_temps[2],
-                                        ramped_temps[3],
-                                        ramped_temps[4]
-                                    );
-                                }
 
                                 calibrated
                             } else {
@@ -1913,6 +1890,96 @@ impl LSTMModel {
                                     );
                                 }
                             }
+                        }
+                    }
+                }
+
+                // CRITICAL FIX: Print ensemble calibration status every 5 epochs during ramp-up
+                // This provides visibility into the gradual calibration application
+                if self.bias_correction_config.use_ensemble_calibration
+                    && self.bias_correction_config.print_info
+                    && self.ensemble_calibrator.is_some()
+                    && !all_val_predictions.is_empty()
+                    && epoch % 5 == 0
+                {
+                    if let Some(ref ensemble_cal) = self.ensemble_calibrator {
+                        if ensemble_cal.is_calibrated {
+                            let ramp_up_epochs = self.bias_correction_config.ramp_up_epochs;
+                            let ramp_factor = if epoch < ramp_up_epochs {
+                                epoch as f64 / ramp_up_epochs as f64
+                            } else {
+                                1.0
+                            };
+
+                            // Calculate current ECE dynamically from validation predictions
+                            let total_val_predictions = ndarray::concatenate(
+                                ndarray::Axis(0),
+                                &all_val_predictions
+                                    .iter()
+                                    .map(|arr| arr.view())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|e| {
+                                VangaError::ModelError(format!(
+                                    "Failed to concatenate validation predictions for ECE calculation: {}",
+                                    e
+                                ))
+                            })?;
+
+                            let total_val_targets = ndarray::concatenate(
+                                ndarray::Axis(0),
+                                &all_val_targets
+                                    .iter()
+                                    .map(|arr| arr.view())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|e| {
+                                VangaError::ModelError(format!(
+                                    "Failed to concatenate validation targets for ECE calculation: {}",
+                                    e
+                                ))
+                            })?;
+
+                            // Convert targets to one-hot if needed
+                            let val_targets_one_hot = if total_val_targets.shape()[1] == 1 {
+                                let num_samples = total_val_targets.shape()[0];
+                                let mut one_hot = ndarray::Array2::<f64>::zeros((num_samples, 5));
+                                for (i, class_idx) in total_val_targets.iter().enumerate() {
+                                    let class_index = (*class_idx as usize).min(4);
+                                    one_hot[[i, class_index]] = 1.0;
+                                }
+                                one_hot
+                            } else {
+                                total_val_targets.clone()
+                            };
+
+                            // Calculate current ECE dynamically
+                            use crate::model::calibration::ece::calculate_ece;
+                            let current_ece =
+                                calculate_ece(&total_val_predictions, &val_targets_one_hot)?;
+
+                            // Get temperatures and calculate ramped values
+                            let temps = ensemble_cal.temperature_scaling.temperatures;
+                            let ramped_temps: Vec<f32> = temps
+                                .iter()
+                                .map(|&t| (1.0 + (t - 1.0) * ramp_factor) as f32)
+                                .collect();
+
+                            log::info!(
+                                "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, Temps=[{:.3},{:.3},{:.3},{:.3},{:.3}], Ramped=[{:.3},{:.3},{:.3},{:.3},{:.3}]",
+                                ramp_factor,
+                                current_ece,
+                                temps[0],
+                                temps[1],
+                                temps[2],
+                                temps[3],
+                                temps[4],
+                                ramped_temps[0],
+                                ramped_temps[1],
+                                ramped_temps[2],
+                                ramped_temps[3],
+                                ramped_temps[4]
+                            );
                         }
                     }
                 }
