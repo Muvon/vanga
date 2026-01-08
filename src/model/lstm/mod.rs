@@ -55,6 +55,9 @@ mod inference_test;
 #[cfg(test)]
 mod loss_test;
 
+#[cfg(test)]
+mod reduce_on_plateau_test;
+
 // Re-export main types for backward compatibility
 pub use config::{
     LSTMConfig, LSTMModel, ModelState, OptimizerWrapper, TargetFormat, TrainingConfig,
@@ -67,6 +70,9 @@ pub use core::*;
 
 // Re-export window-aware learning rate functionality
 pub use window_aware_lr::{create_window_aware_config, WindowAwareLearningRate};
+
+// Re-export ReduceOnPlateauScheduler for testing
+pub use training::ReduceOnPlateauScheduler;
 #[cfg(test)]
 mod tests {
     use super::*;

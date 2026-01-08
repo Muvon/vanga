@@ -78,7 +78,9 @@ impl ReduceOnPlateauScheduler {
             // No improvement: increment patience
             self.patience_counter += 1;
 
-            if self.patience_counter >= self.patience {
+            // CRITICAL FIX: Use > instead of >= to reduce AFTER patience exceeded, not AT patience
+            // patience=3 means: wait 3 epochs (counter: 1, 2, 3), then reduce on 4th epoch
+            if self.patience_counter > self.patience {
                 // Patience exceeded: reduce LR
                 self.current_lr *= self.factor;
                 self.patience_counter = 0;
