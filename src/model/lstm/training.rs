@@ -97,6 +97,16 @@ impl ReduceOnPlateauScheduler {
     pub fn current_lr(&self) -> f64 {
         self.current_lr
     }
+
+    /// Get the current patience counter (epochs without improvement)
+    pub fn patience_counter(&self) -> u32 {
+        self.patience_counter
+    }
+
+    /// Get the configured patience threshold
+    pub fn patience(&self) -> u32 {
+        self.patience
+    }
 }
 
 /// Deterministic shuffle using Fisher-Yates algorithm with linear congruential generator
@@ -2188,44 +2198,55 @@ impl LSTMModel {
                     if let Some(schedule) = &config.training.learning_schedule {
                         match schedule {
                             crate::config::training::LearningScheduleConfig::Constant => {
-                                " [Constant]"
+                                " [Constant]".to_string()
                             }
                             crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
                                 ..
-                            } => " [ReduceOnPlateau]",
+                            } => {
+                                // Get patience counter from scheduler if available
+                                if let Some(ref scheduler) = reduce_on_plateau_scheduler {
+                                    format!(
+                                        " [ReduceOnPlateau: {}/{}]",
+                                        scheduler.patience_counter(),
+                                        scheduler.patience()
+                                    )
+                                } else {
+                                    " [ReduceOnPlateau]".to_string()
+                                }
+                            }
                             crate::config::training::LearningScheduleConfig::LinearDecay {
                                 ..
-                            } => " [LinearDecay]",
+                            } => " [LinearDecay]".to_string(),
                             crate::config::training::LearningScheduleConfig::ExponentialDecay {
                                 ..
-                            } => " [ExponentialDecay]",
+                            } => " [ExponentialDecay]".to_string(),
                             crate::config::training::LearningScheduleConfig::StepDecay {
                                 ..
-                            } => " [StepDecay]",
+                            } => " [StepDecay]".to_string(),
                             crate::config::training::LearningScheduleConfig::PolynomialDecay {
                                 ..
-                            } => " [PolynomialDecay]",
+                            } => " [PolynomialDecay]".to_string(),
                             crate::config::training::LearningScheduleConfig::CosineAnnealing {
                                 ..
-                            } => " [CosineAnnealing]",
+                            } => " [CosineAnnealing]".to_string(),
                             crate::config::training::LearningScheduleConfig::WarmRestarts {
                                 ..
-                            } => " [WarmRestarts]",
+                            } => " [WarmRestarts]".to_string(),
                             crate::config::training::LearningScheduleConfig::OneCycle {
                                 ..
-                            } => " [OneCycle]",
+                            } => " [OneCycle]".to_string(),
                             crate::config::training::LearningScheduleConfig::CyclicalLR {
                                 ..
-                            } => " [CyclicalLR]",
+                            } => " [CyclicalLR]".to_string(),
                             crate::config::training::LearningScheduleConfig::NoamLR { .. } => {
-                                " [NoamLR]"
+                                " [NoamLR]".to_string()
                             }
                         }
                     } else {
-                        ""
+                        String::new()
                     }
                 } else {
-                    ""
+                    String::new()
                 };
 
                 if let Some(val_loss) = avg_val_loss {
