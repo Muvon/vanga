@@ -377,3 +377,299 @@ fn test_optimize_temperature_no_improvement() {
         );
     }
 }
+
+/// Test entropy calculation with confident predictions (low entropy)
+#[test]
+fn test_calculate_entropy_confident() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    // Highly confident predictions: [0.9, 0.03, 0.03, 0.03, 0.01]
+    let predictions = Array2::from_shape_vec(
+        (3, 5),
+        vec![
+            0.90, 0.03, 0.03, 0.03, 0.01, // Very confident
+            0.85, 0.05, 0.04, 0.04, 0.02, // Confident
+            0.80, 0.06, 0.05, 0.05, 0.04, // Moderately confident
+        ],
+    )
+    .unwrap();
+
+    let entropy = temp_scaling.calculate_entropy(&predictions);
+
+    // Confident predictions should have low entropy (close to 0)
+    assert!(
+        entropy < 0.5,
+        "Confident predictions should have low entropy, got {}",
+        entropy
+    );
+    assert!(
+        entropy > 0.0,
+        "Entropy should be positive for non-deterministic predictions"
+    );
+}
+
+/// Test entropy calculation with uncertain predictions (high entropy)
+#[test]
+fn test_calculate_entropy_uncertain() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    // Nearly uniform predictions: [0.2, 0.2, 0.2, 0.2, 0.2]
+    let predictions = Array2::from_shape_vec(
+        (3, 5),
+        vec![
+            0.20, 0.20, 0.20, 0.20, 0.20, // Uniform (maximum entropy)
+            0.22, 0.20, 0.18, 0.20, 0.20, // Nearly uniform
+            0.21, 0.21, 0.19, 0.19, 0.20, // Slightly uneven
+        ],
+    )
+    .unwrap();
+
+    let entropy = temp_scaling.calculate_entropy(&predictions);
+
+    // Uncertain predictions should have high entropy (close to 1)
+    assert!(
+        entropy > 0.7,
+        "Uncertain predictions should have high entropy, got {}",
+        entropy
+    );
+    assert!(
+        entropy <= 1.0,
+        "Normalized entropy should be <= 1.0, got {}",
+        entropy
+    );
+}
+
+/// Test entropy calculation with empty data
+#[test]
+fn test_calculate_entropy_empty() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    let predictions = Array2::zeros((0, 5));
+    let entropy = temp_scaling.calculate_entropy(&predictions);
+
+    assert_eq!(entropy, 0.0, "Empty predictions should return 0 entropy");
+}
+
+/// Test batch-wise entropies calculation
+#[test]
+fn test_calculate_batch_entropies() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    let predictions = Array2::from_shape_vec(
+        (4, 5),
+        vec![
+            0.90, 0.03, 0.03, 0.03, 0.01, // High confidence (low entropy)
+            0.20, 0.20, 0.20, 0.20, 0.20, // Low confidence (high entropy)
+            0.70, 0.10, 0.08, 0.07, 0.05, // Medium confidence
+            0.95, 0.02, 0.01, 0.01, 0.01, // Very high confidence
+        ],
+    )
+    .unwrap();
+
+    let entropies = temp_scaling.calculate_batch_entropies(&predictions);
+
+    assert_eq!(entropies.len(), 4);
+
+    // First sample should have lower entropy than second
+    assert!(
+        entropies[0] < entropies[1],
+        "Confident sample should have lower entropy than uncertain sample"
+    );
+
+    // Fourth sample should have lowest entropy (most confident)
+    assert!(
+        entropies[3] < entropies[0],
+        "Most confident sample should have lowest entropy"
+    );
+}
+
+/// Test entropy-based adaptive temperature scaling
+#[test]
+fn test_entropy_adaptive_temperature() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    // Create logits that will produce confident predictions
+    let logits = Array2::from_shape_vec(
+        (3, 5),
+        vec![
+            3.0, 0.5, 0.3, 0.2, 0.1, // High confidence for class 0
+            0.1, 3.5, 0.5, 0.2, 0.2, // High confidence for class 1
+            0.1, 0.1, 0.1, 0.1, 4.0, // High confidence for class 4
+        ],
+    )
+    .unwrap();
+
+    let base_temp = 1.2;
+    let ramp_factor = 1.0; // Full ramp (no gradual)
+
+    let (adapted_preds, avg_entropy) = temp_scaling
+        .apply_entropy_adaptive_temperature(&logits, base_temp, ramp_factor)
+        .unwrap();
+
+    // Verify predictions are valid probabilities
+    assert_eq!(adapted_preds.shape(), [3, 5]);
+    for row in adapted_preds.axis_iter(ndarray::Axis(0)) {
+        let sum: f64 = row.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "Probabilities should sum to 1.0, got {}",
+            sum
+        );
+    }
+
+    // Average entropy should be reasonably low (confident predictions)
+    // With logits [3.0, 0.5, 0.3, 0.2, 0.1] after softmax, entropy is moderate
+    assert!(
+        avg_entropy < 0.6,
+        "Confident predictions should have reasonably low entropy, got {}",
+        avg_entropy
+    );
+}
+
+/// Test entropy adaptive temperature with ramp factor
+#[test]
+fn test_entropy_adaptive_temperature_with_ramp() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    let logits = Array2::from_shape_vec(
+        (2, 5),
+        vec![3.0, 0.5, 0.3, 0.2, 0.1, 0.1, 3.5, 0.5, 0.2, 0.2],
+    )
+    .unwrap();
+
+    let base_temp = 1.5;
+
+    // Test with different ramp factors
+    for &ramp_factor in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+        let (adapted_preds, _) = temp_scaling
+            .apply_entropy_adaptive_temperature(&logits, base_temp, ramp_factor)
+            .unwrap();
+
+        assert_eq!(adapted_preds.shape(), [2, 5]);
+
+        // Verify probabilities sum to 1
+        for row in adapted_preds.axis_iter(ndarray::Axis(0)) {
+            let sum: f64 = row.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-6);
+        }
+    }
+}
+
+/// Test temperature adjustment info helper
+#[test]
+fn test_get_temperature_adjustment_info() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    // Confident predictions
+    let confident_preds = Array2::from_shape_vec(
+        (2, 5),
+        vec![0.90, 0.03, 0.03, 0.03, 0.01, 0.85, 0.05, 0.04, 0.04, 0.02],
+    )
+    .unwrap();
+
+    let (factor, confidence, entropy) =
+        temp_scaling.get_temperature_adjustment_info(&confident_preds);
+
+    // Confident predictions should have high confidence, low entropy
+    assert!(
+        confidence > 0.5,
+        "Confident predictions should have confidence > 0.5"
+    );
+    assert!(
+        entropy < 0.5,
+        "Confident predictions should have entropy < 0.5"
+    );
+
+    // Adaptive factor should be > 1.0 for confident predictions
+    assert!(
+        factor > 1.0,
+        "Confident predictions should have factor > 1.0"
+    );
+    assert!(
+        factor <= 1.25,
+        "Factor should be <= 1.25 (0.75 + 0.5 * 1.0), got {}",
+        factor
+    );
+
+    // Uncertain predictions
+    let uncertain_preds = Array2::from_shape_vec(
+        (2, 5),
+        vec![0.20, 0.20, 0.20, 0.20, 0.20, 0.22, 0.20, 0.18, 0.20, 0.20],
+    )
+    .unwrap();
+
+    let (factor_uncertain, confidence_uncertain, entropy_uncertain) =
+        temp_scaling.get_temperature_adjustment_info(&uncertain_preds);
+
+    // Uncertain predictions should have low confidence, high entropy
+    assert!(
+        confidence_uncertain < 0.5,
+        "Uncertain predictions should have confidence < 0.5"
+    );
+    assert!(
+        entropy_uncertain > 0.7,
+        "Uncertain predictions should have entropy > 0.7"
+    );
+
+    // Adaptive factor should be < 1.0 for uncertain predictions
+    assert!(
+        factor_uncertain < 1.0,
+        "Uncertain predictions should have factor < 1.0"
+    );
+    assert!(
+        factor_uncertain >= 0.75,
+        "Factor should be >= 0.75 (0.75 + 0.5 * 0.0), got {}",
+        factor_uncertain
+    );
+
+    // Verify inverse relationship
+    assert!(
+        factor > factor_uncertain,
+        "Confident should have higher factor than uncertain"
+    );
+    assert!(
+        confidence > confidence_uncertain,
+        "Confident should have higher confidence than uncertain"
+    );
+    assert!(
+        entropy < entropy_uncertain,
+        "Confident should have lower entropy than uncertain"
+    );
+}
+
+/// Test that entropy values are in valid range [0, 1]
+#[test]
+fn test_entropy_range_normalized() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    // Maximum entropy (uniform distribution)
+    let uniform = Array2::from_shape_vec((1, 5), vec![0.2, 0.2, 0.2, 0.2, 0.2]).unwrap();
+    let max_entropy = temp_scaling.calculate_entropy(&uniform);
+    assert!(
+        (max_entropy - 1.0).abs() < 1e-6,
+        "Uniform distribution should have entropy = 1.0, got {}",
+        max_entropy
+    );
+
+    // Minimum entropy (deterministic distribution)
+    let deterministic = Array2::from_shape_vec((1, 5), vec![1.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+    let min_entropy = temp_scaling.calculate_entropy(&deterministic);
+    assert!(
+        min_entropy < 0.01,
+        "Deterministic distribution should have entropy close to 0, got {}",
+        min_entropy
+    );
+}
+
+/// Test entropy calculation with single sample
+#[test]
+fn test_calculate_entropy_single_sample() {
+    let temp_scaling = AdaptiveTemperatureScaling::new();
+
+    let predictions = Array2::from_shape_vec((1, 5), vec![0.5, 0.2, 0.15, 0.1, 0.05]).unwrap();
+
+    let entropy = temp_scaling.calculate_entropy(&predictions);
+
+    assert!(entropy > 0.0);
+    assert!(entropy <= 1.0);
+}

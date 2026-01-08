@@ -1300,15 +1300,53 @@ impl LSTMModel {
                                 1.0
                             };
 
-                            // Apply temperature scaling with ramp-up strength
+                            // Apply entropy-based adaptive temperature scaling (2024 research)
+                            // This adapts temperature based on prediction uncertainty:
+                            // - High entropy (uncertain): warmer temperature (0.75×T to 1.0×T)
+                            // - Low entropy (confident): sharper temperature (1.0×T to 1.25×T)
                             if ramp_factor > 0.01 {
-                                // Get single shared temperature and apply with ramp factor
+                                // Convert predictions tensor to ndarray for entropy calculation
+                                let pred_shape = predictions.shape();
+                                let pred_data: Vec<f64> = predictions.to_vec1().map_err(|e| {
+                                    VangaError::ModelError(format!(
+                                        "Failed to convert predictions to vec: {}",
+                                        e
+                                    ))
+                                })?;
+                                let predictions_array =
+                                    Array2::from_shape_vec((pred_shape.dims()[0], 5), pred_data)
+                                        .map_err(|e| {
+                                            VangaError::ModelError(format!(
+                                                "Failed to create predictions array: {}",
+                                                e
+                                            ))
+                                        })?;
+
+                                // Get temperature adjustment info for logging
+                                let (adjust_factor, confidence, entropy) = ensemble_cal
+                                    .temperature_scaling
+                                    .get_temperature_adjustment_info(&predictions_array);
+
+                                // Apply entropy-adaptive temperature with ramp-up
                                 let temp = ensemble_cal.temperature_scaling.temperature;
+                                let ramped_temp = if ramp_factor < 1.0 {
+                                    // Interpolate between 1.0 and adaptive temperature
+                                    let adaptive_temp = temp * adjust_factor;
+                                    1.0 + (adaptive_temp - 1.0) * ramp_factor
+                                } else {
+                                    // Full adaptive temperature
+                                    temp * adjust_factor
+                                };
 
-                                // Interpolate between 1.0 (no scaling) and actual temperature
-                                let ramped_temp = 1.0 + (temp - 1.0) * ramp_factor;
+                                // Log periodically for monitoring
+                                if batch_idx == 0 && epoch % 10 == 0 {
+                                    log::debug!(
+                                        "🌡️ Entropy-adaptive T: base={:.3}, factor={:.3}, conf={:.3}, entropy={:.3}, ramped={:.3}",
+                                        temp, adjust_factor, confidence, entropy, ramped_temp
+                                    );
+                                }
 
-                                // Create temperature tensor [1, 5] with same temperature for all classes
+                                // Create temperature tensor [1, 5]
                                 let temp_f32 = ramped_temp as f32;
                                 let temp_tensor = Tensor::from_vec(
                                     vec![temp_f32, temp_f32, temp_f32, temp_f32, temp_f32],

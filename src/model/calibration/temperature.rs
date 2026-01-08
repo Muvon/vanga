@@ -4,6 +4,16 @@
 //! Temperature scaling: softmax(logits / T) where T is learned from validation data.
 //!
 //! Uses single shared temperature for all classes (standard calibration approach).
+//!
+//! ## Entropy-Based Adaptive Temperature (2024 Research)
+//!
+//! Temperature can be dynamically adjusted based on prediction uncertainty:
+//! - **High entropy** (uncertain predictions): warmer temperature → softer probabilities
+//! - **Low entropy** (confident predictions): sharper temperature → more concentrated
+//!
+//! Formula: `T_adaptive = T_base * (0.75 + 0.5 * confidence)` where `confidence = 1 - entropy`
+//!
+//! This prevents overconfidence on uncertain predictions while sharpening confident ones.
 
 use super::ece::{calculate_ece, calculate_per_class_ece};
 use crate::utils::error::{Result, VangaError};
@@ -12,6 +22,10 @@ use ndarray::{Array2, Axis};
 use serde::{Deserialize, Serialize};
 
 /// Adaptive temperature scaling with single shared temperature
+///
+/// Supports both static temperature scaling (learned from validation) and
+/// entropy-based adaptive temperature (2024 research) for dynamic adjustment
+/// based on prediction uncertainty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveTemperatureScaling {
     /// Single shared temperature for all classes (learned from validation data)
@@ -345,5 +359,126 @@ impl AdaptiveTemperatureScaling {
             .contiguous()?;
 
         Ok(scaled_logits)
+    }
+
+    /// Calculate prediction entropy for a batch of predictions
+    ///
+    /// Entropy measures uncertainty: high entropy = uncertain predictions,
+    /// low entropy = confident predictions.
+    /// Range: [0, ln(5)] ≈ [0, 1.609]
+    pub fn calculate_entropy(&self, predictions: &Array2<f64>) -> f64 {
+        let num_samples = predictions.nrows();
+        if num_samples == 0 {
+            return 0.0;
+        }
+
+        let epsilon = 1e-10;
+        let log_base = (5.0_f64).ln(); // Natural log of number of classes
+
+        let mut total_entropy = 0.0;
+
+        for pred_row in predictions.axis_iter(ndarray::Axis(0)) {
+            let mut row_entropy = 0.0;
+            for &p in pred_row.iter() {
+                // Clamp probability to avoid log(0)
+                let prob = p.max(epsilon).min(1.0 - epsilon);
+                row_entropy -= prob * prob.ln();
+            }
+            // Normalize by log(5) to get value in [0, 1]
+            total_entropy += row_entropy / log_base;
+        }
+
+        total_entropy / num_samples as f64
+    }
+
+    /// Calculate batch-wise entropies for per-sample adaptive temperature
+    ///
+    /// Returns entropies for each sample in the batch.
+    /// High entropy = uncertain prediction, low entropy = confident.
+    pub fn calculate_batch_entropies(&self, predictions: &Array2<f64>) -> Vec<f64> {
+        let num_samples = predictions.nrows();
+        if num_samples == 0 {
+            return Vec::new();
+        }
+
+        let epsilon = 1e-10;
+        let log_base = (5.0_f64).ln();
+
+        let mut entropies = Vec::with_capacity(num_samples);
+
+        for pred_row in predictions.axis_iter(ndarray::Axis(0)) {
+            let mut row_entropy = 0.0;
+            for &p in pred_row.iter() {
+                let prob = p.max(epsilon).min(1.0 - epsilon);
+                row_entropy -= prob * prob.ln();
+            }
+            // Normalize to [0, 1]
+            entropies.push(row_entropy / log_base);
+        }
+
+        entropies
+    }
+
+    /// Apply entropy-based adaptive temperature scaling
+    ///
+    /// This 2024 research approach adapts temperature based on prediction entropy:
+    /// - High entropy (uncertain): warmer temperature → softer probabilities
+    /// - Low entropy (confident): sharper temperature → more concentrated
+    ///
+    /// Formula: T_adaptive = T_base * (0.75 + 0.5 * confidence)
+    /// Where confidence = 1 - normalized_entropy
+    /// Resulting range: [0.75 * T_base, 1.25 * T_base]
+    ///
+    /// Args:
+    ///     logits: Raw model logits [batch, 5]
+    ///     base_temperature: Optimized temperature from validation calibration
+    ///     ramp_factor: Gradual ramp-up factor [0, 1] from training loop
+    ///
+    /// Returns:
+    ///     Tuple of (adapted_predictions, average_entropy) for logging
+    pub fn apply_entropy_adaptive_temperature(
+        &self,
+        logits: &Array2<f64>,
+        base_temperature: f64,
+        ramp_factor: f64,
+    ) -> Result<(Array2<f64>, f64)> {
+        // First apply base temperature to get probabilities
+        let predictions = self.apply_temperature_to_logits(logits, base_temperature)?;
+
+        // Calculate entropy for each sample
+        let entropies = self.calculate_batch_entropies(&predictions);
+        let avg_entropy = entropies.iter().sum::<f64>() / entropies.len() as f64;
+
+        // Confidence is inverse of entropy (normalized to [0, 1])
+        // entropy=1 (max) → confidence=0 (uncertain)
+        // entropy=0 (min) → confidence=1 (confident)
+        let confidence = 1.0 - avg_entropy;
+
+        // Adaptive temperature: higher for uncertain, lower for confident
+        // Range: 0.75×T_base to 1.25×T_base based on confidence
+        let adaptive_factor = 0.75 + 0.5 * confidence;
+        let adaptive_temperature = base_temperature * adaptive_factor;
+
+        // If ramp factor < 1, interpolate between T=1 (no scaling) and adaptive T
+        let ramped_temperature = if ramp_factor < 1.0 {
+            1.0 + (adaptive_temperature - 1.0) * ramp_factor
+        } else {
+            adaptive_temperature
+        };
+
+        // Re-apply with adaptive temperature
+        let adapted_predictions = self.apply_temperature_to_logits(logits, ramped_temperature)?;
+
+        Ok((adapted_predictions, avg_entropy))
+    }
+
+    /// Get temperature adjustment info for logging
+    ///
+    /// Returns tuple of (adaptive_factor, confidence, entropy) for monitoring
+    pub fn get_temperature_adjustment_info(&self, predictions: &Array2<f64>) -> (f64, f64, f64) {
+        let entropy = self.calculate_entropy(predictions);
+        let confidence = 1.0 - entropy;
+        let adaptive_factor = 0.75 + 0.5 * confidence;
+        (adaptive_factor, confidence, entropy)
     }
 }
