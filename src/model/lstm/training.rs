@@ -3319,38 +3319,35 @@ impl LSTMModel {
             }
         }
 
-        // Check feature variance - convert to appropriate type
-        let features_array = match lstm_features.dtype() {
-            candle_core::DType::F32 => {
-                let f32_array = lstm_features.to_vec2::<f32>()?;
-                f32_array
-                    .iter()
-                    .map(|row| row.iter().map(|&x| x as f64).collect())
-                    .collect::<Vec<Vec<f64>>>()
-            }
-            candle_core::DType::F64 => lstm_features.to_vec2::<f64>()?,
-            _ => {
-                log::warn!("Unexpected dtype for LSTM features, skipping variance check");
-                vec![]
-            }
-        };
-
-        if !features_array.is_empty() {
-            let mut zero_variance_count = 0;
-            for col_idx in 0..features_array[0].len() {
-                let col_values: Vec<f64> = features_array.iter().map(|row| row[col_idx]).collect();
-                let variance = statistical_variance(&col_values);
+        // Check feature variance using tensor operations (avoids materializing full CPU copy)
+        let zero_variance_count = if lstm_features.dim(1)? > 0 {
+            let feature_dim = lstm_features.dim(1)?;
+            let mut zero_count = 0;
+            for col_idx in 0..feature_dim {
+                // Extract single column without full CPU copy
+                let col = lstm_features
+                    .narrow(1, col_idx, 1)?
+                    .squeeze(1)?
+                    .to_vec1::<f32>()?;
+                // Calculate variance directly
+                let mean: f32 = col.iter().sum::<f32>() / col.len() as f32;
+                let variance: f32 =
+                    col.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / col.len() as f32;
                 if variance < 1e-10 {
-                    zero_variance_count += 1;
+                    zero_count += 1;
                 }
             }
-            if zero_variance_count > 0 {
-                log::warn!(
-                    "⚠️ {} out of {} LSTM features have near-zero variance!",
-                    zero_variance_count,
-                    features_array[0].len()
-                );
-            }
+            zero_count
+        } else {
+            0
+        };
+
+        if zero_variance_count > 0 {
+            log::warn!(
+                "⚠️ {} out of {} LSTM features have near-zero variance!",
+                zero_variance_count,
+                lstm_features.dim(1)?
+            );
         }
         log::debug!("   • z = h_n (final LSTM hidden state)");
         log::debug!("   • Architecture: {:?}", self.architecture);
@@ -3895,14 +3892,4 @@ impl LSTMModel {
 
         Ok(())
     }
-}
-
-/// Helper function to calculate statistical variance
-fn statistical_variance(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
-    variance
 }
