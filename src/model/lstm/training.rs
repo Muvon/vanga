@@ -1015,6 +1015,9 @@ impl LSTMModel {
             total_params,
         );
         // Unified training loop with warmup, adaptive learning, optional validation, and early stopping
+        // Track previous epoch's loss for ReduceOnPlateau scheduler (None for first epoch)
+        let mut previous_epoch_loss: Option<f64> = None;
+
         for epoch in 0..self.training_config.epochs {
             // Clear variational dropout masks at the start of each epoch for fresh randomization
             self.clear_dropout_masks();
@@ -1023,9 +1026,6 @@ impl LSTMModel {
             let mut epoch_train_loss = 0.0;
             let mut epoch_grad_norm = 0.0; // Track gradient norm for epoch logging
             let mut batch_count = 0;
-
-            // Track previous epoch's loss for ReduceOnPlateau scheduler (None for first epoch)
-            let mut previous_epoch_loss: Option<f64> = None;
 
             // CRITICAL FIX: Shuffle training data indices each epoch to prevent overfitting to batch order
             let mut sample_indices: Vec<usize> = (0..total_train_samples).collect();
