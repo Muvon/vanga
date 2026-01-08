@@ -1157,6 +1157,14 @@ impl LSTMModel {
                                 let initial_lr = scheduler.current_lr();
                                 optimizer.set_learning_rate(initial_lr);
                             }
+
+                            // Log scheduler status AFTER step to show actual best_loss
+                            log::debug!(
+                                "📊 ReduceOnPlateau status - Best loss: {:.6}, Patience: {}/{}",
+                                scheduler.best_loss,
+                                scheduler.patience_counter,
+                                scheduler.patience
+                            );
                         } else {
                             // Non-ReduceOnPlateau schedules: use epoch-based calculation
                             let epoch_after_warmup = epoch - warmup_epochs as usize;
@@ -2280,16 +2288,6 @@ impl LSTMModel {
                         effective_lr,
                         warmup_status,
                         schedule_status
-                    );
-                }
-
-                // Additional adaptive learning rate status for ReduceOnPlateau
-                if let Some(ref scheduler) = reduce_on_plateau_scheduler {
-                    log::debug!(
-                        "📊 ReduceOnPlateau status - Best loss: {:.6}, Patience: {}/{}",
-                        scheduler.best_loss,
-                        scheduler.patience_counter,
-                        scheduler.patience
                     );
                 }
             }
