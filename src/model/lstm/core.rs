@@ -1204,11 +1204,24 @@ impl LSTMModel {
         std::fs::create_dir_all(&checkpoint_dir)
             .map_err(|e| VangaError::IoError(format!("Failed to create checkpoint dir: {}", e)))?;
 
-        let checkpoint_path = checkpoint_dir.join(format!(
-            "best_model_{}_{}.safetensors",
-            std::process::id(),
-            epoch
-        ));
+        // CRITICAL FIX: Clean up old checkpoint files BEFORE saving new one to prevent memory leak
+        // This prevents accumulation of checkpoint files during training
+        let pid = std::process::id();
+        if let Ok(entries) = std::fs::read_dir(&checkpoint_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    // Delete old checkpoint files for this process
+                    if filename.starts_with(&format!("best_model_{}_", pid)) {
+                        let _ = std::fs::remove_file(&path);
+                        log::debug!("🧹 Cleaned up old checkpoint: {}", filename);
+                    }
+                }
+            }
+        }
+
+        let checkpoint_path =
+            checkpoint_dir.join(format!("best_model_{}_{}.safetensors", pid, epoch));
 
         // Save the entire model state using the existing save method
         self.save(&checkpoint_path)?;

@@ -2333,6 +2333,31 @@ impl LSTMModel {
         self.optimizer = Some(optimizer);
         log::info!("💾 Optimizer state preserved for potential continuation training");
 
+        // CRITICAL FIX: Clean up ALL checkpoint files at end of training to prevent memory leak
+        // This ensures no checkpoint files are left behind after training completes
+        let checkpoint_dir = std::env::temp_dir().join("vanga_checkpoints");
+        let pid = std::process::id();
+        if let Ok(entries) = std::fs::read_dir(&checkpoint_dir) {
+            let mut cleaned_count = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    // Delete all checkpoint files for this process
+                    if filename.starts_with(&format!("best_model_{}_", pid)) {
+                        if std::fs::remove_file(&path).is_ok() {
+                            cleaned_count += 1;
+                        }
+                    }
+                }
+            }
+            if cleaned_count > 0 {
+                log::debug!(
+                    "🧹 Cleaned up {} checkpoint files at end of training",
+                    cleaned_count
+                );
+            }
+        }
+
         Ok(())
     }
     fn setup_advanced_optimizer(
