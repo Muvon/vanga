@@ -123,7 +123,7 @@ impl AdaptiveTemperatureScaling {
         logits: &Array2<f64>,
         targets: &Array2<f64>,
     ) -> Result<f64> {
-        const TEMP_MIN: f64 = 0.5;
+        const TEMP_MIN: f64 = 0.05; // Extended from 0.5 to allow sharper temperature scaling
         const TEMP_MAX: f64 = 5.0;
         const PRECISION: f64 = 0.01;
         const MAX_ITERATIONS: u32 = 50;
@@ -146,6 +146,8 @@ impl AdaptiveTemperatureScaling {
                 let predictions = self.apply_temperature_to_logits(logits, temp)?;
                 let nll = self.calculate_nll(&predictions, targets)?;
 
+                log::trace!("   Temp={:.4}: NLL={:.6}", temp, nll);
+
                 if nll < best_nll {
                     best_nll = nll;
                     best_temp = temp;
@@ -164,6 +166,14 @@ impl AdaptiveTemperatureScaling {
                 high = (best_temp + range).min(TEMP_MAX);
             }
         }
+
+        log::info!(
+            "   Binary search: best_temp={:.4} (NLL={:.6}), range=[{:.2}, {:.2}]",
+            best_temp,
+            best_nll,
+            low,
+            high
+        );
 
         Ok(best_temp)
     }

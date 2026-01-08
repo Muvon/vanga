@@ -75,10 +75,10 @@ fn test_optimize_temperature_nll_minimization() {
         "Temperature should be optimized, not 1.0"
     );
 
-    // Temperature should be in reasonable range [0.5, 5.0]
+    // Temperature should be in extended range [0.05, 5.0]
     assert!(
-        temp_scaling.temperature >= 0.5 && temp_scaling.temperature <= 5.0,
-        "Temperature should be in range [0.5, 5.0], got {}",
+        temp_scaling.temperature >= 0.05 && temp_scaling.temperature <= 5.0,
+        "Temperature should be in range [0.05, 5.0], got {}",
         temp_scaling.temperature
     );
 
