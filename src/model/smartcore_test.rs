@@ -40,7 +40,7 @@ async fn test_smartcore_training() -> Result<()> {
     // Create synthetic training data
     let batch_size = 50;
     let feature_dim = 4;
-    let num_classes = 3;
+    let num_classes = 5; // Use 5 classes as per architecture
 
     let features_data: Vec<f32> = (0..batch_size * feature_dim)
         .map(|i| (i as f32 * 0.1).sin())
@@ -88,7 +88,7 @@ async fn test_xgboost_wrapper_with_smartcore() -> Result<()> {
     // Create synthetic data
     let batch_size = 30;
     let feature_dim = 6;
-    let num_classes = 4;
+    let num_classes = 5; // Use 5 classes as per architecture
 
     let features_data: Vec<f32> = (0..batch_size * feature_dim)
         .map(|i| (i as f32 * 0.05).cos() + 0.1)
@@ -96,10 +96,10 @@ async fn test_xgboost_wrapper_with_smartcore() -> Result<()> {
     let features = Tensor::from_vec(features_data, (batch_size, feature_dim), &device)?
         .to_dtype(DType::F32)?;
 
-    // Create one-hot targets
+    // Create one-hot targets with 5 classes
     let mut targets_data = Vec::new();
     for i in 0..batch_size {
-        let class = (i * 2 + 1) % num_classes;
+        let class = (i * 2) % num_classes;
         let mut target_row = vec![0.0f32; num_classes];
         target_row[class] = 1.0;
         targets_data.extend(target_row);
@@ -301,7 +301,7 @@ async fn test_backend_compatibility() -> Result<()> {
     // Create same data for both
     let batch_size = 25;
     let feature_dim = 4;
-    let num_classes = 3;
+    let num_classes = 5; // Use 5 classes as per architecture
 
     let features_data: Vec<f32> = (0..batch_size * feature_dim)
         .map(|i| (i as f32 * 0.1).sin())

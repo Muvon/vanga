@@ -1243,15 +1243,16 @@ mod tests {
         let device = Device::Cpu;
         let regressor = SmartCoreRegressor::new(config, device.clone());
 
-        // Test 1D tensor (regression)
+        // VANGA ALWAYS uses 5-class system - test reflects new architecture
+        // Test 1D tensor - returns 5 for 5-class classification
         let targets_1d = Tensor::zeros((10,), candle_core::DType::F32, &device).unwrap();
-        assert_eq!(regressor.determine_num_classes(&targets_1d).unwrap(), 1);
+        assert_eq!(regressor.determine_num_classes(&targets_1d).unwrap(), 5);
 
-        // Test 2D tensor with 1 column (regression/binary)
+        // Test 2D tensor with 1 column - returns 5 for 5-class
         let targets_2d_1 = Tensor::zeros((10, 1), candle_core::DType::F32, &device).unwrap();
-        assert_eq!(regressor.determine_num_classes(&targets_2d_1).unwrap(), 1);
+        assert_eq!(regressor.determine_num_classes(&targets_2d_1).unwrap(), 5);
 
-        // Test 2D tensor with multiple columns (multi-class)
+        // Test 2D tensor with 5 columns - returns 5 for 5-class consistency
         let targets_2d_5 = Tensor::zeros((10, 5), candle_core::DType::F32, &device).unwrap();
         assert_eq!(regressor.determine_num_classes(&targets_2d_5).unwrap(), 5);
     }

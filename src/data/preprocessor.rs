@@ -1444,8 +1444,7 @@ impl DataPreprocessor {
                             }
                         };
 
-                        let normalized_series =
-                            Series::new(column_name.clone(), normalized_values);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
                         stats_index += 1;
 
@@ -1556,8 +1555,7 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - median) / iqr))
                             .collect();
 
-                        let normalized_series =
-                            Series::new(column_name.clone(), normalized_values);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!("Column '{}': median={:.4}, Q1={:.4}, Q3={:.4}, IQR={:.4} - normalized for time-series stability",
@@ -1626,8 +1624,7 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - min_val) / range))
                             .collect();
 
-                        let normalized_series =
-                            Series::new(column_name.clone(), normalized_values);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
@@ -1699,8 +1696,7 @@ impl DataPreprocessor {
                             .map(|v| v.filter(|x| x.is_finite()).map(|x| (x - mean) / std_dev))
                             .collect();
 
-                        let normalized_series =
-                            Series::new(column_name.clone(), normalized_values);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(
@@ -1772,8 +1768,7 @@ impl DataPreprocessor {
                             })
                             .collect();
 
-                         let normalized_series =
-                            Series::new(column_name.clone(), normalized_values);
+                        let normalized_series = Series::new(column_name.clone(), normalized_values);
                         normalized_columns.push(normalized_series.into_column());
 
                         log::debug!(

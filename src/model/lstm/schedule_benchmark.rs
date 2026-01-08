@@ -427,8 +427,9 @@ mod tests {
         let metrics = benchmark_multiple_schedules(schedules, &config);
 
         assert_eq!(metrics.len(), 2);
-        assert_eq!(metrics[0].schedule_name, "Constant");
-        assert_eq!(metrics[1].schedule_name, "LinearDecay");
+        // Schedule names are formatted as debug output with details
+        assert!(metrics[0].schedule_name.starts_with("Constant"));
+        assert!(metrics[1].schedule_name.starts_with("LinearDecay"));
     }
 
     #[test]

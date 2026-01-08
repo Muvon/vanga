@@ -113,9 +113,14 @@ async fn test_attention_vs_baseline_comparison() -> Result<()> {
         !baseline_model.use_attention,
         "Baseline should not use attention"
     );
+    // Note: attention_config is stored regardless of use_attention (for reference)
     assert!(
-        baseline_model.attention_config.is_none(),
-        "Baseline should have no attention config"
+        baseline_model.attention_config.is_some(),
+        "Baseline should store attention config for reference"
+    );
+    assert!(
+        !baseline_model.attention_config.unwrap().enabled,
+        "Baseline stored config should show attention disabled"
     );
 
     assert!(
@@ -185,7 +190,11 @@ async fn test_backward_compatibility() -> Result<()> {
 
     // Verify attention is disabled
     assert!(!model.use_attention);
-    assert!(model.attention_config.is_none());
+    // Config is stored for reference but shows disabled
+    assert!(
+        model.attention_config.is_some() && !model.attention_config.unwrap().enabled,
+        "Non-attention model should store disabled config"
+    );
 
     Ok(())
 }

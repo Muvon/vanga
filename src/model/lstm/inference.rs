@@ -1320,6 +1320,7 @@ eval_metric = "rmse"
 objective = "reg:squarederror"
 save_feature_importance = true
 importance_type = "gain"
+importance_method = "permutation"
 "#;
 
         // Parse the TOML config
