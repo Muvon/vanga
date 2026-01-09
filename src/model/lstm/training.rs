@@ -1305,23 +1305,39 @@ impl LSTMModel {
                             // - High entropy (uncertain): warmer temperature (0.75×T to 1.0×T)
                             // - Low entropy (confident): sharper temperature (1.0×T to 1.25×T)
                             if ramp_factor > 0.01 {
-                                // Convert predictions tensor to ndarray for entropy calculation
+                                // Convert predictions tensor (F32) to ndarray (f64) for entropy calculation
                                 let pred_shape = predictions.shape();
-                                let pred_data: Vec<f64> = predictions.to_vec1().map_err(|e| {
-                                    VangaError::ModelError(format!(
-                                        "Failed to convert predictions to vec: {}",
-                                        e
-                                    ))
-                                })?;
+                                let batch_size = pred_shape.dims()[0];
+                                // Tensor is F32, convert to f64
+                                let pred_data: Vec<f64> = predictions
+                                    .flatten_all()
+                                    .map_err(|e| {
+                                        VangaError::ModelError(format!(
+                                            "Failed to flatten predictions: {}",
+                                            e
+                                        ))
+                                    })?
+                                    .to_vec1::<f32>()
+                                    .map_err(|e| {
+                                        VangaError::ModelError(format!(
+                                            "Failed to convert predictions to vec: {}",
+                                            e
+                                        ))
+                                    })?
+                                    .iter()
+                                    .map(|&v| v as f64)
+                                    .collect();
                                 let predictions_array =
-                                    Array2::from_shape_vec((pred_shape.dims()[0], 5), pred_data)
-                                        .map_err(|e| {
+                                    Array2::from_shape_vec((batch_size, 5), pred_data).map_err(
+                                        |e| {
                                             VangaError::ModelError(format!(
                                                 "Failed to create predictions array: {}",
                                                 e
                                             ))
-                                        })?;
+                                        },
+                                    )?;
 
+                                // Get temperature adjustment info for logging
                                 // Get temperature adjustment info for logging
                                 let (adjust_factor, confidence, entropy) = ensemble_cal
                                     .temperature_scaling
