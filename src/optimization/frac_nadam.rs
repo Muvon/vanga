@@ -266,8 +266,10 @@ impl Optimizer for FracNAdam {
                 .div(&bias_corr2_tensor)?
                 .contiguous()?;
 
-            // Nesterov acceleration term (equation 38)
-            // θ = θ - η * [β₁ m̂_t^(α) + (1-β₁) D^α ∇_θ J(θ)] / (√v̂_t^(α) + ε)
+            // Nesterov acceleration term (equation 38 from fractional NAdam paper)
+            // Uses bias-corrected m̂_t as per the fractional paper's derivation,
+            // which differs from Dozat 2016 NAdam that uses raw moment m_t
+            // Formula: β₁ * m̂_t + (1 - β₁) * D^α∇J(θ)
             let nesterov_term = corrected_first_moment
                 .contiguous()?
                 .mul(&beta1_tensor)?

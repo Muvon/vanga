@@ -295,10 +295,6 @@ impl Optimizer for FracProdigy {
             );
         }
 
-        // Bias correction factors
-        let bias_correction1 = 1.0 - self.params.beta1.powi(self.step_count as i32);
-        let bias_correction2 = 1.0 - self.params.beta2.powi(self.step_count as i32);
-
         // Apply Fractional NAdam updates with automatic LR
         for (i, (var, frac_grad)) in self.vars.iter().zip(fractional_grads.iter()).enumerate() {
             // Apply weight decay to fractional gradient if specified
@@ -323,11 +319,23 @@ impl Optimizer for FracProdigy {
                 (&grad_squared * (1.0 - self.params.beta2))?
             };
 
-            // Bias correction
-            let corrected_first_moment = (&first_moment / bias_correction1)?;
-            let corrected_second_moment = (&second_moment / bias_correction2)?;
+            // Bias correction for second moment only (first_moment used raw in Nesterov)
+            let bias_correction2 = 1.0 - self.params.beta2.powi(self.step_count as i32);
+            let bias_corr2_tensor = Tensor::new(bias_correction2 as f32, var.device())?
+                .broadcast_as(second_moment.shape())?
+                .contiguous()?;
+            let corrected_second_moment = second_moment.contiguous()?.div(&bias_corr2_tensor)?;
 
-            // Nesterov acceleration term (NAdam)
+            // Nesterov acceleration term (consistent with fractional NAdam paper)
+            // Uses bias-corrected m̂_t for consistency with FracNAdam
+            // Formula: β₁ * m̂_t + (1 - β₁) * D^α∇J(θ)
+            // Compute bias correction for first moment
+            let bias_correction1 = 1.0 - self.params.beta1.powi(self.step_count as i32);
+            let bias_corr1_tensor = Tensor::new(bias_correction1 as f32, var.device())?
+                .broadcast_as(first_moment.shape())?
+                .contiguous()?;
+            let corrected_first_moment = first_moment.contiguous()?.div(&bias_corr1_tensor)?;
+
             let nesterov_term = ((&corrected_first_moment * self.params.beta1)?
                 + (&grad_with_decay * (1.0 - self.params.beta1))?)?;
 
