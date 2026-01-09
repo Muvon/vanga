@@ -145,14 +145,22 @@ pub struct DataConfig {
     /// Normalization method
     pub normalization: NormalizationMethod,
 
-    /// Sequence overlap ratio
+    /// Sequence overlap ratio (0.0-1.0)
     pub sequence_overlap: f64,
+
+    /// Enable sequence augmentation for overlapping sequences
+    #[serde(default = "default_sequence_augment")]
+    pub sequence_augment: bool,
 
     /// Outlier detection and handling
     pub outlier_handling: OutlierHandling,
 
     /// Feature selection configuration
     pub feature_selection: FeatureSelectionConfig,
+}
+
+fn default_sequence_augment() -> bool {
+    false
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd, Debug, Clone, Serialize, Deserialize)]
@@ -1522,6 +1530,7 @@ impl Default for DataConfig {
         Self {
             normalization: NormalizationMethod::Robust,
             sequence_overlap: 0.8,
+            sequence_augment: false,
             outlier_handling: OutlierHandling {
                 enabled: true,
                 method: OutlierMethod::ModifiedZScore,

@@ -1,3 +1,6 @@
+pub mod augmentation;
+#[cfg(test)]
+mod augmentation_test;
 pub mod balance;
 #[cfg(test)]
 mod balance_critical_test;
@@ -17,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
+pub use augmentation::{augment_sequence, AugmentationConfig};
 pub use loader::DataLoader;
 pub use preprocessor::DataPreprocessor;
 pub use schema::{CryptoDataSchema, DataValidationError};
