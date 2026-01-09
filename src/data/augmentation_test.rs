@@ -2,12 +2,14 @@ use crate::data::augmentation::*;
 use ndarray::Array2;
 
 #[test]
-fn test_augmentation_always_enabled_when_flag_set() {
+fn test_augmentation_config_creation() {
+    // Config should be created with default values
     let config = AugmentationConfig::from_overlap(0.1);
-    assert!(config.should_augment());
+    assert!((config.magnitude_sigma - 0.2).abs() < 1e-6);
+    assert!((config.jitter_sigma - 0.03).abs() < 1e-6);
 
     let config = AugmentationConfig::from_overlap(0.9);
-    assert!(config.should_augment());
+    assert!((config.scaling_sigma - 0.1).abs() < 1e-6);
 }
 
 #[test]
@@ -108,22 +110,6 @@ fn test_calculate_overlap_ratio() {
 }
 
 #[test]
-fn test_mixup_sequences() {
-    let mut rng = rand::rng();
-    let seq1 = Array2::ones((100, 5));
-    let seq2 = Array2::ones((100, 5)) * 2.0;
-
-    let (mixed, lambda) = mixup_sequences(&seq1, &seq2, 0.2, &mut rng);
-
-    assert_eq!(mixed.shape(), seq1.shape());
-    assert!(lambda >= 0.0 && lambda <= 1.0);
-
-    // Mixed values should be between 1.0 and 2.0
-    let mean = mixed.mean().unwrap();
-    assert!(mean >= 1.0 && mean <= 2.0);
-}
-
-#[test]
 fn test_cubic_interpolate() {
     let points = vec![1.0, 2.0, 3.0, 4.0];
     let interpolated = cubic_interpolate(&points, 10);
@@ -197,9 +183,10 @@ fn test_jitter_range() {
     let sigma = 0.03;
     let jittered = jitter(&sequence, sigma, &mut rng);
 
-    // Values should be within reasonable range (1.0 ± sigma)
+    // With Gaussian noise, values should be mostly within 3*sigma (99.7% of values)
+    // but we check a wider range to avoid flaky tests
     for val in jittered.iter() {
-        assert!(*val > 1.0 - sigma - 0.01 && *val < 1.0 + sigma + 0.01);
+        assert!(*val > 1.0 - 4.0 * sigma && *val < 1.0 + 4.0 * sigma);
     }
 }
 

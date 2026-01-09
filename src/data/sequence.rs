@@ -609,10 +609,10 @@ impl SequenceGenerator {
             None
         };
 
-        if let Some(ref config) = augment_config {
+        if augment_config.is_some() {
             log::info!(
                 "🎨 Augmentation ENABLED: overlap={:.1}%, augmenting ALL overlapping sequences",
-                config.overlap * 100.0
+                data_config.sequence_overlap * 100.0
             );
             log::info!(
                 "   Techniques: magnitude_warp (always), jitter (50%), scaling (50%), time_warp (30%)"
