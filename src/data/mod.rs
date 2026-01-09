@@ -553,6 +553,26 @@ impl DataPipeline {
                         .cloned()
                         .unwrap_or_default();
 
+                    // CRITICAL FIX: Create augmentation config ONLY for training data
+                    // Augmentation is applied AFTER the split to avoid data leakage into val/test
+                    let augment_config = if config.data.sequence_augment {
+                        Some(crate::data::augmentation::AugmentationConfig::from_overlap(
+                            config.data.sequence_overlap,
+                        ))
+                    } else {
+                        None
+                    };
+
+                    if let Some(ref config_aug) = augment_config {
+                        log::debug!(
+                            "   🎨 Augmentation enabled for training: sigma_jitter={:.3}, sigma_magnitude={:.2}, sigma_time={:.2}, sigma_scale={:.2}",
+                            config_aug.jitter_sigma,
+                            config_aug.magnitude_sigma,
+                            config_aug.time_warp_sigma,
+                            config_aug.scaling_sigma
+                        );
+                    }
+
                     log::debug!(
                         "   🎯 {:?} {} balanced split: {} train (balanced), {} val (balanced)",
                         target_type,
@@ -620,17 +640,25 @@ impl DataPipeline {
                     let mut val_indices_map = HashMap::new();
                     val_indices_map.insert(target_key.clone(), val_indices.clone());
 
+                    // CRITICAL: Apply augmentation ONLY to training data, NOT to validation/test
+                    // This prevents data leakage and ensures proper evaluation
+                    let train_augment_config = augment_config.as_ref();
+
                     // Create window data using target-specific indices
+                    // NOTE: Augmentation is applied inside create_data_from_indices() for train only
                     let train_data = self.create_data_from_indices(
                         &all_sequences_data,
                         &train_indices_map,
                         &all_sequences,
+                        train_augment_config,
                     )?;
 
+                    // Validation data: NO augmentation (pristine data for proper evaluation)
                     let val_data = self.create_data_from_indices(
                         &all_sequences_data,
                         &val_indices_map,
                         &all_sequences,
+                        None, // NO augmentation for validation
                     )?;
 
                     // TEST DATA: Use diverse test split from create_diverse_splits
@@ -647,10 +675,12 @@ impl DataPipeline {
                             test_indices_map.insert(target_key.clone(), test_indices.clone());
 
                             // Create test data using target-specific indices
+                            // TEST DATA: NO augmentation (pristine data for final evaluation)
                             let test_data = self.create_data_from_indices(
                                 &all_sequences_data,
                                 &test_indices_map,
                                 &all_sequences,
+                                None, // NO augmentation for test data
                             )?;
 
                             log::info!(
@@ -811,11 +841,13 @@ impl DataPipeline {
     }
 
     /// Create PreparedData from selected sequence indices with PROPER target alignment
+    /// Optionally applies augmentation to training sequences only
     fn create_data_from_indices(
         &self,
         all_data: &PreparedData,
         indices_by_target: &HashMap<(crate::targets::TargetType, String), Vec<usize>>,
         all_sequences: &[crate::data::balance::SequenceWithTargets],
+        augment_config: Option<&crate::data::augmentation::AugmentationConfig>,
     ) -> Result<PreparedData> {
         // Get unique indices across all targets
         let mut unique_indices: HashSet<usize> = HashSet::new();
@@ -859,11 +891,56 @@ impl DataPipeline {
         let mut sequences = ndarray::Array3::zeros((num_sequences, sequence_length, num_features));
         let mut sequence_indices = Vec::new();
 
+        // Apply augmentation if configured
+        // CRITICAL: Augmentation is only applied here for training data
+        // This ensures validation and test data remain pristine
+        let mut augmented_count = 0;
+        let mut rng = rand::rng();
+
         for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
             sequences
                 .slice_mut(ndarray::s![new_idx, .., ..])
                 .assign(&all_data.sequences.slice(ndarray::s![orig_idx, .., ..]));
             sequence_indices.push(all_data.sequence_indices[orig_idx]);
+
+            // Apply augmentation if enabled and configured
+            // Note: We augment based on overlap with the PREVIOUS sequence in THIS dataset
+            // not the original all_sequences dataset
+            if let Some(config) = augment_config {
+                if new_idx > 0 {
+                    // Check overlap with previous sequence in this subset
+                    let prev_orig_idx = sorted_indices[new_idx - 1];
+                    let prev_start = all_data.sequence_indices[prev_orig_idx].0;
+                    let prev_end = all_data.sequence_indices[prev_orig_idx].1;
+                    let curr_start = all_data.sequence_indices[orig_idx].0;
+                    let curr_end = all_data.sequence_indices[orig_idx].1;
+
+                    if crate::data::augmentation::sequences_overlap(
+                        prev_start, prev_end, curr_start, curr_end,
+                    ) {
+                        // Augment this sequence
+                        // We need to work with Array2 for augmentation
+                        let mut sequence_2d =
+                            sequences.slice(ndarray::s![new_idx, .., ..]).to_owned();
+                        sequence_2d = crate::data::augmentation::augment_sequence(
+                            &sequence_2d,
+                            config,
+                            &mut rng,
+                        );
+                        // Copy back
+                        let mut seq_view_mut = sequences.slice_mut(ndarray::s![new_idx, .., ..]);
+                        seq_view_mut.assign(&sequence_2d);
+                        augmented_count += 1;
+                    }
+                }
+            }
+        }
+
+        if augmented_count > 0 {
+            log::debug!(
+                "   • Applied augmentation to {} overlapping training sequences",
+                augmented_count
+            );
         }
 
         // Create targets using EMBEDDED targets from SequenceWithTargets (CRITICAL FIX!)

@@ -600,66 +600,24 @@ impl SequenceGenerator {
             rayon::current_num_threads()
         );
 
-        // Augmentation configuration based on overlap
-        let augment_config = if data_config.sequence_augment {
-            Some(crate::data::augmentation::AugmentationConfig::from_overlap(
-                data_config.sequence_overlap,
-            ))
-        } else {
-            None
-        };
-
-        if augment_config.is_some() {
-            log::info!(
-                "🎨 Augmentation ENABLED: overlap={:.1}%, augmenting ALL overlapping sequences",
-                data_config.sequence_overlap * 100.0
-            );
-            log::info!(
-                "   Techniques: magnitude_warp (always), jitter (50%), scaling (50%), time_warp (30%)"
-            );
-        } else {
-            log::info!("🎨 Augmentation DISABLED: sequence_augment=false");
-        }
-
         // Start timing for performance measurement
         let start_time = std::time::Instant::now();
 
         // Generate sequences using parallel processing - each sequence processed independently
+        // NOTE: Augmentation is NOT applied here. It should be applied AFTER the train/val/test split
+        // to avoid data leakage into validation and test sets.
         let all_sequences: Result<Vec<Array2<f64>>> = sequence_indices
             .par_iter() // ← PARALLEL PROCESSING: Each sequence on different thread
             .enumerate()
-            .map(|(seq_idx, &start_idx)| {
+            .map(|(_seq_idx, &start_idx)| {
                 // Extract the complete window (sequence + horizon)
                 let window_df = df.slice(start_idx as i64, total_window_size);
 
                 // FIXED: Only normalize the input sequence part, NOT targets
                 let sequence_df = window_df.slice(0, sequence_length);
                 let normalized_sequence = self.normalize_sequence_window(&sequence_df)?;
-                let mut sequence_matrix =
+                let sequence_matrix =
                     self.extract_feature_matrix(&normalized_sequence, &feature_columns)?;
-
-                // Apply augmentation if enabled and sequence overlaps with previous
-                if let Some(ref config) = augment_config {
-                    if seq_idx > 0 {
-                        // Check if this sequence overlaps with previous
-                        let prev_start = sequence_indices[seq_idx - 1];
-                        let prev_end = prev_start + sequence_length;
-                        let curr_start = start_idx;
-                        let curr_end = curr_start + sequence_length;
-
-                        if crate::data::augmentation::sequences_overlap(
-                            prev_start, prev_end, curr_start, curr_end,
-                        ) {
-                            // This sequence overlaps - apply augmentation
-                            let mut rng = rand::rng();
-                            sequence_matrix = crate::data::augmentation::augment_sequence(
-                                &sequence_matrix,
-                                config,
-                                &mut rng,
-                            );
-                        }
-                    }
-                }
 
                 Ok(sequence_matrix)
             })
