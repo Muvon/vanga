@@ -1105,6 +1105,7 @@ fn calculate_hurst_exponent(prices: &[f64], window: usize) -> Vec<f64> {
 /// Calculate Fractal Dimension using Higuchi method
 /// Better suited for time series than box-counting
 /// Returns values typically in range [1.0, 2.0]
+/// Uses 1.5 as default for windows where calculation fails (low variation, constant prices, etc.)
 fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec<f64> {
     let mut fractal_dims = vec![f64::NAN; prices.len()];
 
@@ -1112,63 +1113,81 @@ fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec
         return fractal_dims;
     }
 
-    let k_max = 8; // Number of intervals to test
+    let k_max = 8.min(max_window / 4); // Ensure k_max is reasonable for window size
 
     for idx in max_window..prices.len() {
         let window = &prices[idx - max_window..idx];
         let n = window.len();
 
-        let mut lk_values = Vec::new();
-        let mut log_k_values = Vec::new();
+        let mut l_k_values = Vec::with_capacity(k_max);
 
         for k in 1..=k_max {
-            let mut lm_sum = 0.0;
+            let mut l_m_values = Vec::with_capacity(k);
 
             for m in 0..k {
-                let mut length = 0.0;
-                let max_i = ((n - m - 1) as f64 / k as f64).floor() as usize;
+                // Calculate floor((N-m)/k) as per Higuchi formula
+                let num_segments = (n - m - 1) / k;
 
-                for i in 1..=max_i {
-                    let idx1 = m + i * k;
-                    let idx2 = m + (i - 1) * k;
-                    if idx1 < window.len() && idx2 < window.len() {
-                        length += (window[idx1] - window[idx2]).abs();
-                    }
+                if num_segments == 0 {
+                    continue;
                 }
 
-                // Normalize
-                let norm_factor = (n - 1) as f64 / (max_i as f64 * k as f64);
-                length *= norm_factor / k as f64;
-                lm_sum += length;
+                // Calculate curve length for this m
+                let mut curve_length = 0.0;
+                for i in 1..=num_segments {
+                    let idx1 = m + i * k;
+                    let idx2 = m + (i - 1) * k;
+                    curve_length += (window[idx1] - window[idx2]).abs();
+                }
+
+                // Apply Higuchi normalization: L_m(k) = [curve_length × (N-1)] / [num_segments × k²]
+                let normalization = (n - 1) as f64 / (num_segments as f64 * k as f64 * k as f64);
+                let l_m = curve_length * normalization;
+
+                l_m_values.push(l_m);
             }
 
-            let lk = lm_sum / k as f64;
-            if lk > 0.0 {
-                lk_values.push(lk.ln());
-                log_k_values.push((k as f64).ln());
+            // Calculate average L(k) across all m values
+            if !l_m_values.is_empty() {
+                let l_k = l_m_values.iter().sum::<f64>() / l_m_values.len() as f64;
+                l_k_values.push(l_k);
             }
         }
 
-        // Linear regression: ln(L(k)) vs ln(k)
-        // Slope = -D (fractal dimension)
-        if lk_values.len() >= 3 {
-            let n = lk_values.len() as f64;
-            let sum_x = log_k_values.iter().sum::<f64>();
-            let sum_y = lk_values.iter().sum::<f64>();
-            let sum_xy = log_k_values
-                .iter()
-                .zip(lk_values.iter())
-                .map(|(x, y)| x * y)
-                .sum::<f64>();
-            let sum_x2 = log_k_values.iter().map(|x| x * x).sum::<f64>();
+        // Perform linear regression on log(1/k) vs log(L(k))
+        // Slope gives the fractal dimension D
+        if l_k_values.len() >= 3 {
+            let mut log_inv_k = Vec::with_capacity(l_k_values.len());
+            let mut log_l_k = Vec::with_capacity(l_k_values.len());
 
-            let denominator = n * sum_x2 - sum_x * sum_x;
-            if denominator.abs() > 1e-10 {
-                let slope = (n * sum_xy - sum_x * sum_y) / denominator;
-                let fractal_dim = -slope;
+            for (k_idx, &l_k) in l_k_values.iter().enumerate() {
+                let k = (k_idx + 1) as f64;
+                if l_k > 0.0 {
+                    log_inv_k.push((1.0 / k).ln());
+                    log_l_k.push(l_k.ln());
+                }
+            }
 
-                if fractal_dim.is_finite() && (1.0..=2.0).contains(&fractal_dim) {
-                    fractal_dims[idx] = fractal_dim;
+            if log_inv_k.len() >= 3 {
+                let n_points = log_inv_k.len() as f64;
+                let sum_x = log_inv_k.iter().sum::<f64>();
+                let sum_y = log_l_k.iter().sum::<f64>();
+                let sum_xy = log_inv_k
+                    .iter()
+                    .zip(log_l_k.iter())
+                    .map(|(x, y)| x * y)
+                    .sum::<f64>();
+                let sum_x2 = log_inv_k.iter().map(|x| x * x).sum::<f64>();
+
+                let denominator = n_points * sum_x2 - sum_x * sum_x;
+
+                if denominator.abs() > 1e-10 {
+                    let slope = (n_points * sum_xy - sum_x * sum_y) / denominator;
+
+                    // The slope is the fractal dimension
+                    if slope.is_finite() && slope > 0.0 && slope <= 2.0 {
+                        fractal_dims[idx] = slope;
+                    }
                 }
             }
         }

@@ -2,57 +2,6 @@
 use crate::features::ta_helpers::*;
 use crate::features::validation::*;
 
-// Helper function to access the fractal dimension calculation
-fn calculate_fractal_dimension_test(prices: &[f64], window: usize) -> Vec<f64> {
-    // This would normally be called from the technical indicators module
-    // For testing, we'll create a simple version that mimics the fixed implementation
-    let fractal_dims = vec![1.5; prices.len()]; // Default to 1.5 instead of NaN
-
-    if prices.len() < window || window < 10 {
-        return fractal_dims;
-    }
-
-    // For testing purposes, just return the default values
-    // The actual implementation is in technical.rs
-    fractal_dims
-}
-
-#[test]
-fn test_fixed_fractal_dimension() {
-    println!("Testing fixed fractal dimension calculation...");
-
-    // Test with constant prices (should not return all NaN)
-    let constant_prices = vec![100.0; 50];
-    let fractal_dims = calculate_fractal_dimension_test(&constant_prices, 20);
-
-    // Should have default values instead of NaN
-    let non_nan_count = fractal_dims.iter().filter(|&&x| x.is_finite()).count();
-    println!(
-        "Constant prices: {} finite values out of {}",
-        non_nan_count,
-        fractal_dims.len()
-    );
-    assert!(
-        non_nan_count > 0,
-        "Fractal dimension should have finite values even for constant prices"
-    );
-
-    // Test with varying prices
-    let varying_prices: Vec<f64> = (0..50).map(|i| 100.0 + (i as f64 * 0.1)).collect();
-    let fractal_dims = calculate_fractal_dimension_test(&varying_prices, 20);
-
-    let non_nan_count = fractal_dims.iter().filter(|&&x| x.is_finite()).count();
-    println!(
-        "Varying prices: {} finite values out of {}",
-        non_nan_count,
-        fractal_dims.len()
-    );
-    assert!(
-        non_nan_count > 0,
-        "Fractal dimension should work with varying prices"
-    );
-}
-
 #[test]
 fn test_fixed_price_gaps() {
     println!("Testing body-to-range ratio (price inefficiency)...");
