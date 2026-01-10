@@ -145,3 +145,93 @@ fn test_convert_sequences_to_tensors_edge_cases() {
 
     println!("✅ Label smoothing and argmax handling working correctly!");
 }
+
+#[tokio::test]
+async fn test_extract_lstm_features_returns_3d_tensor() {
+    // This test verifies the fix for the regression where extract_lstm_features
+    // was incorrectly returning a 2D tensor [batch_size, hidden_size] instead of
+    // the correct 3D tensor [batch_size, 1, hidden_size] after narrow() operation.
+    // The 3D shape is critical for proper output layer and attention processing.
+    use crate::config::TrainingConfig;
+    use crate::model::lstm::config::LSTMConfig;
+
+    let config = LSTMConfig {
+        input_size: 10,
+        hidden_sizes: vec![32],
+        output_size: 5,
+        sequence_length: 20,
+        learning_rate: 0.001,
+        num_layers: 1,
+    };
+
+    let mut model = LSTMModel::new(config).unwrap();
+
+    // Create test sequences - must be large enough for validation split
+    let batch_size = 32;
+    let seq_len = 20;
+    let features = 10;
+
+    // Create dummy sequences filled with random-ish data
+    let mut sequences_data = Array3::<f64>::zeros((batch_size, seq_len, features));
+    for b in 0..batch_size {
+        for s in 0..seq_len {
+            for f in 0..features {
+                sequences_data[[b, s, f]] = ((b + s + f) as f64 * 0.1).sin().abs();
+            }
+        }
+    }
+
+    // Create dummy targets for training (one-hot encoded for 5 classes)
+    let mut targets = Array2::<f64>::zeros((batch_size, 5));
+    for i in 0..batch_size {
+        targets[[i, i % 5]] = 1.0;
+    }
+
+    // Create minimal training config
+    let training_config = TrainingConfig::default();
+
+    // Train the model briefly to initialize LSTM layers
+    model
+        .train(&sequences_data, &targets, &training_config, None, None)
+        .await
+        .unwrap();
+
+    // Convert to tensor for the LSTM model
+    let seq_tensor = model
+        .convert_sequences_to_prediction_tensor(&sequences_data)
+        .unwrap();
+
+    // Verify input tensor has correct 3D shape
+    assert_eq!(
+        seq_tensor.shape().dims(),
+        &[batch_size, seq_len, features],
+        "Input tensor should be 3D: [batch_size, seq_len, features]"
+    );
+
+    // Extract LSTM features - should return 2D tensor [batch_size, hidden_size] for XGBoost
+    let lstm_features = model.extract_lstm_features(&seq_tensor).unwrap();
+
+    // Verify output is 2D tensor [batch_size, hidden_size] for XGBoost compatibility
+    assert_eq!(
+        lstm_features.dims().len(),
+        2,
+        "LSTM features should be 2D tensor [batch_size, hidden_size] for XGBoost, but got {}D",
+        lstm_features.dims().len()
+    );
+
+    assert_eq!(
+        lstm_features.dims()[0],
+        batch_size,
+        "Batch dimension should be preserved"
+    );
+    assert_eq!(
+        lstm_features.dims()[1],
+        32,
+        "Hidden size dimension should match LSTM config"
+    );
+
+    println!(
+        "✅ extract_lstm_features correctly returns 2D tensor [{}, {}] for XGBoost",
+        batch_size, 32
+    );
+}

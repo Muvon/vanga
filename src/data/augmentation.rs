@@ -58,7 +58,7 @@ pub fn augment_sequence(
     sequence: &Array2<f64>,
     config: &AugmentationConfig,
     rng: &mut impl Rng,
-    price_volume_cols: &[usize],  // Columns to skip (price/volume)
+    price_volume_cols: &[usize], // Columns to skip (price/volume)
 ) -> Array2<f64> {
     let mut augmented = sequence.clone();
 
@@ -89,7 +89,12 @@ pub fn augment_sequence(
 /// Research: "Improves LSTM performance by 11.5-22.5%" (MDPI 2024)
 /// Effect: Changes amplitude while preserving temporal patterns
 /// CRITICAL: Skips price/volume columns that determine targets
-pub fn magnitude_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_volume_cols: &[usize]) -> Array2<f64> {
+pub fn magnitude_warp(
+    sequence: &Array2<f64>,
+    sigma: f64,
+    rng: &mut impl Rng,
+    price_volume_cols: &[usize],
+) -> Array2<f64> {
     let timesteps = sequence.shape()[0];
     let features = sequence.shape()[1];
 
@@ -105,7 +110,8 @@ pub fn magnitude_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, pr
 
     // Apply warping to each feature independently, skipping price/volume columns
     let mut warped = sequence.clone();
-    let price_volume_set: std::collections::HashSet<usize> = price_volume_cols.iter().cloned().collect();
+    let price_volume_set: std::collections::HashSet<usize> =
+        price_volume_cols.iter().cloned().collect();
     for t in 0..timesteps {
         for f in 0..features {
             if !price_volume_set.contains(&f) {
@@ -123,13 +129,19 @@ pub fn magnitude_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, pr
 /// Uses proper Gaussian distribution as recommended by all major surveys.
 /// Effect: Prevents memorization of exact values
 /// CRITICAL: Skips price/volume columns that determine targets
-pub fn jitter(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_volume_cols: &[usize]) -> Array2<f64> {
+pub fn jitter(
+    sequence: &Array2<f64>,
+    sigma: f64,
+    rng: &mut impl Rng,
+    price_volume_cols: &[usize],
+) -> Array2<f64> {
     let shape = sequence.shape();
     let mut jittered = sequence.clone();
 
     // Use Gaussian noise as per research recommendations
     let normal = Normal::new(0.0, sigma).unwrap_or_else(|_| Normal::new(0.0, 0.03).unwrap());
-    let price_volume_set: std::collections::HashSet<usize> = price_volume_cols.iter().cloned().collect();
+    let price_volume_set: std::collections::HashSet<usize> =
+        price_volume_cols.iter().cloned().collect();
 
     for t in 0..shape[0] {
         for f in 0..shape[1] {
@@ -147,10 +159,16 @@ pub fn jitter(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_volu
 ///
 /// Effect: Simulates different price ranges (symbol-agnostic)
 /// CRITICAL: Skips price/volume columns that determine targets
-pub fn scaling(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_volume_cols: &[usize]) -> Array2<f64> {
+pub fn scaling(
+    sequence: &Array2<f64>,
+    sigma: f64,
+    rng: &mut impl Rng,
+    price_volume_cols: &[usize],
+) -> Array2<f64> {
     let factor = rng.random_range((1.0 - sigma)..(1.0 + sigma));
     let mut scaled = sequence.clone();
-    let price_volume_set: std::collections::HashSet<usize> = price_volume_cols.iter().cloned().collect();
+    let price_volume_set: std::collections::HashSet<usize> =
+        price_volume_cols.iter().cloned().collect();
 
     // Only scale non-price/volume columns
     let shape = sequence.shape();
@@ -173,7 +191,12 @@ pub fn scaling(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_vol
 /// between price/volume and indicators. This is acceptable because:
 /// - Target is based on price CHANGE, not exact timing
 /// - All features maintain their relative temporal relationships
-pub fn time_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, _price_volume_cols: &[usize]) -> Array2<f64> {
+pub fn time_warp(
+    sequence: &Array2<f64>,
+    sigma: f64,
+    rng: &mut impl Rng,
+    _price_volume_cols: &[usize],
+) -> Array2<f64> {
     let timesteps = sequence.shape()[0];
     let features = sequence.shape()[1];
 

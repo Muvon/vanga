@@ -899,16 +899,12 @@ impl LSTMModel {
                         layer_idx
                     )));
                 }
-
-                // CRITICAL FIX: Avoid cloning hidden states - extract only the last one efficiently
-                let forward_output = if let Some(last_state) = forward_states.last() {
-                    last_state.h().contiguous()?
-                } else {
-                    return Err(VangaError::ModelError(format!(
-                        "Forward layer {} produced no hidden states",
-                        layer_idx
-                    )));
-                };
+                // Stack all hidden states to preserve [batch_size, seq_len, hidden_size] shape
+                let mut forward_hidden_states = Vec::new();
+                for state in &forward_states {
+                    forward_hidden_states.push(state.h().clone());
+                }
+                let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
 
                 // Process backward direction - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
                 let backward_zero_state = backward_layer.zero_state(batch_size)?;
@@ -921,24 +917,21 @@ impl LSTMModel {
                     )));
                 }
 
-                // CRITICAL FIX: Avoid cloning hidden states - extract only the last one efficiently
-                let backward_output = if let Some(last_state) = backward_states.last() {
-                    last_state.h().contiguous()?
-                } else {
-                    return Err(VangaError::ModelError(format!(
-                        "Backward layer {} produced no hidden states",
-                        layer_idx
-                    )));
-                };
+                // Stack all hidden states to preserve [batch_size, seq_len, hidden_size] shape
+                let mut backward_hidden_states = Vec::new();
+                for state in &backward_states {
+                    backward_hidden_states.push(state.h().clone());
+                }
+                let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
 
                 // Concatenate forward and backward outputs along the feature dimension
-                // forward_output: [batch_size, hidden_size] (last timestep)
-                // backward_output: [batch_size, hidden_size] (last timestep)
-                // Result: [batch_size, 2*hidden_size]
+                // forward_output: [batch_size, seq_len, hidden_size]
+                // backward_output: [batch_size, seq_len, hidden_size]
+                // Result: [batch_size, seq_len, 2*hidden_size]
                 let forward_shape = forward_output.shape();
                 let backward_shape = backward_output.shape();
                 current_input =
-                    Tensor::cat(&[&forward_output, &backward_output], 1)?.contiguous()?;
+                    Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
                 log::debug!(
                     "🔄 Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
@@ -979,15 +972,13 @@ impl LSTMModel {
                 )));
             }
 
-            // CRITICAL FIX: Avoid cloning hidden states - extract only the last one efficiently
-            let layer_output = if let Some(last_state) = lstm_states.last() {
-                last_state.h().contiguous()?
-            } else {
-                return Err(VangaError::ModelError(format!(
-                    "LSTM layer {} produced no hidden states",
-                    layer_idx
-                )));
-            };
+            // Stack all hidden states to preserve [batch_size, seq_len, hidden_size] shape
+            // This is required for the narrow() operation on final_timestep_idx below
+            let mut hidden_states = Vec::new();
+            for state in &lstm_states {
+                hidden_states.push(state.h().clone());
+            }
+            let layer_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
 
             log::debug!(
                 "🔄 Standard layer {} output shape: {:?}",
@@ -1007,11 +998,10 @@ impl LSTMModel {
             return Err(VangaError::model("No LSTM layers processed"));
         };
 
-        // Extract final timestep: z = h_n (equation 8 from paper)
+        // Extract final timestep features: z = h_n (equation 8 from paper)
+        // Keep 3D shape [batch_size, 1, hidden_size] for proper output layer processing
         let final_timestep_idx = seq_len - 1;
-        let lstm_features = final_layer_output
-            .narrow(1, final_timestep_idx, 1)? // Get last timestep
-            .squeeze(1)?; // Remove sequence dimension
+        let lstm_features = final_layer_output.narrow(1, final_timestep_idx, 1)?; // Get last timestep: [batch_size, 1, hidden_size]
 
         log::info!(
             "✅ Extracted standard LSTM features shape: {:?}",
@@ -1022,10 +1012,10 @@ impl LSTMModel {
         let features = if self.use_attention {
             if let Some(attention) = &self.attention_module {
                 log::debug!("🎯 Applying attention to LSTM features");
-                let attention_result = attention.forward(&lstm_features.unsqueeze(1)?, false)?; // inference mode
-                                                                                                // Handle attention output (may be tuple)
+                let attention_result = attention.forward(&lstm_features, false)?; // inference mode
+                                                                                  // Handle attention output (may be tuple)
                 let (attended_features, _) = attention_result;
-                attended_features.squeeze(1)?
+                attended_features
             } else {
                 lstm_features
             }
@@ -1034,8 +1024,14 @@ impl LSTMModel {
         };
 
         // Ensure feature dimension matches configuration
+        // For 3D tensor [batch_size, 1, hidden_size], calculate total feature dim
         let expected_dim = self.get_xgboost_feature_dim();
-        let actual_dim = features.dim(1)?;
+        let features_dims = features.dims();
+        let actual_dim = if features_dims.len() == 3 {
+            features_dims[1] * features_dims[2] // seq_len * hidden_size (1 * hidden_size = hidden_size)
+        } else {
+            features_dims[1] // 2D case
+        };
 
         if actual_dim != expected_dim {
             log::warn!(
@@ -1044,10 +1040,17 @@ impl LSTMModel {
                 actual_dim
             );
 
+            // For 3D features, flatten to 2D [batch_size, seq_len*hidden_size]
+            let features_2d = if features_dims.len() == 3 {
+                features.reshape((features_dims[0], features_dims[1] * features_dims[2]))?
+            } else {
+                features.clone()
+            };
+
             // Add projection layer if needed (simple linear transformation)
             if let Some(output_layer) = &self.output_layer {
                 log::debug!("🔄 Applying output projection to match feature dimension");
-                let projected = output_layer.forward(&features)?;
+                let projected = output_layer.forward(&features_2d)?;
 
                 // Take first expected_dim features if output is larger
                 if projected.dim(1)? >= expected_dim {
@@ -1058,11 +1061,18 @@ impl LSTMModel {
             }
 
             // Fallback: pad or truncate to match expected dimension
-            return self.adjust_feature_dimension(features, expected_dim);
+            return self.adjust_feature_dimension(features_2d, expected_dim);
         }
 
-        log::debug!("✅ Final LSTM features shape: {:?}", features.shape());
-        Ok(features)
+        // Flatten 3D to 2D [batch_size, seq_len*hidden_size] for XGBoost
+        let features_2d = if features_dims.len() == 3 {
+            features.reshape((features_dims[0], features_dims[1] * features_dims[2]))?
+        } else {
+            features
+        };
+
+        log::debug!("✅ Final LSTM features shape: {:?}", features_2d.shape());
+        Ok(features_2d)
     }
 
     /// Extract LSTM features for all sequences in a batch (for training)
