@@ -889,7 +889,6 @@ impl LSTMModel {
                 .enumerate()
             {
                 // Process forward direction - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
-                // CRITICAL FIX: Avoid tensor cloning - use take() to reuse memory
                 let batch_size = current_input.dim(0)?;
                 let forward_zero_state = forward_layer.zero_state(batch_size)?;
                 let forward_states = forward_layer.seq_init(&current_input, &forward_zero_state)?;
@@ -899,12 +898,12 @@ impl LSTMModel {
                         layer_idx
                     )));
                 }
-                // Stack all hidden states to preserve [batch_size, seq_len, hidden_size] shape
-                let mut forward_hidden_states = Vec::new();
-                for state in &forward_states {
-                    forward_hidden_states.push(state.h().clone());
-                }
-                let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
+
+                // CRITICAL OOM FIX: Only extract last timestep for feature extraction
+                let forward_last = forward_states.last().ok_or_else(|| {
+                    VangaError::ModelError(format!("Forward layer {} has no states", layer_idx))
+                })?;
+                let forward_output = forward_last.h().unsqueeze(1)?.contiguous()?;
 
                 // Process backward direction - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
                 let backward_zero_state = backward_layer.zero_state(batch_size)?;
@@ -917,36 +916,29 @@ impl LSTMModel {
                     )));
                 }
 
-                // Stack all hidden states to preserve [batch_size, seq_len, hidden_size] shape
-                let mut backward_hidden_states = Vec::new();
-                for state in &backward_states {
-                    backward_hidden_states.push(state.h().clone());
-                }
-                let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
+                // CRITICAL OOM FIX: Only extract last timestep for feature extraction
+                let backward_last = backward_states.last().ok_or_else(|| {
+                    VangaError::ModelError(format!("Backward layer {} has no states", layer_idx))
+                })?;
+                let backward_output = backward_last.h().unsqueeze(1)?.contiguous()?;
 
                 // Concatenate forward and backward outputs along the feature dimension
-                // forward_output: [batch_size, seq_len, hidden_size]
-                // backward_output: [batch_size, seq_len, hidden_size]
-                // Result: [batch_size, seq_len, 2*hidden_size]
-                let forward_shape = forward_output.shape();
-                let backward_shape = backward_output.shape();
+                // forward_output: [batch_size, 1, hidden_size]
+                // backward_output: [batch_size, 1, hidden_size]
+                // Result: [batch_size, 1, 2*hidden_size]
                 current_input =
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
 
                 log::debug!(
-                    "🔄 Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
+                    "🔄 Bidirectional layer {} - Concatenated shape: {:?} (last timestep only)",
                     layer_idx,
-                    forward_shape,
-                    backward_shape,
                     current_input.shape()
                 );
             }
 
             // Extract final timestep features from bidirectional output
-            let final_timestep_idx = seq_len - 1;
-            let lstm_features = current_input
-                .narrow(1, final_timestep_idx, 1)? // Get last timestep
-                .squeeze(1)?; // Remove sequence dimension
+            // Already have [batch_size, 1, 2*hidden_size] from last layer
+            let lstm_features = current_input.squeeze(1)?; // Remove sequence dimension to get [batch_size, 2*hidden_size]
 
             log::info!(
                 "✅ Extracted LSTM latent vector z_test shape: {:?}",
@@ -957,13 +949,13 @@ impl LSTMModel {
         }
 
         // Standard (non-bidirectional) processing - CRITICAL: Only keep last layer's output
-        let mut current_layer_output: Option<Tensor> = None;
+        let mut current_output = current_input;
 
         for (layer_idx, lstm_layer) in forward_lstm_layers.iter().enumerate() {
             // LSTM forward pass - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
-            let batch_size = current_input.dim(0)?;
+            let batch_size = current_output.dim(0)?;
             let zero_state = lstm_layer.zero_state(batch_size)?;
-            let lstm_states = lstm_layer.seq_init(&current_input, &zero_state)?;
+            let lstm_states = lstm_layer.seq_init(&current_output, &zero_state)?;
 
             if lstm_states.is_empty() {
                 return Err(VangaError::ModelError(format!(
@@ -972,36 +964,26 @@ impl LSTMModel {
                 )));
             }
 
-            // Stack all hidden states to preserve [batch_size, seq_len, hidden_size] shape
-            // This is required for the narrow() operation on final_timestep_idx below
-            let mut hidden_states = Vec::new();
-            for state in &lstm_states {
-                hidden_states.push(state.h().clone());
-            }
-            let layer_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
+            // CRITICAL OOM FIX: Only extract last timestep, don't stack all timesteps
+            // For feature extraction, we only need h_n (final hidden state)
+            let last_state = lstm_states.last().ok_or_else(|| {
+                VangaError::ModelError(format!("Layer {} has no states", layer_idx))
+            })?;
+
+            // Get last hidden state and expand to [batch_size, 1, hidden_size] for next layer
+            let last_hidden = last_state.h();
+            current_output = last_hidden.unsqueeze(1)?.contiguous()?;
 
             log::debug!(
-                "🔄 Standard layer {} output shape: {:?}",
+                "🔄 Standard layer {} output shape: {:?} (last timestep only)",
                 layer_idx,
-                layer_output.shape()
+                current_output.shape()
             );
-
-            // Store this as current output for next iteration
-            current_layer_output = Some(layer_output);
         }
 
-        // Get the final layer output - drop previous current_input to free memory
-        drop(current_input);
-        let final_layer_output = if let Some(output) = current_layer_output {
-            output
-        } else {
-            return Err(VangaError::model("No LSTM layers processed"));
-        };
-
         // Extract final timestep features: z = h_n (equation 8 from paper)
-        // Keep 3D shape [batch_size, 1, hidden_size] for proper output layer processing
-        let final_timestep_idx = seq_len - 1;
-        let lstm_features = final_layer_output.narrow(1, final_timestep_idx, 1)?; // Get last timestep: [batch_size, 1, hidden_size]
+        // Already have [batch_size, 1, hidden_size] from last layer
+        let lstm_features = current_output;
 
         log::info!(
             "✅ Extracted standard LSTM features shape: {:?}",
@@ -1097,11 +1079,21 @@ impl LSTMModel {
         let batch_size = self.training_config.batch_size;
         let num_batches = total_sequences.div_ceil(batch_size);
 
+        // Calculate memory requirements
+        let memory_per_sequence_mb = (seq_len * features * 4) / 1_048_576; // 4 bytes per f32
+        let total_memory_mb = memory_per_sequence_mb * total_sequences;
+        let batch_memory_mb = memory_per_sequence_mb * batch_size;
+
         log::info!(
             "📦 Processing {} sequences in {} batches of size {} (from config)",
             total_sequences,
             num_batches,
             batch_size
+        );
+        log::info!(
+            "💾 Memory estimate: ~{} MB total, ~{} MB per batch",
+            total_memory_mb,
+            batch_memory_mb
         );
 
         let mut all_features = Vec::new();
