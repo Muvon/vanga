@@ -388,6 +388,28 @@ impl SeededTensorUtils {
                 // 2D tensors are weight matrices
                 let (rows, cols) = (dims[0], dims[1]);
 
+                // Identify output/classification layer (Fixup Initialization: ICLR 2019)
+                // "Initialize the classification layer to 0" for stable training
+                let is_output_layer = var_name_str.contains("output.weight")
+                    || var_name_str.ends_with("output.weight");
+
+                if is_output_layer {
+                    // Apply zero initialization for output layer (Fixup Initialization)
+                    log::info!(
+                        "🎯 Applying ZERO initialization to output layer '{}': shape={:?} (Fixup Init)",
+                        var_name_str, dims
+                    );
+                    let zero_weights = Tensor::zeros(dims, var.dtype(), device)?;
+                    var.set(&zero_weights)?;
+                    initialized_count += 1;
+
+                    log::info!(
+                        "✅ Output layer '{}' initialized to ZERO for balanced class prediction",
+                        var_name_str
+                    );
+                    continue;
+                }
+
                 // Identify weight types based on Candle's LSTM naming convention
                 // In Candle LSTM: weight_ih = input-to-hidden, weight_hh = hidden-to-hidden (recurrent)
                 let is_recurrent_weight = var_name_str.contains("weight_hh")
