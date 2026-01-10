@@ -482,6 +482,38 @@ impl SeededTensorUtils {
                 // 1D tensors are biases
                 let bias_size = dims[0];
 
+                // Identify output layer bias (CRITICAL for ordinal regression with Gaussian smoothing)
+                let is_output_bias =
+                    var_name_str.contains("output.bias") || var_name_str.ends_with("output.bias");
+
+                if is_output_bias && bias_size == 5 {
+                    // RESEARCH-BACKED FIX: Anti-middle-class bias initialization
+                    // Paper: "Ordinal regression encourage conservative model to predict middle-rank classes"
+                    // Solution: Initialize with small negative bias for middle class, small positive for extremes
+                    // This breaks the symmetry that causes middle-class collapse with Gaussian label smoothing
+                    let anti_middle_bias = vec![
+                        0.1f32, // Class 0: slight positive (encourage extreme predictions)
+                        0.05,   // Class 1: small positive
+                        -0.2,   // Class 2: NEGATIVE (discourage middle class)
+                        0.05,   // Class 3: small positive
+                        0.1,    // Class 4: slight positive (encourage extreme predictions)
+                    ];
+                    let bias_tensor =
+                        Tensor::new(anti_middle_bias.clone(), device)?.to_dtype(var.dtype())?;
+                    var.set(&bias_tensor)?;
+                    bias_count += 1;
+
+                    log::info!(
+                        "🎯 Output bias '{}' initialized with ANTI-MIDDLE-CLASS pattern: {:?}",
+                        var_name_str,
+                        anti_middle_bias
+                    );
+                    log::info!(
+                        "   Research: Prevents ordinal regression middle-class collapse with Gaussian smoothing"
+                    );
+                    continue;
+                }
+
                 // Identify forget gate bias based on Candle's LSTM naming
                 // In LSTM, forget gate bias should be initialized to 1.0
                 let is_forget_gate_bias = var_name_str.contains("bias_hh")
