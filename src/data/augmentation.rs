@@ -46,35 +46,39 @@ impl AugmentationConfig {
 
 /// Augment a single sequence using research-backed techniques
 ///
+/// CRITICAL: Skips price and volume columns that determine targets!
+/// Only augments technical indicators (RSI, MACD, SMA, EMA, etc.)
+///
 /// Research-based strategy (2024-2025 state-of-art):
 /// - Always apply magnitude warping (highest impact - MDPI 2024: 11.5-22.5% improvement)
-/// - 50% probability: Gaussian jittering (IJASEIT 2024: best for imbalance)
+/// - 50% probability: Gaussian jittering (prevents memorization)
 /// - 50% probability: scaling (symbol-agnostic)
 /// - 30% probability: time warping (temporal diversity, more aggressive)
 pub fn augment_sequence(
     sequence: &Array2<f64>,
     config: &AugmentationConfig,
     rng: &mut impl Rng,
+    price_volume_cols: &[usize],  // Columns to skip (price/volume)
 ) -> Array2<f64> {
     let mut augmented = sequence.clone();
 
     // 1. ALWAYS: Magnitude warping (highest impact - MDPI 2024)
-    augmented = magnitude_warp(&augmented, config.magnitude_sigma, rng);
+    augmented = magnitude_warp(&augmented, config.magnitude_sigma, rng, price_volume_cols);
 
     // 2. 50% probability: Gaussian jittering (prevents memorization)
     if rng.random_bool(0.5) {
-        augmented = jitter(&augmented, config.jitter_sigma, rng);
+        augmented = jitter(&augmented, config.jitter_sigma, rng, price_volume_cols);
     }
 
     // 3. 50% probability: Scaling (symbol-agnostic)
     if rng.random_bool(0.5) {
-        augmented = scaling(&augmented, config.scaling_sigma, rng);
+        augmented = scaling(&augmented, config.scaling_sigma, rng, price_volume_cols);
     }
 
     // 4. 30% probability: Time warping (temporal diversity)
     // Lower probability because it's more aggressive
     if rng.random_bool(0.3) {
-        augmented = time_warp(&augmented, config.time_warp_sigma, rng);
+        augmented = time_warp(&augmented, config.time_warp_sigma, rng, price_volume_cols);
     }
 
     augmented
@@ -84,7 +88,8 @@ pub fn augment_sequence(
 ///
 /// Research: "Improves LSTM performance by 11.5-22.5%" (MDPI 2024)
 /// Effect: Changes amplitude while preserving temporal patterns
-pub fn magnitude_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng) -> Array2<f64> {
+/// CRITICAL: Skips price/volume columns that determine targets
+pub fn magnitude_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_volume_cols: &[usize]) -> Array2<f64> {
     let timesteps = sequence.shape()[0];
     let features = sequence.shape()[1];
 
@@ -98,11 +103,14 @@ pub fn magnitude_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng) ->
     // Create smooth curve through knot points
     let warp_curve = cubic_interpolate(&warp_points, timesteps);
 
-    // Apply warping to each feature independently
+    // Apply warping to each feature independently, skipping price/volume columns
     let mut warped = sequence.clone();
+    let price_volume_set: std::collections::HashSet<usize> = price_volume_cols.iter().cloned().collect();
     for t in 0..timesteps {
         for f in 0..features {
-            warped[[t, f]] *= warp_curve[t];
+            if !price_volume_set.contains(&f) {
+                warped[[t, f]] *= warp_curve[t];
+            }
         }
     }
 
@@ -114,17 +122,21 @@ pub fn magnitude_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng) ->
 /// Research: "Best performance for data imbalance" (IJASEIT 2024)
 /// Uses proper Gaussian distribution as recommended by all major surveys.
 /// Effect: Prevents memorization of exact values
-pub fn jitter(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng) -> Array2<f64> {
+/// CRITICAL: Skips price/volume columns that determine targets
+pub fn jitter(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_volume_cols: &[usize]) -> Array2<f64> {
     let shape = sequence.shape();
     let mut jittered = sequence.clone();
 
     // Use Gaussian noise as per research recommendations
     let normal = Normal::new(0.0, sigma).unwrap_or_else(|_| Normal::new(0.0, 0.03).unwrap());
+    let price_volume_set: std::collections::HashSet<usize> = price_volume_cols.iter().cloned().collect();
 
     for t in 0..shape[0] {
         for f in 0..shape[1] {
-            let noise = normal.sample(rng);
-            jittered[[t, f]] += noise;
+            if !price_volume_set.contains(&f) {
+                let noise = normal.sample(rng);
+                jittered[[t, f]] += noise;
+            }
         }
     }
 
@@ -134,16 +146,34 @@ pub fn jitter(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng) -> Array2<
 /// Scaling: Multiply by random constant
 ///
 /// Effect: Simulates different price ranges (symbol-agnostic)
-pub fn scaling(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng) -> Array2<f64> {
+/// CRITICAL: Skips price/volume columns that determine targets
+pub fn scaling(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, price_volume_cols: &[usize]) -> Array2<f64> {
     let factor = rng.random_range((1.0 - sigma)..(1.0 + sigma));
-    sequence * factor
+    let mut scaled = sequence.clone();
+    let price_volume_set: std::collections::HashSet<usize> = price_volume_cols.iter().cloned().collect();
+
+    // Only scale non-price/volume columns
+    let shape = sequence.shape();
+    for t in 0..shape[0] {
+        for f in 0..shape[1] {
+            if !price_volume_set.contains(&f) {
+                scaled[[t, f]] *= factor;
+            }
+        }
+    }
+
+    scaled
 }
 
 /// Time Warping: Non-linear time axis distortion
 ///
 /// Research: Standard in time series augmentation (uchidalab)
 /// Effect: Simulates different market speeds
-pub fn time_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng) -> Array2<f64> {
+/// NOTE: Time warp applies to ALL columns together to preserve temporal synchronization
+/// between price/volume and indicators. This is acceptable because:
+/// - Target is based on price CHANGE, not exact timing
+/// - All features maintain their relative temporal relationships
+pub fn time_warp(sequence: &Array2<f64>, sigma: f64, rng: &mut impl Rng, _price_volume_cols: &[usize]) -> Array2<f64> {
     let timesteps = sequence.shape()[0];
     let features = sequence.shape()[1];
 

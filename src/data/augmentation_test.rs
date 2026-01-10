@@ -16,7 +16,8 @@ fn test_augmentation_config_creation() {
 fn test_magnitude_warp_preserves_shape() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((100, 10));
-    let warped = magnitude_warp(&sequence, 0.2, &mut rng);
+    let empty_cols: Vec<usize> = vec![]; // No columns to skip in test
+    let warped = magnitude_warp(&sequence, 0.2, &mut rng, &empty_cols);
 
     assert_eq!(warped.shape(), sequence.shape());
     assert_ne!(warped, sequence); // Should be different
@@ -26,7 +27,8 @@ fn test_magnitude_warp_preserves_shape() {
 fn test_jitter_adds_noise() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((50, 5));
-    let jittered = jitter(&sequence, 0.03, &mut rng);
+    let empty_cols: Vec<usize> = vec![];
+    let jittered = jitter(&sequence, 0.03, &mut rng, &empty_cols);
 
     assert_eq!(jittered.shape(), sequence.shape());
     // Values should be close to 1.0 but not exactly 1.0
@@ -38,7 +40,8 @@ fn test_jitter_adds_noise() {
 fn test_scaling_uniform() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((50, 5));
-    let scaled = scaling(&sequence, 0.1, &mut rng);
+    let empty_cols: Vec<usize> = vec![];
+    let scaled = scaling(&sequence, 0.1, &mut rng, &empty_cols);
 
     assert_eq!(scaled.shape(), sequence.shape());
     // All values should be scaled by same factor
@@ -61,7 +64,8 @@ fn test_time_warp_preserves_shape() {
         }
     }
 
-    let warped = time_warp(&sequence, 0.2, &mut rng);
+    let empty_cols: Vec<usize> = vec![];
+    let warped = time_warp(&sequence, 0.2, &mut rng, &empty_cols);
     assert_eq!(warped.shape(), sequence.shape());
 }
 
@@ -70,13 +74,13 @@ fn test_augment_sequence_applies_multiple_techniques() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((100, 10));
     let config = AugmentationConfig::from_overlap(0.9);
+    let empty_cols: Vec<usize> = vec![];
 
-    let augmented = augment_sequence(&sequence, &config, &mut rng);
+    let augmented = augment_sequence(&sequence, &config, &mut rng, &empty_cols);
 
     assert_eq!(augmented.shape(), sequence.shape());
     assert_ne!(augmented, sequence); // Should be different due to magnitude warp
 }
-
 #[test]
 fn test_sequences_overlap_detection() {
     // Overlapping sequences
@@ -139,9 +143,10 @@ fn test_augmentation_deterministic_with_seed() {
 
     let sequence = Array2::ones((50, 5));
     let config = AugmentationConfig::from_overlap(0.9);
+    let empty_cols: Vec<usize> = vec![];
 
-    let aug1 = augment_sequence(&sequence, &config, &mut rng1);
-    let aug2 = augment_sequence(&sequence, &config, &mut rng2);
+    let aug1 = augment_sequence(&sequence, &config, &mut rng1, &empty_cols);
+    let aug2 = augment_sequence(&sequence, &config, &mut rng2, &empty_cols);
 
     // Same seed should produce same result
     assert_eq!(aug1, aug2);
@@ -155,9 +160,10 @@ fn test_augmentation_different_with_different_seed() {
 
     let sequence = Array2::ones((50, 5));
     let config = AugmentationConfig::from_overlap(0.9);
+    let empty_cols: Vec<usize> = vec![];
 
-    let aug1 = augment_sequence(&sequence, &config, &mut rng1);
-    let aug2 = augment_sequence(&sequence, &config, &mut rng2);
+    let aug1 = augment_sequence(&sequence, &config, &mut rng1, &empty_cols);
+    let aug2 = augment_sequence(&sequence, &config, &mut rng2, &empty_cols);
 
     // Different seeds should produce different results
     assert_ne!(aug1, aug2);
@@ -168,7 +174,8 @@ fn test_magnitude_warp_range() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((100, 5));
     let sigma = 0.2;
-    let warped = magnitude_warp(&sequence, sigma, &mut rng);
+    let empty_cols: Vec<usize> = vec![];
+    let warped = magnitude_warp(&sequence, sigma, &mut rng, &empty_cols);
 
     // Values should be within reasonable range (1.0 ± sigma)
     for val in warped.iter() {
@@ -181,7 +188,8 @@ fn test_jitter_range() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((100, 5));
     let sigma = 0.03;
-    let jittered = jitter(&sequence, sigma, &mut rng);
+    let empty_cols: Vec<usize> = vec![];
+    let jittered = jitter(&sequence, sigma, &mut rng, &empty_cols);
 
     // With Gaussian noise, values should be mostly within 3*sigma (99.7% of values)
     // but we check a wider range to avoid flaky tests
@@ -195,7 +203,8 @@ fn test_scaling_range() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((100, 5));
     let sigma = 0.1;
-    let scaled = scaling(&sequence, sigma, &mut rng);
+    let empty_cols: Vec<usize> = vec![];
+    let scaled = scaling(&sequence, sigma, &mut rng, &empty_cols);
 
     let mean = scaled.mean().unwrap();
     // Mean should be within range (1.0 ± sigma)
@@ -207,8 +216,9 @@ fn test_augmentation_preserves_non_nan() {
     let mut rng = rand::rng();
     let sequence = Array2::from_elem((100, 5), 1.0);
     let config = AugmentationConfig::from_overlap(0.9);
+    let empty_cols: Vec<usize> = vec![];
 
-    let augmented = augment_sequence(&sequence, &config, &mut rng);
+    let augmented = augment_sequence(&sequence, &config, &mut rng, &empty_cols);
 
     // No NaN values should be introduced
     for val in augmented.iter() {
@@ -222,8 +232,9 @@ fn test_single_feature_augmentation() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((100, 1)); // Single feature
     let config = AugmentationConfig::from_overlap(0.9);
+    let empty_cols: Vec<usize> = vec![];
 
-    let augmented = augment_sequence(&sequence, &config, &mut rng);
+    let augmented = augment_sequence(&sequence, &config, &mut rng, &empty_cols);
 
     assert_eq!(augmented.shape(), [100, 1]);
     assert_ne!(augmented, sequence);
@@ -234,8 +245,9 @@ fn test_large_sequence_augmentation() {
     let mut rng = rand::rng();
     let sequence = Array2::ones((1000, 50)); // Large sequence
     let config = AugmentationConfig::from_overlap(0.9);
+    let empty_cols: Vec<usize> = vec![];
 
-    let augmented = augment_sequence(&sequence, &config, &mut rng);
+    let augmented = augment_sequence(&sequence, &config, &mut rng, &empty_cols);
 
     assert_eq!(augmented.shape(), sequence.shape());
     assert_ne!(augmented, sequence);

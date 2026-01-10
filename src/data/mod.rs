@@ -641,16 +641,22 @@ impl DataPipeline {
                     val_indices_map.insert(target_key.clone(), val_indices.clone());
 
                     // CRITICAL: Apply augmentation ONLY to training data, NOT to validation/test
-                    // This prevents data leakage and ensures proper evaluation
-                    let train_augment_config = augment_config.as_ref();
+                    // Augmentation ONLY affects technical indicators, NOT price/volume columns
+                    let augment_config = if config.data.sequence_augment {
+                        Some(crate::data::augmentation::AugmentationConfig::from_overlap(
+                            config.data.sequence_overlap,
+                        ))
+                    } else {
+                        None
+                    };
 
                     // Create window data using target-specific indices
-                    // NOTE: Augmentation is applied inside create_data_from_indices() for train only
+                    // Augmentation is applied inside create_data_from_indices() for train only
                     let train_data = self.create_data_from_indices(
                         &all_sequences_data,
                         &train_indices_map,
                         &all_sequences,
-                        train_augment_config,
+                        augment_config.as_ref(),
                     )?;
 
                     // Validation data: NO augmentation (pristine data for proper evaluation)
@@ -893,9 +899,13 @@ impl DataPipeline {
 
         // Apply augmentation if configured
         // CRITICAL: Augmentation is only applied here for training data
-        // This ensures validation and test data remain pristine
+        // Augmentation ONLY affects technical indicators, NOT price/volume columns
         let mut augmented_count = 0;
         let mut rng = rand::rng();
+
+        // Price/volume columns to skip (indices that determine targets)
+        // These correspond to: open(0), high(1), low(2), close(3), volume(4) typically
+        let price_volume_cols: Vec<usize> = (0..5).collect();
 
         for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
             sequences
@@ -905,7 +915,6 @@ impl DataPipeline {
 
             // Apply augmentation if enabled and configured
             // Note: We augment based on overlap with the PREVIOUS sequence in THIS dataset
-            // not the original all_sequences dataset
             if let Some(config) = augment_config {
                 if new_idx > 0 {
                     // Check overlap with previous sequence in this subset
@@ -918,14 +927,14 @@ impl DataPipeline {
                     if crate::data::augmentation::sequences_overlap(
                         prev_start, prev_end, curr_start, curr_end,
                     ) {
-                        // Augment this sequence
-                        // We need to work with Array2 for augmentation
+                        // Augment this sequence - ONLY technical indicators, NOT price/volume
                         let mut sequence_2d =
                             sequences.slice(ndarray::s![new_idx, .., ..]).to_owned();
                         sequence_2d = crate::data::augmentation::augment_sequence(
                             &sequence_2d,
                             config,
                             &mut rng,
+                            &price_volume_cols,
                         );
                         // Copy back
                         let mut seq_view_mut = sequences.slice_mut(ndarray::s![new_idx, .., ..]);
@@ -938,7 +947,7 @@ impl DataPipeline {
 
         if augmented_count > 0 {
             log::debug!(
-                "   • Applied augmentation to {} overlapping training sequences",
+                "   • Applied augmentation to {} overlapping sequences (price/volume preserved)",
                 augmented_count
             );
         }
