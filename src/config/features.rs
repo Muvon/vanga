@@ -70,6 +70,10 @@ pub struct MovingAveragesConfig {
     pub ema_periods: Vec<u32>,
     pub wma_periods: Vec<u32>,
     pub hull_periods: Vec<u32>,
+    pub dema_periods: Vec<u32>,
+    pub tema_periods: Vec<u32>,
+    pub kama_periods: Vec<u32>,
+    pub zlema_periods: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +374,10 @@ impl Default for TechnicalIndicatorsConfig {
                 ema_periods: vec![5, 10, 20, 50, 200],
                 wma_periods: vec![10, 20],
                 hull_periods: vec![9, 21],
+                dema_periods: vec![9, 21, 50],
+                tema_periods: vec![9, 21, 50],
+                kama_periods: vec![10, 20, 30],
+                zlema_periods: vec![9, 21],
             },
             momentum: MomentumConfig {
                 rsi_periods: vec![14, 21],

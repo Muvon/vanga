@@ -314,6 +314,10 @@ mod tests {
                     ema_periods: vec![], // Empty to avoid larger windows
                     wma_periods: vec![],
                     hull_periods: vec![],
+                    dema_periods: vec![],
+                    tema_periods: vec![],
+                    kama_periods: vec![],
+                    zlema_periods: vec![],
                 },
                 momentum: crate::config::features::MomentumConfig {
                     rsi_periods: vec![],

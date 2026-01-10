@@ -70,6 +70,50 @@ pub async fn generate_technical_indicators(
                 ));
             }
 
+            if !config.moving_averages.dema_periods.is_empty() {
+                trend_results.push((
+                    "dema",
+                    add_dema_indicators(
+                        df.clone(),
+                        &close_prices,
+                        &config.moving_averages.dema_periods,
+                    ),
+                ));
+            }
+
+            if !config.moving_averages.tema_periods.is_empty() {
+                trend_results.push((
+                    "tema",
+                    add_tema_indicators(
+                        df.clone(),
+                        &close_prices,
+                        &config.moving_averages.tema_periods,
+                    ),
+                ));
+            }
+
+            if !config.moving_averages.kama_periods.is_empty() {
+                trend_results.push((
+                    "kama",
+                    add_kama_indicators(
+                        df.clone(),
+                        &close_prices,
+                        &config.moving_averages.kama_periods,
+                    ),
+                ));
+            }
+
+            if !config.moving_averages.zlema_periods.is_empty() {
+                trend_results.push((
+                    "zlema",
+                    add_zlema_indicators(
+                        df.clone(),
+                        &close_prices,
+                        &config.moving_averages.zlema_periods,
+                    ),
+                ));
+            }
+
             trend_results
         },
         || {
@@ -396,6 +440,257 @@ fn add_ema_indicators(
             .clone();
     }
     Ok(df)
+}
+
+/// Add DEMA (Double Exponential Moving Average) indicators to DataFrame - PARALLELIZED
+fn add_dema_indicators(
+    mut df: DataFrame,
+    close_prices: &[f64],
+    periods: &[u32],
+) -> Result<DataFrame> {
+    let dema_results: Vec<_> = periods
+        .par_iter()
+        .map(|&period| {
+            let dema = calculate_dema(close_prices, period as usize);
+            (format!("dema_{}", period), dema)
+        })
+        .collect();
+
+    for (column_name, dema_values) in dema_results {
+        let series = Series::new(column_name.clone().into(), dema_values).into_column();
+        df = df
+            .with_column(series)
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add {} column: {}", column_name, e))
+            })?
+            .clone();
+    }
+    Ok(df)
+}
+
+/// Add TEMA (Triple Exponential Moving Average) indicators to DataFrame - PARALLELIZED
+fn add_tema_indicators(
+    mut df: DataFrame,
+    close_prices: &[f64],
+    periods: &[u32],
+) -> Result<DataFrame> {
+    let tema_results: Vec<_> = periods
+        .par_iter()
+        .map(|&period| {
+            let tema = calculate_tema(close_prices, period as usize);
+            (format!("tema_{}", period), tema)
+        })
+        .collect();
+
+    for (column_name, tema_values) in tema_results {
+        let series = Series::new(column_name.clone().into(), tema_values).into_column();
+        df = df
+            .with_column(series)
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add {} column: {}", column_name, e))
+            })?
+            .clone();
+    }
+    Ok(df)
+}
+
+/// Add KAMA (Kaufman's Adaptive Moving Average) indicators to DataFrame - PARALLELIZED
+fn add_kama_indicators(
+    mut df: DataFrame,
+    close_prices: &[f64],
+    periods: &[u32],
+) -> Result<DataFrame> {
+    let kama_results: Vec<_> = periods
+        .par_iter()
+        .map(|&period| {
+            let kama = calculate_kama(close_prices, period as usize, 2, 30);
+            (format!("kama_{}", period), kama)
+        })
+        .collect();
+
+    for (column_name, kama_values) in kama_results {
+        let series = Series::new(column_name.clone().into(), kama_values).into_column();
+        df = df
+            .with_column(series)
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add {} column: {}", column_name, e))
+            })?
+            .clone();
+    }
+    Ok(df)
+}
+
+/// Add ZLEMA (Zero-Lag Exponential Moving Average) indicators to DataFrame - PARALLELIZED
+fn add_zlema_indicators(
+    mut df: DataFrame,
+    close_prices: &[f64],
+    periods: &[u32],
+) -> Result<DataFrame> {
+    let zlema_results: Vec<_> = periods
+        .par_iter()
+        .map(|&period| {
+            let zlema = calculate_zlema(close_prices, period as usize);
+            (format!("zlema_{}", period), zlema)
+        })
+        .collect();
+
+    for (column_name, zlema_values) in zlema_results {
+        let series = Series::new(column_name.clone().into(), zlema_values).into_column();
+        df = df
+            .with_column(series)
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add {} column: {}", column_name, e))
+            })?
+            .clone();
+    }
+    Ok(df)
+}
+
+/// Calculate DEMA (Double Exponential Moving Average)
+/// Formula: DEMA = 2 * EMA(n) - EMA(EMA(n))
+fn calculate_dema(prices: &[f64], period: usize) -> Vec<f64> {
+    let mut result = vec![f64::NAN; prices.len()];
+
+    if prices.len() < period || period < 2 {
+        return result;
+    }
+
+    // Calculate EMA
+    let ema1 = match calculate_ema_ta(prices, period) {
+        Ok(ema) => ema,
+        Err(_) => return result,
+    };
+
+    // Calculate EMA of EMA
+    let ema2 = match calculate_ema_ta(&ema1, period) {
+        Ok(ema) => ema,
+        Err(_) => return result,
+    };
+
+    // DEMA = 2 * EMA - EMA(EMA)
+    for i in (2 * period - 1)..prices.len() {
+        if ema1[i].is_finite() && ema2[i].is_finite() {
+            result[i] = 2.0 * ema1[i] - ema2[i];
+        }
+    }
+
+    result
+}
+
+/// Calculate TEMA (Triple Exponential Moving Average)
+/// Formula: TEMA = 3 * EMA - 3 * EMA(EMA) + EMA(EMA(EMA))
+fn calculate_tema(prices: &[f64], period: usize) -> Vec<f64> {
+    let mut result = vec![f64::NAN; prices.len()];
+
+    if prices.len() < period || period < 2 {
+        return result;
+    }
+
+    // Calculate EMA
+    let ema1 = match calculate_ema_ta(prices, period) {
+        Ok(ema) => ema,
+        Err(_) => return result,
+    };
+
+    // Calculate EMA of EMA
+    let ema2 = match calculate_ema_ta(&ema1, period) {
+        Ok(ema) => ema,
+        Err(_) => return result,
+    };
+
+    // Calculate EMA of EMA of EMA
+    let ema3 = match calculate_ema_ta(&ema2, period) {
+        Ok(ema) => ema,
+        Err(_) => return result,
+    };
+
+    // TEMA = 3 * EMA - 3 * EMA(EMA) + EMA(EMA(EMA))
+    for i in (3 * period - 2)..prices.len() {
+        if ema1[i].is_finite() && ema2[i].is_finite() && ema3[i].is_finite() {
+            result[i] = 3.0 * ema1[i] - 3.0 * ema2[i] + ema3[i];
+        }
+    }
+
+    result
+}
+
+/// Calculate KAMA (Kaufman's Adaptive Moving Average)
+/// Adapts to market volatility using Efficiency Ratio
+fn calculate_kama(
+    prices: &[f64],
+    period: usize,
+    fast_period: usize,
+    slow_period: usize,
+) -> Vec<f64> {
+    let mut result = vec![f64::NAN; prices.len()];
+
+    if prices.len() < period || period < 2 {
+        return result;
+    }
+
+    let fast_sc = 2.0 / (fast_period as f64 + 1.0); // Fast smoothing constant
+    let slow_sc = 2.0 / (slow_period as f64 + 1.0); // Slow smoothing constant
+
+    // Initialize KAMA with first valid price
+    let mut kama = prices[period - 1];
+    result[period - 1] = kama;
+
+    for i in period..prices.len() {
+        // Calculate Efficiency Ratio (ER)
+        let change = (prices[i] - prices[i - period]).abs();
+        let volatility: f64 = (0..period)
+            .map(|j| (prices[i - j] - prices[i - j - 1]).abs())
+            .sum();
+
+        let er = if volatility > 1e-10 {
+            change / volatility
+        } else {
+            0.0
+        };
+
+        // Calculate Smoothing Constant (SC)
+        let sc = (er * (fast_sc - slow_sc) + slow_sc).powi(2);
+
+        // Calculate KAMA
+        kama = kama + sc * (prices[i] - kama);
+        result[i] = kama;
+    }
+
+    result
+}
+
+/// Calculate ZLEMA (Zero-Lag Exponential Moving Average)
+/// Formula: ZLEMA = EMA(Data + (Data - Data[Lag]))
+/// where Lag = (Period - 1) / 2
+fn calculate_zlema(prices: &[f64], period: usize) -> Vec<f64> {
+    let mut result = vec![f64::NAN; prices.len()];
+
+    if prices.len() < period || period < 2 {
+        return result;
+    }
+
+    let lag = (period - 1) / 2;
+
+    // Create lag-adjusted data
+    let mut ema_data = vec![f64::NAN; prices.len()];
+    for i in lag..prices.len() {
+        ema_data[i] = prices[i] + (prices[i] - prices[i - lag]);
+    }
+
+    // Calculate EMA on lag-adjusted data
+    let zlema = match calculate_ema_ta(&ema_data, period) {
+        Ok(ema) => ema,
+        Err(_) => return result,
+    };
+
+    // Copy valid values
+    for i in (period + lag - 1)..prices.len() {
+        if zlema[i].is_finite() {
+            result[i] = zlema[i];
+        }
+    }
+
+    result
 }
 
 /// Add MACD indicators to DataFrame
@@ -1113,11 +1408,21 @@ fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec
         return fractal_dims;
     }
 
-    let k_max = 8.min(max_window / 4); // Ensure k_max is reasonable for window size
+    let k_max = 8.min(max_window / 4);
 
     for idx in max_window..prices.len() {
         let window = &prices[idx - max_window..idx];
         let n = window.len();
+
+        // Check for constant prices (all same value)
+        let min_price = window.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_price = window.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let price_range = max_price - min_price;
+
+        // If prices are constant or near-constant, skip calculation
+        if price_range < 1e-10 {
+            continue;
+        }
 
         let mut l_k_values = Vec::with_capacity(k_max);
 
@@ -1125,14 +1430,12 @@ fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec
             let mut l_m_values = Vec::with_capacity(k);
 
             for m in 0..k {
-                // Calculate floor((N-m)/k) as per Higuchi formula
                 let num_segments = (n - m - 1) / k;
 
                 if num_segments == 0 {
                     continue;
                 }
 
-                // Calculate curve length for this m
                 let mut curve_length = 0.0;
                 for i in 1..=num_segments {
                     let idx1 = m + i * k;
@@ -1140,31 +1443,36 @@ fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec
                     curve_length += (window[idx1] - window[idx2]).abs();
                 }
 
-                // Apply Higuchi normalization: L_m(k) = [curve_length × (N-1)] / [num_segments × k²]
+                // Skip if curve length is zero (constant segment)
+                if curve_length < 1e-10 {
+                    continue;
+                }
+
                 let normalization = (n - 1) as f64 / (num_segments as f64 * k as f64 * k as f64);
                 let l_m = curve_length * normalization;
 
                 l_m_values.push(l_m);
             }
 
-            // Calculate average L(k) across all m values
             if !l_m_values.is_empty() {
                 let l_k = l_m_values.iter().sum::<f64>() / l_m_values.len() as f64;
-                l_k_values.push(l_k);
+                // Only add if l_k is positive and finite
+                if l_k > 1e-10 && l_k.is_finite() {
+                    l_k_values.push(l_k);
+                }
             }
         }
 
-        // Perform linear regression on log(1/k) vs log(L(k))
-        // Slope gives the fractal dimension D
         if l_k_values.len() >= 3 {
             let mut log_inv_k = Vec::with_capacity(l_k_values.len());
             let mut log_l_k = Vec::with_capacity(l_k_values.len());
 
             for (k_idx, &l_k) in l_k_values.iter().enumerate() {
                 let k = (k_idx + 1) as f64;
-                if l_k > 0.0 {
+                let log_val = l_k.ln();
+                if log_val.is_finite() {
                     log_inv_k.push((1.0 / k).ln());
-                    log_l_k.push(l_k.ln());
+                    log_l_k.push(log_val);
                 }
             }
 
@@ -1184,9 +1492,9 @@ fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec
                 if denominator.abs() > 1e-10 {
                     let slope = (n_points * sum_xy - sum_x * sum_y) / denominator;
 
-                    // The slope is the fractal dimension
-                    if slope.is_finite() && slope > 0.0 && slope <= 2.0 {
-                        fractal_dims[idx] = slope;
+                    // Clamp to reasonable range for time series (0.5 to 2.5)
+                    if slope.is_finite() && slope > 0.0 {
+                        fractal_dims[idx] = slope.clamp(0.5, 2.5);
                     }
                 }
             }

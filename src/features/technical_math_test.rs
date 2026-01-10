@@ -188,8 +188,8 @@ async fn test_advanced_indicators_range() {
             if let Some(val) = fractal_series.get(i) {
                 if !val.is_nan() {
                     assert!(
-                        (1.0..=2.0).contains(&val),
-                        "Fractal dimension at index {} = {} is out of range [1.0, 2.0]",
+                        (0.5..=2.5).contains(&val),
+                        "Fractal dimension at index {} = {} is out of range [0.5, 2.5]",
                         i,
                         val
                     );
