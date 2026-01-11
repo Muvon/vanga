@@ -189,11 +189,13 @@ impl LSTMModel {
                     )));
                 }
 
-                let mut forward_hidden_states = Vec::new();
-                for state in &forward_states {
-                    forward_hidden_states.push(state.h().clone());
-                }
+                let forward_hidden_states: Vec<Tensor> = forward_states
+                    .iter()
+                    .map(|state| state.h().clone())
+                    .collect();
                 let forward_output = Tensor::stack(&forward_hidden_states, 1)?.contiguous()?;
+                drop(forward_hidden_states);
+                drop(forward_states);
 
                 // Process backward direction with same logic
                 let backward_states = if training {
@@ -213,14 +215,18 @@ impl LSTMModel {
                     )));
                 }
 
-                let mut backward_hidden_states = Vec::new();
-                for state in &backward_states {
-                    backward_hidden_states.push(state.h().clone());
-                }
+                let backward_hidden_states: Vec<Tensor> = backward_states
+                    .iter()
+                    .map(|state| state.h().clone())
+                    .collect();
                 let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
+                drop(backward_hidden_states);
+                drop(backward_states);
 
                 current_input =
                     Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
+                drop(forward_output);
+                drop(backward_output);
 
                 // Apply consistent dropout between layers if enabled AND in training mode
                 let should_apply_dropout = if let Some(dropout_config) = &self.dropout_config {
@@ -250,10 +256,8 @@ impl LSTMModel {
                 // which would require passing it through the forward pass or storing it in the model
 
                 log::debug!(
-                    "Bidirectional layer {} - Forward: {:?}, Backward: {:?}, Concatenated: {:?}",
+                    "Bidirectional layer {} - Concatenated: {:?}",
                     layer_idx,
-                    forward_output.shape(),
-                    backward_output.shape(),
                     current_input.shape()
                 );
             }
@@ -283,12 +287,11 @@ impl LSTMModel {
                     )));
                 }
 
-                let mut hidden_states = Vec::new();
-                for state in &layer_states {
-                    hidden_states.push(state.h().clone());
-                }
-
+                let hidden_states: Vec<Tensor> =
+                    layer_states.iter().map(|state| state.h().clone()).collect();
                 current_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
+                drop(hidden_states);
+                drop(layer_states);
 
                 // Apply consistent dropout between layers if enabled AND in training mode
                 let should_apply_dropout = self
@@ -425,6 +428,66 @@ impl LSTMModel {
             ));
         }
 
+        let total_sequences = sequences.shape()[0];
+        let batch_size = self.training_config.batch_size;
+
+        // If total sequences fit in one batch, process directly
+        if total_sequences <= batch_size {
+            return self.predict_batch(sequences).await;
+        }
+
+        // Process in batches to avoid OOM
+        log::info!(
+            "Processing {} sequences in batches of {}",
+            total_sequences,
+            batch_size
+        );
+
+        let num_batches = total_sequences.div_ceil(batch_size);
+        let mut all_predictions = Vec::new();
+
+        for batch_idx in 0..num_batches {
+            let start_idx = batch_idx * batch_size;
+            let end_idx = std::cmp::min(start_idx + batch_size, total_sequences);
+
+            log::debug!(
+                "Processing batch {}/{}: sequences {}-{}",
+                batch_idx + 1,
+                num_batches,
+                start_idx,
+                end_idx
+            );
+
+            let batch_sequences = sequences.slice(ndarray::s![start_idx..end_idx, .., ..]);
+            let batch_predictions = self.predict_batch(&batch_sequences.to_owned()).await?;
+
+            all_predictions.push(batch_predictions);
+        }
+
+        // Concatenate all batch predictions
+        let total_rows: usize = all_predictions.iter().map(|p| p.nrows()).sum();
+        let num_cols = all_predictions[0].ncols();
+
+        let mut result = Array2::zeros((total_rows, num_cols));
+        let mut current_row = 0;
+
+        for batch_pred in all_predictions {
+            let batch_rows = batch_pred.nrows();
+            result
+                .slice_mut(ndarray::s![current_row..current_row + batch_rows, ..])
+                .assign(&batch_pred);
+            current_row += batch_rows;
+        }
+
+        log::info!(
+            "Generated {} predictions across {} batches",
+            total_rows,
+            num_batches
+        );
+        Ok(result)
+    }
+
+    async fn predict_batch(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
         // Convert sequences to tensor (prediction-optimized version)
         let input_tensor = self.convert_sequences_to_prediction_tensor(sequences)?;
 
@@ -613,9 +676,11 @@ impl LSTMModel {
 
         // Explicit memory cleanup for prediction tensors
         drop(input_tensor);
-        // Note: predictions_tensor and final_predictions_tensor are dropped automatically
 
-        log::info!("Generated {} predictions", predictions_array.nrows());
+        log::debug!(
+            "Generated {} predictions for batch",
+            predictions_array.nrows()
+        );
         Ok(predictions_array)
     }
 
