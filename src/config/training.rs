@@ -148,9 +148,35 @@ pub struct DataConfig {
     /// Sequence overlap ratio (0.0-1.0)
     pub sequence_overlap: f64,
 
-    /// Enable sequence augmentation for overlapping sequences
+    /// Enable intelligent minority class augmentation
+    /// When true: augments underrepresented classes to balance dataset
+    /// When false: uses traditional min-class balancing (downsamples all to minimum)
+    ///
+    /// **New Strategy**: Instead of augmenting all overlapping sequences,
+    /// this intelligently oversamples minority classes using time-series augmentation
+    /// to achieve perfect balance while increasing total training samples.
     #[serde(default = "default_sequence_augment")]
     pub sequence_augment: bool,
+
+    /// Target percentile for class balancing (0.0-1.0)
+    /// - 0.4 = 40th percentile (conservative, less augmentation)
+    /// - 0.5 = median (balanced approach, recommended)
+    /// - 0.6 = 60th percentile (aggressive, more augmentation)
+    ///
+    /// Higher values generate more synthetic samples but may risk overfitting.
+    /// Lower values are more conservative but may undersample majority classes.
+    #[serde(default = "default_augment_target_percentile")]
+    pub augment_target_percentile: f64,
+
+    /// Maximum synthetic samples per real sample (prevents over-augmentation)
+    /// - 1.0 = max 1 synthetic per real (conservative)
+    /// - 2.0 = max 2 synthetic per real (balanced, recommended)
+    /// - 3.0 = max 3 synthetic per real (aggressive)
+    ///
+    /// Limits how many synthetic sequences can be generated from minority classes
+    /// to prevent excessive augmentation that could lead to overfitting.
+    #[serde(default = "default_max_synthetic_ratio")]
+    pub max_synthetic_ratio: f64,
 
     /// Outlier detection and handling
     pub outlier_handling: OutlierHandling,
@@ -161,6 +187,14 @@ pub struct DataConfig {
 
 fn default_sequence_augment() -> bool {
     false
+}
+
+fn default_augment_target_percentile() -> f64 {
+    0.5 // Use median by default (balanced approach)
+}
+
+fn default_max_synthetic_ratio() -> f64 {
+    2.0 // Max 2 synthetic per 1 real sample (balanced approach)
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd, Debug, Clone, Serialize, Deserialize)]
@@ -1531,6 +1565,8 @@ impl Default for DataConfig {
             normalization: NormalizationMethod::Robust,
             sequence_overlap: 0.8,
             sequence_augment: false,
+            augment_target_percentile: 0.5,
+            max_synthetic_ratio: 2.0,
             outlier_handling: OutlierHandling {
                 enabled: true,
                 method: OutlierMethod::ModifiedZScore,

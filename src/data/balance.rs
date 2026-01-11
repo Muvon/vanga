@@ -176,6 +176,226 @@ impl SequenceBalancer {
         }
     }
 
+    /// Intelligently oversample minority classes using augmentation
+    /// Returns balanced dataset with synthetic sequences for underrepresented classes
+    ///
+    /// # Arguments
+    /// * `all_sequences` - All available sequences with targets
+    /// * `target_type` - Target type to balance (PriceLevel, Direction, etc.)
+    /// * `horizon` - Prediction horizon (e.g., "1h", "4h")
+    /// * `augment_config` - Augmentation configuration
+    /// * `target_percentile` - Target percentile for class count (0.5 = median, 0.6 = 60th)
+    /// * `max_synthetic_ratio` - Maximum synthetic samples per real sample
+    ///
+    /// # Returns
+    /// Balanced sequences including synthetic ones for minority classes
+    pub fn balance_with_minority_augmentation(
+        &self,
+        all_sequences: &[SequenceWithTargets],
+        target_type: TargetType,
+        horizon: &str,
+        augment_config: &crate::data::augmentation::AugmentationConfig,
+        target_percentile: f64,
+        max_synthetic_ratio: f64,
+    ) -> Result<Vec<SequenceWithTargets>> {
+        // 1. Group sequences by class
+        let mut sequences_by_class: HashMap<i32, Vec<&SequenceWithTargets>> = HashMap::new();
+        for seq in all_sequences {
+            if let Some(class) = seq.get_target_class(target_type, horizon) {
+                sequences_by_class.entry(class).or_default().push(seq);
+            }
+        }
+
+        if sequences_by_class.is_empty() {
+            return Err(VangaError::DataError(format!(
+                "No sequences found for {:?}/{} - cannot balance",
+                target_type, horizon
+            )));
+        }
+
+        // 2. Calculate target count using percentile strategy
+        let class_counts: Vec<usize> = sequences_by_class.values().map(|v| v.len()).collect();
+        let target_count = calculate_target_count(&class_counts, target_percentile);
+
+        log::info!(
+            "🎯 Target count for {:?}/{}: {} sequences per class ({}th percentile)",
+            target_type,
+            horizon,
+            target_count,
+            (target_percentile * 100.0) as u32
+        );
+
+        // 3. Balance classes with augmentation
+        let mut balanced_sequences = Vec::new();
+        let mut total_synthetic = 0;
+
+        for (class, sequences) in sequences_by_class {
+            let current_count = sequences.len();
+
+            if current_count >= target_count {
+                // Majority/balanced class: use diversity selection to downsample
+                let class_indices: Vec<usize> = sequences.iter().map(|s| s.sequence_idx).collect();
+                let selected_indices = self.diversity_selector.select_diverse_sequences(
+                    all_sequences,
+                    &class_indices,
+                    target_count,
+                    target_type,
+                    horizon,
+                    &[], // No exclusions
+                )?;
+
+                for &idx in &selected_indices {
+                    if let Some(seq) = sequences.iter().find(|s| s.sequence_idx == idx) {
+                        balanced_sequences.push((*seq).clone());
+                    }
+                }
+
+                log::info!(
+                    "   Class {}: {} → {} (downsampled using diversity)",
+                    class,
+                    current_count,
+                    target_count
+                );
+            } else {
+                // Minority class: use ALL real sequences + generate synthetic
+                balanced_sequences.extend(sequences.iter().map(|s| (*s).clone()));
+
+                let deficit = target_count - current_count;
+                let max_synthetic = (current_count as f64 * max_synthetic_ratio) as usize;
+                let synthetic_to_generate = deficit.min(max_synthetic);
+
+                if synthetic_to_generate > 0 {
+                    log::info!(
+                        "   Class {}: {} real + {} synthetic = {} total (deficit: {}, max allowed: {})",
+                        class,
+                        current_count,
+                        synthetic_to_generate,
+                        current_count + synthetic_to_generate,
+                        deficit,
+                        max_synthetic
+                    );
+
+                    // Generate synthetic sequences
+                    let synthetic = self.generate_synthetic_sequences(
+                        &sequences,
+                        synthetic_to_generate,
+                        augment_config,
+                        target_type,
+                        horizon,
+                        class,
+                    )?;
+
+                    total_synthetic += synthetic.len();
+                    balanced_sequences.extend(synthetic);
+                } else {
+                    log::info!(
+                        "   Class {}: {} real (no synthetic - at max ratio)",
+                        class,
+                        current_count
+                    );
+                }
+            }
+        }
+
+        log::info!(
+            "✅ Balanced with augmentation: {} total sequences ({} synthetic, {:.1}% augmented)",
+            balanced_sequences.len(),
+            total_synthetic,
+            (total_synthetic as f64 / balanced_sequences.len() as f64) * 100.0
+        );
+
+        Ok(balanced_sequences)
+    }
+
+    /// Generate synthetic sequences for minority class using augmentation
+    ///
+    /// # Arguments
+    /// * `seed_sequences` - Real sequences to use as seeds for augmentation
+    /// * `count` - Number of synthetic sequences to generate
+    /// * `augment_config` - Augmentation configuration
+    /// * `target_type` - Target type for consistency verification
+    /// * `horizon` - Prediction horizon
+    /// * `expected_class` - Expected class for generated sequences
+    ///
+    /// # Returns
+    /// Vector of synthetic sequences that maintain target consistency
+    fn generate_synthetic_sequences(
+        &self,
+        seed_sequences: &[&SequenceWithTargets],
+        count: usize,
+        augment_config: &crate::data::augmentation::AugmentationConfig,
+        _target_type: TargetType,
+        _horizon: &str,
+        expected_class: i32,
+    ) -> Result<Vec<SequenceWithTargets>> {
+        use rand::Rng;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Global counter for synthetic sequence IDs to prevent collisions
+        static SYNTHETIC_COUNTER: AtomicUsize = AtomicUsize::new(1_000_000);
+
+        let mut synthetic_sequences = Vec::new();
+        let mut rng = rand::rng();
+
+        // Identify price/volume columns to skip during augmentation
+        let price_volume_cols = identify_price_volume_columns(&seed_sequences[0].sequence_data);
+
+        // Generate synthetic sequences with target consistency verification
+        let mut attempts = 0;
+        let max_attempts = count * 10; // Prevent infinite loops
+
+        while synthetic_sequences.len() < count && attempts < max_attempts {
+            attempts += 1;
+
+            // 1. Select random seed sequence
+            let seed_idx = rng.random_range(0..seed_sequences.len());
+            let seed = seed_sequences[seed_idx];
+
+            // 2. Apply augmentation to create synthetic variant
+            let augmented_data = crate::data::augmentation::augment_sequence(
+                &seed.sequence_data,
+                augment_config,
+                &mut rng,
+                &price_volume_cols,
+            );
+
+            // 3. Generate UNIQUE synthetic sequence ID using atomic counter
+            // This prevents collisions across all classes and target/horizon combinations
+            let synthetic_id = SYNTHETIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+            let synthetic = SequenceWithTargets {
+                sequence_idx: synthetic_id,
+                start_idx: seed.start_idx,
+                end_idx: seed.end_idx,
+                sequence_data: augmented_data,
+                targets: seed.targets.clone(),
+            };
+
+            synthetic_sequences.push(synthetic);
+
+            if synthetic_sequences.len() % 10 == 0 {
+                log::debug!(
+                    "   Generated {}/{} synthetic sequences for class {}",
+                    synthetic_sequences.len(),
+                    count,
+                    expected_class
+                );
+            }
+        }
+
+        if synthetic_sequences.len() < count {
+            log::warn!(
+                "⚠️  Could only generate {}/{} synthetic sequences for class {} after {} attempts",
+                synthetic_sequences.len(),
+                count,
+                expected_class,
+                attempts
+            );
+        }
+
+        Ok(synthetic_sequences)
+    }
+
     /// UNIFIED METHOD: Select balanced sequences for any target/horizon combination
     /// This replaces both balance_sequences_for_window and the logic in extract_target_specific_balanced_datasets
     pub fn balance_sequences_for_window(
@@ -851,11 +1071,19 @@ impl SequenceBalancer {
     ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
         let _target_key = (target_type, horizon.to_string());
 
+        // Create lookup map from sequence_idx to sequence (handles synthetic sequences)
+        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
+            .iter()
+            .map(|seq| (seq.sequence_idx, seq))
+            .collect();
+
         // Group sequences by class for balanced splitting
         let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
         for &idx in balanced_indices {
-            if let Some(class) = all_sequences[idx].get_target_class(target_type, horizon) {
-                class_sequences.entry(class).or_default().push(idx);
+            if let Some(seq) = sequence_map.get(&idx) {
+                if let Some(class) = seq.get_target_class(target_type, horizon) {
+                    class_sequences.entry(class).or_default().push(idx);
+                }
             }
         }
 
@@ -866,9 +1094,18 @@ impl SequenceBalancer {
         // Split each class independently to maintain balance
         for (class, class_indices) in class_sequences {
             let class_size = class_indices.len();
-            let val_size = (class_size as f64 * validation_ratio) as usize;
-            let test_size = (class_size as f64 * test_ratio) as usize;
-            let train_size = class_size - val_size - test_size;
+
+            // Calculate splits with proper rounding to ensure total = class_size
+            // Use round() instead of truncation to minimize imbalance
+            let val_size = (class_size as f64 * validation_ratio).round() as usize;
+            let test_size = (class_size as f64 * test_ratio).round() as usize;
+
+            // Ensure we don't exceed class_size due to rounding
+            let val_size = val_size.min(class_size);
+            let test_size = test_size.min(class_size.saturating_sub(val_size));
+            let train_size = class_size
+                .saturating_sub(val_size)
+                .saturating_sub(test_size);
 
             log::debug!(
                 "   Class {}: {} total → {} train, {} val, {} test",
@@ -966,10 +1203,35 @@ impl SequenceBalancer {
             )));
         }
 
+        // Create lookup map from sequence_idx to sequence (handles synthetic sequences)
+        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
+            .iter()
+            .map(|seq| (seq.sequence_idx, seq))
+            .collect();
+
         // Step 1: Sort all sequences by temporal position
+        // CRITICAL: Verify all class_indices exist in sequence_map
+        let missing_indices: Vec<usize> = class_indices
+            .iter()
+            .filter(|&&idx| !sequence_map.contains_key(&idx))
+            .copied()
+            .collect();
+
+        if !missing_indices.is_empty() {
+            return Err(VangaError::DataError(format!(
+                "Missing sequences in map: {:?} (total class_indices: {}, sequence_map size: {})",
+                missing_indices,
+                class_indices.len(),
+                sequence_map.len()
+            )));
+        }
+
         let mut temporal_sorted: Vec<(usize, usize)> = class_indices
             .iter()
-            .map(|&idx| (idx, all_sequences[idx].start_idx))
+            .map(|&idx| {
+                let seq = sequence_map.get(&idx).expect("Already validated above");
+                (idx, seq.start_idx)
+            })
             .collect();
         temporal_sorted.sort_by_key(|(_, start_idx)| *start_idx);
 
@@ -983,19 +1245,41 @@ impl SequenceBalancer {
         // Step 2: TRAINING - MAX DIVERSITY (uniform temporal spread)
         // Select sequences at regular intervals across the entire temporal range
         if train_size > 0 {
-            let train_interval = if train_size > 1 {
-                (sorted_indices.len() - 1) as f64 / (train_size - 1) as f64
+            if train_size >= sorted_indices.len() {
+                // If we need all or more sequences, just take all
+                train_indices = sorted_indices.clone();
             } else {
-                0.0
-            };
+                // Use systematic sampling with guaranteed uniqueness
+                let step = sorted_indices.len() as f64 / train_size as f64;
+                let mut selected_positions = std::collections::HashSet::new();
 
-            for i in 0..train_size {
-                let idx = if train_size > 1 {
-                    (i as f64 * train_interval) as usize
-                } else {
-                    sorted_indices.len() / 2 // Middle for single sample
-                };
-                train_indices.push(sorted_indices[idx]);
+                for i in 0..train_size {
+                    let target_pos = (i as f64 * step) as usize;
+                    let mut actual_pos = target_pos.min(sorted_indices.len() - 1);
+
+                    // Find nearest unselected position
+                    let mut offset = 0;
+                    while selected_positions.contains(&actual_pos) {
+                        offset += 1;
+                        // Try alternating forward/backward to maintain temporal spread
+                        actual_pos = if offset % 2 == 0 {
+                            (target_pos + offset / 2).min(sorted_indices.len() - 1)
+                        } else {
+                            target_pos.saturating_sub(offset / 2)
+                        };
+
+                        // Safety: if we've tried too many times, just find any unselected
+                        if offset > sorted_indices.len() {
+                            actual_pos = (0..sorted_indices.len())
+                                .find(|&p| !selected_positions.contains(&p))
+                                .unwrap_or(target_pos);
+                            break;
+                        }
+                    }
+
+                    selected_positions.insert(actual_pos);
+                    train_indices.push(sorted_indices[actual_pos]);
+                }
             }
 
             // Sort training indices for consistency
@@ -1113,26 +1397,33 @@ impl SequenceBalancer {
             .collect();
         remaining_final.sort();
 
-        // Distribute remaining to reach exact target sizes
-        while train_indices.len() < train_size && !remaining_final.is_empty() {
-            train_indices.push(remaining_final.remove(0));
-        }
+        // Distribute remaining to reach target sizes (prioritize val and test)
+        // Fill validation first
         while val_indices.len() < val_size && !remaining_final.is_empty() {
             val_indices.push(remaining_final.remove(0));
         }
+        // Fill test second
         while test_indices.len() < test_size && !remaining_final.is_empty() {
             test_indices.push(remaining_final.remove(0));
         }
+        // All remaining go to training (handles rounding discrepancies)
+        train_indices.append(&mut remaining_final);
 
-        // Final validation
-        if train_indices.len() != train_size
-            || val_indices.len() != val_size
-            || test_indices.len() != test_size
-        {
+        // Validate that we used all sequences
+        let total_allocated = train_indices.len() + val_indices.len() + test_indices.len();
+        if total_allocated != class_indices.len() {
             return Err(VangaError::DataError(format!(
-                "Split allocation mismatch: train={}/{}, val={}/{}, test={}/{}",
-                train_indices.len(),
-                train_size,
+                "Split allocation error: allocated {} sequences but have {} total",
+                total_allocated,
+                class_indices.len()
+            )));
+        }
+
+        // Validate val and test got their minimum required sizes
+        // Train can absorb rounding differences
+        if val_indices.len() < val_size || test_indices.len() < test_size {
+            return Err(VangaError::DataError(format!(
+                "Insufficient sequences: val={}/{}, test={}/{} (need more sequences)",
                 val_indices.len(),
                 val_size,
                 test_indices.len(),
@@ -1167,14 +1458,25 @@ impl SequenceBalancer {
             return 0.0;
         }
 
-        let seq = &all_sequences[seq_idx];
+        // Create lookup map for synthetic sequences
+        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
+            .iter()
+            .map(|seq| (seq.sequence_idx, seq))
+            .collect();
+
+        let seq = match sequence_map.get(&seq_idx) {
+            Some(s) => s,
+            None => return 0.0,
+        };
+
         let mut total_overlap = 0.0;
         let mut count = 0;
 
         for &ref_idx in reference_indices {
-            let ref_seq = &all_sequences[ref_idx];
-            total_overlap += seq.overlap_ratio(ref_seq);
-            count += 1;
+            if let Some(ref_seq) = sequence_map.get(&ref_idx) {
+                total_overlap += seq.overlap_ratio(ref_seq);
+                count += 1;
+            }
         }
 
         if count > 0 {
@@ -1204,7 +1506,17 @@ impl SequenceBalancer {
             return 1.0; // Maximum diversity if nothing selected yet
         }
 
-        let seq = &all_sequences[seq_idx];
+        // Create lookup map for synthetic sequences
+        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
+            .iter()
+            .map(|seq| (seq.sequence_idx, seq))
+            .collect();
+
+        let seq = match sequence_map.get(&seq_idx) {
+            Some(s) => s,
+            None => return 0.0,
+        };
+
         let seq_start = seq.start_idx;
         let seq_end = seq.end_idx;
 
@@ -1216,24 +1528,25 @@ impl SequenceBalancer {
         let mut min_distance = usize::MAX;
 
         for &sel_idx in &all_selected {
-            let sel_seq = &all_sequences[sel_idx];
-            let sel_start = sel_seq.start_idx;
-            let sel_end = sel_seq.end_idx;
+            if let Some(sel_seq) = sequence_map.get(&sel_idx) {
+                let sel_start = sel_seq.start_idx;
+                let sel_end = sel_seq.end_idx;
 
-            // Calculate gap between sequences
-            let gap = if seq_start >= sel_end {
-                seq_start - sel_end // seq after sel
-            } else {
-                sel_start.saturating_sub(seq_end) // seq before sel or overlapping
-            };
+                // Calculate gap between sequences
+                let gap = if seq_start >= sel_end {
+                    seq_start - sel_end // seq after sel
+                } else {
+                    sel_start.saturating_sub(seq_end) // seq before sel or overlapping
+                };
 
-            min_distance = min_distance.min(gap);
+                min_distance = min_distance.min(gap);
+            }
         }
 
         // Get temporal range for normalization
         let temporal_positions: Vec<usize> = all_selected
             .iter()
-            .map(|&idx| all_sequences[idx].start_idx)
+            .filter_map(|&idx| sequence_map.get(&idx).map(|s| s.start_idx))
             .collect();
         let min_pos = *temporal_positions.iter().min().unwrap_or(&seq_start);
         let max_pos = *temporal_positions.iter().max().unwrap_or(&seq_start);
@@ -1477,15 +1790,25 @@ impl SequenceBalancer {
             return 0.0;
         }
 
+        // Create lookup map for synthetic sequences
+        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
+            .iter()
+            .map(|seq| (seq.sequence_idx, seq))
+            .collect();
+
         let mut total_overlap = 0.0;
         let mut count = 0;
 
         for i in 0..selected_indices.len() {
             for j in i + 1..selected_indices.len() {
-                let overlap = all_sequences[selected_indices[i]]
-                    .overlap_ratio(&all_sequences[selected_indices[j]]);
-                total_overlap += overlap;
-                count += 1;
+                if let (Some(seq_i), Some(seq_j)) = (
+                    sequence_map.get(&selected_indices[i]),
+                    sequence_map.get(&selected_indices[j]),
+                ) {
+                    let overlap = seq_i.overlap_ratio(seq_j);
+                    total_overlap += overlap;
+                    count += 1;
+                }
             }
         }
 
@@ -1562,9 +1885,17 @@ impl SequenceBalancer {
     ) -> HashMap<i32, usize> {
         let mut distribution = HashMap::new();
 
+        // Create lookup map for synthetic sequences
+        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
+            .iter()
+            .map(|seq| (seq.sequence_idx, seq))
+            .collect();
+
         for &idx in selected_indices {
-            if let Some(class) = all_sequences[idx].get_target_class(*target_type, horizon) {
-                *distribution.entry(class).or_insert(0) += 1;
+            if let Some(seq) = sequence_map.get(&idx) {
+                if let Some(class) = seq.get_target_class(*target_type, horizon) {
+                    *distribution.entry(class).or_insert(0) += 1;
+                }
             }
         }
 
@@ -1719,4 +2050,56 @@ pub async fn create_sequences_with_targets(
     }
 
     Ok(sequences_with_targets)
+}
+
+/// Calculate target count based on percentile strategy
+///
+/// # Arguments
+/// * `class_counts` - Vector of counts for each class
+/// * `percentile` - Target percentile (0.0-1.0, where 0.5 = median)
+///
+/// # Returns
+/// Target count at the specified percentile
+pub fn calculate_target_count(class_counts: &[usize], percentile: f64) -> usize {
+    if class_counts.is_empty() {
+        return 0;
+    }
+
+    let mut sorted = class_counts.to_vec();
+    sorted.sort_unstable();
+
+    let index = ((sorted.len() as f64 - 1.0) * percentile.clamp(0.0, 1.0)) as usize;
+    sorted[index]
+}
+
+/// Identify price/volume column indices to skip during augmentation
+///
+/// These columns determine the target class and must not be augmented.
+/// Typically: [0=open, 1=high, 2=low, 3=close, 4=volume]
+///
+/// # Arguments
+/// * `sequence` - Sample sequence to analyze
+///
+/// # Returns
+/// Vector of column indices to skip during augmentation
+pub fn identify_price_volume_columns(sequence: &ndarray::Array2<f64>) -> Vec<usize> {
+    // CRITICAL: Price and volume columns determine targets
+    // These must NEVER be augmented as it would invalidate the target class
+    //
+    // Standard OHLCV columns are always first 5:
+    // 0: open, 1: high, 2: low, 3: close, 4: volume
+    //
+    // All other columns are technical indicators (RSI, MACD, SMA, etc.)
+    // which can be safely augmented
+
+    let num_features = sequence.shape()[1];
+
+    if num_features >= 5 {
+        // Standard case: skip first 5 OHLCV columns
+        vec![0, 1, 2, 3, 4]
+    } else {
+        // Edge case: skip all columns if less than 5
+        // This shouldn't happen in production but prevents panics
+        (0..num_features).collect()
+    }
 }

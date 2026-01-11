@@ -3,6 +3,8 @@ pub mod augmentation;
 mod augmentation_test;
 pub mod balance;
 #[cfg(test)]
+mod balance_augmentation_test;
+#[cfg(test)]
 mod balance_critical_test;
 #[cfg(test)]
 mod balance_test;
@@ -21,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::targets::PreparedTargets;
 use crate::utils::error::{Result, VangaError};
 pub use augmentation::{augment_sequence, AugmentationConfig};
+pub use balance::SequenceWithTargets;
 pub use loader::DataLoader;
 pub use preprocessor::DataPreprocessor;
 pub use schema::{CryptoDataSchema, DataValidationError};
@@ -434,12 +437,118 @@ impl DataPipeline {
 
         log::info!("🎯 Enabled targets for training: {:?}", target_types);
 
+        // STEP 5: Extract target-specific balanced datasets with optional augmentation
         log::info!("🎯 TARGET-SPECIFIC BALANCE EXTRACTION: Each target balanced independently");
-        let target_balanced_datasets = balancer.extract_target_specific_balanced_datasets(
-            &all_sequences,
-            &target_types,
-            &config.horizons,
-        )?;
+
+        // Store augmented sequences separately to extend all_sequences
+        let mut augmented_sequences_map: HashMap<
+            (crate::targets::TargetType, String),
+            Vec<SequenceWithTargets>,
+        > = HashMap::new();
+
+        let target_balanced_datasets = if config.data.sequence_augment {
+            // NEW: Intelligent minority class augmentation
+            log::info!("🔬 Intelligent minority augmentation ENABLED");
+            log::info!(
+                "   Target percentile: {}th ({})",
+                (config.data.augment_target_percentile * 100.0) as u32,
+                if config.data.augment_target_percentile == 0.5 {
+                    "median"
+                } else if config.data.augment_target_percentile < 0.5 {
+                    "conservative"
+                } else {
+                    "aggressive"
+                }
+            );
+            log::info!(
+                "   Max synthetic ratio: {:.1}x (max {} synthetic per real sample)",
+                config.data.max_synthetic_ratio,
+                config.data.max_synthetic_ratio
+            );
+
+            // Create augmentation config
+            let augment_config = crate::data::augmentation::AugmentationConfig::default();
+
+            // Balance with augmentation for each target/horizon
+            let mut augmented_datasets = HashMap::new();
+
+            for target_type in &target_types {
+                for horizon in &config.horizons {
+                    let balanced_sequences = balancer.balance_with_minority_augmentation(
+                        &all_sequences,
+                        *target_type,
+                        horizon,
+                        &augment_config,
+                        config.data.augment_target_percentile,
+                        config.data.max_synthetic_ratio,
+                    )?;
+
+                    // Count synthetic vs real
+                    let real_count = balanced_sequences
+                        .iter()
+                        .filter(|s| s.sequence_idx < 1_000_000)
+                        .count();
+                    let synthetic_count = balanced_sequences.len() - real_count;
+
+                    log::info!(
+                        "   {:?} {}: {} total ({} real + {} synthetic = {:.1}% augmented)",
+                        target_type,
+                        horizon,
+                        balanced_sequences.len(),
+                        real_count,
+                        synthetic_count,
+                        (synthetic_count as f64 / balanced_sequences.len() as f64) * 100.0
+                    );
+
+                    // Store augmented sequences for this target/horizon
+                    let target_key = (*target_type, horizon.clone());
+                    augmented_sequences_map.insert(target_key.clone(), balanced_sequences.clone());
+
+                    // Convert to balanced dataset format using sequence_idx as lookup key
+                    let balanced_indices: Vec<usize> =
+                        balanced_sequences.iter().map(|s| s.sequence_idx).collect();
+
+                    // Calculate class distribution
+                    let mut class_distribution = HashMap::new();
+                    for seq in &balanced_sequences {
+                        if let Some(class) = seq.get_target_class(*target_type, horizon) {
+                            *class_distribution.entry(class).or_insert(0) += 1;
+                        }
+                    }
+
+                    let target_key_for_map = target_key.clone();
+                    augmented_datasets.insert(
+                        target_key_for_map.clone(),
+                        crate::data::balance::GloballyBalancedDataset {
+                            balanced_indices: {
+                                let mut map = HashMap::new();
+                                map.insert(target_key_for_map.clone(), balanced_indices);
+                                map
+                            },
+                            class_distribution: {
+                                let mut map = HashMap::new();
+                                map.insert(target_key_for_map, class_distribution);
+                                map
+                            },
+                            global_min_class_count: balanced_sequences.len() / 5, // 5 classes
+                            total_balanced_samples: balanced_sequences.len(),
+                            overloaded_classes: HashMap::new(),
+                        },
+                    );
+                }
+            }
+
+            augmented_datasets
+        } else {
+            // Traditional min-class balancing (no augmentation)
+            log::info!("📊 Traditional min-class balancing (no augmentation)");
+
+            balancer.extract_target_specific_balanced_datasets(
+                &all_sequences,
+                &target_types,
+                &config.horizons,
+            )?
+        };
 
         // Log per-target balance summary (sorted for consistent logging)
         let mut sorted_log_targets: Vec<_> = target_balanced_datasets.keys().collect();
@@ -530,10 +639,16 @@ impl DataPipeline {
 
                     // DIVERSE SPLITS: Create diverse train/validation/test splits
                     // Uses temporal stratification to ensure all splits are diverse
+                    // Use augmented sequences if available, otherwise use original sequences
+                    let sequences_for_split: &[SequenceWithTargets] = augmented_sequences_map
+                        .get(&target_key)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&all_sequences);
+
                     let (balanced_training_dataset, target_validation_indices, target_test_indices) =
                         balancer.create_diverse_splits(
                             target_dataset,
-                            &all_sequences,
+                            sequences_for_split,
                             validation_ratio,
                             config.training.test_split,
                             &[*target_type],
@@ -651,11 +766,12 @@ impl DataPipeline {
                     };
 
                     // Create window data using target-specific indices
+                    // CRITICAL: Use sequences_for_split which includes synthetic sequences
                     // Augmentation is applied inside create_data_from_indices() for train only
                     let train_data = self.create_data_from_indices(
                         &all_sequences_data,
                         &train_indices_map,
-                        &all_sequences,
+                        sequences_for_split,
                         augment_config.as_ref(),
                     )?;
 
@@ -663,7 +779,7 @@ impl DataPipeline {
                     let val_data = self.create_data_from_indices(
                         &all_sequences_data,
                         &val_indices_map,
-                        &all_sequences,
+                        sequences_for_split,
                         None, // NO augmentation for validation
                     )?;
 
@@ -682,10 +798,11 @@ impl DataPipeline {
 
                             // Create test data using target-specific indices
                             // TEST DATA: NO augmentation (pristine data for final evaluation)
+                            // CRITICAL: Use sequences_for_split which includes synthetic sequences
                             let test_data = self.create_data_from_indices(
                                 &all_sequences_data,
                                 &test_indices_map,
-                                &all_sequences,
+                                sequences_for_split,
                                 None, // NO augmentation for test data
                             )?;
 
@@ -864,23 +981,48 @@ impl DataPipeline {
         let mut sorted_indices: Vec<usize> = unique_indices.into_iter().collect();
         sorted_indices.sort();
 
-        // Validate indices are within bounds
+        // Validate indices and build sequence map for synthetic sequences
         let max_available_idx = all_data.sequences.shape()[0];
-        let invalid_indices: Vec<usize> = sorted_indices
-            .iter()
-            .filter(|&&idx| idx >= max_available_idx)
-            .copied()
-            .collect();
 
-        if !invalid_indices.is_empty() {
-            log::error!("❌ Invalid indices found: {:?}", invalid_indices);
-            log::error!("   Max available index: {}", max_available_idx - 1);
-            return Err(VangaError::DataError(format!(
-                "Invalid sequence indices: {:?} (max available: {})",
-                invalid_indices,
-                max_available_idx - 1
-            )));
+        // Create lookup map for all sequences (including synthetic)
+        let sequence_map: HashMap<usize, &crate::data::balance::SequenceWithTargets> =
+            all_sequences
+                .iter()
+                .map(|seq| (seq.sequence_idx, seq))
+                .collect();
+
+        // Separate real and synthetic indices
+        let mut real_indices = Vec::new();
+        let mut synthetic_indices = Vec::new();
+
+        for &idx in &sorted_indices {
+            if idx < 1_000_000 {
+                // Real sequence - validate against all_data
+                if idx >= max_available_idx {
+                    return Err(VangaError::DataError(format!(
+                        "Invalid real sequence index: {} (max available: {})",
+                        idx,
+                        max_available_idx - 1
+                    )));
+                }
+                real_indices.push(idx);
+            } else {
+                // Synthetic sequence - must exist in sequence_map
+                if !sequence_map.contains_key(&idx) {
+                    return Err(VangaError::DataError(format!(
+                        "Synthetic sequence {} not found in sequence map",
+                        idx
+                    )));
+                }
+                synthetic_indices.push(idx);
+            }
         }
+
+        log::debug!(
+            "   • Processing {} real + {} synthetic sequences",
+            real_indices.len(),
+            synthetic_indices.len()
+        );
 
         // Extract sequences
         let num_sequences = sorted_indices.len();
@@ -908,21 +1050,34 @@ impl DataPipeline {
         let price_volume_cols: Vec<usize> = (0..5).collect();
 
         for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
-            sequences
-                .slice_mut(ndarray::s![new_idx, .., ..])
-                .assign(&all_data.sequences.slice(ndarray::s![orig_idx, .., ..]));
-            sequence_indices.push(all_data.sequence_indices[orig_idx]);
+            if orig_idx < 1_000_000 {
+                // Real sequence - extract from all_data
+                sequences
+                    .slice_mut(ndarray::s![new_idx, .., ..])
+                    .assign(&all_data.sequences.slice(ndarray::s![orig_idx, .., ..]));
+                sequence_indices.push(all_data.sequence_indices[orig_idx]);
+            } else {
+                // Synthetic sequence - extract from sequence_map
+                if let Some(seq_with_targets) = sequence_map.get(&orig_idx) {
+                    sequences
+                        .slice_mut(ndarray::s![new_idx, .., ..])
+                        .assign(&seq_with_targets.sequence_data);
+                    sequence_indices.push((seq_with_targets.start_idx, seq_with_targets.end_idx));
+                } else {
+                    return Err(VangaError::DataError(format!(
+                        "Synthetic sequence {} not found",
+                        orig_idx
+                    )));
+                }
+            }
 
             // Apply augmentation if enabled and configured
             // Note: We augment based on overlap with the PREVIOUS sequence in THIS dataset
             if let Some(config) = augment_config {
                 if new_idx > 0 {
                     // Check overlap with previous sequence in this subset
-                    let prev_orig_idx = sorted_indices[new_idx - 1];
-                    let prev_start = all_data.sequence_indices[prev_orig_idx].0;
-                    let prev_end = all_data.sequence_indices[prev_orig_idx].1;
-                    let curr_start = all_data.sequence_indices[orig_idx].0;
-                    let curr_end = all_data.sequence_indices[orig_idx].1;
+                    let (prev_start, prev_end) = sequence_indices[new_idx - 1];
+                    let (curr_start, curr_end) = sequence_indices[new_idx];
 
                     if crate::data::augmentation::sequences_overlap(
                         prev_start, prev_end, curr_start, curr_end,
@@ -1019,10 +1174,10 @@ impl DataPipeline {
         }
 
         // Extract targets from SequenceWithTargets (TARGET-SPECIFIC FILTERING!)
+        // CRITICAL: Use sequence_map to look up synthetic sequences by sequence_idx
+        // Synthetic sequences have idx >= 1_000_000 and are NOT at array index positions
         for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
-            if orig_idx < all_sequences.len() {
-                let seq_with_targets = &all_sequences[orig_idx];
-
+            if let Some(seq_with_targets) = sequence_map.get(&orig_idx) {
                 // Copy ONLY the target types that are present in indices_by_target
                 for target_data in &seq_with_targets.targets {
                     let target_key = (target_data.target_type, target_data.horizon.clone());

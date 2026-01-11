@@ -1,6 +1,7 @@
 # VANGA Quick Start Configuration
 # Minimal configuration for getting started with VANGA LSTM training
 # For detailed parameter explanations, see configs/example_single_asset.toml
+# For intelligent augmentation, see configs/augmented_training.toml
 # Usage: vanga train --symbol BTCUSDT --data data.csv --config configs/quick_start.toml
 
 # Target configuration - enable/disable specific targets

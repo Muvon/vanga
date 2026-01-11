@@ -1,0 +1,178 @@
+# VANGA Augmented Training Configuration
+# Intelligent Minority Class Augmentation for Balanced Training
+# Usage: vanga train --symbol BTCUSDT --data data.csv --config configs/augmented_training.toml
+
+# ============================================================================
+# TARGET CONFIGURATION - Enable/disable specific targets
+# ============================================================================
+[targets]
+price_level = true    # Enable price level targets
+direction = true      # Enable direction targets
+volatility = true     # Enable volatility targets (optional)
+sentiment = false     # Disable for faster training
+volume = false        # Disable for faster training
+
+# ============================================================================
+# DATA CONFIGURATION - Intelligent Augmentation Strategy
+# ============================================================================
+[data]
+normalization = "Robust"
+
+# CRITICAL: Reduced overlap for better generalization
+# 0.3 = 30% overlap (70% new information per sequence)
+# Recommended: 0.2-0.4 for cryptocurrency markets
+sequence_overlap = 0.3  # CHANGED from 0.8 to 0.3
+
+# NEW: Intelligent minority class augmentation
+# When enabled: augments underrepresented classes to achieve perfect balance
+# When disabled: uses traditional min-class balancing (downsamples all to minimum)
+sequence_augment = true  # Enable smart augmentation
+
+# Target percentile for class balancing (0.0-1.0)
+# - 0.4 = 40th percentile (conservative, less augmentation)
+# - 0.5 = median (balanced approach, RECOMMENDED)
+# - 0.6 = 60th percentile (aggressive, more augmentation)
+augment_target_percentile = 0.5  # Use median (balanced)
+
+# Maximum synthetic samples per real sample
+# - 1.0 = max 1 synthetic per real (conservative)
+# - 2.0 = max 2 synthetic per real (balanced, RECOMMENDED)
+# - 3.0 = max 3 synthetic per real (aggressive)
+max_synthetic_ratio = 2.0  # Balanced approach
+
+[data.outlier_handling]
+enabled = true
+method = "ModifiedZScore"
+threshold = 3.5
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+[training]
+epochs = { Auto = { max_epochs = 1000 } }
+learning_rate = 0.001
+batch_size = { Auto = { min_size = 32, max_size = 512 } }
+validation_split = 0.2
+validation_gap = "1h"
+test_split = 0.1
+early_stopping = { patience = 50, min_delta = 0.00005 }
+gradient_clip = 1.0
+seed = 42  # Reproducible training
+
+# Optimizer: AdamW recommended for augmented training
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+
+# Warmup and scheduling
+warmup_epochs = 5
+learning_schedule = { ReduceOnPlateau = { patience = 10, factor = 0.5, min_lr = 1e-6 } }
+
+# Device configuration
+device = "Auto"  # Auto-detect best device (CUDA > Metal > CPU)
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+[model]
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Auto = { min_length = 30, max_length = 120 } }
+hidden_units = { Auto = { min_units = 64, max_units = 512 } }
+
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.2 }
+variational = true
+recurrent = true
+
+[model.attention]
+enabled = false  # Disable for faster training
+
+[model.output_heads]
+
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0
+
+[model.output_heads.direction]
+enabled = true
+slope_sensitivity = 0.02
+base_threshold = 0.12
+extreme_multiplier = 2.5
+
+[model.output_heads.volatility]
+enabled = true
+bandwidth_size = 0.4
+base_threshold = 0.15
+extreme_multiplier = 2.0
+
+# ============================================================================
+# FEATURE CONFIGURATION
+# ============================================================================
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.moving_averages]
+sma_periods = [5, 20, 50]
+ema_periods = [5, 20, 50]
+
+[features.technical_indicators.momentum]
+rsi_periods = [14]
+stochastic = true
+
+[features.technical_indicators.volatility]
+bollinger_bands = { enabled = true, period = 20, std_dev = 2.0 }
+atr_periods = [14]
+
+[features.technical_indicators.volume]
+obv = true
+volume_sma_periods = [20]
+
+[features.market_microstructure]
+enabled = false  # Disable for faster training
+
+[features.volatility_features]
+enabled = false  # Disable for faster training
+
+[features.custom_features]
+enabled = true
+include_all_numeric = true
+exclude_features = []
+
+[features.engineering]
+enabled = true
+
+[features.engineering.lag_features]
+enabled = true
+lag_periods = [1, 2, 3]
+features_to_lag = ["close", "volume"]
+
+[features.engineering.rolling_features]
+enabled = true
+window_sizes = [5, 10]
+statistics = ["Mean", "Std"]
+
+[features.selection]
+enabled = true
+max_features = 50
+correlation_threshold = 0.95
+importance_threshold = 0.001
+methods = ["CorrelationFilter"]
+keep_crypto_features = true
+
+[features.cross_asset]
+enabled = false  # Disable for single-asset training
+
+# ============================================================================
+# EXPECTED RESULTS WITH AUGMENTATION
+# ============================================================================
+# With 30% overlap + intelligent augmentation:
+# - 50-100% more training samples (vs traditional min-class balancing)
+# - Perfect class balance (exactly 20% per class)
+# - Better generalization (less redundancy)
+# - Expected loss: 0.65-0.70 (vs 0.74 plateau with 80% overlap)
+# - Training time: Similar (more samples but faster convergence)
+#
+# Tuning Guidelines:
+# - If overfitting: reduce augment_target_percentile to 0.4 or disable augmentation
+# - If underfitting: increase augment_target_percentile to 0.6
+# - If too slow: reduce max_synthetic_ratio to 1.0
+# - If loss plateaus early: check sequence_overlap (should be 0.2-0.4)

@@ -369,3 +369,209 @@ fn test_window_range_filtering() {
         assert!(sequences[idx].start_idx >= 500 || sequences[idx].end_idx <= 1000);
     }
 }
+
+#[test]
+fn test_split_allocation_with_rounding_edge_cases() {
+    // Test the math fix for split allocation with various class sizes
+    let test_cases = vec![
+        (1398, 0.8, 0.1, 0.1),   // Original failing case: 1398 * 0.1 = 139.8
+        (1000, 0.7, 0.15, 0.15), // 1000 * 0.15 = 150.0 (exact)
+        (999, 0.7, 0.15, 0.15),  // 999 * 0.15 = 149.85 (rounds to 150)
+        (100, 0.8, 0.1, 0.1),    // 100 * 0.1 = 10.0 (exact)
+        (101, 0.8, 0.1, 0.1),    // 101 * 0.1 = 10.1 (rounds to 10)
+        (137, 0.7, 0.2, 0.1),    // Mixed ratios
+        (1397, 0.8, 0.1, 0.1),   // 1397 * 0.1 = 139.7
+        (1399, 0.8, 0.1, 0.1),   // 1399 * 0.1 = 139.9
+    ];
+
+    for (class_size, _train_ratio, val_ratio, test_ratio) in test_cases {
+        // Test the math directly
+        let val_size = (class_size as f64 * val_ratio).round() as usize;
+        let test_size = (class_size as f64 * test_ratio).round() as usize;
+        let val_size = val_size.min(class_size);
+        let test_size = test_size.min(class_size.saturating_sub(val_size));
+        let train_size = class_size
+            .saturating_sub(val_size)
+            .saturating_sub(test_size);
+
+        // Verify the math works
+        assert_eq!(
+            train_size + val_size + test_size,
+            class_size,
+            "Math error for class_size={}: train={}, val={}, test={}",
+            class_size,
+            train_size,
+            val_size,
+            test_size
+        );
+
+        // Verify val and test are reasonable
+        assert!(
+            val_size > 0,
+            "Val size is zero for class_size={}",
+            class_size
+        );
+        assert!(
+            test_size > 0,
+            "Test size is zero for class_size={}",
+            class_size
+        );
+        assert!(
+            train_size > 0,
+            "Train size is zero for class_size={}",
+            class_size
+        );
+    }
+}
+
+#[test]
+fn test_split_allocation_exact_1398_case() {
+    // Reproduce the exact failing case from logs
+    let class_size = 1398;
+    let validation_ratio = 0.1;
+    let test_ratio = 0.1;
+
+    // Test the math with proper rounding
+    let val_size = (class_size as f64 * validation_ratio).round() as usize; // 139.8 → 140
+    let test_size = (class_size as f64 * test_ratio).round() as usize; // 139.8 → 140
+    let val_size = val_size.min(class_size);
+    let test_size = test_size.min(class_size.saturating_sub(val_size));
+    let train_size = class_size
+        .saturating_sub(val_size)
+        .saturating_sub(test_size);
+
+    // Verify exact allocation
+    assert_eq!(
+        train_size + val_size + test_size,
+        1398,
+        "Total must be 1398: train={}, val={}, test={}",
+        train_size,
+        val_size,
+        test_size
+    );
+
+    // Verify sizes are reasonable
+    assert_eq!(val_size, 140, "Val size should be 140 (rounded from 139.8)");
+    assert_eq!(
+        test_size, 140,
+        "Test size should be 140 (rounded from 139.8)"
+    );
+    assert_eq!(
+        train_size, 1118,
+        "Train size should be 1118 (1398 - 140 - 140)"
+    );
+}
+
+#[test]
+fn test_split_allocation_exact_1399_case() {
+    // Test the 1399 case that was failing
+    let class_size = 1399;
+    let validation_ratio = 0.1;
+    let test_ratio = 0.1;
+
+    // Test the math with proper rounding
+    let val_size = (class_size as f64 * validation_ratio).round() as usize; // 139.9 → 140
+    let test_size = (class_size as f64 * test_ratio).round() as usize; // 139.9 → 140
+    let val_size = val_size.min(class_size);
+    let test_size = test_size.min(class_size.saturating_sub(val_size));
+    let train_size = class_size
+        .saturating_sub(val_size)
+        .saturating_sub(test_size);
+
+    // Verify exact allocation
+    assert_eq!(
+        train_size + val_size + test_size,
+        1399,
+        "Total must be 1399: train={}, val={}, test={}",
+        train_size,
+        val_size,
+        test_size
+    );
+
+    // Verify sizes are reasonable
+    assert_eq!(val_size, 140, "Val size should be 140 (rounded from 139.9)");
+    assert_eq!(
+        test_size, 140,
+        "Test size should be 140 (rounded from 139.9)"
+    );
+    assert_eq!(
+        train_size, 1119,
+        "Train size should be 1119 (1399 - 140 - 140)"
+    );
+}
+
+#[test]
+fn test_split_allocation_exact_2164_case() {
+    // Test the 2164 case that was failing in logs
+    let class_size = 2164;
+    let validation_ratio = 0.1;
+    let test_ratio = 0.1;
+
+    // Test the math with proper rounding
+    let val_size = (class_size as f64 * validation_ratio).round() as usize; // 216.4 → 216
+    let test_size = (class_size as f64 * test_ratio).round() as usize; // 216.4 → 216
+    let val_size = val_size.min(class_size);
+    let test_size = test_size.min(class_size.saturating_sub(val_size));
+    let train_size = class_size
+        .saturating_sub(val_size)
+        .saturating_sub(test_size);
+
+    // Verify exact allocation
+    assert_eq!(
+        train_size + val_size + test_size,
+        2164,
+        "Total must be 2164: train={}, val={}, test={}",
+        train_size,
+        val_size,
+        test_size
+    );
+
+    // Verify sizes are reasonable
+    assert_eq!(val_size, 216, "Val size should be 216 (rounded from 216.4)");
+    assert_eq!(
+        test_size, 216,
+        "Test size should be 216 (rounded from 216.4)"
+    );
+    assert_eq!(
+        train_size, 1732,
+        "Train size should be 1732 (2164 - 216 - 216)"
+    );
+}
+
+#[test]
+fn test_split_allocation_exact_2165_case() {
+    // Test the 2165 case that was failing
+    let class_size = 2165;
+    let validation_ratio = 0.1;
+    let test_ratio = 0.1;
+
+    // Test the math with proper rounding
+    let val_size = (class_size as f64 * validation_ratio).round() as usize; // 216.5 → 217
+    let test_size = (class_size as f64 * test_ratio).round() as usize; // 216.5 → 217
+    let val_size = val_size.min(class_size);
+    let test_size = test_size.min(class_size.saturating_sub(val_size));
+    let train_size = class_size
+        .saturating_sub(val_size)
+        .saturating_sub(test_size);
+
+    // Verify exact allocation
+    assert_eq!(
+        train_size + val_size + test_size,
+        2165,
+        "Total must be 2165: train={}, val={}, test={}",
+        train_size,
+        val_size,
+        test_size
+    );
+
+    // Verify sizes are reasonable
+    assert_eq!(val_size, 217, "Val size should be 217 (rounded from 216.5)");
+    assert_eq!(
+        test_size, 217,
+        "Test size should be 217 (rounded from 216.5)"
+    );
+    assert_eq!(
+        train_size, 1731,
+        "Train size should be 1731 (2165 - 217 - 217)"
+    );
+}

@@ -611,12 +611,7 @@ impl LSTMModel {
                 let initial_probs = candle_nn::ops::softmax(&initial_logits, 1)?;
 
                 // Calculate mean probabilities across all samples in batch
-                let probs_data: Vec<f32> = initial_probs
-                    .flatten_all()?
-                    .to_vec1::<f32>()?
-                    .iter()
-                    .map(|&x| x as f32)
-                    .collect();
+                let probs_data: Vec<f32> = initial_probs.flatten_all()?.to_vec1::<f32>()?;
 
                 let num_classes = probs_data.len() / diagnostic_batch_size;
                 let mut mean_probs = vec![0.0f64; num_classes];

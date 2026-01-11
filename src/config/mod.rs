@@ -3,6 +3,9 @@ pub mod model;
 pub mod prediction;
 pub mod training;
 
+#[cfg(test)]
+mod training_augmentation_test;
+
 pub use features::FeatureConfig;
 pub use model::ModelConfig;
 pub use prediction::PredictionConfig;
