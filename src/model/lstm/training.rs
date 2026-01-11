@@ -585,6 +585,96 @@ impl LSTMModel {
 
             // Apply Xavier initialization for fresh training
             self.apply_xavier_initialization()?;
+
+            // 🔍 DIAGNOSTIC: Test initial model predictions (before any training)
+            // This verifies that weight initialization produces uniform output distribution
+            // Expected: [0.200, 0.200, 0.200, 0.200, 0.200] (baseline for 5-class)
+            if sequences.shape()[0] > 0 {
+                log::info!(
+                    "🔍 DIAGNOSTIC: Testing initial model predictions (before any training)..."
+                );
+
+                // Use first batch for diagnostic (or full sequences if smaller than batch size)
+                let diagnostic_batch_size = std::cmp::min(
+                    sequences.shape()[0],
+                    std::cmp::min(64, self.training_config.batch_size),
+                );
+
+                let diag_sequences = sequences.slice(ndarray::s![0..diagnostic_batch_size, .., ..]);
+                let diag_tensor =
+                    self.convert_sequences_to_prediction_tensor(&diag_sequences.to_owned())?;
+
+                // Forward pass in inference mode (no dropout) to get initial predictions
+                let initial_logits = self.forward(&diag_tensor, false)?;
+
+                // Apply softmax to get probabilities
+                let initial_probs = candle_nn::ops::softmax(&initial_logits, 1)?;
+
+                // Calculate mean probabilities across all samples in batch
+                let probs_data: Vec<f32> = initial_probs
+                    .flatten_all()?
+                    .to_vec1::<f32>()?
+                    .iter()
+                    .map(|&x| x as f32)
+                    .collect();
+
+                let num_classes = probs_data.len() / diagnostic_batch_size;
+                let mut mean_probs = vec![0.0f64; num_classes];
+
+                for class_idx in 0..num_classes {
+                    let mut class_sum = 0.0f64;
+                    for sample_idx in 0..diagnostic_batch_size {
+                        class_sum += probs_data[sample_idx * num_classes + class_idx] as f64;
+                    }
+                    mean_probs[class_idx] = class_sum / diagnostic_batch_size as f64;
+                }
+
+                // Format probabilities for logging
+                let probs_formatted: Vec<String> =
+                    mean_probs.iter().map(|p| format!("{:.3}", p)).collect();
+                log::info!(
+                    "   Initial output probabilities: [{}]",
+                    probs_formatted.join(", ")
+                );
+
+                // Calculate deviation from uniform (0.2 for 5-class)
+                let uniform = 1.0 / num_classes as f64;
+                let max_deviation = mean_probs
+                    .iter()
+                    .map(|p| (p - uniform).abs())
+                    .fold(0.0f64, f64::max);
+
+                // Check if predictions are approximately uniform (within 0.1 tolerance)
+                let is_uniform = max_deviation < 0.1;
+
+                // Log expected value
+                let expected_formatted: Vec<String> = (0..num_classes)
+                    .map(|_| format!("{:.3}", uniform))
+                    .collect();
+                log::info!(
+                    "   Expected: [{}] (uniform distribution)",
+                    expected_formatted.join(", ")
+                );
+
+                if is_uniform {
+                    log::info!(
+                        "   ✅ Initial predictions are UNIFORM (zero bias working correctly)"
+                    );
+                } else {
+                    log::warn!(
+                        "   ⚠️ Initial predictions deviate from uniform by {:.3}",
+                        max_deviation
+                    );
+                    log::warn!(
+                        "   This may indicate initialization issues or unexpected model state"
+                    );
+                }
+
+                // Clean up diagnostic tensors
+                drop(diag_tensor);
+                drop(initial_logits);
+                drop(initial_probs);
+            }
         } else {
             log::info!("🔄 CONTINUE TRAINING: Reusing existing LSTM network layers and weights (NO reinitialization)");
             log::info!(
