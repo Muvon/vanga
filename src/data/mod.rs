@@ -15,6 +15,8 @@ pub mod loader;
 pub mod preprocessor;
 pub mod schema;
 pub mod sequence;
+#[cfg(test)]
+mod sequence_test;
 pub mod structures;
 pub mod target_converter;
 
