@@ -163,11 +163,15 @@ impl Optimizer for FracNAdam {
 
         // For the first few steps, use regular gradients while building history
         // This ensures stable initial training
-        let fractional_grads = if self.step_count <= 3 {
-            log::debug!(
-                "FracNAdam: Using regular gradients for step {} (building history)",
-                self.step_count
-            );
+        // CRITICAL FIX: Wait for full memory window to avoid unstable fractional derivatives
+        let fractional_grads = if self.step_count <= self.fractional_derivative.memory_window() {
+            if self.step_count <= 5 || self.step_count % 10 == 0 {
+                log::debug!(
+                    "FracNAdam: Using regular gradients for step {}/{} (building history)",
+                    self.step_count,
+                    self.fractional_derivative.memory_window()
+                );
+            }
             gradients.clone()
         } else {
             // Compute fractional gradients using short-memory approximation
@@ -269,7 +273,8 @@ impl Optimizer for FracNAdam {
             // Nesterov acceleration term (equation 38 from fractional NAdam paper)
             // Uses bias-corrected m̂_t as per the fractional paper's derivation,
             // which differs from Dozat 2016 NAdam that uses raw moment m_t
-            // Formula: β₁ * m̂_t + (1 - β₁) * D^α∇J(θ)
+            // Formula: β₁ * m̂_t + [(1 - β₁) * D^α∇J(θ) / (1 - β₁^t)]
+            // CRITICAL FIX: Added bias correction for the gradient term
             let nesterov_term = corrected_first_moment
                 .contiguous()?
                 .mul(&beta1_tensor)?
@@ -278,9 +283,26 @@ impl Optimizer for FracNAdam {
                     &grad_with_decay
                         .contiguous()?
                         .mul(&one_minus_beta1)?
+                        .div(&bias_corr1_tensor)?
                         .contiguous()?,
                 )?
                 .contiguous()?;
+
+            // Log fractional gradient magnitude occasionally for debugging
+            if self.step_count % 100 == 0 && i == 0 {
+                // Use a lightweight check to avoid performance impact
+                if cfg!(debug_assertions) {
+                    let grad_norm = grad_with_decay.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+                    let frac_norm = frac_grad.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+                    log::debug!(
+                        "FracNAdam step {}: grad_norm={:.6}, frac_grad_norm={:.6} (ratio={:.2})",
+                        self.step_count,
+                        grad_norm,
+                        frac_norm,
+                        frac_norm / grad_norm.max(1e-8)
+                    );
+                }
+            }
 
             let eps_tensor = Tensor::new(self.params.eps as f32, var.device())?
                 .broadcast_as(corrected_second_moment.shape())?

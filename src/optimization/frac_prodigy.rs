@@ -207,11 +207,15 @@ impl Optimizer for FracProdigy {
         self.fractional_derivative.update_history(&gradients)?;
 
         // For the first few steps, use regular gradients while building history
-        let fractional_grads = if self.step_count <= 3 {
-            log::debug!(
-                "FracProdigy: Using regular gradients for step {} (building history)",
-                self.step_count
-            );
+        // CRITICAL FIX: Wait for full memory window to avoid unstable fractional derivatives
+        let fractional_grads = if self.step_count <= self.fractional_derivative.memory_window() {
+            if self.step_count <= 5 || self.step_count % 10 == 0 {
+                log::debug!(
+                    "FracProdigy: Using regular gradients for step {}/{} (building history)",
+                    self.step_count,
+                    self.fractional_derivative.memory_window()
+                );
+            }
             gradients.clone()
         } else {
             // Compute fractional gradients using Caputo derivative
@@ -328,7 +332,8 @@ impl Optimizer for FracProdigy {
 
             // Nesterov acceleration term (consistent with fractional NAdam paper)
             // Uses bias-corrected m̂_t for consistency with FracNAdam
-            // Formula: β₁ * m̂_t + (1 - β₁) * D^α∇J(θ)
+            // Formula: β₁ * m̂_t + [(1 - β₁) * D^α∇J(θ) / (1 - β₁^t)]
+
             // Compute bias correction for first moment
             let bias_correction1 = 1.0 - self.params.beta1.powi(self.step_count as i32);
             let bias_corr1_tensor = Tensor::new(bias_correction1 as f32, var.device())?
@@ -336,8 +341,9 @@ impl Optimizer for FracProdigy {
                 .contiguous()?;
             let corrected_first_moment = first_moment.contiguous()?.div(&bias_corr1_tensor)?;
 
+            // CRITICAL FIX: Added bias correction for the gradient term
             let nesterov_term = ((&corrected_first_moment * self.params.beta1)?
-                + (&grad_with_decay * (1.0 - self.params.beta1))?)?;
+                + (&grad_with_decay * (1.0 - self.params.beta1))?.div(&bias_corr1_tensor)?)?;
 
             // Compute update: auto_lr * nesterov_term / (sqrt(corrected_second_moment) + eps)
             let denominator = (corrected_second_moment.sqrt()? + self.params.eps)?;
@@ -505,6 +511,77 @@ mod tests {
         optimizer.compact_memory();
         let compacted_usage = optimizer.memory_usage();
         assert!(compacted_usage <= initial_usage);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_frac_prodigy_transition() -> Result<()> {
+        let device = Device::Cpu;
+        // Initialize to non-zero to avoid division by zero in D-estimate (Prodigy limitation)
+        let var = Var::new(&[0.1f32], &device)?;
+
+        // Use a small memory window to test transition quickly
+        let memory_window = 5;
+        let params = ParamsFracProdigy {
+            lr: 1.0, // Prodigy standard LR
+            fractional: crate::optimization::FractionalConfig {
+                alpha: 0.5,
+                memory_window,
+                step_size: 1.0,
+            },
+            ..Default::default()
+        };
+        let mut opt = FracProdigy::new(vec![var.clone()], params)?;
+
+        // Helper loss function
+        fn simple_loss(w: &Var, device: &Device) -> Result<Tensor> {
+            let target = Tensor::new(&[1.0f32], device)?;
+            let diff = w.as_tensor().sub(&target)?;
+            diff.sqr()?.mean_all()
+        }
+
+        println!("Step | Loss | D-Estimate");
+        // Step 1: Run through the warmup phase (regular gradients)
+        for i in 0..memory_window {
+            let loss = simple_loss(&var, &device)?;
+            let loss_val = loss.to_scalar::<f32>()?;
+            println!(
+                "{} | {:.6} | {:.6} (warmup)",
+                i + 1,
+                loss_val,
+                opt.d_estimate
+            );
+            opt.backward_step(&loss)?;
+        }
+
+        // Step 2: Run through the transition phase (fractional gradients start)
+        for i in 0..30 {
+            let loss = simple_loss(&var, &device)?;
+            let loss_val = loss.to_scalar::<f32>()?;
+            println!(
+                "{} | {:.6} | {:.6} (fractional)",
+                i + 1 + memory_window,
+                loss_val,
+                opt.d_estimate
+            );
+            opt.backward_step(&loss)?;
+        }
+
+        // Verify we are still learning (loss should be small)
+        let final_loss = simple_loss(&var, &device)?.to_scalar::<f32>()?;
+        assert!(
+            final_loss < 0.1,
+            "Should have converged significantly: {}",
+            final_loss
+        );
+
+        // Verify D-estimate has adapted
+        assert!(opt.d_estimate > 0.0, "D-estimate should be positive");
+        assert!(
+            opt.d_estimate != 1.0,
+            "D-estimate should have adapted from initial 1.0"
+        );
 
         Ok(())
     }

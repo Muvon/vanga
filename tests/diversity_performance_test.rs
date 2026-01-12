@@ -84,6 +84,7 @@ mod tests {
             TargetType::PriceLevel,
             "6h",
             &[], // No exclusions
+            0,   // validation_gap_steps
         );
 
         let duration = start_time.elapsed();
@@ -161,7 +162,6 @@ mod tests {
             let class_indices: Vec<usize> = (0..size).collect();
 
             let start_time = Instant::now();
-
             let result = diversity_selector.select_diverse_sequences(
                 &sequences,
                 &class_indices,
@@ -169,6 +169,7 @@ mod tests {
                 TargetType::PriceLevel,
                 "6h",
                 &[],
+                0, // validation_gap_steps
             );
 
             let duration = start_time.elapsed();

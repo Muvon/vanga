@@ -195,3 +195,49 @@ fn test_frac_nadam_convergence_comparison() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_frac_nadam_transition() -> Result<()> {
+    let device = Device::Cpu;
+    let w = Var::new(&[0.0f32], &device)?;
+
+    // Use a small memory window to test transition quickly
+    let memory_window = 5;
+    let params = ParamsFracNAdam {
+        lr: 0.05, // Increased LR for faster convergence in test
+        fractional: crate::optimization::FractionalConfig {
+            alpha: 0.5,
+            memory_window,
+            step_size: 1.0,
+        },
+        ..Default::default()
+    };
+    let mut opt = FracNAdam::new(vec![w.clone()], params)?;
+
+    println!("Step | Loss");
+    // Step 1: Run through the warmup phase (regular gradients)
+    for i in 0..memory_window {
+        let loss = simple_quadratic_loss(&w, &device)?;
+        let loss_val = loss.to_scalar::<f32>()?;
+        println!("{} | {:.6} (warmup)", i + 1, loss_val);
+        opt.backward_step(&loss)?;
+    }
+
+    // Step 2: Run through the transition phase (fractional gradients start)
+    for i in 0..15 {
+        let loss = simple_quadratic_loss(&w, &device)?;
+        let loss_val = loss.to_scalar::<f32>()?;
+        println!("{} | {:.6} (fractional)", i + 1 + memory_window, loss_val);
+        opt.backward_step(&loss)?;
+    }
+
+    // Verify we are still learning (loss should be small)
+    let final_loss = simple_quadratic_loss(&w, &device)?.to_scalar::<f32>()?;
+    assert!(
+        final_loss < 0.1,
+        "Should have converged significantly: {}",
+        final_loss
+    );
+
+    Ok(())
+}
