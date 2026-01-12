@@ -381,6 +381,17 @@ impl SeededTensorUtils {
             let dims = shape.dims();
             let var_name_str = var_name.as_str();
 
+            // Skip LayerNorm parameters (gamma/beta) - they have their own initialization
+            if var_name_str.contains("layer_norm_")
+                && (var_name_str.contains(".gamma") || var_name_str.contains(".beta"))
+            {
+                log::debug!(
+                    "⏭️  Skipping LayerNorm parameter '{}' (already initialized)",
+                    var_name_str
+                );
+                continue;
+            }
+
             log::debug!("🔍 Processing tensor '{}': shape={:?}", var_name_str, dims);
 
             // Determine weight type based on tensor name and shape

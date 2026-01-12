@@ -136,6 +136,7 @@ pub struct LSTMModel {
     pub layer_norm_config: Option<crate::config::model::LayerNormConfig>,
     /// Dropout configuration for regularization
     pub dropout_config: Option<DropoutConfig>,
+
     /// Stored validation data for consistent metrics calculation
     /// Used to ensure epoch metrics and final metrics use the same data
     pub stored_val_sequences: Option<ndarray::Array3<f64>>,
@@ -335,6 +336,10 @@ impl OptimizerWrapper {
 
 impl LSTMModel {
     /// Apply layer normalization to tensor
+    /// Apply Layer Normalization with learnable affine parameters (Ba et al., 2016)
+    ///
+    /// Formula: y = (x - E[x]) / sqrt(Var[x] + ε) * γ + β
+    /// where γ (gamma) and β (beta) are learnable parameters
     ///
     /// Layer Normalization normalizes across features for each sample independently.
     /// This stabilizes training in deep LSTMs by maintaining consistent activation
@@ -403,14 +408,45 @@ impl LSTMModel {
             .broadcast_sub(&mean)?
             .broadcast_div(&var_stable.sqrt()?)?;
 
+        // Apply learnable affine transformation: y = normalized * gamma + beta
+        // Retrieve gamma and beta from VarMap if they exist
+        let gamma_key = format!("layer_norm_{}_gamma.gamma", layer_idx);
+        let beta_key = format!("layer_norm_{}_beta.beta", layer_idx);
+
+        let has_params = {
+            let var_data = self.varmap.data().lock().unwrap();
+            var_data.contains_key(&gamma_key) && var_data.contains_key(&beta_key)
+        };
+
+        let output = if has_params {
+            let var_data = self.varmap.data().lock().unwrap();
+            let gamma = var_data.get(&gamma_key).unwrap().clone();
+            let beta = var_data.get(&beta_key).unwrap().clone();
+            drop(var_data);
+
+            // Broadcast gamma and beta to match normalized shape
+            let gamma_broadcast = gamma.broadcast_as(normalized.shape())?;
+            let beta_broadcast = beta.broadcast_as(normalized.shape())?;
+
+            // Apply affine transformation: normalized * gamma + beta
+            normalized.mul(&gamma_broadcast)?.add(&beta_broadcast)?
+        } else {
+            log::warn!(
+                "LayerNorm learnable parameters not found for layer {}, using normalization only (this may cause gradient issues)",
+                layer_idx
+            );
+            normalized
+        };
+
         log::debug!(
-            "🔧 Applied LayerNorm (layer: {}, features: {}, epsilon: {:.2e})",
+            "🔧 Applied LayerNorm (layer: {}, features: {}, epsilon: {:.2e}, affine: {})",
             layer_idx,
             feature_size,
-            epsilon
+            epsilon,
+            has_params
         );
 
-        Ok(normalized)
+        Ok(output)
     }
 
     /// Check if layer normalization is enabled

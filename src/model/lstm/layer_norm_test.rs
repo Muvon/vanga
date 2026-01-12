@@ -418,3 +418,249 @@ async fn test_layer_norm_multi_layer_consistency() -> Result<(), crate::utils::e
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_layer_norm_learnable_parameters_initialization(
+) -> Result<(), crate::utils::error::VangaError> {
+    use crate::config::model::{
+        DropoutConfig, HiddenUnitsConfig, LSTMArchitecture, SequenceLengthConfig,
+    };
+
+    // Create ModelConfig with LayerNorm enabled
+    let model_config = ModelConfig {
+        architecture: LSTMArchitecture::MultiLSTM { layers: 2 },
+        sequence_length: SequenceLengthConfig::Fixed(10),
+        hidden_units: HiddenUnitsConfig::Fixed(vec![64, 32]),
+        layer_norm: LayerNormConfig {
+            enabled: true,
+            epsilon: 1e-5,
+            lstm_cell: true,
+            position: "post".to_string(),
+        },
+        dropout: DropoutConfig::default(),
+        attention: crate::config::model::AttentionConfig::default(),
+        xgboost: crate::config::model::XGBoostConfig::default(),
+        quantile_outputs: None,
+        bias_correction: crate::model::bias_correction::BiasCorrection::default(),
+    };
+
+    let mut model = LSTMModel::from_model_config(&model_config, 10, 5)?;
+    model.initialize_network(None)?;
+
+    // Check that gamma and beta parameters exist in VarMap for each layer
+    let var_data = model.varmap.data().lock().unwrap();
+
+    for layer_idx in 0..2 {
+        let gamma_key = format!("layer_norm_{}_gamma.gamma", layer_idx);
+        let beta_key = format!("layer_norm_{}_beta.beta", layer_idx);
+
+        assert!(
+            var_data.contains_key(&gamma_key),
+            "Gamma parameter should exist for layer {}",
+            layer_idx
+        );
+        assert!(
+            var_data.contains_key(&beta_key),
+            "Beta parameter should exist for layer {}",
+            layer_idx
+        );
+
+        // Check gamma is initialized to 1.0
+        let gamma = var_data.get(&gamma_key).unwrap();
+        let gamma_vec = gamma.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!(
+            gamma_vec.iter().all(|&x| (x - 1.0).abs() < 1e-3),
+            "Gamma should be initialized to 1.0 for layer {}",
+            layer_idx
+        );
+
+        // Check beta is initialized to 0.0
+        let beta = var_data.get(&beta_key).unwrap();
+        let beta_vec = beta.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!(
+            beta_vec.iter().all(|&x| x.abs() < 1e-3),
+            "Beta should be initialized to 0.0 for layer {}",
+            layer_idx
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_layer_norm_affine_transformation_applied(
+) -> Result<(), crate::utils::error::VangaError> {
+    use crate::config::model::{
+        DropoutConfig, HiddenUnitsConfig, LSTMArchitecture, SequenceLengthConfig,
+    };
+
+    let model_config = ModelConfig {
+        architecture: LSTMArchitecture::MultiLSTM { layers: 1 },
+        sequence_length: SequenceLengthConfig::Fixed(10),
+        hidden_units: HiddenUnitsConfig::Fixed(vec![8]),
+        layer_norm: LayerNormConfig {
+            enabled: true,
+            epsilon: 1e-5,
+            lstm_cell: true,
+            position: "post".to_string(),
+        },
+        dropout: DropoutConfig::default(),
+        attention: crate::config::model::AttentionConfig::default(),
+        xgboost: crate::config::model::XGBoostConfig::default(),
+        quantile_outputs: None,
+        bias_correction: crate::model::bias_correction::BiasCorrection::default(),
+    };
+
+    let mut model = LSTMModel::from_model_config(&model_config, 10, 5)?;
+    model.initialize_network(None)?;
+
+    // Create test input with known values
+    let input_data = vec![vec![vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]];
+    let input = Tensor::new(input_data, &Device::Cpu)?;
+
+    // Apply LayerNorm (should use gamma=1.0, beta=0.0 initially)
+    let result = model.apply_layer_norm(&input, model.layer_norm_config.as_ref().unwrap(), 0)?;
+
+    // Result should be normalized (mean≈0, std≈1) since gamma=1, beta=0
+    let flattened = result.flatten_all()?.to_vec1::<f32>()?;
+    let mean: f32 = flattened.iter().sum::<f32>() / flattened.len() as f32;
+    let variance: f32 =
+        flattened.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / flattened.len() as f32;
+
+    assert!(
+        mean.abs() < 1e-5,
+        "Mean should be close to 0 with gamma=1, beta=0, got {}",
+        mean
+    );
+    assert!(
+        (variance - 1.0).abs() < 1e-3,
+        "Variance should be close to 1 with gamma=1, beta=0, got {}",
+        variance
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_layer_norm_parameters_per_layer() -> Result<(), crate::utils::error::VangaError> {
+    use crate::config::model::{
+        DropoutConfig, HiddenUnitsConfig, LSTMArchitecture, SequenceLengthConfig,
+    };
+
+    // Create 3-layer model with different hidden sizes
+    let model_config = ModelConfig {
+        architecture: LSTMArchitecture::MultiLSTM { layers: 3 },
+        sequence_length: SequenceLengthConfig::Fixed(10),
+        hidden_units: HiddenUnitsConfig::Fixed(vec![64, 32, 16]),
+        layer_norm: LayerNormConfig {
+            enabled: true,
+            epsilon: 1e-5,
+            lstm_cell: true,
+            position: "post".to_string(),
+        },
+        dropout: DropoutConfig::default(),
+        attention: crate::config::model::AttentionConfig::default(),
+        xgboost: crate::config::model::XGBoostConfig::default(),
+        quantile_outputs: None,
+        bias_correction: crate::model::bias_correction::BiasCorrection::default(),
+    };
+
+    let mut model = LSTMModel::from_model_config(&model_config, 10, 5)?;
+    model.initialize_network(None)?;
+
+    // Check that each layer has parameters with correct feature size
+    let var_data = model.varmap.data().lock().unwrap();
+    let expected_sizes = vec![64, 32, 16];
+
+    for (layer_idx, expected_size) in expected_sizes.iter().enumerate() {
+        let gamma_key = format!("layer_norm_{}_gamma.gamma", layer_idx);
+        let beta_key = format!("layer_norm_{}_beta.beta", layer_idx);
+
+        let gamma = var_data.get(&gamma_key).unwrap();
+        let beta = var_data.get(&beta_key).unwrap();
+
+        assert_eq!(
+            gamma.dims()[0],
+            *expected_size,
+            "Gamma size should match hidden size for layer {}",
+            layer_idx
+        );
+        assert_eq!(
+            beta.dims()[0],
+            *expected_size,
+            "Beta size should match hidden size for layer {}",
+            layer_idx
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_layer_norm_bidirectional_parameter_size(
+) -> Result<(), crate::utils::error::VangaError> {
+    use crate::config::model::{
+        DropoutConfig, HiddenUnitsConfig, LSTMArchitecture, SequenceLengthConfig,
+    };
+
+    // Create bidirectional model
+    let model_config = ModelConfig {
+        architecture: LSTMArchitecture::BidirectionalLSTM { layers: 2 },
+        sequence_length: SequenceLengthConfig::Fixed(10),
+        hidden_units: HiddenUnitsConfig::Fixed(vec![64, 32]),
+        layer_norm: LayerNormConfig {
+            enabled: true,
+            epsilon: 1e-5,
+            lstm_cell: true,
+            position: "post".to_string(),
+        },
+        dropout: DropoutConfig::default(),
+        attention: crate::config::model::AttentionConfig::default(),
+        xgboost: crate::config::model::XGBoostConfig::default(),
+        quantile_outputs: None,
+        bias_correction: crate::model::bias_correction::BiasCorrection::default(),
+    };
+
+    let mut model = LSTMModel::from_model_config(&model_config, 10, 5)?;
+    model.initialize_network(None)?;
+
+    // For bidirectional, feature size should be 2x hidden size (concatenated)
+    let var_data = model.varmap.data().lock().unwrap();
+    let expected_sizes = vec![128, 64]; // 2x [64, 32]
+
+    for (layer_idx, expected_size) in expected_sizes.iter().enumerate() {
+        let gamma_key = format!("layer_norm_{}_gamma.gamma", layer_idx);
+        let gamma = var_data.get(&gamma_key).unwrap();
+
+        assert_eq!(
+            gamma.dims()[0],
+            *expected_size,
+            "Bidirectional gamma size should be 2x hidden size for layer {}",
+            layer_idx
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_layer_norm_without_affine_parameters_warns(
+) -> Result<(), crate::utils::error::VangaError> {
+    // Create model without initializing network (no parameters in VarMap)
+    let mut model = create_test_model(10, vec![64], 5)?;
+    model.layer_norm_config = Some(LayerNormConfig {
+        enabled: true,
+        epsilon: 1e-5,
+        lstm_cell: true,
+        position: "post".to_string(),
+    });
+
+    let input = Tensor::randn(0.0, 1.0, (2, 3, 64), &Device::Cpu)?;
+
+    // Should still work but without affine transformation
+    let result = model.apply_layer_norm(&input, model.layer_norm_config.as_ref().unwrap(), 0)?;
+
+    assert_eq!(result.dims(), input.dims());
+
+    Ok(())
+}

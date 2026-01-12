@@ -7,7 +7,7 @@ use super::config::{LSTMConfig, LSTMModel, ModelState, TrainingConfig};
 use crate::config::ModelConfig;
 use crate::utils::error::{Result, VangaError};
 
-use candle_core::{DType, Device};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::{linear, lstm, LSTMConfig as CandleLSTMConfig, VarBuilder, VarMap};
 
 /// Format numbers with thousands separators for better readability
@@ -593,6 +593,56 @@ impl LSTMModel {
         self.lstm_layers = Some(forward_lstm_layers);
         if is_bidirectional {
             self.backward_lstm_layers = Some(backward_lstm_layers);
+        }
+
+        // Initialize LayerNorm learnable parameters (gamma, beta) if enabled
+        // These are stored in VarMap and retrieved during forward pass
+        if let Some(ln_config) = &self.layer_norm_config {
+            if ln_config.enabled && ln_config.lstm_cell {
+                for layer_idx in 0..num_layers {
+                    // Calculate feature size for this layer
+                    let layer_hidden_size = self.config.get_hidden_size_for_layer(layer_idx);
+                    let feature_size = if is_bidirectional {
+                        layer_hidden_size * 2 // Bidirectional concatenates forward+backward
+                    } else {
+                        layer_hidden_size
+                    };
+
+                    // Create learnable gamma (scale) and beta (shift) parameters
+                    // Gamma initialized to 1.0, Beta initialized to 0.0 (standard LayerNorm init)
+
+                    // Create gamma with ones initialization
+                    let gamma_ones =
+                        Tensor::ones((feature_size,), candle_core::DType::F32, &self.device)?;
+                    let gamma_var = candle_core::Var::from_tensor(&gamma_ones)?;
+                    let gamma_key = format!("layer_norm_{}_gamma.gamma", layer_idx);
+                    {
+                        let mut var_data = self.varmap.data().lock().unwrap();
+                        var_data.insert(gamma_key, gamma_var);
+                    }
+
+                    // Create beta with zeros initialization
+                    let beta_zeros =
+                        Tensor::zeros((feature_size,), candle_core::DType::F32, &self.device)?;
+                    let beta_var = candle_core::Var::from_tensor(&beta_zeros)?;
+                    let beta_key = format!("layer_norm_{}_beta.beta", layer_idx);
+                    {
+                        let mut var_data = self.varmap.data().lock().unwrap();
+                        var_data.insert(beta_key, beta_var);
+                    }
+
+                    log::debug!(
+                        "🔧 Created LayerNorm parameters for layer {} (feature_size: {})",
+                        layer_idx,
+                        feature_size
+                    );
+                }
+
+                log::info!(
+                    "✅ LayerNorm learnable parameters initialized for {} layers",
+                    num_layers
+                );
+            }
         }
 
         // Initialize attention layers if configured
