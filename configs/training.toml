@@ -267,6 +267,31 @@ sequence_length = { Auto = { min_length = 30, max_length = 120 } }
 # Hidden units configuration
 hidden_units = { Auto = { min_units = 64, max_units = 512 } }
 
+# ============================================================================
+# LAYER NORMALIZATION - Stabilizes deep LSTM training (Ba et al., 2016)
+# ============================================================================
+# Layer Normalization normalizes activations across features for each sample,
+# maintaining consistent distributions across layers for better gradient flow.
+#
+# Benefits for cryptocurrency training:
+# - Faster convergence in deep networks (2+ layers)
+# - Better gradient flow (prevents vanishing/exploding gradients)
+# - Handles volatile crypto price movements more effectively
+# - Reduces internal covariate shift
+#
+# Recommended settings:
+# - enabled = true for deep networks (3+ layers)
+# - enabled = false for shallow networks (1-2 layers) - adds overhead
+# - epsilon = 1e-5 (standard, good numerical stability)
+# - epsilon = 1e-4 (more stable for extreme values)
+# - lstm_cell = true (apply to LSTM cell outputs)
+# - position = "post" (after activation, standard for LSTMs)
+[model.layer_norm]
+enabled = false           # Enable for deep networks (3+ layers)
+epsilon = 1e-5           # Numerical stability constant
+lstm_cell = true         # Apply to LSTM cell outputs
+position = "post"        # "post" = after activation (standard), "pre" = before
+
 # Dropout configuration
 [model.dropout]
 enabled = true

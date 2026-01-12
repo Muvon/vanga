@@ -46,6 +46,32 @@ impl Default for TFTQuantileOutputConfig {
     }
 }
 
+/// Layer Normalization configuration for stabilizing LSTM training
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerNormConfig {
+    /// Enable layer normalization
+    pub enabled: bool,
+    /// Epsilon value for numerical stability (default: 1e-5)
+    pub epsilon: f64,
+    /// Apply layer norm to LSTM cell outputs
+    pub lstm_cell: bool,
+    /// Apply layer norm before or after LSTM activation
+    /// "pre" = before, "post" = after (post is more common for LSTMs)
+    pub position: String,
+}
+
+impl Default for LayerNormConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            epsilon: 1e-5,
+            lstm_cell: true,
+            position: "post".to_string(), // post-norm is standard for LSTMs
+        }
+    }
+}
+
+/// Model configuration for LSTM architecture
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     /// LSTM architecture type
@@ -56,6 +82,10 @@ pub struct ModelConfig {
 
     /// Hidden units configuration
     pub hidden_units: HiddenUnitsConfig,
+
+    /// Layer normalization configuration
+    #[serde(default)]
+    pub layer_norm: LayerNormConfig,
 
     /// Dropout configuration
     pub dropout: DropoutConfig,
@@ -133,6 +163,19 @@ impl Default for HiddenUnitsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DropoutRate {
+    Auto { min_rate: f64, max_rate: f64 },
+    Fixed(f64),
+    Adaptive,
+}
+
+impl Default for DropoutRate {
+    fn default() -> Self {
+        Self::Fixed(0.2)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropoutConfig {
     pub enabled: bool,
     pub rate: DropoutRate,
@@ -152,13 +195,6 @@ impl Default for DropoutConfig {
             recurrent: true,   // Enable recurrent dropout by default for LSTM
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DropoutRate {
-    Auto { min_rate: f64, max_rate: f64 },
-    Fixed(f64),
-    Adaptive,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,6 +489,14 @@ impl Default for ModelConfig {
             hidden_units: HiddenUnitsConfig::Auto {
                 min_units: 64,
                 max_units: 512,
+            },
+            // Layer Normalization for deep LSTM stabilization (Ba et al., 2016)
+            // Enables faster convergence and better gradient flow in deep networks
+            layer_norm: LayerNormConfig {
+                enabled: false, // Disabled by default for backward compatibility
+                epsilon: 1e-5,
+                lstm_cell: true,
+                position: "post".to_string(),
             },
             dropout: DropoutConfig {
                 enabled: true,

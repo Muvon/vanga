@@ -1,0 +1,104 @@
+# Deep LSTM with Layer Normalization Configuration
+# Optimized for cryptocurrency forecasting with deep networks (3+ layers)
+# Layer Normalization stabilizes training and improves gradient flow
+
+[training]
+epochs = { Auto = { max_epochs = 1000 } }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+learning_rate = 0.001
+seed = 42  # Reproducible training
+batch_size = 32
+print_every = 1
+device = "Auto"
+
+[model]
+# Deep LSTM architecture (3+ layers benefit most from LayerNorm)
+architecture = { MultiLSTM = { layers = 3 } }
+sequence_length = { Fixed = 60 }
+hidden_units = { Fixed = [128, 64, 32] }
+
+# ============================================================================
+# LAYER NORMALIZATION - ENABLED for deep networks
+# ============================================================================
+# Stabilizes training in deep LSTMs by normalizing activations across features
+# for each sample independently, maintaining consistent distributions across layers.
+#
+# Key benefits:
+# - Faster convergence (20-30% fewer epochs typically)
+# - Better gradient flow through deep networks
+# - Handles volatile cryptocurrency price movements
+# - Reduces internal covariate shift
+# - Prevents vanishing/exploding gradients
+[model.layer_norm]
+enabled = true           # ENABLED for deep networks (3+ layers)
+epsilon = 1e-5          # Numerical stability (standard value)
+lstm_cell = true        # Apply to LSTM cell outputs
+position = "post"       # Apply after activation (standard for LSTMs)
+
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.3 }  # Higher dropout for deep networks
+variational = true
+recurrent = true
+
+[model.attention]
+enabled = true
+mechanism = "MultiHeadAttention"
+heads = 8
+head_dim = 64
+dropout_rate = 0.1
+temperature_scaling = 1.0
+use_relative_position = true
+
+[model.attention.visualization]
+save_heatmaps = false
+export_analysis = false
+output_dir = "attention_analysis"
+
+[model.output_heads]
+
+[model.output_heads.price_levels]
+enabled = true
+bandwidth_size = 1.0
+
+[model.output_heads.direction]
+enabled = true
+
+[model.output_heads.volatility]
+enabled = true
+
+[model.output_heads.volume]
+enabled = true
+
+[model.output_heads.sentiment]
+enabled = true
+
+[model.xgboost]
+enabled = false
+
+[model.bias_correction]
+mode = "Disabled"
+
+[data]
+outlier_handling = "IQR"
+iqr_multiplier = 1.5
+z_score_threshold = 3.0
+normalization = "Robust"
+
+[data.split]
+train_ratio = 0.7
+validation_ratio = 0.15
+test_ratio = 0.15
+
+[features]
+technical_indicators = true
+cross_asset = false
+market_microstructure = true
+
+[targets]
+horizons = ["1h", "4h", "1d"]
+price_levels = true
+direction = true
+volatility = true
+sentiment = true
+volume = true

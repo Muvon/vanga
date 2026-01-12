@@ -228,6 +228,22 @@ impl LSTMModel {
                 drop(forward_output);
                 drop(backward_output);
 
+                // Apply Layer Normalization if enabled (Ba et al., 2016)
+                // LayerNorm stabilizes training in deep LSTMs
+                let should_apply_ln = self
+                    .layer_norm_config
+                    .as_ref()
+                    .map(|c| c.enabled && c.lstm_cell)
+                    .unwrap_or(false);
+
+                if should_apply_ln {
+                    current_input = self.apply_layer_norm(
+                        &current_input,
+                        self.layer_norm_config.as_ref().unwrap(),
+                        layer_idx,
+                    )?;
+                }
+
                 // Apply consistent dropout between layers if enabled AND in training mode
                 let should_apply_dropout = if let Some(dropout_config) = &self.dropout_config {
                     dropout_config.enabled && training // Only apply dropout during training
@@ -292,6 +308,23 @@ impl LSTMModel {
                 current_output = Tensor::stack(&hidden_states, 1)?.contiguous()?;
                 drop(hidden_states);
                 drop(layer_states);
+
+                // Apply Layer Normalization if enabled (Ba et al., 2016)
+                // LayerNorm stabilizes training in deep LSTMs by normalizing activations
+                // across features for each sample independently
+                let should_apply_ln = self
+                    .layer_norm_config
+                    .as_ref()
+                    .map(|c| c.enabled && c.lstm_cell)
+                    .unwrap_or(false);
+
+                if should_apply_ln {
+                    current_output = self.apply_layer_norm(
+                        &current_output,
+                        self.layer_norm_config.as_ref().unwrap(),
+                        i,
+                    )?;
+                }
 
                 // Apply consistent dropout between layers if enabled AND in training mode
                 let should_apply_dropout = self

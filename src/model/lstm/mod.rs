@@ -50,6 +50,12 @@ pub mod window_aware_lr;
 mod hidden_state_test;
 
 #[cfg(test)]
+mod layer_norm_test;
+
+#[cfg(test)]
+mod layer_norm_integration_test;
+
+#[cfg(test)]
 mod inference_test;
 
 #[cfg(test)]
@@ -526,6 +532,7 @@ mod tests {
             architecture: LSTMArchitecture::BidirectionalLSTM { layers: 2 },
             sequence_length: SequenceLengthConfig::Fixed(10),
             hidden_units: HiddenUnitsConfig::Fixed(vec![32, 16]),
+            layer_norm: crate::config::model::LayerNormConfig::default(),
             dropout: DropoutConfig {
                 enabled: false,
                 rate: DropoutRate::Fixed(0.0),
@@ -589,6 +596,7 @@ mod tests {
             architecture: LSTMArchitecture::BidirectionalLSTM { layers: 1 },
             sequence_length: SequenceLengthConfig::Fixed(5),
             hidden_units: HiddenUnitsConfig::Fixed(vec![8]),
+            layer_norm: crate::config::model::LayerNormConfig::default(),
             dropout: DropoutConfig {
                 enabled: false,
                 rate: DropoutRate::Fixed(0.0),
@@ -694,6 +702,7 @@ mod tests {
             architecture: LSTMArchitecture::MultiLSTM { layers: 1 },
             sequence_length: SequenceLengthConfig::default(),
             hidden_units: HiddenUnitsConfig::Fixed(vec![hidden_size]),
+            layer_norm: crate::config::model::LayerNormConfig::default(),
             dropout: DropoutConfig::default(),
             attention: AttentionConfig {
                 enabled: true,
@@ -745,6 +754,7 @@ mod tests {
             architecture: LSTMArchitecture::BidirectionalLSTM { layers: 1 },
             sequence_length: SequenceLengthConfig::Fixed(5),
             hidden_units: HiddenUnitsConfig::Fixed(vec![8]),
+            layer_norm: crate::config::model::LayerNormConfig::default(),
             dropout: DropoutConfig {
                 enabled: false,
                 rate: DropoutRate::Fixed(0.0),

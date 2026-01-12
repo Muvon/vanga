@@ -7,7 +7,8 @@ use crate::config::model::{AttentionConfig, DropoutConfig};
 use crate::model::attention::AttentionModule;
 use crate::utils::error::{Result, VangaError};
 
-use candle_core::Device;
+use candle_core::{Device, Tensor};
+
 use candle_nn::{
     optim::{self, Optimizer},
     Linear, VarMap, LSTM,
@@ -131,6 +132,8 @@ pub struct LSTMModel {
 
     /// Architecture configuration for bidirectional detection
     pub architecture: Option<crate::config::model::LSTMArchitecture>,
+    /// Layer normalization configuration for stabilizing deep LSTM training
+    pub layer_norm_config: Option<crate::config::model::LayerNormConfig>,
     /// Dropout configuration for regularization
     pub dropout_config: Option<DropoutConfig>,
     /// Stored validation data for consistent metrics calculation
@@ -323,5 +326,106 @@ impl OptimizerWrapper {
         // Dispatch to the appropriate optimizer's backward_step method
         // All optimizers implement the Optimizer trait with backward_step
         optimizer_dispatch!(self, backward_step, loss)
+    }
+}
+
+// ============================================================================
+// Layer Normalization Implementation for Deep LSTM Stabilization
+// ============================================================================
+
+impl LSTMModel {
+    /// Apply layer normalization to tensor
+    ///
+    /// Layer Normalization normalizes across features for each sample independently.
+    /// This stabilizes training in deep LSTMs by maintaining consistent activation
+    /// distributions across layers (Ba et al., 2016).
+    ///
+    /// # Arguments
+    /// * `input` - Input tensor of shape [batch, ..., features]
+    /// * `config` - LayerNorm configuration
+    /// * `layer_idx` - Layer index for logging
+    ///
+    /// # Returns
+    /// Normalized tensor of same shape as input
+    pub fn apply_layer_norm(
+        &self,
+        input: &Tensor,
+        config: &crate::config::model::LayerNormConfig,
+        layer_idx: usize,
+    ) -> Result<Tensor> {
+        if !config.enabled {
+            return Ok(input.clone());
+        }
+
+        // LayerNorm is applied on the last dimension (features)
+        let ndims = input.dims().len();
+        if ndims < 2 {
+            log::warn!(
+                "LayerNorm requires at least 2 dimensions [batch, features], got {:?}",
+                input.shape()
+            );
+            return Ok(input.clone());
+        }
+
+        let input_shape = input.dims();
+        let feature_size = input_shape[ndims - 1];
+        let epsilon = config.epsilon;
+
+        // Compute mean along last dimension using mean_keepdim
+        // For tensor [B, ..., F], mean_keepdim(ndims-1) gives [B, ..., 1]
+        let mean = input.mean_keepdim(ndims - 1)?;
+
+        // Compute variance: E[x²] - E[x]²
+        let input_sq = input.sqr()?;
+        let mean_sq = input_sq.mean_keepdim(ndims - 1)?;
+
+        // Variance = E[x²] - E[x]²
+        let var = mean_sq.sub(&mean.sqr()?)?;
+
+        // Add epsilon for numerical stability: var + epsilon
+        // Match dtype of input tensor (f32 or f64)
+        let epsilon_tensor = match input.dtype() {
+            candle_core::DType::F32 => Tensor::new(&[epsilon as f32], input.device())?,
+            candle_core::DType::F64 => Tensor::new(&[epsilon], input.device())?,
+            _ => {
+                return Err(VangaError::ModelError(format!(
+                    "LayerNorm only supports F32 and F64 dtypes, got {:?}",
+                    input.dtype()
+                )))
+            }
+        };
+        let epsilon_broadcast = epsilon_tensor.broadcast_as(var.shape())?;
+        let var_stable = var.add(&epsilon_broadcast)?;
+
+        // Normalize: (x - mean) / sqrt(var + epsilon)
+        // Use broadcast_sub and broadcast_div for automatic broadcasting
+        let normalized = input
+            .broadcast_sub(&mean)?
+            .broadcast_div(&var_stable.sqrt()?)?;
+
+        log::debug!(
+            "🔧 Applied LayerNorm (layer: {}, features: {}, epsilon: {:.2e})",
+            layer_idx,
+            feature_size,
+            epsilon
+        );
+
+        Ok(normalized)
+    }
+
+    /// Check if layer normalization is enabled
+    pub fn is_layer_norm_enabled(&self) -> bool {
+        self.layer_norm_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false)
+    }
+
+    /// Get layer norm epsilon value
+    pub fn layer_norm_epsilon(&self) -> f64 {
+        self.layer_norm_config
+            .as_ref()
+            .map(|c| c.epsilon)
+            .unwrap_or(1e-5)
     }
 }

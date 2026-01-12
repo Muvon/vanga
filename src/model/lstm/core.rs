@@ -70,6 +70,7 @@ impl LSTMModel {
             target_context: None, // No target context by default
 
             architecture: None,         // No architecture info by default
+            layer_norm_config: None,    // No layer norm config by default
             dropout_config: None,       // No dropout config by default
             stored_val_sequences: None, // No stored validation data initially
             stored_val_targets: None,   // No stored validation targets initially
@@ -286,9 +287,21 @@ impl LSTMModel {
         )?;
         model.seed = seed;
         model.architecture = Some(model_config.architecture.clone());
+        model.layer_norm_config = Some(model_config.layer_norm.clone());
         model.dropout_config = Some(model_config.dropout.clone());
         model.attention_config = Some(model_config.attention.clone());
         model.use_attention = model_config.attention.enabled;
+
+        // Log layer normalization configuration
+        if model_config.layer_norm.enabled {
+            log::info!(
+                "🔧 Layer Normalization ENABLED (epsilon: {:.2e}, position: {})",
+                model_config.layer_norm.epsilon,
+                model_config.layer_norm.position
+            );
+        } else {
+            log::debug!("Layer Normalization disabled");
+        }
 
         // Initialize XGBoost model if enabled
         if model_config.xgboost.enabled {
