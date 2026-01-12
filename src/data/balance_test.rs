@@ -188,9 +188,9 @@ fn test_validation_selection() {
 
     let horizons = vec!["1h".to_string()];
 
-    // Select 20% for validation
+    // Select 20% for validation with no gap
     let (val_indices, distributions) = balancer
-        .select_balanced_validation(&sequences, 0.2, &target_types, &horizons)
+        .select_balanced_validation(&sequences, 0.2, &target_types, &horizons, 0)
         .expect("Validation selection should succeed");
 
     // Should select some sequences (at least a few)

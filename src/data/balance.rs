@@ -242,6 +242,7 @@ impl SequenceBalancer {
                     target_type,
                     horizon,
                     &[], // No exclusions
+                    0,   // No gap enforcement for training data
                 )?;
 
                 for &idx in &selected_indices {
@@ -513,6 +514,7 @@ impl SequenceBalancer {
                     target_type,
                     horizon,
                     exclude_indices,
+                    0, // No gap enforcement for training data
                 )?
             } else {
                 // NOT OVERLOADED: Use all available sequences
@@ -570,6 +572,7 @@ impl SequenceBalancer {
         validation_ratio: f64,
         target_types: &[TargetType],
         horizons: &[String],
+        validation_gap_steps: usize,
     ) -> Result<TargetSpecificValidationResult> {
         if all_sequences.is_empty() {
             return Err(VangaError::DataError(
@@ -609,6 +612,7 @@ impl SequenceBalancer {
                     target_val_size,
                     &[],  // No existing sequences to avoid
                     None, // Use all available data
+                    validation_gap_steps,
                 )?;
 
                 target_validation_indices.insert(
@@ -683,6 +687,7 @@ impl SequenceBalancer {
         validation_ratio: f64,
         target_types: &[TargetType],
         horizons: &[String],
+        validation_gap_steps: usize,
     ) -> Result<ValidationSelectionResult> {
         if all_sequences.is_empty() {
             return Err(VangaError::DataError(
@@ -694,10 +699,11 @@ impl SequenceBalancer {
         let target_val_size = (total_sequences as f64 * validation_ratio) as usize;
 
         log::info!(
-            "🎯 Selecting balanced validation set: {} sequences ({:.1}% of {})",
+            "🎯 Selecting balanced validation set: {} sequences ({:.1}% of {}), gap={} steps",
             target_val_size,
             validation_ratio * 100.0,
-            total_sequences
+            total_sequences,
+            validation_gap_steps
         );
 
         // Find the most imbalanced target to use as primary selection criteria
@@ -718,6 +724,7 @@ impl SequenceBalancer {
             target_val_size,
             &[],  // No existing sequences to avoid
             None, // Use all available data
+            validation_gap_steps,
         )?;
 
         // Calculate class distributions for all targets
@@ -983,6 +990,7 @@ impl SequenceBalancer {
     ///
     /// This ensures ALL three splits maintain diversity, not just training data.
     /// Uses stratified sampling across temporal and statistical dimensions.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_diverse_splits(
         &self,
         balanced_dataset: &GloballyBalancedDataset,
@@ -991,6 +999,7 @@ impl SequenceBalancer {
         test_ratio: f64,
         target_types: &[TargetType],
         horizons: &[String],
+        validation_gap_steps: usize,
     ) -> Result<DiverseSplitsResult> {
         log::info!(
             "🎯 DIVERSE SPLITS: Creating diverse train ({:.1}%) / val ({:.1}%) / test ({:.1}%) splits",
@@ -1025,6 +1034,7 @@ impl SequenceBalancer {
                             test_ratio,
                             *target_type,
                             horizon,
+                            validation_gap_steps,
                         )?;
 
                     remaining_training_indices.insert(target_key.clone(), train_indices);
@@ -1060,6 +1070,7 @@ impl SequenceBalancer {
     }
 
     /// Create diverse train/val/test splits for a specific target
+    #[allow(clippy::too_many_arguments)]
     fn create_diverse_target_splits(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -1068,6 +1079,7 @@ impl SequenceBalancer {
         test_ratio: f64,
         target_type: TargetType,
         horizon: &str,
+        validation_gap_steps: usize,
     ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
         let _target_key = (target_type, horizon.to_string());
 
@@ -1116,13 +1128,14 @@ impl SequenceBalancer {
                 test_size
             );
 
-            // Use our fast diversity selection for each split
+            // Use our fast diversity selection for each split (with gap enforcement for validation)
             let (class_train, class_val, class_test) = self.create_diverse_class_splits(
                 all_sequences,
                 &class_indices,
                 train_size,
                 val_size,
                 test_size,
+                validation_gap_steps,
             )?;
 
             train_indices.extend(class_train);
@@ -1149,6 +1162,7 @@ impl SequenceBalancer {
         train_size: usize,
         val_size: usize,
         test_size: usize,
+        validation_gap_steps: usize,
     ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
         self.create_priority_based_class_splits(
             all_sequences,
@@ -1156,6 +1170,7 @@ impl SequenceBalancer {
             train_size,
             val_size,
             test_size,
+            validation_gap_steps,
         )
     }
 
@@ -1193,6 +1208,7 @@ impl SequenceBalancer {
         train_size: usize,
         val_size: usize,
         test_size: usize,
+        validation_gap_steps: usize,
     ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
         let total_size = train_size + val_size + test_size;
         if total_size > class_indices.len() {
@@ -1291,7 +1307,7 @@ impl SequenceBalancer {
             );
         }
 
-        // Step 3: VALIDATION - MAX OVERLAP WITH TRAINING
+        // Step 3: VALIDATION - MAX OVERLAP WITH TRAINING (with gap enforcement)
         // From remaining sequences, select those with MAXIMUM overlap to test interpolation
         // This maximizes training data diversity while validation tests generalization to similar patterns
         let remaining: Vec<usize> = sorted_indices
@@ -1314,13 +1330,59 @@ impl SequenceBalancer {
             // Sort by overlap score (HIGHEST first) for validation - test interpolation
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Select top val_size for validation
-            val_indices.extend(
-                scored
-                    .iter()
-                    .take(val_size.min(scored.len()))
-                    .map(|(idx, _)| *idx),
-            );
+            // CRITICAL: Apply validation_gap enforcement
+            let mut filtered_by_gap = 0;
+            if validation_gap_steps > 0 {
+                for (candidate_idx, _score) in scored.iter() {
+                    if val_indices.len() >= val_size {
+                        break;
+                    }
+
+                    let candidate_seq = sequence_map
+                        .get(candidate_idx)
+                        .expect("Sequence must exist");
+                    let mut violates_gap = false;
+
+                    // Check gap with all already selected validation sequences
+                    for &selected_idx in &val_indices {
+                        let selected_seq = sequence_map
+                            .get(&selected_idx)
+                            .expect("Sequence must exist");
+
+                        let gap = if candidate_seq.start_idx >= selected_seq.end_idx {
+                            candidate_seq.start_idx - selected_seq.end_idx
+                        } else {
+                            selected_seq.start_idx.saturating_sub(candidate_seq.end_idx)
+                        };
+
+                        if gap < validation_gap_steps {
+                            violates_gap = true;
+                            filtered_by_gap += 1;
+                            break;
+                        }
+                    }
+
+                    if !violates_gap {
+                        val_indices.push(*candidate_idx);
+                    }
+                }
+
+                if filtered_by_gap > 0 {
+                    log::debug!(
+                        "   🔒 Gap enforcement: filtered {} validation candidates (gap={} steps)",
+                        filtered_by_gap,
+                        validation_gap_steps
+                    );
+                }
+            } else {
+                // No gap enforcement - select top val_size
+                val_indices.extend(
+                    scored
+                        .iter()
+                        .take(val_size.min(scored.len()))
+                        .map(|(idx, _)| *idx),
+                );
+            }
 
             // Sort validation indices for consistency
             val_indices.sort();
@@ -1573,6 +1635,7 @@ impl SequenceBalancer {
     }
 
     /// Select sequences for a target with specified count
+    #[allow(clippy::too_many_arguments)]
     fn select_sequences_for_target(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -1581,6 +1644,7 @@ impl SequenceBalancer {
         target_count: usize,
         exclude_indices: &[usize],
         window_range: Option<(usize, usize)>,
+        validation_gap_steps: usize,
     ) -> Result<BalancedSelection> {
         // Group sequences by class
         let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
@@ -1618,6 +1682,7 @@ impl SequenceBalancer {
             exclude_indices,
             *target_type,
             horizon,
+            validation_gap_steps,
         )
     }
 
@@ -1625,14 +1690,16 @@ impl SequenceBalancer {
     ///
     /// CRITICAL: This method MUST achieve EXACTLY equal sequences per class (20% each for 5-class system)
     /// Uses minimum available class count - NO sequence reuse allowed
+    #[allow(clippy::too_many_arguments)]
     fn select_balanced_with_overlap_management(
         &self,
         all_sequences: &[SequenceWithTargets],
         mut class_sequences: HashMap<i32, Vec<usize>>,
         _target_total_sequences: usize, // Ignored - we use minimum class count
         exclude_indices: &[usize],
-        target_type: TargetType, // NEW: For diversity selection
-        horizon: &str,           // NEW: For diversity selection
+        target_type: TargetType,     // NEW: For diversity selection
+        horizon: &str,               // NEW: For diversity selection
+        validation_gap_steps: usize, // NEW: Minimum gap between validation samples
     ) -> Result<BalancedSelection> {
         let num_classes = class_sequences.len();
 
@@ -1722,6 +1789,7 @@ impl SequenceBalancer {
                     target_type,
                     horizon,
                     exclude_indices,
+                    validation_gap_steps,
                 )?;
 
                 if diverse_selection.len() != needed {

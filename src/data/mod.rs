@@ -576,14 +576,42 @@ impl DataPipeline {
             );
         }
 
-        // STEP 6: Calculate window configuration
+        // STEP 6: Parse validation_gap from config
+        let validation_gap_steps = if !config.training.validation_gap.is_empty() {
+            crate::utils::parser::parse_horizon_to_steps(&config.training.validation_gap, 60)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        log::info!(
+            "🔒 Validation gap: {} (parsed to {} steps)",
+            config.training.validation_gap,
+            validation_gap_steps
+        );
+
+        // STEP 7: Calculate window configuration
+        // FIXED: Validation is 20% of training data (after test split), not 20% of total
+        let test_split = config.training.test_split;
+        let validation_ratio = config.training.validation_split;
         let first_target_validation_size = target_balanced_datasets
             .values()
             .next()
             .map(|dataset| {
-                (dataset.total_balanced_samples as f64 * config.training.validation_split) as usize
+                // Calculate validation as % of (total * (1 - test_split))
+                let samples_for_train_val =
+                    dataset.total_balanced_samples as f64 * (1.0 - test_split);
+                (samples_for_train_val * validation_ratio) as usize
             })
             .unwrap_or(0);
+
+        log::info!(
+            "📊 Split calculation: test_split={:.1}%, validation_split={:.1}%, validation_size={}, gap={} steps",
+            test_split * 100.0,
+            validation_ratio * 100.0,
+            first_target_validation_size,
+            validation_gap_steps
+        );
 
         let window_config = self.calculate_window_configuration_for_balanced(
             available_for_training,
@@ -591,7 +619,7 @@ impl DataPipeline {
             config,
         )?;
 
-        // STEP 7: Create target-specific windows with 100% balanced train/val splits
+        // STEP 8: Create target-specific windows with 100% balanced train/val splits
         let mut target_specific_windows: HashMap<
             (crate::targets::TargetType, String),
             Vec<TrainingWindow>,
@@ -655,6 +683,7 @@ impl DataPipeline {
                             config.training.test_split,
                             &[*target_type],
                             std::slice::from_ref(horizon),
+                            validation_gap_steps,
                         )?;
 
                     // Extract training indices for this specific target from the balanced dataset

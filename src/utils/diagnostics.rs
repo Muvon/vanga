@@ -443,7 +443,7 @@ impl TrainingDiagnostics {
     /// 📊 DATA DIAGNOSTICS:
     ///    🎯 Training samples: 1000
     ///    ✅ Validation samples: 200
-    ///    📊 Validation ratio: 20.0%
+    ///    📊 Validation ratio: 20.0% (of training data)
     ///    📦 Batch size: 32
     /// ```
     pub fn log_data_config(
@@ -457,8 +457,12 @@ impl TrainingDiagnostics {
 
         if use_validation {
             log::info!("   ✅ Validation samples: {}", total_val_samples);
+            // Validation ratio is calculated as % of training data (after test split)
             let val_ratio = total_val_samples as f64 / total_train_samples as f64;
-            log::info!("   📊 Validation ratio: {:.1}%", val_ratio * 100.0);
+            log::info!(
+                "   📊 Validation ratio: {:.1}% (of training data)",
+                val_ratio * 100.0
+            );
         } else {
             log::info!("   ❌ Validation: DISABLED");
         }

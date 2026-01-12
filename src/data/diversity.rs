@@ -71,6 +71,7 @@ impl DiversitySelector {
     /// 1. Pre-computed statistical features (O(n))
     /// 2. K-means clustering for diversity (O(n log n))
     /// 3. Stratified sampling within clusters
+    #[allow(clippy::too_many_arguments)]
     pub fn select_diverse_sequences(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -79,6 +80,7 @@ impl DiversitySelector {
         target_type: TargetType,
         horizon: &str,
         exclude_indices: &[usize],
+        validation_gap_steps: usize,
     ) -> Result<Vec<usize>> {
         if class_indices.len() <= target_count {
             return Ok(class_indices.to_vec());
@@ -87,12 +89,13 @@ impl DiversitySelector {
         let utilization = (target_count as f64 / class_indices.len() as f64) * 100.0;
 
         log::info!(
-            "🎯 DIVERSITY SELECTION: Selecting {} most diverse sequences from {} available for {:?} {} ({:.1}% utilization)",
+            "🎯 DIVERSITY SELECTION: Selecting {} most diverse sequences from {} available for {:?} {} ({:.1}% utilization), gap={} steps",
             target_count,
             class_indices.len(),
             target_type,
             horizon,
-            utilization
+            utilization,
+            validation_gap_steps
         );
 
         // Filter out excluded indices
@@ -117,6 +120,7 @@ impl DiversitySelector {
             target_count,
             target_type,
             horizon,
+            validation_gap_steps,
         )?;
 
         log::info!(
@@ -128,6 +132,7 @@ impl DiversitySelector {
     }
 
     /// Fast diversity selection using clustering and stratified sampling with strength-based selection
+    #[allow(clippy::too_many_arguments)]
     fn select_diverse_fast_with_strength(
         &self,
         all_sequences: &[SequenceWithTargets],
@@ -135,6 +140,7 @@ impl DiversitySelector {
         target_count: usize,
         target_type: TargetType,
         horizon: &str,
+        validation_gap_steps: usize,
     ) -> Result<Vec<usize>> {
         // Step 1: Extract lightweight features for all sequences (O(n))
         let mut sequence_features = Vec::new();
@@ -151,6 +157,7 @@ impl DiversitySelector {
             all_sequences,
             target_type,
             horizon,
+            validation_gap_steps,
         )?;
 
         Ok(selected)
@@ -205,6 +212,7 @@ impl DiversitySelector {
     }
 
     /// Select sequences by maximizing spread in temporal space and strength within buckets
+    #[allow(clippy::too_many_arguments)]
     fn select_by_temporal_and_strength_spread(
         &self,
         sequence_features: &[(usize, Vec<f64>)],
@@ -212,6 +220,7 @@ impl DiversitySelector {
         all_sequences: &[SequenceWithTargets],
         target_type: TargetType,
         horizon: &str,
+        validation_gap_steps: usize,
     ) -> Result<Vec<usize>> {
         // Sort by temporal position for temporal diversity (KEEP EXISTING LOGIC)
         let mut temporal_sorted: Vec<(usize, usize)> = sequence_features
@@ -227,6 +236,7 @@ impl DiversitySelector {
         let remainder = target_count % num_buckets;
 
         let mut selected = Vec::new();
+        let mut filtered_by_gap = 0;
 
         for bucket_idx in 0..num_buckets {
             let start = bucket_idx * bucket_size;
@@ -256,12 +266,50 @@ impl DiversitySelector {
                 horizon,
             )?;
 
-            selected.extend(bucket_selected);
+            // CRITICAL: Enforce validation_gap between selected sequences
+            if validation_gap_steps > 0 {
+                for &candidate_idx in &bucket_selected {
+                    let candidate_seq: &SequenceWithTargets = &all_sequences[candidate_idx];
+                    let mut violates_gap = false;
+
+                    // Check if this sequence is too close to any already selected sequence
+                    for &selected_idx in &selected {
+                        let selected_seq: &SequenceWithTargets = &all_sequences[selected_idx];
+
+                        // Calculate gap between sequences
+                        let gap = if candidate_seq.start_idx >= selected_seq.end_idx {
+                            candidate_seq.start_idx - selected_seq.end_idx
+                        } else {
+                            selected_seq.start_idx.saturating_sub(candidate_seq.end_idx)
+                        };
+
+                        if gap < validation_gap_steps {
+                            violates_gap = true;
+                            filtered_by_gap += 1;
+                            break;
+                        }
+                    }
+
+                    if !violates_gap {
+                        selected.push(candidate_idx);
+                    }
+                }
+            } else {
+                // No gap enforcement - add all selected from bucket
+                selected.extend(bucket_selected);
+            }
         }
 
-        // If we still need more sequences, add strongest from remaining
+        if filtered_by_gap > 0 {
+            log::info!(
+                "🔒 Gap enforcement: filtered {} sequences (gap={} steps)",
+                filtered_by_gap,
+                validation_gap_steps
+            );
+        }
+
+        // If we still need more sequences, add strongest from remaining (with gap enforcement)
         if selected.len() < target_count {
-            let remaining_needed = target_count - selected.len();
             let remaining: Vec<usize> = sequence_features
                 .iter()
                 .map(|(idx, _)| *idx)
@@ -281,17 +329,51 @@ impl DiversitySelector {
             remaining_sorted
                 .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            let strongest_remaining: Vec<usize> = remaining_sorted
-                .into_iter()
-                .take(remaining_needed)
-                .map(|(idx, _)| idx)
-                .collect();
+            // Apply gap enforcement to remaining sequences
+            for (candidate_idx, _strength) in remaining_sorted {
+                if selected.len() >= target_count {
+                    break;
+                }
 
-            selected.extend(strongest_remaining);
+                if validation_gap_steps > 0 {
+                    let candidate_seq = &all_sequences[candidate_idx];
+                    let mut violates_gap = false;
+
+                    for &selected_idx in &selected {
+                        let selected_seq = &all_sequences[selected_idx];
+
+                        let gap = if candidate_seq.start_idx >= selected_seq.end_idx {
+                            candidate_seq.start_idx - selected_seq.end_idx
+                        } else {
+                            selected_seq.start_idx.saturating_sub(candidate_seq.end_idx)
+                        };
+
+                        if gap < validation_gap_steps {
+                            violates_gap = true;
+                            break;
+                        }
+                    }
+
+                    if !violates_gap {
+                        selected.push(candidate_idx);
+                    }
+                } else {
+                    selected.push(candidate_idx);
+                }
+            }
         }
 
-        // Ensure we have exactly the right count
+        // Ensure we have exactly the right count (or less if gap constraints prevent it)
         selected.truncate(target_count);
+
+        if selected.len() < target_count && validation_gap_steps > 0 {
+            log::warn!(
+                "⚠️ Gap enforcement reduced selection: {} selected vs {} requested (gap={} steps)",
+                selected.len(),
+                target_count,
+                validation_gap_steps
+            );
+        }
 
         Ok(selected)
     }

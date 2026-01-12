@@ -736,7 +736,15 @@ impl LSTMModel {
                 available_for_training
             );
 
-            // FIXED: Calculate proper gap size to prevent data leakage
+            // Parse validation_gap from config (e.g., "1h", "30m", "0" for no gap)
+            let validation_gap_steps = if !config.training.validation_gap.is_empty() {
+                crate::utils::parser::parse_horizon_to_steps(&config.training.validation_gap, 60)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            // Calculate minimum gap: max of calculated gap and user-specified validation_gap
             let max_horizon_steps = if !config.horizons.is_empty() {
                 // Assume 1h timeframe for validation calculations (actual targets use detected timeframe)
                 let assumed_timeframe = 60;
@@ -753,20 +761,23 @@ impl LSTMModel {
                 72
             };
 
-            // CRITICAL FIX: Proper gap calculation
-            let gap_size = self.config.sequence_length + max_horizon_steps;
+            // CRITICAL: Use max of calculated gap and user-specified validation_gap
+            let calculated_gap = self.config.sequence_length + max_horizon_steps;
+            let gap_size = calculated_gap.max(validation_gap_steps);
 
             log::info!(
-                "🔒 Gap calculation: sequence_length({}) + max_horizon_steps({}) = {} total gap",
+                "🔒 Gap calculation: sequence_length({}) + max_horizon_steps({}) = {} calculated, validation_gap={} steps, final_gap={}",
                 self.config.sequence_length,
                 max_horizon_steps,
+                calculated_gap,
+                validation_gap_steps,
                 gap_size
             );
 
             // FIXED: Account for gap in validation split calculation
+            // Validation is now 20% of training data (after test split), not 20% of total
             let effective_samples = available_for_training.saturating_sub(gap_size);
-            let base_train_samples = ((1.0 - validation_split) * effective_samples as f64) as usize;
-            let train_samples = base_train_samples;
+            let train_samples = ((1.0 - validation_split) * effective_samples as f64) as usize;
             let val_start = train_samples + gap_size;
 
             // Ensure we have enough samples for validation after the gap
