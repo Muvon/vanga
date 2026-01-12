@@ -3,13 +3,15 @@ use ndarray::Array2;
 
 #[test]
 fn test_augmentation_config_creation() {
-    // Config should be created with default values
+    // Config should be created with conservative default values for financial data
     let config = AugmentationConfig::from_overlap(0.1);
-    assert!((config.magnitude_sigma - 0.2).abs() < 1e-6);
-    assert!((config.jitter_sigma - 0.03).abs() < 1e-6);
+    assert!((config.magnitude_sigma - 0.1).abs() < 1e-6); // Conservative: ±10%
+    assert!((config.jitter_sigma - 0.02).abs() < 1e-6); // Conservative
+    assert!((config.jitter_probability - 0.3).abs() < 1e-6);
 
     let config = AugmentationConfig::from_overlap(0.9);
-    assert!((config.scaling_sigma - 0.1).abs() < 1e-6);
+    assert!((config.scaling_sigma - 0.05).abs() < 1e-6); // Conservative: ±5%
+    assert!((config.time_warp_probability - 0.2).abs() < 1e-6);
 }
 
 #[test]

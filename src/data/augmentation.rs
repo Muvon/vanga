@@ -13,24 +13,48 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 /// Augmentation configuration for time series
+///
+/// Based on research (2024-2025):
+/// - Magnitude Warping: MDPI 2024 (11.5-22.5% improvement)
+/// - Jittering with Gaussian noise: IJASEIT 2024 (best for imbalance)
+/// - Time Warping: Standard technique (uchidalab)
+/// - Scaling: Symbol-agnostic augmentation
+///
+/// CONSERVATIVE parameters for financial data (crypto is volatile):
+/// - Smaller sigma values to prevent target class changes
+/// - Lower probability for aggressive techniques
 pub struct AugmentationConfig {
-    /// Magnitude warping sigma (default: 0.2)
+    /// Magnitude warping sigma (default: 0.1 for financial data)
+    /// ±10% variation preserves target classification better
     pub magnitude_sigma: f64,
-    /// Jittering sigma for Gaussian noise (default: 0.03 for crypto)
+    /// Jittering sigma for Gaussian noise (default: 0.02 for crypto)
+    /// Small noise prevents memorization without affecting targets
     pub jitter_sigma: f64,
-    /// Time warping sigma (default: 0.2)
+    /// Time warping sigma (default: 0.1 for financial data)
+    /// Conservative to preserve temporal patterns
     pub time_warp_sigma: f64,
-    /// Scaling sigma (default: 0.1)
+    /// Scaling sigma (default: 0.05 for financial data)
+    /// Small scaling preserves price relationships
     pub scaling_sigma: f64,
+    /// Probability of applying jitter (default: 0.3)
+    pub jitter_probability: f64,
+    /// Probability of applying scaling (default: 0.3)
+    pub scaling_probability: f64,
+    /// Probability of applying time warping (default: 0.2)
+    /// Lower because it's more aggressive
+    pub time_warp_probability: f64,
 }
 
 impl Default for AugmentationConfig {
     fn default() -> Self {
         Self {
-            magnitude_sigma: 0.2,
-            jitter_sigma: 0.03,
-            time_warp_sigma: 0.2,
-            scaling_sigma: 0.1,
+            magnitude_sigma: 0.1,    // ±10% instead of ±20%
+            jitter_sigma: 0.02,      // Small noise
+            time_warp_sigma: 0.1,    // Conservative
+            scaling_sigma: 0.05,     // Small scaling
+            jitter_probability: 0.3, // Lower probability
+            scaling_probability: 0.3,
+            time_warp_probability: 0.2,
         }
     }
 }
@@ -58,35 +82,31 @@ pub fn augment_sequence(
     sequence: &Array2<f64>,
     config: &AugmentationConfig,
     rng: &mut impl Rng,
-    price_volume_cols: &[usize], // Columns to skip (price/volume)
+    price_volume_cols: &[usize],
 ) -> Array2<f64> {
     let mut augmented = sequence.clone();
 
     // 1. ALWAYS: Magnitude warping (highest impact - MDPI 2024)
     augmented = magnitude_warp(&augmented, config.magnitude_sigma, rng, price_volume_cols);
 
-    // 2. 50% probability: Gaussian jittering (prevents memorization)
-    if rng.random_bool(0.5) {
+    // 2. Conservative probability: Gaussian jittering (prevents memorization)
+    if rng.random_bool(config.jitter_probability) {
         augmented = jitter(&augmented, config.jitter_sigma, rng, price_volume_cols);
     }
 
-    // 3. 50% probability: Scaling (symbol-agnostic)
-    if rng.random_bool(0.5) {
+    // 3. Conservative probability: Scaling (symbol-agnostic)
+    if rng.random_bool(config.scaling_probability) {
         augmented = scaling(&augmented, config.scaling_sigma, rng, price_volume_cols);
     }
 
-    // 4. 30% probability: Time warping (temporal diversity)
-    // Lower probability because it's more aggressive
-    if rng.random_bool(0.3) {
+    // 4. Lower probability: Time warping (temporal diversity)
+    // Only applies to indicators, not price/volume
+    if rng.random_bool(config.time_warp_probability) {
         augmented = time_warp(&augmented, config.time_warp_sigma, rng, price_volume_cols);
     }
 
     augmented
 }
-
-/// Magnitude Warping: Multiply by smooth random curve
-///
-/// Research: "Improves LSTM performance by 11.5-22.5%" (MDPI 2024)
 /// Effect: Changes amplitude while preserving temporal patterns
 /// CRITICAL: Skips price/volume columns that determine targets
 pub fn magnitude_warp(
@@ -187,15 +207,14 @@ pub fn scaling(
 ///
 /// Research: Standard in time series augmentation (uchidalab)
 /// Effect: Simulates different market speeds
-/// NOTE: Time warp applies to ALL columns together to preserve temporal synchronization
-/// between price/volume and indicators. This is acceptable because:
-/// - Target is based on price CHANGE, not exact timing
-/// - All features maintain their relative temporal relationships
+/// CRITICAL: Now skips price/volume columns to preserve target consistency.
+/// Only applies to technical indicators (RSI, MACD, etc.) where temporal
+/// distortion doesn't affect target classification.
 pub fn time_warp(
     sequence: &Array2<f64>,
     sigma: f64,
     rng: &mut impl Rng,
-    _price_volume_cols: &[usize],
+    price_volume_cols: &[usize],
 ) -> Array2<f64> {
     let timesteps = sequence.shape()[0];
     let features = sequence.shape()[1];
@@ -218,14 +237,32 @@ pub fn time_warp(
         *step = (*step - min_warp) / range * (timesteps - 1) as f64;
     }
 
-    // Interpolate original sequence to warped time steps
-    let mut warped = Array2::zeros((timesteps, features));
-    for f in 0..features {
-        let feature_values: Vec<f64> = (0..timesteps).map(|t| sequence[[t, f]]).collect();
-        let warped_values = linear_interpolate(&feature_values, &warp_steps);
+    // Create price/volume lookup set
+    let price_volume_set: std::collections::HashSet<usize> =
+        price_volume_cols.iter().cloned().collect();
 
-        for t in 0..timesteps {
-            warped[[t, f]] = warped_values[t];
+    // Interpolate ONLY non-price/volume columns
+    // Price/volume columns are copied as-is to preserve temporal relationships
+    let mut warped = Array2::zeros((timesteps, features));
+
+    // First, copy price/volume columns unchanged
+    for &col in price_volume_cols {
+        if col < features {
+            for t in 0..timesteps {
+                warped[[t, col]] = sequence[[t, col]];
+            }
+        }
+    }
+
+    // Then interpolate indicator columns
+    for f in 0..features {
+        if !price_volume_set.contains(&f) {
+            let feature_values: Vec<f64> = (0..timesteps).map(|t| sequence[[t, f]]).collect();
+            let warped_values = linear_interpolate(&feature_values, &warp_steps);
+
+            for t in 0..timesteps {
+                warped[[t, f]] = warped_values[t];
+            }
         }
     }
 
