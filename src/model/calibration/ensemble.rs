@@ -119,7 +119,7 @@ impl EnsembleCalibrator {
         self.per_class_ece_history.push(per_class_ece);
 
         // Step 4: Tune mixup from ECE
-        self.mixup.calibrate_from_ece(overall_ece, &per_class_ece)?;
+        self.mixup.calibrate_from_ece(overall_ece)?;
 
         // Step 5: Generate reliability diagram
         self.reliability_diagram = Some(generate_reliability_diagram(&calibrated_logits, targets)?);

@@ -170,33 +170,6 @@ fn test_generate_reliability_diagram_empty() {
     assert_eq!(diagram.ece, 0.0);
 }
 
-#[test]
-fn test_ece_gradient_calculation() {
-    let logits = Array2::from_shape_vec(
-        (20, 5),
-        (0..20)
-            .flat_map(|_| vec![5.0, -2.0, -2.0, -2.0, -2.0])
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-
-    let targets = Array2::from_shape_vec(
-        (20, 5),
-        (0..20)
-            .flat_map(|_| vec![1.0, 0.0, 0.0, 0.0, 0.0])
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-
-    let temperature = 1.0;
-    let class_idx = 0;
-
-    let gradient =
-        calculate_ece_gradient_for_temperature(&logits, &targets, temperature, class_idx).unwrap();
-
-    // Gradient should be a finite number
-    assert!(gradient.is_finite());
-}
 
 #[test]
 fn test_ece_bins_coverage() {

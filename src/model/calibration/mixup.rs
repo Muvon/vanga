@@ -43,7 +43,6 @@ impl AdaptiveMixup {
     pub fn calibrate_from_ece(
         &mut self,
         overall_ece: f64,
-        _per_class_ece: &[f64; 5],
     ) -> Result<()> {
         log::info!("🔀 Calibrating mixup...");
 

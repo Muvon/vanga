@@ -6,7 +6,6 @@ use polars::prelude::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::error::Result;
 
     fn make_df(n: usize) -> DataFrame {
         let mut df = DataFrame::new(vec![]).unwrap();
