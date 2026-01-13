@@ -85,12 +85,17 @@ impl LSTMModel {
             optimizer: None,            // No optimizer initially (created during training)
             bias_correction_factors: None, // No bias correction initially
             bias_correction_config: bias_correction_config.clone(), // Use provided bias correction config
-            bias_corrector: if bias_correction_config.use_ensemble_calibration {
-                None // Use ensemble calibrator instead
-            } else {
+
+            // CRITICAL: Bias corrector and ensemble calibrator are INDEPENDENT
+            // Bias correction: Training-time method (applied to logits during training)
+            // Ensemble calibration: Post-hoc method (applied after training completes)
+            // Both can be enabled simultaneously for optimal results
+            bias_corrector: if bias_correction_config.enabled {
                 Some(crate::model::bias_correction::LinearBiasCorrector::new(
                     bias_correction_config.clone(),
                 ))
+            } else {
+                None
             },
             ensemble_calibrator: if bias_correction_config.use_ensemble_calibration {
                 Some(crate::model::calibration::EnsembleCalibrator::new())
@@ -767,6 +772,8 @@ impl LSTMModel {
             print_every: self.training_config.print_every,
             clip_gradient: self.training_config.clip_gradient,
             calibrated_parameters: self.calibrated_parameters.clone(),
+            ensemble_calibrator: self.ensemble_calibrator.clone(),
+            bias_corrector: self.bias_corrector.clone(),
         };
 
         let config_path = path.with_extension("config");
@@ -834,6 +841,27 @@ impl LSTMModel {
         model.training_config.print_every = model_state.print_every;
         model.training_config.clip_gradient = model_state.clip_gradient;
         model.calibrated_parameters = model_state.calibrated_parameters.clone();
+
+        // CRITICAL: Restore ensemble calibrator and bias corrector from saved state
+        // This ensures post-hoc temperature scaling is applied during inference
+        model.ensemble_calibrator = model_state.ensemble_calibrator.clone();
+        model.bias_corrector = model_state.bias_corrector.clone();
+
+        if model.ensemble_calibrator.is_some() {
+            log::info!("✅ Ensemble calibrator restored from saved model");
+            if let Some(ref ensemble_cal) = model.ensemble_calibrator {
+                if ensemble_cal.is_calibrated {
+                    log::info!(
+                        "   🌡️  Temperature: {:.4} (will be applied during inference)",
+                        ensemble_cal.temperature_scaling.temperature
+                    );
+                }
+            }
+        }
+
+        if model.bias_corrector.is_some() {
+            log::info!("✅ Bias corrector restored from saved model");
+        }
 
         // CRITICAL FIX: Initialize network structure FIRST to create tensor placeholders
         // Skip weight initialization since we'll load trained weights from safetensors

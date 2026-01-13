@@ -4,9 +4,27 @@ use ndarray::{Array2, Axis};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for bias correction system
+///
+/// **CRITICAL DISTINCTION**:
+/// - **Bias Correction**: Applied DURING training to logits (training-time method)
+/// - **Ensemble Calibration**: Applied AFTER training to probabilities (post-hoc method)
+///
+/// ## Bias Correction (Training-Time)
+/// Runs during training to correct systematic prediction errors:
+/// - Applied to logits before loss calculation
+/// - Helps model learn balanced predictions
+/// - Uses ordinal-aware adjustments for classification
+///
+/// ## Ensemble Calibration (Post-Hoc)
+/// Runs AFTER training completes to calibrate confidence:
+/// - **Temperature Scaling**: Optimized on validation set after training
+/// - **Label Smoothing**: Applied during training (training-time method)
+/// - **Mixup**: Applied during training (training-time augmentation)
+///
+/// Research: Guo et al. 2017, ICLR 2025 - temperature scaling is post-processing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiasCorrection {
-    /// Enable/disable bias correction
+    /// Enable/disable bias correction (training-time method)
     pub enabled: bool,
     /// Smoothing factor for bias factor calculation (0.0 = no smoothing, 1.0 = maximum smoothing)
     pub smoothing_factor: f64,
@@ -29,7 +47,18 @@ pub struct BiasCorrection {
     #[serde(default = "default_recalibration_frequency")]
     pub recalibration_frequency: usize,
 
-    /// Use ensemble calibration (temperature scaling + label smoothing + mixup)
+    /// Use ensemble calibration (POST-HOC temperature scaling + training-time methods)
+    ///
+    /// **CRITICAL**: Temperature scaling is POST-HOC ONLY (applied after training)
+    ///
+    /// When enabled:
+    /// - **During Training**: Only label smoothing and mixup are applied (training-time methods)
+    /// - **After Training**: Temperature scaling optimized on validation set (post-hoc)
+    /// - **During Inference**: Temperature scaling applied to logits (post-hoc calibration)
+    ///
+    /// Research: Guo et al. 2017, ICLR 2025 - temperature scaling is post-processing
+    ///
+    /// **Bias correction (enabled=true) runs independently of this flag**
     #[serde(default = "default_use_ensemble")]
     pub use_ensemble_calibration: bool,
 }

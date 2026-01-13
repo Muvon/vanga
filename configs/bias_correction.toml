@@ -42,6 +42,35 @@ print_info = false
 #        - Simpler, more interpretable class-specific bias factors
 #        - Direct correction of class imbalances
 # Recommended: true for EnsembleCalibrator (more sophisticated, better calibration)
+# ============================================================================
+# ENSEMBLE CALIBRATION - POST-HOC temperature scaling + training-time methods
+# ============================================================================
+# CRITICAL: Temperature scaling is POST-HOC ONLY (applied after training)
+#
+# Research Foundation:
+# - Guo et al. 2017: "On Calibration of Modern Neural Networks"
+# - ICLR 2025: "GETS: Ensemble Temperature Scaling for Calibration"
+# - AWS Prescriptive Guidance 2024: Temperature scaling is post-processing
+#
+# When enabled (use_ensemble_calibration = true):
+# 1. DURING TRAINING:
+#    - Label smoothing applied to targets (training-time regularization)
+#    - Mixup applied to batches (training-time augmentation)
+#    - NO temperature scaling (would cause validation data leakage)
+#
+# 2. AFTER TRAINING (POST-HOC):
+#    - Temperature optimized on validation set (minimizes NLL)
+#    - Saved with model for inference use
+#
+# 3. DURING INFERENCE:
+#    - Temperature scaling applied to logits (post-hoc calibration)
+#    - Improves probability calibration without changing predictions
+#
+# IMPORTANT: Bias correction (enabled above) runs INDEPENDENTLY
+# - Bias correction: Training-time method (applied to logits during training)
+# - Ensemble calibration: Post-hoc method (applied after training completes)
+# - Both can be used together for optimal results
+#
 use_ensemble_calibration = true
 
 # NEW: Training Integration Parameters (FULLY ADAPTIVE)

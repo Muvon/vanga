@@ -564,7 +564,50 @@ impl LSTMModel {
             log::info!("🔄 Using pure LSTM prediction");
 
             // Forward pass through network (inference mode - no dropout)
-            self.forward(&input_tensor, false)?
+            let raw_logits = self.forward(&input_tensor, false)?;
+
+            // CRITICAL: Apply POST-HOC ensemble calibration if available
+            // Temperature scaling is applied ONLY during inference, never during training
+            // Research: Guo et al. 2017 - temperature scaling is post-processing method
+            if let Some(ref ensemble_cal) = self.ensemble_calibrator {
+                if ensemble_cal.is_calibrated {
+                    // Convert logits tensor to ndarray for temperature scaling
+                    let logits_shape = raw_logits.shape();
+                    let batch_size = logits_shape.dims()[0];
+                    let logits_data: Vec<f64> = raw_logits
+                        .flatten_all()?
+                        .to_vec1::<f32>()?
+                        .iter()
+                        .map(|&v| v as f64)
+                        .collect();
+
+                    let logits_array = Array2::from_shape_vec((batch_size, 5), logits_data)
+                        .map_err(|e| {
+                            VangaError::ModelError(format!("Failed to create logits array: {}", e))
+                        })?;
+
+                    // Apply temperature scaling to logits
+                    let calibrated_logits_array = ensemble_cal.apply_to_logits(&logits_array)?;
+
+                    // Convert back to tensor
+                    let calibrated_data: Vec<f32> =
+                        calibrated_logits_array.iter().map(|&v| v as f32).collect();
+
+                    let calibrated_logits =
+                        Tensor::from_vec(calibrated_data, (batch_size, 5), &self.device)?;
+
+                    log::debug!(
+                        "🌡️ Applied temperature scaling (T={:.3}) during inference",
+                        ensemble_cal.temperature_scaling.temperature
+                    );
+
+                    calibrated_logits
+                } else {
+                    raw_logits
+                }
+            } else {
+                raw_logits
+            }
         };
 
         // CRITICAL FIX: Handle multi-class outputs for categorical targets

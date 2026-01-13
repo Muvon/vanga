@@ -193,6 +193,13 @@ pub struct ModelState {
     /// These parameters are calibrated during training to achieve balanced
     /// class distributions and must be reused during prediction for consistency
     pub calibrated_parameters: Option<crate::targets::calibration::CalibratedParameters>,
+
+    /// Ensemble calibrator state (temperature scaling + label smoothing + mixup)
+    /// CRITICAL: Must be saved to apply post-hoc temperature scaling during inference
+    pub ensemble_calibrator: Option<crate::model::calibration::EnsembleCalibrator>,
+
+    /// Bias corrector state for training-time bias correction
+    pub bias_corrector: Option<crate::model::bias_correction::LinearBiasCorrector>,
 }
 
 // Optimizer wrapper for concrete type handling with Candle

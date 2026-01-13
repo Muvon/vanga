@@ -1,6 +1,54 @@
 //! Ensemble calibrator orchestrating all calibration methods
 //!
-//! Combines temperature scaling, label smoothing, and mixup for optimal calibration.
+//! **CRITICAL: Temperature Scaling is POST-HOC ONLY**
+//!
+//! This module implements ensemble calibration combining:
+//! - **Temperature Scaling**: POST-HOC calibration applied AFTER training
+//! - **Label Smoothing**: Training-time regularization
+//! - **Mixup**: Training-time data augmentation
+//!
+//! ## Research Foundation
+//!
+//! Temperature scaling is a **post-processing method** that should ONLY be applied
+//! after training completes, never during training:
+//!
+//! - **Guo et al. 2017**: "On Calibration of Modern Neural Networks"
+//!   > "Temperature scaling is a post-processing method that fixes [overconfidence]"
+//!
+//! - **ICLR 2025**: "GETS: Ensemble Temperature Scaling for Calibration"
+//!   > "Existing post-hoc methods, such as temperature scaling..."
+//!
+//! - **AWS Prescriptive Guidance 2024**:
+//!   > "After a model training is completed, extract the temperature value T
+//!   > by using the validation dataset"
+//!
+//! ## Correct Usage
+//!
+//! ```rust
+//! // TRAINING: Use label smoothing and mixup (training-time methods)
+//! let smoothed_targets = ensemble_cal.apply_label_smoothing(&targets)?;
+//! let (mixed_seq, mixed_tgt) = ensemble_cal.apply_mixup(&sequences, &targets, &mut rng)?;
+//!
+//! // AFTER TRAINING: Calibrate temperature on validation set (POST-HOC)
+//! ensemble_cal.calibrate_from_validation(&val_predictions, &val_targets)?;
+//!
+//! // INFERENCE: Apply temperature scaling to logits
+//! let calibrated_logits = ensemble_cal.apply_to_logits(&logits)?;
+//! ```
+//!
+//! ## Why Temperature Scaling is Post-Hoc
+//!
+//! 1. **Validation Data Leakage**: Optimizing temperature on validation during
+//!    training causes the model to indirectly learn validation patterns
+//!
+//! 2. **Gradient Instability**: Changing temperature during training causes
+//!    gradients to be scaled differently, preventing convergence
+//!
+//! 3. **Moving Target**: Model parameters adapt to current temperature, then
+//!    temperature changes, creating a never-ending chase
+//!
+//! 4. **Conflicting Objectives**: Training loss (cross-entropy) vs calibration
+//!    loss (NLL on validation) pull in different directions
 
 use super::ece::{
     calculate_ece, calculate_per_class_ece, generate_reliability_diagram, ReliabilityDiagram,

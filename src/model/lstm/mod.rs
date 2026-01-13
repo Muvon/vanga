@@ -62,9 +62,11 @@ mod inference_test;
 mod loss_test;
 
 #[cfg(test)]
+#[cfg(test)]
 mod reduce_on_plateau_test;
 
 // Re-export main types for backward compatibility
+
 pub use config::{
     LSTMConfig, LSTMModel, ModelState, OptimizerWrapper, TargetFormat, TrainingConfig,
 };

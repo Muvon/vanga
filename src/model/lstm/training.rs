@@ -1338,153 +1338,46 @@ impl LSTMModel {
                 // This prevents hidden state contamination between batches
                 let predictions = self.forward(&input_tensor, true)?;
 
-                // Apply bias correction or ensemble calibration during training if enabled
-                let predictions_for_loss = if !self.bias_correction_config.use_ensemble_calibration
-                {
-                    // Use LinearBiasCorrector (normal bias correction)
-                    if let Some(ref corrector) = self.bias_corrector {
-                        let ramp_up_epochs = corrector.config.ramp_up_epochs;
+                // CRITICAL FIX: Apply ONLY bias correction during training
+                // Temperature scaling is POST-HOC and applied after training completes
+                // Research: Guo et al. 2017, ICLR 2025 - temperature scaling is post-hoc calibration
+                let predictions_for_loss = if let Some(ref corrector) = self.bias_corrector {
+                    let ramp_up_epochs = corrector.config.ramp_up_epochs;
 
-                        if epoch >= ramp_up_epochs
-                            && corrector.is_calibrated
-                            && corrector.config.enabled
+                    if epoch >= ramp_up_epochs
+                        && corrector.is_calibrated
+                        && corrector.config.enabled
+                    {
+                        // Apply bias correction to RAW LOGITS (before softmax)
+                        let corrected =
+                            corrector.apply_correction_to_logits(&predictions, epoch)?;
+
+                        // Log correction impact periodically
+                        if corrector.config.print_info
+                            && corrector.config.recalibration_frequency > 0
+                            && epoch % corrector.config.recalibration_frequency == 0
+                            && batch_idx == 0
                         {
-                            // Apply bias correction to RAW LOGITS (before softmax)
-                            let corrected =
-                                corrector.apply_correction_to_logits(&predictions, epoch)?;
+                            let original_probs = candle_nn::ops::softmax(&predictions, 1)?;
+                            let corrected_probs = candle_nn::ops::softmax(&corrected, 1)?;
 
-                            // Log correction impact periodically
-                            if corrector.config.print_info
-                                && corrector.config.recalibration_frequency > 0
-                                && epoch % corrector.config.recalibration_frequency == 0
-                                && batch_idx == 0
+                            if let Ok(kl_div) = corrector
+                                .calculate_correction_impact(&original_probs, &corrected_probs)
                             {
-                                let original_probs = candle_nn::ops::softmax(&predictions, 1)?;
-                                let corrected_probs = candle_nn::ops::softmax(&corrected, 1)?;
-
-                                if let Ok(kl_div) = corrector
-                                    .calculate_correction_impact(&original_probs, &corrected_probs)
-                                {
-                                    log::info!(
-                                        "📊 Bias correction impact at epoch {} (KL divergence): {:.6}",
-                                        epoch + 1,
-                                        kl_div
-                                    );
-                                }
+                                log::info!(
+                                    "📊 Bias correction impact at epoch {} (KL divergence): {:.6}",
+                                    epoch + 1,
+                                    kl_div
+                                );
                             }
-
-                            corrected
-                        } else {
-                            predictions.clone()
                         }
+
+                        corrected
                     } else {
                         predictions.clone()
                     }
                 } else {
-                    // Use EnsembleCalibrator (temperature scaling + label smoothing + mixup)
-                    if let Some(ref ensemble_cal) = self.ensemble_calibrator {
-                        let ramp_up_epochs = self.bias_correction_config.ramp_up_epochs;
-
-                        // CRITICAL FIX: Start ramping from epoch 0, not after ramp_up_epochs
-                        // Ramp factor gradually increases from 0.0 to 1.0 over ramp_up_epochs
-                        if ensemble_cal.is_calibrated {
-                            let ramp_factor = if epoch < ramp_up_epochs {
-                                // Gradual ramp-up: 0.0 at epoch 0 → 1.0 at ramp_up_epochs
-                                epoch as f64 / ramp_up_epochs as f64
-                            } else {
-                                // Full strength after ramp-up period
-                                1.0
-                            };
-
-                            // Apply entropy-based adaptive temperature scaling (2024 research)
-                            // This adapts temperature based on prediction uncertainty:
-                            // - High entropy (uncertain): warmer temperature (0.75×T to 1.0×T)
-                            // - Low entropy (confident): sharper temperature (1.0×T to 1.25×T)
-                            if ramp_factor > 0.01 {
-                                // Convert predictions tensor (F32) to ndarray (f64) for entropy calculation
-                                let pred_shape = predictions.shape();
-                                let batch_size = pred_shape.dims()[0];
-                                // Tensor is F32, convert to f64
-                                let pred_data: Vec<f64> = predictions
-                                    .flatten_all()
-                                    .map_err(|e| {
-                                        VangaError::ModelError(format!(
-                                            "Failed to flatten predictions: {}",
-                                            e
-                                        ))
-                                    })?
-                                    .to_vec1::<f32>()
-                                    .map_err(|e| {
-                                        VangaError::ModelError(format!(
-                                            "Failed to convert predictions to vec: {}",
-                                            e
-                                        ))
-                                    })?
-                                    .iter()
-                                    .map(|&v| v as f64)
-                                    .collect();
-                                let predictions_array =
-                                    Array2::from_shape_vec((batch_size, 5), pred_data).map_err(
-                                        |e| {
-                                            VangaError::ModelError(format!(
-                                                "Failed to create predictions array: {}",
-                                                e
-                                            ))
-                                        },
-                                    )?;
-
-                                // Get temperature adjustment info for logging
-                                // Get temperature adjustment info for logging
-                                let (adjust_factor, confidence, entropy) = ensemble_cal
-                                    .temperature_scaling
-                                    .get_temperature_adjustment_info(&predictions_array);
-
-                                // Apply entropy-adaptive temperature with ramp-up
-                                let temp = ensemble_cal.temperature_scaling.temperature;
-                                let ramped_temp = if ramp_factor < 1.0 {
-                                    // Interpolate between 1.0 and adaptive temperature
-                                    let adaptive_temp = temp * adjust_factor;
-                                    1.0 + (adaptive_temp - 1.0) * ramp_factor
-                                } else {
-                                    // Full adaptive temperature
-                                    temp * adjust_factor
-                                };
-
-                                // Log periodically for monitoring
-                                if batch_idx == 0 && epoch % 10 == 0 {
-                                    log::debug!(
-                                        "🌡️ Entropy-adaptive T: base={:.3}, factor={:.3}, conf={:.3}, entropy={:.3}, ramped={:.3}",
-                                        temp, adjust_factor, confidence, entropy, ramped_temp
-                                    );
-                                }
-
-                                // Create temperature tensor [1, 5]
-                                let temp_f32 = ramped_temp as f32;
-                                let temp_tensor = Tensor::from_vec(
-                                    vec![temp_f32, temp_f32, temp_f32, temp_f32, temp_f32],
-                                    (1, 5),
-                                    &self.device,
-                                )
-                                .map_err(|e| {
-                                    VangaError::ModelError(format!(
-                                        "Failed to create temperature tensor: {}",
-                                        e
-                                    ))
-                                })?;
-
-                                // Apply temperature scaling: logits / ramped_temp
-                                let temp_broadcast =
-                                    temp_tensor.broadcast_as(predictions.shape())?;
-                                predictions.broadcast_div(&temp_broadcast)?.contiguous()?
-                            } else {
-                                predictions.clone()
-                            }
-                        } else {
-                            predictions.clone()
-                        }
-                    } else {
-                        predictions.clone()
-                    }
+                    predictions.clone()
                 };
 
                 // Calculate loss using potentially corrected predictions
@@ -1841,22 +1734,19 @@ impl LSTMModel {
                                 log::debug!("ℹ️ Bias corrector already calibrated - skipping initial calibration");
                             }
                         }
-                    } else if self.bias_correction_config.use_ensemble_calibration
+                    }
+
+                    // ENSEMBLE CALIBRATION: Separate from bias correction, runs independently
+                    if self.bias_correction_config.use_ensemble_calibration
                         && self.ensemble_calibrator.is_some()
                     {
                         let ensemble_cal = self.ensemble_calibrator.as_mut().unwrap();
-                        // Ensemble calibration - initial setup
+                        // Ensemble calibration - initial setup (monitoring only during training)
                         if !ensemble_cal.is_calibrated {
-                            log::info!("🎯 Starting initial ensemble calibration...");
+                            log::info!("🎯 Ensemble calibration enabled (will be optimized POST-HOC after training)");
 
                             // Ensure predictions are 5-class format
-                            if total_val_predictions.shape()[1] != 5 {
-                                log::warn!(
-                                    "⚠️ Unexpected prediction shape for ensemble calibration: [{}, {}], expected [*, 5]",
-                                    total_val_predictions.shape()[0],
-                                    total_val_predictions.shape()[1]
-                                );
-                            } else {
+                            if total_val_predictions.shape()[1] == 5 {
                                 // Convert targets to one-hot if needed
                                 let val_targets_for_ensemble = if total_val_targets.shape()[1] == 1
                                 {
@@ -1874,16 +1764,13 @@ impl LSTMModel {
                                     total_val_targets.slice(s![.., 0..5]).to_owned()
                                 };
 
+                                // Initial calibration for monitoring only
                                 ensemble_cal.calibrate_from_validation(
                                     &total_val_predictions,
                                     &val_targets_for_ensemble,
                                 )?;
                             }
                         }
-                    } else {
-                        log::info!(
-                            "ℹ️ No bias correction mechanism available - bias correction disabled"
-                        );
                     }
                 }
 
@@ -1984,160 +1871,11 @@ impl LSTMModel {
                 }
 
                 // Ensemble calibrator recalibration during training (if enabled in config)
-                // CRITICAL: This is for MONITORING calibration quality, NOT for modifying training
-                let should_recalibrate = if let Some(ref corrector) = self.bias_corrector {
-                    corrector.config.use_ensemble_calibration
-                        && corrector.config.recalibration_frequency > 0
-                        && epoch > 0
-                        && epoch % corrector.config.recalibration_frequency == 0
-                } else {
-                    false
-                };
+                // Remove ensemble recalibration during training - it's POST-HOC only
+                // Temperature will be optimized once after training completes
 
-                if should_recalibrate
-                    && self.ensemble_calibrator.is_some()
-                    && !all_val_predictions.is_empty()
-                {
-                    if let Some(ref mut ensemble_cal) = self.ensemble_calibrator {
-                        let total_val_predictions = ndarray::concatenate(
-                            ndarray::Axis(0),
-                            &all_val_predictions
-                                .iter()
-                                .map(|arr| arr.view())
-                                .collect::<Vec<_>>(),
-                        )
-                        .map_err(|e| {
-                            VangaError::ModelError(format!(
-                                "Failed to concatenate validation predictions for ensemble recalibration: {}",
-                                e
-                            ))
-                        })?;
-
-                        let total_val_targets = ndarray::concatenate(
-                            ndarray::Axis(0),
-                            &all_val_targets
-                                .iter()
-                                .map(|arr| arr.view())
-                                .collect::<Vec<_>>(),
-                        )
-                        .map_err(|e| {
-                            VangaError::ModelError(format!(
-                                "Failed to concatenate validation targets for ensemble recalibration: {}",
-                                e
-                            ))
-                        })?;
-
-                        if total_val_predictions.shape()[1] == 5 {
-                            let val_targets_for_ensemble = if total_val_targets.shape()[1] == 1 {
-                                let num_samples = total_val_targets.shape()[0];
-                                let mut one_hot = ndarray::Array2::<f64>::zeros((num_samples, 5));
-                                for (i, class_idx) in total_val_targets.iter().enumerate() {
-                                    let class_index = (*class_idx as usize).min(4);
-                                    one_hot[[i, class_index]] = 1.0;
-                                }
-                                one_hot
-                            } else {
-                                total_val_targets.clone()
-                            };
-
-                            ensemble_cal.calibrate_from_validation(
-                                &total_val_predictions,
-                                &val_targets_for_ensemble,
-                            )?;
-
-                            if ensemble_cal.is_calibrated {
-                                // Only print if print_info is enabled in config
-                                if self.bias_correction_config.print_info {
-                                    let metrics = ensemble_cal.get_calibration_metrics();
-                                    log::info!(
-                                        "🔄 Ensemble calibration recalibrated at epoch {}: {}",
-                                        epoch + 1,
-                                        metrics.summary()
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // CRITICAL FIX: Print ensemble calibration status every 5 epochs during ramp-up
-                // This provides visibility into the gradual calibration application
-                if self.bias_correction_config.use_ensemble_calibration
-                    && self.bias_correction_config.print_info
-                    && self.ensemble_calibrator.is_some()
-                    && !all_val_predictions.is_empty()
-                    && epoch % 5 == 0
-                {
-                    if let Some(ref ensemble_cal) = self.ensemble_calibrator {
-                        if ensemble_cal.is_calibrated {
-                            let ramp_up_epochs = self.bias_correction_config.ramp_up_epochs;
-                            let ramp_factor = if epoch < ramp_up_epochs {
-                                epoch as f64 / ramp_up_epochs as f64
-                            } else {
-                                1.0
-                            };
-
-                            // Calculate current ECE dynamically from validation predictions
-                            let total_val_predictions = ndarray::concatenate(
-                                ndarray::Axis(0),
-                                &all_val_predictions
-                                    .iter()
-                                    .map(|arr| arr.view())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|e| {
-                                VangaError::ModelError(format!(
-                                    "Failed to concatenate validation predictions for ECE calculation: {}",
-                                    e
-                                ))
-                            })?;
-
-                            let total_val_targets = ndarray::concatenate(
-                                ndarray::Axis(0),
-                                &all_val_targets
-                                    .iter()
-                                    .map(|arr| arr.view())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|e| {
-                                VangaError::ModelError(format!(
-                                    "Failed to concatenate validation targets for ECE calculation: {}",
-                                    e
-                                ))
-                            })?;
-
-                            // Convert targets to one-hot if needed
-                            let val_targets_one_hot = if total_val_targets.shape()[1] == 1 {
-                                let num_samples = total_val_targets.shape()[0];
-                                let mut one_hot = ndarray::Array2::<f64>::zeros((num_samples, 5));
-                                for (i, class_idx) in total_val_targets.iter().enumerate() {
-                                    let class_index = (*class_idx as usize).min(4);
-                                    one_hot[[i, class_index]] = 1.0;
-                                }
-                                one_hot
-                            } else {
-                                total_val_targets.clone()
-                            };
-
-                            // Calculate current ECE dynamically
-                            use crate::model::calibration::ece::calculate_ece;
-                            let current_ece =
-                                calculate_ece(&total_val_predictions, &val_targets_one_hot)?;
-
-                            // Get single shared temperature and calculate ramped value
-                            let temp = ensemble_cal.temperature_scaling.temperature;
-                            let ramped_temp = 1.0 + (temp - 1.0) * ramp_factor;
-
-                            log::info!(
-                                "📊 Ensemble calibration (ramp={:.2}): ECE={:.6}, T={:.3}, Ramped={:.3}",
-                                ramp_factor,
-                                current_ece,
-                                temp,
-                                ramped_temp
-                            );
-                        }
-                    }
-                }
+                // Remove the periodic ensemble calibration logging during training
+                // It's confusing and not useful - temperature is POST-HOC only
 
                 // Calculate categorical metrics for all categorical targets
                 if let Some((_, target_type)) = &self.target_context {
@@ -2551,6 +2289,25 @@ impl LSTMModel {
             log::info!("🔄 Starting XGBoost hybrid training phase...");
             self.train_xgboost_phase(sequences, targets, config, val_sequences, val_targets)
                 .await?;
+        }
+
+        // POST-HOC ENSEMBLE CALIBRATION (Temperature Scaling)
+        // CRITICAL: This must happen AFTER training completes, never during training
+        // Research: Guo et al. 2017, ICLR 2025 - temperature scaling is post-processing
+        if self.bias_correction_config.use_ensemble_calibration {
+            if let (Some(val_seq), Some(val_tgt)) = (val_sequences, val_targets) {
+                log::info!("🌡️ Applying POST-HOC ensemble calibration (temperature scaling)...");
+                log::info!("   📚 Research: Temperature scaling optimized on validation set AFTER training");
+
+                self.calibrate_ensemble_post_training(val_seq, val_tgt)?;
+
+                log::info!("✅ POST-HOC calibration complete - temperature will be applied during inference only");
+            } else {
+                log::warn!("⚠️ Ensemble calibration enabled but no validation data available");
+                log::warn!(
+                    "   Temperature scaling requires validation set for post-hoc optimization"
+                );
+            }
         }
 
         // CRITICAL: Store optimizer state for next window/continuation
@@ -4039,6 +3796,140 @@ impl LSTMModel {
         log::info!("✅ Bias correction factors: {:?}", correction_factors);
         log::debug!("   Predicted frequencies: {:?}", predicted_frequencies);
         log::debug!("   Actual frequencies: {:?}", actual_frequencies);
+
+        Ok(())
+    }
+
+    /// POST-HOC ensemble calibration (temperature scaling) after training completes
+    ///
+    /// This implements proper post-hoc calibration as per research:
+    /// - Guo et al. 2017: "On Calibration of Modern Neural Networks"
+    /// - ICLR 2025: Temperature scaling is post-processing method
+    ///
+    /// Temperature scaling should ONLY be applied after training, never during training.
+    /// This method:
+    /// 1. Runs validation data through trained model to get logits
+    /// 2. Converts logits to probabilities via softmax
+    /// 3. Optimizes temperature on validation set to minimize NLL
+    /// 4. Saves calibrated temperature for inference use
+    pub fn calibrate_ensemble_post_training(
+        &mut self,
+        val_sequences: &Array3<f64>,
+        val_targets: &Array2<f64>,
+    ) -> Result<()> {
+        if !self.bias_correction_config.use_ensemble_calibration {
+            log::debug!("🔧 Ensemble calibration disabled in configuration");
+            return Ok(());
+        }
+
+        if self.ensemble_calibrator.is_none() {
+            log::warn!("⚠️ Ensemble calibrator not initialized, skipping post-hoc calibration");
+            return Ok(());
+        }
+
+        let num_samples = val_sequences.shape()[0];
+        if num_samples < self.bias_correction_config.min_samples {
+            log::warn!(
+                "⚠️ Insufficient validation samples for ensemble calibration: {} < {}",
+                num_samples,
+                self.bias_correction_config.min_samples
+            );
+            return Ok(());
+        }
+
+        log::info!(
+            "🎯 POST-HOC ensemble calibration starting ({} validation samples)...",
+            num_samples
+        );
+        log::info!(
+            "   📚 Research: Temperature scaling is post-training calibration (Guo et al. 2017)"
+        );
+
+        // Run validation data through trained model to get predictions
+        let batch_size = self.training_config.batch_size;
+        let num_batches = (num_samples + batch_size - 1) / batch_size;
+        let mut all_predictions = Vec::new();
+
+        for batch_idx in 0..num_batches {
+            let start_idx = batch_idx * batch_size;
+            let end_idx = std::cmp::min(start_idx + batch_size, num_samples);
+            let actual_batch_size = end_idx - start_idx;
+
+            let batch_sequences = val_sequences
+                .slice(s![start_idx..end_idx, .., ..])
+                .to_owned();
+            let batch_targets = val_targets.slice(s![start_idx..end_idx, ..]).to_owned();
+
+            // Convert to tensors
+            let (input_tensor, _) =
+                self.convert_sequences_to_tensors(&batch_sequences, &batch_targets)?;
+
+            // Forward pass (inference mode - no dropout)
+            let logits = self.forward(&input_tensor, false)?;
+
+            // Apply softmax to get probabilities
+            let probabilities = candle_nn::ops::softmax(&logits, 1)?;
+
+            // Convert to ndarray
+            let probs_data: Vec<f64> = probabilities
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .map(|&v| v as f64)
+                .collect();
+
+            let probs_array =
+                Array2::from_shape_vec((actual_batch_size, 5), probs_data).map_err(|e| {
+                    VangaError::ModelError(format!("Failed to create probabilities array: {}", e))
+                })?;
+
+            all_predictions.push(probs_array);
+        }
+
+        // Concatenate all predictions
+        let total_predictions = ndarray::concatenate(
+            ndarray::Axis(0),
+            &all_predictions
+                .iter()
+                .map(|arr| arr.view())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| {
+            VangaError::ModelError(format!(
+                "Failed to concatenate validation predictions: {}",
+                e
+            ))
+        })?;
+
+        // Convert targets to one-hot if needed
+        let val_targets_one_hot = if val_targets.shape()[1] == 1 {
+            let mut one_hot = ndarray::Array2::<f64>::zeros((num_samples, 5));
+            for (i, class_idx) in val_targets.iter().enumerate() {
+                let class_index = (*class_idx as usize).min(4);
+                one_hot[[i, class_index]] = 1.0;
+            }
+            one_hot
+        } else {
+            val_targets.clone()
+        };
+
+        // Calibrate ensemble (optimize temperature on validation set)
+        if let Some(ref mut ensemble_cal) = self.ensemble_calibrator {
+            ensemble_cal.calibrate_from_validation(&total_predictions, &val_targets_one_hot)?;
+
+            if ensemble_cal.is_calibrated {
+                let metrics = ensemble_cal.get_calibration_metrics();
+                log::info!("✅ POST-HOC calibration complete: {}", metrics.summary());
+                log::info!(
+                    "   🌡️  Temperature: {:.4} (optimized on validation set)",
+                    ensemble_cal.temperature_scaling.temperature
+                );
+                log::info!(
+                    "   📊 ECE: {:.6} (Expected Calibration Error)",
+                    metrics.overall_ece
+                );
+            }
+        }
 
         Ok(())
     }
