@@ -7,7 +7,11 @@ mod balance_augmentation_test;
 #[cfg(test)]
 mod balance_critical_test;
 #[cfg(test)]
+mod balance_split_test;
+#[cfg(test)]
 mod balance_test;
+#[cfg(test)]
+mod debug_sampling_test;
 pub mod diversity; // NEW: Advanced diversity-based selection
 #[cfg(test)]
 mod diversity_test; // Cosine distance diversity tests
@@ -439,118 +443,19 @@ impl DataPipeline {
 
         log::info!("🎯 Enabled targets for training: {:?}", target_types);
 
-        // STEP 5: Extract target-specific balanced datasets with optional augmentation
+        // STEP 5: Extract target-specific balanced datasets
         log::info!("🎯 TARGET-SPECIFIC BALANCE EXTRACTION: Each target balanced independently");
 
-        // Store augmented sequences separately to extend all_sequences
-        let mut augmented_sequences_map: HashMap<
-            (crate::targets::TargetType, String),
-            Vec<SequenceWithTargets>,
-        > = HashMap::new();
+        // CRITICAL: Create balanced datasets WITHOUT augmentation for proper splitting
+        // Augmentation will be applied ONLY to training data later in create_data_from_indices()
+        // This ensures validation/test splits use ONLY real sequences
+        log::info!("📊 Creating balanced datasets for splitting (no augmentation at this stage)");
 
-        let target_balanced_datasets = if config.data.sequence_augment {
-            // NEW: Intelligent minority class augmentation
-            log::info!("🔬 Intelligent minority augmentation ENABLED");
-            log::info!(
-                "   Target percentile: {}th ({})",
-                (config.data.augment_target_percentile * 100.0) as u32,
-                if config.data.augment_target_percentile == 0.5 {
-                    "median"
-                } else if config.data.augment_target_percentile < 0.5 {
-                    "conservative"
-                } else {
-                    "aggressive"
-                }
-            );
-            log::info!(
-                "   Max synthetic ratio: {:.1}x (max {} synthetic per real sample)",
-                config.data.max_synthetic_ratio,
-                config.data.max_synthetic_ratio
-            );
-
-            // Create augmentation config
-            let augment_config = crate::data::augmentation::AugmentationConfig::default();
-
-            // Balance with augmentation for each target/horizon
-            let mut augmented_datasets = HashMap::new();
-
-            for target_type in &target_types {
-                for horizon in &config.horizons {
-                    let balanced_sequences = balancer.balance_with_minority_augmentation(
-                        &all_sequences,
-                        *target_type,
-                        horizon,
-                        &augment_config,
-                        config.data.augment_target_percentile,
-                        config.data.max_synthetic_ratio,
-                    )?;
-
-                    // Count synthetic vs real
-                    let real_count = balanced_sequences
-                        .iter()
-                        .filter(|s| s.sequence_idx < 1_000_000)
-                        .count();
-                    let synthetic_count = balanced_sequences.len() - real_count;
-
-                    log::info!(
-                        "   {:?} {}: {} total ({} real + {} synthetic = {:.1}% augmented)",
-                        target_type,
-                        horizon,
-                        balanced_sequences.len(),
-                        real_count,
-                        synthetic_count,
-                        (synthetic_count as f64 / balanced_sequences.len() as f64) * 100.0
-                    );
-
-                    // Store augmented sequences for this target/horizon
-                    let target_key = (*target_type, horizon.clone());
-                    augmented_sequences_map.insert(target_key.clone(), balanced_sequences.clone());
-
-                    // Convert to balanced dataset format using sequence_idx as lookup key
-                    let balanced_indices: Vec<usize> =
-                        balanced_sequences.iter().map(|s| s.sequence_idx).collect();
-
-                    // Calculate class distribution
-                    let mut class_distribution = HashMap::new();
-                    for seq in &balanced_sequences {
-                        if let Some(class) = seq.get_target_class(*target_type, horizon) {
-                            *class_distribution.entry(class).or_insert(0) += 1;
-                        }
-                    }
-
-                    let target_key_for_map = target_key.clone();
-                    augmented_datasets.insert(
-                        target_key_for_map.clone(),
-                        crate::data::balance::GloballyBalancedDataset {
-                            balanced_indices: {
-                                let mut map = HashMap::new();
-                                map.insert(target_key_for_map.clone(), balanced_indices);
-                                map
-                            },
-                            class_distribution: {
-                                let mut map = HashMap::new();
-                                map.insert(target_key_for_map, class_distribution);
-                                map
-                            },
-                            global_min_class_count: balanced_sequences.len() / 5, // 5 classes
-                            total_balanced_samples: balanced_sequences.len(),
-                            overloaded_classes: HashMap::new(),
-                        },
-                    );
-                }
-            }
-
-            augmented_datasets
-        } else {
-            // Traditional min-class balancing (no augmentation)
-            log::info!("📊 Traditional min-class balancing (no augmentation)");
-
-            balancer.extract_target_specific_balanced_datasets(
-                &all_sequences,
-                &target_types,
-                &config.horizons,
-            )?
-        };
+        let target_balanced_datasets = balancer.extract_target_specific_balanced_datasets(
+            &all_sequences,
+            &target_types,
+            &config.horizons,
+        )?;
 
         // Log per-target balance summary (sorted for consistent logging)
         let mut sorted_log_targets: Vec<_> = target_balanced_datasets.keys().collect();
@@ -576,18 +481,33 @@ impl DataPipeline {
             );
         }
 
-        // STEP 6: Parse validation_gap from config
+        // STEP 6: Parse validation_gap from config using detected timeframe
+        let detected_timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(
+            &raw_processed_data,
+        )
+        .unwrap_or_else(|e| {
+            log::warn!(
+                "⚠️ Failed to detect timeframe, defaulting to 60 minutes: {}",
+                e
+            );
+            60
+        });
+
         let validation_gap_steps = if !config.training.validation_gap.is_empty() {
-            crate::utils::parser::parse_horizon_to_steps(&config.training.validation_gap, 60)
-                .unwrap_or(0)
+            crate::utils::parser::parse_horizon_to_steps(
+                &config.training.validation_gap,
+                detected_timeframe_minutes,
+            )
+            .unwrap_or(0)
         } else {
             0
         };
 
         log::info!(
-            "🔒 Validation gap: {} (parsed to {} steps)",
+            "🔒 Validation gap: {} (parsed to {} steps based on {}m timeframe)",
             config.training.validation_gap,
-            validation_gap_steps
+            validation_gap_steps,
+            detected_timeframe_minutes
         );
 
         // STEP 7: Calculate window configuration
@@ -668,17 +588,12 @@ impl DataPipeline {
                     );
 
                     // DIVERSE SPLITS: Create diverse train/validation/test splits
-                    // Uses temporal stratification to ensure all splits are diverse
-                    // Use augmented sequences if available, otherwise use original sequences
-                    let sequences_for_split: &[SequenceWithTargets] = augmented_sequences_map
-                        .get(&target_key)
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&all_sequences);
-
+                    // CRITICAL: Use ONLY original sequences for split creation
+                    // Synthetic sequences from augmentation should NEVER be in validation/test
                     let (balanced_training_dataset, target_validation_indices, target_test_indices) =
                         balancer.create_diverse_splits(
                             target_dataset,
-                            sequences_for_split,
+                            &all_sequences, // Use original sequences ONLY
                             validation_ratio,
                             config.training.test_split,
                             &[*target_type],
@@ -797,12 +712,12 @@ impl DataPipeline {
                     };
 
                     // Create window data using target-specific indices
-                    // CRITICAL: Use sequences_for_split which includes synthetic sequences
-                    // Augmentation is applied inside create_data_from_indices() for train only
+                    // CRITICAL: Use original all_sequences, NOT augmented
+                    // Augmentation is applied inside create_data_from_indices() ONLY for training
                     let train_data = self.create_data_from_indices(
                         &all_sequences_data,
                         &train_indices_map,
-                        sequences_for_split,
+                        &all_sequences, // Original sequences only
                         augment_config.as_ref(),
                     )?;
 
@@ -810,8 +725,8 @@ impl DataPipeline {
                     let val_data = self.create_data_from_indices(
                         &all_sequences_data,
                         &val_indices_map,
-                        sequences_for_split,
-                        None, // NO augmentation for validation
+                        &all_sequences, // Original sequences only
+                        None,           // NO augmentation for validation
                     )?;
 
                     // TEST DATA: Use diverse test split from create_diverse_splits
@@ -829,12 +744,12 @@ impl DataPipeline {
 
                             // Create test data using target-specific indices
                             // TEST DATA: NO augmentation (pristine data for final evaluation)
-                            // CRITICAL: Use sequences_for_split which includes synthetic sequences
+                            // CRITICAL: Use original all_sequences, NOT augmented
                             let test_data = self.create_data_from_indices(
                                 &all_sequences_data,
                                 &test_indices_map,
-                                sequences_for_split,
-                                None, // NO augmentation for test data
+                                &all_sequences, // Original sequences only
+                                None,           // NO augmentation for test data
                             )?;
 
                             log::info!(

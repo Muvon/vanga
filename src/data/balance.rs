@@ -228,8 +228,9 @@ impl SequenceBalancer {
         // 3. Balance classes with augmentation
         let mut balanced_sequences = Vec::new();
         let mut total_synthetic = 0;
+        let mut class_final_counts: HashMap<i32, usize> = HashMap::new();
 
-        for (class, sequences) in sequences_by_class {
+        for (class, sequences) in &sequences_by_class {
             let current_count = sequences.len();
 
             if current_count >= target_count {
@@ -251,6 +252,8 @@ impl SequenceBalancer {
                     }
                 }
 
+                class_final_counts.insert(*class, target_count);
+
                 log::info!(
                     "   Class {}: {} → {} (downsampled using diversity)",
                     class,
@@ -268,7 +271,7 @@ impl SequenceBalancer {
                 if synthetic_to_generate > 0 {
                     log::info!(
                         "   Class {}: {} real + {} synthetic = {} total (deficit: {}, max allowed: {})",
-                        class,
+                        *class,
                         current_count,
                         synthetic_to_generate,
                         current_count + synthetic_to_generate,
@@ -278,31 +281,85 @@ impl SequenceBalancer {
 
                     // Generate synthetic sequences
                     let synthetic = self.generate_synthetic_sequences(
-                        &sequences,
+                        sequences,
                         synthetic_to_generate,
                         augment_config,
                         target_type,
                         horizon,
-                        class,
+                        *class,
                     )?;
 
-                    total_synthetic += synthetic.len();
+                    let synthetic_count = synthetic.len();
+                    total_synthetic += synthetic_count;
                     balanced_sequences.extend(synthetic);
+                    class_final_counts.insert(*class, current_count + synthetic_count);
                 } else {
                     log::info!(
                         "   Class {}: {} real (no synthetic - at max ratio)",
-                        class,
+                        *class,
                         current_count
                     );
+                    class_final_counts.insert(*class, current_count);
                 }
             }
         }
 
+        // CRITICAL FIX: Ensure EXACT balance by trimming all classes to minimum count
+        let min_final_count = *class_final_counts.values().min().unwrap_or(&0);
+
+        if class_final_counts
+            .values()
+            .any(|&count| count != min_final_count)
+        {
+            log::warn!(
+                "⚠️ Class imbalance detected after augmentation: {:?}. Trimming to {} per class for perfect balance.",
+                class_final_counts,
+                min_final_count
+            );
+
+            // Group sequences by class
+            let mut sequences_by_class_final: HashMap<i32, Vec<SequenceWithTargets>> =
+                HashMap::new();
+            for seq in balanced_sequences.drain(..) {
+                if let Some(class) = seq.get_target_class(target_type, horizon) {
+                    sequences_by_class_final.entry(class).or_default().push(seq);
+                }
+            }
+
+            // Trim each class to min_final_count
+            for (class, mut sequences) in sequences_by_class_final {
+                if sequences.len() > min_final_count {
+                    // Use diversity selection to trim
+                    let class_indices: Vec<usize> =
+                        sequences.iter().map(|s| s.sequence_idx).collect();
+                    let selected_indices = self.diversity_selector.select_diverse_sequences(
+                        all_sequences,
+                        &class_indices,
+                        min_final_count,
+                        target_type,
+                        horizon,
+                        &[],
+                        0,
+                    )?;
+
+                    sequences.retain(|s| selected_indices.contains(&s.sequence_idx));
+                    log::info!(
+                        "   Class {}: trimmed {} → {} for perfect balance",
+                        class,
+                        class_indices.len(),
+                        sequences.len()
+                    );
+                }
+                balanced_sequences.extend(sequences);
+            }
+        }
+
         log::info!(
-            "✅ Balanced with augmentation: {} total sequences ({} synthetic, {:.1}% augmented)",
+            "✅ Balanced with augmentation: {} total sequences ({} synthetic, {:.1}% augmented), {} per class",
             balanced_sequences.len(),
             total_synthetic,
-            (total_synthetic as f64 / balanced_sequences.len() as f64) * 100.0
+            (total_synthetic as f64 / balanced_sequences.len() as f64) * 100.0,
+            min_final_count
         );
 
         Ok(balanced_sequences)
@@ -1099,42 +1156,61 @@ impl SequenceBalancer {
             }
         }
 
+        // CRITICAL: Calculate split sizes based on MINIMUM class size to ensure perfect balance
+        let min_class_size = class_sequences.values().map(|v| v.len()).min().unwrap_or(0);
+
+        // Use floor() to ensure we don't exceed min_class_size
+        let val_size_per_class = (min_class_size as f64 * validation_ratio).floor() as usize;
+        let test_size_per_class = (min_class_size as f64 * test_ratio).floor() as usize;
+        let train_size_per_class = min_class_size
+            .saturating_sub(val_size_per_class)
+            .saturating_sub(test_size_per_class);
+
+        log::info!(
+            "🎯 PERFECT BALANCE SPLIT: {} per class → {} train, {} val, {} test (all classes identical)",
+            min_class_size,
+            train_size_per_class,
+            val_size_per_class,
+            test_size_per_class
+        );
+
         let mut train_indices = Vec::new();
         let mut val_indices = Vec::new();
         let mut test_indices = Vec::new();
 
-        // Split each class independently to maintain balance
+        // Split each class using IDENTICAL sizes
         for (class, class_indices) in class_sequences {
             let class_size = class_indices.len();
 
-            // Calculate splits with proper rounding to ensure total = class_size
-            // Use round() instead of truncation to minimize imbalance
-            let val_size = (class_size as f64 * validation_ratio).round() as usize;
-            let test_size = (class_size as f64 * test_ratio).round() as usize;
-
-            // Ensure we don't exceed class_size due to rounding
-            let val_size = val_size.min(class_size);
-            let test_size = test_size.min(class_size.saturating_sub(val_size));
-            let train_size = class_size
-                .saturating_sub(val_size)
-                .saturating_sub(test_size);
+            // Trim to min_class_size if this class has more
+            let indices_to_use = if class_size > min_class_size {
+                log::debug!(
+                    "   Class {}: trimming {} → {} for perfect balance",
+                    class,
+                    class_size,
+                    min_class_size
+                );
+                &class_indices[..min_class_size]
+            } else {
+                &class_indices[..]
+            };
 
             log::debug!(
                 "   Class {}: {} total → {} train, {} val, {} test",
                 class,
-                class_size,
-                train_size,
-                val_size,
-                test_size
+                indices_to_use.len(),
+                train_size_per_class,
+                val_size_per_class,
+                test_size_per_class
             );
 
             // Use our fast diversity selection for each split (with gap enforcement for validation)
             let (class_train, class_val, class_test) = self.create_diverse_class_splits(
                 all_sequences,
-                &class_indices,
-                train_size,
-                val_size,
-                test_size,
+                indices_to_use,
+                train_size_per_class,
+                val_size_per_class,
+                test_size_per_class,
                 validation_gap_steps,
             )?;
 
@@ -1155,7 +1231,7 @@ impl SequenceBalancer {
     ///
     /// This replaces the old temporal stratification approach for better
     /// training/validation/test split quality.
-    fn create_diverse_class_splits(
+    pub fn create_diverse_class_splits(
         &self,
         all_sequences: &[SequenceWithTargets],
         class_indices: &[usize],
@@ -1508,15 +1584,29 @@ impl SequenceBalancer {
             .copied()
             .collect();
         remaining_final.sort();
-        // Distribute remaining to reach target sizes (prioritize val and test)
-        // With validation_gap > 0, must respect gap constraints when adding to validation
-        // IMPORTANT: Candidates that fail gap check stay in remaining_final for training
-        while val_indices.len() < val_size && !remaining_final.is_empty() {
-            let candidate = remaining_final[0];
-            let mut can_add_to_val = true;
+
+        // Track candidates that fail validation gap check - they should go to TEST first, then TRAINING
+        // This ensures validation gap enforcement doesn't inflate training set unnecessarily
+        // Track candidates that fail validation gap check - they should go to TEST first, then TRAINING
+        // This ensures validation gap enforcement doesn't inflate training set
+        let mut skipped_for_val_gap: Vec<usize> = Vec::new();
+
+        // Phase 1: Try to fill validation respecting gap constraints
+        // Phase 2: If we can't fill validation, relax gap constraint to maintain exact counts
+        let mut phase = 1;
+        while (phase == 1 && val_indices.len() < val_size && !remaining_final.is_empty())
+            || (phase == 2 && val_indices.len() < val_size && !skipped_for_val_gap.is_empty())
+        {
+            // Get candidate from remaining_final (phase 1) or skipped (phase 2)
+            let candidate = if phase == 1 {
+                remaining_final[0]
+            } else {
+                skipped_for_val_gap[0]
+            };
+
+            let mut violates_gap = false;
 
             if validation_gap_steps > 0 {
-                // Check gap with training (using min_gap approach)
                 let candidate_seq = sequence_map.get(&candidate).expect("Sequence must exist");
                 let mut min_gap = usize::MAX;
 
@@ -1540,45 +1630,56 @@ impl SequenceBalancer {
                 }
 
                 if min_gap < validation_gap_steps {
-                    // Skip this candidate - don't add to validation
-                    // It will be added to training later
-                    break; // Exit loop, remaining stays for training
+                    violates_gap = true;
                 }
 
                 // Check gap with existing validation
-                for &val_idx in &val_indices {
-                    let val_seq = sequence_map.get(&val_idx).expect("Sequence must exist");
+                if !violates_gap {
+                    for &val_idx in &val_indices {
+                        let val_seq = sequence_map.get(&val_idx).expect("Sequence must exist");
 
-                    let gap = if candidate_seq.start_idx >= val_seq.end_idx {
-                        candidate_seq.start_idx - val_seq.end_idx
-                    } else if val_seq.start_idx >= candidate_seq.end_idx {
-                        val_seq.start_idx - candidate_seq.end_idx
-                    } else {
-                        0 // Overlap
-                    };
+                        let gap = if candidate_seq.start_idx >= val_seq.end_idx {
+                            candidate_seq.start_idx - val_seq.end_idx
+                        } else if val_seq.start_idx >= candidate_seq.end_idx {
+                            val_seq.start_idx - candidate_seq.end_idx
+                        } else {
+                            0 // Overlap
+                        };
 
-                    if gap < validation_gap_steps {
-                        // Skip this candidate - it will go to training
-                        can_add_to_val = false;
-                        break;
+                        if gap < validation_gap_steps {
+                            violates_gap = true;
+                            break;
+                        }
                     }
                 }
             }
 
-            if can_add_to_val {
-                // Add to validation and remove from remaining
-                val_indices.push(remaining_final.remove(0));
+            if !violates_gap {
+                // Add to validation (gap satisfied)
+                if phase == 1 {
+                    val_indices.push(remaining_final.remove(0));
+                } else {
+                    val_indices.push(skipped_for_val_gap.remove(0));
+                }
+            } else if phase == 1 {
+                // Skip this candidate for now, try remaining in phase 1
+                remaining_final.remove(0);
+                skipped_for_val_gap.push(candidate);
             } else {
-                // Can't add to validation, break and let it go to training
-                break;
+                // Phase 2: We need to relax gap to maintain exact counts
+                // Add this candidate anyway to reach val_size
+                val_indices.push(skipped_for_val_gap.remove(0));
+            }
+
+            // Transition to phase 2 if we've exhausted remaining_final
+            if phase == 1 && remaining_final.is_empty() && val_indices.len() < val_size {
+                phase = 2;
             }
         }
-        // Fill test from remaining
-        while test_indices.len() < test_size && !remaining_final.is_empty() {
-            test_indices.push(remaining_final.remove(0));
-        }
-        // All remaining go to training (handles rounding and gap filtering)
-        train_indices.append(&mut remaining_final);
+        // This ensures ALL sequences are allocated
+        let mut final_remaining: Vec<usize> = remaining_final;
+        final_remaining.extend(skipped_for_val_gap);
+        train_indices.append(&mut final_remaining);
 
         // Validate that we used all sequences
         let total_allocated = train_indices.len() + val_indices.len() + test_indices.len();
@@ -1590,11 +1691,11 @@ impl SequenceBalancer {
             )));
         }
         if test_indices.len() < test_size {
-            return Err(VangaError::DataError(format!(
-                "Insufficient sequences for test: {}/{}",
+            log::warn!(
+                "   ⚠️ Insufficient sequences for test: {}/{} (gap enforcement may have reduced available candidates)",
                 test_indices.len(),
                 test_size
-            )));
+            );
         }
 
         // Validation can be smaller than requested due to gap enforcement (warn but don't error)
@@ -1615,55 +1716,9 @@ impl SequenceBalancer {
             test_indices.len()
         );
 
-        // CRITICAL: Post-process validation to enforce gap with training
-        // Move validation sequences that violate gap to training
-        if validation_gap_steps > 0 {
-            let mut violating_val_indices = Vec::new();
-
-            for &val_idx in &val_indices {
-                let val_seq = sequence_map.get(&val_idx).expect("Sequence must exist");
-                let mut min_gap = usize::MAX;
-
-                for &train_idx in &train_indices {
-                    let train_seq = sequence_map.get(&train_idx).expect("Sequence must exist");
-
-                    let gap = if val_seq.start_idx >= train_seq.end_idx {
-                        val_seq.start_idx - train_seq.end_idx
-                    } else if train_seq.start_idx >= val_seq.end_idx {
-                        train_seq.start_idx - val_seq.end_idx
-                    } else {
-                        0
-                    };
-
-                    if gap < min_gap {
-                        min_gap = gap;
-                    }
-                    if min_gap < validation_gap_steps {
-                        break;
-                    }
-                }
-
-                if min_gap < validation_gap_steps {
-                    violating_val_indices.push(val_idx);
-                }
-            }
-
-            if !violating_val_indices.is_empty() {
-                log::info!(
-                    "   🔒 Post-processing: Moving {} validation sequences to training due to gap violations",
-                    violating_val_indices.len()
-                );
-
-                // Remove from validation and add to training
-                val_indices.retain(|idx| !violating_val_indices.contains(idx));
-                train_indices.extend(violating_val_indices);
-                train_indices.sort();
-                val_indices.sort();
-            }
-        }
-
         Ok((train_indices, val_indices, test_indices))
     }
+
     /// Calculate overlap score between a sequence and a set of training indices
     /// Returns value between 0.0 (no overlap) and 1.0 (maximum overlap)
     fn calculate_overlap_with_set(
@@ -1719,9 +1774,8 @@ impl SequenceBalancer {
             .chain(val_indices.iter())
             .copied()
             .collect();
-
         if all_selected.is_empty() {
-            return 1.0; // Maximum diversity if nothing selected yet
+            return 1.0; // Maximum diversity if nothing selected
         }
 
         // Create lookup map for synthetic sequences
@@ -1772,8 +1826,6 @@ impl SequenceBalancer {
 
         // Normalize by total span
         let normalized_distance = min_distance as f64 / total_span as f64;
-
-        // Also consider temporal position diversity (prefer extremes over center)
         let temporal_center = (min_pos + max_pos) as f64 / 2.0;
         let pos_from_center = (seq_start as f64 - temporal_center).abs();
         let max_distance_from_center = (max_pos - min_pos) as f64 / 2.0;
@@ -1804,7 +1856,6 @@ impl SequenceBalancer {
     ) -> Result<BalancedSelection> {
         // Group sequences by class
         let mut class_sequences: HashMap<i32, Vec<usize>> = HashMap::new();
-
         for (idx, seq) in all_sequences.iter().enumerate() {
             // Skip excluded sequences
             if exclude_indices.contains(&idx) {
