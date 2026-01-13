@@ -253,5 +253,3 @@ pub fn generate_reliability_diagram(
         ece,
     })
 }
-
-

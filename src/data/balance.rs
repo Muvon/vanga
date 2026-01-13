@@ -1257,7 +1257,6 @@ impl SequenceBalancer {
         let mut train_indices = Vec::new();
         let mut val_indices = Vec::new();
         let mut test_indices = Vec::new();
-
         // Step 2: TRAINING - MAX DIVERSITY (uniform temporal spread)
         // Select sequences at regular intervals across the entire temporal range
         if train_size > 0 {
@@ -1307,9 +1306,9 @@ impl SequenceBalancer {
             );
         }
 
-        // Step 3: VALIDATION - MAX OVERLAP WITH TRAINING (with gap enforcement)
-        // From remaining sequences, select those with MAXIMUM overlap to test interpolation
-        // This maximizes training data diversity while validation tests generalization to similar patterns
+        // Step 3: VALIDATION - Strategy depends on validation_gap
+        // - With validation_gap > 0: Select sequences MINIMALLY overlapping with training (temporal separation)
+        // - With validation_gap = 0: Select sequences MAXIMALLY overlapping with training (interpolation test)
         let remaining: Vec<usize> = sorted_indices
             .iter()
             .filter(|&&idx| !train_indices.contains(&idx))
@@ -1327,12 +1326,12 @@ impl SequenceBalancer {
                 })
                 .collect();
 
-            // Sort by overlap score (HIGHEST first) for validation - test interpolation
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // CRITICAL: Apply validation_gap enforcement
-            let mut filtered_by_gap = 0;
             if validation_gap_steps > 0 {
+                // With validation_gap: Sort by OVERLAP score (LOWEST first) for temporal separation
+                // This ensures validation sequences are temporally distant from training
+                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Select from lowest overlap (most temporally distant) first
                 for (candidate_idx, _score) in scored.iter() {
                     if val_indices.len() >= val_size {
                         break;
@@ -1343,22 +1342,59 @@ impl SequenceBalancer {
                         .expect("Sequence must exist");
                     let mut violates_gap = false;
 
-                    // Check gap with all already selected validation sequences
-                    for &selected_idx in &val_indices {
-                        let selected_seq = sequence_map
-                            .get(&selected_idx)
-                            .expect("Sequence must exist");
+                    // Check gap with ALL training sequences
+                    // CRITICAL: Calculate gap as MINIMUM distance to ANY training sequence
+                    // This ensures validation is at least `validation_gap_steps` away from
+                    // the NEAREST training sample, not ALL training samples
+                    let mut min_gap = usize::MAX;
+                    for &train_idx in &train_indices {
+                        let train_seq = sequence_map.get(&train_idx).expect("Sequence must exist");
 
-                        let gap = if candidate_seq.start_idx >= selected_seq.end_idx {
-                            candidate_seq.start_idx - selected_seq.end_idx
+                        // Calculate gap to this training sequence
+                        // If candidate overlaps with training, gap = 0
+                        // If separated, gap = distance between them
+                        let gap = if candidate_seq.start_idx >= train_seq.end_idx {
+                            // Candidate is completely after training
+                            candidate_seq.start_idx - train_seq.end_idx
+                        } else if train_seq.start_idx >= candidate_seq.end_idx {
+                            // Training is completely after candidate
+                            train_seq.start_idx - candidate_seq.end_idx
                         } else {
-                            selected_seq.start_idx.saturating_sub(candidate_seq.end_idx)
+                            // Sequences overlap - this is the critical case for data leakage
+                            0
                         };
 
-                        if gap < validation_gap_steps {
-                            violates_gap = true;
-                            filtered_by_gap += 1;
+                        if gap < min_gap {
+                            min_gap = gap;
+                        }
+                        // Early exit if we already found a violation
+                        if min_gap < validation_gap_steps {
                             break;
+                        }
+                    }
+
+                    if min_gap < validation_gap_steps {
+                        violates_gap = true;
+                    } else {
+                        // Passed training gap check, now check against validation
+                        for &selected_idx in &val_indices {
+                            let selected_seq = sequence_map
+                                .get(&selected_idx)
+                                .expect("Sequence must exist");
+
+                            // Calculate gap: 0 if sequences overlap, positive if separated
+                            let gap = if candidate_seq.start_idx >= selected_seq.end_idx {
+                                candidate_seq.start_idx - selected_seq.end_idx
+                            } else if selected_seq.start_idx >= candidate_seq.end_idx {
+                                selected_seq.start_idx - candidate_seq.end_idx
+                            } else {
+                                0 // Overlap
+                            };
+
+                            if gap < validation_gap_steps {
+                                violates_gap = true;
+                                break;
+                            }
                         }
                     }
 
@@ -1367,15 +1403,20 @@ impl SequenceBalancer {
                     }
                 }
 
-                if filtered_by_gap > 0 {
-                    log::debug!(
-                        "   🔒 Gap enforcement: filtered {} validation candidates (gap={} steps)",
-                        filtered_by_gap,
+                if val_indices.len() < val_size {
+                    log::warn!(
+                        "   ⚠️ Validation gap enforcement reduced val from {} to {} (gap={} steps)",
+                        val_size,
+                        val_indices.len(),
                         validation_gap_steps
                     );
                 }
             } else {
-                // No gap enforcement - select top val_size
+                // No gap enforcement - select by MAX overlap (original behavior)
+                // Sort by overlap score (HIGHEST first) for validation - test interpolation
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Select top val_size
                 val_indices.extend(
                     scored
                         .iter()
@@ -1397,11 +1438,20 @@ impl SequenceBalancer {
                 0.0
             };
 
-            log::debug!(
-                "   🎯 VALIDATION (Max Overlap): {} sequences, avg overlap with train: {:.2}",
-                val_indices.len(),
-                avg_overlap
-            );
+            if validation_gap_steps > 0 {
+                log::debug!(
+                    "   🎯 VALIDATION (Min Overlap + Gap {}): {} sequences, avg overlap with train: {:.2}",
+                    validation_gap_steps,
+                    val_indices.len(),
+                    avg_overlap
+                );
+            } else {
+                log::debug!(
+                    "   🎯 VALIDATION (Max Overlap): {} sequences, avg overlap with train: {:.2}",
+                    val_indices.len(),
+                    avg_overlap
+                );
+            }
         }
 
         // Step 4: TEST - MAX DIVERSITY FROM REMAINING
@@ -1458,17 +1508,76 @@ impl SequenceBalancer {
             .copied()
             .collect();
         remaining_final.sort();
-
         // Distribute remaining to reach target sizes (prioritize val and test)
-        // Fill validation first
+        // With validation_gap > 0, must respect gap constraints when adding to validation
+        // IMPORTANT: Candidates that fail gap check stay in remaining_final for training
         while val_indices.len() < val_size && !remaining_final.is_empty() {
-            val_indices.push(remaining_final.remove(0));
+            let candidate = remaining_final[0];
+            let mut can_add_to_val = true;
+
+            if validation_gap_steps > 0 {
+                // Check gap with training (using min_gap approach)
+                let candidate_seq = sequence_map.get(&candidate).expect("Sequence must exist");
+                let mut min_gap = usize::MAX;
+
+                for &train_idx in &train_indices {
+                    let train_seq = sequence_map.get(&train_idx).expect("Sequence must exist");
+
+                    let gap = if candidate_seq.start_idx >= train_seq.end_idx {
+                        candidate_seq.start_idx - train_seq.end_idx
+                    } else if train_seq.start_idx >= candidate_seq.end_idx {
+                        train_seq.start_idx - candidate_seq.end_idx
+                    } else {
+                        0 // Overlap
+                    };
+
+                    if gap < min_gap {
+                        min_gap = gap;
+                    }
+                    if min_gap < validation_gap_steps {
+                        break;
+                    }
+                }
+
+                if min_gap < validation_gap_steps {
+                    // Skip this candidate - don't add to validation
+                    // It will be added to training later
+                    break; // Exit loop, remaining stays for training
+                }
+
+                // Check gap with existing validation
+                for &val_idx in &val_indices {
+                    let val_seq = sequence_map.get(&val_idx).expect("Sequence must exist");
+
+                    let gap = if candidate_seq.start_idx >= val_seq.end_idx {
+                        candidate_seq.start_idx - val_seq.end_idx
+                    } else if val_seq.start_idx >= candidate_seq.end_idx {
+                        val_seq.start_idx - candidate_seq.end_idx
+                    } else {
+                        0 // Overlap
+                    };
+
+                    if gap < validation_gap_steps {
+                        // Skip this candidate - it will go to training
+                        can_add_to_val = false;
+                        break;
+                    }
+                }
+            }
+
+            if can_add_to_val {
+                // Add to validation and remove from remaining
+                val_indices.push(remaining_final.remove(0));
+            } else {
+                // Can't add to validation, break and let it go to training
+                break;
+            }
         }
-        // Fill test second
+        // Fill test from remaining
         while test_indices.len() < test_size && !remaining_final.is_empty() {
             test_indices.push(remaining_final.remove(0));
         }
-        // All remaining go to training (handles rounding discrepancies)
+        // All remaining go to training (handles rounding and gap filtering)
         train_indices.append(&mut remaining_final);
 
         // Validate that we used all sequences
@@ -1480,24 +1589,25 @@ impl SequenceBalancer {
                 class_indices.len()
             )));
         }
-
-        // Validate val and test got their minimum required sizes
-        // Train can absorb rounding differences
-        if val_indices.len() < val_size || test_indices.len() < test_size {
+        if test_indices.len() < test_size {
             return Err(VangaError::DataError(format!(
-                "Insufficient sequences: val={}/{}, test={}/{} (need more sequences)",
-                val_indices.len(),
-                val_size,
+                "Insufficient sequences for test: {}/{}",
                 test_indices.len(),
                 test_size
             )));
         }
 
-        // Sort all indices for consistency
-        train_indices.sort();
+        // Validation can be smaller than requested due to gap enforcement (warn but don't error)
+        if val_indices.len() < val_size {
+            log::warn!(
+                "   ⚠️ Validation size reduced from {} to {} due to gap enforcement (gap={} steps)",
+                val_size,
+                val_indices.len(),
+                validation_gap_steps
+            );
+        }
         val_indices.sort();
         test_indices.sort();
-
         log::debug!(
             "   📊 Split allocation: {} train, {} val, {} test (no overlaps)",
             train_indices.len(),
@@ -1505,9 +1615,55 @@ impl SequenceBalancer {
             test_indices.len()
         );
 
+        // CRITICAL: Post-process validation to enforce gap with training
+        // Move validation sequences that violate gap to training
+        if validation_gap_steps > 0 {
+            let mut violating_val_indices = Vec::new();
+
+            for &val_idx in &val_indices {
+                let val_seq = sequence_map.get(&val_idx).expect("Sequence must exist");
+                let mut min_gap = usize::MAX;
+
+                for &train_idx in &train_indices {
+                    let train_seq = sequence_map.get(&train_idx).expect("Sequence must exist");
+
+                    let gap = if val_seq.start_idx >= train_seq.end_idx {
+                        val_seq.start_idx - train_seq.end_idx
+                    } else if train_seq.start_idx >= val_seq.end_idx {
+                        train_seq.start_idx - val_seq.end_idx
+                    } else {
+                        0
+                    };
+
+                    if gap < min_gap {
+                        min_gap = gap;
+                    }
+                    if min_gap < validation_gap_steps {
+                        break;
+                    }
+                }
+
+                if min_gap < validation_gap_steps {
+                    violating_val_indices.push(val_idx);
+                }
+            }
+
+            if !violating_val_indices.is_empty() {
+                log::info!(
+                    "   🔒 Post-processing: Moving {} validation sequences to training due to gap violations",
+                    violating_val_indices.len()
+                );
+
+                // Remove from validation and add to training
+                val_indices.retain(|idx| !violating_val_indices.contains(idx));
+                train_indices.extend(violating_val_indices);
+                train_indices.sort();
+                val_indices.sort();
+            }
+        }
+
         Ok((train_indices, val_indices, test_indices))
     }
-
     /// Calculate overlap score between a sequence and a set of training indices
     /// Returns value between 0.0 (no overlap) and 1.0 (maximum overlap)
     fn calculate_overlap_with_set(

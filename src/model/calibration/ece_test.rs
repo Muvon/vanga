@@ -170,7 +170,6 @@ fn test_generate_reliability_diagram_empty() {
     assert_eq!(diagram.ece, 0.0);
 }
 
-
 #[test]
 fn test_ece_bins_coverage() {
     // Create predictions spanning all confidence ranges

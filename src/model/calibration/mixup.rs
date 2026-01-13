@@ -40,10 +40,7 @@ impl AdaptiveMixup {
     ///
     /// Mixup applies uniformly to all samples with lambda sampled from Beta(alpha, alpha).
     /// Higher ECE → more aggressive mixup (higher alpha).
-    pub fn calibrate_from_ece(
-        &mut self,
-        overall_ece: f64,
-    ) -> Result<()> {
+    pub fn calibrate_from_ece(&mut self, overall_ece: f64) -> Result<()> {
         log::info!("🔀 Calibrating mixup...");
 
         self.current_ece = overall_ece;

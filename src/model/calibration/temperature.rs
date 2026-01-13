@@ -92,16 +92,30 @@ impl AdaptiveTemperatureScaling {
         let optimal_temp = self.find_optimal_temperature_binary_search(logits, targets)?;
 
         // Only update temperature if it actually improves NLL over baseline (T=1.0)
+        // CRITICAL: Also reject truly pathological temperatures (T > 5.0 or T < 0.5)
+        // Research shows T can legitimately be in range [0.5, 5.0] per Guo et al. 2017
         let predictions_optimized = self.apply_temperature_to_logits(logits, optimal_temp)?;
         let optimized_nll = self.calculate_nll(&predictions_optimized, targets)?;
 
-        // Use baseline temperature if no improvement
-        if optimized_nll >= initial_nll {
-            log::info!(
-                "   No improvement found (NLL {:.4} >= {:.4}), keeping T=1.0",
-                optimized_nll,
-                initial_nll
-            );
+        // Check if optimal temperature is truly pathological
+        // T > 5.0 makes probabilities nearly uniform (0.2 each) - indicates model issues
+        // T < 0.5 is also unusual and indicates calibration problems
+        let is_truly_pathological = optimal_temp > 5.0 || optimal_temp < 0.5;
+
+        // Use baseline temperature if no improvement OR if temperature is truly pathological
+        if optimized_nll >= initial_nll || is_truly_pathological {
+            if is_truly_pathological {
+                log::info!(
+                    "   ⚠️ Pathological temperature {:.4} detected, keeping T=1.0",
+                    optimal_temp
+                );
+            } else {
+                log::info!(
+                    "   No improvement found (NLL {:.4} >= {:.4}), keeping T=1.0",
+                    optimized_nll,
+                    initial_nll
+                );
+            }
             self.temperature = 1.0;
         } else {
             self.temperature = optimal_temp;
@@ -153,20 +167,33 @@ impl AdaptiveTemperatureScaling {
         Ok(())
     }
 
-    /// Find optimal single shared temperature using binary search on NLL
+    /// Find optimal temperature using unconstrained optimization with softplus constraint
+    ///
+    /// Based on WACV 2024 (Krumpl et al.) and Neural Computing 2024 (Balanya et al.)
+    /// Modern approach: optimize raw parameter, apply softplus to ensure T > 0
+    /// This avoids arbitrary bounds and naturally handles the positivity constraint
     fn find_optimal_temperature_binary_search(
         &self,
         logits: &Array2<f64>,
         targets: &Array2<f64>,
     ) -> Result<f64> {
-        const TEMP_MIN: f64 = 0.05; // Extended from 0.5 to allow sharper temperature scaling
-        const TEMP_MAX: f64 = 5.0;
+        // Softplus-based temperature: T = softplus(raw) = ln(1 + exp(raw))
+        // This ensures T > 0 without arbitrary bounds
+        // - raw = 0 → T ≈ 0.693 (slightly softening)
+        // - raw = 2 → T ≈ 1.31 (moderate softening)
+        // - raw = 5 → T ≈ 148 (extreme - indicates model issues)
+        // - raw negative → T < 1 (sharpening)
         const PRECISION: f64 = 0.01;
         const MAX_ITERATIONS: u32 = 50;
 
-        let mut low = TEMP_MIN;
-        let mut high = TEMP_MAX;
-        let mut best_temp = 1.0;
+        // Search range for raw parameter (unconstrained)
+        // This maps to reasonable temperature range after softplus
+        const RAW_MIN: f64 = -5.0; // T ≈ 0.006 (very sharp)
+        const RAW_MAX: f64 = 5.0; // T ≈ 148 (very soft)
+
+        let mut low = RAW_MIN;
+        let mut high = RAW_MAX;
+        let mut best_raw = 0.0; // Start with T ≈ 0.693
         let mut best_nll = f64::INFINITY;
 
         for _ in 0..MAX_ITERATIONS {
@@ -178,40 +205,58 @@ impl AdaptiveTemperatureScaling {
             let mid = (low + high) / 2.0;
             let temps = [low, mid, high];
 
-            for &temp in &temps {
+            for &raw in &temps {
+                // Apply softplus: T = ln(1 + exp(raw))
+                let temp = (raw.exp() + 1.0).ln();
                 let predictions = self.apply_temperature_to_logits(logits, temp)?;
                 let nll = self.calculate_nll(&predictions, targets)?;
 
-                log::trace!("   Temp={:.4}: NLL={:.6}", temp, nll);
+                log::trace!("   Raw={:.4}, Temp={:.4}: NLL={:.6}", raw, temp, nll);
 
                 if nll < best_nll {
                     best_nll = nll;
-                    best_temp = temp;
+                    best_raw = raw;
                 }
             }
 
-            // Narrow search range around best temperature
-            if (best_temp - low).abs() < PRECISION {
+            // Narrow search range around best raw value
+            if (best_raw - low).abs() < PRECISION {
                 high = mid;
-            } else if (best_temp - high).abs() < PRECISION {
+            } else if (best_raw - high).abs() < PRECISION {
                 low = mid;
             } else {
                 // Best is in middle, narrow both sides
                 let range = (high - low) / 4.0;
-                low = (best_temp - range).max(TEMP_MIN);
-                high = (best_temp + range).min(TEMP_MAX);
+                low = (best_raw - range).max(RAW_MIN);
+                high = (best_raw + range).min(RAW_MAX);
             }
         }
 
+        // Convert raw to temperature using softplus
+        let optimal_temp = (best_raw.exp() + 1.0).ln();
+
+        // Validate: warn if temperature is pathological
+        // T > 5.0 or T < 0.5 indicates model calibration issues
+        if optimal_temp > 5.0 {
+            log::warn!(
+                "   ⚠️ Very high temperature {:.4} detected - model severely overconfident",
+                optimal_temp
+            );
+        } else if optimal_temp < 0.5 {
+            log::warn!(
+                "   ⚠️ Very low temperature {:.4} detected - model severely underconfident",
+                optimal_temp
+            );
+        }
+
         log::info!(
-            "   Binary search: best_temp={:.4} (NLL={:.6}), range=[{:.2}, {:.2}]",
-            best_temp,
-            best_nll,
-            low,
-            high
+            "   Binary search: raw={:.4}, temperature={:.4} (NLL={:.6})",
+            best_raw,
+            optimal_temp,
+            best_nll
         );
 
-        Ok(best_temp)
+        Ok(optimal_temp)
     }
 
     /// Calculate Negative Log-Likelihood (NLL) loss (pub(crate) for testing)
