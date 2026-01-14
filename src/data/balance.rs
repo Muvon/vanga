@@ -1432,10 +1432,10 @@ impl SequenceBalancer {
                         // If separated, gap = distance between them
                         let gap = if candidate_seq.start_idx >= train_seq.end_idx {
                             // Candidate is completely after training
-                            candidate_seq.start_idx - train_seq.end_idx
+                            candidate_seq.start_idx.saturating_sub(train_seq.end_idx)
                         } else if train_seq.start_idx >= candidate_seq.end_idx {
                             // Training is completely after candidate
-                            train_seq.start_idx - candidate_seq.end_idx
+                            train_seq.start_idx.saturating_sub(candidate_seq.end_idx)
                         } else {
                             // Sequences overlap - this is the critical case for data leakage
                             0
@@ -1461,9 +1461,9 @@ impl SequenceBalancer {
 
                             // Calculate gap: 0 if sequences overlap, positive if separated
                             let gap = if candidate_seq.start_idx >= selected_seq.end_idx {
-                                candidate_seq.start_idx - selected_seq.end_idx
+                                candidate_seq.start_idx.saturating_sub(selected_seq.end_idx)
                             } else if selected_seq.start_idx >= candidate_seq.end_idx {
-                                selected_seq.start_idx - candidate_seq.end_idx
+                                selected_seq.start_idx.saturating_sub(candidate_seq.end_idx)
                             } else {
                                 0 // Overlap
                             };

@@ -442,6 +442,35 @@ impl LSTMModel {
             .forward(&final_output)
             .map_err(|e| VangaError::ModelError(format!("Output layer forward failed: {}", e)))?;
 
+        // DEBUG: Check if LSTM hidden states are diverse across samples
+        // If hidden states are similar for all samples, output will be similar too
+        if !training {
+            let hs = final_output.flatten_all()?;
+            let hs_data: Vec<f32> = hs.to_vec1()?;
+            let sample_size = self
+                .config
+                .get_hidden_size_for_layer(self.config.num_layers - 1);
+            if hs_data.len() >= sample_size * 2 {
+                let first_sample = &hs_data[0..sample_size];
+                let second_sample = &hs_data[sample_size..sample_size * 2];
+                let diff: f32 = first_sample
+                    .iter()
+                    .zip(second_sample.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .sum();
+                let avg_diff = diff / sample_size as f32;
+                log::debug!(
+                    "🔍 Hidden state diversity: avg diff between sample 0 and 1 = {:.6}",
+                    avg_diff
+                );
+            }
+        }
+
+        // DEBUG: Check output layer weights (if possible)
+        if !training {
+            log::debug!("🔍 Checking output layer weights...");
+        }
+
         log::debug!(
             "Forward pass complete: input_shape={:?}, final_output_shape={:?}, predictions_shape={:?}, bidirectional={}",
             input.shape(),

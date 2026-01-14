@@ -624,6 +624,57 @@ impl LSTMModel {
                     mean_probs[class_idx] = class_sum / diagnostic_batch_size as f64;
                 }
 
+                // CRITICAL FIX: Also check INDIVIDUAL prediction distribution (argmax)
+                // Mean probabilities can be uniform even if individual predictions are biased!
+                let mut pred_counts = [0usize; 5];
+                for sample_idx in 0..diagnostic_batch_size {
+                    let mut max_prob = -1.0f32;
+                    let mut pred_class = 0usize;
+                    for class_idx in 0..num_classes {
+                        let prob = probs_data[sample_idx * num_classes + class_idx];
+                        if prob > max_prob {
+                            max_prob = prob;
+                            pred_class = class_idx;
+                        }
+                    }
+                    if pred_class < 5 {
+                        pred_counts[pred_class] += 1;
+                    }
+                }
+
+                // Log individual prediction distribution
+                let pred_formatted: Vec<String> =
+                    pred_counts.iter().map(|&c| format!("{}", c)).collect();
+                log::info!(
+                    "   Individual prediction counts (argmax): [{}]",
+                    pred_formatted.join(", ")
+                );
+                let pred_pcts: Vec<String> = pred_counts
+                    .iter()
+                    .map(|&c| format!("{:.0}%", c as f64 / diagnostic_batch_size as f64 * 100.0))
+                    .collect();
+                log::info!(
+                    "   Individual prediction distribution: [{}]",
+                    pred_pcts.join(", ")
+                );
+                // Check if individual predictions are approximately uniform
+                let expected_per_class = diagnostic_batch_size / num_classes;
+                let mut pred_deviation = 0.0f64;
+                for deviation in pred_counts
+                    .iter()
+                    .take(num_classes)
+                    .map(|&c| (c as f64 - expected_per_class as f64).abs())
+                {
+                    pred_deviation = pred_deviation.max(deviation);
+                }
+                let is_pred_uniform = pred_deviation < (diagnostic_batch_size as f64 / 2.0); // Allow 50% tolerance
+
+                if is_pred_uniform {
+                } else {
+                    log::warn!("   ⚠️ Individual predictions are BIASED: max deviation = {:.0} from expected {}",
+                        pred_deviation, expected_per_class);
+                }
+
                 // Format probabilities for logging
                 let probs_formatted: Vec<String> =
                     mean_probs.iter().map(|p| format!("{:.3}", p)).collect();
@@ -3775,7 +3826,7 @@ impl LSTMModel {
 
         // Run validation data through trained model to get predictions
         let batch_size = self.training_config.batch_size;
-        let num_batches = (num_samples + batch_size - 1) / batch_size;
+        let num_batches = num_samples.div_ceil(batch_size);
         let mut all_predictions = Vec::new();
 
         for batch_idx in 0..num_batches {
@@ -3794,7 +3845,6 @@ impl LSTMModel {
 
             // Forward pass (inference mode - no dropout)
             let logits = self.forward(&input_tensor, false)?;
-
             // Apply softmax to get probabilities
             let probabilities = candle_nn::ops::softmax(&logits, 1)?;
 

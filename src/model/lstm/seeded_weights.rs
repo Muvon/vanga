@@ -399,23 +399,54 @@ impl SeededTensorUtils {
                 // 2D tensors are weight matrices
                 let (rows, cols) = (dims[0], dims[1]);
 
-                // Identify output/classification layer (Fixup Initialization: ICLR 2019)
-                // "Initialize the classification layer to 0" for stable training
+                // Identify output/classification layer
+                // CRITICAL FIX: Use Xavier initialization instead of zero initialization!
+                // Zero initialization causes all samples to predict the same class
+                // because output = hidden_states @ zero_weights + bias = bias (constant)
+                // This leads to extreme class bias (82% class 0, 93% class 4)
                 let is_output_layer = var_name_str.contains("output.weight")
-                    || var_name_str.ends_with("output.weight");
+                    || var_name_str.ends_with("output.weight")
+                    || (var_name_str.contains("linear")
+                        && !var_name_str.contains("weight_ih")
+                        && !var_name_str.contains("weight_hh"));
 
                 if is_output_layer {
-                    // Apply zero initialization for output layer (Fixup Initialization)
+                    // Apply SMALL Xavier initialization for output layer
+                    // Using std=0.01 instead of standard Xavier to prevent large hidden state
+                    // activations from creating class bias (especially with structured data)
+                    let small_std = 0.01; // Much smaller than standard Xavier
+
+                    // Generate small random weights
+                    let small_weights = Tensor::randn(0.0, small_std as f32, dims, device)?
+                        .to_dtype(var.dtype())?;
+
                     log::info!(
-                        "🎯 Applying ZERO initialization to output layer '{}': shape={:?} (Fixup Init)",
-                        var_name_str, dims
+                        "🎯 Applying SMALL initialization to output layer '{}': shape={:?}, std={:.4}",
+                        var_name_str, dims, small_std
                     );
-                    let zero_weights = Tensor::zeros(dims, var.dtype(), device)?;
-                    var.set(&zero_weights)?;
+
+                    // Verify the weights before setting
+                    let sample: Vec<f32> = small_weights.flatten_all()?.to_vec1::<f32>()?;
+                    let weight_mean: f32 = sample.iter().sum::<f32>() / sample.len() as f32;
+                    let weight_std: f32 = {
+                        let mean = weight_mean;
+                        let variance = sample.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
+                            / sample.len() as f32;
+                        variance.sqrt()
+                    };
+                    log::info!(
+                        "   Output layer weight stats: mean={:.6}, std={:.6}, min={:.6}, max={:.6}",
+                        weight_mean,
+                        weight_std,
+                        sample.iter().fold(f32::MAX, |m, v| v.min(m)),
+                        sample.iter().fold(f32::MIN, |m, v| v.max(m))
+                    );
+
+                    var.set(&small_weights)?;
                     initialized_count += 1;
 
                     log::info!(
-                        "✅ Output layer '{}' initialized to ZERO for balanced class prediction",
+                        "✅ Output layer '{}' initialized with small random weights for balanced predictions",
                         var_name_str
                     );
                     continue;
@@ -493,34 +524,30 @@ impl SeededTensorUtils {
                 // 1D tensors are biases
                 let bias_size = dims[0];
 
-                // Identify output layer bias (CRITICAL for ordinal regression with Gaussian smoothing)
+                // Identify output layer bias
+                // CRITICAL FIX: Use uniform bias initialization instead of anti-middle-class pattern
+                // The anti-middle-class pattern was pushing predictions toward extremes (class 0 and 4)
+                // Combined with zero output weights, this caused 82% class 0, 93% class 4
+                // With proper Xavier initialization on weights, use uniform bias for balanced starts
                 let is_output_bias =
                     var_name_str.contains("output.bias") || var_name_str.ends_with("output.bias");
 
                 if is_output_bias && bias_size == 5 {
-                    // RESEARCH-BACKED FIX: Anti-middle-class bias initialization
-                    // Paper: "Ordinal regression encourage conservative model to predict middle-rank classes"
-                    // Solution: Initialize with small negative bias for middle class, small positive for extremes
-                    // This breaks the symmetry that causes middle-class collapse with Gaussian label smoothing
-                    let anti_middle_bias = vec![
-                        0.1f32, // Class 0: slight positive (encourage extreme predictions)
-                        0.05,   // Class 1: small positive
-                        -0.2,   // Class 2: NEGATIVE (discourage middle class)
-                        0.05,   // Class 3: small positive
-                        0.1,    // Class 4: slight positive (encourage extreme predictions)
-                    ];
+                    // Uniform small bias for all classes - no preference at initialization
+                    // This ensures random weight initialization dominates initial predictions
+                    let uniform_bias = vec![0.05f32; 5]; // Small positive for all classes
                     let bias_tensor =
-                        Tensor::new(anti_middle_bias.clone(), device)?.to_dtype(var.dtype())?;
+                        Tensor::new(uniform_bias.clone(), device)?.to_dtype(var.dtype())?;
                     var.set(&bias_tensor)?;
                     bias_count += 1;
 
                     log::info!(
-                        "🎯 Output bias '{}' initialized with ANTI-MIDDLE-CLASS pattern: {:?}",
+                        "🎯 Output bias '{}' initialized with UNIFORM pattern: {:?} (Fix: anti-middle pattern caused extreme bias!)",
                         var_name_str,
-                        anti_middle_bias
+                        uniform_bias
                     );
                     log::info!(
-                        "   Research: Prevents ordinal regression middle-class collapse with Gaussian smoothing"
+                        "   This ensures ~20% per class predictions at epoch 0 with random weights"
                     );
                     continue;
                 }

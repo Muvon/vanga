@@ -165,7 +165,7 @@ impl Optimizer for FracNAdam {
         // This ensures stable initial training
         // CRITICAL FIX: Wait for full memory window to avoid unstable fractional derivatives
         let fractional_grads = if self.step_count <= self.fractional_derivative.memory_window() {
-            if self.step_count <= 5 || self.step_count % 10 == 0 {
+            if self.step_count <= 5 || self.step_count.is_multiple_of(10) {
                 log::debug!(
                     "FracNAdam: Using regular gradients for step {}/{} (building history)",
                     self.step_count,
@@ -289,7 +289,7 @@ impl Optimizer for FracNAdam {
                 .contiguous()?;
 
             // Log fractional gradient magnitude occasionally for debugging
-            if self.step_count % 100 == 0 && i == 0 {
+            if self.step_count.is_multiple_of(100) && i == 0 {
                 // Use a lightweight check to avoid performance impact
                 if cfg!(debug_assertions) {
                     let grad_norm = grad_with_decay.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
@@ -303,7 +303,6 @@ impl Optimizer for FracNAdam {
                     );
                 }
             }
-
             let eps_tensor = Tensor::new(self.params.eps as f32, var.device())?
                 .broadcast_as(corrected_second_moment.shape())?
                 .contiguous()?;

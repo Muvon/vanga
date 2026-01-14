@@ -50,17 +50,12 @@ impl Default for TFTQuantileOutputConfig {
 ///
 /// Pre-LN: Normalize BEFORE the LSTM layer (better gradient flow for deep networks)
 /// Post-LN: Normalize AFTER the LSTM layer (standard for LSTMs, Ba et al., 2016)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LayerNormPosition {
+    #[default]
     Pre,
     Post,
-}
-
-impl Default for LayerNormPosition {
-    fn default() -> Self {
-        LayerNormPosition::Post
-    }
 }
 
 impl std::fmt::Display for LayerNormPosition {
@@ -163,12 +158,10 @@ impl Default for DAINConfig {
 impl DAINConfig {
     /// Validate DAIN configuration
     pub fn validate(&self) -> Result<(), String> {
-        if self.enabled {
-            if self.hidden_dim == 0 {
-                return Err("DAIN hidden_dim must be greater than 0".to_string());
-            }
-            // input_dim is set automatically by the code from input_size
+        if self.enabled && self.hidden_dim == 0 {
+            return Err("DAIN hidden_dim must be greater than 0".to_string());
         }
+        // input_dim is set automatically by the code from input_size
         Ok(())
     }
 }

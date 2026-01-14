@@ -209,7 +209,7 @@ impl Optimizer for FracProdigy {
         // For the first few steps, use regular gradients while building history
         // CRITICAL FIX: Wait for full memory window to avoid unstable fractional derivatives
         let fractional_grads = if self.step_count <= self.fractional_derivative.memory_window() {
-            if self.step_count <= 5 || self.step_count % 10 == 0 {
+            if self.step_count <= 5 || self.step_count.is_multiple_of(10) {
                 log::debug!(
                     "FracProdigy: Using regular gradients for step {}/{} (building history)",
                     self.step_count,

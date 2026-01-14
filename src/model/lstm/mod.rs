@@ -65,6 +65,9 @@ mod loss_test;
 #[cfg(test)]
 mod reduce_on_plateau_test;
 
+#[cfg(test)]
+mod output_init_test;
+
 // Re-export main types for backward compatibility
 
 pub use config::{

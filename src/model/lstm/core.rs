@@ -761,11 +761,35 @@ impl LSTMModel {
                 log::info!("  Tensor {}: '{}' shape={:?}", idx, var_name, dims);
             }
 
+            // Now run initialization
             crate::model::lstm::seeded_weights::SeededTensorUtils::apply_lstm_weight_initialization(
                 &self.varmap,
                 &self.device,
                 self.seed,
             )?;
+
+            // Verify initialization worked - check output layer specifically
+            log::info!("🔍 Post-initialization verification:");
+            let var_data = self.varmap.data().lock().unwrap();
+            for (name, var) in var_data.iter() {
+                if name.contains("output") {
+                    let tensor = var.as_tensor();
+                    if let Ok(flattened) = tensor.flatten_all() {
+                        if let Ok(values) = flattened.to_vec1::<f32>() {
+                            let mean: f32 = values.iter().sum::<f32>() / values.len() as f32;
+                            log::info!(
+                                "  Output tensor '{}': shape={:?}, mean={:.6}, std={:.6}",
+                                name,
+                                tensor.shape(),
+                                mean,
+                                (values.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
+                                    / values.len() as f32)
+                                    .sqrt()
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())

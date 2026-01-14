@@ -100,7 +100,7 @@ impl AdaptiveTemperatureScaling {
         // Check if optimal temperature is truly pathological
         // T > 5.0 makes probabilities nearly uniform (0.2 each) - indicates model issues
         // T < 0.5 is also unusual and indicates calibration problems
-        let is_truly_pathological = optimal_temp > 5.0 || optimal_temp < 0.5;
+        let is_truly_pathological = !(0.5..=5.0).contains(&optimal_temp);
 
         // Use baseline temperature if no improvement OR if temperature is truly pathological
         if optimized_nll >= initial_nll || is_truly_pathological {
