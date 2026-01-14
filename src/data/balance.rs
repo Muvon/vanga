@@ -1385,12 +1385,13 @@ impl SequenceBalancer {
         // Step 3: VALIDATION - Strategy depends on validation_gap
         // - With validation_gap > 0: Select sequences MINIMALLY overlapping with training (temporal separation)
         // - With validation_gap = 0: Select sequences MAXIMALLY overlapping with training (interpolation test)
+        // CRITICAL: Track skipped candidates that fail gap check - they will be added to validation in Phase 2
+        let mut skipped_for_val_gap: Vec<usize> = Vec::new();
         let remaining: Vec<usize> = sorted_indices
             .iter()
             .filter(|&&idx| !train_indices.contains(&idx))
             .copied()
             .collect();
-
         if val_size > 0 && !remaining.is_empty() {
             // Calculate overlap score for each remaining sequence with training set
             let mut scored: Vec<(usize, f64)> = remaining
@@ -1476,6 +1477,10 @@ impl SequenceBalancer {
 
                     if !violates_gap {
                         val_indices.push(*candidate_idx);
+                    } else if validation_gap_steps > 0 {
+                        // Track skipped candidates for Phase 2 - they will be added to validation
+                        // even if they violate gap (to maintain exact validation size)
+                        skipped_for_val_gap.push(*candidate_idx);
                     }
                 }
 
@@ -1487,6 +1492,17 @@ impl SequenceBalancer {
                         validation_gap_steps
                     );
                 }
+
+                // Phase 2: Fill remaining validation slots with skipped candidates (relax gap constraint)
+                // This ensures we reach exactly val_size even if gap enforcement would leave gaps
+                // CRITICAL: Only add enough skipped candidates to reach val_size, leaving rest for test
+                let needed_for_validation = val_size.saturating_sub(val_indices.len());
+                let to_add_to_validation = needed_for_validation.min(skipped_for_val_gap.len());
+                // split_off(N) returns elements [0, N) and keeps [N, end)
+                let _kept_for_test: Vec<usize> =
+                    skipped_for_val_gap.split_off(to_add_to_validation);
+                val_indices.append(&mut skipped_for_val_gap);
+                val_indices.sort();
             } else {
                 // No gap enforcement - select by MAX overlap (original behavior)
                 // Sort by overlap score (HIGHEST first) for validation - test interpolation
@@ -1531,16 +1547,15 @@ impl SequenceBalancer {
         }
 
         // Step 4: TEST - MAX DIVERSITY FROM REMAINING
-        // From remaining sequences, select those that maximize temporal diversity
-        let remaining_after_val: Vec<usize> = remaining
+        // Exclude sequences in train and val (skipped_for_val_gap remaining after Phase 2 are available for test)
+        let remaining_after_val_and_skipped: Vec<usize> = sorted_indices
             .iter()
-            .filter(|&&idx| !val_indices.contains(&idx))
+            .filter(|&&idx| !train_indices.contains(&idx) && !val_indices.contains(&idx))
             .copied()
             .collect();
-
-        if test_size > 0 && !remaining_after_val.is_empty() {
+        if test_size > 0 && !remaining_after_val_and_skipped.is_empty() {
             // Score by temporal distance from nearest training OR validation sequence
-            let mut scored: Vec<(usize, f64)> = remaining_after_val
+            let mut scored: Vec<(usize, f64)> = remaining_after_val_and_skipped
                 .iter()
                 .map(|&idx| {
                     let diversity_score = self.calculate_diversity_from_selected(
@@ -1574,6 +1589,7 @@ impl SequenceBalancer {
         }
 
         // Step 5: Handle any remaining due to rounding or exact size requirements
+        // CRITICAL: remaining_final excludes skipped_for_val_gap (already in validation)
         let mut remaining_final: Vec<usize> = class_indices
             .iter()
             .filter(|&&idx| {
@@ -1585,109 +1601,19 @@ impl SequenceBalancer {
             .collect();
         remaining_final.sort();
 
-        // Track candidates that fail validation gap check - they should go to TEST first, then TRAINING
-        // This ensures validation gap enforcement doesn't inflate training set unnecessarily
-        // Track candidates that fail validation gap check - they should go to TEST first, then TRAINING
-        // This ensures validation gap enforcement doesn't inflate training set
-        let mut skipped_for_val_gap: Vec<usize> = Vec::new();
-
-        // Phase 1: Try to fill validation respecting gap constraints
-        // Phase 2: If we can't fill validation, relax gap constraint to maintain exact counts
-        let mut phase = 1;
-        while (phase == 1 && val_indices.len() < val_size && !remaining_final.is_empty())
-            || (phase == 2 && val_indices.len() < val_size && !skipped_for_val_gap.is_empty())
-        {
-            // Get candidate from remaining_final (phase 1) or skipped (phase 2)
-            let candidate = if phase == 1 {
-                remaining_final[0]
-            } else {
-                skipped_for_val_gap[0]
-            };
-
-            let mut violates_gap = false;
-
-            if validation_gap_steps > 0 {
-                let candidate_seq = sequence_map.get(&candidate).expect("Sequence must exist");
-                let mut min_gap = usize::MAX;
-
-                for &train_idx in &train_indices {
-                    let train_seq = sequence_map.get(&train_idx).expect("Sequence must exist");
-
-                    let gap = if candidate_seq.start_idx >= train_seq.end_idx {
-                        candidate_seq.start_idx - train_seq.end_idx
-                    } else if train_seq.start_idx >= candidate_seq.end_idx {
-                        train_seq.start_idx - candidate_seq.end_idx
-                    } else {
-                        0 // Overlap
-                    };
-
-                    if gap < min_gap {
-                        min_gap = gap;
-                    }
-                    if min_gap < validation_gap_steps {
-                        break;
-                    }
-                }
-
-                if min_gap < validation_gap_steps {
-                    violates_gap = true;
-                }
-
-                // Check gap with existing validation
-                if !violates_gap {
-                    for &val_idx in &val_indices {
-                        let val_seq = sequence_map.get(&val_idx).expect("Sequence must exist");
-
-                        let gap = if candidate_seq.start_idx >= val_seq.end_idx {
-                            candidate_seq.start_idx - val_seq.end_idx
-                        } else if val_seq.start_idx >= candidate_seq.end_idx {
-                            val_seq.start_idx - candidate_seq.end_idx
-                        } else {
-                            0 // Overlap
-                        };
-
-                        if gap < validation_gap_steps {
-                            violates_gap = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if !violates_gap {
-                // Add to validation (gap satisfied)
-                if phase == 1 {
-                    val_indices.push(remaining_final.remove(0));
-                } else {
-                    val_indices.push(skipped_for_val_gap.remove(0));
-                }
-            } else if phase == 1 {
-                // Skip this candidate for now, try remaining in phase 1
-                remaining_final.remove(0);
-                skipped_for_val_gap.push(candidate);
-            } else {
-                // Phase 2: We need to relax gap to maintain exact counts
-                // Add this candidate anyway to reach val_size
-                val_indices.push(skipped_for_val_gap.remove(0));
-            }
-
-            // Transition to phase 2 if we've exhausted remaining_final
-            if phase == 1 && remaining_final.is_empty() && val_indices.len() < val_size {
-                phase = 2;
-            }
-        }
-        // This ensures ALL sequences are allocated
-        let mut final_remaining: Vec<usize> = remaining_final;
-        final_remaining.extend(skipped_for_val_gap);
-        train_indices.append(&mut final_remaining);
+        // All remaining sequences go to training
+        train_indices.append(&mut remaining_final);
 
         // Validate that we used all sequences
         let total_allocated = train_indices.len() + val_indices.len() + test_indices.len();
         if total_allocated != class_indices.len() {
             return Err(VangaError::DataError(format!(
-                "Split allocation error: allocated {} sequences but have {} total",
+                "Split allocation error: allocated {} sequences but have {} total (train={}, val={}, test={})",
                 total_allocated,
-                class_indices.len()
+                class_indices.len(),
+                train_indices.len(),
+                val_indices.len(),
+                test_indices.len()
             )));
         }
         if test_indices.len() < test_size {
@@ -1709,6 +1635,7 @@ impl SequenceBalancer {
         }
         val_indices.sort();
         test_indices.sort();
+
         log::debug!(
             "   📊 Split allocation: {} train, {} val, {} test (no overlaps)",
             train_indices.len(),
