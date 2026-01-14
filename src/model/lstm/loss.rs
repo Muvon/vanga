@@ -1339,11 +1339,17 @@ impl LSTMModel {
         }
 
         // Convert targets to class indices if needed
+        // Cross-entropy requires u32 targets for gather operation (not f32)
         let target_indices = if target_contiguous.dim(1)? == 1 {
-            target_contiguous.squeeze(1)?.contiguous()?
+            target_contiguous
+                .squeeze(1)?
+                .to_dtype(candle_core::DType::U32)?
+                .contiguous()?
         } else {
-            // Already in correct format
-            target_contiguous.contiguous()?
+            // Already in correct format, convert to u32 for cross_entropy
+            target_contiguous
+                .to_dtype(candle_core::DType::U32)?
+                .contiguous()?
         };
 
         // Standard cross-entropy loss (optimal for balanced datasets)
