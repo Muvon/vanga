@@ -6,6 +6,7 @@
 use super::config::{LSTMConfig, LSTMModel, ModelState, TrainingConfig};
 use crate::config::ModelConfig;
 use crate::utils::error::{Result, VangaError};
+use crate::utils::normalization::DAINormalization;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{linear, lstm, LSTMConfig as CandleLSTMConfig, VarBuilder, VarMap};
@@ -102,6 +103,7 @@ impl LSTMModel {
             } else {
                 None
             },
+            dain_normalization: None,
         })
     }
 
@@ -315,6 +317,24 @@ impl LSTMModel {
                 model_config.xgboost.clone(),
                 model.device.clone(),
             ));
+        }
+
+        // Initialize DAIN normalization if enabled
+        if let Some(ref dain_config) = model_config.dain {
+            if dain_config.enabled {
+                let mut dain_config = dain_config.clone();
+                dain_config.input_dim = input_size;
+                log::info!(
+                    "🎯 Initializing DAIN normalization: input_dim={}, hidden_dim={}",
+                    input_size,
+                    dain_config.hidden_dim
+                );
+                model.dain_normalization = Some(DAINormalization::new(
+                    input_size,
+                    &model.device,
+                    dain_config,
+                )?);
+            }
         }
 
         Ok(model)

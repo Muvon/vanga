@@ -559,6 +559,7 @@ mod tests {
             xgboost: crate::config::model::XGBoostConfig::default(),
             bias_correction: crate::model::bias_correction::BiasCorrection::default(),
             quantile_outputs: None,
+            dain: None,
         };
 
         // Create model with bidirectional architecture
@@ -621,6 +622,7 @@ mod tests {
                 moh: None,
             },
             quantile_outputs: None,
+            dain: None,
             xgboost: crate::config::model::XGBoostConfig::default(),
             bias_correction: crate::model::bias_correction::BiasCorrection::default(),
         };
@@ -722,6 +724,7 @@ mod tests {
                 moh: None,
             },
             quantile_outputs: None,
+            dain: None,
             xgboost: crate::config::model::XGBoostConfig::default(),
             bias_correction: crate::model::bias_correction::BiasCorrection::default(),
         };
@@ -779,6 +782,7 @@ mod tests {
                 moh: None,
             },
             quantile_outputs: None,
+            dain: None,
             xgboost: crate::config::model::XGBoostConfig::default(),
             bias_correction: crate::model::bias_correction::BiasCorrection::default(),
         };

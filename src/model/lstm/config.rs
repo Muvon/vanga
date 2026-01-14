@@ -179,6 +179,9 @@ pub struct LSTMModel {
 
     /// Ensemble calibrator (temperature scaling + label smoothing + mixup)
     pub ensemble_calibrator: Option<crate::model::calibration::EnsembleCalibrator>,
+
+    /// DAIN (Deep Adaptive Input Normalization) for adaptive feature normalization
+    pub dain_normalization: Option<crate::utils::normalization::DAINormalization>,
 }
 
 /// Serializable model state for persistence - Enhanced with adaptive parameters

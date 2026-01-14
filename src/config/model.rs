@@ -112,6 +112,67 @@ impl Default for LayerNormConfig {
     }
 }
 
+/// Deep Adaptive Input Normalization (DAIN) for financial time series
+///
+/// DAIN learns to adaptively normalize input data based on its distribution.
+/// Unlike standard Z-score normalization, DAIN uses:
+/// - Learnable mean scaling (α) - controls how much to shift the mean
+/// - Learnable variance scaling (β) - controls how much to scale the variance
+/// - Attention-based feature gating (γ) - per-feature importance weighting
+///
+/// This is particularly effective for non-stationary crypto markets where
+/// data distribution changes over time due to market volatility.
+///
+/// Reference: Passalis et al., "Deep Adaptive Input Normalization for Time Series Forecasting", ICLR 2019
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DAINConfig {
+    /// Enable DAIN normalization
+    pub enabled: bool,
+    /// Hidden dimension for the attention network
+    pub hidden_dim: usize,
+    /// Learnable mean scaling parameter (alpha)
+    /// If true, alpha is learned during training; otherwise uses 1.0
+    pub learnable_mean_scale: bool,
+    /// Learnable variance scaling parameter (beta)
+    /// If true, beta is learned during training; otherwise uses 1.0
+    pub learnable_std_scale: bool,
+    /// Enable per-feature attention gating (gamma)
+    /// Attention network learns which features need more/less normalization
+    pub feature_gate_enabled: bool,
+    /// Epsilon for numerical stability
+    pub epsilon: f64,
+    /// Input dimension (features) - set automatically by the code
+    #[serde(default)]
+    pub input_dim: usize,
+}
+
+impl Default for DAINConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hidden_dim: 32,
+            learnable_mean_scale: true,
+            learnable_std_scale: true,
+            feature_gate_enabled: true,
+            epsilon: 1e-5,
+            input_dim: 0, // Set automatically by code from input_size
+        }
+    }
+}
+
+impl DAINConfig {
+    /// Validate DAIN configuration
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled {
+            if self.hidden_dim == 0 {
+                return Err("DAIN hidden_dim must be greater than 0".to_string());
+            }
+            // input_dim is set automatically by the code from input_size
+        }
+        Ok(())
+    }
+}
+
 /// Model configuration for LSTM architecture
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
@@ -142,6 +203,10 @@ pub struct ModelConfig {
 
     /// Bias correction configuration
     pub bias_correction: BiasCorrection,
+
+    /// DAIN (Deep Adaptive Input Normalization) configuration
+    #[serde(default)]
+    pub dain: Option<DAINConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -566,6 +631,7 @@ impl Default for ModelConfig {
             xgboost: XGBoostConfig::default(), // XGBoost disabled by default
             quantile_outputs: None,            // Disabled by default for backward compatibility
             bias_correction: BiasCorrection::default(), // Bias correction with default settings
+            dain: None,                        // DAIN disabled by default
         }
     }
 }

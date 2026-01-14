@@ -42,6 +42,7 @@ async fn test_layer_norm_config_propagation() {
         },
         xgboost: crate::config::model::XGBoostConfig::default(),
         quantile_outputs: None,
+        dain: None,
         bias_correction: crate::model::bias_correction::BiasCorrection::default(),
     };
 
@@ -102,6 +103,7 @@ async fn test_layer_norm_disabled_by_default() {
         },
         xgboost: crate::config::model::XGBoostConfig::default(),
         quantile_outputs: None,
+        dain: None,
         bias_correction: crate::model::bias_correction::BiasCorrection::default(),
     };
 

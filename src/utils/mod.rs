@@ -7,6 +7,7 @@ pub mod file_discovery;
 pub mod market_data;
 pub mod metrics;
 pub mod model_path;
+pub mod normalization;
 pub mod parser;
 pub mod sequence_utils;
 

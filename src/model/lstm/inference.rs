@@ -138,6 +138,16 @@ impl LSTMModel {
             input_device_name
         );
 
+        // Apply DAIN normalization if enabled
+        let normalized_input = if let Some(ref dain) = self.dain_normalization {
+            let input_f64 = input.to_dtype(candle_core::DType::F64)?;
+            let normalized = dain.forward(&input_f64)?;
+            log::debug!("🎯 Applied DAIN normalization to input");
+            normalized.to_dtype(input.dtype())?
+        } else {
+            input.clone()
+        };
+
         let forward_lstm_layers = self.lstm_layers.as_ref().ok_or_else(|| {
             VangaError::ModelError("Forward LSTM layers not initialized".to_string())
         })?;
@@ -162,7 +172,7 @@ impl LSTMModel {
             })?;
 
             // Process each layer bidirectionally
-            let mut current_input = input.clone();
+            let mut current_input = normalized_input.clone();
 
             for (layer_idx, (forward_layer, backward_layer)) in forward_lstm_layers
                 .iter()
@@ -281,7 +291,7 @@ impl LSTMModel {
             current_input
         } else {
             // Unidirectional processing (original logic)
-            let mut current_output = input.clone();
+            let mut current_output = normalized_input.clone();
             for (i, lstm_layer) in forward_lstm_layers.iter().enumerate() {
                 // CRITICAL FIX: Use seq_init() with zero_state() for validation to prevent hidden state contamination
                 // During training, we want to maintain states for temporal learning
