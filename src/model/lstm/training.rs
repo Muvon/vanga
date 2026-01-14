@@ -1661,80 +1661,8 @@ impl LSTMModel {
                         ))
                     })?;
 
-                    // Calibrate bias correction using LinearBiasCorrector (initial setup only)
-                    if let Some(ref mut corrector) = self.bias_corrector {
-                        // Only run initial calibration if not already calibrated
-                        if !corrector.is_calibrated {
-                            // Only log if print_info is true
-                            if corrector.config.print_info {
-                                log::info!("🎯 Starting initial bias correction calibration...");
-                            }
-
-                            // Ensure predictions are 5-class format
-                            if total_val_predictions.shape()[1] != 5 {
-                                log::warn!(
-                                    "⚠️ Unexpected prediction shape for bias correction: [{}, {}], expected [*, 5]",
-                                    total_val_predictions.shape()[0],
-                                    total_val_predictions.shape()[1]
-                                );
-                                // Skip bias correction if predictions are not 5-class
-                                log::warn!(
-                                    "⚠️ Skipping bias correction calibration due to shape mismatch"
-                                );
-                            } else {
-                                // Convert single-column class indices to one-hot encoding if needed
-                                let val_targets_for_bias = if total_val_targets.shape()[1] == 1 {
-                                    // Single column class indices - convert to one-hot
-                                    let num_samples = total_val_targets.shape()[0];
-                                    let mut one_hot =
-                                        ndarray::Array2::<f64>::zeros((num_samples, 5));
-
-                                    for (i, class_idx) in total_val_targets.iter().enumerate() {
-                                        let class_index = (*class_idx as usize).min(4); // Ensure within bounds
-                                        one_hot[[i, class_index]] = 1.0;
-                                    }
-
-                                    log::debug!(
-                                        "📊 Converted class indices to one-hot: [{}, 1] -> [{}, 5]",
-                                        num_samples,
-                                        num_samples
-                                    );
-                                    one_hot
-                                } else if total_val_targets.shape()[1] == 5 {
-                                    // Already one-hot encoded
-                                    log::debug!(
-                                        "📊 Targets already in one-hot format: [{}, 5]",
-                                        total_val_targets.shape()[0]
-                                    );
-                                    total_val_targets.clone()
-                                } else {
-                                    // Multi-target case (15 columns) - extract first 5 columns for first target
-                                    log::debug!(
-                                        "📊 Extracting first target from multi-target: [{}, {}] -> [{}, 5]",
-                                        total_val_targets.shape()[0],
-                                        total_val_targets.shape()[1],
-                                        total_val_targets.shape()[0]
-                                    );
-                                    total_val_targets.slice(s![.., 0..5]).to_owned()
-                                };
-
-                                corrector.calibrate_from_validation(
-                                    &total_val_predictions,
-                                    &val_targets_for_bias,
-                                )?;
-                            }
-
-                            // Only log if print_info is true
-                            if corrector.config.print_info {
-                                log::info!("✅ Initial bias correction setup completed");
-                            }
-                        } else {
-                            // Already calibrated, skip initial calibration
-                            if corrector.config.print_info {
-                                log::debug!("ℹ️ Bias corrector already calibrated - skipping initial calibration");
-                            }
-                        }
-                    }
+                    // Bias correction will be calibrated periodically according to recalibration_frequency
+                    // No initial calibration at epoch 0 - let model stabilize first
 
                     // ENSEMBLE CALIBRATION: Separate from bias correction, runs independently
                     if self.bias_correction_config.use_ensemble_calibration
