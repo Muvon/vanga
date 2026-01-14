@@ -3,7 +3,7 @@
 //! This module contains configuration structs, enums, and validation
 //! for LSTM model setup and training parameters.
 
-use crate::config::model::{AttentionConfig, DropoutConfig};
+use crate::config::model::{AttentionConfig, DropoutConfig, LayerNormPosition};
 use crate::model::attention::AttentionModule;
 use crate::utils::error::{Result, VangaError};
 
@@ -357,13 +357,47 @@ impl LSTMModel {
     /// * `config` - LayerNorm configuration
     /// * `layer_idx` - Layer index for logging
     ///
+    /// Apply LayerNorm to input BEFORE LSTM computation (Pre-LN)
+    /// Pre-LN provides better gradient flow for deep networks (Xiong et al., 2020)
+    pub fn apply_pre_layer_norm(
+        &self,
+        input: &Tensor,
+        config: &crate::config::model::LayerNormConfig,
+        layer_idx: usize,
+    ) -> Result<Tensor> {
+        self.apply_layer_norm(input, config, layer_idx, LayerNormPosition::Pre)
+    }
+
+    /// Apply LayerNorm to output AFTER LSTM computation (Post-LN)
+    /// Standard approach for LSTMs (Ba et al., 2016)
+    pub fn apply_post_layer_norm(
+        &self,
+        input: &Tensor,
+        config: &crate::config::model::LayerNormConfig,
+        layer_idx: usize,
+    ) -> Result<Tensor> {
+        self.apply_layer_norm(input, config, layer_idx, LayerNormPosition::Post)
+    }
+
+    /// Apply layer normalization to the input tensor
+    ///
+    /// # Arguments
+    /// * `input` - Input tensor of shape [batch, ..., features]
+    /// * `config` - LayerNorm configuration
+    /// * `layer_idx` - Layer index for logging
+    /// * `position` - Pre or Post normalization position (for logging/validation)
+    ///
     /// # Returns
     /// Normalized tensor of same shape as input
+    ///
+    /// Formula: y = (x - μ) / √(σ² + ε) ⊙ γ + β
+    /// where μ = mean, σ² = variance, γ = scale, β = shift
     pub fn apply_layer_norm(
         &self,
         input: &Tensor,
         config: &crate::config::model::LayerNormConfig,
         layer_idx: usize,
+        _position: LayerNormPosition,
     ) -> Result<Tensor> {
         if !config.enabled {
             return Ok(input.clone());

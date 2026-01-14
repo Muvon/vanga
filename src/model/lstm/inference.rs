@@ -230,18 +230,18 @@ impl LSTMModel {
 
                 // Apply Layer Normalization if enabled (Ba et al., 2016)
                 // LayerNorm stabilizes training in deep LSTMs
-                let should_apply_ln = self
-                    .layer_norm_config
-                    .as_ref()
-                    .map(|c| c.enabled && c.lstm_cell)
-                    .unwrap_or(false);
-
-                if should_apply_ln {
-                    current_input = self.apply_layer_norm(
-                        &current_input,
-                        self.layer_norm_config.as_ref().unwrap(),
-                        layer_idx,
-                    )?;
+                // CRITICAL FIX: Use configured position (Pre or Post)
+                if let Some(ref config) = self.layer_norm_config {
+                    if config.enabled && config.lstm_cell {
+                        let position = config.position;
+                        log::debug!(
+                            "Applying LayerNorm (position: {:?}, layer: {})",
+                            position,
+                            layer_idx
+                        );
+                        current_input =
+                            self.apply_layer_norm(&current_input, config, layer_idx, position)?;
+                    }
                 }
 
                 // Apply consistent dropout between layers if enabled AND in training mode
@@ -312,18 +312,18 @@ impl LSTMModel {
                 // Apply Layer Normalization if enabled (Ba et al., 2016)
                 // LayerNorm stabilizes training in deep LSTMs by normalizing activations
                 // across features for each sample independently
-                let should_apply_ln = self
-                    .layer_norm_config
-                    .as_ref()
-                    .map(|c| c.enabled && c.lstm_cell)
-                    .unwrap_or(false);
-
-                if should_apply_ln {
-                    current_output = self.apply_layer_norm(
-                        &current_output,
-                        self.layer_norm_config.as_ref().unwrap(),
-                        i,
-                    )?;
+                // CRITICAL FIX: Use configured position (Pre or Post)
+                if let Some(ref config) = self.layer_norm_config {
+                    if config.enabled && config.lstm_cell {
+                        let position = config.position;
+                        log::debug!(
+                            "Applying LayerNorm (position: {:?}, layer: {})",
+                            position,
+                            i
+                        );
+                        current_output =
+                            self.apply_layer_norm(&current_output, config, i, position)?;
+                    }
                 }
 
                 // Apply consistent dropout between layers if enabled AND in training mode

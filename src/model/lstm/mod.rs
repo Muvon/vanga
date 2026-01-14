@@ -50,7 +50,7 @@ pub mod window_aware_lr;
 mod hidden_state_test;
 
 #[cfg(test)]
-mod layer_norm_test;
+mod layer_norm_position_test;
 
 #[cfg(test)]
 mod layer_norm_integration_test;

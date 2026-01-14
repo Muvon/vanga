@@ -46,6 +46,46 @@ impl Default for TFTQuantileOutputConfig {
     }
 }
 
+/// Position of LayerNorm relative to LSTM activation
+///
+/// Pre-LN: Normalize BEFORE the LSTM layer (better gradient flow for deep networks)
+/// Post-LN: Normalize AFTER the LSTM layer (standard for LSTMs, Ba et al., 2016)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LayerNormPosition {
+    Pre,
+    Post,
+}
+
+impl Default for LayerNormPosition {
+    fn default() -> Self {
+        LayerNormPosition::Post
+    }
+}
+
+impl std::fmt::Display for LayerNormPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayerNormPosition::Pre => write!(f, "pre"),
+            LayerNormPosition::Post => write!(f, "post"),
+        }
+    }
+}
+
+impl std::str::FromStr for LayerNormPosition {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pre" => Ok(LayerNormPosition::Pre),
+            "post" => Ok(LayerNormPosition::Post),
+            _ => Err(format!(
+                "Invalid LayerNormPosition '{}'. Must be 'pre' or 'post'",
+                s
+            )),
+        }
+    }
+}
+
 /// Layer Normalization configuration for stabilizing LSTM training
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerNormConfig {
@@ -56,8 +96,9 @@ pub struct LayerNormConfig {
     /// Apply layer norm to LSTM cell outputs
     pub lstm_cell: bool,
     /// Apply layer norm before or after LSTM activation
-    /// "pre" = before, "post" = after (post is more common for LSTMs)
-    pub position: String,
+    /// "pre" = before (better gradient flow for deep networks)
+    /// "post" = after (standard for LSTMs)
+    pub position: LayerNormPosition,
 }
 
 impl Default for LayerNormConfig {
@@ -66,7 +107,7 @@ impl Default for LayerNormConfig {
             enabled: false,
             epsilon: 1e-5,
             lstm_cell: true,
-            position: "post".to_string(), // post-norm is standard for LSTMs
+            position: LayerNormPosition::Post, // post-norm is standard for LSTMs
         }
     }
 }
@@ -496,7 +537,7 @@ impl Default for ModelConfig {
                 enabled: false, // Disabled by default for backward compatibility
                 epsilon: 1e-5,
                 lstm_cell: true,
-                position: "post".to_string(),
+                position: LayerNormPosition::Post,
             },
             dropout: DropoutConfig {
                 enabled: true,
@@ -617,6 +658,16 @@ impl ModelConfig {
                     ));
                 }
             }
+        }
+
+        // Validate LayerNormConfig position
+        if self.layer_norm.enabled {
+            // Position is now a type-safe enum, so it's always valid
+            // Just log for debugging
+            log::debug!(
+                "LayerNorm enabled with position: {:?}",
+                self.layer_norm.position
+            );
         }
 
         Ok(())

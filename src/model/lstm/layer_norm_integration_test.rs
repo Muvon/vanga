@@ -2,7 +2,7 @@
 
 use crate::config::model::{
     AttentionConfig, DropoutConfig, DropoutRate, HiddenUnitsConfig, LSTMArchitecture,
-    LayerNormConfig, ModelConfig, SequenceLengthConfig,
+    LayerNormConfig, LayerNormPosition, ModelConfig, SequenceLengthConfig,
 };
 use crate::model::lstm::config::LSTMModel;
 
@@ -17,7 +17,7 @@ async fn test_layer_norm_config_propagation() {
             enabled: true,
             epsilon: 1e-5,
             lstm_cell: true,
-            position: "post".to_string(),
+            position: LayerNormPosition::Post,
         },
         dropout: DropoutConfig {
             enabled: true,
@@ -58,7 +58,11 @@ async fn test_layer_norm_config_propagation() {
     assert!(layer_norm.enabled, "LayerNorm should be enabled");
     assert_eq!(layer_norm.epsilon, 1e-5, "Epsilon should match config");
     assert!(layer_norm.lstm_cell, "lstm_cell should be true");
-    assert_eq!(layer_norm.position, "post", "Position should be 'post'");
+    assert_eq!(
+        layer_norm.position,
+        LayerNormPosition::Post,
+        "Position should be 'post'"
+    );
 
     // Verify helper methods work
     assert!(

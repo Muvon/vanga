@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod tests {
     use crate::model::lstm::LSTMModel;
-    use crate::config::model::{LayerNormConfig, ModelConfig};
+    use crate::config::model::{LayerNormConfig, LayerNormPosition, ModelConfig};
     use candle_core::{Device, Tensor, DType};
 
     #[test]
@@ -14,7 +14,7 @@ mod tests {
             enabled: true,
             epsilon: 1e-5,
             lstm_cell: true,
-            position: "post".to_string(),
+            position: LayerNormPosition::Post,
         };
         
         // Create a dummy model instance just to access the method
@@ -40,7 +40,7 @@ mod tests {
         let input = Tensor::new(data.as_slice(), &device)?.reshape((1, 3))?;
         
         // This should NOT panic or return NaNs
-        let output = model.apply_layer_norm(&input, &ln_config, 0)?;
+        let output = model.apply_layer_norm(&input, &ln_config, 0, LayerNormPosition::Post)?;
         
         println!("Input: {:?}", input.to_vec2::<f32>()?);
         println!("Output: {:?}", output.to_vec2::<f32>()?);
