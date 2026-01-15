@@ -589,18 +589,24 @@ impl LSTMModel {
             // 🔍 DIAGNOSTIC: Test initial model predictions (before any training)
             // This verifies that weight initialization produces uniform output distribution
             // Expected: [0.200, 0.200, 0.200, 0.200, 0.200] (baseline for 5-class)
-            if sequences.shape()[0] > 0 {
+            // CRITICAL: Use FULL validation set for accurate statistics across diverse market conditions
+            let (diag_sequences, diag_source) = if let Some(val_seq) = val_sequences {
+                if val_seq.shape()[0] > 0 {
+                    (val_seq, "validation")
+                } else {
+                    (sequences, "training")
+                }
+            } else {
+                (sequences, "training")
+            };
+
+            if diag_sequences.shape()[0] > 0 {
                 log::info!(
-                    "🔍 DIAGNOSTIC: Testing initial model predictions (before any training)..."
+                    "🔍 DIAGNOSTIC: Testing initial model predictions (before any training) using {} set ({} samples)...",
+                    diag_source,
+                    diag_sequences.shape()[0]
                 );
 
-                // Use first batch for diagnostic (or full sequences if smaller than batch size)
-                let diagnostic_batch_size = std::cmp::min(
-                    sequences.shape()[0],
-                    std::cmp::min(64, self.training_config.batch_size),
-                );
-
-                let diag_sequences = sequences.slice(ndarray::s![0..diagnostic_batch_size, .., ..]);
                 let diag_tensor =
                     self.convert_sequences_to_prediction_tensor(&diag_sequences.to_owned())?;
 
@@ -610,7 +616,8 @@ impl LSTMModel {
                 // Apply softmax to get probabilities
                 let initial_probs = candle_nn::ops::softmax(&initial_logits, 1)?;
 
-                // Calculate mean probabilities across all samples in batch
+                // Calculate mean probabilities across all samples
+                let diagnostic_batch_size = diag_sequences.shape()[0];
                 let probs_data: Vec<f32> = initial_probs.flatten_all()?.to_vec1::<f32>()?;
 
                 let num_classes = probs_data.len() / diagnostic_batch_size;

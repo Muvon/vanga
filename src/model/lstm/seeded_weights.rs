@@ -411,22 +411,29 @@ impl SeededTensorUtils {
                         && !var_name_str.contains("weight_hh"));
 
                 if is_output_layer {
-                    // Apply SMALL Xavier initialization for output layer
-                    // Using std=0.01 instead of standard Xavier to prevent large hidden state
-                    // activations from creating class bias (especially with structured data)
-                    let small_std = 0.01; // Much smaller than standard Xavier
+                    // Apply proper Xavier initialization for output layer
+                    // CRITICAL FIX: Previous std=0.01 was too small, causing hidden state collapse
+                    // With zero-initialized LSTM states and tiny weights, all samples produced
+                    // nearly identical outputs, leading to argmax bias (34% class 2, 9% class 0)
+                    // even though probabilities were uniform [0.200, 0.199, 0.201, 0.200, 0.201]
+                    //
+                    // Proper Xavier initialization creates sufficient weight diversity to prevent
+                    // this collapse, ensuring true ~20% per class predictions at initialization
+                    let fan_in = rows; // hidden_size (e.g., 25-55)
+                    let fan_out = cols; // num_classes (5)
+                    let xavier_std = (2.0 / (fan_in + fan_out) as f64).sqrt();
 
-                    // Generate small random weights
-                    let small_weights = Tensor::randn(0.0, small_std as f32, dims, device)?
+                    // Generate Xavier-initialized weights
+                    let xavier_weights = Tensor::randn(0.0, xavier_std as f32, dims, device)?
                         .to_dtype(var.dtype())?;
 
                     log::info!(
-                        "🎯 Applying SMALL initialization to output layer '{}': shape={:?}, std={:.4}",
-                        var_name_str, dims, small_std
+                        "🎯 Applying Xavier initialization to output layer '{}': shape={:?}, std={:.4} (fan_in={}, fan_out={})",
+                        var_name_str, dims, xavier_std, fan_in, fan_out
                     );
 
                     // Verify the weights before setting
-                    let sample: Vec<f32> = small_weights.flatten_all()?.to_vec1::<f32>()?;
+                    let sample: Vec<f32> = xavier_weights.flatten_all()?.to_vec1::<f32>()?;
                     let weight_mean: f32 = sample.iter().sum::<f32>() / sample.len() as f32;
                     let weight_std: f32 = {
                         let mean = weight_mean;
@@ -442,17 +449,18 @@ impl SeededTensorUtils {
                         sample.iter().fold(f32::MIN, |m, v| v.max(m))
                     );
 
-                    var.set(&small_weights)?;
+                    var.set(&xavier_weights)?;
                     initialized_count += 1;
 
                     log::info!(
-                        "✅ Output layer '{}' initialized with small random weights for balanced predictions",
+                        "✅ Output layer '{}' initialized with proper Xavier weights for balanced predictions",
                         var_name_str
                     );
                     continue;
                 }
 
                 // Identify weight types based on Candle's LSTM naming convention
+
                 // In Candle LSTM: weight_ih = input-to-hidden, weight_hh = hidden-to-hidden (recurrent)
                 let is_recurrent_weight = var_name_str.contains("weight_hh")
                     || var_name_str.contains("hh")
@@ -533,22 +541,23 @@ impl SeededTensorUtils {
                     var_name_str.contains("output.bias") || var_name_str.ends_with("output.bias");
 
                 if is_output_bias && bias_size == 5 {
-                    // Uniform small bias for all classes - no preference at initialization
-                    // This ensures random weight initialization dominates initial predictions
-                    let uniform_bias = vec![0.05f32; 5]; // Small positive for all classes
+                    // Add small random noise to bias to break symmetry
+                    // CRITICAL: With zero-initialized LSTM states, all samples start with identical
+                    // hidden states, leading to identical outputs. Small random bias breaks this symmetry.
                     let bias_tensor =
-                        Tensor::new(uniform_bias.clone(), device)?.to_dtype(var.dtype())?;
+                        Tensor::randn(0.0, 0.02, &[5], device)?.to_dtype(var.dtype())?;
                     var.set(&bias_tensor)?;
                     bias_count += 1;
 
-                    log::info!(
-                        "🎯 Output bias '{}' initialized with UNIFORM pattern: {:?} (Fix: anti-middle pattern caused extreme bias!)",
-                        var_name_str,
-                        uniform_bias
-                    );
-                    log::info!(
-                        "   This ensures ~20% per class predictions at epoch 0 with random weights"
-                    );
+                    // Log the actual bias values
+                    if let Ok(bias_vals) = bias_tensor.to_vec1::<f32>() {
+                        log::info!(
+                            "🎯 Output bias '{}' initialized with RANDOM pattern: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}]",
+                            var_name_str,
+                            bias_vals[0], bias_vals[1], bias_vals[2], bias_vals[3], bias_vals[4]
+                        );
+                    }
+                    log::info!("   Random bias breaks symmetry from zero-initialized LSTM states");
                     continue;
                 }
 
