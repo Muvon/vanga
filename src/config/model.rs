@@ -53,8 +53,8 @@ impl Default for TFTQuantileOutputConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LayerNormPosition {
-    #[default]
     Pre,
+    #[default]
     Post,
 }
 
