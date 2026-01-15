@@ -361,6 +361,12 @@ mod tests {
                         clustering_window: 50,
                         reversion_window: 50,
                     },
+                    consolidation: crate::config::features::ConsolidationFeaturesConfig {
+                        enabled: false,
+                        choppiness_periods: vec![],
+                        efficiency_periods: vec![],
+                        dm_balance_periods: vec![],
+                    },
                 },
             },
             cross_asset: crate::config::features::CrossAssetConfig {

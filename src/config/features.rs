@@ -117,6 +117,20 @@ pub struct TrendIndicatorsConfig {
     pub aroon: bool,
     /// Advanced mathematical indicators
     pub advanced: AdvancedIndicatorsConfig,
+    /// Consolidation/neutral-detection features for Class 2 learning
+    pub consolidation: ConsolidationFeaturesConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidationFeaturesConfig {
+    /// Enable consolidation features (critical for Class 2 neutral detection)
+    pub enabled: bool,
+    /// Choppiness Index periods (high values = consolidation)
+    pub choppiness_periods: Vec<u32>,
+    /// Price Efficiency Ratio periods (low values = choppy/sideways)
+    pub efficiency_periods: Vec<u32>,
+    /// Directional Movement Balance periods (low values = balanced/sideways)
+    pub dm_balance_periods: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +428,7 @@ impl Default for TechnicalIndicatorsConfig {
                 parabolic_sar: true,
                 aroon: true,
                 advanced: AdvancedIndicatorsConfig::default(),
+                consolidation: ConsolidationFeaturesConfig::default(),
             },
         }
     }
@@ -551,6 +566,17 @@ impl Default for AdvancedIndicatorsConfig {
             regime_window: 50,
             clustering_window: 50,
             reversion_window: 50,
+        }
+    }
+}
+
+impl Default for ConsolidationFeaturesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            choppiness_periods: vec![14, 20],
+            efficiency_periods: vec![10, 20],
+            dm_balance_periods: vec![14, 20],
         }
     }
 }

@@ -1,9 +1,10 @@
-use super::*;
+use crate::config::features::TechnicalIndicatorsConfig;
+use crate::features::technical::generate_technical_indicators;
 use polars::prelude::*;
 
 #[tokio::test]
 async fn test_generate_technical_indicators_basic() {
-    let mut df = DataFrame::new(
+    let df = DataFrame::new(
         vec![
             Series::new("open".into(), &[42000.0, 42100.0, 42200.0]),
             Series::new("high".into(), &[42500.0, 42600.0, 42700.0]),
@@ -16,7 +17,10 @@ async fn test_generate_technical_indicators_basic() {
         .collect(),
     )
     .unwrap();
-    let df2 = generate_technical_indicators(df.clone()).await.unwrap();
+    let config = TechnicalIndicatorsConfig::default();
+    let df2 = generate_technical_indicators(df.clone(), &config)
+        .await
+        .unwrap();
     assert!(df2.get_column_names().len() > df.get_column_names().len());
     assert!(
         df2.column("sma_5").is_ok() || df2.get_column_names().iter().any(|n| n.contains("sma"))

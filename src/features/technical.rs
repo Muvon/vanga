@@ -7,12 +7,12 @@ use rayon::prelude::*;
 
 /// OHLCV data structure to reduce function parameter count
 #[derive(Clone)]
-struct OhlcvData<'a> {
-    open: &'a [f64],
-    high: &'a [f64],
-    low: &'a [f64],
-    close: &'a [f64],
-    volume: &'a [f64],
+pub struct OhlcvData<'a> {
+    pub open: &'a [f64],
+    pub high: &'a [f64],
+    pub low: &'a [f64],
+    pub close: &'a [f64],
+    pub volume: &'a [f64],
 }
 
 /// Generate comprehensive technical indicators for cryptocurrency data - PARALLELIZED
@@ -256,6 +256,11 @@ pub async fn generate_technical_indicators(
             timeframe_multiplier,
         },
     )?;
+
+    // Consolidation/Neutral-detection features (CRITICAL for Class 2 learning)
+    if config.trend.consolidation.enabled {
+        df = add_consolidation_features(df, &ohlcv, config)?;
+    }
 
     log::info!("Generated {} technical indicators", df.width() - 6); // Subtract OHLCV + timestamp
     Ok(df)
@@ -1709,4 +1714,267 @@ fn calculate_mean_reversion_strength(prices: &[f64], window: usize) -> Vec<f64> 
     }
 
     reversion_values
+}
+
+/// Add consolidation/neutral-detection features to help model learn Class 2 (Neutral) patterns
+///
+/// These features specifically detect sideways/consolidation markets where price is NOT trending.
+/// Critical for improving Class 2 (Neutral) classification accuracy.
+///
+/// NEW Features added (non-duplicates):
+/// 1. Range Tightness: (high - low) / close - measures price compression
+/// 2. Bollinger Band Squeeze: (upper_bb - lower_bb) / close - detects volatility contraction
+/// 3. Choppiness Index: High values (>61.8) indicate consolidation
+/// 4. Price Efficiency Ratio: Measures how efficiently price moves (low = choppy)
+/// 5. Directional Movement Balance: |+DI - -DI| / (+DI + -DI) - low = balanced/sideways
+///
+/// NOTE: ADX already exists in trend indicators, so we don't duplicate it here
+pub fn add_consolidation_features(
+    mut df: DataFrame,
+    ohlcv: &OhlcvData,
+    config: &TechnicalIndicatorsConfig,
+) -> Result<DataFrame> {
+    log::info!("🎯 Adding consolidation/neutral-detection features for Class 2 learning...");
+
+    let close = ohlcv.close;
+    let high = ohlcv.high;
+    let low = ohlcv.low;
+
+    // 1. Range Tightness: (high - low) / close
+    // Low values indicate tight consolidation
+    let range_tightness = calculate_range_tightness(high, low, close);
+    df = df
+        .with_column(Series::new("range_tightness".into(), range_tightness).into_column())
+        .map_err(|e| VangaError::FeatureError(format!("Failed to add range_tightness: {}", e)))?
+        .clone();
+
+    // 2. Bollinger Band Squeeze: (upper_bb - lower_bb) / close
+    // Low values indicate volatility contraction (consolidation)
+    if config.volatility.bollinger_bands.enabled {
+        let period = config.volatility.bollinger_bands.period;
+        let std_dev = config.volatility.bollinger_bands.std_dev;
+        let bb_squeeze = calculate_bollinger_squeeze(close, period, std_dev);
+        df = df
+            .with_column(
+                Series::new(format!("bb_squeeze_{}", period).into(), bb_squeeze).into_column(),
+            )
+            .map_err(|e| VangaError::FeatureError(format!("Failed to add bb_squeeze: {}", e)))?
+            .clone();
+    }
+
+    // 3. Choppiness Index
+    // High values (>61.8) indicate consolidation, low values (<38.2) indicate trending
+    for &period in &config.trend.consolidation.choppiness_periods {
+        let choppiness = calculate_choppiness_index(high, low, close, period as usize);
+        df = df
+            .with_column(
+                Series::new(format!("choppiness_{}", period).into(), choppiness).into_column(),
+            )
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add choppiness_{}: {}", period, e))
+            })?
+            .clone();
+    }
+
+    // 4. Price Efficiency Ratio
+    // Low values indicate choppy/sideways movement
+    for &period in &config.trend.consolidation.efficiency_periods {
+        let efficiency = calculate_price_efficiency_ratio(close, period as usize);
+        df = df
+            .with_column(
+                Series::new(format!("price_efficiency_{}", period).into(), efficiency)
+                    .into_column(),
+            )
+            .map_err(|e| {
+                VangaError::FeatureError(format!(
+                    "Failed to add price_efficiency_{}: {}",
+                    period, e
+                ))
+            })?
+            .clone();
+    }
+
+    // 5. Directional Movement Balance
+    // Low values indicate balanced directional movement (sideways)
+    for &period in &config.trend.consolidation.dm_balance_periods {
+        let dm_balance = calculate_directional_movement_balance(high, low, close, period as usize);
+        df = df
+            .with_column(
+                Series::new(format!("dm_balance_{}", period).into(), dm_balance).into_column(),
+            )
+            .map_err(|e| {
+                VangaError::FeatureError(format!("Failed to add dm_balance_{}: {}", period, e))
+            })?
+            .clone();
+    }
+
+    log::info!("✅ Added consolidation features: range_tightness, bb_squeeze, choppiness, price_efficiency, dm_balance");
+    Ok(df)
+}
+
+/// Calculate Range Tightness: (high - low) / close
+/// Low values indicate tight consolidation (neutral market)
+pub fn calculate_range_tightness(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+    high.iter()
+        .zip(low.iter())
+        .zip(close.iter())
+        .map(
+            |((&h, &l), &c)| {
+                if c > 0.0 {
+                    (h - l) / c
+                } else {
+                    f64::NAN
+                }
+            },
+        )
+        .collect()
+}
+
+/// Calculate Bollinger Band Squeeze: (upper_bb - lower_bb) / close
+/// Low values indicate volatility contraction (consolidation phase)
+pub fn calculate_bollinger_squeeze(close: &[f64], period: u32, std_dev: f64) -> Vec<f64> {
+    let period_usize = period as usize;
+    let mut result = vec![f64::NAN; close.len()];
+
+    if close.len() < period_usize {
+        return result;
+    }
+
+    for i in (period_usize - 1)..close.len() {
+        let window = &close[(i + 1 - period_usize)..=i];
+        let mean = window.iter().sum::<f64>() / period_usize as f64;
+
+        let variance =
+            window.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / period_usize as f64;
+        let std = variance.sqrt();
+
+        let upper_bb = mean + (std_dev * std);
+        let lower_bb = mean - (std_dev * std);
+
+        if close[i] > 0.0 {
+            result[i] = (upper_bb - lower_bb) / close[i];
+        }
+    }
+
+    result
+}
+
+/// Calculate Choppiness Index
+/// High values (>61.8) indicate consolidation/sideways
+/// Low values (<38.2) indicate trending market
+pub fn calculate_choppiness_index(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> Vec<f64> {
+    let mut result = vec![f64::NAN; close.len()];
+
+    if close.len() < period + 1 {
+        return result;
+    }
+
+    for i in period..close.len() {
+        let window_high = &high[(i + 1 - period)..=i];
+        let window_low = &low[(i + 1 - period)..=i];
+
+        let highest_high = window_high.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let lowest_low = window_low.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+
+        // Calculate sum of True Ranges
+        let mut tr_sum = 0.0;
+        for j in (i + 1 - period + 1)..=i {
+            let h_l = high[j] - low[j];
+            let h_c = (high[j] - close[j - 1]).abs();
+            let l_c = (low[j] - close[j - 1]).abs();
+            tr_sum += h_l.max(h_c).max(l_c);
+        }
+
+        let range = highest_high - lowest_low;
+        if range > 0.0 && tr_sum > 0.0 {
+            result[i] = 100.0 * (tr_sum / range).ln() / (period as f64).ln();
+        }
+    }
+
+    result
+}
+
+/// Calculate Price Efficiency Ratio
+/// Measures how efficiently price moves from start to end
+/// Low values indicate choppy/sideways movement
+pub fn calculate_price_efficiency_ratio(close: &[f64], period: usize) -> Vec<f64> {
+    let mut result = vec![f64::NAN; close.len()];
+
+    if close.len() < period {
+        return result;
+    }
+
+    for i in (period - 1)..close.len() {
+        let start_price = close[i + 1 - period];
+        let end_price = close[i];
+
+        // Net price change (direction)
+        let net_change = (end_price - start_price).abs();
+
+        // Sum of absolute price changes (volatility)
+        let mut total_change = 0.0;
+        for j in (i + 1 - period + 1)..=i {
+            total_change += (close[j] - close[j - 1]).abs();
+        }
+
+        if total_change > 0.0 {
+            result[i] = net_change / total_change;
+        } else {
+            result[i] = 0.0; // No movement = no efficiency
+        }
+    }
+
+    result
+}
+
+/// Calculate Directional Movement Balance
+/// Measures balance between +DI and -DI
+/// Low values indicate balanced directional movement (sideways)
+pub fn calculate_directional_movement_balance(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> Vec<f64> {
+    let mut result = vec![f64::NAN; close.len()];
+
+    if close.len() < period + 1 {
+        return result;
+    }
+
+    // Calculate +DM and -DM
+    let mut plus_dm = vec![0.0; close.len()];
+    let mut minus_dm = vec![0.0; close.len()];
+    for i in 1..close.len() {
+        let up_move = high[i] - high[i - 1];
+        let down_move = low[i - 1] - low[i];
+
+        if up_move > down_move && up_move > 0.0 {
+            plus_dm[i] = up_move;
+        }
+        if down_move > up_move && down_move > 0.0 {
+            minus_dm[i] = down_move;
+        }
+    }
+
+    // Calculate smoothed +DM and -DM
+    for i in period..close.len() {
+        let plus_sum = plus_dm[(i + 1 - period)..=i].iter().sum::<f64>();
+        let minus_sum = minus_dm[(i + 1 - period)..=i].iter().sum::<f64>();
+
+        let total = plus_sum + minus_sum;
+        if total > 0.0 {
+            // Balance: 0 = perfectly balanced (sideways), 1 = completely one-directional
+            result[i] = (plus_sum - minus_sum).abs() / total;
+        } else {
+            result[i] = 0.0; // No movement = balanced
+        }
+    }
+
+    result
 }

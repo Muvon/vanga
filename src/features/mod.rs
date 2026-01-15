@@ -7,6 +7,9 @@ pub mod technical;
 pub mod validation;
 pub mod volatility;
 
+// Test modules
+#[cfg(test)]
+mod consolidation_test;
 #[cfg(test)]
 mod feature_validation_test;
 #[cfg(test)]
@@ -15,6 +18,8 @@ mod price_inefficiency_test;
 mod ta_tests;
 #[cfg(test)]
 mod technical_math_test;
+#[cfg(test)]
+mod technical_test;
 
 use crate::config::FeatureConfig;
 use crate::utils::error::Result;
