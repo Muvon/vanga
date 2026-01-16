@@ -1,8 +1,7 @@
-// use crate::data::balance::SequenceWithTargets; // Unused import
-use crate::data::diversity::*;
+// Tests for diversity module
+use crate::data::diversity::{DiversityConfig, DiversitySelector};
 use crate::utils::error::Result;
 use ndarray::Array2;
-// use std::collections::HashMap; // Unused import
 
 /// Test cosine distance calculation for normalized sequences
 #[test]
@@ -32,8 +31,6 @@ fn test_cosine_distance_normalized_sequences() -> Result<()> {
     // Distance should be in [0, 1] range
     assert!((0.0..=1.0).contains(&distance));
 
-    println!("✅ Cosine distance test passed: {:.4}", distance);
-
     Ok(())
 }
 
@@ -48,7 +45,34 @@ fn test_cosine_distance_edge_cases() -> Result<()> {
     let distance = selector.calculate_cosine_distance(&zero_seq, &normal_seq)?;
     assert_eq!(distance, 1.0);
 
-    println!("✅ Edge cases test passed: {:.4}", distance);
-
     Ok(())
+}
+
+#[test]
+fn test_diversity_config_default() {
+    let config = DiversityConfig::default();
+    assert!(
+        (config.feature_weight
+            + config.temporal_weight
+            + config.market_weight
+            + config.target_weight
+            - 1.0)
+            .abs()
+            < 0.001
+    );
+}
+
+#[test]
+fn test_statistical_features() {
+    let selector = DiversitySelector::new(DiversityConfig::default());
+    let data = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 2.0, 3.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0, 4.0, 5.0, 6.0, 5.0, 6.0, 7.0,
+        ],
+    )
+    .unwrap();
+
+    let stats = selector.calculate_sequence_statistics(&data).unwrap();
+    assert!(!stats.is_empty());
 }

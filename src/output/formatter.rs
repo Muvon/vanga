@@ -1154,7 +1154,9 @@ impl OutputFormatter {
         prediction.training_horizon = training_horizon.unwrap_or("unknown").to_string();
 
         // Enhanced reconstruction using calibrated parameters if available
-        if self.sequence_ohlcv.is_some() && self.calibrated_parameters.is_some() {
+        if let (Some(ohlcv), Some(calibrated_params)) =
+            (&self.sequence_ohlcv, &self.calibrated_parameters)
+        {
             // Prepare probabilities array for reconstruction
             let probabilities = vec![
                 sentiment_output.very_bearish_probability,
@@ -1166,10 +1168,7 @@ impl OutputFormatter {
 
             // Call reconstruction function with calibrated parameters
             let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
-            let horizon_params = self
-                .calibrated_parameters
-                .as_ref()
-                .unwrap()
+            let horizon_params = calibrated_params
                 .get_sentiment(horizon_str)
                 .ok_or_else(|| {
                     VangaError::ConfigError(format!(
@@ -1178,11 +1177,7 @@ impl OutputFormatter {
                     ))
                 })?;
 
-            match reconstruct_sentiment(
-                &probabilities,
-                self.sequence_ohlcv.as_ref().unwrap(),
-                horizon_params,
-            ) {
+            match reconstruct_sentiment(&probabilities, ohlcv, horizon_params) {
                 Ok(reconstruction) => {
                     // Use reconstruction results to enhance prediction
                     // The reconstruction provides richer information than basic probabilities
@@ -1247,17 +1242,17 @@ impl OutputFormatter {
 
                 // Call reconstruction function with calibrated parameters (NEW: percentile-based)
                 let horizon_str = training_horizon.unwrap_or("1h"); // Default to 1h if not provided
-                let horizon_params = self
-                    .calibrated_parameters
-                    .as_ref()
-                    .unwrap()
-                    .get_volume(horizon_str)
-                    .ok_or_else(|| {
-                        VangaError::ConfigError(format!(
-                            "No calibrated volume parameters found for horizon: {}",
-                            horizon_str
-                        ))
-                    })?;
+                let horizon_params = if let Some(params) = &self.calibrated_parameters {
+                    params.get_volume(horizon_str)
+                } else {
+                    None
+                }
+                .ok_or_else(|| {
+                    VangaError::ConfigError(format!(
+                        "No calibrated volume parameters found for horizon: {}",
+                        horizon_str
+                    ))
+                })?;
 
                 match reconstruct_volume(
                     &probabilities,

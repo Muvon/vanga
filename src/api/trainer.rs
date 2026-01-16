@@ -566,7 +566,8 @@ impl ModelTrainer {
         let target_windows = if target_count > 0 && self.config.data.target_samples.truncate {
             let mut truncated_windows = target_windows;
 
-            for ((target_type, horizon), windows) in truncated_windows.windows_by_target.iter_mut() {
+            for ((target_type, horizon), windows) in truncated_windows.windows_by_target.iter_mut()
+            {
                 for window in windows.iter_mut() {
                     let current_total = window.train_samples + window.val_samples;
 
@@ -595,58 +596,63 @@ impl ModelTrainer {
 
                         // CRITICAL: Use BALANCED sampling to preserve perfect class distribution
                         // Must select train and val separately to maintain balance in each split
-                        
+
                         // Combine targets from train + val to get class labels for THIS specific target+horizon
                         let combined_train_targets = window.train_data.targets.clone();
                         let combined_val_targets = window.val_data.targets.clone();
-                        
+
                         // Get target classes for the current target/horizon being trained
                         let mut target_classes: Vec<i32> = combined_train_targets
                             .get_targets(horizon, *target_type)
                             .cloned()
                             .unwrap_or_default();
-                        
-                        if let Some(val_classes) = combined_val_targets.get_targets(horizon, *target_type) {
+
+                        if let Some(val_classes) =
+                            combined_val_targets.get_targets(horizon, *target_type)
+                        {
                             target_classes.extend(val_classes);
                         }
-                        
+
                         // Group indices by class
-                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
+                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
+                            std::collections::HashMap::new();
                         for (idx, &class) in target_classes.iter().enumerate() {
                             class_indices.entry(class).or_default().push(idx);
                         }
-                        
+
                         // Calculate train/val split
                         let val_ratio = self.config.training.validation_split;
                         let val_samples = (samples_to_keep as f64 * val_ratio).round() as usize;
                         let train_samples = samples_to_keep - val_samples;
-                        
+
                         // Calculate samples per class for each split (must be exact for perfect balance)
                         let train_per_class = train_samples / 5;
                         let val_per_class = val_samples / 5;
-                        
+
                         // Select balanced indices for train and val separately
                         let mut train_indices: Vec<usize> = Vec::with_capacity(train_samples);
                         let mut val_indices: Vec<usize> = Vec::with_capacity(val_samples);
-                        
+
                         for class in 0..5 {
                             if let Some(indices) = class_indices.get(&class) {
                                 // Use stride-based sampling WITHIN each class to maintain diversity
                                 let total_needed = train_per_class + val_per_class;
                                 let class_stride = indices.len() as f64 / total_needed as f64;
-                                
-                                let mut class_selected: Vec<usize> = Vec::with_capacity(total_needed);
+
+                                let mut class_selected: Vec<usize> =
+                                    Vec::with_capacity(total_needed);
                                 for i in 0..total_needed {
-                                    let idx_in_class = ((i as f64 * class_stride).round() as usize).min(indices.len() - 1);
+                                    let idx_in_class = ((i as f64 * class_stride).round() as usize)
+                                        .min(indices.len() - 1);
                                     class_selected.push(indices[idx_in_class]);
                                 }
-                                
+
                                 // Split this class's samples into train and val
                                 train_indices.extend(&class_selected[..train_per_class]);
                                 val_indices.extend(&class_selected[train_per_class..]);
                             }
                         }
-                        
+
                         // Sort indices to maintain temporal order
                         train_indices.sort_unstable();
                         train_indices.dedup();

@@ -382,43 +382,45 @@ impl LSTMModel {
         };
 
         // Apply attention if enabled
-        let final_output = if self.use_attention && self.attention_module.is_some() {
-            let attention = self.attention_module.as_ref().unwrap();
+        let final_output = if self.use_attention {
+            if let Some(attention) = &self.attention_module {
+                // Ensure LSTM output is contiguous before passing to attention
+                let contiguous_lstm_output = lstm_output.contiguous()?;
+                let (attended_output, _attention_weights) =
+                    attention.forward(&contiguous_lstm_output, training)?;
 
-            // Ensure LSTM output is contiguous before passing to attention
-            let contiguous_lstm_output = lstm_output.contiguous()?;
-            let (attended_output, _attention_weights) =
-                attention.forward(&contiguous_lstm_output, training)?;
+                let attention_dropout_rate = attention.get_config().dropout_rate;
+                log::debug!(
+                    "🎯 Applied attention with dropout rate: {:.3}, training: {}",
+                    attention_dropout_rate,
+                    training
+                );
 
-            let attention_dropout_rate = attention.get_config().dropout_rate;
-            log::debug!(
-                "🎯 Applied attention with dropout rate: {:.3}, training: {}",
-                attention_dropout_rate,
-                training
-            );
+                // For sequence-to-one prediction, take the last timestep from attended output
+                let seq_len = attended_output.dim(1).map_err(|e| {
+                    VangaError::ModelError(format!("Failed to get attended sequence length: {}", e))
+                })?;
 
-            // For sequence-to-one prediction, take the last timestep from attended output
-            let seq_len = attended_output.dim(1).map_err(|e| {
-                VangaError::ModelError(format!("Failed to get attended sequence length: {}", e))
-            })?;
-
-            attended_output
-                .narrow(1, seq_len - 1, 1)
-                .map_err(|e| {
-                    VangaError::ModelError(format!(
-                        "Failed to extract last timestep from attended output: {}",
-                        e
-                    ))
-                })?
-                .contiguous()?
-                .squeeze(1)
-                .map_err(|e| {
-                    VangaError::ModelError(format!(
-                        "Failed to squeeze attended last timestep: {}",
-                        e
-                    ))
-                })?
-                .contiguous()?
+                attended_output
+                    .narrow(1, seq_len - 1, 1)
+                    .map_err(|e| {
+                        VangaError::ModelError(format!(
+                            "Failed to extract last timestep from attended output: {}",
+                            e
+                        ))
+                    })?
+                    .contiguous()?
+                    .squeeze(1)
+                    .map_err(|e| {
+                        VangaError::ModelError(format!(
+                            "Failed to squeeze attended last timestep: {}",
+                            e
+                        ))
+                    })?
+                    .contiguous()?
+            } else {
+                lstm_output
+            }
         } else {
             // Standard LSTM: For sequence-to-one prediction, we need the last timestep
             // LSTM output should be [batch_size, seq_len, hidden_size] or [batch_size, seq_len, 2*hidden_size] for bidirectional

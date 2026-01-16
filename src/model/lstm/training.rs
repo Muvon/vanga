@@ -1697,94 +1697,92 @@ impl LSTMModel {
                 }
 
                 // Progressive bias correction recalibration during training
-                if epoch > 0 && self.bias_corrector.is_some() {
-                    let recalib_freq = self
-                        .bias_corrector
-                        .as_ref()
-                        .unwrap()
-                        .config
-                        .recalibration_frequency;
-                    if recalib_freq > 0
-                        && epoch % recalib_freq == 0
-                        && !all_val_predictions.is_empty()
-                    {
-                        // Recalibrate bias correction with recent validation data
-                        if let Some(ref mut corrector) = self.bias_corrector {
-                            let total_val_predictions = ndarray::concatenate(
-                                ndarray::Axis(0),
-                                &all_val_predictions
-                                    .iter()
-                                    .map(|arr| arr.view())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|e| {
-                                VangaError::ModelError(format!(
-                                    "Failed to concatenate validation predictions for recalibration: {}",
-                                    e
-                                ))
-                            })?;
+                if epoch > 0 {
+                    if let Some(corrector) = self.bias_corrector.as_ref() {
+                        let recalib_freq = corrector.config.recalibration_frequency;
+                        if recalib_freq > 0
+                            && epoch % recalib_freq == 0
+                            && !all_val_predictions.is_empty()
+                        {
+                            // Recalibrate bias correction with recent validation data
+                            if let Some(ref mut corrector) = self.bias_corrector {
+                                let total_val_predictions = ndarray::concatenate(
+                                    ndarray::Axis(0),
+                                    &all_val_predictions
+                                        .iter()
+                                        .map(|arr| arr.view())
+                                        .collect::<Vec<_>>(),
+                                )
+                                .map_err(|e| {
+                                    VangaError::ModelError(format!(
+                                        "Failed to concatenate validation predictions for recalibration: {}",
+                                        e
+                                    ))
+                                })?;
 
-                            let total_val_targets = ndarray::concatenate(
-                                ndarray::Axis(0),
-                                &all_val_targets
-                                    .iter()
-                                    .map(|arr| arr.view())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|e| {
-                                VangaError::ModelError(format!(
-                                    "Failed to concatenate validation targets for recalibration: {}",
-                                    e
-                                ))
-                            })?;
+                                let total_val_targets = ndarray::concatenate(
+                                    ndarray::Axis(0),
+                                    &all_val_targets
+                                        .iter()
+                                        .map(|arr| arr.view())
+                                        .collect::<Vec<_>>(),
+                                )
+                                .map_err(|e| {
+                                    VangaError::ModelError(format!(
+                                        "Failed to concatenate validation targets for recalibration: {}",
+                                        e
+                                    ))
+                                })?;
 
-                            // Ensure proper shape for bias correction
-                            if total_val_predictions.shape()[1] == 5 {
-                                let val_targets_for_bias = if total_val_targets.shape()[1] == 1 {
-                                    // Convert class indices to one-hot
-                                    let num_samples = total_val_targets.shape()[0];
-                                    let mut one_hot =
-                                        ndarray::Array2::<f64>::zeros((num_samples, 5));
-                                    for (i, class_idx) in total_val_targets.iter().enumerate() {
-                                        let class_index = (*class_idx as usize).min(4);
-                                        one_hot[[i, class_index]] = 1.0;
-                                    }
-                                    one_hot
-                                } else {
-                                    total_val_targets.clone()
-                                };
+                                // Ensure proper shape for bias correction
+                                if total_val_predictions.shape()[1] == 5 {
+                                    let val_targets_for_bias = if total_val_targets.shape()[1] == 1
+                                    {
+                                        // Convert class indices to one-hot
+                                        let num_samples = total_val_targets.shape()[0];
+                                        let mut one_hot =
+                                            ndarray::Array2::<f64>::zeros((num_samples, 5));
+                                        for (i, class_idx) in total_val_targets.iter().enumerate() {
+                                            let class_index = (*class_idx as usize).min(4);
+                                            one_hot[[i, class_index]] = 1.0;
+                                        }
+                                        one_hot
+                                    } else {
+                                        total_val_targets.clone()
+                                    };
 
-                                // Recalibrate
-                                corrector.calibrate_from_validation(
-                                    &total_val_predictions,
-                                    &val_targets_for_bias,
-                                )?;
+                                    // Recalibrate
+                                    corrector.calibrate_from_validation(
+                                        &total_val_predictions,
+                                        &val_targets_for_bias,
+                                    )?;
 
-                                if corrector.is_calibrated {
-                                    log::info!(
-                                        "🔄 Bias correction recalibrated at epoch {} with factors: {:?}",
-                                        epoch + 1, corrector.class_bias_factors
-                                    );
-
-                                    // Calculate and log class distribution improvement
-                                    if let Some(stats) = &corrector.validation_stats {
-                                        let pred_variance: f64 = stats
-                                            .class_frequencies_predicted
-                                            .iter()
-                                            .map(|&f| (f - 0.2).powi(2))
-                                            .sum::<f64>()
-                                            / 5.0;
-                                        let actual_variance: f64 = stats
-                                            .class_frequencies_actual
-                                            .iter()
-                                            .map(|&f| (f - 0.2).powi(2))
-                                            .sum::<f64>()
-                                            / 5.0;
-
+                                    if corrector.is_calibrated {
                                         log::info!(
-                                            "📊 Class distribution variance - Predicted: {:.6}, Actual: {:.6}",
-                                            pred_variance, actual_variance
+                                            "🔄 Bias correction recalibrated at epoch {} with factors: {:?}",
+                                            epoch + 1, corrector.class_bias_factors
                                         );
+
+                                        // Calculate and log class distribution improvement
+                                        if let Some(stats) = &corrector.validation_stats {
+                                            let pred_variance: f64 = stats
+                                                .class_frequencies_predicted
+                                                .iter()
+                                                .map(|&f| (f - 0.2).powi(2))
+                                                .sum::<f64>()
+                                                / 5.0;
+                                            let actual_variance: f64 = stats
+                                                .class_frequencies_actual
+                                                .iter()
+                                                .map(|&f| (f - 0.2).powi(2))
+                                                .sum::<f64>()
+                                                / 5.0;
+
+                                            log::info!(
+                                                "📊 Class distribution variance - Predicted: {:.6}, Actual: {:.6}",
+                                                pred_variance, actual_variance
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -3699,10 +3697,8 @@ impl LSTMModel {
             if predicted_frequencies[class_idx] > 0.001 {
                 let raw_factor = actual_frequencies[class_idx] / predicted_frequencies[class_idx];
                 // Apply smoothing if we already have factors
-                let smoothed_factor = if self.bias_correction_factors.is_some() {
-                    let existing_factor = self.bias_correction_factors.unwrap()[class_idx];
-                    existing_factor * (1.0 - self.bias_correction_config.smoothing_factor)
-                        + raw_factor * self.bias_correction_config.smoothing_factor
+                let smoothed_factor = if let Some(existing_factor) = self.bias_correction_factors {
+                    existing_factor[class_idx]
                 } else {
                     raw_factor
                 };

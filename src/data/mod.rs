@@ -1,26 +1,26 @@
 pub mod augmentation;
 #[cfg(test)]
-mod augmentation_test;
+pub mod augmentation_test;
 pub mod balance;
 #[cfg(test)]
-mod balance_augmentation_test;
+pub mod balance_augmentation_test;
 #[cfg(test)]
-mod balance_critical_test;
+pub mod balance_critical_test;
 #[cfg(test)]
-mod balance_split_test;
+pub mod balance_split_test;
 #[cfg(test)]
-mod balance_test;
+pub mod balance_test;
 #[cfg(test)]
-mod debug_sampling_test;
-pub mod diversity; // NEW: Advanced diversity-based selection
+pub mod debug_sampling_test;
+pub mod diversity;
 #[cfg(test)]
-mod diversity_test; // Cosine distance diversity tests
+pub mod diversity_test; // Cosine distance diversity tests
 pub mod loader;
 pub mod preprocessor;
 pub mod schema;
 pub mod sequence;
 #[cfg(test)]
-mod sequence_test;
+pub mod sequence_test;
 pub mod structures;
 pub mod target_converter;
 

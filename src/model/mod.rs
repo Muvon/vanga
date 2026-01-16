@@ -1,11 +1,15 @@
 pub mod attention;
 pub mod attention_loss;
+#[cfg(test)]
+pub mod attention_loss_test;
 pub mod attention_moh;
 #[cfg(test)]
 pub mod attention_moh_test;
 pub mod attention_moh_wrapper;
-pub mod attention_optimizer;
-pub mod attention_viz;
+#[cfg(test)]
+pub mod attention_moh_wrapper_test;
+#[cfg(test)]
+pub mod attention_test;
 pub mod bias_correction;
 #[cfg(test)]
 pub mod bias_correction_integration_test;
@@ -28,10 +32,6 @@ pub use attention_moh::MixtureOfHeadAttention;
 pub use attention_moh_wrapper::{
     EnhancedAttentionFactory, MoHAttentionWrapper, MoHMetrics, MoHTrainingLoss,
 };
-pub use attention_optimizer::{
-    OptimizedAttention, OptimizedAttentionConfig, OptimizedAttentionFactory,
-};
-pub use attention_viz::{AttentionAnalysis, AttentionVisualizationConfig, AttentionVisualizer};
 pub use bias_correction::{BiasCorrection, LinearBiasCorrector};
 pub use calibration::{
     AdaptiveLabelSmoothing, AdaptiveMixup, AdaptiveTemperatureScaling, EnsembleCalibrator,
