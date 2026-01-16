@@ -143,12 +143,13 @@ fn evaluate_volume_params(
                     sequence_data.iter().map(|row| row.volume).collect();
                 let horizon_volumes: Vec<f64> = horizon_data.iter().map(|row| row.volume).collect();
 
-                // CRITICAL: Use PERCENTILE-BASED classification (same as target generation)
+                // CRITICAL: Use PERCENTILE-BASED classification with smoothing (same as target generation)
                 match classify_volume_percentile_based(
                     &sequence_volumes,
                     &horizon_volumes,
                     params.bandwidth,
                     params.multiplier,
+                    params.smoothing,
                     params.percentile_low,
                     params.percentile_high,
                 ) {
@@ -182,15 +183,17 @@ fn evaluate_volume_params(
 /// This function MUST match classify_volume_regime_with_strength() in volume.rs
 /// to ensure calibration optimizes the correct classification algorithm.
 ///
-/// **CRITICAL**: Uses logarithmic ratio approach for symmetric classification.
+/// **CRITICAL**: Uses smoothed volume with logarithmic ratio approach for symmetric classification.
 fn classify_volume_percentile_based(
     sequence_volumes: &[f64],
     horizon_volumes: &[f64],
     bandwidth_size: f64,
     extreme_multiplier: f64,
+    smoothing: usize,
     percentile_low: f64,
     percentile_high: f64,
 ) -> Result<i32> {
+    use crate::targets::volume::calculate_smoothed_volume;
     use crate::utils::error::VangaError;
 
     if sequence_volumes.is_empty() || horizon_volumes.is_empty() {
@@ -199,36 +202,43 @@ fn classify_volume_percentile_based(
         ));
     }
 
-    // 1. Calculate sequence median volume (baseline)
-    let mut sorted_seq_volumes = sequence_volumes.to_vec();
-    sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let sequence_median = if sorted_seq_volumes.len().is_multiple_of(2) {
-        let mid = sorted_seq_volumes.len() / 2;
-        (sorted_seq_volumes[mid - 1] + sorted_seq_volumes[mid]) / 2.0
-    } else {
-        sorted_seq_volumes[sorted_seq_volumes.len() / 2]
-    };
+    // 1. Calculate smoothed sequence volume (baseline - matches training)
+    let sequence_smooth =
+        calculate_smoothed_volume(sequence_volumes, smoothing).unwrap_or_else(|_| {
+            let sum: f64 = sequence_volumes.iter().filter(|&&v| v > 0.0).sum();
+            let count = sequence_volumes.iter().filter(|&&v| v > 0.0).count();
+            if count > 0 {
+                sum / count as f64
+            } else {
+                1.0
+            }
+        });
 
-    // 2. Calculate horizon median volume (target)
-    let mut sorted_hor_volumes = horizon_volumes.to_vec();
-    sorted_hor_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let horizon_median = if sorted_hor_volumes.len().is_multiple_of(2) {
-        let mid = sorted_hor_volumes.len() / 2;
-        (sorted_hor_volumes[mid - 1] + sorted_hor_volumes[mid]) / 2.0
-    } else {
-        sorted_hor_volumes[sorted_hor_volumes.len() / 2]
-    };
+    // 2. Calculate smoothed horizon volume (target - matches training)
+    let horizon_smooth =
+        calculate_smoothed_volume(horizon_volumes, smoothing).unwrap_or_else(|_| {
+            let sum: f64 = horizon_volumes.iter().filter(|&&v| v > 0.0).sum();
+            let count = horizon_volumes.iter().filter(|&&v| v > 0.0).count();
+            if count > 0 {
+                sum / count as f64
+            } else {
+                1.0
+            }
+        });
 
     // Handle edge case: zero volume
-    if sequence_median < 1e-10 {
+    if sequence_smooth < 1e-10 {
         return Ok(2); // Default to medium
     }
 
     // 3. Calculate volume ratio and apply logarithmic transformation
-    let volume_ratio = horizon_median / sequence_median;
+    let volume_ratio = horizon_smooth / sequence_smooth;
     let log_ratio = volume_ratio.ln();
 
     // 4. Calculate adaptive thresholds using percentile-based range
+    let mut sorted_seq_volumes = sequence_volumes.to_vec();
+    sorted_seq_volumes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
     let plow_idx = (sorted_seq_volumes.len() as f64 * percentile_low).floor() as usize;
     let phigh_idx = ((sorted_seq_volumes.len() as f64 * percentile_high).ceil() as usize)
         .min(sorted_seq_volumes.len() - 1);

@@ -142,92 +142,74 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_log_volume_thresholds() {
+    fn test_classify_volume_regime_with_strength() {
         let config = VolumeConfig {
             bandwidth_size: 0.8,
             extreme_multiplier: 2.0,
             smoothing_periods: 3,
         };
 
-        let thresholds = calculate_log_volume_thresholds(&config).unwrap();
-
-        // Thresholds should be in ascending order
-        assert!(
-            thresholds.very_low_max < thresholds.low_max,
-            "Very low max should be < low max"
-        );
-        assert!(
-            thresholds.low_max < thresholds.medium_max,
-            "Low max should be < medium max"
-        );
-        assert!(
-            thresholds.medium_max < thresholds.high_max,
-            "Medium max should be < high max"
+        // Test volume sequences - sequence: low volume, horizon: high volume = Very High
+        let seq_low_hor_high = (
+            vec![1000.0, 1100.0, 1200.0, 1100.0, 1000.0], // low sequence
+            vec![2500.0, 2800.0, 3000.0, 2700.0, 2600.0], // high horizon
         );
 
-        println!("Volume thresholds: very_low_max={:.3}, low_max={:.3}, medium_max={:.3}, high_max={:.3}",
-                 thresholds.very_low_max, thresholds.low_max,
-                 thresholds.medium_max, thresholds.high_max);
-    }
-
-    #[test]
-    fn test_classify_volume_log_ratio() {
-        let config = VolumeConfig {
-            bandwidth_size: 0.8,
-            extreme_multiplier: 2.0,
-            smoothing_periods: 3,
-        };
-        let thresholds = calculate_log_volume_thresholds(&config).unwrap();
-
-        // Test different log ratios
-        let very_low_ratio = -1.5;
-        let low_ratio = -0.5;
-        let medium_ratio = 0.0;
-        let high_ratio = 0.5;
-        let very_high_ratio = 1.5;
-
-        let very_low_class = classify_volume_log_ratio(very_low_ratio, &thresholds);
-        let low_class = classify_volume_log_ratio(low_ratio, &thresholds);
-        let medium_class = classify_volume_log_ratio(medium_ratio, &thresholds);
-        let high_class = classify_volume_log_ratio(high_ratio, &thresholds);
-        let very_high_class = classify_volume_log_ratio(very_high_ratio, &thresholds);
-
-        // Classes should be in ascending order
-        assert!(
-            very_low_class <= low_class,
-            "Very low class should be <= low class"
-        );
-        assert!(
-            low_class <= medium_class,
-            "Low class should be <= medium class"
-        );
-        assert!(
-            medium_class <= high_class,
-            "Medium class should be <= high class"
-        );
-        assert!(
-            high_class <= very_high_class,
-            "High class should be <= very high class"
+        // Test volume sequences - sequence: high volume, horizon: low volume = Very Low
+        let seq_high_hor_low = (
+            vec![2500.0, 2800.0, 3000.0, 2700.0, 2600.0], // high sequence
+            vec![900.0, 1000.0, 1100.0, 950.0, 1050.0],   // low horizon
         );
 
-        // All classes should be valid (0-4)
-        for &class in &[
-            very_low_class,
-            low_class,
-            medium_class,
-            high_class,
-            very_high_class,
-        ] {
-            assert!(
-                (0..=4).contains(&class),
-                "Volume class should be 0-4, got {}",
-                class
-            );
-        }
+        // Test similar volume = Medium
+        let similar = (
+            vec![1000.0, 1100.0, 1200.0, 1100.0, 1000.0],
+            vec![1050.0, 1150.0, 1250.0, 1100.0, 1000.0],
+        );
+
+        let (class_vh, _) = classify_volume_regime_with_strength(
+            &seq_low_hor_high.0,
+            &seq_low_hor_high.1,
+            &config,
+            0.10,
+            0.90,
+        )
+        .unwrap();
+
+        let (class_vl, _) = classify_volume_regime_with_strength(
+            &seq_high_hor_low.0,
+            &seq_high_hor_low.1,
+            &config,
+            0.10,
+            0.90,
+        )
+        .unwrap();
+
+        let (class_mid, _) =
+            classify_volume_regime_with_strength(&similar.0, &similar.1, &config, 0.10, 0.90)
+                .unwrap();
+
+        // High volume ratio should be class 4 (Very High)
+        assert_eq!(
+            class_vh, 4,
+            "High volume ratio should be classified as Very High (4)"
+        );
+
+        // Low volume ratio should be class 0 (Very Low)
+        assert_eq!(
+            class_vl, 0,
+            "Low volume ratio should be classified as Very Low (0)"
+        );
+
+        // Similar volume should be class 2 (Medium)
+        assert_eq!(
+            class_mid, 2,
+            "Similar volume should be classified as Medium (2)"
+        );
 
         println!(
-            "Volume classes: very_low={}, low={}, medium={}, high={}, very_high={}",
-            very_low_class, low_class, medium_class, high_class, very_high_class
+            "Volume classes: very_high={}, very_low={}, medium={}",
+            class_vh, class_vl, class_mid
         );
     }
 
