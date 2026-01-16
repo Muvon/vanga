@@ -115,13 +115,196 @@ pub fn calculate_divergence_score(
     volume_change - price_change
 }
 
-/// Calculate sentiment classification thresholds (like volatility)
-fn calculate_sentiment_thresholds(
-    calibrated_params: &crate::targets::calibration::SentimentParams,
-) -> (f64, f64) {
-    let moderate_threshold = calibrated_params.sensitivity;
-    let extreme_threshold = moderate_threshold * calibrated_params.extreme_multiplier;
-    (moderate_threshold, extreme_threshold)
+/// Calculate divergence percentiles within a sequence (for adaptive threshold calculation)
+/// Like volume uses p_low/p_high to find typical volume range, sentiment uses them for divergence range
+fn calculate_sequence_divergence_percentiles(
+    candles: &[MarketDataRow],
+    percentile_low: f64,
+    percentile_high: f64,
+    smoothing_periods: usize,
+) -> Result<(f64, f64)> {
+    if candles.len() < 2 {
+        return Ok((0.0, 1.0)); // Default range for edge case
+    }
+
+    // Calculate divergence scores between consecutive candles in the sequence
+    let mut divergence_scores: Vec<f64> = Vec::new();
+
+    for i in 1..candles.len() {
+        let prev_candle = &candles[i - 1];
+        let curr_candle = &candles[i];
+
+        // Calculate smoothed metrics for both candles
+        let prev_metrics = calculate_period_metrics_with_smoothing(
+            std::slice::from_ref(prev_candle),
+            smoothing_periods,
+        )?;
+        let curr_metrics = calculate_period_metrics_with_smoothing(
+            std::slice::from_ref(curr_candle),
+            smoothing_periods,
+        )?;
+
+        // Divergence: volume change - price change
+        let volume_ratio = curr_metrics.avg_volume / prev_metrics.avg_volume.max(1.0);
+        let volume_change = volume_ratio.ln();
+        let price_change = curr_metrics.price_change;
+        let divergence = volume_change - price_change;
+
+        if divergence.is_finite() {
+            divergence_scores.push(divergence);
+        }
+    }
+
+    if divergence_scores.is_empty() {
+        return Ok((0.0, 1.0));
+    }
+
+    // Sort to find percentiles
+    divergence_scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let plow_idx = (divergence_scores.len() as f64 * percentile_low).floor() as usize;
+    let phigh_idx = ((divergence_scores.len() as f64 * percentile_high).ceil() as usize)
+        .min(divergence_scores.len() - 1);
+
+    let p_low = divergence_scores[plow_idx.min(divergence_scores.len() - 1)];
+    let p_high = divergence_scores[phigh_idx];
+
+    Ok((p_low, p_high))
+}
+
+/// Classify sentiment using evaluation parameters (for calibration)
+pub fn classify_sentiment_with_evaluation_params(
+    sequence_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
+    params: &crate::targets::calibration::SentimentEvalParams,
+) -> Result<(i32, f64)> {
+    if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
+        return Err(VangaError::DataError(
+            "Empty sequence or horizon OHLCV data for sentiment analysis".to_string(),
+        ));
+    }
+
+    // Calculate divergence percentiles within sequence (for adaptive thresholds)
+    let sequence_percentiles = calculate_sequence_divergence_percentiles(
+        sequence_ohlcv,
+        params.percentile_low,
+        params.percentile_high,
+        params.smoothing,
+    )?;
+
+    // Calculate metrics for both periods with optional smoothing
+    let sequence_metrics =
+        calculate_period_metrics_with_smoothing(sequence_ohlcv, params.smoothing)?;
+    let horizon_metrics = calculate_period_metrics_with_smoothing(horizon_ohlcv, params.smoothing)?;
+
+    // Calculate divergence score
+    let divergence_score = calculate_divergence_score(&sequence_metrics, &horizon_metrics);
+
+    // Use adaptive thresholds based on sequence's own divergence distribution (like volume)
+    let (base_threshold, extreme_threshold, _, _) = calculate_sentiment_thresholds_with_percentiles(
+        params.sensitivity,
+        params.extreme_multiplier,
+        params.percentile_low,
+        params.percentile_high,
+        sequence_percentiles,
+    );
+
+    // Classify based on divergence score
+    let class = if divergence_score <= -extreme_threshold {
+        0 // STRONG DISTRIBUTION: High volume, price falling
+    } else if divergence_score <= -base_threshold {
+        1 // MODERATE DISTRIBUTION: Volume exceeds price drop
+    } else if divergence_score < base_threshold {
+        2 // NEUTRAL: Volume matches price movement
+    } else if divergence_score < extreme_threshold {
+        3 // MODERATE ACCUMULATION: Volume exceeds price rise
+    } else {
+        4 // STRONG ACCUMULATION: High volume, price rising
+    };
+
+    // Calculate classification strength
+    let strength =
+        calculate_sentiment_strength(divergence_score, base_threshold, extreme_threshold, class);
+
+    Ok((class, strength))
+}
+
+/// Calculate thresholds with percentile-based adaptation
+fn calculate_sentiment_thresholds_with_percentiles(
+    sensitivity: f64,
+    extreme_multiplier: f64,
+    _percentile_low: f64,
+    _percentile_high: f64,
+    sequence_divergence_percentiles: (f64, f64),
+) -> (f64, f64, f64, f64) {
+    // Use percentile range to scale thresholds (like volume uses volume percentiles)
+    let (_, p_high) = sequence_divergence_percentiles;
+    let percentile_range = p_high.abs().max(0.1);
+
+    // Scale base threshold by sequence's typical divergence range
+    let base_threshold = sensitivity * percentile_range;
+    let extreme_threshold = base_threshold * extreme_multiplier;
+
+    (
+        base_threshold,
+        extreme_threshold,
+        _percentile_low,
+        _percentile_high,
+    )
+}
+
+/// Calculate period metrics with optional smoothing
+fn calculate_period_metrics_with_smoothing(
+    candles: &[MarketDataRow],
+    smoothing_periods: usize,
+) -> Result<VolumePriceDivergence> {
+    if candles.is_empty() {
+        return Err(VangaError::DataError(
+            "Cannot calculate metrics from empty candles".to_string(),
+        ));
+    }
+
+    // Apply smoothing to volume if requested
+    let effective_candles: Vec<MarketDataRow> =
+        if smoothing_periods > 1 && candles.len() > smoothing_periods {
+            let start_idx = candles.len().saturating_sub(smoothing_periods);
+            candles[start_idx..].to_vec()
+        } else {
+            candles.to_vec()
+        };
+
+    // Calculate average price (VWAP for better representation)
+    let mut total_volume = 0.0;
+    let mut vwap_sum = 0.0;
+
+    for candle in &effective_candles {
+        let typical_price = (candle.high + candle.low + candle.close) / 3.0;
+        vwap_sum += typical_price * candle.volume;
+        total_volume += candle.volume;
+    }
+
+    let safe_volume = total_volume.max(1.0);
+    let avg_price = vwap_sum / safe_volume;
+    let avg_volume = total_volume / effective_candles.len() as f64;
+
+    // Calculate price change (percentage)
+    let first_price = (effective_candles[0].open + effective_candles[0].close) / 2.0;
+    let last_price = (effective_candles[effective_candles.len() - 1].open
+        + effective_candles[effective_candles.len() - 1].close)
+        / 2.0;
+    let price_change = if first_price > 0.0 {
+        (last_price - first_price) / first_price
+    } else {
+        0.0
+    };
+
+    Ok(VolumePriceDivergence {
+        price_change,
+        volume_change: 0.0,
+        divergence_score: 0.0,
+        avg_price,
+        avg_volume,
+    })
 }
 
 /// Generate sentiment targets with calibrated parameters - returns both class and strength
@@ -150,9 +333,13 @@ pub fn generate_sentiment_targets_with_calibrated_params(
         })?;
 
         log::debug!(
-            "  Horizon {}: sensitivity={:.4}",
+            "  Horizon {}: sensitivity={:.4}, extreme_mult={:.2}, percentile=[{:.2}, {:.2}], smoothing={}",
             horizon,
-            params.sensitivity
+            params.sensitivity,
+            params.extreme_multiplier,
+            params.percentile_low,
+            params.percentile_high,
+            params.smoothing_periods
         );
 
         let horizon_steps =
@@ -197,7 +384,7 @@ pub fn generate_sentiment_targets_with_calibrated_params(
     Ok((targets, strengths))
 }
 
-/// Classify sentiment using volume-price divergence
+/// Classify sentiment using volume-price divergence with calibrated parameters
 pub fn classify_sentiment_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
@@ -209,23 +396,43 @@ pub fn classify_sentiment_with_calibrated_params(
         ));
     }
 
-    // Calculate metrics for both periods
-    let sequence_metrics = calculate_period_metrics(sequence_ohlcv)?;
-    let horizon_metrics = calculate_period_metrics(horizon_ohlcv)?;
+    // Calculate divergence percentiles within sequence (for adaptive thresholds like volume)
+    let sequence_percentiles = calculate_sequence_divergence_percentiles(
+        sequence_ohlcv,
+        calibrated_params.percentile_low,
+        calibrated_params.percentile_high,
+        calibrated_params.smoothing_periods,
+    )?;
+
+    // Calculate metrics for both periods with calibrated smoothing
+    let sequence_metrics = calculate_period_metrics_with_smoothing(
+        sequence_ohlcv,
+        calibrated_params.smoothing_periods,
+    )?;
+    let horizon_metrics = calculate_period_metrics_with_smoothing(
+        horizon_ohlcv,
+        calibrated_params.smoothing_periods,
+    )?;
 
     // Calculate divergence score
     let divergence_score = calculate_divergence_score(&sequence_metrics, &horizon_metrics);
 
-    // Use adaptive thresholds for classification
-    let (moderate_threshold, extreme_threshold) = calculate_sentiment_thresholds(calibrated_params);
+    // Use adaptive thresholds based on sequence's own divergence distribution (like volume)
+    let (base_threshold, extreme_threshold, _, _) = calculate_sentiment_thresholds_with_percentiles(
+        calibrated_params.sensitivity,
+        calibrated_params.extreme_multiplier,
+        calibrated_params.percentile_low,
+        calibrated_params.percentile_high,
+        sequence_percentiles,
+    );
 
     // Classify based on divergence score
     // Negative = Distribution (selling pressure), Positive = Accumulation (buying pressure)
     let class = if divergence_score <= -extreme_threshold {
         0 // STRONG DISTRIBUTION: High volume, price falling
-    } else if divergence_score <= -moderate_threshold {
+    } else if divergence_score <= -base_threshold {
         1 // MODERATE DISTRIBUTION: Volume exceeds price drop
-    } else if divergence_score < moderate_threshold {
+    } else if divergence_score < base_threshold {
         2 // NEUTRAL: Volume matches price movement
     } else if divergence_score < extreme_threshold {
         3 // MODERATE ACCUMULATION: Volume exceeds price rise
@@ -234,12 +441,8 @@ pub fn classify_sentiment_with_calibrated_params(
     };
 
     // Calculate classification strength (distance from boundaries)
-    let strength = calculate_sentiment_strength(
-        divergence_score,
-        moderate_threshold,
-        extreme_threshold,
-        class,
-    );
+    let strength =
+        calculate_sentiment_strength(divergence_score, base_threshold, extreme_threshold, class);
 
     log::debug!(
         "🎭 Sentiment (Divergence): seq_price={:.4}%, hor_price={:.4}%, seq_vol={:.0}, hor_vol={:.0}, divergence={:.4}, thresholds=[{:.4}, {:.4}] → class={} ({}) strength={:.3}",
@@ -248,7 +451,7 @@ pub fn classify_sentiment_with_calibrated_params(
         sequence_metrics.avg_volume,
         horizon_metrics.avg_volume,
         divergence_score,
-        moderate_threshold,
+        base_threshold,
         extreme_threshold,
         class,
         ["VERY_BEARISH", "BEARISH", "NEUTRAL", "BULLISH", "VERY_BULLISH"][class as usize],
@@ -429,28 +632,45 @@ pub fn reconstruct_sentiment(
         ));
     }
 
-    // Use calibrated parameters for threshold calculation (same as classification)
-    let (moderate_threshold, extreme_threshold) = calculate_sentiment_thresholds(calibrated_params);
+    // Calculate divergence percentiles within sequence (for adaptive thresholds like classification)
+    let sequence_percentiles = calculate_sequence_divergence_percentiles(
+        sequence_ohlcv,
+        calibrated_params.percentile_low,
+        calibrated_params.percentile_high,
+        calibrated_params.smoothing_periods,
+    )?;
 
-    // Calculate actual sequence metrics for real divergence score
-    let sequence_metrics = calculate_period_metrics(sequence_ohlcv)?;
+    // Use calibrated parameters for threshold calculation (same as classification)
+    let (base_threshold, extreme_threshold, _, _) = calculate_sentiment_thresholds_with_percentiles(
+        calibrated_params.sensitivity,
+        calibrated_params.extreme_multiplier,
+        calibrated_params.percentile_low,
+        calibrated_params.percentile_high,
+        sequence_percentiles,
+    );
+
+    // Calculate actual sequence metrics with calibrated smoothing
+    let sequence_metrics = calculate_period_metrics_with_smoothing(
+        sequence_ohlcv,
+        calibrated_params.smoothing_periods,
+    )?;
 
     // Define divergence score ranges for each class (symmetric)
     let divergence_ranges = [
         [-f64::INFINITY, -extreme_threshold],
-        [-extreme_threshold, -moderate_threshold],
-        [-moderate_threshold, moderate_threshold],
-        [moderate_threshold, extreme_threshold],
+        [-extreme_threshold, -base_threshold],
+        [-base_threshold, base_threshold],
+        [base_threshold, extreme_threshold],
         [extreme_threshold, f64::INFINITY],
     ];
 
     // Calculate representative divergence scores for each class (midpoints)
     let class_divergence_midpoints = [
-        -extreme_threshold - (extreme_threshold - moderate_threshold) / 2.0,
-        -(extreme_threshold + moderate_threshold) / 2.0,
+        -extreme_threshold - (extreme_threshold - base_threshold) / 2.0,
+        -(extreme_threshold + base_threshold) / 2.0,
         0.0,
-        (moderate_threshold + extreme_threshold) / 2.0,
-        extreme_threshold + (extreme_threshold - moderate_threshold) / 2.0,
+        (base_threshold + extreme_threshold) / 2.0,
+        extreme_threshold + (extreme_threshold - base_threshold) / 2.0,
     ];
 
     // Find most likely class
@@ -475,12 +695,13 @@ pub fn reconstruct_sentiment(
     // Generate interpretation with actual sequence context
     let class_names = get_sentiment_class_names();
     let sentiment_interpretation = format!(
-        "{} (confidence: {:.1}%, divergence: {:.3}, seq_vol: {:.0}, seq_price: {:.4}%)",
+        "{} (confidence: {:.1}%, divergence: {:.3}, seq_vol: {:.0}, seq_price: {:.4}%, smoothing: {})",
         class_names[most_likely_class],
         confidence * 100.0,
         class_divergence_midpoints[most_likely_class],
         sequence_metrics.avg_volume,
-        sequence_metrics.price_change * 100.0
+        sequence_metrics.price_change * 100.0,
+        calibrated_params.smoothing_periods
     );
 
     Ok(SentimentReconstruction {

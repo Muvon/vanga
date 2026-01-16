@@ -125,12 +125,19 @@ pub struct VolatilityParams {
     pub balance: ClassBalance,
 }
 
-/// Sentiment target parameters (Simplified to 2 parameters like volatility)
+/// Sentiment target parameters (Extended with percentile and smoothing for better balance)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SentimentParams {
-    // Classification thresholds (ONLY 2 parameters needed)
+    // Classification thresholds (Base parameters)
     pub sensitivity: f64,        // Base threshold for classification
     pub extreme_multiplier: f64, // Multiplier for extreme classes
+
+    // Percentile-based adaptive thresholds (NEW - for better balance with fewer samples)
+    pub percentile_low: f64, // Lower percentile for sequence range (e.g., 0.05 for p5)
+    pub percentile_high: f64, // Upper percentile for sequence range (e.g., 0.95 for p95)
+
+    // Smoothing for noise reduction (NEW - reduces noise in volume-price divergence)
+    pub smoothing_periods: usize, // Moving average periods for volume smoothing (1-30)
 
     // Balance metrics
     pub balance: ClassBalance,
@@ -264,4 +271,14 @@ pub struct VolumeEvalParams {
     pub smoothing: usize,
     pub percentile_low: f64,  // Lower percentile for sequence range
     pub percentile_high: f64, // Upper percentile for sequence range
+}
+
+/// Parameters for sentiment evaluation (extended with percentiles and smoothing)
+#[derive(Debug, Clone)]
+pub struct SentimentEvalParams {
+    pub sensitivity: f64,
+    pub extreme_multiplier: f64,
+    pub percentile_low: f64,
+    pub percentile_high: f64,
+    pub smoothing: usize,
 }
