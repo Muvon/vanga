@@ -130,8 +130,8 @@ impl ParameterCalibrator {
         Self {
             target_balance: 0.2,
             max_iterations: 100,
-            balance_weight: 0.6,
-            diversity_weight: 0.4,
+            balance_weight: 0.4,
+            diversity_weight: 0.6,
             seed: None, // Will be set via from_config_with_seed if needed
             enabled_price_level: targets_config.price_level,
             enabled_direction: targets_config.direction,
@@ -149,8 +149,8 @@ impl ParameterCalibrator {
         Self {
             target_balance: 0.2,
             max_iterations: 100,
-            balance_weight: 0.6,
-            diversity_weight: 0.4,
+            balance_weight: 0.4,
+            diversity_weight: 0.6,
             seed,
             enabled_price_level: targets_config.price_level,
             enabled_direction: targets_config.direction,
@@ -167,8 +167,8 @@ impl ParameterCalibrator {
             max_iterations: 100,
 
             // NEW: Diversity optimization configuration
-            balance_weight: 0.6,   // Prioritize balance but consider diversity
-            diversity_weight: 0.4, // Significant weight for diversity
+            balance_weight: 0.4,   // Consider diversity but prioritize it
+            diversity_weight: 0.6, // MORE weight for feature-space diversity
 
             // Random seed for reproducibility
             seed: None, // None = random initialization
@@ -204,8 +204,8 @@ impl ParameterCalibrator {
         Self {
             target_balance: 0.2,
             max_iterations: 100,
-            balance_weight: 0.6,
-            diversity_weight: 0.4,
+            balance_weight: 0.4,
+            diversity_weight: 0.6,
             seed: None,
             enabled_price_level: true,
             enabled_direction: true,
@@ -741,8 +741,8 @@ impl Default for ParameterCalibrator {
         Self {
             target_balance: 0.2, // 20% per class target
             max_iterations: 100,
-            balance_weight: 0.6,
-            diversity_weight: 0.4,
+            balance_weight: 0.4,
+            diversity_weight: 0.6,
             seed: None, // Random by default
             enabled_price_level: true,
             enabled_direction: true,

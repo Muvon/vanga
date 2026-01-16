@@ -237,8 +237,13 @@ impl CalibrationUtils {
         (1.0 - cv.min(1.0)).clamp(0.0, 1.0)
     }
 
-    /// Calculate feature space diversity using price ranges and volatility
+    /// Calculate feature space diversity using PCA-like coverage across multiple features
+    /// Uses quintile-based sampling (5 regions) to measure feature space coverage
     /// Returns 0.0 (poor) to 1.0 (excellent feature coverage)
+    ///
+    /// **Key Improvement**: Uses 8 derived features and quintile (5-bin) coverage
+    /// to ensure calibration samples cover diverse regions of feature space.
+    /// This helps find parameters that work well across different market patterns.
     pub fn calculate_feature_space_diversity(
         ohlcv_data: &[MarketDataRow],
         sample_indices: &[usize],
@@ -247,31 +252,150 @@ impl CalibrationUtils {
             return 0.0;
         }
 
-        // Extract price ranges and volatility for sampled periods
-        let mut price_ranges = Vec::new();
-        let mut volatilities = Vec::new();
+        // Extract multiple derived features for each sample
+        // Using 8 features for better coverage of the feature space
+        let mut feature_vectors: Vec<Vec<f64>> = Vec::new();
 
         for &idx in sample_indices {
             if idx < ohlcv_data.len() {
                 let candle = &ohlcv_data[idx];
-                let price_range = (candle.high - candle.low) / candle.close;
-                let volatility = (candle.close - candle.open).abs() / candle.close;
 
-                price_ranges.push(price_range);
-                volatilities.push(volatility);
+                // Feature 1: Price range (normalized)
+                let price_range = if candle.close > 0.0 {
+                    (candle.high - candle.low) / candle.close
+                } else {
+                    0.0
+                };
+
+                // Feature 2: Body size (normalized)
+                let body_size = if candle.close > 0.0 {
+                    (candle.close - candle.open).abs() / candle.close
+                } else {
+                    0.0
+                };
+
+                // Feature 3: Upper wick
+                let upper_wick = if candle.high > 0.0 && candle.close > 0.0 {
+                    (candle.high - candle.close.max(candle.open)) / candle.close
+                } else {
+                    0.0
+                };
+
+                // Feature 4: Lower wick
+                let lower_wick = if candle.low > 0.0 && candle.close > 0.0 {
+                    (candle.open.min(candle.close) - candle.low) / candle.close
+                } else {
+                    0.0
+                };
+
+                // Feature 5: Volume intensity (normalized log)
+                let volume_intensity = if candle.volume > 0.0 {
+                    candle.volume.ln()
+                } else {
+                    0.0
+                };
+
+                // Feature 6: Price position in candle (0-1, top of wick to bottom)
+                let price_position = if candle.high > candle.low {
+                    (candle.close - candle.low) / (candle.high - candle.low)
+                } else {
+                    0.5
+                };
+
+                // Feature 7: Trend direction (body sign)
+                let trend_direction = if candle.close > candle.open { 1.0 } else { 0.0 };
+
+                // Feature 8: Candle size relative to range (0-1)
+                let candle_relative_size = if price_range > 0.0 {
+                    body_size / price_range
+                } else {
+                    0.5
+                };
+
+                feature_vectors.push(vec![
+                    price_range,
+                    body_size,
+                    upper_wick,
+                    lower_wick,
+                    volume_intensity,
+                    price_position,
+                    trend_direction,
+                    candle_relative_size,
+                ]);
             }
         }
 
-        if price_ranges.is_empty() {
+        if feature_vectors.is_empty() {
             return 0.0;
         }
 
-        // Calculate coverage using quartile representation
-        let price_coverage = Self::calculate_quartile_coverage(&price_ranges);
-        let volatility_coverage = Self::calculate_quartile_coverage(&volatilities);
+        // Calculate quintile (5-bin) coverage for each feature dimension
+        let num_features = feature_vectors[0].len();
+        let mut total_quintile_coverage = 0.0;
 
-        // Average coverage
-        (price_coverage + volatility_coverage) / 2.0
+        for dim in 0..num_features {
+            let mut values: Vec<f64> = feature_vectors.iter().map(|v| v[dim]).collect();
+            let coverage = Self::calculate_quintile_coverage(&mut values);
+            total_quintile_coverage += coverage;
+        }
+
+        // Average coverage across all features
+        total_quintile_coverage / num_features as f64
+    }
+
+    /// Calculate quintile (5-bin) coverage for diversity measurement
+    /// Returns 0.0 (all samples in same quintile) to 1.0 (uniformly distributed)
+    ///
+    /// **Why Quintiles?**
+    /// - Matches our 5-class classification system
+    /// - Ensures samples cover all regions of feature space
+    /// - Penalizes clustering in one or few regions
+    fn calculate_quintile_coverage(values: &mut [f64]) -> f64 {
+        if values.len() < 5 {
+            return 0.0;
+        }
+
+        // Clone first since sort consumes
+        let min_val = *values
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(&0.0);
+        let max_val = *values
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(&1.0);
+        let range = max_val - min_val + 1e-10;
+
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // After sort, use index-based access to avoid borrowing issues
+        let n = values.len();
+        let mut quintile_counts = [0usize; 5];
+
+        // Use indices instead of iterating to avoid borrowing conflict after sort
+        for i in 0..n {
+            let percentile = (values[i] - min_val) / range;
+            let bin = (percentile * 5.0).floor() as usize;
+            let bin = bin.min(4);
+            quintile_counts[bin] += 1;
+        }
+
+        // Calculate how evenly distributed samples are across quintiles
+        // Ideal: equal distribution (20% each)
+        let total = values.len() as f64;
+        let ideal = 0.2;
+
+        // Calculate deviation from ideal distribution
+        let deviation: f64 = quintile_counts
+            .iter()
+            .map(|&count| ((count as f64 / total) - ideal).abs())
+            .sum::<f64>()
+            / 5.0;
+
+        // Convert deviation to coverage score
+        // 0 deviation = 1.0 (perfect coverage)
+        // 0.2 deviation = 0.0 (all in one bin)
+        (1.0 - deviation * 5.0).clamp(0.0, 1.0)
     }
 
     /// Calculate market condition diversity (bull/bear/sideways distribution)
@@ -347,46 +471,5 @@ impl CalibrationUtils {
 
         // Convert deviation to diversity score (0 deviation = 1.0 diversity)
         (1.0 - deviation * 3.0).clamp(0.0, 1.0)
-    }
-
-    /// Calculate quartile coverage for a feature
-    fn calculate_quartile_coverage(values: &[f64]) -> f64 {
-        if values.len() < 4 {
-            return 0.0;
-        }
-
-        let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let n = sorted.len();
-        let q1_idx = n / 4;
-        let q2_idx = n / 2;
-        let q3_idx = 3 * n / 4;
-
-        // Check representation in each quartile
-        let mut quartile_counts = [0usize; 4];
-        for &val in values {
-            if val <= sorted[q1_idx] {
-                quartile_counts[0] += 1;
-            } else if val <= sorted[q2_idx] {
-                quartile_counts[1] += 1;
-            } else if val <= sorted[q3_idx] {
-                quartile_counts[2] += 1;
-            } else {
-                quartile_counts[3] += 1;
-            }
-        }
-
-        // Calculate balance across quartiles (ideal: 25% each)
-        let total = values.len() as f64;
-        let ideal = 0.25;
-        let deviation: f64 = quartile_counts
-            .iter()
-            .map(|&count| ((count as f64 / total) - ideal).abs())
-            .sum::<f64>()
-            / 4.0;
-
-        // Convert deviation to coverage score
-        (1.0 - deviation * 4.0).clamp(0.0, 1.0)
     }
 }
