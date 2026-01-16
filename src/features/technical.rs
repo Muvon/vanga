@@ -206,6 +206,7 @@ pub async fn generate_technical_indicators(
             &close_prices,
             &volume,
             &config.volume.volume_sma_periods,
+            &config.momentum,
         )?;
     }
 
@@ -236,6 +237,7 @@ pub async fn generate_technical_indicators(
             &close_prices,
             &volume,
             &config.volatility.atr_periods,
+            &config.momentum,
         )?;
     }
 
@@ -262,7 +264,36 @@ pub async fn generate_technical_indicators(
         df = add_consolidation_features(df, &ohlcv, config)?;
     }
 
-    log::info!("Generated {} technical indicators", df.width() - 6); // Subtract OHLCV + timestamp
+    let total_features = df.width() - 6; // Subtract OHLCV + timestamp
+    log::info!("Generated {} technical indicators", total_features);
+
+    // Log momentum features if enabled
+    if config.momentum.atr_momentum_enabled
+        || config.momentum.volume_momentum_enabled
+        || config.momentum.pv_divergence_enabled
+    {
+        let mut momentum_count = 0;
+        if config.momentum.atr_momentum_enabled {
+            momentum_count += config.volatility.atr_periods.len()
+                * (config.momentum.momentum_periods.len() * 2 + 1);
+        }
+        if config.momentum.volume_momentum_enabled {
+            momentum_count += config.volume.volume_sma_periods.len()
+                * (config.momentum.momentum_periods.len() * 2 + 1);
+        }
+        if config.momentum.pv_divergence_enabled {
+            momentum_count +=
+                config.volume.volume_sma_periods.len() * 2 + config.momentum.momentum_periods.len();
+        }
+        log::info!(
+            "  └─ Momentum features: {} (ATR: {}, Volume: {}, PV Divergence: {})",
+            momentum_count,
+            config.momentum.atr_momentum_enabled,
+            config.momentum.volume_momentum_enabled,
+            config.momentum.pv_divergence_enabled
+        );
+    }
+
     Ok(df)
 }
 
@@ -287,7 +318,7 @@ pub fn extract_numeric_column(df: &DataFrame, column_name: &str) -> Result<Vec<f
 }
 
 /// Calculate simple moving average
-fn calculate_sma(data: &[f64], period: usize) -> Vec<f64> {
+pub(crate) fn calculate_sma(data: &[f64], period: usize) -> Vec<f64> {
     let mut result = vec![f64::NAN; data.len()];
 
     if period > data.len() {
@@ -302,8 +333,85 @@ fn calculate_sma(data: &[f64], period: usize) -> Vec<f64> {
     result
 }
 
+/// Calculate momentum: (current - previous) / previous
+/// Returns rate of change over specified period
+pub(crate) fn calculate_momentum(data: &[f64], period: usize) -> Vec<f64> {
+    let mut result = vec![f64::NAN; data.len()];
+
+    if period == 0 || period >= data.len() {
+        return result;
+    }
+
+    for i in period..data.len() {
+        let previous = data[i - period];
+        let current = data[i];
+
+        if previous.abs() > 1e-10 && previous.is_finite() && current.is_finite() {
+            result[i] = (current - previous) / previous;
+        }
+    }
+
+    result
+}
+
+/// Calculate acceleration: change in momentum
+pub(crate) fn calculate_acceleration(momentum: &[f64]) -> Vec<f64> {
+    let mut result = vec![f64::NAN; momentum.len()];
+
+    for i in 1..momentum.len() {
+        if momentum[i].is_finite() && momentum[i - 1].is_finite() {
+            result[i] = momentum[i] - momentum[i - 1];
+        }
+    }
+
+    result
+}
+
+/// Calculate trend slope using linear regression over rolling window
+pub(crate) fn calculate_trend_slope(data: &[f64], window: usize) -> Vec<f64> {
+    let mut result = vec![f64::NAN; data.len()];
+
+    if window < 2 || window > data.len() {
+        return result;
+    }
+
+    for i in (window - 1)..data.len() {
+        let window_data = &data[(i + 1 - window)..=i];
+
+        // Linear regression: y = mx + b, we want slope m
+        let n = window as f64;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+
+        let mut valid = true;
+        for (j, &y) in window_data.iter().enumerate() {
+            if !y.is_finite() {
+                valid = false;
+                break;
+            }
+            let x = j as f64;
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+        }
+
+        if valid {
+            let denominator = n * sum_x2 - sum_x * sum_x;
+            if denominator.abs() > 1e-10 {
+                let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+                result[i] = slope;
+            }
+        }
+    }
+
+    result
+}
+
 /// Calculate On-Balance Volume (OBV)
-fn calculate_obv(close: &[f64], volume: &[f64]) -> Vec<f64> {
+pub(crate) fn calculate_obv(close: &[f64], volume: &[f64]) -> Vec<f64> {
     let mut result = vec![0.0; close.len()];
 
     if close.is_empty() {
@@ -908,17 +1016,18 @@ fn add_cci_indicator(
     Ok(df)
 }
 
-/// Add Volume indicators to DataFrame
-fn add_volume_indicators(
+/// Add Volume indicators to DataFrame with optional momentum features
+pub(crate) fn add_volume_indicators(
     mut df: DataFrame,
     close: &[f64],
     volume: &[f64],
     periods: &[u32],
+    momentum_config: &crate::config::features::MomentumConfig,
 ) -> Result<DataFrame> {
     for &period in periods {
         let volume_sma = calculate_sma(volume, period as usize);
         let column_name = format!("volume_sma_{}", period);
-        let series = Series::new(column_name.clone().into(), volume_sma).into_column();
+        let series = Series::new(column_name.clone().into(), volume_sma.clone()).into_column();
         df = df
             .with_column(series)
             .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
@@ -945,7 +1054,103 @@ fn add_volume_indicators(
                 VangaError::FeatureError(format!("Failed to add {}: {}", vwap_column_name, e))
             })?
             .clone();
+
+        // Add volume momentum features if enabled
+        if momentum_config.volume_momentum_enabled {
+            for &mom_period in &momentum_config.momentum_periods {
+                // Volume momentum (relative to SMA)
+                let mut volume_momentum = vec![f64::NAN; volume.len()];
+                for i in (period as usize)..volume.len() {
+                    if volume_sma[i].is_finite() && volume_sma[i].abs() > 1e-10 {
+                        volume_momentum[i] = (volume[i] - volume_sma[i]) / volume_sma[i];
+                    }
+                }
+                let mom_name = format!("volume_{}_momentum_{}", period, mom_period);
+                df = df
+                    .with_column(
+                        Series::new(mom_name.clone().into(), volume_momentum.clone()).into_column(),
+                    )
+                    .map_err(|e| {
+                        VangaError::FeatureError(format!("Failed to add {}: {}", mom_name, e))
+                    })?
+                    .clone();
+
+                // Volume acceleration
+                let volume_acceleration = calculate_acceleration(&volume_momentum);
+                let accel_name = format!("volume_{}_acceleration_{}", period, mom_period);
+                df = df
+                    .with_column(
+                        Series::new(accel_name.clone().into(), volume_acceleration).into_column(),
+                    )
+                    .map_err(|e| {
+                        VangaError::FeatureError(format!("Failed to add {}: {}", accel_name, e))
+                    })?
+                    .clone();
+            }
+
+            // Volume trend slope
+            let volume_trend = calculate_trend_slope(volume, period as usize);
+            let trend_name = format!("volume_{}_trend", period);
+            df = df
+                .with_column(Series::new(trend_name.clone().into(), volume_trend).into_column())
+                .map_err(|e| {
+                    VangaError::FeatureError(format!("Failed to add {}: {}", trend_name, e))
+                })?
+                .clone();
+        }
+
+        // Add price-volume divergence features if enabled
+        if momentum_config.pv_divergence_enabled {
+            // Calculate price momentum
+            let price_momentum = calculate_momentum(close, period as usize);
+
+            // Calculate volume momentum for divergence
+            let volume_momentum_raw = calculate_momentum(volume, period as usize);
+
+            // PV divergence = volume_momentum - price_momentum
+            let mut pv_divergence = vec![f64::NAN; close.len()];
+            for i in 0..close.len() {
+                if price_momentum[i].is_finite() && volume_momentum_raw[i].is_finite() {
+                    pv_divergence[i] = volume_momentum_raw[i] - price_momentum[i];
+                }
+            }
+            let div_name = format!("pv_divergence_{}", period);
+            df = df
+                .with_column(
+                    Series::new(div_name.clone().into(), pv_divergence.clone()).into_column(),
+                )
+                .map_err(|e| {
+                    VangaError::FeatureError(format!("Failed to add {}: {}", div_name, e))
+                })?
+                .clone();
+
+            // PV divergence trend
+            let pv_div_trend = calculate_trend_slope(&pv_divergence, period as usize);
+            let div_trend_name = format!("pv_divergence_{}_trend", period);
+            df = df
+                .with_column(Series::new(div_trend_name.clone().into(), pv_div_trend).into_column())
+                .map_err(|e| {
+                    VangaError::FeatureError(format!("Failed to add {}: {}", div_trend_name, e))
+                })?
+                .clone();
+        }
     }
+
+    // Add AD line momentum if PV divergence is enabled
+    if momentum_config.pv_divergence_enabled {
+        let obv_values = calculate_obv(close, volume);
+        for &mom_period in &momentum_config.momentum_periods {
+            let ad_momentum = calculate_momentum(&obv_values, mom_period as usize);
+            let ad_mom_name = format!("ad_momentum_{}", mom_period);
+            df = df
+                .with_column(Series::new(ad_mom_name.clone().into(), ad_momentum).into_column())
+                .map_err(|e| {
+                    VangaError::FeatureError(format!("Failed to add {}: {}", ad_mom_name, e))
+                })?
+                .clone();
+        }
+    }
+
     Ok(df)
 }
 
@@ -978,8 +1183,8 @@ fn add_mfi_indicator(
     Ok(df)
 }
 
-/// Add ATR indicators to DataFrame
-fn add_atr_indicators(
+/// Add ATR indicators to DataFrame with optional momentum features
+pub(crate) fn add_atr_indicators(
     mut df: DataFrame,
     open: &[f64],
     high: &[f64],
@@ -987,6 +1192,7 @@ fn add_atr_indicators(
     close: &[f64],
     volume: &[f64],
     periods: &[u32],
+    momentum_config: &crate::config::features::MomentumConfig,
 ) -> Result<DataFrame> {
     for &period in periods {
         let atr_values = calculate_atr_ta(open, high, low, close, volume, period as usize)
@@ -995,11 +1201,50 @@ fn add_atr_indicators(
                 vec![f64::NAN; close.len()] // Use NaN for filtering
             });
         let column_name = format!("atr_{}", period);
-        let series = Series::new(column_name.clone().into(), atr_values).into_column();
+        let series = Series::new(column_name.clone().into(), atr_values.clone()).into_column();
         df = df
             .with_column(series)
             .map_err(|e| VangaError::FeatureError(format!("Failed to add {}: {}", column_name, e)))?
             .clone();
+
+        // Add ATR momentum features if enabled
+        if momentum_config.atr_momentum_enabled {
+            for &mom_period in &momentum_config.momentum_periods {
+                // ATR momentum
+                let atr_momentum = calculate_momentum(&atr_values, mom_period as usize);
+                let mom_name = format!("atr_{}_momentum_{}", period, mom_period);
+                df = df
+                    .with_column(
+                        Series::new(mom_name.clone().into(), atr_momentum.clone()).into_column(),
+                    )
+                    .map_err(|e| {
+                        VangaError::FeatureError(format!("Failed to add {}: {}", mom_name, e))
+                    })?
+                    .clone();
+
+                // ATR acceleration
+                let atr_acceleration = calculate_acceleration(&atr_momentum);
+                let accel_name = format!("atr_{}_acceleration_{}", period, mom_period);
+                df = df
+                    .with_column(
+                        Series::new(accel_name.clone().into(), atr_acceleration).into_column(),
+                    )
+                    .map_err(|e| {
+                        VangaError::FeatureError(format!("Failed to add {}: {}", accel_name, e))
+                    })?
+                    .clone();
+            }
+
+            // ATR trend slope
+            let atr_trend = calculate_trend_slope(&atr_values, period as usize);
+            let trend_name = format!("atr_{}_trend", period);
+            df = df
+                .with_column(Series::new(trend_name.clone().into(), atr_trend).into_column())
+                .map_err(|e| {
+                    VangaError::FeatureError(format!("Failed to add {}: {}", trend_name, e))
+                })?
+                .clone();
+        }
     }
     Ok(df)
 }

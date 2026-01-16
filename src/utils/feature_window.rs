@@ -325,6 +325,9 @@ mod tests {
                     williams_r: false,
                     cci_periods: vec![],
                     momentum_periods: vec![],
+                    atr_momentum_enabled: false,
+                    volume_momentum_enabled: false,
+                    pv_divergence_enabled: false,
                 },
                 volatility: crate::config::features::VolatilityIndicatorsConfig {
                     bollinger_bands: crate::config::features::BollingerBandsConfig {

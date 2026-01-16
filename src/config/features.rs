@@ -83,6 +83,20 @@ pub struct MomentumConfig {
     pub williams_r: bool,
     pub cci_periods: Vec<u32>,
     pub momentum_periods: Vec<u32>,
+
+    /// Enable ATR momentum features for volatility target
+    #[serde(default = "default_true")]
+    pub atr_momentum_enabled: bool,
+    /// Enable volume momentum features for volume target
+    #[serde(default = "default_true")]
+    pub volume_momentum_enabled: bool,
+    /// Enable price-volume divergence features for sentiment target
+    #[serde(default = "default_true")]
+    pub pv_divergence_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +133,24 @@ pub struct TrendIndicatorsConfig {
     pub advanced: AdvancedIndicatorsConfig,
     /// Consolidation/neutral-detection features for Class 2 learning
     pub consolidation: ConsolidationFeaturesConfig,
+}
+
+impl Default for TrendIndicatorsConfig {
+    fn default() -> Self {
+        Self {
+            macd: MACDConfig {
+                enabled: true,
+                fast_period: 12,
+                slow_period: 26,
+                signal_period: 9,
+            },
+            adx_periods: vec![14],
+            parabolic_sar: true,
+            aroon: true,
+            advanced: AdvancedIndicatorsConfig::default(),
+            consolidation: ConsolidationFeaturesConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,6 +431,9 @@ impl Default for TechnicalIndicatorsConfig {
                 williams_r: true,
                 cci_periods: vec![14, 20],
                 momentum_periods: vec![10, 20],
+                atr_momentum_enabled: true,
+                volume_momentum_enabled: true,
+                pv_divergence_enabled: true,
             },
             volatility: VolatilityIndicatorsConfig {
                 bollinger_bands: BollingerBandsConfig {
