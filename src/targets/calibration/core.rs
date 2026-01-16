@@ -431,14 +431,14 @@ impl ParameterCalibrator {
                     let direction_handle = if calibrator.enabled_direction {
                         Some(tokio::task::spawn_blocking(move || {
                             log::info!("{} [Direction] 🚀 Starting Bayesian optimization on CPU thread...", prefix1);
-                            let rt = tokio::runtime::Handle::current();
-                            let result = rt.block_on(calibrator1.calibrate_direction(
-                                &ohlcv_clone1,
+                            let context = EvaluationContext {
+                                ohlcv_data: &ohlcv_clone1,
+                                sample_indices: &indices_clone1,
                                 sequence_length,
                                 horizon_steps,
-                                &indices_clone1,
-                                &prefix1,
-                            ));
+                            };
+                            let rt = tokio::runtime::Handle::current();
+                            let result = rt.block_on(calibrator1.calibrate_direction(&context, &prefix1));
                             match &result {
                                 Ok(params) => log::info!(
                                     "{} [Direction] ✅ Complete - score: {:.3}",
@@ -757,21 +757,10 @@ impl Default for ParameterCalibrator {
 impl ParameterCalibrator {
     pub async fn calibrate_direction(
         &self,
-        ohlcv_data: &[MarketDataRow],
-        sequence_length: usize,
-        horizon_steps: usize,
-        sample_indices: &[usize],
+        context: &EvaluationContext<'_>,
         prefix: &str,
     ) -> Result<DirectionParams> {
-        super::direction::calibrate_direction(
-            self,
-            ohlcv_data,
-            sequence_length,
-            horizon_steps,
-            sample_indices,
-            prefix,
-        )
-        .await
+        super::direction::calibrate_direction(self, context, prefix).await
     }
 
     pub async fn calibrate_price_levels(

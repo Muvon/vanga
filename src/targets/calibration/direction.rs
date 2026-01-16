@@ -3,6 +3,7 @@
 //! Contains direction-specific calibration logic including parameter optimization,
 //! evaluation functions, and classification helpers.
 
+use super::bayesian::BayesianConfig;
 use super::core::ParameterCalibrator;
 use super::types::*;
 use crate::data::structures::MarketDataRow;
@@ -11,14 +12,9 @@ use crate::utils::error::Result;
 /// Calibrate direction parameters using Bayesian optimization
 pub async fn calibrate_direction(
     calibrator: &ParameterCalibrator,
-    ohlcv_data: &[MarketDataRow],
-    sequence_length: usize,
-    horizon_steps: usize,
-    sample_indices: &[usize],
+    context: &EvaluationContext<'_>,
     prefix: &str,
 ) -> Result<DirectionParams> {
-    use super::bayesian::BayesianConfig;
-
     log::info!(
         "{} 🔬 Starting Bayesian Optimization for Direction calibration",
         prefix
@@ -53,14 +49,7 @@ pub async fn calibrate_direction(
             base_multiplier: params[4],
         };
 
-        let balance = evaluate_direction_params(
-            &utils,
-            ohlcv_data,
-            sample_indices,
-            sequence_length,
-            horizon_steps,
-            &test_params,
-        )?;
+        let balance = evaluate_direction_params(&utils, context, &test_params)?;
 
         // Return score only if diversity is acceptable
         if balance.diversity_score >= 0.3 {
@@ -94,15 +83,7 @@ pub async fn calibrate_direction(
         base_multiplier: best_params[4],
     };
 
-    let final_balance = evaluate_direction_params(
-        &utils,
-        ohlcv_data,
-        sample_indices,
-        sequence_length,
-        horizon_steps,
-        &final_eval_params,
-    )?;
-
+    let final_balance = evaluate_direction_params(&utils, context, &final_eval_params)?;
     let result = DirectionParams {
         sensitivity: best_params[0],
         extreme_multiplier: best_params[1],
@@ -127,23 +108,20 @@ pub async fn calibrate_direction(
 /// Evaluate direction parameters with REAL diversity metrics
 fn evaluate_direction_params(
     utils: &super::utils::CalibrationUtils,
-    ohlcv_data: &[MarketDataRow],
-    sample_indices: &[usize],
-    sequence_length: usize,
-    horizon_steps: usize,
+    context: &EvaluationContext,
     params: &DirectionEvalParams,
 ) -> Result<ClassBalance> {
     let mut class_counts = vec![0; 5];
     let mut total = 0;
 
-    for &idx in sample_indices {
-        let seq_end = idx + sequence_length;
-        let target_end = seq_end + horizon_steps;
+    for &idx in context.sample_indices {
+        let seq_end = idx + context.sequence_length;
+        let target_end = seq_end + context.horizon_steps;
 
-        if target_end <= ohlcv_data.len() {
+        if target_end <= context.ohlcv_data.len() {
             // Use OHLCV data for richer momentum analysis (matches training)
-            let sequence_ohlcv = &ohlcv_data[idx..seq_end];
-            let horizon_ohlcv = &ohlcv_data[seq_end..target_end];
+            let sequence_ohlcv = &context.ohlcv_data[idx..seq_end];
+            let horizon_ohlcv = &context.ohlcv_data[seq_end..target_end];
 
             // Use the same logic as the actual direction classification
             let class = classify_direction_with_params(sequence_ohlcv, horizon_ohlcv, params)?;
@@ -159,12 +137,11 @@ fn evaluate_direction_params(
     utils.calculate_balance_with_diversity(
         &class_counts,
         total,
-        ohlcv_data,
-        sample_indices,
-        sequence_length,
+        context.ohlcv_data,
+        context.sample_indices,
+        context.sequence_length,
     )
 }
-
 /// Classify direction using calibrated parameters (mirrors actual classification logic)
 fn classify_direction_with_params(
     sequence_ohlcv: &[MarketDataRow],

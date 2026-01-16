@@ -256,14 +256,6 @@ pub struct VolatilityEvalParams {
     pub min_baseline: f64,  // NEW: Minimum volatility baseline parameter
 }
 
-/// Parameters for sentiment evaluation
-#[derive(Debug, Clone)]
-pub struct SentimentEvalParams {
-    pub sensitivity: f64,
-    pub volume_weight: f64,
-    pub consistency_factor: f64,
-}
-
 /// Parameters for volume evaluation
 #[derive(Debug, Clone)]
 pub struct VolumeEvalParams {

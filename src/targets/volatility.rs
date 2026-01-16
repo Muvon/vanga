@@ -573,6 +573,7 @@ pub struct LogVolatilityThresholds {
 /// - **ML Learning**: Simple features are easier for LSTM to learn patterns from
 /// - **Research-Based**: ATR momentum is a proven volatility measurement technique
 /// - **Volume Integration**: High volume volatility changes are more meaningful
+/// - **Horizon Decay**: Uses calibrated decay factor for weighted ATR calculation
 pub fn classify_volatility_with_calibrated_params(
     sequence_candles: &[MarketDataRow],
     horizon_candles: &[MarketDataRow],
@@ -582,23 +583,27 @@ pub fn classify_volatility_with_calibrated_params(
         return Ok((2, 0.5)); // Default to Medium with neutral strength for insufficient data
     }
 
-    // Calculate ATR for both periods (same as before)
+    // Calculate sequence ATR (simple, no decay needed for sequence baseline)
     let sequence_atr = calculate_simple_atr_with_params(
         sequence_candles,
         calibrated_params.min_volatility_baseline,
     )?;
-    let horizon_atr = calculate_simple_atr_with_params(
+
+    // Calculate horizon ATR using calibrated decay factor for weighted average
+    // Higher decay = more weight on recent candles in horizon
+    let horizon_atr = get_horizon_weighted_atr_baseline(
         horizon_candles,
+        calibrated_params.horizon_decay,
         calibrated_params.min_volatility_baseline,
     )?;
 
     // Ensure minimum baseline to avoid division by zero
     let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline);
 
-    // SIMPLE FEATURE 1: ATR momentum (identical to price momentum formula)
+    // ATR momentum with weighted horizon ATR (uses calibrated horizon_decay)
     let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
 
-    // SIMPLE FEATURE 2: Volume conviction (identical to sentiment approach)
+    // Volume conviction (identical to sentiment approach)
     let sequence_volume = calculate_average_volume(sequence_candles);
     let horizon_volume = calculate_average_volume(horizon_candles);
     let volume_conviction = if sequence_volume > 0.0 {
@@ -611,7 +616,7 @@ pub fn classify_volatility_with_calibrated_params(
     let volatility_score = atr_momentum + (volume_conviction * calibrated_params.volume_weight);
 
     // Use adaptive thresholds for classification (same structure as sentiment)
-    let moderate_threshold = calibrated_params.bandwidth; // Now represents ATR momentum threshold
+    let moderate_threshold = calibrated_params.bandwidth;
     let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
 
     // Classify based on combined volatility score
@@ -636,7 +641,8 @@ pub fn classify_volatility_with_calibrated_params(
     );
 
     log::debug!(
-        "🎯 Simple ATR Momentum: seq_atr={:.6}, hor_atr={:.6}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({}) strength={:.3}",
+        "🎯 Weighted ATR Momentum: decay={:.2}, seq_atr={:.6}, hor_atr={:.6}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({}) strength={:.3}",
+        calibrated_params.horizon_decay,
         baseline_atr, horizon_atr, atr_momentum, volume_conviction, volatility_score,
         -extreme_threshold, -moderate_threshold, moderate_threshold, extreme_threshold,
         class, ["VeryLow", "Low", "Medium", "High", "VeryHigh"][class as usize], strength
