@@ -22,13 +22,13 @@ pub async fn calibrate_volatility(
 
     let utils = calibrator.get_utils();
 
-    // Define 5D parameter space with WIDE, ADAPTIVE bounds for all market conditions
+    // Define 5D parameter space optimized for balanced class distribution
     let param_bounds = vec![
         (0.1, 3.0),     // bandwidth: 0.1-3.0 (narrow to very wide volatility ranges)
         (1.2, 6.0),     // extreme_multiplier: 1.2-6.0 (narrow to very wide extremes)
-        (0.5, 2.0), // horizon_decay: 0.5-2.0 (50% reduction to 100% amplification) - EXPANDED from 0.7-1.0
+        (0.5, 1.0), // horizon_decay: 0.5-1.0 (decay only, no amplification for balanced classes)
         (0.01, 0.5), // volume_weight: 1%-50% (subtle to dominant volume influence)
-        (0.0001, 0.05), // min_volatility_baseline: 0.01%-5% (expanded for edge cases) - EXPANDED from 0.0001-0.02
+        (0.0001, 0.02), // min_volatility_baseline: 0.01%-2% (tight range for crypto sensitivity)
     ];
 
     let param_names = vec![
