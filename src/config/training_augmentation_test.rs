@@ -6,8 +6,8 @@ use crate::config::training::DataConfig;
 fn test_data_config_defaults() {
     let config = DataConfig::default();
 
-    assert_eq!(
-        config.sequence_augment, false,
+    assert!(
+        !config.sequence_augment,
         "Augmentation should be disabled by default"
     );
     assert_eq!(
@@ -48,7 +48,7 @@ fn test_data_config_deserialization_with_new_fields() {
     assert!(config.is_ok(), "Should deserialize config with new fields");
 
     let config = config.unwrap();
-    assert_eq!(config.sequence_augment, true);
+    assert!(config.sequence_augment);
     assert_eq!(config.augment_target_percentile, 0.6);
     assert_eq!(config.max_synthetic_ratio, 3.0);
     assert_eq!(config.sequence_overlap, 0.3);
@@ -80,7 +80,7 @@ fn test_backward_compatibility_without_new_fields() {
 
     let config = config.unwrap();
     // Should use defaults for new fields
-    assert_eq!(config.sequence_augment, false, "Should default to false");
+    assert!(!config.sequence_augment, "Should default to false");
     assert_eq!(
         config.augment_target_percentile, 0.5,
         "Should default to 0.5"
@@ -172,7 +172,7 @@ fn test_augmentation_enabled_with_defaults() {
     assert!(config.is_ok());
 
     let config = config.unwrap();
-    assert_eq!(config.sequence_augment, true);
+    assert!(config.sequence_augment);
     // Should use defaults when not specified
     assert_eq!(config.augment_target_percentile, 0.5);
     assert_eq!(config.max_synthetic_ratio, 2.0);

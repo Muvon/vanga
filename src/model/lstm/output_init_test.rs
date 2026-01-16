@@ -224,7 +224,7 @@ fn test_initial_predictions_are_balanced() {
     // The key is that NO class should dominate (>50%) or be absent (<5%)
     for (class_idx, &prob) in distribution.iter().enumerate() {
         assert!(
-            prob >= 0.03 && prob <= 0.50,
+            (0.03..=0.50).contains(&prob),
             "Class {} has probability {:.2}% - distribution is too imbalanced! \
              Expected ~20% with reasonable variance. This indicates hidden state collapse.",
             class_idx,

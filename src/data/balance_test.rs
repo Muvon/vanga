@@ -653,10 +653,8 @@ fn test_validation_gap_enforcement_basic() {
 
                     let gap = if val_seq.start_idx >= train_seq.end_idx {
                         val_seq.start_idx - train_seq.end_idx
-                    } else if train_seq.start_idx >= val_seq.end_idx {
-                        train_seq.start_idx - val_seq.end_idx
                     } else {
-                        0 // Overlap
+                        train_seq.start_idx.saturating_sub(val_seq.end_idx)
                     };
 
                     if gap < 150 {
@@ -757,10 +755,8 @@ fn test_validation_gap_with_overlapping_sequences() {
 
                     let gap = if val_seq.start_idx >= train_seq.end_idx {
                         val_seq.start_idx - train_seq.end_idx
-                    } else if train_seq.start_idx >= val_seq.end_idx {
-                        train_seq.start_idx - val_seq.end_idx
                     } else {
-                        0
+                        train_seq.start_idx.saturating_sub(val_seq.end_idx)
                     };
 
                     assert!(

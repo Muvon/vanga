@@ -62,7 +62,6 @@ mod inference_test;
 mod loss_test;
 
 #[cfg(test)]
-#[cfg(test)]
 mod reduce_on_plateau_test;
 
 #[cfg(test)]

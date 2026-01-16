@@ -396,14 +396,29 @@ impl OutputFormatter {
             // Parse the horizon-specific predictions using the multi-target parser
             let parsed_output = parser.parse_output(horizon_view)?;
 
+            // Extract horizon-specific calibrated parameters
+            let horizon_bandwidth = self
+                .calibrated_parameters
+                .as_ref()
+                .and_then(|params| params.get_price_levels(horizon))
+                .map(|price_params| price_params.bandwidth)
+                .or(self.bandwidth_size);
+
+            let horizon_percentiles = self
+                .calibrated_parameters
+                .as_ref()
+                .and_then(|params| params.get_price_levels(horizon))
+                .map(|price_params| price_params.percentiles)
+                .or(self.percentiles);
+
             // Convert parsed output to structured predictions
             if let Some(price_level_probs) = parsed_output.price_levels {
                 result = result.with_price_levels(self.create_price_level_prediction(
                     &price_level_probs,
                     current_price,
                     horizon,
-                    self.bandwidth_size,
-                    self.percentiles,
+                    horizon_bandwidth,
+                    horizon_percentiles,
                 )?);
             }
 
@@ -424,8 +439,8 @@ impl OutputFormatter {
                     }
 
                     if sequence_vwap_prices.len() >= 2 {
-                        // Use percentile boundaries (matches training approach)
-                        let percentiles = self.percentiles.unwrap_or([0.1, 0.9]);
+                        // Use percentile boundaries from calibrated parameters (matches training approach)
+                        let percentiles = horizon_percentiles.unwrap_or([0.1, 0.9]);
                         let mut sorted_prices = sequence_vwap_prices.clone();
                         sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -436,10 +451,10 @@ impl OutputFormatter {
                         let sequence_min = sorted_prices[lower_idx];
                         let sequence_max = sorted_prices[upper_idx];
 
-                        // Use model config bandwidth_size (sequence bandwidth multiplier)
-                        let model_bandwidth_multiplier = self.bandwidth_size.ok_or_else(|| {
+                        // Use calibrated bandwidth from training (CRITICAL: no fallback, must be present)
+                        let model_bandwidth_multiplier = horizon_bandwidth.ok_or_else(|| {
                             VangaError::PredictionError(
-                                "Model bandwidth_size not configured. This is required for adaptive predictions.".to_string()
+                                format!("Model bandwidth_size not configured for horizon '{}'. This is required for adaptive predictions. Calibrated parameters must be saved during training.", horizon)
                             )
                         })?;
 
@@ -493,8 +508,8 @@ impl OutputFormatter {
                     }
 
                     if sequence_vwap_prices.len() >= 2 {
-                        // Use percentile boundaries (matches training approach)
-                        let percentiles = self.percentiles.unwrap_or([0.1, 0.9]);
+                        // Use percentile boundaries from calibrated parameters (matches training approach)
+                        let percentiles = horizon_percentiles.unwrap_or([0.1, 0.9]);
                         let mut sorted_prices = sequence_vwap_prices.clone();
                         sorted_prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -505,10 +520,10 @@ impl OutputFormatter {
                         let sequence_min = sorted_prices[lower_idx];
                         let sequence_max = sorted_prices[upper_idx];
 
-                        // Use model config bandwidth_size (sequence bandwidth multiplier)
-                        let model_bandwidth_multiplier = self.bandwidth_size.ok_or_else(|| {
+                        // Use calibrated bandwidth from training (CRITICAL: no fallback, must be present)
+                        let model_bandwidth_multiplier = horizon_bandwidth.ok_or_else(|| {
                             VangaError::PredictionError(
-                                "Model bandwidth_size not configured. This is required for adaptive predictions.".to_string()
+                                format!("Model bandwidth_size not configured for horizon '{}'. This is required for adaptive predictions. Calibrated parameters must be saved during training.", horizon)
                             )
                         })?;
 

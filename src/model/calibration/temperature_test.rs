@@ -326,9 +326,9 @@ fn test_optimize_temperature_no_improvement() {
         let mut logit_row = vec![-0.5; 5];
         logit_row[class] = 1.5;
         // Add small random noise to other classes
-        for j in 0..5 {
-            if j != class {
-                logit_row[j] = -0.5 + (j as f64 * 0.05);
+        for (idx, logit) in logit_row.iter_mut().enumerate() {
+            if idx != class {
+                *logit = -0.5 + (idx as f64 * 0.05);
             }
         }
         logits_data.extend_from_slice(&logit_row);

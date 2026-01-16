@@ -73,13 +73,13 @@ fn test_bollinger_squeeze_calculation() {
 
     assert_eq!(result.len(), 8);
     // First 4 values should be NaN (warmup period)
-    for i in 0..4 {
-        assert!(result[i].is_nan());
+    for value in result.iter().take(4) {
+        assert!(value.is_nan());
     }
     // Values after warmup should be valid
-    for i in 4..8 {
-        assert!(!result[i].is_nan());
-        assert!(result[i] > 0.0);
+    for value in result.iter().skip(4) {
+        assert!(!value.is_nan());
+        assert!(*value > 0.0);
     }
 }
 
@@ -133,13 +133,13 @@ fn test_choppiness_index_calculation() {
 
     assert_eq!(result.len(), 20);
     // First values should be NaN (warmup period)
-    for i in 0..14 {
-        assert!(result[i].is_nan());
+    for value in result.iter().take(14) {
+        assert!(value.is_nan());
     }
     // Values after warmup should be valid and in range [0, 100]
-    for i in 14..20 {
-        assert!(!result[i].is_nan());
-        assert!(result[i] >= 0.0 && result[i] <= 100.0);
+    for value in result.iter().skip(14) {
+        assert!(!value.is_nan());
+        assert!(*value >= 0.0 && *value <= 100.0);
     }
 }
 
@@ -192,13 +192,13 @@ fn test_price_efficiency_ratio_calculation() {
 
     assert_eq!(result.len(), 10);
     // First 4 values should be NaN (warmup period)
-    for i in 0..4 {
-        assert!(result[i].is_nan());
+    for value in result.iter().take(4) {
+        assert!(value.is_nan());
     }
     // Values after warmup should be valid and in range [0, 1]
-    for i in 4..10 {
-        assert!(!result[i].is_nan());
-        assert!(result[i] >= 0.0 && result[i] <= 1.0);
+    for value in result.iter().skip(4) {
+        assert!(!value.is_nan());
+        assert!(*value >= 0.0 && *value <= 1.0);
     }
 }
 
@@ -251,13 +251,13 @@ fn test_directional_movement_balance_calculation() {
 
     assert_eq!(result.len(), 20);
     // First values should be NaN (warmup period)
-    for i in 0..14 {
-        assert!(result[i].is_nan());
+    for value in result.iter().take(14) {
+        assert!(value.is_nan());
     }
     // Values after warmup should be valid and in range [0, 1]
-    for i in 14..20 {
-        assert!(!result[i].is_nan());
-        assert!(result[i] >= 0.0 && result[i] <= 1.0);
+    for value in result.iter().skip(14) {
+        assert!(!value.is_nan());
+        assert!(*value >= 0.0 && *value <= 1.0);
     }
 }
 
