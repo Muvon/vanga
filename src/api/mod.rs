@@ -1,6 +1,12 @@
 pub mod backtester;
 pub mod predictor;
 pub mod trainer;
+#[cfg(test)]
+mod trainer_balance_test;
+#[cfg(test)]
+mod trainer_target_alignment_test;
+#[cfg(test)]
+mod trainer_truncation_test;
 
 pub use backtester::{run_backtest, run_batch_backtest, BacktestResults, Backtester};
 pub use predictor::{predict, ModelWrapper, Predictor};

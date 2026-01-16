@@ -1688,76 +1688,12 @@ impl LSTMModel {
                     epoch + 1, epoch_val_loss, val_samples_used, avg_val_loss
                 );
 
-                // Calibrate bias correction from all validation predictions
-                if !all_val_predictions.is_empty() {
-                    // Concatenate all validation predictions and targets
-                    let total_val_predictions = ndarray::concatenate(
-                        ndarray::Axis(0),
-                        &all_val_predictions
-                            .iter()
-                            .map(|arr| arr.view())
-                            .collect::<Vec<_>>(),
-                    )
-                    .map_err(|e| {
-                        VangaError::ModelError(format!(
-                            "Failed to concatenate validation predictions: {}",
-                            e
-                        ))
-                    })?;
-
-                    let total_val_targets = ndarray::concatenate(
-                        ndarray::Axis(0),
-                        &all_val_targets
-                            .iter()
-                            .map(|arr| arr.view())
-                            .collect::<Vec<_>>(),
-                    )
-                    .map_err(|e| {
-                        VangaError::ModelError(format!(
-                            "Failed to concatenate validation targets: {}",
-                            e
-                        ))
-                    })?;
-
-                    // Bias correction will be calibrated periodically according to recalibration_frequency
-                    // No initial calibration at epoch 0 - let model stabilize first
-
-                    // ENSEMBLE CALIBRATION: Separate from bias correction, runs independently
-                    if self.bias_correction_config.use_ensemble_calibration
-                        && self.ensemble_calibrator.is_some()
-                    {
-                        let ensemble_cal = self.ensemble_calibrator.as_mut().unwrap();
-                        // Ensemble calibration - initial setup (monitoring only during training)
-                        if !ensemble_cal.is_calibrated {
-                            log::info!("🎯 Ensemble calibration enabled (will be optimized POST-HOC after training)");
-
-                            // Ensure predictions are 5-class format
-                            if total_val_predictions.shape()[1] == 5 {
-                                // Convert targets to one-hot if needed
-                                let val_targets_for_ensemble = if total_val_targets.shape()[1] == 1
-                                {
-                                    let num_samples = total_val_targets.shape()[0];
-                                    let mut one_hot =
-                                        ndarray::Array2::<f64>::zeros((num_samples, 5));
-                                    for (i, class_idx) in total_val_targets.iter().enumerate() {
-                                        let class_index = (*class_idx as usize).min(4);
-                                        one_hot[[i, class_index]] = 1.0;
-                                    }
-                                    one_hot
-                                } else if total_val_targets.shape()[1] == 5 {
-                                    total_val_targets.clone()
-                                } else {
-                                    total_val_targets.slice(s![.., 0..5]).to_owned()
-                                };
-
-                                // Initial calibration for monitoring only
-                                ensemble_cal.calibrate_from_validation(
-                                    &total_val_predictions,
-                                    &val_targets_for_ensemble,
-                                )?;
-                            }
-                        }
-                    }
+                // ENSEMBLE CALIBRATION: Applied POST-HOC after training completes
+                if epoch == 0
+                    && self.bias_correction_config.use_ensemble_calibration
+                    && self.ensemble_calibrator.is_some()
+                {
+                    log::info!("🎯 Ensemble calibration enabled (will be applied POST-HOC after training completes)");
                 }
 
                 // Progressive bias correction recalibration during training

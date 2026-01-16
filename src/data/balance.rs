@@ -1330,311 +1330,166 @@ impl SequenceBalancer {
         // Extract just the indices in temporal order
         let sorted_indices: Vec<usize> = temporal_sorted.iter().map(|(idx, _)| *idx).collect();
 
-        let mut train_indices = Vec::new();
         let mut val_indices = Vec::new();
         let mut test_indices = Vec::new();
-        // Step 2: TRAINING - MAX DIVERSITY (uniform temporal spread)
-        // Select sequences at regular intervals across the entire temporal range
-        if train_size > 0 {
-            if train_size >= sorted_indices.len() {
-                // If we need all or more sequences, just take all
-                train_indices = sorted_indices.clone();
-            } else {
-                // Use systematic sampling with guaranteed uniqueness
-                let step = sorted_indices.len() as f64 / train_size as f64;
-                let mut selected_positions = std::collections::HashSet::new();
 
-                for i in 0..train_size {
-                    let target_pos = (i as f64 * step) as usize;
-                    let mut actual_pos = target_pos.min(sorted_indices.len() - 1);
+        // Simple 3-step process: Val → Test → Train (everything else)
+        // Validation and test get proper gap enforcement, training gets the rest
 
-                    // Find nearest unselected position
-                    let mut offset = 0;
-                    while selected_positions.contains(&actual_pos) {
-                        offset += 1;
-                        // Try alternating forward/backward to maintain temporal spread
-                        actual_pos = if offset % 2 == 0 {
-                            (target_pos + offset / 2).min(sorted_indices.len() - 1)
-                        } else {
-                            target_pos.saturating_sub(offset / 2)
-                        };
-
-                        // Safety: if we've tried too many times, just find any unselected
-                        if offset > sorted_indices.len() {
-                            actual_pos = (0..sorted_indices.len())
-                                .find(|&p| !selected_positions.contains(&p))
-                                .unwrap_or(target_pos);
-                            break;
-                        }
-                    }
-
-                    selected_positions.insert(actual_pos);
-                    train_indices.push(sorted_indices[actual_pos]);
+        // Step 1: Select VALIDATION with even temporal spacing
+        if val_size > 0 {
+            let step = (sorted_indices.len() as f64 / val_size as f64).max(1.0);
+            for i in 0..val_size {
+                let pos = ((i as f64 * step) as usize).min(sorted_indices.len() - 1);
+                let idx = sorted_indices[pos];
+                if !val_indices.contains(&idx) {
+                    val_indices.push(idx);
                 }
             }
 
-            // Sort training indices for consistency
-            train_indices.sort();
-
-            log::debug!(
-                "   🎯 TRAINING (Max Diversity): {} sequences at uniform temporal intervals",
-                train_indices.len()
-            );
-        }
-
-        // Step 3: VALIDATION - Strategy depends on validation_gap
-        // - With validation_gap > 0: Select sequences MINIMALLY overlapping with training (temporal separation)
-        // - With validation_gap = 0: Select sequences MAXIMALLY overlapping with training (interpolation test)
-        // CRITICAL: Track skipped candidates that fail gap check - they will be added to validation in Phase 2
-        let mut skipped_for_val_gap: Vec<usize> = Vec::new();
-        let remaining: Vec<usize> = sorted_indices
-            .iter()
-            .filter(|&&idx| !train_indices.contains(&idx))
-            .copied()
-            .collect();
-        if val_size > 0 && !remaining.is_empty() {
-            // Calculate overlap score for each remaining sequence with training set
-            let mut scored: Vec<(usize, f64)> = remaining
-                .iter()
-                .map(|&idx| {
-                    let overlap_score =
-                        self.calculate_overlap_with_set(idx, &train_indices, all_sequences);
-                    (idx, overlap_score)
-                })
-                .collect();
-
-            if validation_gap_steps > 0 {
-                // With validation_gap: Sort by OVERLAP score (LOWEST first) for temporal separation
-                // This ensures validation sequences are temporally distant from training
-                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-                // Select from lowest overlap (most temporally distant) first
-                for (candidate_idx, _score) in scored.iter() {
-                    if val_indices.len() >= val_size {
-                        break;
-                    }
-
-                    let candidate_seq = sequence_map
-                        .get(candidate_idx)
-                        .expect("Sequence must exist");
-                    let mut violates_gap = false;
-
-                    // Check gap with ALL training sequences
-                    // CRITICAL: Calculate gap as MINIMUM distance to ANY training sequence
-                    // This ensures validation is at least `validation_gap_steps` away from
-                    // the NEAREST training sample, not ALL training samples
-                    let mut min_gap = usize::MAX;
-                    for &train_idx in &train_indices {
-                        let train_seq = sequence_map.get(&train_idx).expect("Sequence must exist");
-
-                        // Calculate gap to this training sequence
-                        // If candidate overlaps with training, gap = 0
-                        // If separated, gap = distance between them
-                        let gap = if candidate_seq.start_idx >= train_seq.end_idx {
-                            // Candidate is completely after training
-                            candidate_seq.start_idx.saturating_sub(train_seq.end_idx)
-                        } else if train_seq.start_idx >= candidate_seq.end_idx {
-                            // Training is completely after candidate
-                            train_seq.start_idx.saturating_sub(candidate_seq.end_idx)
-                        } else {
-                            // Sequences overlap - this is the critical case for data leakage
-                            0
-                        };
-
-                        if gap < min_gap {
-                            min_gap = gap;
-                        }
-                        // Early exit if we already found a violation
-                        if min_gap < validation_gap_steps {
+            // If we got duplicates, fill from remaining
+            if val_indices.len() < val_size {
+                for &idx in &sorted_indices {
+                    if !val_indices.contains(&idx) {
+                        val_indices.push(idx);
+                        if val_indices.len() >= val_size {
                             break;
                         }
                     }
+                }
+            }
+            val_indices.sort();
+        }
 
-                    if min_gap < validation_gap_steps {
-                        violates_gap = true;
-                    } else {
-                        // Passed training gap check, now check against validation
-                        for &selected_idx in &val_indices {
-                            let selected_seq = sequence_map
-                                .get(&selected_idx)
-                                .expect("Sequence must exist");
+        // Step 2: Select TEST with gap enforcement from validation
+        if test_size > 0 {
+            let mut candidates: Vec<usize> = sorted_indices
+                .iter()
+                .filter(|&&idx| !val_indices.contains(&idx))
+                .copied()
+                .collect();
 
-                            // Calculate gap: 0 if sequences overlap, positive if separated
-                            let gap = if candidate_seq.start_idx >= selected_seq.end_idx {
-                                candidate_seq.start_idx.saturating_sub(selected_seq.end_idx)
-                            } else if selected_seq.start_idx >= candidate_seq.end_idx {
-                                selected_seq.start_idx.saturating_sub(candidate_seq.end_idx)
-                            } else {
-                                0 // Overlap
-                            };
+            // Apply gap enforcement if needed
+            if validation_gap_steps > 0 {
+                candidates.retain(|&idx| {
+                    let seq = match sequence_map.get(&idx) {
+                        Some(s) => s,
+                        None => return false,
+                    };
 
-                            if gap < validation_gap_steps {
-                                violates_gap = true;
+                    // Check gap to ALL validation sequences
+                    for &val_idx in &val_indices {
+                        let val_seq = match sequence_map.get(&val_idx) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+
+                        let gap = if seq.start_idx >= val_seq.end_idx {
+                            seq.start_idx - val_seq.end_idx
+                        } else if val_seq.start_idx >= seq.end_idx {
+                            val_seq.start_idx.saturating_sub(seq.end_idx)
+                        } else {
+                            0 // overlap
+                        };
+
+                        if gap < validation_gap_steps {
+                            return false; // Too close to validation
+                        }
+                    }
+                    true
+                });
+            }
+
+            // Select test with even spacing from candidates
+            if !candidates.is_empty() {
+                let step = (candidates.len() as f64 / test_size as f64).max(1.0);
+                for i in 0..test_size.min(candidates.len()) {
+                    let pos = ((i as f64 * step) as usize).min(candidates.len() - 1);
+                    let idx = candidates[pos];
+                    if !test_indices.contains(&idx) {
+                        test_indices.push(idx);
+                    }
+                }
+
+                // Fill remaining if we got duplicates
+                if test_indices.len() < test_size {
+                    for &idx in &candidates {
+                        if !test_indices.contains(&idx) {
+                            test_indices.push(idx);
+                            if test_indices.len() >= test_size {
                                 break;
                             }
                         }
                     }
+                }
+            }
+            test_indices.sort();
+        }
 
-                    if !violates_gap {
-                        val_indices.push(*candidate_idx);
-                    } else if validation_gap_steps > 0 {
-                        // Track skipped candidates for Phase 2 - they will be added to validation
-                        // even if they violate gap (to maintain exact validation size)
-                        skipped_for_val_gap.push(*candidate_idx);
+        // Step 3: TRAINING - Select from remaining with even spacing
+        let remaining: Vec<usize> = class_indices
+            .iter()
+            .filter(|&&idx| !val_indices.contains(&idx) && !test_indices.contains(&idx))
+            .copied()
+            .collect();
+
+        let mut train_indices = Vec::new();
+        if train_size > 0 && !remaining.is_empty() {
+            let step = (remaining.len() as f64 / train_size as f64).max(1.0);
+            for i in 0..train_size.min(remaining.len()) {
+                let pos = ((i as f64 * step) as usize).min(remaining.len() - 1);
+                let idx = remaining[pos];
+                if !train_indices.contains(&idx) {
+                    train_indices.push(idx);
+                }
+            }
+
+            // Fill remaining if we got duplicates
+            if train_indices.len() < train_size {
+                for &idx in &remaining {
+                    if !train_indices.contains(&idx) {
+                        train_indices.push(idx);
+                        if train_indices.len() >= train_size {
+                            break;
+                        }
                     }
                 }
-
-                if val_indices.len() < val_size {
-                    log::warn!(
-                        "   ⚠️ Validation gap enforcement reduced val from {} to {} (gap={} steps)",
-                        val_size,
-                        val_indices.len(),
-                        validation_gap_steps
-                    );
-                }
-
-                // Phase 2: Fill remaining validation slots with skipped candidates (relax gap constraint)
-                // This ensures we reach exactly val_size even if gap enforcement would leave gaps
-                // CRITICAL: Only add enough skipped candidates to reach val_size, leaving rest for test
-                let needed_for_validation = val_size.saturating_sub(val_indices.len());
-                let to_add_to_validation = needed_for_validation.min(skipped_for_val_gap.len());
-                // split_off(N) returns elements [0, N) and keeps [N, end)
-                let _kept_for_test: Vec<usize> =
-                    skipped_for_val_gap.split_off(to_add_to_validation);
-                val_indices.append(&mut skipped_for_val_gap);
-                val_indices.sort();
-            } else {
-                // No gap enforcement - select by MAX overlap (original behavior)
-                // Sort by overlap score (HIGHEST first) for validation - test interpolation
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-                // Select top val_size
-                val_indices.extend(
-                    scored
-                        .iter()
-                        .take(val_size.min(scored.len()))
-                        .map(|(idx, _)| *idx),
-                );
-            }
-
-            // Sort validation indices for consistency
-            val_indices.sort();
-
-            let avg_overlap: f64 = if !val_indices.is_empty() {
-                let total: f64 = val_indices
-                    .iter()
-                    .map(|&idx| self.calculate_overlap_with_set(idx, &train_indices, all_sequences))
-                    .sum();
-                total / val_indices.len() as f64
-            } else {
-                0.0
-            };
-
-            if validation_gap_steps > 0 {
-                log::debug!(
-                    "   🎯 VALIDATION (Min Overlap + Gap {}): {} sequences, avg overlap with train: {:.2}",
-                    validation_gap_steps,
-                    val_indices.len(),
-                    avg_overlap
-                );
-            } else {
-                log::debug!(
-                    "   🎯 VALIDATION (Max Overlap): {} sequences, avg overlap with train: {:.2}",
-                    val_indices.len(),
-                    avg_overlap
-                );
             }
         }
+        train_indices.sort();
 
-        // Step 4: TEST - MAX DIVERSITY FROM REMAINING
-        // Exclude sequences in train and val (skipped_for_val_gap remaining after Phase 2 are available for test)
-        let remaining_after_val_and_skipped: Vec<usize> = sorted_indices
-            .iter()
-            .filter(|&&idx| !train_indices.contains(&idx) && !val_indices.contains(&idx))
-            .copied()
-            .collect();
-        if test_size > 0 && !remaining_after_val_and_skipped.is_empty() {
-            // Score by temporal distance from nearest training OR validation sequence
-            let mut scored: Vec<(usize, f64)> = remaining_after_val_and_skipped
-                .iter()
-                .map(|&idx| {
-                    let diversity_score = self.calculate_diversity_from_selected(
-                        idx,
-                        &train_indices,
-                        &val_indices,
-                        all_sequences,
-                    );
-                    (idx, diversity_score)
-                })
-                .collect();
-
-            // Sort by diversity score (highest first) - prefer sequences far from others
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Select top test_size for test (they are already the most diverse)
-            test_indices.extend(
-                scored
-                    .iter()
-                    .take(test_size.min(scored.len()))
-                    .map(|(idx, _)| *idx),
-            );
-
-            // Sort test indices for consistency
-            test_indices.sort();
-
-            log::debug!(
-                "   🎯 TEST (Max Diversity from Remaining): {} sequences",
-                test_indices.len()
-            );
-        }
-
-        // Step 5: Handle any remaining due to rounding or exact size requirements
-        // CRITICAL: remaining_final excludes skipped_for_val_gap (already in validation)
-        let mut remaining_final: Vec<usize> = class_indices
-            .iter()
-            .filter(|&&idx| {
-                !train_indices.contains(&idx)
-                    && !val_indices.contains(&idx)
-                    && !test_indices.contains(&idx)
-            })
-            .copied()
-            .collect();
-        remaining_final.sort();
-
-        // All remaining sequences go to training
-        train_indices.append(&mut remaining_final);
-
-        // Validate that we used all sequences
-        let total_allocated = train_indices.len() + val_indices.len() + test_indices.len();
-        if total_allocated != class_indices.len() {
+        // Validate exact sizes
+        if train_indices.len() != train_size {
             return Err(VangaError::DataError(format!(
-                "Split allocation error: allocated {} sequences but have {} total (train={}, val={}, test={})",
-                total_allocated,
-                class_indices.len(),
+                "Training size mismatch: got {} but expected {}",
                 train_indices.len(),
-                val_indices.len(),
-                test_indices.len()
+                train_size
             )));
         }
-        if test_indices.len() < test_size {
-            log::warn!(
-                "   ⚠️ Insufficient sequences for test: {}/{} (gap enforcement may have reduced available candidates)",
+        if val_indices.len() != val_size {
+            return Err(VangaError::DataError(format!(
+                "Validation size mismatch: got {} but expected {}",
+                val_indices.len(),
+                val_size
+            )));
+        }
+        if test_indices.len() != test_size {
+            return Err(VangaError::DataError(format!(
+                "Test size mismatch: got {} but expected {}",
                 test_indices.len(),
                 test_size
-            );
+            )));
         }
 
-        // Validation can be smaller than requested due to gap enforcement (warn but don't error)
-        if val_indices.len() < val_size {
-            log::warn!(
-                "   ⚠️ Validation size reduced from {} to {} due to gap enforcement (gap={} steps)",
-                val_size,
-                val_indices.len(),
-                validation_gap_steps
-            );
+        // Validate no overlaps
+        let total = train_indices.len() + val_indices.len() + test_indices.len();
+        if total != train_size + val_size + test_size {
+            return Err(VangaError::DataError(format!(
+                "Split allocation error: total={} but expected {}",
+                total,
+                train_size + val_size + test_size
+            )));
         }
-        val_indices.sort();
-        test_indices.sort();
 
         log::debug!(
             "   📊 Split allocation: {} train, {} val, {} test (no overlaps)",
@@ -1644,129 +1499,6 @@ impl SequenceBalancer {
         );
 
         Ok((train_indices, val_indices, test_indices))
-    }
-
-    /// Calculate overlap score between a sequence and a set of training indices
-    /// Returns value between 0.0 (no overlap) and 1.0 (maximum overlap)
-    fn calculate_overlap_with_set(
-        &self,
-        seq_idx: usize,
-        reference_indices: &[usize],
-        all_sequences: &[SequenceWithTargets],
-    ) -> f64 {
-        if reference_indices.is_empty() {
-            return 0.0;
-        }
-
-        // Create lookup map for synthetic sequences
-        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
-            .iter()
-            .map(|seq| (seq.sequence_idx, seq))
-            .collect();
-
-        let seq = match sequence_map.get(&seq_idx) {
-            Some(s) => s,
-            None => return 0.0,
-        };
-
-        let mut total_overlap = 0.0;
-        let mut count = 0;
-
-        for &ref_idx in reference_indices {
-            if let Some(ref_seq) = sequence_map.get(&ref_idx) {
-                total_overlap += seq.overlap_ratio(ref_seq);
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            // Normalize: average overlap across all reference sequences
-            (total_overlap / count as f64).clamp(0.0, 1.0)
-        } else {
-            0.0
-        }
-    }
-
-    /// Calculate diversity score - how far this sequence is from any selected sequence
-    /// Higher score = more diverse (far from all selected)
-    fn calculate_diversity_from_selected(
-        &self,
-        seq_idx: usize,
-        train_indices: &[usize],
-        val_indices: &[usize],
-        all_sequences: &[SequenceWithTargets],
-    ) -> f64 {
-        let all_selected: Vec<usize> = train_indices
-            .iter()
-            .chain(val_indices.iter())
-            .copied()
-            .collect();
-        if all_selected.is_empty() {
-            return 1.0; // Maximum diversity if nothing selected
-        }
-
-        // Create lookup map for synthetic sequences
-        let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
-            .iter()
-            .map(|seq| (seq.sequence_idx, seq))
-            .collect();
-
-        let seq = match sequence_map.get(&seq_idx) {
-            Some(s) => s,
-            None => return 0.0,
-        };
-
-        let seq_start = seq.start_idx;
-        let seq_end = seq.end_idx;
-
-        if seq_end <= seq_start {
-            return 0.0;
-        }
-
-        // Find minimum distance to any selected sequence
-        let mut min_distance = usize::MAX;
-
-        for &sel_idx in &all_selected {
-            if let Some(sel_seq) = sequence_map.get(&sel_idx) {
-                let sel_start = sel_seq.start_idx;
-                let sel_end = sel_seq.end_idx;
-
-                // Calculate gap between sequences
-                let gap = if seq_start >= sel_end {
-                    seq_start - sel_end // seq after sel
-                } else {
-                    sel_start.saturating_sub(seq_end) // seq before sel or overlapping
-                };
-
-                min_distance = min_distance.min(gap);
-            }
-        }
-
-        // Get temporal range for normalization
-        let temporal_positions: Vec<usize> = all_selected
-            .iter()
-            .filter_map(|&idx| sequence_map.get(&idx).map(|s| s.start_idx))
-            .collect();
-        let min_pos = *temporal_positions.iter().min().unwrap_or(&seq_start);
-        let max_pos = *temporal_positions.iter().max().unwrap_or(&seq_start);
-        let total_span = max_pos.saturating_sub(min_pos).max(1);
-
-        // Normalize by total span
-        let normalized_distance = min_distance as f64 / total_span as f64;
-        let temporal_center = (min_pos + max_pos) as f64 / 2.0;
-        let pos_from_center = (seq_start as f64 - temporal_center).abs();
-        let max_distance_from_center = (max_pos - min_pos) as f64 / 2.0;
-        let temporal_diversity = if max_distance_from_center > 0.0 {
-            pos_from_center / max_distance_from_center
-        } else {
-            0.5
-        };
-
-        // Combined score: weighted average of distance and temporal position
-        // Higher weight on distance to prefer non-overlapping sequences
-        let combined_score = 0.7 * normalized_distance + 0.3 * temporal_diversity;
-
-        combined_score.clamp(0.0, 1.0)
     }
 
     /// Select sequences for a target with specified count

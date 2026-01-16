@@ -237,6 +237,70 @@ impl PreparedTargets {
         Ok(())
     }
 
+    /// Select targets by indices (for truncation)
+    /// CRITICAL: Used during truncation to maintain sequence-target alignment
+    pub fn select_by_indices(&self, indices: &[usize]) -> Self {
+        let mut result = Self::new(indices.len());
+        result.target_names = self.target_names.clone();
+        result.valid_indices = (0..indices.len()).collect();
+
+        // Select from each target type
+        for (horizon, targets) in &self.price_levels {
+            let selected: Vec<i32> = indices.iter().map(|&i| targets[i]).collect();
+            result.price_levels.insert(horizon.clone(), selected);
+        }
+
+        for (horizon, targets) in &self.direction {
+            let selected: Vec<i32> = indices.iter().map(|&i| targets[i]).collect();
+            result.direction.insert(horizon.clone(), selected);
+        }
+
+        for (horizon, targets) in &self.volatility {
+            let selected: Vec<i32> = indices.iter().map(|&i| targets[i]).collect();
+            result.volatility.insert(horizon.clone(), selected);
+        }
+
+        for (horizon, targets) in &self.sentiment {
+            let selected: Vec<i32> = indices.iter().map(|&i| targets[i]).collect();
+            result.sentiment.insert(horizon.clone(), selected);
+        }
+
+        for (horizon, targets) in &self.volume {
+            let selected: Vec<i32> = indices.iter().map(|&i| targets[i]).collect();
+            result.volume.insert(horizon.clone(), selected);
+        }
+
+        // Select from strength values
+        for (horizon, strengths) in &self.price_levels_strength {
+            let selected: Vec<f64> = indices.iter().map(|&i| strengths[i]).collect();
+            result
+                .price_levels_strength
+                .insert(horizon.clone(), selected);
+        }
+
+        for (horizon, strengths) in &self.direction_strength {
+            let selected: Vec<f64> = indices.iter().map(|&i| strengths[i]).collect();
+            result.direction_strength.insert(horizon.clone(), selected);
+        }
+
+        for (horizon, strengths) in &self.volatility_strength {
+            let selected: Vec<f64> = indices.iter().map(|&i| strengths[i]).collect();
+            result.volatility_strength.insert(horizon.clone(), selected);
+        }
+
+        for (horizon, strengths) in &self.sentiment_strength {
+            let selected: Vec<f64> = indices.iter().map(|&i| strengths[i]).collect();
+            result.sentiment_strength.insert(horizon.clone(), selected);
+        }
+
+        for (horizon, strengths) in &self.volume_strength {
+            let selected: Vec<f64> = indices.iter().map(|&i| strengths[i]).collect();
+            result.volume_strength.insert(horizon.clone(), selected);
+        }
+
+        result
+    }
+
     /// Calculate target statistics
     pub fn calculate_statistics(&self) -> TargetStatistics {
         let mut stats = TargetStatistics::new();

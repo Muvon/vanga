@@ -140,7 +140,9 @@ fn test_validation_gap_does_not_affect_training_balance() {
     for class in 0..5 {
         for i in 0..600 {
             let seq_idx = class * 600 + i;
-            let start_idx = seq_idx * 5;
+            // Create sequences with realistic spacing for gap=10
+            // Each sequence is 30 long, spaced 20 apart (overlap=10, gap=20 between non-overlapping)
+            let start_idx = seq_idx * 20;
             let end_idx = start_idx + 30;
 
             let sequence_data = Array2::zeros((30, 50));
@@ -173,6 +175,9 @@ fn test_validation_gap_does_not_affect_training_balance() {
 
     let result = balancer.create_diverse_class_splits(&sequences, &class_indices, 480, 60, 60, 10);
 
+    if let Err(e) = &result {
+        eprintln!("ERROR: {:?}", e);
+    }
     assert!(result.is_ok(), "Split should succeed");
     let (train_indices, val_indices, test_indices) = result.unwrap();
     let train: Vec<usize> = train_indices;
