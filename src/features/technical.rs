@@ -1184,6 +1184,7 @@ fn add_mfi_indicator(
 }
 
 /// Add ATR indicators to DataFrame with optional momentum features
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_atr_indicators(
     mut df: DataFrame,
     open: &[f64],

@@ -509,6 +509,43 @@ correlation_window = 20           # Rolling window for correlation
 #   enabled = true, method = "Bayesian", n_trials = 500
 
 # ============================================================================
+# DATA CONFIGURATION - Sequence generation and sample control
+# ============================================================================
+[data]
+# Sequence overlap ratio (0.0-1.0)
+# - 0.0: No overlap (sequences are independent)
+# - 0.5: 50% overlap (moderate augmentation)
+# - 0.8: 80% overlap (high augmentation, default)
+# Higher overlap = more training samples but more correlation
+sequence_overlap = 0.8
+
+# Target samples configuration for iterative calibration
+# System runs calibration multiple times, adjusting overlap until target is reached
+[data.target_samples]
+# Target number of BALANCED samples after calibration
+# - 0: Disabled (use baseline sequence_overlap as-is) - DEFAULT
+# - >0: System iteratively adjusts overlap to reach target
+count = 0
+
+# Whether to truncate balanced samples if count exceeds target
+# - false: Keep all balanced samples if > target (target is minimum) - DEFAULT
+# - true: Truncate to exact target count (maintains diversity and balance)
+truncate = false
+
+# EXAMPLE CONFIGURATIONS:
+#
+# Disabled mode (default):
+#   count = 0
+#   truncate = false
+#
+# Target balanced samples (iterative):
+#   count = 5000
+#   truncate = true
+#   # System runs calibration, checks balanced count
+#   # If < 5000: increases overlap, runs again (max 5 iterations)
+#   # If > 5000: truncates to exactly 5000
+
+# ============================================================================
 # TARGET CONFIGURATION - Enable/disable specific targets
 # ============================================================================
 # Simple enable/disable flags for each target type

@@ -414,16 +414,135 @@ impl ModelTrainer {
             Some(self.config.training.seed),
         );
 
-        let calibrated_params = calibrator
-            .calibrate(
-                &ohlcv_data,
-                sequence_length,
-                &self.config.horizons, // Pass ALL horizons
-                None,                  // Use all available samples
-                self.config.data.sequence_overlap,
-                timeframe_minutes, // Pass detected timeframe
-            )
-            .await?;
+        // Iterative calibration to reach target balanced samples
+        let mut current_overlap = self.config.data.sequence_overlap;
+        let target_count = self.config.data.target_samples.count;
+        let max_iterations = 5;
+
+        let (calibrated_params, final_overlap) = if target_count > 0 {
+            log::info!(
+                "🎯 Target balanced samples: {} (iterative calibration enabled)",
+                target_count
+            );
+
+            let mut iteration = 0;
+            let final_params;
+
+            loop {
+                iteration += 1;
+                log::info!(
+                    "🔄 Calibration iteration {}/{}: overlap={:.1}%",
+                    iteration,
+                    max_iterations,
+                    current_overlap * 100.0
+                );
+
+                let params = calibrator
+                    .calibrate(
+                        &ohlcv_data,
+                        sequence_length,
+                        &self.config.horizons,
+                        None,
+                        current_overlap,
+                        timeframe_minutes,
+                    )
+                    .await?;
+
+                // Load data with these params to count ACTUAL balanced samples
+                let mut temp_config = self.config.clone();
+                temp_config.data.sequence_overlap = current_overlap;
+
+                let target_windows = data_pipeline
+                    .prepare_training_data_with_calibrated_params(
+                        &self.config.data_path,
+                        &temp_config,
+                        Some(&params),
+                    )
+                    .await?;
+
+                // Count actual balanced samples from first target (train + val)
+                let balanced_count = target_windows
+                    .windows_by_target
+                    .values()
+                    .next()
+                    .and_then(|windows| windows.first())
+                    .map(|w| w.train_samples + w.val_samples)
+                    .unwrap_or(0);
+
+                log::info!(
+                    "📊 Iteration {} result: {} balanced samples (target: {})",
+                    iteration,
+                    balanced_count,
+                    target_count
+                );
+
+                // Check if we reached target (within 5% tolerance)
+                let ratio = balanced_count as f64 / target_count as f64;
+                if (0.95..=1.05).contains(&ratio) {
+                    log::info!(
+                        "✅ Target reached: {} samples ({:.1}% of target)",
+                        balanced_count,
+                        ratio * 100.0
+                    );
+                    final_params = (params, current_overlap);
+                    break;
+                }
+
+                // If we have too many samples and truncate is enabled, we're done
+                if balanced_count > target_count && self.config.data.target_samples.truncate {
+                    log::info!(
+                        "✅ Exceeded target: {} samples, will truncate to {}",
+                        balanced_count,
+                        target_count
+                    );
+                    final_params = (params, current_overlap);
+                    break;
+                }
+
+                // If max iterations reached, use what we have
+                if iteration >= max_iterations {
+                    log::warn!(
+                        "⚠️  Max iterations reached. Using {} samples (target: {})",
+                        balanced_count,
+                        target_count
+                    );
+                    final_params = (params, current_overlap);
+                    break;
+                }
+
+                // Calculate new overlap based on ratio
+                let adjustment_ratio = target_count as f64 / balanced_count as f64;
+                current_overlap = (current_overlap * adjustment_ratio).min(0.95);
+
+                log::info!(
+                    "🔧 Adjusting overlap: {:.1}% → {:.1}% (ratio: {:.2})",
+                    (current_overlap / adjustment_ratio) * 100.0,
+                    current_overlap * 100.0,
+                    adjustment_ratio
+                );
+            }
+
+            let (params, _overlap) = final_params;
+
+            (params, current_overlap)
+        } else {
+            // No target, run calibration once with baseline overlap
+            let params = calibrator
+                .calibrate(
+                    &ohlcv_data,
+                    sequence_length,
+                    &self.config.horizons,
+                    None,
+                    current_overlap,
+                    timeframe_minutes,
+                )
+                .await?;
+            (params, current_overlap)
+        };
+
+        // Update config with final overlap
+        let mut final_config = self.config.clone();
+        final_config.data.sequence_overlap = final_overlap;
 
         log::info!(
             "✅ Per-horizon parameters calibrated successfully for {} horizons",
@@ -438,10 +557,85 @@ impl ModelTrainer {
         let target_windows = data_pipeline
             .prepare_training_data_with_calibrated_params(
                 &self.config.data_path,
-                &self.config,
+                &final_config,
                 Some(&calibrated_params),
             )
             .await?;
+
+        // Apply truncation if enabled and we exceeded target
+        let target_windows = if target_count > 0 && self.config.data.target_samples.truncate {
+            let mut truncated_windows = target_windows;
+
+            for windows in truncated_windows.windows_by_target.values_mut() {
+                for window in windows.iter_mut() {
+                    let current_total = window.train_samples + window.val_samples;
+
+                    if current_total > target_count {
+                        let samples_to_keep = (target_count / 5) * 5;
+
+                        log::info!(
+                            "✂️  Truncating from {} to {} samples (evenly distributed, maintaining balance)",
+                            current_total, samples_to_keep
+                        );
+
+                        // Combine train + val
+                        let combined_sequences = ndarray::concatenate(
+                            ndarray::Axis(0),
+                            &[
+                                window.train_data.sequences.view(),
+                                window.val_data.sequences.view(),
+                            ],
+                        )
+                        .map_err(|e| {
+                            crate::utils::error::VangaError::DataError(format!(
+                                "Concatenation failed: {}",
+                                e
+                            ))
+                        })?;
+
+                        // Select evenly distributed indices for diversity
+                        let stride = current_total as f64 / samples_to_keep as f64;
+                        let selected_indices: Vec<usize> = (0..samples_to_keep)
+                            .map(|i| ((i as f64 * stride).round() as usize).min(current_total - 1))
+                            .collect();
+
+                        // Split into train/val (80/20)
+                        let train_samples = (samples_to_keep as f64 * 0.8).round() as usize;
+                        let val_samples = samples_to_keep - train_samples;
+
+                        let train_indices: Vec<usize> = selected_indices
+                            .iter()
+                            .take(train_samples)
+                            .copied()
+                            .collect();
+                        let val_indices: Vec<usize> = selected_indices
+                            .iter()
+                            .skip(train_samples)
+                            .copied()
+                            .collect();
+
+                        window.train_data.sequences =
+                            combined_sequences.select(ndarray::Axis(0), &train_indices);
+                        window.train_samples = train_samples;
+
+                        window.val_data.sequences =
+                            combined_sequences.select(ndarray::Axis(0), &val_indices);
+                        window.val_samples = val_samples;
+
+                        log::info!(
+                            "✅ Truncated: {} train + {} val = {} total (diverse + balanced)",
+                            train_samples,
+                            val_samples,
+                            samples_to_keep
+                        );
+                    }
+                }
+            }
+
+            truncated_windows
+        } else {
+            target_windows
+        };
 
         log::info!(
             "Target-specific training: {} targets prepared with independent balancing",

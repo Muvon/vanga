@@ -140,6 +140,41 @@ pub struct EarlyStoppingConfig {
     pub min_delta: f64,
 }
 
+/// Target samples configuration for iterative calibration
+///
+/// Controls the number of BALANCED training samples by iteratively running
+/// calibration with adjusted overlap until target is reached.
+///
+/// # Examples
+///
+/// Disabled (default):
+/// ```toml
+/// [data.target_samples]
+/// count = 0
+/// truncate = false
+/// ```
+///
+/// Target balanced samples:
+/// ```toml
+/// [data.target_samples]
+/// count = 5000
+/// truncate = true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TargetSamples {
+    /// Target number of BALANCED samples after calibration
+    /// - 0: Disabled (use baseline sequence_overlap as-is)
+    /// - >0: System iteratively adjusts overlap to reach target
+    #[serde(default)]
+    pub count: usize,
+
+    /// Whether to truncate balanced samples if count exceeds target
+    /// - false: Keep all balanced samples if > target (target is minimum)
+    /// - true: Truncate to exact target count (maintains diversity and balance)
+    #[serde(default)]
+    pub truncate: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataConfig {
     /// Normalization method
@@ -183,6 +218,10 @@ pub struct DataConfig {
 
     /// Feature selection configuration
     pub feature_selection: FeatureSelectionConfig,
+
+    /// Target samples configuration for adaptive overlap optimization
+    #[serde(default)]
+    pub target_samples: TargetSamples,
 }
 
 fn default_sequence_augment() -> bool {
@@ -1578,6 +1617,7 @@ impl Default for DataConfig {
                 correlation_threshold: 0.95,
                 importance_threshold: 0.001,
             },
+            target_samples: TargetSamples::default(),
         }
     }
 }

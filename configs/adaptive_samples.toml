@@ -1,0 +1,201 @@
+# VANGA Adaptive Samples Configuration
+# Demonstrates the adaptive target samples feature for controlling training data size
+
+# This configuration shows how to use the adaptive overlap optimization feature
+# to control the number of training samples after calibration.
+
+[training]
+epochs = { Auto = { max_epochs = 1000 } }
+optimizer = { AdamW = { weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8 } }
+learning_rate = 0.001
+seed = 42  # Reproducible training
+batch_size = { Fixed = 32 }
+warmup_epochs = 5
+validation_split = 0.2
+test_split = 0.1
+print_every = 1
+device = "Auto"
+
+[training.early_stopping]
+patience = 50
+min_delta = 0.001
+
+[model]
+architecture = { MultiLSTM = { layers = 2 } }
+sequence_length = { Fixed = 60 }
+hidden_units = { Fixed = 128 }
+
+[model.dropout]
+enabled = true
+rate = { Fixed = 0.2 }
+variational = true
+recurrent = true
+
+[model.loss_function]
+Composite = { accuracy_weight = 0.2, direction_weight = 0.5, volatility_weight = 0.2, risk_weight = 0.1 }
+
+# ============================================================================
+# DATA CONFIGURATION - Adaptive Target Samples Feature
+# ============================================================================
+[data]
+# Baseline sequence overlap (starting point for optimization)
+# This will be automatically adjusted if target_samples is enabled
+sequence_overlap = 0.8
+
+# ============================================================================
+# TARGET SAMPLES CONFIGURATION - Three Usage Modes
+# ============================================================================
+
+# MODE 1: DISABLED (Default Behavior)
+# Uses baseline sequence_overlap as-is, no optimization
+# Uncomment to use:
+# [data.target_samples]
+# count = 0
+# truncate = false
+# balance_overhead = 0.3
+
+# MODE 2: MINIMUM BALANCED SAMPLES (Recommended for Small Datasets)
+# Ensures at least N BALANCED samples through iterative calibration
+# Use when you have limited data and want to maximize training samples
+[data.target_samples]
+count = 10000
+truncate = false
+
+# How it works:
+# 1. Run calibration with baseline overlap
+# 2. Count balanced samples (e.g., 7000)
+# 3. If < 10,000: increase overlap by ratio (10000/7000 = 1.43x)
+# 4. Run calibration again with new overlap
+# 5. Repeat until target reached (max 5 iterations)
+# 6. Maintains perfect class balance (20% per class)
+
+# MODE 3: FIXED BALANCED SAMPLES (Recommended for Large Datasets)
+# Iteratively adjusts overlap and truncates to exactly N samples
+# Use when you have abundant data and want consistent training size
+# [data.target_samples]
+# count = 5000
+# truncate = true
+
+# How it works:
+# 1. Run calibration with baseline overlap
+# 2. Count balanced samples (e.g., 7000)
+# 3. If > 5,000: truncate to exactly 5,000
+# 4. If < 5,000: increase overlap and run again
+# 5. Truncation maintains temporal diversity
+# 6. Maintains perfect class balance (20% per class)
+
+# ============================================================================
+# PRACTICAL EXAMPLES
+# ============================================================================
+
+# Example 1: Small Dataset
+# [data.target_samples]
+# count = 5000
+# truncate = false
+# Result: Iteratively increases overlap until 5000 balanced samples reached
+
+# Example 2: Medium Dataset
+# [data.target_samples]
+# count = 10000
+# truncate = false
+# Result: Adjusts overlap to reach 10000 balanced samples
+
+# Example 3: Large Dataset
+# [data.target_samples]
+# count = 8000
+# truncate = true
+# Result: Iterates to reach ~8000, truncates if more
+
+# Example 4: Fixed Size Training
+# [data.target_samples]
+# count = 5000
+# truncate = true
+# Result: Exactly 5000 balanced samples for consistent training
+
+# ============================================================================
+# BENEFITS
+# ============================================================================
+# 1. Consistent Training: Same balanced sample count across symbols
+# 2. Automatic Adjustment: System finds optimal overlap through iteration
+# 3. Perfect Balance: Maintains 20% per class distribution
+# 4. Temporal Diversity: Truncation preserves time-series spread
+# 5. Data-Driven: Uses actual calibration results, not guessed ratios
+
+# ============================================================================
+# ADVANCED TUNING
+# ============================================================================
+
+# For volatile cryptocurrencies:
+# - Use higher count (10000+) for more training data
+# - Set truncate=false to keep all available patterns
+
+# For stable cryptocurrencies:
+# - Use moderate count (5000-8000) for efficiency
+# - Set truncate=true to control training time
+
+# For backtesting consistency:
+# - Use fixed count with truncate=true
+# - Ensures all symbols have same sample count
+# - Makes performance comparisons fair
+
+[data.outlier_handling]
+enabled = true
+method = "ModifiedZScore"
+threshold = 3.5
+
+[data.feature_selection]
+enabled = true
+correlation_threshold = 0.95
+importance_threshold = 0.001
+
+# ============================================================================
+# FEATURES CONFIGURATION
+# ============================================================================
+[features.technical_indicators]
+enabled = true
+
+[features.technical_indicators.trend]
+sma_periods = [7, 14, 21, 50, 100, 200]
+ema_periods = [7, 14, 21, 50, 100, 200]
+wma_periods = [7, 14, 21]
+dema_periods = [7, 14, 21]
+tema_periods = [7, 14, 21]
+kama_periods = [10, 20, 30]
+macd_configs = [[12, 26, 9], [5, 35, 5]]
+
+[features.technical_indicators.momentum]
+rsi_periods = [7, 14, 21]
+stoch_periods = [14, 21]
+cci_periods = [14, 20]
+roc_periods = [9, 12, 25]
+williams_r_periods = [14]
+mfi_periods = [14]
+tsi_configs = [[25, 13], [13, 7]]
+
+[features.technical_indicators.volatility]
+bb_configs = [[20, 2.0], [20, 2.5]]
+kc_configs = [[20, 2.0], [20, 1.5]]
+dc_periods = [20, 55]
+atr_periods = [7, 14, 21]
+
+[features.technical_indicators.volume]
+obv = true
+vwap = true
+ad = true
+cmf_periods = [20, 21]
+vpt = true
+nvi = true
+pvi = true
+
+[features.cross_asset]
+enabled = false
+
+# ============================================================================
+# TARGET CONFIGURATION
+# ============================================================================
+[targets]
+price_level = true
+direction = true
+volatility = true
+sentiment = true
+volume = true

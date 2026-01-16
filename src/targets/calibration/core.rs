@@ -307,16 +307,17 @@ impl ParameterCalibrator {
     /// * `sequence_length` - Length of input sequences for the model
     /// * `horizons` - All prediction horizons (e.g., ["1h", "4h", "24h"])
     /// * `sample_size` - Optional limit on samples to use (default: all available)
+    /// * `sequence_overlap` - Overlap ratio for sequence generation (0.0-1.0)
+    /// * `timeframe_minutes` - Timeframe in minutes for horizon parsing
+    /// * `target_samples_config` - Optional target samples configuration for adaptive overlap
     ///
     /// # Returns
     /// * `CalibratedParameters` - Optimized parameters per horizon for all target types
     ///
     /// # Algorithm
-    /// 1. For each horizon IN PARALLEL:
-    ///    a. Generate diverse sample indices
-    ///    b. Calibrate all 5 targets IN PARALLEL
-    ///    c. Store parameters in HashMap<horizon, params>
-    /// 2. Returns comprehensive results with per-horizon metadata
+    /// 1. If target_samples configured: optimize overlap to reach target sample count
+    /// 2. For each horizon IN PARALLEL:
+    #[allow(clippy::too_many_arguments)]
     pub async fn calibrate(
         &self,
         ohlcv_data: &[MarketDataRow],
@@ -671,17 +672,36 @@ impl ParameterCalibrator {
         let mut volume_params = std::collections::HashMap::new();
         let mut overall_scores = Vec::new();
         let mut total_optimization_time = 0u64;
+        let mut sample_count = 0usize;
 
         for (horizon, direction, price_levels, volatility, sentiment, volume, score, time) in
-            results
+            &results
         {
-            direction_params.insert(horizon.clone(), direction);
-            price_level_params.insert(horizon.clone(), price_levels);
-            volatility_params.insert(horizon.clone(), volatility);
-            sentiment_params.insert(horizon.clone(), sentiment);
-            volume_params.insert(horizon.clone(), volume);
-            overall_scores.push(score);
+            direction_params.insert(horizon.clone(), direction.clone());
+            price_level_params.insert(horizon.clone(), price_levels.clone());
+            volatility_params.insert(horizon.clone(), volatility.clone());
+            sentiment_params.insert(horizon.clone(), sentiment.clone());
+            volume_params.insert(horizon.clone(), volume.clone());
+            overall_scores.push(*score);
             total_optimization_time += time;
+        }
+
+        // Get sample count from first horizon
+        if !results.is_empty() {
+            let first_horizon = &results[0].0;
+            let horizon_steps =
+                crate::utils::parser::parse_horizon_to_steps(first_horizon, timeframe_minutes)
+                    .unwrap_or(1);
+            sample_count = self
+                .generate_diverse_calibration_indices(
+                    ohlcv_data.len(),
+                    sequence_length,
+                    horizon_steps,
+                    sample_size,
+                    sequence_overlap,
+                )
+                .map(|indices| indices.len())
+                .unwrap_or(0);
         }
 
         // Calculate overall statistics
@@ -698,9 +718,9 @@ impl ParameterCalibrator {
             data_length: ohlcv_data.len(),
             sequence_length,
             horizons: horizons.to_vec(),
-            calibration_samples: 0, // Will be set per-horizon
+            calibration_samples: sample_count,
             calibration_iterations: self.max_iterations,
-            optimization_time_ms: total_elapsed, // Use actual wall-clock time
+            optimization_time_ms: total_elapsed,
             target_balance: self.target_balance,
             overall_balance_score: overall_score,
             calibration_success: success,

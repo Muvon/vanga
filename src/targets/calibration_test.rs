@@ -9,24 +9,27 @@ async fn test_parameter_calibrator_basic() {
 
     // Create minimal test data
     let test_data = create_test_ohlcv_data(100);
+    let horizons = vec!["1h".to_string()];
 
-    let result = calibrator.calibrate(&test_data, 20, 5, Some(50), 0.8).await;
+    let result = calibrator
+        .calibrate(&test_data, 20, &horizons, Some(50), 0.8, 60)
+        .await;
+
 
     assert!(result.is_ok());
     let params = result.unwrap();
 
     // Verify all parameters are within reasonable ranges
-    assert!(params.direction.sensitivity > 0.0);
-    assert!(params.direction.extreme_multiplier > 1.0);
-    assert!(params.price_levels.bandwidth > 0.0);
-    assert!(params.volatility.bandwidth > 0.0);
-    assert!(params.sentiment.body_sensitivity > 0.0);
-    assert!(params.volume.bandwidth > 0.0);
+    assert!(params.direction.get("1h").unwrap().sensitivity > 0.0);
+    assert!(params.direction.get("1h").unwrap().extreme_multiplier > 1.0);
+    assert!(params.price_levels.get("1h").unwrap().bandwidth > 0.0);
+    assert!(params.volatility.get("1h").unwrap().bandwidth > 0.0);
+    assert!(params.sentiment.get("1h").unwrap().body_sensitivity > 0.0);
+    assert!(params.volume.get("1h").unwrap().bandwidth > 0.0);
 
     // Verify metadata
     assert_eq!(params.metadata.data_length, 100);
     assert_eq!(params.metadata.sequence_length, 20);
-    assert_eq!(params.metadata.horizon_steps, 5);
     assert!(params.metadata.optimization_time_ms > 0);
 }
 
@@ -34,10 +37,14 @@ async fn test_parameter_calibrator_basic() {
 async fn test_calibration_with_insufficient_data() {
     let calibrator = ParameterCalibrator::new();
 
-    // Create insufficient test data
-    let test_data = create_test_ohlcv_data(10);
+    let result = calibrator
+        .calibrate(&test_data, 20, &horizons, Some(50), 0.8, 60)
+        .await;
 
-    let result = calibrator.calibrate(&test_data, 20, 5, Some(50), 0.8).await;
+
+    let result = calibrator
+        .calibrate(&test_data, 20, &horizons, Some(50), 0.8, 60, None)
+        .await;
 
     // Should still work but with default parameters
     assert!(result.is_ok());

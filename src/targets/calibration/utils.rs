@@ -373,8 +373,8 @@ impl CalibrationUtils {
         let mut quintile_counts = [0usize; 5];
 
         // Use indices instead of iterating to avoid borrowing conflict after sort
-        for i in 0..n {
-            let percentile = (values[i] - min_val) / range;
+        for value in values.iter().take(n) {
+            let percentile = (value - min_val) / range;
             let bin = (percentile * 5.0).floor() as usize;
             let bin = bin.min(4);
             quintile_counts[bin] += 1;
