@@ -22,17 +22,19 @@ pub async fn calibrate_stop_levels(
 
     let utils = calibrator.get_utils();
 
-    // Define 3D parameter space (only what classification uses)
+    // Define 4D parameter space (all parameters that affect boundary calculation)
     let param_bounds = vec![
-        (0.01, 0.75), // bandwidth: 5%-90% of range = neutral zone width
-        (0.01, 0.45), // percentile_low: 1%-45% = min from weighted lows
-        (0.55, 0.99), // percentile_high: 55%-99% = max from weighted highs
+        (0.1, 3.0),   // bandwidth: 0.1-3.0 (controls extreme zone size)
+        (0.01, 0.45), // percentile_low: 1%-45% = min from weighted adverse
+        (0.55, 0.99), // percentile_high: 55%-99% = max from weighted adverse
+        (0.1, 0.8),   // neutral_band_factor: 10%-80% (controls neutral zone size)
     ];
 
     let param_names = vec![
         "bandwidth".to_string(),
         "percentile_low".to_string(),
         "percentile_high".to_string(),
+        "neutral_band_factor".to_string(),
     ];
 
     // Objective function: minimize balance_score
@@ -40,8 +42,8 @@ pub async fn calibrate_stop_levels(
         let test_params = StopLevelEvalParams {
             bandwidth: params[0],
             percentiles: [params[1], params[2]],
-            neutral_band: 0.4,    // Fixed default - not calibrated
-            momentum_factor: 1.0, // Fixed default - not used
+            neutral_band: params[3],
+            momentum_factor: 1.0, // Fixed - not used in boundary calculation
         };
 
         let balance = evaluate_stop_level_params(&utils, context, &test_params)?;
@@ -68,7 +70,7 @@ pub async fn calibrate_stop_levels(
     let final_eval_params = StopLevelEvalParams {
         bandwidth: best_params[0],
         percentiles: [best_params[1], best_params[2]],
-        neutral_band: 0.4,
+        neutral_band: best_params[3],
         momentum_factor: 1.0,
     };
 
@@ -77,20 +79,22 @@ pub async fn calibrate_stop_levels(
     let result = StopLevelParams {
         bandwidth: best_params[0],
         percentiles: [best_params[1], best_params[2]],
-        neutral_band_factor: 0.4, // Fixed default
-        momentum_factor: 1.0,     // Fixed default
+        neutral_band_factor: best_params[3],
+        momentum_factor: 1.0, // Fixed default
         balance: final_balance,
     };
 
     log::info!(
         "🛑 Stop Level Calibration Complete!
   Final Parameters:
-    - Bandwidth (neutral zone width): {:.2}
+    - Bandwidth: {:.2}
     - Percentiles: [{:.2}, {:.2}]
+    - Neutral Band Factor: {:.2}
   Final Score: {:.4}",
         result.bandwidth,
         result.percentiles[0],
         result.percentiles[1],
+        result.neutral_band_factor,
         result.balance.balance_score
     );
 

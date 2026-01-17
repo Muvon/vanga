@@ -1,54 +1,58 @@
 //! Stop level target generation for cryptocurrency forecasting
 //!
-//! # 🎯 TARGET PURPOSE: "WHAT'S THE MAXIMUM ADVERSE EXCURSION (MAE)?"
+//! # 🎯 TARGET PURPOSE: "WHAT'S THE ADVERSE PRICE MOVEMENT RISK?"
 //!
-//! This module implements **Maximum Adverse Excursion (MAE) analysis** for risk management.
-//! It answers: "What's the worst drawdown I should expect during the price movement?"
+//! This module implements **Adverse Price Level Analysis** for risk management.
+//! It answers: "How far will price move AGAINST the expected direction?"
 //!
 //! ## 📊 MATHEMATICAL FOUNDATION
 //!
-//! ### **Core Logic: MAE-Based Risk Classification**
-//! ```
-//! 1. Calculate sequence reference price (exponentially-weighted close)
-//! 2. Find Maximum Adverse Excursion (MAE) during horizon:
-//!    - MAE = maximum drawdown from reference price
-//!    - Always measures downside risk (reference - lowest_price)
-//! 3. Normalize MAE by sequence volatility range
-//! 4. Classify MAE severity into 5 risk levels
+//! ### **Core Logic: Direction-Aware Adverse Analysis**
+//! ```text
+//! 1. Determine expected direction (target vs reference price)
+//! 2. Collect ADVERSE prices from sequence (lows for bullish, highs for bearish)
+//! 3. Build boundaries from SAME adverse price distribution
+//! 4. Find worst adverse price during horizon (weighted by recency)
+//! 5. Classify adverse severity against sequence-derived boundaries
 //! ```
 //!
+//! ### **KEY INSIGHT: Distribution Matching**
+//!
+//! Unlike price_levels (which classifies closes against closes), stop_levels must:
+//! - For bullish: Build boundaries from sequence LOWS, classify horizon LOWS
+//! - For bearish: Build boundaries from sequence HIGHS, classify horizon HIGHS
+//!
+//! This ensures the boundary distribution matches what we're classifying.
+//!
 //! ### **5-Class Risk Classification System:**
-//! - **0: Extreme Risk** - MAE > 200% of sequence range (massive drawdown)
-//! - **1: High Risk** - MAE 100-200% of sequence range (large drawdown)
-//! - **2: Moderate Risk** - MAE 50-100% of sequence range (normal drawdown)
-//! - **3: Low Risk** - MAE 25-50% of sequence range (small drawdown)
-//! - **4: Minimal Risk** - MAE < 25% of sequence range (very safe)
+//! - **0: Extreme Risk** - Adverse beyond sequence adverse range (deep dip/high bounce)
+//! - **1: High Risk** - Adverse at edge of sequence adverse range
+//! - **2: Moderate Risk** - Adverse in neutral zone (center of range)
+//! - **3: Low Risk** - Adverse within normal sequence adverse range
+//! - **4: Minimal Risk** - Adverse very contained (shallow dip/small bounce)
 //!
 //! ## 🔧 KEY FEATURES
 //!
-//! ### **MAE (Maximum Adverse Excursion)**
-//! - Industry-standard metric for stop-loss placement
-//! - Measures worst intrabar drawdown from entry point
-//! - Direction-independent (always measures downside risk)
-//! - Exponentially weighted for recent-focused analysis
+//! ### **Direction-Aware Analysis**
+//! - Bullish: Measures downside risk using LOWS
+//! - Bearish: Measures upside risk using HIGHS
+//! - Boundaries built from same price type as classification target
+//!
+//! ### **Calibrated Boundaries**
+//! - Uses Bayesian-optimized percentiles on adverse prices
+//! - Bandwidth parameter controls extreme zone size
+//! - Neutral band factor controls center zone size
 //!
 //! ### **Symbol-Agnostic Design**
-//! - MAE normalized by sequence volatility range
+//! - Normalized by adverse price range from sequence
 //! - Works with any price range (BTC, ETH, altcoins)
-//! - No hardcoded price thresholds
-//!
-//! ### **Trading-Oriented Classification**
-//! - Class 4 (Minimal): Safe trades, tight stops work
-//! - Class 3 (Low): Normal trades, standard stops
-//! - Class 2 (Moderate): Wider stops needed
-//! - Class 1 (High): Very wide stops or avoid
-//! - Class 0 (Extreme): Stop-loss will trigger, high risk
+//! - Percentage-based classification
 //!
 //! ## 🎯 COMPLEMENTARY ROLE
 //!
 //! **Stop Levels** work with **Price Levels**:
-//! - **Price Levels**: "Where will price END UP?" (destination)
-//! - **Stop Levels**: "What's the WORST DRAWDOWN along the way?" (risk)
+//! - **Price Levels**: "Where will price END UP?" (destination via closes)
+//! - **Stop Levels**: "What's the WORST ADVERSE MOVEMENT?" (risk via wicks)
 //! - **Combined**: Complete risk-reward picture for trading decisions
 
 use crate::data::structures::MarketDataRow;
@@ -178,103 +182,242 @@ pub fn generate_stop_level_targets_with_calibrated_params(
     Ok((targets, strengths))
 }
 
-/// Calculate sequence extreme range from LOW/HIGH using calibrated percentiles
-/// This ensures we're comparing extremes against extreme-based boundaries
-fn calculate_sequence_extreme_range(
+/// Adverse price boundaries calculated from sequence data
+/// Similar to SequenceBoundaries but for adverse (dip/bounce) analysis
+#[derive(Debug, Clone)]
+pub struct AdverseBoundaries {
+    /// Lower percentile boundary of adverse prices
+    pub adverse_min: f64,
+    /// Upper percentile boundary of adverse prices  
+    pub adverse_max: f64,
+    /// Bandwidth for extreme classification
+    pub bandwidth: f64,
+    /// Reference price (exponentially-weighted close)
+    pub reference_price: f64,
+    /// Classification boundaries [b0, b1, b2, b3]
+    ///
+    /// For bullish (measuring dips - lower is worse):
+    /// - Class 0 (Extreme): adverse < b0 (very deep dip)
+    /// - Class 1 (High): b0 <= adverse < b1
+    /// - Class 2 (Moderate): b1 <= adverse < b2
+    /// - Class 3 (Low): b2 <= adverse < b3
+    /// - Class 4 (Minimal): adverse >= b3 (shallow dip)
+    ///
+    /// For bearish (measuring bounces - higher is worse):
+    /// - Class 0 (Extreme): adverse > b3 (very high bounce)
+    /// - Class 1 (High): b2 < adverse <= b3
+    /// - Class 2 (Moderate): b1 < adverse <= b2
+    /// - Class 3 (Low): b0 < adverse <= b1
+    /// - Class 4 (Minimal): adverse <= b0 (small bounce)
+    pub boundaries: [f64; 4],
+    /// Whether this is for bullish (true) or bearish (false) direction
+    pub is_bullish: bool,
+}
+
+impl AdverseBoundaries {
+    /// Classify an adverse price into one of 5 risk classes
+    pub fn classify_adverse(&self, adverse_price: f64) -> i32 {
+        if self.is_bullish {
+            // Bullish: lower adverse = worse (deeper dip)
+            // boundaries are ordered: b0 < b1 < b2 < b3
+            if adverse_price < self.boundaries[0] {
+                0 // Extreme Risk: very deep dip
+            } else if adverse_price < self.boundaries[1] {
+                1 // High Risk
+            } else if adverse_price < self.boundaries[2] {
+                2 // Moderate Risk
+            } else if adverse_price < self.boundaries[3] {
+                3 // Low Risk
+            } else {
+                4 // Minimal Risk: shallow dip
+            }
+        } else {
+            // Bearish: higher adverse = worse (higher bounce)
+            // boundaries are ordered: b0 < b1 < b2 < b3
+            if adverse_price > self.boundaries[3] {
+                0 // Extreme Risk: very high bounce
+            } else if adverse_price > self.boundaries[2] {
+                1 // High Risk
+            } else if adverse_price > self.boundaries[1] {
+                2 // Moderate Risk
+            } else if adverse_price > self.boundaries[0] {
+                3 // Low Risk
+            } else {
+                4 // Minimal Risk: small bounce
+            }
+        }
+    }
+
+    /// Calculate strength based on distance from boundary
+    pub fn calculate_strength(&self, adverse_price: f64, class: i32) -> f64 {
+        let (lower, upper) = match class {
+            0 => {
+                if self.is_bullish {
+                    (self.adverse_min - self.bandwidth, self.boundaries[0])
+                } else {
+                    (self.boundaries[3], self.adverse_max + self.bandwidth)
+                }
+            }
+            1 => {
+                if self.is_bullish {
+                    (self.boundaries[0], self.boundaries[1])
+                } else {
+                    (self.boundaries[2], self.boundaries[3])
+                }
+            }
+            2 => (self.boundaries[1], self.boundaries[2]),
+            3 => {
+                if self.is_bullish {
+                    (self.boundaries[2], self.boundaries[3])
+                } else {
+                    (self.boundaries[0], self.boundaries[1])
+                }
+            }
+            4 => {
+                if self.is_bullish {
+                    (self.boundaries[3], self.adverse_max + self.bandwidth)
+                } else {
+                    (self.adverse_min - self.bandwidth, self.boundaries[0])
+                }
+            }
+            _ => return 0.5,
+        };
+
+        let range = (upper - lower).abs();
+        if range == 0.0 {
+            return 0.5;
+        }
+
+        let center = (lower + upper) / 2.0;
+        let distance = (adverse_price - center).abs();
+        let half_range = range / 2.0;
+
+        (1.0 - (distance / half_range).min(1.0)).max(0.1)
+    }
+}
+
+/// Calculate adverse boundaries from sequence data
+///
+/// **KEY FIX**: Builds boundaries from the SAME type of prices we classify:
+/// - For bullish: boundaries from sequence LOWS (since we classify horizon lows)
+/// - For bearish: boundaries from sequence HIGHS (since we classify horizon highs)
+///
+/// This ensures the boundary distribution matches the classification target distribution,
+/// enabling proper calibration for balanced 5-class output.
+pub fn calculate_adverse_boundaries(
     sequence_ohlcv: &[MarketDataRow],
+    is_bullish: bool,
     calibrated_params: &crate::targets::calibration::StopLevelParams,
-) -> Result<(f64, f64)> {
-    if sequence_ohlcv.is_empty() {
+) -> Result<AdverseBoundaries> {
+    if sequence_ohlcv.len() < 2 {
         return Err(crate::utils::error::VangaError::DataError(
-            "Empty sequence for extreme range calculation".to_string(),
+            "Insufficient sequence data for adverse boundary calculation".to_string(),
         ));
     }
 
-    // Collect all lows and highs with exponential weighting
-    let len = sequence_ohlcv.len() as f64;
-    let mut weighted_lows = Vec::new();
-    let mut weighted_highs = Vec::new();
+    // Get reference price (exponentially-weighted close)
+    let reference_price =
+        crate::targets::price_levels::get_sequence_exponential_weighted_close(sequence_ohlcv)?;
 
-    for (i, candle) in sequence_ohlcv.iter().enumerate() {
-        let weight = ((i as f64 + 1.0) / len).powf(2.0);
-        // Weight lows: recent lows more significant (less penalty)
-        let weighted_low = candle.low / (1.0 + (1.0 - weight) * 0.05);
-        // Weight highs: recent highs more significant (bonus)
-        let weighted_high = candle.high * (1.0 + (1.0 - weight) * 0.05);
-        weighted_lows.push(weighted_low);
-        weighted_highs.push(weighted_high);
-    }
+    // **CRITICAL**: Collect ADVERSE prices (lows for bullish, highs for bearish)
+    // This matches the distribution of what we're classifying in the horizon
+    let mut adverse_prices: Vec<f64> = if is_bullish {
+        sequence_ohlcv.iter().map(|c| c.low).collect()
+    } else {
+        sequence_ohlcv.iter().map(|c| c.high).collect()
+    };
+    adverse_prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Sort to find percentiles
-    weighted_lows.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    weighted_highs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let n = weighted_lows.len();
+    let n = adverse_prices.len();
     let lower_idx = ((n as f64 * calibrated_params.percentiles[0]) as usize).min(n - 1);
     let upper_idx = ((n as f64 * calibrated_params.percentiles[1]) as usize).min(n - 1);
 
-    let sequence_min = weighted_lows[lower_idx];
-    let sequence_max = weighted_highs[upper_idx];
+    let sequence_min = adverse_prices[lower_idx];
+    let sequence_max = adverse_prices[upper_idx];
 
-    Ok((sequence_min, sequence_max))
+    // Calculate effective range from adverse prices
+    let base_range = (sequence_max - sequence_min).abs();
+    let effective_range = if base_range > 0.0 {
+        base_range
+    } else {
+        // Flat sequence - use spread between adverse and reference as proxy
+        let price_spread = (reference_price - sequence_min).abs();
+        if price_spread > 0.0 {
+            price_spread
+        } else {
+            // Last resort: use bandwidth param as multiplier on price level
+            sequence_min * calibrated_params.bandwidth
+        }
+    };
+
+    let bandwidth = effective_range * calibrated_params.bandwidth;
+    let range_center = (sequence_min + sequence_max) / 2.0;
+    let neutral_half = effective_range * calibrated_params.neutral_band_factor / 2.0;
+
+    // Build boundaries for 5-class classification
+    // Boundaries are based on ADVERSE prices (lows for bullish, highs for bearish)
+    // For bullish: we track LOWS (dips) - lower adverse = worse risk
+    //   Class 0: adverse < b0 (extreme dip below sequence low range)
+    //   Class 4: adverse >= b3 (minimal dip, stays within sequence low range)
+    // For bearish: we track HIGHS (bounces) - higher adverse = worse risk
+    //   Class 0: adverse > b3 (extreme bounce above sequence high range)
+    //   Class 4: adverse <= b0 (minimal bounce, stays within sequence high range)
+    let boundaries = [
+        sequence_min - bandwidth,
+        range_center - neutral_half,
+        range_center + neutral_half,
+        sequence_max + bandwidth,
+    ];
+
+    Ok(AdverseBoundaries {
+        adverse_min: sequence_min,
+        adverse_max: sequence_max,
+        bandwidth,
+        reference_price,
+        boundaries,
+        is_bullish,
+    })
 }
 
-/// Classify stop level with calibrated parameters using MAE (Maximum Adverse Excursion)
+/// Classify stop level with calibrated parameters using boundary-based approach
+///
+/// Uses the same boundary-based classification as price_levels but for adverse prices.
+/// Boundaries are built from sequence adverse prices, then horizon worst adverse is classified.
 pub fn classify_stop_level_with_calibrated_params(
     sequence_ohlcv: &[MarketDataRow],
     horizon_ohlcv: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::StopLevelParams,
 ) -> Result<(i32, f64)> {
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
-        return Ok((2, 0.5)); // Default to neutral class with neutral strength
+        return Ok((2, 0.5));
     }
 
-    // 1. Calculate sequence reference price (exponentially-weighted close)
+    // 1. Determine direction from horizon
     let reference_price =
         crate::targets::price_levels::get_sequence_exponential_weighted_close(sequence_ohlcv)?;
+    let target_price =
+        crate::targets::price_levels::get_horizon_exponential_weighted_close(horizon_ohlcv)?;
+    let is_bullish = target_price >= reference_price;
 
-    // 2. Calculate Maximum Adverse Excursion (MAE) - worst drawdown from reference
-    let mae = calculate_maximum_adverse_excursion(horizon_ohlcv, reference_price)?;
+    // 2. Calculate adverse boundaries from sequence
+    let boundaries = calculate_adverse_boundaries(sequence_ohlcv, is_bullish, calibrated_params)?;
 
-    // 3. Calculate sequence volatility range for context
-    let (sequence_min, sequence_max) =
-        calculate_sequence_extreme_range(sequence_ohlcv, calibrated_params)?;
-    let sequence_range = sequence_max - sequence_min;
+    // 3. Find worst adverse price in horizon (with exponential weighting for recency)
+    let worst_adverse = find_weighted_worst_adverse(horizon_ohlcv, is_bullish, reference_price);
 
-    // Handle edge case: flat sequence
-    if sequence_range == 0.0 {
-        return Ok((2, 0.3)); // Neutral with low strength
-    }
-
-    // 4. Calculate MAE as percentage of sequence range (normalized risk metric)
-    let mae_ratio = mae / sequence_range;
-
-    // 5. Classify based on MAE severity using calibrated thresholds
-    // bandwidth parameter controls the threshold scaling
-    let threshold_multiplier = calibrated_params.bandwidth;
-
-    // Thresholds based on MAE ratio (how many times sequence range)
-    let class = if mae_ratio < 0.25 * threshold_multiplier {
-        4 // Minimal Risk: MAE < 25% of sequence range
-    } else if mae_ratio < 0.5 * threshold_multiplier {
-        3 // Low Risk: MAE 25-50% of sequence range
-    } else if mae_ratio < 1.0 * threshold_multiplier {
-        2 // Moderate Risk: MAE 50-100% of sequence range
-    } else if mae_ratio < 2.0 * threshold_multiplier {
-        1 // High Risk: MAE 100-200% of sequence range
-    } else {
-        0 // Extreme Risk: MAE > 200% of sequence range
-    };
-
-    // 6. Calculate classification strength based on distance from boundaries
-    let strength = calculate_mae_strength(mae_ratio, threshold_multiplier, class);
+    // 4. Classify using boundaries
+    let class = boundaries.classify_adverse(worst_adverse);
+    let strength = boundaries.calculate_strength(worst_adverse, class);
 
     log::debug!(
-        "🛑 Stop Level MAE: ref={:.6}, mae={:.6} ({:.1}% of range), ratio={:.3} → class={} strength={:.3}",
+        "🛑 Stop Level: dir={}, ref={:.6}, worst={:.6}, bounds=[{:.6}, {:.6}, {:.6}, {:.6}] → class={} strength={:.3}",
+        if is_bullish { "BULL" } else { "BEAR" },
         reference_price,
-        mae,
-        (mae / sequence_range) * 100.0,
-        mae_ratio,
+        worst_adverse,
+        boundaries.boundaries[0],
+        boundaries.boundaries[1],
+        boundaries.boundaries[2],
+        boundaries.boundaries[3],
         class,
         strength
     );
@@ -282,106 +425,47 @@ pub fn classify_stop_level_with_calibrated_params(
     Ok((class, strength))
 }
 
-/// Calculate Maximum Adverse Excursion (MAE) from reference price
-/// MAE = maximum drawdown during horizon period (exponentially weighted)
-fn calculate_maximum_adverse_excursion(
+/// Find the worst adverse price in horizon with exponential weighting
+///
+/// Recent adverse prices are weighted more heavily because:
+/// - Recent drawdowns are more relevant for stop-loss placement
+/// - Early drawdowns that recover are less concerning
+fn find_weighted_worst_adverse(
     horizon_ohlcv: &[MarketDataRow],
+    is_bullish: bool,
     reference_price: f64,
-) -> Result<f64> {
+) -> f64 {
     if horizon_ohlcv.is_empty() {
-        return Ok(0.0);
+        return reference_price;
     }
 
     let len = horizon_ohlcv.len() as f64;
-    let mut max_drawdown = 0.0;
+    let mut worst_adverse = reference_price;
+    let mut max_weighted_severity = 0.0;
 
     for (i, candle) in horizon_ohlcv.iter().enumerate() {
-        // Exponential weighting: recent drawdowns more significant
-        let weight = ((i as f64 + 1.0) / len).powf(2.0);
+        // Exponential weight: recent candles weighted more (0.5 to 1.0 range)
+        let position_ratio = (i as f64 + 1.0) / len;
+        let weight = 0.5 + 0.5 * position_ratio.powi(2);
 
-        // Calculate drawdown from reference (always positive for adverse movement)
-        let drawdown = if reference_price > candle.low {
-            reference_price - candle.low
+        let adverse_price = if is_bullish { candle.low } else { candle.high };
+
+        // Calculate severity (how far from reference in adverse direction)
+        let raw_severity = if is_bullish {
+            (reference_price - adverse_price).max(0.0)
         } else {
-            0.0_f64
+            (adverse_price - reference_price).max(0.0)
         };
 
-        // Apply exponential weighting (50-100% weight based on recency)
-        let weighted_drawdown = drawdown * (0.5 + 0.5 * weight);
+        let weighted_severity = raw_severity * weight;
 
-        if weighted_drawdown > max_drawdown {
-            max_drawdown = weighted_drawdown;
+        if weighted_severity > max_weighted_severity {
+            max_weighted_severity = weighted_severity;
+            worst_adverse = adverse_price;
         }
     }
 
-    Ok(max_drawdown)
-}
-
-/// Calculate classification strength for MAE-based classification
-fn calculate_mae_strength(mae_ratio: f64, threshold_multiplier: f64, class: i32) -> f64 {
-    let thresholds = [
-        0.25 * threshold_multiplier, // Class 4|3 boundary
-        0.5 * threshold_multiplier,  // Class 3|2 boundary
-        1.0 * threshold_multiplier,  // Class 2|1 boundary
-        2.0 * threshold_multiplier,  // Class 1|0 boundary
-    ];
-
-    match class {
-        4 => {
-            // Minimal Risk: closer to 0 = stronger
-            let distance_from_zero = mae_ratio;
-            let max_distance = thresholds[0];
-            if max_distance > 0.0 {
-                (1.0 - (distance_from_zero / max_distance).min(1.0)).max(0.1)
-            } else {
-                0.5
-            }
-        }
-        3 => {
-            // Low Risk: closer to center of range = stronger
-            let range_center = (thresholds[0] + thresholds[1]) / 2.0;
-            let range_half_width = (thresholds[1] - thresholds[0]) / 2.0;
-            if range_half_width > 0.0 {
-                let distance_from_center = (mae_ratio - range_center).abs();
-                (1.0 - (distance_from_center / range_half_width).min(1.0)).max(0.1)
-            } else {
-                0.5
-            }
-        }
-        2 => {
-            // Moderate Risk: closer to center = stronger
-            let range_center = (thresholds[1] + thresholds[2]) / 2.0;
-            let range_half_width = (thresholds[2] - thresholds[1]) / 2.0;
-            if range_half_width > 0.0 {
-                let distance_from_center = (mae_ratio - range_center).abs();
-                (1.0 - (distance_from_center / range_half_width).min(1.0)).max(0.1)
-            } else {
-                0.5
-            }
-        }
-        1 => {
-            // High Risk: closer to center = stronger
-            let range_center = (thresholds[2] + thresholds[3]) / 2.0;
-            let range_half_width = (thresholds[3] - thresholds[2]) / 2.0;
-            if range_half_width > 0.0 {
-                let distance_from_center = (mae_ratio - range_center).abs();
-                (1.0 - (distance_from_center / range_half_width).min(1.0)).max(0.1)
-            } else {
-                0.5
-            }
-        }
-        0 => {
-            // Extreme Risk: further from threshold = stronger
-            let distance_above = (mae_ratio - thresholds[3]).max(0.0);
-            let max_distance = thresholds[3];
-            if max_distance > 0.0 {
-                (distance_above / max_distance).clamp(0.1, 1.0)
-            } else {
-                0.5
-            }
-        }
-        _ => 0.5,
-    }
+    worst_adverse
 }
 
 /// Analyze class distribution and log insights
@@ -467,32 +551,31 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
 /// Reconstruction result for stop level predictions
 #[derive(Debug, Clone)]
 pub struct StopLevelReconstruction {
-    /// MAE ranges for each class as ratio of sequence range
-    pub mae_ratio_ranges: Vec<[f64; 2]>,
-    /// MAE ranges as absolute price values
-    pub mae_price_ranges: Vec<[f64; 2]>,
+    /// Adverse price boundaries for each class
+    pub adverse_price_ranges: Vec<[f64; 2]>,
     /// Class probabilities from model
     pub probabilities: Vec<f64>,
     /// Most likely class index
     pub most_likely_class: usize,
     /// Confidence (calibrated from max probability)
     pub confidence: f64,
-    /// Expected MAE (weighted average)
-    pub expected_mae: f64,
-    /// Sequence range used for normalization
-    pub sequence_range: f64,
+    /// Expected adverse price (weighted average)
+    pub expected_adverse: f64,
+    /// Adverse boundaries used for classification
+    pub boundaries: AdverseBoundaries,
     /// Reference price
     pub reference_price: f64,
 }
 
 /// Reconstruct stop level predictions from model probabilities
+///
+/// Uses boundary-based reconstruction consistent with classification.
 pub fn reconstruct_stop_levels(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
     current_price: f64,
     calibrated_params: &crate::targets::calibration::StopLevelParams,
 ) -> Result<StopLevelReconstruction> {
-    // Validate inputs
     if probabilities.len() != 5 {
         return Err(crate::utils::error::VangaError::DataError(
             "Stop level reconstruction requires exactly 5 class probabilities".to_string(),
@@ -511,51 +594,29 @@ pub fn reconstruct_stop_levels(
         ));
     }
 
-    // Calculate reference price (same as training)
-    let reference_price =
-        crate::targets::price_levels::get_sequence_exponential_weighted_close(sequence_ohlcv)?;
+    // Assume bullish for reconstruction (most common case)
+    // In real usage, direction would be determined from prediction context
+    let is_bullish = true;
 
-    // Calculate sequence range for normalization
-    let (sequence_min, sequence_max) =
-        calculate_sequence_extreme_range(sequence_ohlcv, calibrated_params)?;
-    let sequence_range = sequence_max - sequence_min;
+    // Calculate adverse boundaries using same logic as classification
+    let boundaries = calculate_adverse_boundaries(sequence_ohlcv, is_bullish, calibrated_params)?;
 
-    if sequence_range == 0.0 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Sequence has zero range - cannot reconstruct stop levels".to_string(),
-        ));
-    }
-
-    // Define MAE ratio ranges for each class (based on classification thresholds)
-    let threshold_multiplier = calibrated_params.bandwidth;
-    let mae_ratio_ranges = vec![
-        // Class 0: Extreme Risk (MAE > 200% of sequence range)
-        [2.0 * threshold_multiplier, f64::INFINITY],
-        // Class 1: High Risk (MAE 100-200% of sequence range)
-        [1.0 * threshold_multiplier, 2.0 * threshold_multiplier],
-        // Class 2: Moderate Risk (MAE 50-100% of sequence range)
-        [0.5 * threshold_multiplier, 1.0 * threshold_multiplier],
-        // Class 3: Low Risk (MAE 25-50% of sequence range)
-        [0.25 * threshold_multiplier, 0.5 * threshold_multiplier],
-        // Class 4: Minimal Risk (MAE < 25% of sequence range)
-        [0.0, 0.25 * threshold_multiplier],
+    // Build price ranges from boundaries
+    // For bullish: Class 0 = deepest dip, Class 4 = shallowest dip
+    let adverse_price_ranges = vec![
+        [
+            boundaries.adverse_min - boundaries.bandwidth * 2.0,
+            boundaries.boundaries[0],
+        ], // Class 0: Extreme
+        [boundaries.boundaries[0], boundaries.boundaries[1]], // Class 1: High
+        [boundaries.boundaries[1], boundaries.boundaries[2]], // Class 2: Moderate
+        [boundaries.boundaries[2], boundaries.boundaries[3]], // Class 3: Low
+        [
+            boundaries.boundaries[3],
+            boundaries.adverse_max + boundaries.bandwidth,
+        ], // Class 4: Minimal
     ];
 
-    // Convert MAE ratios to absolute price values
-    let mae_price_ranges: Vec<[f64; 2]> = mae_ratio_ranges
-        .iter()
-        .map(|[lower_ratio, upper_ratio]| {
-            let lower_mae = lower_ratio * sequence_range;
-            let upper_mae = if upper_ratio.is_infinite() {
-                sequence_range * 3.0 // Cap at 3x for display
-            } else {
-                upper_ratio * sequence_range
-            };
-            [lower_mae, upper_mae]
-        })
-        .collect();
-
-    // Find most likely class
     let (most_likely_class, max_prob) = probabilities
         .iter()
         .enumerate()
@@ -563,37 +624,29 @@ pub fn reconstruct_stop_levels(
         .map(|(idx, &prob)| (idx, prob))
         .unwrap_or((2, 0.2));
 
-    // Calculate confidence using unified calibration
     let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
-    // Calculate expected MAE (weighted average of class midpoints)
-    let class_midpoints: Vec<f64> = mae_ratio_ranges
+    // Calculate expected adverse as weighted average of class midpoints
+    let class_midpoints: Vec<f64> = adverse_price_ranges
         .iter()
-        .map(|[lower, upper]| {
-            if upper.is_infinite() {
-                lower + 0.5 // For infinite upper bound, use lower + 0.5
-            } else {
-                (lower + upper) / 2.0
-            }
-        })
+        .map(|[lower, upper]| (lower + upper) / 2.0)
         .collect();
 
-    let expected_mae_ratio: f64 = probabilities
+    let expected_adverse: f64 = probabilities
         .iter()
         .zip(class_midpoints.iter())
         .map(|(&prob, &midpoint)| prob * midpoint)
         .sum();
 
-    let expected_mae = expected_mae_ratio * sequence_range;
+    let reference_price = boundaries.reference_price;
 
     Ok(StopLevelReconstruction {
-        mae_ratio_ranges,
-        mae_price_ranges,
+        adverse_price_ranges,
         probabilities: probabilities.to_vec(),
         most_likely_class,
         confidence,
-        expected_mae,
-        sequence_range,
+        expected_adverse,
+        boundaries,
         reference_price,
     })
 }

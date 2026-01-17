@@ -67,7 +67,9 @@ pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
 };
 pub use stop_levels::{
-    generate_stop_level_targets_with_calibrated_params, reconstruct_stop_levels, StopLevelConfig,
+    calculate_adverse_boundaries, classify_stop_level_with_calibrated_params,
+    generate_stop_level_targets_with_calibrated_params, reconstruct_stop_levels, AdverseBoundaries,
+    StopLevelConfig, StopLevelReconstruction,
 };
 use volatility::generate_volatility_targets_with_calibrated_params;
 pub use volume::{

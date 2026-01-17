@@ -130,10 +130,12 @@ impl MultiTargetLSTMModel {
     }
 
     /// Determine target type from target name based on actual naming convention
-    /// Target names follow pattern: "price_level_1h", "direction_4h", "volatility_1d"
+    /// Target names follow pattern: "price_level_1h", "stop_level_1h", "direction_4h", "volatility_1d"
     fn get_target_type_from_name(target_name: &str) -> TargetType {
         if target_name.starts_with("price_level_") {
             TargetType::PriceLevel
+        } else if target_name.starts_with("stop_level_") {
+            TargetType::StopLevel
         } else if target_name.starts_with("direction_") {
             TargetType::Direction
         } else if target_name.starts_with("volatility_") {
