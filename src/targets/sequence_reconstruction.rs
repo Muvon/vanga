@@ -154,7 +154,16 @@ impl SequenceAnalyzer {
         Ok(Self::new(config))
     }
 
-    /// Calculate exponentially-weighted close prices from OHLCV sequence (centralized logic)
+    /// Extract individual close prices from OHLCV sequence for percentile calculation
+    ///
+    /// Returns raw close prices WITHOUT weighting. The exponential weighting is applied
+    /// separately when calculating the weighted average (reference price), not when
+    /// extracting individual prices for distribution analysis.
+    ///
+    /// This is critical for correct percentile boundary calculation:
+    /// - Percentiles need the actual price distribution
+    /// - Weighting individual prices would distort the distribution
+    /// - Only the reference price (weighted average) should use exponential weighting
     pub fn calculate_exponential_weighted_prices(
         &self,
         sequence_ohlcv: &[MarketDataRow],
@@ -163,20 +172,11 @@ impl SequenceAnalyzer {
             return Err(VangaError::data("Empty OHLCV sequence provided"));
         }
 
-        // Apply exponential weighting to each close price (recent data gets more weight)
-        let len = sequence_ohlcv.len() as f64;
-        let weighted_prices: Vec<f64> = sequence_ohlcv
-            .iter()
-            .enumerate()
-            .map(|(i, candle)| {
-                // Exponential weighting: recent data gets much more weight
-                let weight = ((i as f64 + 1.0) / len).powf(2.0);
-                // Apply weight to close price
-                candle.close * weight
-            })
-            .collect();
+        // Extract raw close prices for percentile calculation
+        // The exponential weighting is applied during boundary calculation, not here
+        let close_prices: Vec<f64> = sequence_ohlcv.iter().map(|candle| candle.close).collect();
 
-        Ok(weighted_prices)
+        Ok(close_prices)
     }
 
     /// Calculate sequence boundaries from OHLCV data (single source of truth)
