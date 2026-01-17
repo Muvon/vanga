@@ -420,6 +420,9 @@ impl DataPipeline {
         if config.targets.price_level {
             target_types.push(crate::targets::TargetType::PriceLevel);
         }
+        if config.targets.stop_level {
+            target_types.push(crate::targets::TargetType::StopLevel);
+        }
         if config.targets.direction {
             target_types.push(crate::targets::TargetType::Direction);
         }
@@ -1083,6 +1086,7 @@ impl DataPipeline {
         for (target_type, horizon) in sorted_keys {
             let target_name = match target_type {
                 crate::targets::TargetType::PriceLevel => format!("price_level_{}", horizon),
+                crate::targets::TargetType::StopLevel => format!("stop_level_{}", horizon),
                 crate::targets::TargetType::Direction => format!("direction_{}", horizon),
                 crate::targets::TargetType::Volatility => format!("volatility_{}", horizon),
                 crate::targets::TargetType::Sentiment => format!("sentiment_{}", horizon),
@@ -1094,6 +1098,11 @@ impl DataPipeline {
                 crate::targets::TargetType::PriceLevel => {
                     targets
                         .price_levels
+                        .insert(horizon.clone(), vec![-1; num_sequences]);
+                }
+                crate::targets::TargetType::StopLevel => {
+                    targets
+                        .stop_levels
                         .insert(horizon.clone(), vec![-1; num_sequences]);
                 }
                 crate::targets::TargetType::Direction => {
@@ -1133,6 +1142,13 @@ impl DataPipeline {
                             crate::targets::TargetType::PriceLevel => {
                                 if let Some(targets_vec) =
                                     targets.price_levels.get_mut(&target_data.horizon)
+                                {
+                                    targets_vec[new_idx] = target_data.class;
+                                }
+                            }
+                            crate::targets::TargetType::StopLevel => {
+                                if let Some(targets_vec) =
+                                    targets.stop_levels.get_mut(&target_data.horizon)
                                 {
                                     targets_vec[new_idx] = target_data.class;
                                 }

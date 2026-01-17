@@ -13,6 +13,7 @@ pub mod overlap_optimizer;
 mod overlap_optimizer_test;
 pub mod price_levels;
 pub mod sentiment;
+pub mod stop_levels;
 pub mod types;
 pub mod utils;
 pub mod volatility;

@@ -97,6 +97,7 @@ fn validate_prepared_targets_balance(targets: &PreparedTargets, data_name: &str)
 
     let target_types = [
         (TargetType::PriceLevel, "Price Level"),
+        (TargetType::StopLevel, "Stop Level"),
         (TargetType::Direction, "Direction"),
         (TargetType::Volatility, "Volatility"),
         (TargetType::Sentiment, "Sentiment"),
@@ -682,6 +683,13 @@ impl ModelTrainer {
                                     .insert(horizon.clone(), merged);
                             }
                         }
+                        for (horizon, train_vec) in &combined_train_targets.stop_levels {
+                            if let Some(val_vec) = combined_val_targets.stop_levels.get(horizon) {
+                                let mut merged = train_vec.clone();
+                                merged.extend(val_vec);
+                                combined_targets.stop_levels.insert(horizon.clone(), merged);
+                            }
+                        }
                         for (horizon, train_vec) in &combined_train_targets.direction {
                             if let Some(val_vec) = combined_val_targets.direction.get(horizon) {
                                 let mut merged = train_vec.clone();
@@ -720,6 +728,17 @@ impl ModelTrainer {
                                 merged.extend(val_vec);
                                 combined_targets
                                     .price_levels_strength
+                                    .insert(horizon.clone(), merged);
+                            }
+                        }
+                        for (horizon, train_vec) in &combined_train_targets.stop_levels_strength {
+                            if let Some(val_vec) =
+                                combined_val_targets.stop_levels_strength.get(horizon)
+                            {
+                                let mut merged = train_vec.clone();
+                                merged.extend(val_vec);
+                                combined_targets
+                                    .stop_levels_strength
                                     .insert(horizon.clone(), merged);
                             }
                         }
@@ -1718,6 +1737,8 @@ pub async fn train_xgboost_only_model(config: TrainingConfig) -> Result<MultiTar
         let (target_type, horizon) =
             if parts.len() == 3 && parts[0] == "price" && parts[1] == "level" {
                 (TargetType::PriceLevel, parts[2].to_string())
+            } else if parts.len() == 3 && parts[0] == "stop" && parts[1] == "level" {
+                (TargetType::StopLevel, parts[2].to_string())
             } else if parts.len() == 2 {
                 let target_type = match parts[0] {
                     "direction" => TargetType::Direction,
@@ -1889,17 +1910,19 @@ fn extract_targets_for_multi_model(
             )));
         }
 
-        // Handle compound target types like "price_level"
+        // Handle compound target types like "price_level" and "stop_level"
         let (target_type, horizon) = if parts.len() == 3
             && parts[0] == "price"
             && parts[1] == "level"
         {
             ("price_level", parts[2])
+        } else if parts.len() == 3 && parts[0] == "stop" && parts[1] == "level" {
+            ("stop_level", parts[2])
         } else if parts.len() == 2 {
             (parts[0], parts[1])
         } else {
             return Err(VangaError::DataError(format!(
-                    "Invalid target name format '{}' - expected format: 'type_horizon' or 'price_level_horizon'",
+                    "Invalid target name format '{}' - expected format: 'type_horizon', 'price_level_horizon', or 'stop_level_horizon'",
                     target_name
                 )));
         };
@@ -1907,13 +1930,14 @@ fn extract_targets_for_multi_model(
         // Get the appropriate target data based on type
         let target_data = match target_type {
             "price_level" => targets.price_levels.get(horizon),
+            "stop_level" => targets.stop_levels.get(horizon),
             "direction" => targets.direction.get(horizon),
             "volatility" => targets.volatility.get(horizon),
             "sentiment" => targets.sentiment.get(horizon),
             "volume" => targets.volume.get(horizon),
             _ => {
                 return Err(VangaError::DataError(format!(
-                "Unknown target type '{}' - supported types: price_level, direction, volatility",
+                "Unknown target type '{}' - supported types: price_level, stop_level, direction, volatility, sentiment, volume",
                 target_type
             )))
             }
@@ -1975,6 +1999,7 @@ fn extract_targets_for_multi_model(
 fn generate_target_name(target_type: crate::targets::TargetType, horizon: &str) -> String {
     let target_type_str = match target_type {
         crate::targets::TargetType::PriceLevel => "price_level",
+        crate::targets::TargetType::StopLevel => "stop_level",
         crate::targets::TargetType::Direction => "direction",
         crate::targets::TargetType::Volatility => "volatility",
         crate::targets::TargetType::Sentiment => "sentiment",

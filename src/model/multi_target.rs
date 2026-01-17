@@ -90,6 +90,14 @@ impl MultiTargetLSTMModel {
                 );
                 bins
             }
+            TargetType::StopLevel => {
+                let bins = crate::config::model::NUM_CLASSES; // Use unified 5-class system
+                log::debug!(
+                    "StopLevel target: {} output classes (5-class unified system)",
+                    bins
+                );
+                bins
+            }
             TargetType::Direction => {
                 log::debug!(
                     "Direction target: {} output classes (Dump/Down/Sideways/Up/Pump)",
@@ -276,6 +284,9 @@ impl MultiTargetLSTMModel {
             // Compact structured logging per target
             let config_info = match target_type {
                 TargetType::PriceLevel => {
+                    "bins=5".to_string() // Use unified 5-class system
+                }
+                TargetType::StopLevel => {
                     "bins=5".to_string() // Use unified 5-class system
                 }
                 TargetType::Direction => "classes=5".to_string(),

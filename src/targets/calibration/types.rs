@@ -22,6 +22,8 @@ pub struct CalibratedParameters {
     pub direction: HashMap<String, DirectionParams>,
     /// Price level parameters per horizon
     pub price_levels: HashMap<String, PriceLevelParams>,
+    /// Stop level parameters per horizon
+    pub stop_levels: HashMap<String, StopLevelParams>,
     /// Volatility parameters per horizon
     pub volatility: HashMap<String, VolatilityParams>,
     /// Sentiment parameters per horizon
@@ -58,12 +60,18 @@ impl CalibratedParameters {
         self.volume.get(horizon)
     }
 
+    /// Get stop level parameters for specific horizon
+    pub fn get_stop_levels(&self, horizon: &str) -> Option<&StopLevelParams> {
+        self.stop_levels.get(horizon)
+    }
+
     /// Get all calibrated horizons
     pub fn get_horizons(&self) -> Vec<String> {
         // Use direction as reference (all targets should have same horizons)
         self.direction.keys().cloned().collect()
     }
 
+    /// Validate that all targets have parameters for all horizons
     /// Validate that all targets have parameters for all horizons
     pub fn validate(&self) -> Result<(), String> {
         let horizons = self.get_horizons();
@@ -72,6 +80,12 @@ impl CalibratedParameters {
             if !self.price_levels.contains_key(horizon) {
                 return Err(format!(
                     "Missing price_levels params for horizon: {}",
+                    horizon
+                ));
+            }
+            if !self.stop_levels.contains_key(horizon) {
+                return Err(format!(
+                    "Missing stop_levels params for horizon: {}",
                     horizon
                 ));
             }
@@ -111,6 +125,16 @@ pub struct PriceLevelParams {
     pub percentiles: [f64; 2], // Base percentiles for adaptive calculation
     pub neutral_band_factor: f64, // Replaces hardcoded 0.4 (was called neutral_band)
     pub momentum_factor: f64,  // NEW: Replaces hardcoded 1.2
+    pub balance: ClassBalance,
+}
+
+/// Stop level target parameters
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StopLevelParams {
+    pub bandwidth: f64,
+    pub percentiles: [f64; 2],
+    pub neutral_band_factor: f64,
+    pub momentum_factor: f64,
     pub balance: ClassBalance,
 }
 
@@ -253,14 +277,23 @@ pub struct PriceLevelEvalParams {
     pub momentum_factor: f64, // Momentum factor for bandwidth adjustment
 }
 
+/// Parameters for stop level evaluation
+#[derive(Debug, Clone)]
+pub struct StopLevelEvalParams {
+    pub bandwidth: f64,
+    pub percentiles: [f64; 2],
+    pub neutral_band: f64,
+    pub momentum_factor: f64,
+}
+
 /// Parameters for volatility evaluation
 #[derive(Debug, Clone)]
 pub struct VolatilityEvalParams {
     pub bandwidth: f64,
     pub multiplier: f64,
     pub decay: f64,
-    pub volume_weight: f64, // NEW: Volume weight parameter
-    pub min_baseline: f64,  // NEW: Minimum volatility baseline parameter
+    pub volume_weight: f64,
+    pub min_baseline: f64,
 }
 
 /// Parameters for volume evaluation

@@ -552,6 +552,7 @@ truncate = false
 # All parameters come from automatic calibration system
 [targets]
 price_level = true    # VWAP-weighted price classification (5 classes)
+stop_level = true     # Worst-case drawdown/bounce detection (5 classes)
 direction = true      # Directional movement classification (5 classes)
 volatility = true     # Volatility regime classification (5 classes)
 sentiment = true      # Market sentiment classification (5 classes)

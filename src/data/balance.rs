@@ -1973,6 +1973,23 @@ pub async fn create_sequences_with_targets(
                     });
                 }
             }
+
+            // Stop Levels
+            if let Some(stop_targets) = targets.stop_levels.get(&horizon) {
+                if seq_idx < stop_targets.len() {
+                    let strength = targets
+                        .get_strengths(&horizon, TargetType::StopLevel)
+                        .and_then(|strengths| strengths.get(seq_idx))
+                        .copied()
+                        .unwrap_or(0.5);
+                    target_data_vec.push(TargetData {
+                        target_type: TargetType::StopLevel,
+                        horizon: horizon.clone(),
+                        class: stop_targets[seq_idx],
+                        strength,
+                    });
+                }
+            }
         }
 
         // Extract sequence data

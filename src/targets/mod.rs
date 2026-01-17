@@ -20,6 +20,7 @@ pub mod interface;
 pub mod price_levels;
 pub mod sentiment;
 pub mod sequence_reconstruction;
+pub mod stop_levels;
 pub mod volatility;
 pub mod volume;
 
@@ -27,6 +28,9 @@ pub mod volume;
 mod math_consistency_test;
 #[cfg(test)]
 mod price_level_test;
+
+#[cfg(test)]
+mod stop_level_test;
 
 #[cfg(test)]
 mod direction_test;
@@ -48,8 +52,10 @@ use std::collections::HashMap;
 pub type TargetResult = (HashMap<String, Vec<i32>>, HashMap<String, Vec<f64>>);
 
 // Re-export configurations and calibrated parameters
+// Re-export configurations and calibrated parameters
 pub use calibration::{
-    DirectionParams, PriceLevelParams, SentimentParams, VolatilityParams, VolumeParams,
+    DirectionParams, PriceLevelParams, SentimentParams, StopLevelParams, VolatilityParams,
+    VolumeParams,
 };
 use direction::generate_direction_targets_with_calibrated_params;
 pub use price_levels::{
@@ -60,17 +66,22 @@ pub use sentiment::{generate_sentiment_targets_with_calibrated_params, get_senti
 pub use sequence_reconstruction::{
     SequenceAnalyzer, SequenceBoundaries, SequenceReconstructionConfig, SequenceReconstructor,
 };
+pub use stop_levels::{
+    generate_stop_level_targets_with_calibrated_params, reconstruct_stop_levels, StopLevelConfig,
+};
 use volatility::generate_volatility_targets_with_calibrated_params;
 pub use volume::{
     generate_volume_targets_with_calibrated_params, get_volume_class_names, VolumeConfig,
 };
 
 /// Comprehensive target configuration
+/// Comprehensive target configuration
 #[derive(Debug, Clone)]
 pub struct MultiTargetConfig {
     pub price_level_config: PriceLevelConfig,
     pub horizons: Vec<String>,
     pub price_level: TargetTypeConfig,
+    pub stop_level: TargetTypeConfig,
     pub direction: TargetTypeConfig,
     pub volatility: TargetTypeConfig,
     pub sentiment: TargetTypeConfig,
@@ -86,10 +97,9 @@ impl Default for MultiTargetConfig {
     fn default() -> Self {
         Self {
             price_level_config: PriceLevelConfig::default(),
-            horizons: vec![
-                "1h".to_string(), // FIXED: Default to single horizon - should be overridden by training config
-            ],
+            horizons: vec!["1h".to_string()],
             price_level: TargetTypeConfig { enabled: true },
+            stop_level: TargetTypeConfig { enabled: true },
             direction: TargetTypeConfig { enabled: true },
             volatility: TargetTypeConfig { enabled: true },
             sentiment: TargetTypeConfig { enabled: true },
@@ -102,11 +112,13 @@ impl MultiTargetConfig {
     /// Create MultiTargetConfig from TrainingConfig with proper target enablement
     pub fn from_training_config(training_config: &crate::config::training::TrainingConfig) -> Self {
         Self {
-            // Price level config not used with calibration system - all parameters come from calibration
             price_level_config: PriceLevelConfig::default(),
             horizons: training_config.horizons.clone(),
             price_level: TargetTypeConfig {
                 enabled: training_config.targets.price_level,
+            },
+            stop_level: TargetTypeConfig {
+                enabled: training_config.targets.stop_level,
             },
             direction: TargetTypeConfig {
                 enabled: training_config.targets.direction,
@@ -128,17 +140,18 @@ impl MultiTargetConfig {
 #[derive(Debug, Clone)]
 pub struct PreparedTargets {
     pub price_levels: HashMap<String, Vec<i32>>,
+    pub stop_levels: HashMap<String, Vec<i32>>,
     pub direction: HashMap<String, Vec<i32>>,
     pub volatility: HashMap<String, Vec<i32>>,
     pub sentiment: HashMap<String, Vec<i32>>,
     pub volume: HashMap<String, Vec<i32>>,
-    // NEW: Strength values for each target type
     pub price_levels_strength: HashMap<String, Vec<f64>>,
+    pub stop_levels_strength: HashMap<String, Vec<f64>>,
     pub direction_strength: HashMap<String, Vec<f64>>,
     pub volatility_strength: HashMap<String, Vec<f64>>,
     pub sentiment_strength: HashMap<String, Vec<f64>>,
     pub volume_strength: HashMap<String, Vec<f64>>,
-    pub target_names: Vec<String>, // ADDED: Avoid redundant TargetGenerator creation
+    pub target_names: Vec<String>,
     pub data_length: usize,
     pub valid_indices: Vec<usize>,
 }
@@ -148,17 +161,18 @@ impl PreparedTargets {
     pub fn new(data_length: usize) -> Self {
         Self {
             price_levels: HashMap::new(),
+            stop_levels: HashMap::new(),
             direction: HashMap::new(),
             volatility: HashMap::new(),
             sentiment: HashMap::new(),
             volume: HashMap::new(),
-            // Initialize strength containers
             price_levels_strength: HashMap::new(),
+            stop_levels_strength: HashMap::new(),
             direction_strength: HashMap::new(),
             volatility_strength: HashMap::new(),
             sentiment_strength: HashMap::new(),
             volume_strength: HashMap::new(),
-            target_names: Vec::new(), // Initialize empty target names
+            target_names: Vec::new(),
             data_length,
             valid_indices: Vec::new(),
         }
@@ -168,6 +182,7 @@ impl PreparedTargets {
     pub fn get_targets(&self, horizon: &str, target_type: TargetType) -> Option<&Vec<i32>> {
         match target_type {
             TargetType::PriceLevel => self.price_levels.get(horizon),
+            TargetType::StopLevel => self.stop_levels.get(horizon),
             TargetType::Direction => self.direction.get(horizon),
             TargetType::Volatility => self.volatility.get(horizon),
             TargetType::Sentiment => self.sentiment.get(horizon),
@@ -179,6 +194,7 @@ impl PreparedTargets {
     pub fn get_strengths(&self, horizon: &str, target_type: TargetType) -> Option<&Vec<f64>> {
         match target_type {
             TargetType::PriceLevel => self.price_levels_strength.get(horizon),
+            TargetType::StopLevel => self.stop_levels_strength.get(horizon),
             TargetType::Direction => self.direction_strength.get(horizon),
             TargetType::Volatility => self.volatility_strength.get(horizon),
             TargetType::Sentiment => self.sentiment_strength.get(horizon),
@@ -190,8 +206,8 @@ impl PreparedTargets {
     pub fn get_horizons(&self) -> Vec<String> {
         let mut horizons: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Collect horizons from all target types
         horizons.extend(self.price_levels.keys().cloned());
+        horizons.extend(self.stop_levels.keys().cloned());
         horizons.extend(self.direction.keys().cloned());
         horizons.extend(self.volatility.keys().cloned());
         horizons.extend(self.sentiment.keys().cloned());
@@ -250,6 +266,11 @@ impl PreparedTargets {
             result.price_levels.insert(horizon.clone(), selected);
         }
 
+        for (horizon, targets) in &self.stop_levels {
+            let selected: Vec<i32> = indices.iter().map(|&i| targets[i]).collect();
+            result.stop_levels.insert(horizon.clone(), selected);
+        }
+
         for (horizon, targets) in &self.direction {
             let selected: Vec<i32> = indices.iter().map(|&i| targets[i]).collect();
             result.direction.insert(horizon.clone(), selected);
@@ -275,6 +296,13 @@ impl PreparedTargets {
             let selected: Vec<f64> = indices.iter().map(|&i| strengths[i]).collect();
             result
                 .price_levels_strength
+                .insert(horizon.clone(), selected);
+        }
+
+        for (horizon, strengths) in &self.stop_levels_strength {
+            let selected: Vec<f64> = indices.iter().map(|&i| strengths[i]).collect();
+            result
+                .stop_levels_strength
                 .insert(horizon.clone(), selected);
         }
 
@@ -337,6 +365,7 @@ impl PreparedTargets {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TargetType {
     PriceLevel,
+    StopLevel,
     Direction,
     Volatility,
     Sentiment,
@@ -347,6 +376,7 @@ pub enum TargetType {
 #[derive(Debug, Clone)]
 pub struct TargetStatistics {
     pub price_level_stats: HashMap<String, ClassDistribution>,
+    pub stop_level_stats: HashMap<String, ClassDistribution>,
     pub direction_stats: HashMap<String, ClassDistribution>,
     pub volatility_stats: HashMap<String, ClassDistribution>,
     pub sentiment_stats: HashMap<String, ClassDistribution>,
@@ -357,6 +387,7 @@ impl TargetStatistics {
     fn new() -> Self {
         Self {
             price_level_stats: HashMap::new(),
+            stop_level_stats: HashMap::new(),
             direction_stats: HashMap::new(),
             volatility_stats: HashMap::new(),
             sentiment_stats: HashMap::new(),
@@ -400,6 +431,12 @@ impl TargetGenerator {
             }
         }
 
+        if self.config.stop_level.enabled {
+            for horizon in &self.config.horizons {
+                names.push(format!("stop_level_{}", horizon));
+            }
+        }
+
         if self.config.direction.enabled {
             for horizon in &self.config.horizons {
                 names.push(format!("direction_{}", horizon));
@@ -431,6 +468,9 @@ impl TargetGenerator {
     pub fn get_num_targets(&self) -> usize {
         let mut count = 0;
         if self.config.price_level.enabled {
+            count += self.config.horizons.len();
+        }
+        if self.config.stop_level.enabled {
             count += self.config.horizons.len();
         }
         if self.config.direction.enabled {
@@ -498,6 +538,7 @@ impl TargetGenerator {
         // Extract calibrated parameters (now per-horizon HashMaps)
         let direction_params = &calibrated_params.direction;
         let price_level_params = &calibrated_params.price_levels;
+        let stop_level_params = &calibrated_params.stop_levels;
         let volatility_params = &calibrated_params.volatility;
         let sentiment_params = &calibrated_params.sentiment;
         let volume_params = &calibrated_params.volume;
@@ -520,6 +561,20 @@ impl TargetGenerator {
                 )?;
             prepared_targets.price_levels = price_targets;
             prepared_targets.price_levels_strength = price_strengths;
+        }
+
+        if self.config.stop_level.enabled {
+            log::debug!("🛑 Generating stop level targets");
+            let (stop_targets, stop_strengths) =
+                generate_stop_level_targets_with_calibrated_params(
+                    df,
+                    &self.config.horizons,
+                    sequence_indices,
+                    sequence_length,
+                    stop_level_params,
+                )?;
+            prepared_targets.stop_levels = stop_targets;
+            prepared_targets.stop_levels_strength = stop_strengths;
         }
 
         if self.config.direction.enabled {

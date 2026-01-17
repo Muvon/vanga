@@ -163,11 +163,20 @@ impl SequenceAnalyzer {
             return Err(VangaError::data("Empty OHLCV sequence provided"));
         }
 
-        // For reconstruction, we need individual close prices (not weighted)
-        // The exponential weighting is applied during boundary calculation
-        let close_prices: Vec<f64> = sequence_ohlcv.iter().map(|candle| candle.close).collect();
+        // Apply exponential weighting to each close price (recent data gets more weight)
+        let len = sequence_ohlcv.len() as f64;
+        let weighted_prices: Vec<f64> = sequence_ohlcv
+            .iter()
+            .enumerate()
+            .map(|(i, candle)| {
+                // Exponential weighting: recent data gets much more weight
+                let weight = ((i as f64 + 1.0) / len).powf(2.0);
+                // Apply weight to close price
+                candle.close * weight
+            })
+            .collect();
 
-        Ok(close_prices)
+        Ok(weighted_prices)
     }
 
     /// Calculate sequence boundaries from OHLCV data (single source of truth)

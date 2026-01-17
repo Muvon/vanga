@@ -1957,6 +1957,9 @@ pub struct TargetsConfig {
     /// Enable price level targets (VWAP-weighted price classification)
     pub price_level: bool,
 
+    /// Enable stop level targets (worst-case drawdown/bounce detection)
+    pub stop_level: bool,
+
     /// Enable direction targets (directional movement classification)
     pub direction: bool,
 
@@ -1974,6 +1977,7 @@ impl Default for TargetsConfig {
     fn default() -> Self {
         Self {
             price_level: true,
+            stop_level: true,
             direction: true,
             volatility: true,
             sentiment: true,

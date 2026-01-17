@@ -674,6 +674,25 @@ impl LSTMModel {
                         predictions_tensor
                     }
                 }
+                TargetType::StopLevel => {
+                    // For Stop Level: Keep multi-class probabilities (don't convert to indices)
+                    let tensor_shape = predictions_tensor.shape();
+                    log::debug!("Stop Level prediction shape: {:?}", tensor_shape);
+                    if tensor_shape.dims().len() == 2 && tensor_shape.dims()[1] > 1 {
+                        log::info!(
+                            "Keeping Stop Level multi-class output {:?} as probabilities",
+                            tensor_shape
+                        );
+                        // Return the full probability distribution for multi-target parsing
+                        predictions_tensor
+                    } else {
+                        log::debug!(
+                            "Stop Level output already in correct shape: {:?}",
+                            tensor_shape
+                        );
+                        predictions_tensor
+                    }
+                }
                 TargetType::Direction => {
                     // For Direction: Keep multi-class probabilities (don't convert to indices)
                     let tensor_shape = predictions_tensor.shape();

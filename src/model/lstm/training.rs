@@ -1801,6 +1801,7 @@ impl LSTMModel {
                 if let Some((_, target_type)) = &self.target_context {
                     match target_type {
                         TargetType::PriceLevel
+                        | TargetType::StopLevel
                         | TargetType::Direction
                         | TargetType::Volatility
                         | TargetType::Sentiment
@@ -2132,6 +2133,7 @@ impl LSTMModel {
             if let Some((_, target_type)) = &self.target_context {
                 match target_type {
                     TargetType::PriceLevel
+                    | TargetType::StopLevel
                     | TargetType::Direction
                     | TargetType::Volatility
                     | TargetType::Sentiment
