@@ -1338,93 +1338,108 @@ impl SequenceBalancer {
         let mut test_indices = Vec::new();
 
         // Simple 3-step process: Val → Test → Train (everything else)
-        // Validation and test get proper gap enforcement, training gets the rest
+        // Both validation and test maintain gaps between their OWN samples (not between each other)
 
-        // Step 1: Select VALIDATION with even temporal spacing
+        // Step 1: Select VALIDATION with gap enforcement between validation samples
         if val_size > 0 {
-            let step = (sorted_indices.len() as f64 / val_size as f64).max(1.0);
-            for i in 0..val_size {
-                let pos = ((i as f64 * step) as usize).min(sorted_indices.len() - 1);
-                let idx = sorted_indices[pos];
-                if !val_indices.contains(&idx) {
-                    val_indices.push(idx);
-                }
-            }
+            let mut candidates = sorted_indices.clone();
 
-            // If we got duplicates, fill from remaining
-            if val_indices.len() < val_size {
-                for &idx in &sorted_indices {
-                    if !val_indices.contains(&idx) {
-                        val_indices.push(idx);
-                        if val_indices.len() >= val_size {
-                            break;
+            for _ in 0..val_size {
+                if candidates.is_empty() {
+                    break;
+                }
+
+                // Select from middle of remaining candidates for temporal diversity
+                let pos = candidates.len() / 2;
+                let selected_idx = candidates[pos];
+                val_indices.push(selected_idx);
+
+                // Remove selected and enforce gap to other validation samples
+                if validation_gap_steps > 0 {
+                    let selected_seq = match sequence_map.get(&selected_idx) {
+                        Some(s) => s,
+                        None => {
+                            candidates.remove(pos);
+                            continue;
                         }
-                    }
+                    };
+
+                    // Remove sequences within gap distance of this validation sample
+                    candidates.retain(|&idx| {
+                        let seq = match sequence_map.get(&idx) {
+                            Some(s) => s,
+                            None => return false,
+                        };
+
+                        // Calculate temporal gap between sequences
+                        let gap = if seq.start_idx >= selected_seq.end_idx {
+                            seq.start_idx - selected_seq.end_idx
+                        } else if selected_seq.start_idx >= seq.end_idx {
+                            selected_seq.start_idx.saturating_sub(seq.end_idx)
+                        } else {
+                            0 // overlap
+                        };
+
+                        gap >= validation_gap_steps
+                    });
+                } else {
+                    // No gap enforcement, just remove selected
+                    candidates.remove(pos);
                 }
             }
             val_indices.sort();
         }
 
-        // Step 2: Select TEST with gap enforcement from validation
+        // Step 2: Select TEST with gap enforcement between test samples (same logic as validation)
         if test_size > 0 {
+            // Start with all indices excluding validation (but no gap requirement FROM validation)
             let mut candidates: Vec<usize> = sorted_indices
                 .iter()
                 .filter(|&&idx| !val_indices.contains(&idx))
                 .copied()
                 .collect();
 
-            // Apply gap enforcement if needed
-            if validation_gap_steps > 0 {
-                candidates.retain(|&idx| {
-                    let seq = match sequence_map.get(&idx) {
+            for _ in 0..test_size {
+                if candidates.is_empty() {
+                    break;
+                }
+
+                // Select from middle of remaining candidates for temporal diversity
+                let pos = candidates.len() / 2;
+                let selected_idx = candidates[pos];
+                test_indices.push(selected_idx);
+
+                // Remove selected and enforce gap to other test samples
+                if validation_gap_steps > 0 {
+                    let selected_seq = match sequence_map.get(&selected_idx) {
                         Some(s) => s,
-                        None => return false,
+                        None => {
+                            candidates.remove(pos);
+                            continue;
+                        }
                     };
 
-                    // Check gap to ALL validation sequences
-                    for &val_idx in &val_indices {
-                        let val_seq = match sequence_map.get(&val_idx) {
+                    // Remove sequences within gap distance of this test sample
+                    candidates.retain(|&idx| {
+                        let seq = match sequence_map.get(&idx) {
                             Some(s) => s,
-                            None => continue,
+                            None => return false,
                         };
 
-                        let gap = if seq.start_idx >= val_seq.end_idx {
-                            seq.start_idx - val_seq.end_idx
-                        } else if val_seq.start_idx >= seq.end_idx {
-                            val_seq.start_idx.saturating_sub(seq.end_idx)
+                        // Calculate temporal gap between sequences
+                        let gap = if seq.start_idx >= selected_seq.end_idx {
+                            seq.start_idx - selected_seq.end_idx
+                        } else if selected_seq.start_idx >= seq.end_idx {
+                            selected_seq.start_idx.saturating_sub(seq.end_idx)
                         } else {
                             0 // overlap
                         };
 
-                        if gap < validation_gap_steps {
-                            return false; // Too close to validation
-                        }
-                    }
-                    true
-                });
-            }
-
-            // Select test with even spacing from candidates
-            if !candidates.is_empty() {
-                let step = (candidates.len() as f64 / test_size as f64).max(1.0);
-                for i in 0..test_size.min(candidates.len()) {
-                    let pos = ((i as f64 * step) as usize).min(candidates.len() - 1);
-                    let idx = candidates[pos];
-                    if !test_indices.contains(&idx) {
-                        test_indices.push(idx);
-                    }
-                }
-
-                // Fill remaining if we got duplicates
-                if test_indices.len() < test_size {
-                    for &idx in &candidates {
-                        if !test_indices.contains(&idx) {
-                            test_indices.push(idx);
-                            if test_indices.len() >= test_size {
-                                break;
-                            }
-                        }
-                    }
+                        gap >= validation_gap_steps
+                    });
+                } else {
+                    // No gap enforcement, just remove selected
+                    candidates.remove(pos);
                 }
             }
             test_indices.sort();
@@ -1440,6 +1455,7 @@ impl SequenceBalancer {
         let mut train_indices = Vec::new();
         if train_size > 0 && !remaining.is_empty() {
             let step = (remaining.len() as f64 / train_size as f64).max(1.0);
+
             for i in 0..train_size.min(remaining.len()) {
                 let pos = ((i as f64 * step) as usize).min(remaining.len() - 1);
                 let idx = remaining[pos];
