@@ -1178,8 +1178,12 @@ impl SequenceBalancer {
         let mut val_indices = Vec::new();
         let mut test_indices = Vec::new();
 
+        // CRITICAL: Sort classes for deterministic processing order (avoid HashMap randomness)
+        let mut sorted_classes: Vec<_> = class_sequences.into_iter().collect();
+        sorted_classes.sort_by_key(|(class, _)| *class);
+
         // Split each class using IDENTICAL sizes
-        for (class, class_indices) in class_sequences {
+        for (class, class_indices) in sorted_classes {
             let class_size = class_indices.len();
 
             // Trim to min_class_size if this class has more

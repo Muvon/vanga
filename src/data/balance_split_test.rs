@@ -204,3 +204,58 @@ fn test_validation_gap_does_not_affect_training_balance() {
         test_overlap.len()
     );
 }
+
+#[test]
+fn test_deterministic_split_across_runs() {
+    let mut sequences = Vec::new();
+
+    for class in 0..5 {
+        for i in 0..100 {
+            let seq_idx = class * 100 + i;
+            let start_idx = seq_idx * 10;
+            let end_idx = start_idx + 60;
+            let sequence_data = Array2::zeros((60, 50));
+            let target_data = TargetData {
+                target_type: TargetType::PriceLevel,
+                horizon: "18m".to_string(),
+                class: class as i32,
+                strength: 0.5,
+            };
+            sequences.push(SequenceWithTargets {
+                sequence_idx: seq_idx,
+                start_idx,
+                end_idx,
+                sequence_data,
+                targets: vec![target_data],
+            });
+        }
+    }
+
+    let balance_config = BalanceConfig {
+        max_overlap: 0.3,
+        prefer_non_overlapping: true,
+        min_sequences_per_class: 10,
+    };
+    let balancer = SequenceBalancer::new(balance_config);
+
+    let mut all_results = Vec::new();
+    for _ in 0..10 {
+        let result = balancer.create_diverse_class_splits(
+            &sequences,
+            &(0..100).collect::<Vec<_>>(),
+            80,
+            10,
+            10,
+            0,
+        );
+        assert!(result.is_ok());
+        all_results.push(result.unwrap());
+    }
+
+    let first = &all_results[0];
+    for (idx, result) in all_results.iter().enumerate().skip(1) {
+        assert_eq!(result.0, first.0, "Run {} train differs", idx);
+        assert_eq!(result.1, first.1, "Run {} val differs", idx);
+        assert_eq!(result.2, first.2, "Run {} test differs", idx);
+    }
+}
