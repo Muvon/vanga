@@ -23,6 +23,8 @@ pub mod sequence;
 pub mod sequence_test;
 pub mod structures;
 pub mod target_converter;
+#[cfg(test)]
+pub mod truncation_test;
 
 use serde::{Deserialize, Serialize};
 
@@ -563,9 +565,10 @@ impl DataPipeline {
         });
 
         for (target_type, horizon) in sorted_targets {
-            let target_dataset = target_balanced_datasets
+            let mut target_dataset = target_balanced_datasets
                 .get(&(*target_type, horizon.clone()))
-                .unwrap();
+                .unwrap()
+                .clone();
             let target_key = (*target_type, horizon.clone());
 
             log::info!(
@@ -574,6 +577,83 @@ impl DataPipeline {
                 horizon,
                 target_dataset.total_balanced_samples
             );
+
+            // CRITICAL: Apply truncation BEFORE splitting into train/val/test
+            // This ensures val/test splits are from the FINAL truncated dataset
+            let target_count = config.data.target_samples.count;
+            if target_count > 0 && config.data.target_samples.truncate {
+                let current_total = target_dataset.total_balanced_samples;
+
+                if current_total > target_count {
+                    // Ensure truncation preserves perfect balance (multiple of 5 for 5 classes)
+                    let samples_to_keep = (target_count / 5) * 5;
+
+                    log::info!(
+                        "✂️  Truncating {:?} {} from {} to {} samples (maintaining perfect balance)",
+                        target_type,
+                        horizon,
+                        current_total,
+                        samples_to_keep
+                    );
+
+                    // Get balanced indices for this target
+                    if let Some(balanced_indices) = target_dataset.balanced_indices.get(&target_key)
+                    {
+                        // Group indices by class for balanced truncation
+                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
+                            std::collections::HashMap::new();
+
+                        for &idx in balanced_indices {
+                            if let Some(seq) = all_sequences.iter().find(|s| s.sequence_idx == idx)
+                            {
+                                if let Some(class) = seq.get_target_class(*target_type, horizon) {
+                                    class_indices.entry(class).or_default().push(idx);
+                                }
+                            }
+                        }
+
+                        // Calculate samples per class (must be exact for perfect balance)
+                        let samples_per_class = samples_to_keep / 5;
+
+                        // Select balanced indices using stride-based sampling for diversity
+                        let mut truncated_indices = Vec::with_capacity(samples_to_keep);
+
+                        for class in 0..5 {
+                            if let Some(indices) = class_indices.get(&class) {
+                                let class_stride = indices.len() as f64 / samples_per_class as f64;
+
+                                for i in 0..samples_per_class {
+                                    let idx_in_class = ((i as f64 * class_stride).round() as usize)
+                                        .min(indices.len() - 1);
+                                    truncated_indices.push(indices[idx_in_class]);
+                                }
+                            }
+                        }
+
+                        // Update dataset with truncated indices
+                        target_dataset
+                            .balanced_indices
+                            .insert(target_key.clone(), truncated_indices.clone());
+                        target_dataset.total_balanced_samples = samples_to_keep;
+                        target_dataset.global_min_class_count = samples_per_class;
+
+                        // Update class distribution
+                        let mut new_distribution = std::collections::HashMap::new();
+                        for class in 0..5 {
+                            new_distribution.insert(class, samples_per_class);
+                        }
+                        target_dataset
+                            .class_distribution
+                            .insert(target_key.clone(), new_distribution);
+
+                        log::info!(
+                            "✅ Truncation complete: {} samples ({} per class × 5 classes)",
+                            samples_to_keep,
+                            samples_per_class
+                        );
+                    }
+                }
+            }
 
             let mut target_windows = Vec::new();
 
@@ -593,9 +673,10 @@ impl DataPipeline {
                     // DIVERSE SPLITS: Create diverse train/validation/test splits
                     // CRITICAL: Use ONLY original sequences for split creation
                     // Synthetic sequences from augmentation should NEVER be in validation/test
+                    // NOW: Splitting happens AFTER truncation, ensuring perfect alignment
                     let (balanced_training_dataset, target_validation_indices, target_test_indices) =
                         balancer.create_diverse_splits(
-                            target_dataset,
+                            &target_dataset,
                             &all_sequences, // Use original sequences ONLY
                             validation_ratio,
                             config.training.test_split,

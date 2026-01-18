@@ -1345,8 +1345,9 @@ impl SequenceBalancer {
             if validation_gap_steps > 0 {
                 // Try to select with gap enforcement
                 let min_spacing = validation_gap_steps + 1;
-                let step = ((sorted_indices.len() as f64) / (val_size as f64)).max(min_spacing as f64);
-                
+                let step =
+                    ((sorted_indices.len() as f64) / (val_size as f64)).max(min_spacing as f64);
+
                 for i in 0..val_size {
                     let pos = ((i as f64 * step) as usize).min(sorted_indices.len() - 1);
                     let idx = sorted_indices[pos];
@@ -1369,7 +1370,7 @@ impl SequenceBalancer {
             // If not enough samples with gap, fill remaining WITHOUT gap
             if val_indices.len() < val_size {
                 let samples_with_gap = val_indices.len();
-                
+
                 log::warn!(
                     "⚠️ Gap enforcement: Only {} validation samples with {}-step gap (need {})",
                     samples_with_gap,
@@ -1380,7 +1381,7 @@ impl SequenceBalancer {
                     "⚠️ Filling remaining {} validation samples WITHOUT gap enforcement",
                     val_size - samples_with_gap
                 );
-                
+
                 for &idx in &sorted_indices {
                     if !val_indices.contains(&idx) {
                         val_indices.push(idx);
@@ -1406,8 +1407,9 @@ impl SequenceBalancer {
                 if validation_gap_steps > 0 {
                     // Try to select with gap enforcement
                     let min_spacing = validation_gap_steps + 1;
-                    let step = ((candidates.len() as f64) / (test_size as f64)).max(min_spacing as f64);
-                    
+                    let step =
+                        ((candidates.len() as f64) / (test_size as f64)).max(min_spacing as f64);
+
                     for i in 0..test_size {
                         let pos = ((i as f64 * step) as usize).min(candidates.len() - 1);
                         let idx = candidates[pos];
@@ -1430,7 +1432,7 @@ impl SequenceBalancer {
                 // If not enough samples with gap, fill remaining WITHOUT gap
                 if test_indices.len() < test_size {
                     let samples_with_gap = test_indices.len();
-                    
+
                     log::warn!(
                         "⚠️ Gap enforcement: Only {} test samples with {}-step gap (need {})",
                         samples_with_gap,
@@ -1441,7 +1443,7 @@ impl SequenceBalancer {
                         "⚠️ Filling remaining {} test samples WITHOUT gap enforcement",
                         test_size - samples_with_gap
                     );
-                    
+
                     for &idx in &candidates {
                         if !test_indices.contains(&idx) {
                             test_indices.push(idx);
