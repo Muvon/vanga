@@ -739,12 +739,25 @@ impl ParameterCalibrator {
             time,
         ) in &results
         {
-            direction_params.insert(horizon.clone(), direction.clone());
-            price_level_params.insert(horizon.clone(), price_levels.clone());
-            stop_level_params.insert(horizon.clone(), stop_levels.clone());
-            volatility_params.insert(horizon.clone(), volatility.clone());
-            sentiment_params.insert(horizon.clone(), sentiment.clone());
-            volume_params.insert(horizon.clone(), volume.clone());
+            // Only insert parameters for targets that were actually calibrated (not defaults)
+            if direction.balance.total_samples > 0 {
+                direction_params.insert(horizon.clone(), direction.clone());
+            }
+            if price_levels.balance.total_samples > 0 {
+                price_level_params.insert(horizon.clone(), price_levels.clone());
+            }
+            if stop_levels.balance.total_samples > 0 {
+                stop_level_params.insert(horizon.clone(), stop_levels.clone());
+            }
+            if volatility.balance.total_samples > 0 {
+                volatility_params.insert(horizon.clone(), volatility.clone());
+            }
+            if sentiment.balance.total_samples > 0 {
+                sentiment_params.insert(horizon.clone(), sentiment.clone());
+            }
+            if volume.balance.total_samples > 0 {
+                volume_params.insert(horizon.clone(), volume.clone());
+            }
             overall_scores.push(*score);
             total_optimization_time += time;
         }

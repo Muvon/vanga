@@ -195,12 +195,16 @@ impl OutputFormatter {
             raw_predictions.len()
         );
 
-        // Verify we have exactly 25 predictions (5 targets × 5 classes)
-        let expected_count = 5 * NUM_CLASSES; // 5 targets (price_level, direction, volatility, sentiment, volume) × 5 classes
+        // Calculate expected count based on actual number of trained targets for this horizon
+        let num_targets_for_horizon = target_names
+            .iter()
+            .filter(|name| name.ends_with(&format!("_{}", horizon)))
+            .count();
+        let expected_count = num_targets_for_horizon * NUM_CLASSES;
         if horizon_predictions.len() != expected_count {
             return Err(VangaError::PredictionError(format!(
-                "Expected {} predictions for horizon '{}' (5 targets × {} classes), but got {}. Indices: {:?}",
-                expected_count, horizon, NUM_CLASSES, horizon_predictions.len(), horizon_indices
+                "Expected {} predictions for horizon '{}' ({} targets × {} classes), but got {}. Indices: {:?}",
+                expected_count, horizon, num_targets_for_horizon, NUM_CLASSES, horizon_predictions.len(), horizon_indices
             )));
         }
 
