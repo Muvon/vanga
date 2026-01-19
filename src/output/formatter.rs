@@ -862,39 +862,39 @@ impl OutputFormatter {
     }
 
     /// Create stop level prediction with adverse-specific bin names
-    /// 
+    ///
     /// **HOW STOP_LEVELS WORKS**:
-    /// 
+    ///
     /// 1. **Training**: Analyzes sequence LOWS (bullish) or HIGHS (bearish) to build adverse boundaries
     /// 2. **Classification**: Measures worst adverse price during horizon against those boundaries
     /// 3. **Output**: Probabilities for 5 classes based on how far price moved adversely
-    /// 
+    ///
     /// **BINS REPRESENT**: Absolute price ranges where adverse movement may occur
     /// - Boundaries calculated from sequence adverse prices (lows/highs)
     /// - NOT percentages - actual price levels derived from sequence distribution
     /// - Direction-aware: bullish uses lows, bearish uses highs
-    /// 
+    ///
     /// **USAGE WITH PRICE_LEVELS**:
-    /// 
+    ///
     /// Example: Current price = $100, price_levels predicts "strong_up" (target ~$105)
-    /// 
+    ///
     /// stop_levels bins show WHERE price might dip during the move:
     /// - "minimal_adverse": $99-$100 (shallow dip, tight stop at $98.50)
     /// - "low_adverse": $97-$99 (normal dip, stop at $96.50)
     /// - "moderate_adverse": $95-$97 (deeper dip, stop at $94.50)
     /// - "high_adverse": $92-$95 (large dip, stop at $91.50)
     /// - "extreme_adverse": <$92 (very deep dip, wide stop or avoid)
-    /// 
+    ///
     /// **STOP-LOSS PLACEMENT**:
     /// - Find highest probability bin
     /// - Place stop slightly below that bin's lower range
     /// - If "extreme_adverse" >30% probability → reduce position or avoid
-    /// 
+    ///
     /// **POSITION SIZING**:
     /// - Sum probabilities for high+extreme adverse
     /// - If >40% → reduce position by 50%
     /// - If >60% → reduce position by 75% or avoid
-    /// 
+    ///
     /// **TRADE FILTERING**:
     /// - BEST: price_levels strong signal + minimal/low adverse >60%
     /// - CAUTION: moderate_adverse >40%
@@ -957,7 +957,7 @@ impl OutputFormatter {
 
         for (i, bin_name) in bin_names.iter().enumerate() {
             let price_range = reconstruction.adverse_price_ranges[i];
-            
+
             // Convert absolute prices to percentages for display
             let range_pct = [
                 ((price_range[0] - current_price) / current_price) * 100.0,

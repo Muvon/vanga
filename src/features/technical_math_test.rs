@@ -1,5 +1,6 @@
 // Comprehensive mathematical validation tests for technical indicators
 use crate::config::features::TechnicalIndicatorsConfig;
+use crate::features::ta_helpers::calculate_williams_r_ta;
 use crate::features::technical::generate_technical_indicators;
 use approx::assert_relative_eq;
 use polars::prelude::*;
@@ -379,4 +380,952 @@ async fn test_indicators_with_real_data_patterns() {
     assert_eq!(rsi.len(), 15);
     assert_eq!(macd.len(), 15);
     assert_eq!(atr.len(), 15);
+}
+
+#[tokio::test]
+async fn test_hurst_exponent_constant_prices_no_nan() {
+    // Test hurst exponent with constant prices (flat consolidation)
+    // This is the bug that occurred with low-priced assets like DOGE
+    // When all prices are the same, returns are all 0, std_dev is 0,
+    // and ALL chunks become invalid → NaN (BUG)
+    // FIXED: Should return 0.4 (mean-reversion for consolidation)
+    let constant_price = 0.0716; // Same price range as DOGE
+    let close: Vec<f64> = vec![constant_price; 150];
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.0001).collect(),
+        close.iter().map(|x| x - 0.0001).collect(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.hurst_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("hurst_exponent").is_ok());
+    let hurst_series = result.column("hurst_exponent").unwrap().f64().unwrap();
+
+    // After the warmup period (window size), all values should be valid (no NaN)
+    let warmup = 50;
+    for i in warmup..hurst_series.len() {
+        let val = hurst_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "Hurst exponent at index {} is NaN for constant prices (should be 0.4)",
+            i
+        );
+        assert!(
+            (0.1..=0.9).contains(&val),
+            "Hurst exponent at index {} = {} is out of range [0.1, 0.9]",
+            i,
+            val
+        );
+        // Verify exact value for consolidation: should be 0.4
+        assert_relative_eq!(val, 0.4, epsilon = 1e-10);
+    }
+}
+
+#[tokio::test]
+async fn test_hurst_exponent_low_price_asset() {
+    // Test hurst exponent with realistic low-priced asset data (like DOGE)
+    // Simulates what happens with actual crypto data where price changes
+    // are very small relative to price magnitude
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0716;
+    for i in 0..200 {
+        // Small random walk with small steps (typical for low-priced crypto)
+        let change: f64 = if i % 5 == 0 {
+            0.0001
+        } else if i % 7 == 0 {
+            -0.0001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.0001); // Ensure positive price
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.0001).collect(),
+        close.iter().map(|x| x - 0.0001).collect(),
+        close.clone(),
+        vec![1000.0; 200],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.hurst_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("hurst_exponent").is_ok());
+    let hurst_series = result.column("hurst_exponent").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 50;
+    let mut nan_count = 0;
+    for i in warmup..hurst_series.len() {
+        if let Some(val) = hurst_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in hurst_exponent for low-price asset data",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_choppiness_index_constant_prices() {
+    // Test choppiness index with constant prices (flat consolidation)
+    // When high == low (constant prices), range = 0, and the formula
+    // would produce NaN (division by zero)
+    // FIXED: Should return 100.0 (maximum choppiness = consolidation)
+    let constant_price = 100.0;
+    let close: Vec<f64> = vec![constant_price; 100];
+
+    let df = create_test_df(
+        close.clone(),
+        close.clone(),
+        close.clone(),
+        close.clone(),
+        vec![1000.0; 100],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.consolidation.enabled = true;
+    config.trend.consolidation.choppiness_periods = vec![14];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("choppiness_14").is_ok());
+    let chop_series = result.column("choppiness_14").unwrap().f64().unwrap();
+
+    // After warmup period (14), all values should be valid
+    let warmup = 14;
+    for i in warmup..chop_series.len() {
+        let val = chop_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "Choppiness index at index {} is NaN for constant prices (should be 100)",
+            i
+        );
+        // Choppiness index should be 100 for constant prices
+        assert_relative_eq!(val, 100.0, epsilon = 1e-10);
+    }
+}
+
+#[tokio::test]
+async fn test_choppiness_index_low_price_asset() {
+    // Test choppiness index with low-priced asset (like DOGE)
+    // Simulates realistic scenario with very small price movements
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0716;
+    for i in 0..150 {
+        // Small price movements typical of low-priced crypto
+        let change: f64 = (i as f64 * 0.00001).sin() * 0.0001;
+        price = (price + change).max(0.0001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.0001).collect(),
+        close.iter().map(|x| x - 0.0001).collect(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.consolidation.enabled = true;
+    config.trend.consolidation.choppiness_periods = vec![14];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("choppiness_14").is_ok());
+    let chop_series = result.column("choppiness_14").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 14;
+    let mut nan_count = 0;
+    for i in warmup..chop_series.len() {
+        if let Some(val) = chop_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in choppiness_14 for low-price asset data",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_choppiness_index_tr_sum_zero_edge_case() {
+    // Test choppiness index with edge case: range > 0 but tr_sum == 0
+    // This happens when price oscillates within a range without closing outside
+    // the previous candle's range (like DOGE at row 592)
+    // FIXED: Should return valid value (not NaN)
+
+    // Create 50 candles where price moves within a tight range
+    // First establish a range, then oscillate within it
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0724;
+    close.push(price);
+
+    // First candle: move up slightly to establish range
+    price = 0.0725;
+    close.push(price);
+
+    // Subsequent candles: oscillate within the range without new closes
+    for i in 2..50 {
+        // Price alternates between 0.0724 and 0.0725
+        if i % 2 == 0 {
+            price = 0.0724;
+        } else {
+            price = 0.0725;
+        }
+        close.push(price);
+    }
+
+    // High is always 0.0725, low is always 0.0724 (constant range)
+    let high: Vec<f64> = close.iter().map(|_| 0.0725).collect();
+    let low: Vec<f64> = close.iter().map(|_| 0.0724).collect();
+
+    let df = create_test_df(
+        close.clone(),
+        high.clone(),
+        low.clone(),
+        close.clone(),
+        vec![1000.0; 50],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.consolidation.enabled = true;
+    config.trend.consolidation.choppiness_periods = vec![10];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("choppiness_10").is_ok());
+    let chop_series = result.column("choppiness_10").unwrap().f64().unwrap();
+
+    // After warmup (10), all values should be valid (no NaN)
+    // The value should be high (>90) indicating consolidation
+    for i in 10..chop_series.len() {
+        let val = chop_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "Choppiness index at index {} is NaN for tr_sum=0 edge case",
+            i
+        );
+        // Should be high value indicating consolidation (>90)
+        assert!(
+            val > 90.0,
+            "Choppiness index at index {} = {} should be > 90 (consolidation)",
+            i,
+            val
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_choppiness_index_exact_constant_prices() {
+    // Test choppiness index with EXACTLY constant prices (high == low == close)
+    // This is the extreme edge case where range = 0
+    // Should return exactly 100.0 (consolidation)
+    let constant_price = 0.0716;
+    let close: Vec<f64> = vec![constant_price; 100];
+    let high: Vec<f64> = vec![constant_price; 100];
+    let low: Vec<f64> = vec![constant_price; 100];
+
+    let df = create_test_df(
+        close.clone(),
+        high.clone(),
+        low.clone(),
+        close.clone(),
+        vec![1000.0; 100],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.consolidation.enabled = true;
+    config.trend.consolidation.choppiness_periods = vec![14];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("choppiness_14").is_ok());
+    let chop_series = result.column("choppiness_14").unwrap().f64().unwrap();
+
+    // After warmup, ALL values should be exactly 100.0
+    let warmup = 14;
+    for i in warmup..chop_series.len() {
+        let val = chop_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "Choppiness index at index {} is NaN for constant prices",
+            i
+        );
+        // Exact value for constant prices: 100.0
+        assert_relative_eq!(val, 100.0, epsilon = 1e-10);
+    }
+}
+
+#[tokio::test]
+async fn test_choppiness_index_extreme_low_prices() {
+    // Test choppiness index with extremely low prices (like SHIB at $0.00001)
+    // This pushes floating point precision to the limit
+    let extreme_price = 0.00001;
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = extreme_price;
+    for i in 0..100 {
+        // Smallest possible price movement
+        let change: f64 = if i % 3 == 0 {
+            0.000001
+        } else if i % 5 == 0 {
+            -0.000001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.000001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.000001).collect(),
+        close.iter().map(|x| x - 0.000001).collect(),
+        close.clone(),
+        vec![1000.0; 100],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.consolidation.enabled = true;
+    config.trend.consolidation.choppiness_periods = vec![14];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("choppiness_14").is_ok());
+    let chop_series = result.column("choppiness_14").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 14;
+    let mut nan_count = 0;
+    for i in warmup..chop_series.len() {
+        if let Some(val) = chop_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in choppiness_14 for extreme low prices",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_hurst_exponent_mostly_flat_with_spikes() {
+    // Test hurst exponent with mostly flat prices but occasional spikes
+    // This tests the edge case where some chunks are valid but not all
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0716;
+    for i in 0..200 {
+        if i == 50 || i == 100 || i == 150 {
+            // Spike: 10% move
+            price = price * 1.1;
+        } else if i == 51 || i == 101 || i == 151 {
+            // Recovery
+            price = price / 1.1;
+        }
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.001).collect(),
+        close.iter().map(|x| x - 0.001).collect(),
+        close.clone(),
+        vec![1000.0; 200],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.hurst_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("hurst_exponent").is_ok());
+    let hurst_series = result.column("hurst_exponent").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 50;
+    let mut nan_count = 0;
+    for i in warmup..hurst_series.len() {
+        if let Some(val) = hurst_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in hurst_exponent with flat + spikes data",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_all_edge_cases_no_nan() {
+    // Comprehensive test combining all edge cases:
+    // - Constant prices (all returns = 0)
+    // - Very low prices (precision issues)
+    // - Oscillating within range (tr_sum = 0)
+    // Verifies that NONE of these produce NaN
+
+    let test_cases = vec![
+        ("constant_doge", 0.0716, 100),
+        ("constant_btc", 42000.0, 100),
+        ("constant_shib", 0.00001, 100),
+        ("low_price_oscillating", 0.0724, 100),
+    ];
+
+    for (name, base_price, size) in test_cases {
+        let close: Vec<f64> = vec![base_price; size];
+        let df = create_test_df(
+            close.clone(),
+            close.iter().map(|x| x + base_price * 0.001).collect(),
+            close.iter().map(|x| x - base_price * 0.001).collect(),
+            close.clone(),
+            vec![1000.0; size],
+        );
+
+        let mut config = TechnicalIndicatorsConfig::default();
+        config.trend.advanced.enabled = true;
+        config.trend.advanced.hurst_window = 20;
+        config.trend.consolidation.enabled = true;
+        config.trend.consolidation.choppiness_periods = vec![10];
+
+        let result = generate_technical_indicators(df, &config).await.unwrap();
+
+        // Check hurst_exponent
+        if let Ok(hurst_col) = result.column("hurst_exponent") {
+            let hurst_series = hurst_col.f64().unwrap();
+            let warmup = 20;
+            for i in warmup..hurst_series.len() {
+                if let Some(val) = hurst_series.get(i) {
+                    assert!(
+                        !val.is_nan(),
+                        "Hurst NaN at {} for {} (price={})",
+                        i,
+                        name,
+                        base_price
+                    );
+                }
+            }
+        }
+
+        // Check choppiness_10
+        if let Ok(chop_col) = result.column("choppiness_10") {
+            let chop_series = chop_col.f64().unwrap();
+            let warmup = 10;
+            for i in warmup..chop_series.len() {
+                if let Some(val) = chop_series.get(i) {
+                    assert!(
+                        !val.is_nan(),
+                        "Choppiness NaN at {} for {} (price={})",
+                        i,
+                        name,
+                        base_price
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_williams_r_constant_prices() {
+    // Test Williams %R with constant prices (flat consolidation)
+    // When highest_high == lowest_low, division by zero would occur
+    // FIXED: Should return -50.0 (neutral)
+    let constant_price = 0.0716;
+    let close: Vec<f64> = vec![constant_price; 100];
+    let high: Vec<f64> = vec![constant_price; 100];
+    let low: Vec<f64> = vec![constant_price; 100];
+
+    let df = create_test_df(
+        close.clone(),
+        high.clone(),
+        low.clone(),
+        close.clone(),
+        vec![1000.0; 100],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.momentum.williams_r = true;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("williams_r").is_ok());
+    let williams_series = result.column("williams_r").unwrap().f64().unwrap();
+
+    // After warmup (14), all values should be valid (-50.0)
+    let warmup = 14;
+    for i in warmup..williams_series.len() {
+        let val = williams_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "Williams %R at index {} is NaN for constant prices (should be -50)",
+            i
+        );
+        assert_relative_eq!(val, -50.0, epsilon = 1e-10);
+    }
+}
+
+#[tokio::test]
+async fn test_williams_r_low_price_asset() {
+    // Test Williams %R with low-priced asset (like DOGE)
+    // Simulates realistic scenario with very small price movements
+    let mut close: Vec<f64> = Vec::new();
+    let mut high: Vec<f64> = Vec::new();
+    let mut low: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0716;
+    for i in 0..150 {
+        let change: f64 = if i % 5 == 0 {
+            0.0001
+        } else if i % 7 == 0 {
+            -0.0001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.0001);
+        close.push(price);
+        high.push(price + 0.0001);
+        low.push((price - 0.0001).max(0.000001));
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        high.clone(),
+        low.clone(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.momentum.williams_r = true;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("williams_r").is_ok());
+    let williams_series = result.column("williams_r").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 14;
+    let mut nan_count = 0;
+    for i in warmup..williams_series.len() {
+        if let Some(val) = williams_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in williams_r for low-price asset data",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_williams_r_range() {
+    // Test Williams %R returns values in valid range [-100, 0]
+    let mut close: Vec<f64> = Vec::new();
+    let mut high: Vec<f64> = Vec::new();
+    let mut low: Vec<f64> = Vec::new();
+    let mut price: f64 = 100.0;
+    for i in 0..200 {
+        // Create trending movement
+        price = price * (1.0 + (i as f64 * 0.001).sin() * 0.02);
+        close.push(price);
+        high.push(price * 1.01);
+        low.push(price * 0.99);
+    }
+
+    let williams = calculate_williams_r_ta(&high, &low, &close, 14).unwrap();
+
+    // After warmup, values should be in valid range
+    let warmup = 14;
+    for i in warmup..williams.len() {
+        let val = williams[i];
+        if !val.is_nan() {
+            assert!(
+                (-100.0..=0.0).contains(&val),
+                "Williams %R at index {} = {} is out of range [-100, 0]",
+                i,
+                val
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_williams_r_oversold_overbought() {
+    // Test Williams %R correctly identifies oversold and overbought conditions
+    let mut close: Vec<f64> = Vec::new();
+    let mut high: Vec<f64> = Vec::new();
+    let mut low: Vec<f64> = Vec::new();
+
+    // First 50: oversold (price near low of range)
+    for _ in 0..50 {
+        close.push(10.0);
+        high.push(15.0);
+        low.push(10.0);
+    }
+
+    // Next 50: overbought (price near high of range)
+    for _ in 50..100 {
+        close.push(15.0);
+        high.push(15.0);
+        low.push(10.0);
+    }
+
+    let williams = calculate_williams_r_ta(&high, &low, &close, 14).unwrap();
+
+    // Average of oversold period should be < -80
+    let oversold_avg: f64 = williams[40..50].iter().sum::<f64>() / 10.0;
+    assert!(
+        oversold_avg < -80.0,
+        "Oversold average {} should be < -80",
+        oversold_avg
+    );
+
+    // Average of overbought period should be > -20
+    let overbought_avg: f64 = williams[90..100].iter().sum::<f64>() / 10.0;
+    assert!(
+        overbought_avg > -20.0,
+        "Overbought average {} should be > -20",
+        overbought_avg
+    );
+}
+
+#[tokio::test]
+async fn test_williams_r_constant_prices_edge_case() {
+    // Test Williams %R with EXACTLY constant prices (high == low == close)
+    // This is the extreme edge case that causes division by zero
+    let constant_price = 0.0716;
+    let close: Vec<f64> = vec![constant_price; 50];
+    let high: Vec<f64> = vec![constant_price; 50];
+    let low: Vec<f64> = vec![constant_price; 50];
+
+    let williams = calculate_williams_r_ta(&high, &low, &close, 14).unwrap();
+
+    // After warmup, all values should be exactly -50.0
+    for i in 14..williams.len() {
+        assert!(
+            !williams[i].is_nan(),
+            "Williams %R at index {} is NaN for constant prices",
+            i
+        );
+        assert_relative_eq!(williams[i], -50.0, epsilon = 1e-10);
+    }
+}
+
+#[tokio::test]
+async fn test_williams_r_extreme_low_prices() {
+    // Test Williams %R with extremely low prices (like SHIB at $0.00001)
+    let extreme_price = 0.00001;
+    let mut close: Vec<f64> = Vec::new();
+    let mut high: Vec<f64> = Vec::new();
+    let mut low: Vec<f64> = Vec::new();
+    let mut price: f64 = extreme_price;
+    for i in 0..100 {
+        let change: f64 = if i % 3 == 0 {
+            0.000001
+        } else if i % 5 == 0 {
+            -0.000001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.000001);
+        close.push(price);
+        high.push(price + 0.000001);
+        low.push((price - 0.000001).max(0.0000001));
+    }
+
+    let williams = calculate_williams_r_ta(&high, &low, &close, 14).unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 14;
+    let mut nan_count = 0;
+    for i in warmup..williams.len() {
+        if williams[i].is_nan() {
+            nan_count += 1;
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in Williams %R for extreme low prices",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_fractal_dimension_constant_prices() {
+    // Test fractal dimension with constant prices (flat consolidation)
+    // When prices are constant, the Higuchi method has no variation to measure
+    // FIXED: Should return 1.5 (default for flat/consolidation)
+    let constant_price = 0.0716;
+    let close: Vec<f64> = vec![constant_price; 150];
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.0001).collect(),
+        close.iter().map(|x| x - 0.0001).collect(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.fractal_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("fractal_dimension").is_ok());
+    let fractal_series = result.column("fractal_dimension").unwrap().f64().unwrap();
+
+    // After warmup (50), all values should be valid
+    let warmup = 50;
+    for i in warmup..fractal_series.len() {
+        let val = fractal_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "Fractal dimension at index {} is NaN for constant prices",
+            i
+        );
+        assert!(
+            (0.5..=2.5).contains(&val),
+            "Fractal dimension at index {} = {} is out of range [0.5, 2.5]",
+            i,
+            val
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_fractal_dimension_low_price_asset() {
+    // Test fractal dimension with low-priced asset (like DOGE)
+    // Simulates realistic scenario with very small price movements
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0716;
+    for i in 0..200 {
+        let change: f64 = if i % 5 == 0 {
+            0.0001
+        } else if i % 7 == 0 {
+            -0.0001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.0001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.0001).collect(),
+        close.iter().map(|x| x - 0.0001).collect(),
+        close.clone(),
+        vec![1000.0; 200],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.fractal_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("fractal_dimension").is_ok());
+    let fractal_series = result.column("fractal_dimension").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 50;
+    let mut nan_count = 0;
+    for i in warmup..fractal_series.len() {
+        if let Some(val) = fractal_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in fractal_dimension for low-price asset data",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_fractal_dimension_extreme_low_prices() {
+    // Test fractal dimension with extremely low prices (like SHIB at $0.00001)
+    let extreme_price = 0.00001;
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = extreme_price;
+    for i in 0..100 {
+        let change: f64 = if i % 3 == 0 {
+            0.000001
+        } else if i % 5 == 0 {
+            -0.000001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.000001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.000001).collect(),
+        close.iter().map(|x| x - 0.000001).collect(),
+        close.clone(),
+        vec![1000.0; 100],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.fractal_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("fractal_dimension").is_ok());
+    let fractal_series = result.column("fractal_dimension").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 50;
+    let mut nan_count = 0;
+    for i in warmup..fractal_series.len() {
+        if let Some(val) = fractal_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in fractal_dimension for extreme low prices",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_fractal_dimension_range_validation() {
+    // Test fractal dimension returns values in valid range [0.5, 2.5]
+    // Fractal dimension: D < 2 means less complex than Brownian motion
+    // D = 2 is Brownian motion (random walk)
+    // D > 2 means more complex than Brownian motion
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 100.0;
+    for i in 0..200 {
+        // Create varying complexity
+        price = price * (1.0 + (i as f64 * 0.01).sin() * 0.02);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 5.0).collect(),
+        close.iter().map(|x| x - 5.0).collect(),
+        close.clone(),
+        vec![1000.0; 200],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.fractal_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("fractal_dimension").is_ok());
+    let fractal_series = result.column("fractal_dimension").unwrap().f64().unwrap();
+
+    // All valid values should be in range [0.5, 2.5]
+    for i in 50..fractal_series.len() {
+        if let Some(val) = fractal_series.get(i) {
+            if !val.is_nan() {
+                assert!(
+                    (0.5..=2.5).contains(&val),
+                    "Fractal dimension at index {} = {} is out of range [0.5, 2.5]",
+                    i,
+                    val
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_fractal_dimension_mostly_flat_with_spikes() {
+    // Test fractal dimension with mostly flat prices but occasional spikes
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0716;
+    for i in 0..200 {
+        if i == 50 || i == 100 || i == 150 {
+            price = price * 1.1; // Spike
+        } else if i == 51 || i == 101 || i == 151 {
+            price = price / 1.1; // Recovery
+        }
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.001).collect(),
+        close.iter().map(|x| x - 0.001).collect(),
+        close.clone(),
+        vec![1000.0; 200],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.trend.advanced.enabled = true;
+    config.trend.advanced.fractal_window = 50;
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("fractal_dimension").is_ok());
+    let fractal_series = result.column("fractal_dimension").unwrap().f64().unwrap();
+
+    // After warmup, no NaN values should exist
+    let warmup = 50;
+    let mut nan_count = 0;
+    for i in warmup..fractal_series.len() {
+        if let Some(val) = fractal_series.get(i) {
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in fractal_dimension with flat + spikes data",
+        nan_count
+    );
 }

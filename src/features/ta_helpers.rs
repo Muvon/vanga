@@ -273,8 +273,14 @@ pub fn calculate_williams_r_ta(
             .iter()
             .fold(f64::INFINITY, |a, &b| a.min(b)); // Fix: use low instead of high
 
-        if window_high != window_low {
-            result[i] = -100.0 * (window_high - close[i]) / (window_high - window_low);
+        let range = window_high - window_low;
+        if range > 0.0 {
+            result[i] = -100.0 * (window_high - close[i]) / range;
+        } else {
+            // Constant prices (flat consolidation) → neutral value (-50)
+            // Williams %R ranges from -100 (oversold) to 0 (overbought)
+            // Neutral middle value indicates no clear overbought/oversold signal
+            result[i] = -50.0;
         }
     }
 

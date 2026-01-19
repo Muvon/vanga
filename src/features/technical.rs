@@ -1619,6 +1619,8 @@ fn calculate_hurst_exponent(prices: &[f64], window: usize) -> Vec<f64> {
         }
 
         // Linear regression to find Hurst exponent
+        // Handle edge case: not enough valid lags (flat/consolidating prices)
+        // For consolidation, return 0.4 (slight mean-reversion, H < 0.5)
         if rs_values.len() >= 3 {
             let log_lags: Vec<f64> = lags[..rs_values.len()]
                 .iter()
@@ -1641,7 +1643,22 @@ fn calculate_hurst_exponent(prices: &[f64], window: usize) -> Vec<f64> {
                 let slope = (n * sum_xy - sum_x * sum_y) / denominator;
                 // Clamp to reasonable range for crypto markets
                 hurst_values[i] = slope.clamp(0.1, 0.9);
+            } else {
+                // Denominator too small (numerical instability) → consolidation
+                hurst_values[i] = 0.4;
             }
+        } else if rs_values.is_empty() {
+            // All chunks were invalid (constant prices / flat consolidation)
+            // Return mean-reversion value: H = 0.4 indicates prices tend to return to mean
+            hurst_values[i] = 0.4;
+        } else {
+            // Some valid lags but not enough for regression (2 or fewer)
+            // Use available rs_values to estimate: flat → mean reversion
+            let avg_rs: f64 = rs_values.iter().sum::<f64>() / rs_values.len() as f64;
+            // For flat series, R/S tends toward sqrt(n/2) ≈ 1.0 for random walk
+            // If avg_rs is near 1.0, it's flat/random, use 0.5
+            // If avg_rs < 1.0, slight mean reversion
+            hurst_values[i] = if avg_rs <= 1.5 { 0.45 } else { 0.5 };
         }
     }
 
@@ -1670,8 +1687,10 @@ fn calculate_fractal_dimension_higuchi(prices: &[f64], max_window: usize) -> Vec
         let max_price = window.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let price_range = max_price - min_price;
 
-        // If prices are constant or near-constant, skip calculation
+        // If prices are constant or near-constant, use default value for flat line
+        // A constant series has no fractal structure, it's a 1D line (D = 1.0)
         if price_range < 1e-10 {
+            fractal_dims[idx] = 1.5; // Default for flat/consolidation (mid-range)
             continue;
         }
 
@@ -2139,6 +2158,10 @@ pub fn calculate_choppiness_index(
         let range = highest_high - lowest_low;
         if range > 0.0 && tr_sum > 0.0 {
             result[i] = 100.0 * (tr_sum / range).ln() / (period as f64).ln();
+        } else {
+            // Either range == 0 (constant prices) or tr_sum == 0 (no True Range movement)
+            // Both indicate consolidation/sideways → maximum choppiness
+            result[i] = 100.0;
         }
     }
 
