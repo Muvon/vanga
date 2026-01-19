@@ -7,11 +7,13 @@ use crate::config::model::NUM_CLASSES;
 use crate::utils::error::{Result, VangaError};
 use ndarray::{s, ArrayView1};
 
-/// Output segments for multi-target parsing - always 5 targets (price_levels, direction, volatility, sentiment, volume) with NUM_CLASSES each
+/// Output segments for multi-target parsing
 #[derive(Debug, Clone)]
 pub struct OutputSegments {
     /// Price levels segment: (start_idx, end_idx)
     pub price_levels: Option<(usize, usize)>,
+    /// Stop levels segment: (start_idx, end_idx)
+    pub stop_levels: Option<(usize, usize)>,
     /// Direction segment: (start_idx, end_idx)
     pub direction: Option<(usize, usize)>,
     /// Volatility segment: (start_idx, end_idx)
@@ -29,17 +31,102 @@ impl Default for OutputSegments {
 }
 
 impl OutputSegments {
-    /// Create output segments for always-enabled 5 targets with NUM_CLASSES=5 each
+    /// Create output segments for always-enabled 6 targets with NUM_CLASSES=5 each
     pub fn new() -> Self {
         // All targets are always enabled with NUM_CLASSES=5 each
-        // Total output size: 5 targets * 5 classes = 25
+        // Total output size: 6 targets * 5 classes = 30
         Self {
             price_levels: Some((0, NUM_CLASSES)),                 // 0-4
-            direction: Some((NUM_CLASSES, NUM_CLASSES * 2)),      // 5-9
-            volatility: Some((NUM_CLASSES * 2, NUM_CLASSES * 3)), // 10-14
-            sentiment: Some((NUM_CLASSES * 3, NUM_CLASSES * 4)),  // 15-19
-            volume: Some((NUM_CLASSES * 4, NUM_CLASSES * 5)),     // 20-24
+            stop_levels: Some((NUM_CLASSES, NUM_CLASSES * 2)),    // 5-9
+            direction: Some((NUM_CLASSES * 2, NUM_CLASSES * 3)),  // 10-14
+            volatility: Some((NUM_CLASSES * 3, NUM_CLASSES * 4)), // 15-19
+            sentiment: Some((NUM_CLASSES * 4, NUM_CLASSES * 5)),  // 20-24
+            volume: Some((NUM_CLASSES * 5, NUM_CLASSES * 6)),     // 25-29
         }
+    }
+
+    /// Create output segments based on actually trained target names
+    ///
+    /// # Arguments
+    /// * `target_names` - List of trained target names (e.g., ["price_levels_18m", "direction_18m"])
+    ///
+    /// # Returns
+    /// OutputSegments with only the trained targets enabled
+    ///
+    /// # Example
+    /// ```
+    /// let target_names = vec!["price_levels_18m".to_string(), "volatility_18m".to_string()];
+    /// let segments = OutputSegments::from_target_names(&target_names);
+    /// // segments.price_levels = Some((0, 5))
+    /// // segments.direction = None
+    /// // segments.volatility = Some((5, 10))
+    /// // segments.sentiment = None
+    /// // segments.volume = None
+    /// ```
+    pub fn from_target_names(target_names: &[String]) -> Self {
+        let mut segments = Self {
+            price_levels: None,
+            stop_levels: None,
+            direction: None,
+            volatility: None,
+            sentiment: None,
+            volume: None,
+        };
+
+        let mut current_offset = 0;
+
+        // Process each target name and assign segments in order
+        for target_name in target_names {
+            // Extract target type from name (e.g., "price_levels_18m" -> "price_levels")
+            let target_type = if let Some(underscore_pos) = target_name.rfind('_') {
+                &target_name[..underscore_pos]
+            } else {
+                target_name.as_str()
+            };
+
+            let start = current_offset;
+            let end = current_offset + NUM_CLASSES;
+
+            match target_type {
+                "price_levels" | "price_level" => {
+                    segments.price_levels = Some((start, end));
+                }
+                "stop_levels" | "stop_level" => {
+                    segments.stop_levels = Some((start, end));
+                }
+                "direction" => {
+                    segments.direction = Some((start, end));
+                }
+                "volatility" => {
+                    segments.volatility = Some((start, end));
+                }
+                "sentiment" => {
+                    segments.sentiment = Some((start, end));
+                }
+                "volume" => {
+                    segments.volume = Some((start, end));
+                }
+                _ => {
+                    log::warn!("Unknown target type in name: {}", target_name);
+                    continue; // Skip unknown targets
+                }
+            }
+
+            current_offset = end;
+        }
+
+        log::debug!(
+            "Created OutputSegments from {} target names: price_levels={:?}, stop_levels={:?}, direction={:?}, volatility={:?}, sentiment={:?}, volume={:?}",
+            target_names.len(),
+            segments.price_levels,
+            segments.stop_levels,
+            segments.direction,
+            segments.volatility,
+            segments.sentiment,
+            segments.volume
+        );
+
+        segments
     }
 }
 
@@ -55,9 +142,26 @@ impl Default for MultiTargetParser {
 }
 
 impl MultiTargetParser {
-    /// Create new parser with output configuration
+    /// Create new parser with default configuration (all 5 targets)
     pub fn new() -> Self {
-        let segments = OutputSegments::new(); // Always use 3 targets with NUM_CLASSES=5 each
+        let segments = OutputSegments::new();
+        Self { segments }
+    }
+
+    /// Create new parser with specific target names (only trained targets)
+    ///
+    /// # Arguments
+    /// * `target_names` - List of trained target names (e.g., ["price_levels_18m", "direction_18m"])
+    ///
+    /// # Returns
+    /// Parser configured to only parse the specified targets
+    pub fn with_target_names(target_names: &[String]) -> Self {
+        let segments = OutputSegments::from_target_names(target_names);
+        log::info!(
+            "🎯 Created MultiTargetParser for {} trained targets: {:?}",
+            target_names.len(),
+            target_names
+        );
         Self { segments }
     }
 
@@ -73,6 +177,21 @@ impl MultiTargetParser {
             } else {
                 log::warn!(
                     "Price levels segment out of bounds: {} > {}",
+                    end,
+                    raw_output.len()
+                );
+            }
+        }
+
+        // Parse stop levels if enabled
+        if let Some((start, end)) = self.segments.stop_levels {
+            if end <= raw_output.len() {
+                let stop_level_logits = raw_output.slice(s![start..end]);
+                parsed.stop_levels = Some(self.parse_price_levels(&stop_level_logits)?);
+            // Reuse price_levels parser
+            } else {
+                log::warn!(
+                    "Stop levels segment out of bounds: {} > {}",
                     end,
                     raw_output.len()
                 );
@@ -290,6 +409,9 @@ pub struct ParsedOutput {
     /// Price level probabilities (if enabled)
     pub price_levels: Option<Vec<f64>>,
 
+    /// Stop level probabilities (if enabled)
+    pub stop_levels: Option<Vec<f64>>,
+
     /// Direction probabilities (if enabled) - 5-class system
     pub direction: Option<DirectionOutput>,
 
@@ -313,6 +435,7 @@ impl ParsedOutput {
     pub fn new() -> Self {
         Self {
             price_levels: None,
+            stop_levels: None,
             direction: None,
             volatility: None,
             sentiment: None,

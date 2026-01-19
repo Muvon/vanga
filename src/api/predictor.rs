@@ -226,8 +226,19 @@ impl Predictor {
         // Explicit memory cleanup after prediction and data extraction
         drop(prepared_data);
 
+        // Get target names from model to configure parser for only trained targets
+        let target_names = model.get_target_names();
+        log::info!(
+            "🎯 Model has {} trained targets: {:?}",
+            target_names.len(),
+            target_names
+        );
+
         // Format predictions using output formatter with 5-class system
         let mut formatter = OutputFormatter::new(self.config.output_config.clone());
+
+        // Configure parser for only trained targets (prevents out-of-bounds errors)
+        formatter = formatter.with_target_names(&target_names);
 
         // Pass OHLCV data to formatter for VWAP-based range calculation - REQUIRED!
         formatter = formatter.with_sequence_ohlcv(sequence_ohlcv);
@@ -322,6 +333,69 @@ impl Predictor {
             );
             vec![default_horizon]
         };
+
+        // Validate that calibrated parameters exist for all trained targets
+        log::info!("🔍 Validating calibrated parameters for trained targets...");
+        for horizon in &horizons_to_process {
+            // Get targets for this horizon
+            let horizon_targets: Vec<String> = target_names
+                .iter()
+                .filter(|name| name.ends_with(&format!("_{}", horizon)))
+                .cloned()
+                .collect();
+
+            log::debug!(
+                "Validating calibrated parameters for horizon '{}' with {} targets: {:?}",
+                horizon,
+                horizon_targets.len(),
+                horizon_targets
+            );
+
+            // Check each target type
+            for target_name in &horizon_targets {
+                // Extract target type from name (e.g., "price_levels_18m" -> "price_levels")
+                let target_type = if let Some(underscore_pos) = target_name.rfind('_') {
+                    &target_name[..underscore_pos]
+                } else {
+                    target_name.as_str()
+                };
+
+                // Validate calibrated parameters exist for this target type
+                let params_exist = match target_type {
+                    "price_levels" | "price_level" => {
+                        calibrated_params.get_price_levels(horizon).is_some()
+                    }
+                    "stop_levels" | "stop_level" => {
+                        calibrated_params.get_stop_levels(horizon).is_some()
+                    }
+                    "direction" => calibrated_params.get_direction(horizon).is_some(),
+                    "volatility" => calibrated_params.get_volatility(horizon).is_some(),
+                    "sentiment" => calibrated_params.get_sentiment(horizon).is_some(),
+                    "volume" => calibrated_params.get_volume(horizon).is_some(),
+                    _ => {
+                        log::warn!("Unknown target type: {}", target_type);
+                        false
+                    }
+                };
+
+                if !params_exist {
+                    return Err(VangaError::ConfigError(format!(
+                        "No calibrated {} parameters found for horizon: {}. \
+                         The model was trained with target '{}' but calibrated parameters are missing. \
+                         This indicates an incomplete training process. \
+                         Please retrain the model to ensure all targets have calibrated parameters.",
+                        target_type, horizon, target_name
+                    )));
+                }
+
+                log::debug!(
+                    "✅ Calibrated parameters validated for target '{}' (horizon: {})",
+                    target_name,
+                    horizon
+                );
+            }
+        }
+        log::info!("✅ All calibrated parameters validated successfully");
 
         // Process each horizon and collect all predictions
         let mut all_predictions = Vec::new();

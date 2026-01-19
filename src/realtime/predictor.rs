@@ -663,6 +663,7 @@ impl StreamingPredictor {
             current_price: ml_prediction.current_price,
             current_vwap_price: ml_prediction.current_vwap_price,
             price_levels: ml_prediction.price_levels.clone(),
+            stop_levels: ml_prediction.stop_levels.clone(),
             direction: Some(direction),
             volatility: Some(volatility),
             sentiment: ml_prediction.sentiment.clone(),

@@ -31,6 +31,10 @@ pub struct PredictionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_levels: Option<PriceLevelPrediction>,
 
+    /// Stop level predictions (if enabled) - adverse price movement boundaries
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_levels: Option<StopLevelPrediction>,
+
     /// Direction predictions (if enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<DirectionPrediction>,
@@ -84,6 +88,22 @@ pub struct PriceBin {
 }
 
 impl PriceLevelPrediction {}
+
+/// Stop level prediction with adverse price movement boundaries
+/// Similar to PriceLevelPrediction but focuses on risk management levels
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopLevelPrediction {
+    /// Probability distribution across adverse price bins
+    pub bins: HashMap<String, PriceBin>,
+
+    /// Most likely adverse price range as numeric array [min, max]
+    pub most_likely_range: [f64; 2],
+
+    /// Confidence in stop level prediction
+    pub confidence: f64,
+}
+
+impl StopLevelPrediction {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectionPrediction {
@@ -953,6 +973,7 @@ impl PredictionResult {
             current_price,
             current_vwap_price: 0.0, // Will be updated by formatter
             price_levels: None,
+            stop_levels: None,
             direction: None,
             volatility: None,
             sentiment: None,
@@ -990,6 +1011,7 @@ impl PredictionResult {
             current_price,
             current_vwap_price: 0.0, // Will be updated by formatter
             price_levels: None,
+            stop_levels: None,
             direction: None,
             volatility: None,
             sentiment: None,
@@ -1014,6 +1036,12 @@ impl PredictionResult {
     /// Set price level prediction
     pub fn with_price_levels(mut self, price_levels: PriceLevelPrediction) -> Self {
         self.price_levels = Some(price_levels);
+        self
+    }
+
+    /// Set stop level prediction
+    pub fn with_stop_levels(mut self, stop_levels: StopLevelPrediction) -> Self {
+        self.stop_levels = Some(stop_levels);
         self
     }
 

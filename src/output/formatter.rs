@@ -92,6 +92,23 @@ impl OutputFormatter {
         self
     }
 
+    /// Set target names to configure parser for only trained targets
+    ///
+    /// # Arguments
+    /// * `target_names` - List of trained target names (e.g., ["price_levels_18m", "direction_18m"])
+    ///
+    /// This reconfigures the parser to only parse the specified targets, preventing
+    /// "out of bounds" errors when predicting with models trained on subset of targets.
+    pub fn with_target_names(mut self, target_names: &[String]) -> Self {
+        log::info!(
+            "🎯 Configuring OutputFormatter for {} trained targets: {:?}",
+            target_names.len(),
+            target_names
+        );
+        self.parser = Some(MultiTargetParser::with_target_names(target_names));
+        self
+    }
+
     /// Check if multi-target parser is available
     pub fn has_parser(&self) -> bool {
         self.parser.is_some()
@@ -424,6 +441,41 @@ impl OutputFormatter {
                     horizon_bandwidth,
                     horizon_percentiles,
                 )?);
+            }
+
+            // Parse stop levels if enabled (uses same structure as price levels)
+            if let Some(stop_level_probs) = parsed_output.stop_levels {
+                // Get stop level specific parameters or fall back to price level parameters
+                let stop_bandwidth = self
+                    .calibrated_parameters
+                    .as_ref()
+                    .and_then(|params| params.get_stop_levels(horizon))
+                    .map(|stop_params| stop_params.bandwidth)
+                    .or(horizon_bandwidth);
+
+                let stop_percentiles = self
+                    .calibrated_parameters
+                    .as_ref()
+                    .and_then(|params| params.get_stop_levels(horizon))
+                    .map(|stop_params| stop_params.percentiles)
+                    .or(horizon_percentiles);
+
+                // Create stop level prediction using same logic as price levels
+                let price_level_pred = self.create_price_level_prediction(
+                    &stop_level_probs,
+                    current_price,
+                    horizon,
+                    stop_bandwidth,
+                    stop_percentiles,
+                )?;
+
+                // Convert to StopLevelPrediction
+                result =
+                    result.with_stop_levels(crate::output::prediction_types::StopLevelPrediction {
+                        bins: price_level_pred.bins,
+                        most_likely_range: price_level_pred.most_likely_range,
+                        confidence: price_level_pred.confidence,
+                    });
             }
 
             if let Some(direction_output) = parsed_output.direction {
