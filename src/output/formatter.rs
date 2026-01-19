@@ -443,7 +443,7 @@ impl OutputFormatter {
                 )?);
             }
 
-            // Parse stop levels if enabled (uses same structure as price levels)
+            // Parse stop levels if enabled (adverse movement risk analysis)
             if let Some(stop_level_probs) = parsed_output.stop_levels {
                 // Get stop level specific parameters or fall back to price level parameters
                 let stop_bandwidth = self
@@ -460,22 +460,14 @@ impl OutputFormatter {
                     .map(|stop_params| stop_params.percentiles)
                     .or(horizon_percentiles);
 
-                // Create stop level prediction using same logic as price levels
-                let price_level_pred = self.create_price_level_prediction(
+                // Create stop level prediction with adverse-specific bin names
+                result = result.with_stop_levels(self.create_stop_level_prediction(
                     &stop_level_probs,
                     current_price,
                     horizon,
                     stop_bandwidth,
                     stop_percentiles,
-                )?;
-
-                // Convert to StopLevelPrediction
-                result =
-                    result.with_stop_levels(crate::output::prediction_types::StopLevelPrediction {
-                        bins: price_level_pred.bins,
-                        most_likely_range: price_level_pred.most_likely_range,
-                        confidence: price_level_pred.confidence,
-                    });
+                )?);
             }
 
             if let Some(direction_output) = parsed_output.direction {
@@ -863,6 +855,135 @@ impl OutputFormatter {
         let most_likely_range = reconstruction.percentage_ranges[reconstruction.most_likely_class];
 
         Ok(PriceLevelPrediction {
+            bins,
+            most_likely_range,
+            confidence: reconstruction.confidence,
+        })
+    }
+
+    /// Create stop level prediction with adverse-specific bin names
+    /// 
+    /// **HOW STOP_LEVELS WORKS**:
+    /// 
+    /// 1. **Training**: Analyzes sequence LOWS (bullish) or HIGHS (bearish) to build adverse boundaries
+    /// 2. **Classification**: Measures worst adverse price during horizon against those boundaries
+    /// 3. **Output**: Probabilities for 5 classes based on how far price moved adversely
+    /// 
+    /// **BINS REPRESENT**: Absolute price ranges where adverse movement may occur
+    /// - Boundaries calculated from sequence adverse prices (lows/highs)
+    /// - NOT percentages - actual price levels derived from sequence distribution
+    /// - Direction-aware: bullish uses lows, bearish uses highs
+    /// 
+    /// **USAGE WITH PRICE_LEVELS**:
+    /// 
+    /// Example: Current price = $100, price_levels predicts "strong_up" (target ~$105)
+    /// 
+    /// stop_levels bins show WHERE price might dip during the move:
+    /// - "minimal_adverse": $99-$100 (shallow dip, tight stop at $98.50)
+    /// - "low_adverse": $97-$99 (normal dip, stop at $96.50)
+    /// - "moderate_adverse": $95-$97 (deeper dip, stop at $94.50)
+    /// - "high_adverse": $92-$95 (large dip, stop at $91.50)
+    /// - "extreme_adverse": <$92 (very deep dip, wide stop or avoid)
+    /// 
+    /// **STOP-LOSS PLACEMENT**:
+    /// - Find highest probability bin
+    /// - Place stop slightly below that bin's lower range
+    /// - If "extreme_adverse" >30% probability → reduce position or avoid
+    /// 
+    /// **POSITION SIZING**:
+    /// - Sum probabilities for high+extreme adverse
+    /// - If >40% → reduce position by 50%
+    /// - If >60% → reduce position by 75% or avoid
+    /// 
+    /// **TRADE FILTERING**:
+    /// - BEST: price_levels strong signal + minimal/low adverse >60%
+    /// - CAUTION: moderate_adverse >40%
+    /// - AVOID: extreme_adverse >30% OR high+extreme >50%
+    pub fn create_stop_level_prediction(
+        &self,
+        probabilities: &[f64],
+        current_price: f64,
+        horizon: &str,
+        _bandwidth_size: Option<f64>,
+        _percentiles: Option<[f64; 2]>,
+    ) -> Result<crate::output::prediction_types::StopLevelPrediction> {
+        if probabilities.len() != NUM_CLASSES {
+            return Err(VangaError::PredictionError(format!(
+                "Expected {} stop level probabilities, got {}",
+                NUM_CLASSES,
+                probabilities.len()
+            )));
+        }
+
+        // Get sequence OHLCV data (required for reconstruction)
+        let sequence_ohlcv = self.sequence_ohlcv.as_ref().ok_or_else(|| {
+            VangaError::PredictionError(
+                "OHLCV sequence data not available for stop level prediction".to_string(),
+            )
+        })?;
+
+        // Use calibrated stop level parameters
+        let reconstruction = if let Some(ref calibrated_params) = self.calibrated_parameters {
+            let horizon_params = calibrated_params.get_stop_levels(horizon).ok_or_else(|| {
+                VangaError::ConfigError(format!(
+                    "No calibrated stop level parameters found for horizon: {}",
+                    horizon
+                ))
+            })?;
+
+            // Use stop_levels reconstruction function
+            crate::targets::reconstruct_stop_levels(
+                probabilities,
+                sequence_ohlcv,
+                current_price,
+                horizon_params,
+            )?
+        } else {
+            return Err(VangaError::ConfigError(
+                "Calibrated parameters required for stop level reconstruction".to_string(),
+            ));
+        };
+
+        // Create bins with adverse-specific names
+        // adverse_price_ranges are ABSOLUTE PRICES from sequence boundaries
+        let mut bins = HashMap::new();
+        let bin_names = [
+            "extreme_adverse",  // Class 0: Worst adverse (beyond sequence range)
+            "high_adverse",     // Class 1: Large adverse (at edge of range)
+            "moderate_adverse", // Class 2: Medium adverse (neutral zone)
+            "low_adverse",      // Class 3: Small adverse (within normal range)
+            "minimal_adverse",  // Class 4: Very small adverse (contained)
+        ];
+
+        for (i, bin_name) in bin_names.iter().enumerate() {
+            let price_range = reconstruction.adverse_price_ranges[i];
+            
+            // Convert absolute prices to percentages for display
+            let range_pct = [
+                ((price_range[0] - current_price) / current_price) * 100.0,
+                ((price_range[1] - current_price) / current_price) * 100.0,
+            ];
+
+            bins.insert(
+                bin_name.to_string(),
+                PriceBin {
+                    range: range_pct,
+                    vwap_range: range_pct, // Stop levels use same range
+                    price: price_range,    // Actual price levels where adverse may occur
+                    probability: reconstruction.probabilities[i],
+                },
+            );
+        }
+
+        // Most likely adverse range
+        let most_likely_class = reconstruction.most_likely_class;
+        let most_likely_price_range = reconstruction.adverse_price_ranges[most_likely_class];
+        let most_likely_range = [
+            ((most_likely_price_range[0] - current_price) / current_price) * 100.0,
+            ((most_likely_price_range[1] - current_price) / current_price) * 100.0,
+        ];
+
+        Ok(crate::output::prediction_types::StopLevelPrediction {
             bins,
             most_likely_range,
             confidence: reconstruction.confidence,
