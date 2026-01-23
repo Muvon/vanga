@@ -1329,3 +1329,505 @@ async fn test_fractal_dimension_mostly_flat_with_spikes() {
         nan_count
     );
 }
+
+#[tokio::test]
+async fn test_atr_momentum_constant_prices() {
+    // Test ATR momentum with constant prices (no volatility)
+    // When prices are constant, ATR should be near zero, and momentum should be 0.0 (no change)
+    let constant_price = 100.0;
+    let close: Vec<f64> = vec![constant_price; 150];
+
+    let df = create_test_df(
+        close.clone(),
+        close.clone(),
+        close.clone(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.volatility.atr_periods = vec![7];
+    config.momentum.atr_momentum_enabled = true;
+    config.momentum.momentum_periods = vec![5];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("atr_7").is_ok());
+    assert!(result.column("atr_7_momentum_5").is_ok());
+
+    let atr_series = result.column("atr_7").unwrap().f64().unwrap();
+    let momentum_series = result.column("atr_7_momentum_5").unwrap().f64().unwrap();
+
+    // After warmup (7 + 5 = 12), all values should be valid
+    let warmup = 12;
+    for i in warmup..momentum_series.len() {
+        let val = momentum_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "ATR momentum at index {} is NaN for constant prices (should be 0.0)",
+            i
+        );
+        // ATR is constant (near zero), so momentum should be 0.0
+        assert!(
+            val.abs() < 1e-10,
+            "ATR momentum at index {} = {} should be near 0.0 for constant prices",
+            i,
+            val
+        );
+    }
+
+    // Verify ATR itself is valid (should be near zero for constant prices)
+    for i in 7..atr_series.len() {
+        let val = atr_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "ATR at index {} is NaN for constant prices",
+            i
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_atr_momentum_low_price_asset() {
+    // Test ATR momentum with low-priced asset (like SHIB at $0.00001)
+    // Simulates realistic scenario with extremely small ATR values
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.00001;
+    for i in 0..200 {
+        let change: f64 = if i % 5 == 0 {
+            0.000001
+        } else if i % 7 == 0 {
+            -0.000001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.000001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.0000001).collect(),
+        close.iter().map(|x| x - 0.0000001).collect(),
+        close.clone(),
+        vec![1000000.0; 200],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.volatility.atr_periods = vec![7];
+    config.momentum.atr_momentum_enabled = true;
+    config.momentum.momentum_periods = vec![5];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("atr_7").is_ok());
+    assert!(result.column("atr_7_momentum_5").is_ok());
+
+    let atr_series = result.column("atr_7").unwrap().f64().unwrap();
+    let momentum_series = result.column("atr_7_momentum_5").unwrap().f64().unwrap();
+
+    // Count NaN values after warmup
+    let warmup = 12;
+    let mut nan_count = 0;
+    for i in warmup..momentum_series.len() {
+        let val = momentum_series.get(i).unwrap();
+        if val.is_nan() {
+            nan_count += 1;
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in atr_7_momentum_5 for low-price asset data",
+        nan_count
+    );
+
+    // Verify ATR values are valid
+    let mut atr_nan_count = 0;
+    for i in 7..atr_series.len() {
+        let val = atr_series.get(i).unwrap();
+        if val.is_nan() {
+            atr_nan_count += 1;
+        }
+    }
+
+    assert_eq!(
+        atr_nan_count, 0,
+        "Found {} NaN values in atr_7 for low-price asset data",
+        atr_nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_atr_momentum_extreme_low_prices() {
+    // Test ATR momentum with extremely low prices (like PEPE at $0.000001)
+    // This is the most challenging case: ATR values can be 0.0000001 or less
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.000001;
+    for i in 0..250 {
+        let change: f64 = if i % 3 == 0 {
+            0.0000001
+        } else if i % 5 == 0 {
+            -0.0000001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.0000001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.00000001).collect(),
+        close.iter().map(|x| x - 0.00000001).collect(),
+        close.clone(),
+        vec![10000000.0; 250],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.volatility.atr_periods = vec![7, 14];
+    config.momentum.atr_momentum_enabled = true;
+    config.momentum.momentum_periods = vec![5, 10];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    // Test all combinations
+    for atr_period in &[7, 14] {
+        for mom_period in &[5, 10] {
+            let col_name = format!("atr_{}_momentum_{}", atr_period, mom_period);
+            assert!(
+                result.column(&col_name).is_ok(),
+                "Column {} should exist",
+                col_name
+            );
+
+            let series = result.column(&col_name).unwrap().f64().unwrap();
+            let warmup = atr_period + mom_period;
+
+            let mut nan_count = 0;
+            for i in warmup..series.len() {
+                let val = series.get(i).unwrap();
+                if val.is_nan() {
+                    nan_count += 1;
+                }
+            }
+
+            assert_eq!(
+                nan_count, 0,
+                "Found {} NaN values in {} for extreme low prices",
+                nan_count, col_name
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_atr_momentum_mixed_volatility() {
+    // Test ATR momentum with mixed volatility: periods of consolidation + volatility
+    // This tests the transition from low ATR to high ATR
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.001;
+
+    // Phase 1: Consolidation (constant prices, ATR near zero)
+    for _ in 0..50 {
+        close.push(price);
+    }
+
+    // Phase 2: Volatility spike (ATR increases)
+    for i in 0..50 {
+        let change = if i % 2 == 0 { 0.0001 } else { -0.0001 };
+        price += change;
+        close.push(price);
+    }
+
+    // Phase 3: Back to consolidation (ATR decreases)
+    for _ in 0..50 {
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.00001).collect(),
+        close.iter().map(|x| x - 0.00001).collect(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.volatility.atr_periods = vec![7];
+    config.momentum.atr_momentum_enabled = true;
+    config.momentum.momentum_periods = vec![5];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("atr_7_momentum_5").is_ok());
+    let momentum_series = result.column("atr_7_momentum_5").unwrap().f64().unwrap();
+
+    // After warmup, all values should be valid
+    let warmup = 12;
+    let mut nan_count = 0;
+    for i in warmup..momentum_series.len() {
+        let val = momentum_series.get(i).unwrap();
+        if val.is_nan() {
+            nan_count += 1;
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in atr_7_momentum_5 with mixed volatility",
+        nan_count
+    );
+}
+
+#[tokio::test]
+async fn test_rsi_constant_prices() {
+    // Test RSI with constant prices (no price movement)
+    // When prices are constant, RSI should return 50.0 (neutral) after warmup
+    let constant_price = 100.0;
+    let close: Vec<f64> = vec![constant_price; 150];
+
+    let df = create_test_df(
+        close.clone(),
+        close.clone(),
+        close.clone(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.momentum.rsi_periods = vec![5, 14];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    for period in &[5, 14] {
+        let col_name = format!("rsi_{}", period);
+        assert!(
+            result.column(&col_name).is_ok(),
+            "Column {} should exist",
+            col_name
+        );
+
+        let rsi_series = result.column(&col_name).unwrap().f64().unwrap();
+
+        // After warmup, all values should be valid and equal to 50.0 (neutral)
+        let warmup = *period;
+        for i in warmup..rsi_series.len() {
+            let val = rsi_series.get(i).unwrap();
+            assert!(
+                !val.is_nan(),
+                "RSI at index {} is NaN for constant prices (should be 50.0)",
+                i
+            );
+            assert!(
+                (val - 50.0).abs() < 1e-6,
+                "RSI at index {} = {} should be 50.0 for constant prices",
+                i,
+                val
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_rsi_low_price_asset() {
+    // Test RSI with low-priced asset (like DOGE at $0.0716)
+    // Simulates realistic scenario with very small price movements
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.0716;
+    for i in 0..200 {
+        let change: f64 = if i % 5 == 0 {
+            0.0001
+        } else if i % 7 == 0 {
+            -0.0001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.0001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.00001).collect(),
+        close.iter().map(|x| x - 0.00001).collect(),
+        close.clone(),
+        vec![1000.0; 200],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.momentum.rsi_periods = vec![5, 14];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    for period in &[5, 14] {
+        let col_name = format!("rsi_{}", period);
+        assert!(
+            result.column(&col_name).is_ok(),
+            "Column {} should exist",
+            col_name
+        );
+
+        let rsi_series = result.column(&col_name).unwrap().f64().unwrap();
+
+        // Count NaN values after warmup
+        let warmup = *period;
+        let mut nan_count = 0;
+        for i in warmup..rsi_series.len() {
+            let val = rsi_series.get(i).unwrap();
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+
+        assert_eq!(
+            nan_count, 0,
+            "Found {} NaN values in {} for low-price asset data",
+            nan_count, col_name
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rsi_extreme_low_prices() {
+    // Test RSI with extremely low prices (like SHIB at $0.00001)
+    // This is the most challenging case for RSI calculation
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 0.00001;
+    for i in 0..250 {
+        let change: f64 = if i % 3 == 0 {
+            0.000001
+        } else if i % 5 == 0 {
+            -0.000001
+        } else {
+            0.0
+        };
+        price = (price + change).max(0.000001);
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.0000001).collect(),
+        close.iter().map(|x| x - 0.0000001).collect(),
+        close.clone(),
+        vec![1000000.0; 250],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.momentum.rsi_periods = vec![5, 14, 21];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    for period in &[5, 14, 21] {
+        let col_name = format!("rsi_{}", period);
+        assert!(
+            result.column(&col_name).is_ok(),
+            "Column {} should exist",
+            col_name
+        );
+
+        let rsi_series = result.column(&col_name).unwrap().f64().unwrap();
+
+        // Count NaN values after warmup
+        let warmup = *period;
+        let mut nan_count = 0;
+        for i in warmup..rsi_series.len() {
+            let val = rsi_series.get(i).unwrap();
+            if val.is_nan() {
+                nan_count += 1;
+            }
+        }
+
+        assert_eq!(
+            nan_count, 0,
+            "Found {} NaN values in {} for extreme low prices",
+            nan_count, col_name
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rsi_mixed_constant_and_movement() {
+    // Test RSI with mixed periods: constant prices + movement
+    // This tests the transition from constant (RSI=50) to trending
+    let mut close: Vec<f64> = Vec::new();
+    let mut price: f64 = 100.0;
+
+    // Phase 1: Constant prices (50 bars)
+    for _ in 0..50 {
+        close.push(price);
+    }
+
+    // Phase 2: Uptrend (50 bars)
+    for _ in 0..50 {
+        price += 0.5;
+        close.push(price);
+    }
+
+    // Phase 3: Constant prices again (50 bars)
+    for _ in 0..50 {
+        close.push(price);
+    }
+
+    let df = create_test_df(
+        close.clone(),
+        close.iter().map(|x| x + 0.1).collect(),
+        close.iter().map(|x| x - 0.1).collect(),
+        close.clone(),
+        vec![1000.0; 150],
+    );
+
+    let mut config = TechnicalIndicatorsConfig::default();
+    config.momentum.rsi_periods = vec![14];
+
+    let result = generate_technical_indicators(df, &config).await.unwrap();
+
+    assert!(result.column("rsi_14").is_ok());
+    let rsi_series = result.column("rsi_14").unwrap().f64().unwrap();
+
+    // After warmup, all values should be valid
+    let warmup = 14;
+    let mut nan_count = 0;
+    for i in warmup..rsi_series.len() {
+        let val = rsi_series.get(i).unwrap();
+        if val.is_nan() {
+            nan_count += 1;
+        }
+    }
+
+    assert_eq!(
+        nan_count, 0,
+        "Found {} NaN values in rsi_14 with mixed constant and movement",
+        nan_count
+    );
+
+    // Verify RSI is 50.0 during constant periods
+    // First constant period (after warmup)
+    for i in warmup..50 {
+        let val = rsi_series.get(i).unwrap();
+        assert!(
+            (val - 50.0).abs() < 1.0,
+            "RSI at index {} = {} should be near 50.0 during first constant period",
+            i,
+            val
+        );
+    }
+
+    // Last constant period - RSI takes time to return to 50 after strong trend
+    // Just verify no NaN values, not the exact value
+    for i in 100..close.len() {
+        let val = rsi_series.get(i).unwrap();
+        assert!(
+            !val.is_nan(),
+            "RSI at index {} should not be NaN during last constant period",
+            i
+        );
+        assert!(
+            (0.0..=100.0).contains(&val),
+            "RSI at index {} = {} should be in valid range [0, 100]",
+            i,
+            val
+        );
+    }
+}

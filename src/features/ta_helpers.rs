@@ -24,12 +24,18 @@ pub fn calculate_rsi_ta(data: &[f64], period: usize) -> Result<Vec<f64>> {
         if i < period {
             result.push(f64::NAN);
         } else {
-            result.push(rsi_value);
+            // Handle constant prices: RSI returns NaN when there's no price movement
+            // In this case, use 50.0 (neutral RSI) as it indicates no momentum
+            if rsi_value.is_nan() {
+                result.push(50.0);
+            } else {
+                result.push(rsi_value);
+            }
         }
     }
 
     // Sanitize output (but preserve NaN values for filtering)
-    let result = sanitize_indicator_output(result, "RSI", f64::NAN, Some((0.0, 100.0)));
+    let result = sanitize_indicator_output(result, "RSI", 50.0, Some((0.0, 100.0)));
     log_indicator_stats(&result, "RSI");
 
     Ok(result)

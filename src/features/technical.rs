@@ -346,8 +346,18 @@ pub(crate) fn calculate_momentum(data: &[f64], period: usize) -> Vec<f64> {
         let previous = data[i - period];
         let current = data[i];
 
-        if previous.abs() > 1e-10 && previous.is_finite() && current.is_finite() {
-            result[i] = (current - previous) / previous;
+        if previous.is_finite() && current.is_finite() {
+            // Handle constant/same values (no change = 0 momentum)
+            if (current - previous).abs() < 1e-15 {
+                result[i] = 0.0;
+            } else if previous.abs() > 1e-15 {
+                // Normal momentum calculation
+                result[i] = (current - previous) / previous;
+            } else {
+                // Previous is zero or near-zero, use absolute change
+                // This handles low-priced assets where ATR might be 0.001
+                result[i] = current - previous;
+            }
         }
     }
 
