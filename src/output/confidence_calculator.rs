@@ -25,7 +25,7 @@
 
 use crate::output::prediction_types::{
     DirectionPrediction, PredictionResult, PriceLevelPrediction, SentimentPrediction,
-    VolatilityPrediction, VolumePrediction,
+    StopLevelPrediction, VolumePrediction,
 };
 use crate::utils::error::Result;
 
@@ -398,12 +398,12 @@ impl ConfidenceCalculator {
             agreement_scores.push(price_direction_agreement);
         }
 
-        // Check volatility and position sizing agreement
-        if let (Some(ref volatility), Some(ref direction)) =
-            (&prediction.volatility, &prediction.direction)
+        // Check stop levels and direction agreement (tight stop = confirms directional move)
+        if let (Some(ref stop_levels), Some(ref direction)) =
+            (&prediction.stop_levels, &prediction.direction)
         {
-            let volatility_agreement = self.check_volatility_agreement(volatility, direction);
-            agreement_scores.push(volatility_agreement);
+            let stop_agreement = self.check_stop_levels_agreement(stop_levels, direction);
+            agreement_scores.push(stop_agreement);
         }
 
         // Check sentiment and direction agreement
@@ -481,25 +481,43 @@ impl ConfidenceCalculator {
         (up_agreement + down_agreement) / 2.0
     }
 
-    /// Check if volatility regime supports the predicted direction
-    fn check_volatility_agreement(
+    /// Check if stop levels support the predicted direction
+    /// Tight stops (minimal/low adverse) confirm a confident directional move;
+    /// wide stops (high/extreme adverse) suggest uncertainty.
+    fn check_stop_levels_agreement(
         &self,
-        volatility: &VolatilityPrediction,
+        stop_levels: &StopLevelPrediction,
         direction: &DirectionPrediction,
     ) -> f64 {
-        // High volatility should align with pump/dump predictions
-        let extreme_direction = direction.pump_probability + direction.dump_probability;
-        let extreme_volatility = volatility.high_probability + volatility.very_high_probability;
+        let tight_stop = stop_levels
+            .bins
+            .get("minimal_adverse")
+            .map(|b| b.probability)
+            .unwrap_or(0.2)
+            + stop_levels
+                .bins
+                .get("low_adverse")
+                .map(|b| b.probability)
+                .unwrap_or(0.2);
 
-        // Low volatility should align with sideways predictions
-        let low_volatility = volatility.very_low_probability + volatility.low_probability;
-        let sideways = direction.sideways_probability;
+        let wide_stop = stop_levels
+            .bins
+            .get("high_adverse")
+            .map(|b| b.probability)
+            .unwrap_or(0.2)
+            + stop_levels
+                .bins
+                .get("extreme_adverse")
+                .map(|b| b.probability)
+                .unwrap_or(0.2);
 
-        // Calculate agreement
-        let extreme_agreement = 1.0 - (extreme_direction - extreme_volatility).abs();
-        let calm_agreement = 1.0 - (sideways - low_volatility).abs();
+        // Strong directional conviction should pair with tight stops
+        let directional_strength =
+            (direction.up_probability_aggregated - direction.down_probability_aggregated).abs();
+        let tight_stop_agreement = 1.0 - (directional_strength - tight_stop).abs();
+        let wide_stop_penalty = 1.0 - wide_stop.min(1.0);
 
-        (extreme_agreement * 0.6 + calm_agreement * 0.4).clamp(0.0, 1.0)
+        (tight_stop_agreement * 0.6 + wide_stop_penalty * 0.4).clamp(0.0, 1.0)
     }
 
     /// Check if sentiment aligns with direction

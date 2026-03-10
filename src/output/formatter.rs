@@ -634,7 +634,7 @@ impl OutputFormatter {
             // Check if we have all required predictions for trading
             if result.price_levels.is_some()
                 && result.direction.is_some()
-                && result.volatility.is_some()
+                && result.stop_levels.is_some()
             {
                 // Calculate enhanced confidence
                 let enhanced_confidence = self
