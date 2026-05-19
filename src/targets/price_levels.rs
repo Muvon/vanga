@@ -17,11 +17,33 @@
 //! ```
 //!
 //! ### **5-Class Classification System:**
-//! - **0: Strong Down** - `target < sequence_min - bandwidth` (Support breakdown)
-//! - **1: Moderate Down** - `sequence_min - bandwidth ≤ target < sequence_min` (Below range)
-//! - **2: Neutral** - `sequence_min ≤ target < sequence_max` (Within range)
-//! - **3: Moderate Up** - `sequence_max ≤ target < sequence_max + bandwidth` (Above range)
-//! - **4: Strong Up** - `target ≥ sequence_max + bandwidth` (Resistance breakout)
+//!
+//! Boundaries are anchored at `sequence_min` (lower percentile of close prices) and
+//! `sequence_max` (upper percentile), with a symmetric **neutral band** of width
+//! `(sequence_max - sequence_min) * neutral_band_factor` centered on the midpoint of
+//! that range:
+//!
+//! ```text
+//! range_center = (sequence_min + sequence_max) / 2
+//! neutral_half = (sequence_max - sequence_min) * neutral_band_factor / 2
+//! bandwidth    = (sequence_max - sequence_min) * bandwidth_size
+//!
+//! b0 = sequence_min - bandwidth
+//! b1 = range_center - neutral_half        // NOT sequence_min
+//! b2 = range_center + neutral_half        // NOT sequence_max
+//! b3 = sequence_max + bandwidth
+//! ```
+//!
+//! - **0: Strong Down** - `target < b0` (Support breakdown)
+//! - **1: Moderate Down** - `b0 ≤ target < b1` (below the symmetric neutral band)
+//! - **2: Neutral** - `b1 ≤ target < b2` (inside the symmetric neutral band)
+//! - **3: Moderate Up** - `b2 ≤ target < b3` (above the symmetric neutral band)
+//! - **4: Strong Up** - `target ≥ b3` (Resistance breakout)
+//!
+//! Note: with `neutral_band_factor < 1.0`, the moderate_down / moderate_up classes
+//! absorb the portion of the `[sequence_min, sequence_max]` percentile range that
+//! falls outside the neutral band. They are not limited to the bandwidth-extension
+//! zones below `sequence_min` / above `sequence_max`.
 //!
 //! ## 🔧 KEY FEATURES
 //!

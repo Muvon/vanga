@@ -93,18 +93,24 @@ impl SequenceBoundaries {
         ]
     }
 
-    /// Classify a target price into one of 5 classes (matches training logic exactly)
+    /// Classify a target price into one of 5 classes (matches training logic exactly).
+    ///
+    /// Boundaries (see `SequenceAnalyzer::calculate_boundaries`):
+    ///   b0 = sequence_min - bandwidth
+    ///   b1 = range_center - neutral_half   (NOT sequence_min)
+    ///   b2 = range_center + neutral_half   (NOT sequence_max)
+    ///   b3 = sequence_max + bandwidth
     pub fn classify_price(&self, target_price: f64) -> i32 {
         if target_price < self.boundaries[0] {
-            0 // Strong Down: Below sequence_min - bandwidth
+            0 // Strong Down: below sequence_min - bandwidth
         } else if target_price < self.boundaries[1] {
-            1 // Moderate Down: Below sequence_min
+            1 // Moderate Down: between b0 and the symmetric neutral band
         } else if target_price < self.boundaries[2] {
-            2 // Neutral: Within percentile range
+            2 // Neutral: inside the symmetric neutral band around the range center
         } else if target_price < self.boundaries[3] {
-            3 // Moderate Up: Above sequence_max
+            3 // Moderate Up: between the symmetric neutral band and b3
         } else {
-            4 // Strong Up: Above sequence_max + bandwidth
+            4 // Strong Up: above sequence_max + bandwidth
         }
     }
 

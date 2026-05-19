@@ -335,7 +335,13 @@ pub fn calculate_adverse_boundaries(
     let sequence_min = adverse_prices[lower_idx];
     let sequence_max = adverse_prices[upper_idx];
 
-    // Calculate effective range from adverse prices
+    // Calculate effective range from adverse prices.
+    //
+    // `bandwidth` is computed below as `effective_range * calibrated_params.bandwidth`,
+    // so each branch here returns a pure "range" value (no extra bandwidth multiplication).
+    // The last-resort path previously multiplied by `calibrated_params.bandwidth` here AND
+    // again below, squaring it. The fixed version uses a small absolute fraction of the
+    // price level as a fallback range, so the final bandwidth is a single multiplication.
     let base_range = (sequence_max - sequence_min).abs();
     let effective_range = if base_range > 0.0 {
         base_range
@@ -345,8 +351,10 @@ pub fn calculate_adverse_boundaries(
         if price_spread > 0.0 {
             price_spread
         } else {
-            // Last resort: use bandwidth param as multiplier on price level
-            sequence_min * calibrated_params.bandwidth
+            // Last resort: fully flat sequence (reference == adverse == constant).
+            // Use a small fraction of the price level so downstream classification
+            // still has a non-zero bandwidth without compounding `calibrated_params.bandwidth`.
+            sequence_min.abs() * 0.01
         }
     };
 
@@ -565,16 +573,28 @@ pub struct StopLevelReconstruction {
     pub boundaries: AdverseBoundaries,
     /// Reference price
     pub reference_price: f64,
+    /// Direction used for reconstruction (true = bullish/dip-risk, false = bearish/bounce-risk)
+    pub is_bullish: bool,
 }
 
-/// Reconstruct stop level predictions from model probabilities
+/// Reconstruct stop level predictions from model probabilities.
 ///
-/// Uses boundary-based reconstruction consistent with classification.
+/// Stop level training is direction-aware: for bullish samples it builds boundaries
+/// from sequence LOWS (deepest dip = class 0), for bearish samples it builds boundaries
+/// from sequence HIGHS (highest bounce = class 0). At prediction time, we don't know
+/// the realized direction, so we derive it from the model's direction prediction.
+///
+/// # Arguments
+/// * `direction_probabilities` - Optional [DUMP, DOWN, SIDEWAYS, UP, PUMP] probabilities
+///   from the direction head. If `Some`, `is_bullish` is set to `(UP + PUMP) >= (DUMP + DOWN)`,
+///   matching the training rule `target_price >= reference_price`. SIDEWAYS does not
+///   tip either way. If `None`, falls back to bullish (legacy behavior).
 pub fn reconstruct_stop_levels(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
     current_price: f64,
     calibrated_params: &crate::targets::calibration::StopLevelParams,
+    direction_probabilities: Option<&[f64]>,
 ) -> Result<StopLevelReconstruction> {
     if probabilities.len() != 5 {
         return Err(crate::utils::error::VangaError::DataError(
@@ -594,28 +614,63 @@ pub fn reconstruct_stop_levels(
         ));
     }
 
-    // Assume bullish for reconstruction (most common case)
-    // In real usage, direction would be determined from prediction context
-    let is_bullish = true;
+    // Determine direction from the model's direction head to mirror the training-time
+    // rule (`target_price >= reference_price`). Bullish samples were labeled against
+    // sequence LOWS; bearish against sequence HIGHS. Without this, the reconstructed
+    // price ranges are systematically wrong for bearish predictions.
+    let is_bullish = match direction_probabilities {
+        Some(probs) if probs.len() == 5 => {
+            let bull_score = probs[3] + probs[4]; // UP + PUMP
+            let bear_score = probs[0] + probs[1]; // DUMP + DOWN
+            // Tie (including the all-SIDEWAYS case) defaults to bullish so behavior
+            // matches training's `>=` rule.
+            bull_score >= bear_score
+        }
+        Some(_) => {
+            log::warn!(
+                "Stop level reconstruction received direction_probabilities with unexpected length ({}); defaulting to bullish",
+                direction_probabilities.map(|p| p.len()).unwrap_or(0)
+            );
+            true
+        }
+        None => {
+            log::debug!("Stop level reconstruction: no direction prediction available, defaulting to bullish");
+            true
+        }
+    };
 
     // Calculate adverse boundaries using same logic as classification
     let boundaries = calculate_adverse_boundaries(sequence_ohlcv, is_bullish, calibrated_params)?;
 
-    // Build price ranges from boundaries
-    // For bullish: Class 0 = deepest dip, Class 4 = shallowest dip
-    let adverse_price_ranges = vec![
-        [
-            boundaries.adverse_min - boundaries.bandwidth * 2.0,
-            boundaries.boundaries[0],
-        ], // Class 0: Extreme
-        [boundaries.boundaries[0], boundaries.boundaries[1]], // Class 1: High
-        [boundaries.boundaries[1], boundaries.boundaries[2]], // Class 2: Moderate
-        [boundaries.boundaries[2], boundaries.boundaries[3]], // Class 3: Low
-        [
-            boundaries.boundaries[3],
-            boundaries.adverse_max + boundaries.bandwidth,
-        ], // Class 4: Minimal
-    ];
+    // Build price ranges from boundaries.
+    // `boundaries.boundaries` is always sorted b0 < b1 < b2 < b3 where
+    //   b0 = adverse_min - bandwidth,  b3 = adverse_max + bandwidth.
+    //
+    // The two open-ended tails (class 0 and class 4) each need a finite extension
+    // for display/expectation calculations. We extend each tail by `bandwidth`
+    // beyond the boundary it sits against, giving every class a non-degenerate
+    // range of width ~bandwidth on the ends.
+    //
+    // For BULLISH we track dips (lows), so lower adverse = worse: Class 0 sits below b0.
+    // For BEARISH we track bounces (highs), so higher adverse = worse: Class 0 sits above b3.
+    let bw = boundaries.bandwidth;
+    let adverse_price_ranges = if is_bullish {
+        vec![
+            [boundaries.boundaries[0] - bw, boundaries.boundaries[0]], // Class 0: Extreme dip (deepest)
+            [boundaries.boundaries[0], boundaries.boundaries[1]],      // Class 1: High dip
+            [boundaries.boundaries[1], boundaries.boundaries[2]],      // Class 2: Moderate dip
+            [boundaries.boundaries[2], boundaries.boundaries[3]],      // Class 3: Low dip
+            [boundaries.boundaries[3], boundaries.boundaries[3] + bw], // Class 4: Minimal dip (shallowest)
+        ]
+    } else {
+        vec![
+            [boundaries.boundaries[3], boundaries.boundaries[3] + bw], // Class 0: Extreme bounce (highest)
+            [boundaries.boundaries[2], boundaries.boundaries[3]],      // Class 1: High bounce
+            [boundaries.boundaries[1], boundaries.boundaries[2]],      // Class 2: Moderate bounce
+            [boundaries.boundaries[0], boundaries.boundaries[1]],      // Class 3: Low bounce
+            [boundaries.boundaries[0] - bw, boundaries.boundaries[0]], // Class 4: Minimal bounce (smallest)
+        ]
+    };
 
     let (most_likely_class, max_prob) = probabilities
         .iter()
@@ -648,5 +703,6 @@ pub fn reconstruct_stop_levels(
         expected_adverse,
         boundaries,
         reference_price,
+        is_bullish,
     })
 }

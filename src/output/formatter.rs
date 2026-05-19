@@ -444,7 +444,7 @@ impl OutputFormatter {
             }
 
             // Parse stop levels if enabled (adverse movement risk analysis)
-            if let Some(stop_level_probs) = parsed_output.stop_levels {
+            if let Some(stop_level_probs) = parsed_output.stop_levels.clone() {
                 // Get stop level specific parameters or fall back to price level parameters
                 let stop_bandwidth = self
                     .calibrated_parameters
@@ -460,6 +460,23 @@ impl OutputFormatter {
                     .map(|stop_params| stop_params.percentiles)
                     .or(horizon_percentiles);
 
+                // Stop level reconstruction is direction-aware. Training uses the future
+                // realized direction to pick whether boundaries come from sequence lows
+                // (bullish/dip-risk) or highs (bearish/bounce-risk). At prediction time
+                // we don't know the realized future, so we use the model's direction head
+                // as a stand-in. If the direction head was disabled or absent, we pass
+                // None and fall back to bullish.
+                let direction_probs_for_stop: Option<Vec<f64>> =
+                    parsed_output.direction.as_ref().map(|d| {
+                        vec![
+                            d.dump_probability,
+                            d.down_probability,
+                            d.sideways_probability,
+                            d.up_probability,
+                            d.pump_probability,
+                        ]
+                    });
+
                 // Create stop level prediction with adverse-specific bin names
                 result = result.with_stop_levels(self.create_stop_level_prediction(
                     &stop_level_probs,
@@ -467,6 +484,7 @@ impl OutputFormatter {
                     horizon,
                     stop_bandwidth,
                     stop_percentiles,
+                    direction_probs_for_stop.as_deref(),
                 )?);
             }
 
@@ -906,6 +924,7 @@ impl OutputFormatter {
         horizon: &str,
         _bandwidth_size: Option<f64>,
         _percentiles: Option<[f64; 2]>,
+        direction_probabilities: Option<&[f64]>,
     ) -> Result<crate::output::prediction_types::StopLevelPrediction> {
         if probabilities.len() != NUM_CLASSES {
             return Err(VangaError::PredictionError(format!(
@@ -931,12 +950,15 @@ impl OutputFormatter {
                 ))
             })?;
 
-            // Use stop_levels reconstruction function
+            // Use stop_levels reconstruction function, threading direction probabilities
+            // so the reconstruction can pick the correct adverse boundary scheme
+            // (dips for bullish, bounces for bearish) — matching training.
             crate::targets::reconstruct_stop_levels(
                 probabilities,
                 sequence_ohlcv,
                 current_price,
                 horizon_params,
+                direction_probabilities,
             )?
         } else {
             return Err(VangaError::ConfigError(

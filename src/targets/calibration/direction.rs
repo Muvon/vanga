@@ -269,6 +269,14 @@ fn calculate_sequence_trend_consistency(sequence_prices: &[f64]) -> Result<f64> 
 
     // Calculate momentum between consecutive segments - MUST MATCH direction.rs EXACTLY
     let segment_size = (sequence_prices.len() / 3).max(2);
+
+    // Ensure we have enough data for the calculation. Without this guard,
+    // `sequence_prices.len() - segment_size * 2` underflows when len=3 (since
+    // segment_size is clamped to 2). Mirrors the guard in direction.rs.
+    if sequence_prices.len() < segment_size * 2 {
+        return Ok(0.01);
+    }
+
     for i in 0..(sequence_prices.len() - segment_size * 2) {
         let seg1_start = sequence_prices[i];
         let seg1_end = sequence_prices[i + segment_size];
