@@ -1,7 +1,9 @@
 pub mod cross_asset;
 pub mod custom;
 pub mod engineering;
+pub mod liquidity;
 pub mod microstructure;
+pub mod regime;
 pub mod ta_helpers;
 pub mod technical;
 pub mod validation;
@@ -13,7 +15,11 @@ mod consolidation_test;
 #[cfg(test)]
 mod feature_validation_test;
 #[cfg(test)]
+mod liquidity_test;
+#[cfg(test)]
 mod price_inefficiency_test;
+#[cfg(test)]
+mod regime_test;
 #[cfg(test)]
 mod ta_tests;
 #[cfg(test)]
@@ -67,6 +73,16 @@ impl FeatureEngineer {
             )
             .await?;
         }
+
+        // Generate liquidity-aware features (sweeps, wicks, CVD slope).
+        // These need raw OHLCV, so run before custom-feature normalization.
+        result_df =
+            liquidity::generate_liquidity_features(result_df, &self.config.liquidity_features)
+                .await?;
+
+        // Generate regime features (range position, squeeze, range compression).
+        result_df =
+            regime::generate_regime_features(result_df, &self.config.regime_features).await?;
 
         // Process custom features
         result_df =

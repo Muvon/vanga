@@ -224,33 +224,19 @@ fn test_reconstruction_direction_awareness() {
 
     // Bullish direction probs: UP+PUMP dominant
     let bull_dir = vec![0.05, 0.05, 0.10, 0.40, 0.40];
-    let bull = reconstruct_stop_levels(
-        &probabilities,
-        &sequence,
-        105.0,
-        &params,
-        Some(&bull_dir),
-    )
-    .expect("Bullish reconstruction failed");
+    let bull = reconstruct_stop_levels(&probabilities, &sequence, 105.0, &params, Some(&bull_dir))
+        .expect("Bullish reconstruction failed");
     assert!(bull.is_bullish);
 
     // Bearish direction probs: DUMP+DOWN dominant
     let bear_dir = vec![0.40, 0.40, 0.10, 0.05, 0.05];
-    let bear = reconstruct_stop_levels(
-        &probabilities,
-        &sequence,
-        105.0,
-        &params,
-        Some(&bear_dir),
-    )
-    .expect("Bearish reconstruction failed");
+    let bear = reconstruct_stop_levels(&probabilities, &sequence, 105.0, &params, Some(&bear_dir))
+        .expect("Bearish reconstruction failed");
     assert!(!bear.is_bullish);
 
     // Bullish class 0 is the deepest dip — should be BELOW the bearish class 0 (a high bounce).
-    let bull_class0_mid =
-        (bull.adverse_price_ranges[0][0] + bull.adverse_price_ranges[0][1]) / 2.0;
-    let bear_class0_mid =
-        (bear.adverse_price_ranges[0][0] + bear.adverse_price_ranges[0][1]) / 2.0;
+    let bull_class0_mid = (bull.adverse_price_ranges[0][0] + bull.adverse_price_ranges[0][1]) / 2.0;
+    let bear_class0_mid = (bear.adverse_price_ranges[0][0] + bear.adverse_price_ranges[0][1]) / 2.0;
     assert!(
         bull_class0_mid < bear_class0_mid,
         "Bullish extreme (deep dip) midpoint {} should be below bearish extreme (high bounce) midpoint {}",

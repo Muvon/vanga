@@ -23,6 +23,17 @@ pub struct FeatureConfig {
 
     /// Cross-asset features (multi-symbol analysis)
     pub cross_asset: CrossAssetConfig,
+
+    /// Liquidity-aware features (stop hunts, wick anatomy, CVD slope).
+    /// All outputs are scale-invariant and aligned with VANGA's per-sequence
+    /// normalization. Disabled by default for backward compatibility.
+    #[serde(default)]
+    pub liquidity_features: LiquidityFeaturesConfig,
+
+    /// Regime features (range position, BB/KC squeeze, range compression).
+    /// All outputs are scale-invariant. Disabled by default for backward compatibility.
+    #[serde(default)]
+    pub regime_features: RegimeFeaturesConfig,
 }
 
 impl FeatureConfig {
@@ -705,6 +716,83 @@ impl Default for CorrelationAnalysisConfig {
             enabled: true,
             min_periods: 50,
             correlation_window: 20,
+        }
+    }
+}
+
+/// Liquidity-aware features configuration.
+///
+/// Generates sweep flags (stop hunts), wick anatomy (rejection geometry), and
+/// CVD slope (order-flow momentum). All outputs are scale-invariant so they
+/// pass through per-sequence normalization without losing information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiquidityFeaturesConfig {
+    /// Master switch. Off by default to preserve existing feature counts.
+    pub enabled: bool,
+
+    /// Lookback windows (in bars) used to define the prior high / low that a
+    /// sweep must penetrate. One feature triplet per entry.
+    pub sweep_lookbacks: Vec<u32>,
+
+    /// ATR period used to normalize sweep strength. Independent of the lookbacks
+    /// because the strength normalization is purely about local volatility scale.
+    pub atr_period: usize,
+
+    /// Rolling window sizes (in bars) for CVD slope and price/CVD divergence.
+    pub cvd_windows: Vec<u32>,
+}
+
+impl Default for LiquidityFeaturesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sweep_lookbacks: vec![20, 50],
+            atr_period: 14,
+            cvd_windows: vec![10, 20],
+        }
+    }
+}
+
+/// Regime features configuration.
+///
+/// Range position + Bollinger/Keltner squeeze + range compression. Captures
+/// the compression→expansion cycle the model needs to anticipate volatility
+/// and directional resolutions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegimeFeaturesConfig {
+    /// Master switch. Off by default.
+    pub enabled: bool,
+
+    /// Window sizes for `regime_position_in_range_<N>`.
+    pub range_position_windows: Vec<u32>,
+
+    /// Periods for the squeeze indicator. Each period emits an `on` flag and a
+    /// `duration` counter.
+    pub squeeze_periods: Vec<u32>,
+
+    /// Bollinger Band standard-deviation multiplier (typical: 2.0).
+    pub bb_std_dev: f64,
+
+    /// Keltner Channel ATR-proxy multiplier (typical: 1.5).
+    pub kc_atr_mult: f64,
+
+    /// Short window for `regime_range_compression_<short>_<long>`. Skipped if None.
+    pub range_compression_short: Option<u32>,
+
+    /// Long window for `regime_range_compression_<short>_<long>`. Must exceed short.
+    pub range_compression_long: Option<u32>,
+}
+
+impl Default for RegimeFeaturesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            range_position_windows: vec![20, 50],
+            squeeze_periods: vec![20],
+            bb_std_dev: 2.0,
+            kc_atr_mult: 1.5,
+            range_compression_short: Some(10),
+            range_compression_long: Some(50),
         }
     }
 }

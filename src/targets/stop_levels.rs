@@ -622,8 +622,8 @@ pub fn reconstruct_stop_levels(
         Some(probs) if probs.len() == 5 => {
             let bull_score = probs[3] + probs[4]; // UP + PUMP
             let bear_score = probs[0] + probs[1]; // DUMP + DOWN
-            // Tie (including the all-SIDEWAYS case) defaults to bullish so behavior
-            // matches training's `>=` rule.
+                                                  // Tie (including the all-SIDEWAYS case) defaults to bullish so behavior
+                                                  // matches training's `>=` rule.
             bull_score >= bear_score
         }
         Some(_) => {
