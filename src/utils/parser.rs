@@ -79,6 +79,19 @@ pub fn detect_timeframe_minutes(df: &DataFrame) -> Result<usize> {
         }
     };
 
+    // Determine raw-units-per-minute from the KNOWN time unit instead of guessing
+    // by magnitude. Polars stores the TimeUnit in the Datetime dtype, and strings
+    // are cast to Datetime(Microseconds) above — both are exact. Only raw Int64
+    // epoch columns carry no unit metadata, so those fall back to the magnitude
+    // heuristic below.
+    let known_per_minute: Option<i64> = match timestamp_col.dtype() {
+        DataType::Datetime(TimeUnit::Nanoseconds, _) => Some(60_000_000_000),
+        DataType::Datetime(TimeUnit::Microseconds, _) => Some(60_000_000),
+        DataType::Datetime(TimeUnit::Milliseconds, _) => Some(60_000),
+        DataType::String => Some(60_000_000),
+        _ => None,
+    };
+
     if timestamps_i64.len() < 2 {
         return Err(crate::utils::error::VangaError::DataError(
             "Need at least 2 rows to detect timeframe".to_string(),
@@ -116,25 +129,24 @@ pub fn detect_timeframe_minutes(df: &DataFrame) -> Result<usize> {
     differences.sort_unstable();
     let median_diff = differences[differences.len() / 2];
 
-    // Detect unit based on magnitude and convert to minutes
-    // Polars stores Datetime(Microseconds) as microseconds since epoch
-    // Different timestamp formats:
-    // - Nanoseconds: 360000000000 ns = 360 seconds = 6 minutes
-    // - Microseconds: 360000000 µs = 360 seconds = 6 minutes
-    // - Milliseconds: 360000 ms = 360 seconds = 6 minutes
-    // - Seconds: 360 s = 6 minutes
-    let timeframe_minutes = if median_diff >= 1_000_000_000 {
-        // Nanoseconds (>= 1 billion = at least ~16 minutes in nanoseconds)
-        (median_diff / 60_000_000_000) as usize
-    } else if median_diff >= 1_000_000 {
-        // Microseconds (>= 1 million = at least ~16 seconds in microseconds)
-        (median_diff / 60_000_000) as usize
-    } else if median_diff >= 10_000 {
-        // Milliseconds (>= 10,000 = at least 10 seconds in milliseconds)
-        (median_diff / 60_000) as usize
-    } else {
-        // Seconds (< 10,000 = reasonable for seconds)
-        (median_diff / 60) as usize
+    // Convert the median diff to minutes. When the unit is known (Datetime/String)
+    // we divide deterministically. Magnitude guessing only applies to raw Int64
+    // epoch columns, where the unit is genuinely unknown — and even then the ranges
+    // overlap for long timeframes, so prefer typed timestamps.
+    let timeframe_minutes = match known_per_minute {
+        Some(per_minute) => (median_diff / per_minute) as usize,
+        None => {
+            // Raw Int64 epoch column: guess unit from magnitude (ms/s are typical).
+            if median_diff >= 1_000_000_000 {
+                (median_diff / 60_000_000_000) as usize // nanoseconds
+            } else if median_diff >= 1_000_000 {
+                (median_diff / 60_000_000) as usize // microseconds
+            } else if median_diff >= 10_000 {
+                (median_diff / 60_000) as usize // milliseconds
+            } else {
+                (median_diff / 60) as usize // seconds
+            }
+        }
     };
 
     if timeframe_minutes == 0 {
