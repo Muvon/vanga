@@ -346,6 +346,22 @@ impl OutputFormatter {
             )
         })?;
 
+        // `extract_horizon_predictions()` packs THIS horizon's targets into a tight
+        // array re-indexed from 0 (in target_names order), but `parser` (self.parser)
+        // holds GLOBAL segment offsets spanning every trained target. Parsing the
+        // compacted array with global offsets mis-slices stop levels and pushes
+        // price/direction past the end of the array, so they silently vanish
+        // (e.g. price_level_8h sits at global 20..25 vs a 15-wide horizon array).
+        // Build a parser whose segments match the compacted per-horizon layout.
+        let horizon_parser = target_names.map(|names| {
+            let horizon_targets: Vec<String> = names
+                .iter()
+                .filter(|name| name.ends_with(&format!("_{}", horizon)))
+                .cloned()
+                .collect();
+            MultiTargetParser::with_target_names(&horizon_targets)
+        });
+
         // For each batch in the predictions
         for batch_idx in 0..raw_predictions.nrows() {
             // Get actual feature count and sequence length from the prediction data
@@ -414,8 +430,13 @@ impl OutputFormatter {
             let horizon_array = ndarray::Array1::from_vec(horizon_predictions);
             let horizon_view = horizon_array.view();
 
-            // Parse the horizon-specific predictions using the multi-target parser
-            let parsed_output = parser.parse_output(horizon_view)?;
+            // Parse with the horizon-local parser (segments aligned to the compacted
+            // array). Fall back to the global parser only for single-target models,
+            // where no per-horizon compaction happened.
+            let parsed_output = match &horizon_parser {
+                Some(horizon_parser) => horizon_parser.parse_output(horizon_view)?,
+                None => parser.parse_output(horizon_view)?,
+            };
 
             // Extract horizon-specific calibrated parameters
             let horizon_bandwidth = self
