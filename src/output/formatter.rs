@@ -728,27 +728,38 @@ impl OutputFormatter {
                         Down,
                         Neutral,
                     }
-                    let pl_bias = if pl_neutral >= pl_up && pl_neutral >= pl_down {
-                        Bias::Neutral
-                    } else if pl_up > pl_down && pl_up > pl_neutral {
-                        Bias::Up
-                    } else if pl_down > pl_up && pl_down > pl_neutral {
-                        Bias::Down
-                    } else {
-                        Bias::Neutral
+                    // Compare per-bin averages, not raw 2-bin sums vs the single
+                    // neutral bin: on a near-uniform (calibrated, uncertain)
+                    // distribution the sums always beat neutral (~0.38 vs ~0.2),
+                    // which labeled pure noise as directional and made this veto
+                    // fire on coin-flip differences. A side must also clear the
+                    // other side by a margin before we call it a direction.
+                    const BIAS_MARGIN: f64 = 0.02;
+                    let pl_bias = {
+                        let up = pl_up / 2.0;
+                        let down = pl_down / 2.0;
+                        if up > down + BIAS_MARGIN && up > pl_neutral {
+                            Bias::Up
+                        } else if down > up + BIAS_MARGIN && down > pl_neutral {
+                            Bias::Down
+                        } else {
+                            Bias::Neutral
+                        }
                     };
 
                     let dir_up = direction.up_probability_aggregated;
                     let dir_down = direction.down_probability_aggregated;
                     let dir_sideways = direction.sideways_probability_aggregated;
-                    let dir_bias = if dir_sideways >= dir_up && dir_sideways >= dir_down {
-                        Bias::Neutral
-                    } else if dir_up > dir_down && dir_up > dir_sideways {
-                        Bias::Up
-                    } else if dir_down > dir_up && dir_down > dir_sideways {
-                        Bias::Down
-                    } else {
-                        Bias::Neutral
+                    let dir_bias = {
+                        let up = dir_up / 2.0;
+                        let down = dir_down / 2.0;
+                        if up > down + BIAS_MARGIN && up > dir_sideways {
+                            Bias::Up
+                        } else if down > up + BIAS_MARGIN && down > dir_sideways {
+                            Bias::Down
+                        } else {
+                            Bias::Neutral
+                        }
                     };
 
                     let is_opposite = matches!(
