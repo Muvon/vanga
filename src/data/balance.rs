@@ -1254,31 +1254,52 @@ impl SequenceBalancer {
         }
 
         // Phase 2: purge training candidates within validation_gap_steps BARS of any
-        // val/test sequence, so no training window overlaps a validation window
+        // val/test sequence. BEST-EFFORT: with interleaved validation the anchors can
+        // cover the whole timeline and empty the pool — in that case the purge is
+        // skipped for that class (old behavior) instead of starving training.
         let mut train_pools: Vec<Vec<usize>> = Vec::new();
-        for (_, sorted, val, test) in &drafts {
-            let pool: Vec<usize> = sorted
+        for (class, sorted, val, test) in &drafts {
+            let unpurged: Vec<usize> = sorted
                 .iter()
                 .filter(|idx| !val.contains(idx) && !test.contains(idx))
-                .filter(|idx| {
-                    if validation_gap_steps == 0 {
-                        return true;
-                    }
-                    let seq = match sequence_map.get(*idx) {
-                        Some(seq) => seq,
-                        None => return false,
-                    };
-                    !anchors.iter().any(|&(a_start, a_end)| {
-                        let gap = if seq.start_idx >= a_end {
-                            seq.start_idx - a_end
-                        } else {
-                            a_start.saturating_sub(seq.end_idx)
-                        };
-                        gap < validation_gap_steps
-                    })
-                })
                 .copied()
                 .collect();
+
+            let pool = if validation_gap_steps == 0 {
+                unpurged
+            } else {
+                let purged: Vec<usize> = unpurged
+                    .iter()
+                    .filter(|idx| {
+                        let seq = match sequence_map.get(*idx) {
+                            Some(seq) => seq,
+                            None => return false,
+                        };
+                        !anchors.iter().any(|&(a_start, a_end)| {
+                            let gap = if seq.start_idx >= a_end {
+                                seq.start_idx - a_end
+                            } else {
+                                a_start.saturating_sub(seq.end_idx)
+                            };
+                            gap < validation_gap_steps
+                        })
+                    })
+                    .copied()
+                    .collect();
+
+                if purged.len() >= train_size_per_class {
+                    purged
+                } else {
+                    log::warn!(
+                        "🔒 Class {}: validation-gap purge would leave {}/{} train samples — purge SKIPPED for this class (val/test anchors too dense for gap={} bars)",
+                        class,
+                        purged.len(),
+                        train_size_per_class,
+                        validation_gap_steps
+                    );
+                    unpurged
+                }
+            };
             train_pools.push(pool);
         }
 
