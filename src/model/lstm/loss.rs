@@ -123,15 +123,9 @@ impl LSTMModel {
             return f64::INFINITY;
         }
 
-        // Find the maximum class value to determine the scale
-        let max_target = targets.iter().fold(0.0f64, |acc, &x| acc.max(x));
-        let max_prediction = predictions.iter().fold(0.0f64, |acc, &x| acc.max(x));
-        let max_class_value = max_target.max(max_prediction);
-
-        // If all values are 0 or max_class_value is 0, return 0% error
-        if max_class_value <= 0.0 {
-            return 0.0;
-        }
+        // Fixed scale: highest class index. Deriving the scale from the data made
+        // MAPE incomparable across epochs/symbols (denominator shifted with content)
+        let max_class_value = (crate::config::model::NUM_CLASSES - 1) as f64;
 
         let mut total_percentage_error = 0.0;
         let mut total_samples = 0;
@@ -1004,6 +998,7 @@ impl LSTMModel {
 
         let mut total_precision = 0.0;
         let mut total_recall = 0.0;
+        let mut total_f1 = 0.0;
         let mut valid_classes = 0;
 
         for &class in &classes {
@@ -1032,11 +1027,17 @@ impl LSTMModel {
                 0.0
             };
 
-            if precision > 0.0 || recall > 0.0 {
-                total_precision += precision;
-                total_recall += recall;
-                valid_classes += 1;
-            }
+            // Macro averaging: EVERY class contributes, including ones the model
+            // fails on completely — excluding tp=0 classes inflated the average
+            let class_f1 = if precision + recall > 0.0 {
+                2.0 * (precision * recall) / (precision + recall)
+            } else {
+                0.0
+            };
+            total_precision += precision;
+            total_recall += recall;
+            total_f1 += class_f1;
+            valid_classes += 1;
         }
 
         let avg_precision = if valid_classes > 0 {
@@ -1049,8 +1050,9 @@ impl LSTMModel {
         } else {
             0.0
         };
-        let f1 = if avg_precision + avg_recall > 0.0 {
-            2.0 * (avg_precision * avg_recall) / (avg_precision + avg_recall)
+        // Macro-F1 = mean of per-class F1, NOT the harmonic mean of averaged P/R
+        let f1 = if valid_classes > 0 {
+            total_f1 / valid_classes as f32
         } else {
             0.0
         };
@@ -1423,13 +1425,15 @@ impl LSTMModel {
             is_validation,
         )?;
 
-        // Validate loss is not NaN or infinite
-        let loss_value = loss_result.to_scalar::<f32>().unwrap_or(0.0);
-        log::debug!(
-            "🎯 FINAL LOSS - Value: {:.6}, Target type: {:?}",
-            loss_value,
-            target_type
-        );
+        // Gated: to_scalar forces a device sync on the training critical path
+        if log::log_enabled!(log::Level::Debug) {
+            let loss_value = loss_result.to_scalar::<f32>().unwrap_or(0.0);
+            log::debug!(
+                "🎯 FINAL LOSS - Value: {:.6}, Target type: {:?}",
+                loss_value,
+                target_type
+            );
+        }
 
         Ok(loss_result)
     }

@@ -512,6 +512,20 @@ impl SequenceBalancer {
             )));
         }
 
+        // Reject unexpected class keys (e.g. -1 "uncomputable" sentinels) — an extra
+        // bucket would silently become the min class and collapse the whole budget
+        let invalid_classes: Vec<i32> = found_classes
+            .iter()
+            .filter(|&&c| !(0..=4).contains(&c))
+            .cloned()
+            .collect();
+        if !invalid_classes.is_empty() {
+            return Err(VangaError::DataError(format!(
+                "FATAL: Invalid class labels {:?} for {:?} {} — only 0-4 are valid; filter uncomputable targets before balancing",
+                invalid_classes, target_type, horizon
+            )));
+        }
+
         log::info!(
             "✅ ALL 5 CLASSES PRESENT for {:?} {}: {:?}",
             target_type,

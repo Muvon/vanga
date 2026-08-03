@@ -14,6 +14,11 @@ use ndarray::{s, Array2, Array3};
 // Import deterministic dropout
 use super::seeded_weights::SeededTensorUtils;
 
+/// Weight of the LSTM probabilities in the hybrid blend (XGBoost gets the rest).
+/// Referenced by both inference blending and post-hoc bias-corrector fitting so
+/// the calibrated distribution always matches the served one.
+pub const LSTM_BLEND_WEIGHT: f32 = 0.2;
+
 impl LSTMModel {
     pub fn convert_sequences_to_tensors(
         &self,
@@ -121,6 +126,56 @@ impl LSTMModel {
     /// - training=true: Apply dropout for regularization during training
     /// - training=false: NO dropout for consistent validation behavior
     pub fn forward(&self, input: &Tensor, training: bool) -> Result<Tensor> {
+        let final_output = self.forward_features(input, training)?;
+
+        let output_layer = self
+            .output_layer
+            .as_ref()
+            .ok_or_else(|| VangaError::ModelError("Output layer not initialized".to_string()))?;
+
+        let predictions = output_layer
+            .forward(&final_output)
+            .map_err(|e| VangaError::ModelError(format!("Output layer forward failed: {}", e)))?;
+
+        // DEBUG: hidden-state diversity check — gated because flatten_all/to_vec1
+        // force a device→host sync on every call otherwise
+        if !training && log::log_enabled!(log::Level::Debug) {
+            let hs = final_output.flatten_all()?;
+            let hs_data: Vec<f32> = hs.to_vec1()?;
+            let sample_size = self
+                .config
+                .get_hidden_size_for_layer(self.config.num_layers - 1);
+            if hs_data.len() >= sample_size * 2 {
+                let first_sample = &hs_data[0..sample_size];
+                let second_sample = &hs_data[sample_size..sample_size * 2];
+                let diff: f32 = first_sample
+                    .iter()
+                    .zip(second_sample.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .sum();
+                let avg_diff = diff / sample_size as f32;
+                log::debug!(
+                    "🔍 Hidden state diversity: avg diff between sample 0 and 1 = {:.6}",
+                    avg_diff
+                );
+            }
+        }
+
+        log::debug!(
+            "Forward pass complete: input_shape={:?}, final_output_shape={:?}, predictions_shape={:?}",
+            input.shape(),
+            final_output.shape(),
+            predictions.shape()
+        );
+
+        Ok(predictions)
+    }
+
+    /// Everything up to (but excluding) the output layer: DAIN → (bi)LSTM stack →
+    /// LayerNorm/dropout → attention/endpoint extraction. Single source of the
+    /// latent z consumed by both the output head and the XGBoost hybrid, so the
+    /// two can never diverge.
+    pub fn forward_features(&self, input: &Tensor, training: bool) -> Result<Tensor> {
         // CRITICAL: Verify device before forward pass
         let device_name = match &self.device {
             candle_core::Device::Cpu => "CPU",
@@ -152,11 +207,6 @@ impl LSTMModel {
             VangaError::ModelError("Forward LSTM layers not initialized".to_string())
         })?;
 
-        let output_layer = self
-            .output_layer
-            .as_ref()
-            .ok_or_else(|| VangaError::ModelError("Output layer not initialized".to_string()))?;
-
         // Check if this is bidirectional
         let is_bidirectional = matches!(
             self.architecture,
@@ -179,14 +229,9 @@ impl LSTMModel {
                 .zip(backward_lstm_layers.iter())
                 .enumerate()
             {
-                // CRITICAL FIX: Use seq_init() with zero_state() for validation to prevent hidden state contamination
-                // During training, we want to maintain states for temporal learning
-                // During validation, we want fresh states for each batch to get accurate metrics
-                let forward_states = if training {
-                    // Training mode: maintain hidden states between sequences (good for learning)
-                    forward_layer.seq(&current_input)?
-                } else {
-                    // Validation mode: reset hidden states for each batch (prevents contamination)
+                // candle's seq() is exactly seq_init(zero_state): every batch starts
+                // from zero state in both training and validation
+                let forward_states = {
                     let batch_size = current_input.dim(0)?;
                     let zero_state = forward_layer.zero_state(batch_size)?;
                     forward_layer.seq_init(&current_input, &zero_state)?
@@ -218,11 +263,7 @@ impl LSTMModel {
                 )?;
                 let reversed_input = current_input.index_select(&rev_indices, 1)?.contiguous()?;
 
-                let backward_states = if training {
-                    // Training mode: maintain hidden states
-                    backward_layer.seq(&reversed_input)?
-                } else {
-                    // Validation mode: reset hidden states
+                let backward_states = {
                     let batch_size = reversed_input.dim(0)?;
                     let zero_state = backward_layer.zero_state(batch_size)?;
                     backward_layer.seq_init(&reversed_input, &zero_state)?
@@ -276,19 +317,13 @@ impl LSTMModel {
                     false
                 };
 
-                if should_apply_dropout {
-                    // Generate sequence ID for variational dropout consistency
-                    let sequence_id = format!("bidirectional_layer_{}", layer_idx);
-                    current_input = self.apply_dropout_with_context(
-                        &current_input,
-                        training,
-                        Some(&sequence_id),
-                    )?;
+                // Skip dropout after the final layer (matches the unidirectional path)
+                if should_apply_dropout && layer_idx < forward_lstm_layers.len() - 1 {
+                    current_input = self.apply_dropout_with_context(&current_input, training)?;
                     log::debug!(
-                        "🔧 Applied LSTM layer dropout (layer: {}, training: {}, sequence: {})",
+                        "🔧 Applied LSTM layer dropout (layer: {}, training: {})",
                         layer_idx,
-                        training,
-                        sequence_id
+                        training
                     );
                 }
 
@@ -308,14 +343,9 @@ impl LSTMModel {
             // Unidirectional processing (original logic)
             let mut current_output = normalized_input.clone();
             for (i, lstm_layer) in forward_lstm_layers.iter().enumerate() {
-                // CRITICAL FIX: Use seq_init() with zero_state() for validation to prevent hidden state contamination
-                // During training, we want to maintain states for temporal learning
-                // During validation, we want fresh states for each batch to get accurate metrics
-                let layer_states = if training {
-                    // Training mode: maintain hidden states between sequences (good for learning)
-                    lstm_layer.seq(&current_output)?
-                } else {
-                    // Validation mode: reset hidden states for each batch (prevents contamination)
+                // candle's seq() is exactly seq_init(zero_state): every batch starts
+                // from zero state in both training and validation
+                let layer_states = {
                     let batch_size = current_output.dim(0)?;
                     let zero_state = lstm_layer.zero_state(batch_size)?;
                     lstm_layer.seq_init(&current_output, &zero_state)?
@@ -359,18 +389,11 @@ impl LSTMModel {
                     .unwrap_or(false);
 
                 if should_apply_dropout && i < forward_lstm_layers.len() - 1 {
-                    // Generate sequence ID for variational dropout consistency
-                    let sequence_id = format!("unidirectional_layer_{}", i);
-                    current_output = self.apply_dropout_with_context(
-                        &current_output,
-                        training,
-                        Some(&sequence_id),
-                    )?;
+                    current_output = self.apply_dropout_with_context(&current_output, training)?;
                     log::debug!(
-                        "🔧 Applied LSTM layer dropout (layer: {}, training: {}, sequence: {})",
+                        "🔧 Applied LSTM layer dropout (layer: {}, training: {})",
                         i,
-                        training,
-                        sequence_id
+                        training
                     );
                 }
 
@@ -472,49 +495,7 @@ impl LSTMModel {
             }
         };
 
-        // Apply output layer to final hidden state
-        let predictions = output_layer
-            .forward(&final_output)
-            .map_err(|e| VangaError::ModelError(format!("Output layer forward failed: {}", e)))?;
-
-        // DEBUG: Check if LSTM hidden states are diverse across samples
-        // If hidden states are similar for all samples, output will be similar too
-        if !training {
-            let hs = final_output.flatten_all()?;
-            let hs_data: Vec<f32> = hs.to_vec1()?;
-            let sample_size = self
-                .config
-                .get_hidden_size_for_layer(self.config.num_layers - 1);
-            if hs_data.len() >= sample_size * 2 {
-                let first_sample = &hs_data[0..sample_size];
-                let second_sample = &hs_data[sample_size..sample_size * 2];
-                let diff: f32 = first_sample
-                    .iter()
-                    .zip(second_sample.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .sum();
-                let avg_diff = diff / sample_size as f32;
-                log::debug!(
-                    "🔍 Hidden state diversity: avg diff between sample 0 and 1 = {:.6}",
-                    avg_diff
-                );
-            }
-        }
-
-        // DEBUG: Check output layer weights (if possible)
-        if !training {
-            log::debug!("🔍 Checking output layer weights...");
-        }
-
-        log::debug!(
-            "Forward pass complete: input_shape={:?}, final_output_shape={:?}, predictions_shape={:?}, bidirectional={}",
-            input.shape(),
-            final_output.shape(),
-            predictions.shape(),
-            is_bidirectional
-        );
-
-        Ok(predictions)
+        Ok(final_output)
     }
 
     pub async fn predict(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
@@ -594,6 +575,41 @@ impl LSTMModel {
         Ok(result)
     }
 
+    /// Convert raw output-layer logits into calibrated probabilities:
+    /// softmax(z/T) when temperature calibration is available, softmax(z) otherwise.
+    /// Applied exactly once per prediction — downstream code must never softmax again.
+    fn lstm_probabilities(&self, raw_logits: &Tensor) -> Result<Tensor> {
+        if let Some(ref ensemble_cal) = self.ensemble_calibrator {
+            if ensemble_cal.is_calibrated {
+                let batch_size = raw_logits.dims()[0];
+                let num_classes = raw_logits.dims()[1];
+                let logits_data: Vec<f64> = raw_logits
+                    .flatten_all()?
+                    .to_vec1::<f32>()?
+                    .iter()
+                    .map(|&v| v as f64)
+                    .collect();
+
+                let logits_array = Array2::from_shape_vec((batch_size, num_classes), logits_data)
+                    .map_err(|e| {
+                    VangaError::ModelError(format!("Failed to create logits array: {}", e))
+                })?;
+
+                // apply_to_logits returns softmax(z/T): already probabilities
+                let probs_array = ensemble_cal.apply_to_logits(&logits_array)?;
+                let probs_data: Vec<f32> = probs_array.iter().map(|&v| v as f32).collect();
+                let probs = Tensor::from_vec(probs_data, (batch_size, num_classes), &self.device)?;
+
+                log::debug!(
+                    "🌡️ Applied temperature scaling (T={:.3}) during inference",
+                    ensemble_cal.temperature_scaling.temperature
+                );
+                return Ok(probs);
+            }
+        }
+        Ok(candle_nn::ops::softmax(raw_logits, 1)?)
+    }
+
     async fn predict_batch(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
         // Convert sequences to tensor (prediction-optimized version)
         let input_tensor = self.convert_sequences_to_prediction_tensor(sequences)?;
@@ -626,66 +642,26 @@ impl LSTMModel {
             // IMPROVEMENT: Blend XGBoost with LSTM predictions for better stability
             // While paper uses pure XGBoost output, blending improves robustness
             let lstm_logits = self.forward(&input_tensor, false)?;
-            // Blend in probability space: XGBoost outputs are probabilities, so the
-            // LSTM logits must be softmaxed first or the mixture ratio is meaningless
-            let lstm_predictions = candle_nn::ops::softmax(&lstm_logits, 1)?;
+            // Blend in probability space with the SAME calibrated probabilities the
+            // pure-LSTM path produces: XGBoost outputs are probabilities, so the LSTM
+            // side must be softmax(z/T) or the mixture ratio is meaningless
+            let lstm_predictions = self.lstm_probabilities(&lstm_logits)?;
             log::debug!(
                 "📊 LSTM predictions (for blending): {:?}",
                 lstm_predictions.shape()
             );
 
-            // Use weighted average: 20% LSTM + 80% XGBoost
-            // This preserves some LSTM temporal patterns while leveraging XGBoost's power
-            self.blend_predictions(&lstm_predictions, &xgb_predictions, 0.2)?
+            // Weighted average preserves some LSTM temporal patterns while
+            // leveraging XGBoost's power
+            self.blend_predictions(&lstm_predictions, &xgb_predictions, LSTM_BLEND_WEIGHT)?
         } else {
             log::info!("🔄 Using pure LSTM prediction");
 
             // Forward pass through network (inference mode - no dropout)
             let raw_logits = self.forward(&input_tensor, false)?;
 
-            // CRITICAL: Apply POST-HOC ensemble calibration if available
-            // Temperature scaling is applied ONLY during inference, never during training
-            // Research: Guo et al. 2017 - temperature scaling is post-processing method
-            if let Some(ref ensemble_cal) = self.ensemble_calibrator {
-                if ensemble_cal.is_calibrated {
-                    // Convert logits tensor to ndarray for temperature scaling
-                    let logits_shape = raw_logits.shape();
-                    let batch_size = logits_shape.dims()[0];
-                    let logits_data: Vec<f64> = raw_logits
-                        .flatten_all()?
-                        .to_vec1::<f32>()?
-                        .iter()
-                        .map(|&v| v as f64)
-                        .collect();
-
-                    let logits_array = Array2::from_shape_vec((batch_size, 5), logits_data)
-                        .map_err(|e| {
-                            VangaError::ModelError(format!("Failed to create logits array: {}", e))
-                        })?;
-
-                    // Apply temperature scaling to logits
-                    let calibrated_logits_array = ensemble_cal.apply_to_logits(&logits_array)?;
-
-                    // Convert back to tensor
-                    let calibrated_data: Vec<f32> =
-                        calibrated_logits_array.iter().map(|&v| v as f32).collect();
-
-                    let calibrated_logits =
-                        Tensor::from_vec(calibrated_data, (batch_size, 5), &self.device)?;
-
-                    log::debug!(
-                        "🌡️ Applied temperature scaling (T={:.3}) during inference",
-                        ensemble_cal.temperature_scaling.temperature
-                    );
-
-                    // apply_to_logits returns softmax(z/T): already probabilities
-                    calibrated_logits
-                } else {
-                    candle_nn::ops::softmax(&raw_logits, 1)?
-                }
-            } else {
-                candle_nn::ops::softmax(&raw_logits, 1)?
-            }
+            // POST-HOC calibration: softmax(z/T) when calibrated, softmax(z) otherwise
+            self.lstm_probabilities(&raw_logits)?
         };
 
         // CRITICAL FIX: Handle multi-class outputs for categorical targets
@@ -987,18 +963,12 @@ impl LSTMModel {
         })
     }
 
-    /// Apply dropout with sequence context for variational dropout
+    /// Apply the configured dropout variant (variational, recurrent, or standard)
     ///
     /// # Arguments
     /// * `tensor` - Input tensor to apply dropout to
     /// * `training` - Whether model is in training mode
-    /// * `sequence_context` - Optional sequence ID for variational dropout consistency
-    fn apply_dropout_with_context(
-        &self,
-        tensor: &Tensor,
-        training: bool,
-        sequence_context: Option<&str>,
-    ) -> Result<Tensor> {
+    fn apply_dropout_with_context(&self, tensor: &Tensor, training: bool) -> Result<Tensor> {
         let dropout_config = self
             .dropout_config
             .as_ref()
@@ -1027,21 +997,15 @@ impl LSTMModel {
             }
         };
 
-        // Choose dropout method based on configuration
-        let dropped_tensor = if let Some(sequence_id) = sequence_context {
-            // Use variational dropout with sequence context
+        // Choose dropout method based on configuration (honor the variational flag —
+        // the old dispatch keyed on caller context and ignored the config entirely)
+        let dropped_tensor = if dropout_config.variational {
             log::debug!(
-                "🔧 Applying variational dropout with rate {:.3} to tensor shape {:?} [sequence: {}]",
+                "🔧 Applying variational dropout with rate {:.3} to tensor shape {:?}",
                 dropout_rate,
-                tensor.shape(),
-                sequence_id
+                tensor.shape()
             );
-            SeededTensorUtils::variational_dropout(
-                tensor,
-                dropout_rate as f32,
-                training,
-                sequence_id,
-            )?
+            SeededTensorUtils::variational_dropout(tensor, dropout_rate as f32, training)?
         } else if dropout_config.recurrent {
             // Use recurrent dropout (for hidden state connections)
             log::debug!(
@@ -1083,224 +1047,26 @@ impl LSTMModel {
     /// # Returns
     /// * `Result<Tensor>` - LSTM features tensor [batch_size, feature_dim]
     pub fn extract_lstm_features(&self, sequences: &Tensor) -> Result<Tensor> {
-        log::debug!("🔍 Extracting LSTM features for XGBoost");
+        // Delegate to the exact forward-pass feature pipeline (DAIN, LayerNorm,
+        // full-sequence layer stacking, attention, endpoint extraction) so the
+        // latent z consumed by the XGBoost hybrid can never diverge from what
+        // the output head sees in forward()
+        let features = self.forward_features(sequences, false)?;
 
-        // Ensure model is initialized
-        let forward_lstm_layers = self
-            .lstm_layers
-            .as_ref()
-            .ok_or_else(|| VangaError::model("LSTM layers not initialized"))?;
-
-        let batch_size = sequences.dim(0)?;
-        let seq_len = sequences.dim(1)?;
-        let input_size = sequences.dim(2)?;
+        let expected_dim = self.get_xgboost_feature_dim();
+        let actual_dim = features.dim(1)?;
+        if actual_dim != expected_dim {
+            return Err(VangaError::model(format!(
+                "LSTM latent dimension mismatch: expected {} (XGBoost config), got {}",
+                expected_dim, actual_dim
+            )));
+        }
 
         log::debug!(
-            "📊 Input shape: batch={}, seq_len={}, features={}",
-            batch_size,
-            seq_len,
-            input_size
+            "✅ Extracted LSTM latent vector z shape: {:?}",
+            features.shape()
         );
-
-        // Check if this is bidirectional architecture
-        let is_bidirectional = matches!(
-            self.architecture,
-            Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
-        );
-
-        let mut current_input = sequences.clone();
-
-        if is_bidirectional {
-            // Bidirectional processing - mirror the forward() method logic
-            let backward_lstm_layers = self.backward_lstm_layers.as_ref().ok_or_else(|| {
-                VangaError::ModelError(
-                    "Backward LSTM layers not initialized for bidirectional model".to_string(),
-                )
-            })?;
-
-            log::debug!("🔄 Processing bidirectional LSTM for feature extraction");
-
-            // Process each layer bidirectionally
-            for (layer_idx, (forward_layer, backward_layer)) in forward_lstm_layers
-                .iter()
-                .zip(backward_lstm_layers.iter())
-                .enumerate()
-            {
-                // Process forward direction - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
-                let batch_size = current_input.dim(0)?;
-                let forward_zero_state = forward_layer.zero_state(batch_size)?;
-                let forward_states = forward_layer.seq_init(&current_input, &forward_zero_state)?;
-                if forward_states.is_empty() {
-                    return Err(VangaError::ModelError(format!(
-                        "Forward layer {} produced no states",
-                        layer_idx
-                    )));
-                }
-
-                // CRITICAL OOM FIX: Only extract last timestep for feature extraction
-                let forward_last = forward_states.last().ok_or_else(|| {
-                    VangaError::ModelError(format!("Forward layer {} has no states", layer_idx))
-                })?;
-                let forward_output = forward_last.h().unsqueeze(1)?.contiguous()?;
-
-                // Process backward direction on the TIME-REVERSED sequence so the final
-                // backward state carries reverse-time context (matches forward() semantics)
-                let seq_len_bi = current_input.dim(1)?;
-                let rev_indices = Tensor::from_vec(
-                    (0..seq_len_bi as u32).rev().collect::<Vec<u32>>(),
-                    seq_len_bi,
-                    current_input.device(),
-                )?;
-                let reversed_input = current_input.index_select(&rev_indices, 1)?.contiguous()?;
-                let backward_zero_state = backward_layer.zero_state(batch_size)?;
-                let backward_states =
-                    backward_layer.seq_init(&reversed_input, &backward_zero_state)?;
-                if backward_states.is_empty() {
-                    return Err(VangaError::ModelError(format!(
-                        "Backward layer {} produced no states",
-                        layer_idx
-                    )));
-                }
-
-                // CRITICAL OOM FIX: Only extract last timestep for feature extraction
-                let backward_last = backward_states.last().ok_or_else(|| {
-                    VangaError::ModelError(format!("Backward layer {} has no states", layer_idx))
-                })?;
-                let backward_output = backward_last.h().unsqueeze(1)?.contiguous()?;
-
-                // Concatenate forward and backward outputs along the feature dimension
-                // forward_output: [batch_size, 1, hidden_size]
-                // backward_output: [batch_size, 1, hidden_size]
-                // Result: [batch_size, 1, 2*hidden_size]
-                current_input =
-                    Tensor::cat(&[&forward_output, &backward_output], 2)?.contiguous()?;
-
-                log::debug!(
-                    "🔄 Bidirectional layer {} - Concatenated shape: {:?} (last timestep only)",
-                    layer_idx,
-                    current_input.shape()
-                );
-            }
-
-            // Extract final timestep features from bidirectional output
-            // Already have [batch_size, 1, 2*hidden_size] from last layer
-            let lstm_features = current_input.squeeze(1)?; // Remove sequence dimension to get [batch_size, 2*hidden_size]
-
-            log::info!(
-                "✅ Extracted LSTM latent vector z_test shape: {:?}",
-                lstm_features.shape()
-            );
-
-            return Ok(lstm_features);
-        }
-
-        // Standard (non-bidirectional) processing - CRITICAL: Only keep last layer's output
-        let mut current_output = current_input;
-
-        for (layer_idx, lstm_layer) in forward_lstm_layers.iter().enumerate() {
-            // LSTM forward pass - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
-            let batch_size = current_output.dim(0)?;
-            let zero_state = lstm_layer.zero_state(batch_size)?;
-            let lstm_states = lstm_layer.seq_init(&current_output, &zero_state)?;
-
-            if lstm_states.is_empty() {
-                return Err(VangaError::ModelError(format!(
-                    "LSTM layer {} produced no states",
-                    layer_idx
-                )));
-            }
-
-            // CRITICAL OOM FIX: Only extract last timestep, don't stack all timesteps
-            // For feature extraction, we only need h_n (final hidden state)
-            let last_state = lstm_states.last().ok_or_else(|| {
-                VangaError::ModelError(format!("Layer {} has no states", layer_idx))
-            })?;
-
-            // Get last hidden state and expand to [batch_size, 1, hidden_size] for next layer
-            let last_hidden = last_state.h();
-            current_output = last_hidden.unsqueeze(1)?.contiguous()?;
-
-            log::debug!(
-                "🔄 Standard layer {} output shape: {:?} (last timestep only)",
-                layer_idx,
-                current_output.shape()
-            );
-        }
-
-        // Extract final timestep features: z = h_n (equation 8 from paper)
-        // Already have [batch_size, 1, hidden_size] from last layer
-        let lstm_features = current_output;
-
-        log::info!(
-            "✅ Extracted standard LSTM features shape: {:?}",
-            lstm_features.shape()
-        );
-
-        // Apply attention if enabled (optional enhancement)
-        let features = if self.use_attention {
-            if let Some(attention) = &self.attention_module {
-                log::debug!("🎯 Applying attention to LSTM features");
-                let attention_result = attention.forward(&lstm_features, false)?; // inference mode
-                                                                                  // Handle attention output (may be tuple)
-                let (attended_features, _) = attention_result;
-                attended_features
-            } else {
-                lstm_features
-            }
-        } else {
-            lstm_features
-        };
-
-        // Ensure feature dimension matches configuration
-        // For 3D tensor [batch_size, 1, hidden_size], calculate total feature dim
-        let expected_dim = self.get_xgboost_feature_dim();
-        let features_dims = features.dims();
-        let actual_dim = if features_dims.len() == 3 {
-            features_dims[1] * features_dims[2] // seq_len * hidden_size (1 * hidden_size = hidden_size)
-        } else {
-            features_dims[1] // 2D case
-        };
-
-        if actual_dim != expected_dim {
-            log::warn!(
-                "⚠️  Feature dimension mismatch: expected={}, actual={}",
-                expected_dim,
-                actual_dim
-            );
-
-            // For 3D features, flatten to 2D [batch_size, seq_len*hidden_size]
-            let features_2d = if features_dims.len() == 3 {
-                features.reshape((features_dims[0], features_dims[1] * features_dims[2]))?
-            } else {
-                features.clone()
-            };
-
-            // Add projection layer if needed (simple linear transformation)
-            if let Some(output_layer) = &self.output_layer {
-                log::debug!("🔄 Applying output projection to match feature dimension");
-                let projected = output_layer.forward(&features_2d)?;
-
-                // Take first expected_dim features if output is larger
-                if projected.dim(1)? >= expected_dim {
-                    let final_features = projected.narrow(1, 0, expected_dim)?;
-                    log::debug!("✅ Final LSTM features shape: {:?}", final_features.shape());
-                    return Ok(final_features);
-                }
-            }
-
-            // Fallback: pad or truncate to match expected dimension
-            return self.adjust_feature_dimension(features_2d, expected_dim);
-        }
-
-        // Flatten 3D to 2D [batch_size, seq_len*hidden_size] for XGBoost
-        let features_2d = if features_dims.len() == 3 {
-            features.reshape((features_dims[0], features_dims[1] * features_dims[2]))?
-        } else {
-            features
-        };
-
-        log::debug!("✅ Final LSTM features shape: {:?}", features_2d.shape());
-        Ok(features_2d)
+        Ok(features)
     }
 
     /// Extract LSTM features for all sequences in a batch (for training)
@@ -1450,37 +1216,6 @@ impl LSTMModel {
     ) -> usize {
         // ALWAYS prioritize the explicit config value
         xgb_config.feature_dim
-    }
-
-    /// Adjust feature dimension to match expected size
-    fn adjust_feature_dimension(&self, features: Tensor, expected_dim: usize) -> Result<Tensor> {
-        let actual_dim = features.dim(1)?;
-
-        if actual_dim > expected_dim {
-            // Truncate to expected dimension
-            log::debug!(
-                "🔧 Truncating features from {} to {}",
-                actual_dim,
-                expected_dim
-            );
-            Ok(features.narrow(1, 0, expected_dim)?)
-        } else if actual_dim < expected_dim {
-            // Pad with zeros to expected dimension
-            log::debug!(
-                "🔧 Padding features from {} to {}",
-                actual_dim,
-                expected_dim
-            );
-            let batch_size = features.dim(0)?;
-            let padding_size = expected_dim - actual_dim;
-
-            let zeros = Tensor::zeros((batch_size, padding_size), features.dtype(), &self.device)?;
-            let padded = Tensor::cat(&[&features, &zeros], 1)?;
-            Ok(padded)
-        } else {
-            // Dimension already matches
-            Ok(features)
-        }
     }
 }
 impl LSTMModel {

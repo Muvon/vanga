@@ -342,19 +342,11 @@ impl SmartCoreRegressor {
     /// # Returns
     /// * `Result<Tensor>` - Predictions tensor [batch_size, output_dim]
     pub fn predict(&self, features: &Tensor) -> Result<Tensor> {
-        // Check if we should apply ordinal constraints
-        if self.use_ordinal && self.num_classes == Some(5) {
-            log::debug!("🎯 Applying ordinal constraints to 5-class predictions");
-
-            // Get base predictions first
-            let base_predictions = self.predict_base(features)?;
-
-            // Apply ordinal constraints
-            let ordinal_helper = OrdinalSmartCore::new(self.config.clone());
-            return ordinal_helper.apply_ordinal_constraints_to_predictions(&base_predictions);
-        }
-
-        // Standard prediction without ordinal constraints
+        // NOTE: the former "ordinal constraints" post-processing was a Gaussian blur
+        // that uniformly deflated the predicted-class probability by ~23%, and it was
+        // silently dropped after model load (use_ordinal was never serialized) — so
+        // training-time and production predictions disagreed. Removed for consistency;
+        // ordinal awareness stays in training (penalty-matrix weighting).
         self.predict_base(features)
     }
 
@@ -450,8 +442,8 @@ impl SmartCoreRegressor {
 
         match probabilities_result {
             Ok(predictions) => {
-                // For now, use the old method but add randomization to avoid perfect balance
-                self.predictions_to_tensor_with_noise(predictions, features.dim(0)?)
+                // Convert hard class labels to deterministic ordinal-smoothed distributions
+                self.predictions_to_probability_tensor(predictions, features.dim(0)?)
             }
             Err(e) => Err(e),
         }
@@ -767,13 +759,12 @@ impl SmartCoreRegressor {
     }
 
     /// Convert SmartCore predictions to VANGA tensor format with realistic probabilities
-    fn predictions_to_tensor_with_noise(
+    fn predictions_to_probability_tensor(
         &self,
         predictions: Vec<i32>,
         batch_size: usize,
     ) -> Result<Tensor> {
-        // VANGA always expects 5-class outputs (NUM_CLASSES = 5)
-        let num_classes = 5;
+        let num_classes = crate::config::model::NUM_CLASSES;
 
         log::debug!(
             "🔄 Converting {} predictions to [{}, {}] probability tensor",

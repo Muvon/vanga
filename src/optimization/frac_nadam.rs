@@ -121,8 +121,6 @@ impl Optimizer for FracNAdam {
     }
 
     fn step(&mut self, grads: &GradStore) -> Result<()> {
-        self.step_count += 1;
-
         // Collect gradients for all variables
         // IMPORTANT: Only add actual gradients to history, not artificial zeros
         let mut gradients = Vec::new();
@@ -134,29 +132,23 @@ impl Optimizer for FracNAdam {
                 has_any_gradient = true;
                 gradients.push(grad.clone());
             } else {
-                // For missing gradients, use the previous gradient if available
-                // This maintains continuity in the fractional derivative computation
-                if let Some(history) = self
-                    .fractional_derivative
-                    .get_last_gradient(gradients.len())
-                {
-                    gradients.push(history.clone());
-                } else {
-                    // Only create zero gradient if we have no history
-                    let zero_grad = var.as_tensor().zeros_like()?;
-                    gradients.push(zero_grad);
-                }
+                // Missing gradient: use zero, NOT the previous gradient — replaying a
+                // stale gradient keeps drifting the parameter in its last direction
+                // and pollutes the fractional history with duplicate entries
+                let zero_grad = var.as_tensor().zeros_like()?;
+                gradients.push(zero_grad);
             }
         }
 
         // Proceed regardless of gradient magnitude; only skip if literally no gradients exist
-        if !has_any_gradient && self.step_count > 1 {
+        if !has_any_gradient && self.step_count > 0 {
             log::trace!(
                 "FracNAdam: Skipping step {} due to missing gradients",
                 self.step_count
             );
             return Ok(());
         }
+        self.step_count += 1;
 
         // Update gradient history for fractional derivative computation
         self.fractional_derivative.update_history(&gradients)?;
@@ -270,19 +262,31 @@ impl Optimizer for FracNAdam {
                 .div(&bias_corr2_tensor)?
                 .contiguous()?;
 
-            // Nesterov acceleration term (equation 38 from fractional NAdam paper)
-            // Uses bias-corrected m̂_t as per the fractional paper's derivation,
-            // which differs from Dozat 2016 NAdam that uses raw moment m_t
-            // Formula: β₁ * m̂_t + [(1 - β₁) * D^α∇J(θ) / (1 - β₁^t)]
-            // CRITICAL FIX: Added bias correction for the gradient term
+            // Nesterov acceleration term with NAdam momentum schedule (Dozat 2016):
+            // μ_t = β₁·(1 − 0.5·0.96^(t·ψ)), ψ = momentum_decay. This is what the
+            // momentum_decay parameter exists for — it was previously plumbed through
+            // config but never read, so the "NAdam" had no momentum schedule at all.
+            // Formula: μ_{t+1} * m̂_t + [(1 - μ_t) * D^α∇J(θ) / (1 - β₁^t)]
+            let psi = self.params.momentum_decay;
+            let t = self.step_count as f64;
+            let mu_t = self.params.beta_1 * (1.0 - 0.5 * 0.96f64.powf(t * psi));
+            let mu_next = self.params.beta_1 * (1.0 - 0.5 * 0.96f64.powf((t + 1.0) * psi));
+
+            let mu_next_tensor = Tensor::new(mu_next as f32, var.device())?
+                .broadcast_as(corrected_first_moment.shape())?
+                .contiguous()?;
+            let one_minus_mu_t = Tensor::new((1.0 - mu_t) as f32, var.device())?
+                .broadcast_as(grad_with_decay.shape())?
+                .contiguous()?;
+
             let nesterov_term = corrected_first_moment
                 .contiguous()?
-                .mul(&beta1_tensor)?
+                .mul(&mu_next_tensor)?
                 .contiguous()?
                 .add(
                     &grad_with_decay
                         .contiguous()?
-                        .mul(&one_minus_beta1)?
+                        .mul(&one_minus_mu_t)?
                         .div(&bias_corr1_tensor)?
                         .contiguous()?,
                 )?

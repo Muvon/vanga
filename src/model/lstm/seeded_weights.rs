@@ -4,8 +4,6 @@
 //! using Candle's native Device::set_seed() functionality.
 
 use candle_core::{DType, Device, Result, Tensor, Var};
-use std::cell::RefCell;
-use std::collections::HashMap;
 
 /// Gram-Schmidt orthogonalization process for creating orthogonal matrices
 ///
@@ -76,12 +74,6 @@ fn gram_schmidt_orthogonalization(matrix: &Tensor) -> Result<Tensor> {
 
     // Convert back to f32 for consistency with the rest of the system
     result.to_dtype(candle_core::DType::F32)
-}
-
-// Thread-local storage for variational dropout masks
-// Key: sequence_id, Value: dropout mask tensor
-thread_local! {
-    static VARIATIONAL_MASKS: RefCell<HashMap<String, Tensor>> = RefCell::new(HashMap::new());
 }
 
 /// Seeded tensor creation utilities using Candle's native device seeding
@@ -227,17 +219,17 @@ impl SeededTensorUtils {
         masked_tensor.mul(&scale_tensor)
     }
 
-    /// Variational dropout - uses same mask across all time steps in a sequence
+    /// Variational dropout - one mask per (batch, feature), constant across time
     ///
-    /// This implements the variational dropout technique from Gal & Ghahramani (2016)
-    /// where the same dropout mask is applied across all time steps to prevent
-    /// temporal inconsistency in LSTM training.
+    /// Implements Gal & Ghahramani (2016): the SAME mask is applied at every
+    /// timestep of a sequence, and a FRESH mask is sampled for every call
+    /// (per batch, per layer). The previous cached-mask design reused one mask
+    /// for an entire epoch, collapsing effective regularization.
     ///
     /// # Arguments
     /// * `tensor` - Input tensor to apply dropout to
     /// * `dropout_rate` - Dropout probability (0.0 to 1.0)
     /// * `training` - Whether model is in training mode
-    /// * `sequence_id` - Unique identifier for this sequence (for mask consistency)
     ///
     /// # Returns
     /// * Tensor with variational dropout applied (same mask across time steps)
@@ -245,7 +237,6 @@ impl SeededTensorUtils {
         tensor: &Tensor,
         dropout_rate: f32,
         training: bool,
-        sequence_id: &str,
     ) -> Result<Tensor> {
         // No dropout during inference or if rate is 0
         if !training || dropout_rate <= 0.0 || dropout_rate >= 1.0 {
@@ -253,32 +244,20 @@ impl SeededTensorUtils {
         }
 
         let device = tensor.device();
-        let shape = tensor.shape();
+        let dims = tensor.dims();
 
-        // Try to get existing mask for this sequence
-        let mask = VARIATIONAL_MASKS.with(|masks| -> Result<Tensor> {
-            let mut masks_map = masks.borrow_mut();
-
-            if let Some(existing_mask) = masks_map.get(sequence_id) {
-                // Check if existing mask shape matches current tensor
-                if existing_mask.shape() == shape {
-                    return Ok(existing_mask.clone());
-                } else {
-                    // Shape mismatch, remove old mask and create new one
-                    masks_map.remove(sequence_id);
-                }
-            }
-
-            // Create new mask for this sequence
-            let random_tensor = Tensor::rand(0.0, 1.0, shape, device)?;
-            let keep_mask = random_tensor.gt(dropout_rate)?;
-            let mask_tensor = keep_mask.to_dtype(tensor.dtype())?;
-
-            // Store mask for future time steps in this sequence
-            masks_map.insert(sequence_id.to_string(), mask_tensor.clone());
-
-            Ok(mask_tensor)
-        })?;
+        // For [batch, seq_len, features]: sample the mask over (batch, features)
+        // and broadcast across the time axis; otherwise mask the full shape
+        let mask = if dims.len() == 3 {
+            let random_tensor = Tensor::rand(0.0, 1.0, (dims[0], 1, dims[2]), device)?;
+            random_tensor
+                .gt(dropout_rate)?
+                .to_dtype(tensor.dtype())?
+                .broadcast_as(tensor.shape())?
+        } else {
+            let random_tensor = Tensor::rand(0.0, 1.0, tensor.shape(), device)?;
+            random_tensor.gt(dropout_rate)?.to_dtype(tensor.dtype())?
+        };
 
         // Apply mask and scale by 1/(1-p) to maintain expected value
         let scale = 1.0 / (1.0 - dropout_rate);
@@ -324,24 +303,6 @@ impl SeededTensorUtils {
         let masked_tensor = hidden_tensor.mul(&keep_mask.to_dtype(hidden_tensor.dtype())?)?;
         let scale_tensor = Tensor::new(scale, device)?.broadcast_as(hidden_tensor.shape())?;
         masked_tensor.mul(&scale_tensor)
-    }
-
-    /// Clear variational dropout masks (call at end of sequence or epoch)
-    ///
-    /// This clears stored masks to prevent memory leaks and ensure fresh masks
-    /// for new sequences.
-    ///
-    /// # Arguments
-    /// * `sequence_id` - Optional specific sequence ID to clear, or None to clear all
-    pub fn clear_variational_masks(sequence_id: Option<&str>) {
-        VARIATIONAL_MASKS.with(|masks| {
-            let mut masks_map = masks.borrow_mut();
-            if let Some(id) = sequence_id {
-                masks_map.remove(id);
-            } else {
-                masks_map.clear();
-            }
-        });
     }
 
     /// Apply proper LSTM weight initialization to a VarMap

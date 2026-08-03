@@ -398,30 +398,6 @@ impl LSTMModel {
         );
     }
 
-    /// Clear variational dropout masks (call at end of epoch or sequence)
-    ///
-    /// This prevents memory leaks and ensures fresh masks for new sequences.
-    /// Should be called at the end of each training epoch or when switching
-    /// between training and validation.
-    pub fn clear_dropout_masks(&self) {
-        use crate::model::lstm::seeded_weights::SeededTensorUtils;
-        SeededTensorUtils::clear_variational_masks(None);
-        log::debug!("🧹 Cleared all variational dropout masks");
-    }
-
-    /// Clear specific sequence dropout mask
-    ///
-    /// # Arguments
-    /// * `sequence_id` - Specific sequence ID to clear
-    pub fn clear_sequence_dropout_mask(&self, sequence_id: &str) {
-        use crate::model::lstm::seeded_weights::SeededTensorUtils;
-        SeededTensorUtils::clear_variational_masks(Some(sequence_id));
-        log::debug!(
-            "🧹 Cleared variational dropout mask for sequence: {}",
-            sequence_id
-        );
-    }
-
     /// Initialize attention layers during model initialization
     fn initialize_attention_layers(&mut self, vs: &VarBuilder) -> Result<()> {
         if let Some(attention_config) = &self.attention_config {

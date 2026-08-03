@@ -4,40 +4,66 @@ use crate::model::lstm::seeded_weights::SeededTensorUtils;
 use candle_core::{DType, Device, Tensor};
 
 #[test]
-fn test_variational_dropout_consistency() -> Result<(), Box<dyn std::error::Error>> {
+fn test_variational_dropout_constant_across_timesteps() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::Cpu;
-    let shape = &[2, 3, 4]; // [batch, sequence, features]
+    let shape = &[2, 5, 4]; // [batch, sequence, features]
 
-    // Create test tensor
+    // Create test tensor of ones so surviving values are exactly the scale factor
     let tensor = Tensor::ones(shape, DType::F32, &device)?;
     let dropout_rate = 0.5;
-    let sequence_id = "test_sequence";
 
-    // Apply variational dropout multiple times with same sequence ID
-    let result1 = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true, sequence_id)?;
-    let result2 = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true, sequence_id)?;
+    let result = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true)?;
+    let values: Vec<f32> = result.flatten_all()?.to_vec1()?;
 
-    // Results should be identical (same mask used)
-    let diff = result1.sub(&result2)?.abs()?.sum_all()?;
-    let diff_value: f32 = diff.to_scalar()?;
+    // Gal & Ghahramani: the mask must be identical at every timestep — for each
+    // (batch, feature) pair, all timesteps are either all dropped or all kept
+    let (batch, seq_len, features) = (shape[0], shape[1], shape[2]);
+    for b in 0..batch {
+        for f in 0..features {
+            let first = values[b * seq_len * features + f];
+            for t in 1..seq_len {
+                let v = values[b * seq_len * features + t * features + f];
+                assert!(
+                    (v - first).abs() < 1e-6,
+                    "Variational dropout mask must be constant across timesteps (b={}, f={}, t={})",
+                    b,
+                    f,
+                    t
+                );
+            }
+        }
+    }
 
+    // Kept values must be scaled by 1/(1-p)
+    let scale = 1.0 / (1.0 - dropout_rate);
+    for &v in &values {
+        assert!(
+            v.abs() < 1e-6 || (v - scale).abs() < 1e-5,
+            "Values must be either dropped (0) or scaled ({}), got {}",
+            scale,
+            v
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_variational_dropout_resampled_per_call() -> Result<(), Box<dyn std::error::Error>> {
+    let device = Device::Cpu;
+    let shape = &[4, 3, 32];
+    let tensor = Tensor::ones(shape, DType::F32, &device)?;
+    let dropout_rate = 0.5;
+
+    // A fresh mask must be sampled on every call — with 4*32=128 Bernoulli(0.5)
+    // mask entries, two identical consecutive masks are astronomically unlikely
+    let result1 = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true)?;
+    let result2 = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true)?;
+
+    let diff: f32 = result1.sub(&result2)?.abs()?.sum_all()?.to_scalar()?;
     assert!(
-        diff_value < 1e-6,
-        "Variational dropout should use same mask across calls"
-    );
-
-    // Clear masks and test with different sequence ID
-    SeededTensorUtils::clear_variational_masks(Some(sequence_id));
-    let result3 =
-        SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true, "different_sequence")?;
-
-    // This should be different from previous results
-    let diff2 = result1.sub(&result3)?.abs()?.sum_all()?;
-    let diff2_value: f32 = diff2.to_scalar()?;
-
-    assert!(
-        diff2_value > 1e-6,
-        "Different sequence IDs should produce different masks"
+        diff > 1e-6,
+        "Variational dropout must resample its mask on every call"
     );
 
     Ok(())
@@ -82,8 +108,7 @@ fn test_dropout_training_vs_inference() -> Result<(), Box<dyn std::error::Error>
     let dropout_rate = 0.5;
 
     // During inference, dropout should be disabled
-    let inference_result =
-        SeededTensorUtils::variational_dropout(&tensor, dropout_rate, false, "test")?;
+    let inference_result = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, false)?;
     let diff = tensor.sub(&inference_result)?.abs()?.sum_all()?;
     let diff_value: f32 = diff.to_scalar()?;
 
@@ -93,8 +118,7 @@ fn test_dropout_training_vs_inference() -> Result<(), Box<dyn std::error::Error>
     );
 
     // During training, dropout should be applied
-    let training_result =
-        SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true, "test")?;
+    let training_result = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true)?;
     let training_diff = tensor.sub(&training_result)?.abs()?.sum_all()?;
     let training_diff_value: f32 = training_diff.to_scalar()?;
 
@@ -107,42 +131,13 @@ fn test_dropout_training_vs_inference() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn test_mask_clearing() -> Result<(), Box<dyn std::error::Error>> {
-    let device = Device::Cpu;
-    let shape = &[2, 3, 4];
-    let tensor = Tensor::ones(shape, DType::F32, &device)?;
-    let dropout_rate = 0.5;
-    let sequence_id = "test_clear";
-
-    // Apply variational dropout to create a mask
-    let result1 = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true, sequence_id)?;
-
-    // Clear the specific mask
-    SeededTensorUtils::clear_variational_masks(Some(sequence_id));
-
-    // Apply again - should get a different result due to new mask
-    let result2 = SeededTensorUtils::variational_dropout(&tensor, dropout_rate, true, sequence_id)?;
-
-    let diff = result1.sub(&result2)?.abs()?.sum_all()?;
-    let diff_value: f32 = diff.to_scalar()?;
-
-    // Results should be different after clearing masks
-    assert!(
-        diff_value > 1e-6,
-        "Clearing masks should result in different dropout patterns"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn test_zero_dropout_rate() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::Cpu;
     let shape = &[2, 3, 4];
     let tensor = Tensor::ones(shape, DType::F32, &device)?;
 
     // Test with zero dropout rate
-    let result = SeededTensorUtils::variational_dropout(&tensor, 0.0, true, "test")?;
+    let result = SeededTensorUtils::variational_dropout(&tensor, 0.0, true)?;
     let diff = tensor.sub(&result)?.abs()?.sum_all()?;
     let diff_value: f32 = diff.to_scalar()?;
 
@@ -161,7 +156,7 @@ fn test_full_dropout_rate() -> Result<(), Box<dyn std::error::Error>> {
     let tensor = Tensor::ones(shape, DType::F32, &device)?;
 
     // Test with full dropout rate (should not apply dropout)
-    let result = SeededTensorUtils::variational_dropout(&tensor, 1.0, true, "test")?;
+    let result = SeededTensorUtils::variational_dropout(&tensor, 1.0, true)?;
     let diff = tensor.sub(&result)?.abs()?.sum_all()?;
     let diff_value: f32 = diff.to_scalar()?;
 

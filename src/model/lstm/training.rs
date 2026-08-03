@@ -1001,25 +1001,11 @@ impl LSTMModel {
         }
 
         if use_validation {
-            let num_complete_val_batches = total_val_samples / batch_size;
-            let val_samples_used = num_complete_val_batches * batch_size;
-            let val_samples_dropped = total_val_samples - val_samples_used;
-
-            if val_samples_dropped > 0 {
-                log::info!(
-                    "📊 Validation: Using {} samples ({} complete batches), dropping {} incomplete samples ({:.1}%)",
-                    val_samples_used,
-                    num_complete_val_batches,
-                    val_samples_dropped,
-                    (val_samples_dropped as f64 / total_val_samples as f64) * 100.0
-                );
-            } else {
-                log::info!(
-                    "📊 Validation: Using all {} samples ({} complete batches)",
-                    val_samples_used,
-                    num_complete_val_batches
-                );
-            }
+            log::info!(
+                "📊 Validation: Using all {} samples ({} batches, incl. partial tail)",
+                total_val_samples,
+                total_val_samples.div_ceil(batch_size)
+            );
         }
 
         log::info!("🔧 Optimizer: {:?}", config.training.optimizer);
@@ -1053,20 +1039,32 @@ impl LSTMModel {
         let warmup_epochs = config.training.warmup_epochs;
 
         // Initialize ReduceOnPlateau scheduler if configured (unified with other schedulers)
-        let mut reduce_on_plateau_scheduler: Option<ReduceOnPlateauScheduler> =
-            match &config.training.learning_schedule {
-                Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
-                    patience,
-                    factor,
-                    min_lr,
-                    threshold,
-                    ..
-                }) => Some(
+        let mut reduce_on_plateau_scheduler: Option<ReduceOnPlateauScheduler> = match &config
+            .training
+            .learning_schedule
+        {
+            Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
+                patience,
+                factor,
+                min_lr,
+                threshold,
+                monitor,
+            }) => {
+                if let Some(m) = monitor {
+                    if m != "loss" {
+                        log::warn!(
+                                "⚠️ ReduceOnPlateau monitor='{}' is not supported — validation loss is always used",
+                                m
+                            );
+                    }
+                }
+                Some(
                     ReduceOnPlateauScheduler::new(target_lr, *patience, *factor)
                         .with_bounds(min_lr.unwrap_or(0.0), threshold.unwrap_or(1e-4)),
-                ),
-                _ => None,
-            };
+                )
+            }
+            _ => None,
+        };
 
         // Initialize early stopping variables (only used with validation)
         let mut best_val_loss = f64::INFINITY;
@@ -1075,12 +1073,9 @@ impl LSTMModel {
 
         // FIXED: Adaptive early stopping configuration based on target types
         let (early_stopping_patience, early_stopping_min_delta) = if use_validation {
-            let base_patience = match &config.training.epochs {
-                crate::config::training::EpochConfig::Auto { max_epochs: _ } => {
-                    config.training.early_stopping.patience
-                }
-                _ => 10, // Default patience for fixed epochs
-            };
+            // Honor the configured patience for BOTH epoch modes (the old code
+            // silently discarded it for fixed epochs and used a hardcoded 10)
+            let base_patience = config.training.early_stopping.patience;
             let base_min_delta = config.training.early_stopping.min_delta;
 
             // FIXED: Adjust min_delta based on target types and expected scale
@@ -1205,9 +1200,6 @@ impl LSTMModel {
         let mut previous_epoch_loss: Option<f64> = None;
 
         for epoch in 0..self.training_config.epochs {
-            // Clear variational dropout masks at the start of each epoch for fresh randomization
-            self.clear_dropout_masks();
-
             // Initialize epoch tracking variables
             let mut epoch_train_loss = 0.0;
             let mut epoch_grad_norm = 0.0; // Track gradient norm for epoch logging
@@ -1374,16 +1366,21 @@ impl LSTMModel {
                 }
             }
 
-            // Training phase - process data in shuffled batches (drop incomplete batches for stability)
-            let num_complete_batches = total_train_samples / batch_size;
-            let samples_used_for_training = num_complete_batches * batch_size;
+            // Training phase - process data in shuffled batches (incomplete tail is
+            // dropped for stability, EXCEPT when batch_size exceeds the sample count:
+            // then run one short batch instead of silently doing zero updates)
+            let samples_used_for_training = if batch_size >= total_train_samples {
+                total_train_samples
+            } else {
+                (total_train_samples / batch_size) * batch_size
+            };
 
             for (batch_idx, batch_start) in (0..samples_used_for_training)
                 .step_by(batch_size)
                 .enumerate()
             {
-                let batch_end = batch_start + batch_size; // Always complete batch
-                let actual_batch_size = batch_size; // Always full batch size
+                let batch_end = (batch_start + batch_size).min(samples_used_for_training);
+                let actual_batch_size = batch_end - batch_start;
 
                 // Extract shuffled batch indices
                 let batch_indices = &sample_indices[batch_start..batch_end];
@@ -1518,18 +1515,16 @@ impl LSTMModel {
             );
 
             // Validation phase (only if validation data is available)
-            // Clear variational dropout masks before validation to ensure fresh masks
-            self.clear_dropout_masks();
-
             let avg_val_loss = if let (Some(val_seq), Some(val_tgt)) =
                 (&val_sequences_final, &val_targets_final)
             {
                 let mut epoch_val_loss = 0.0;
                 let total_val_samples = val_seq.shape()[0];
 
-                // Drop incomplete batches for validation consistency
-                let num_complete_val_batches = total_val_samples / batch_size;
-                let val_samples_used = num_complete_val_batches * batch_size;
+                // Use ALL validation samples, including the final partial batch —
+                // early stopping and LR scheduling read this loss, and dropping the
+                // tail permanently excluded the same samples every epoch
+                let val_samples_used = total_val_samples;
 
                 // CRITICAL ISSUE FOUND: Training uses SHUFFLED data, validation uses SEQUENTIAL data
                 // This creates a fundamental distribution mismatch that causes divergence!
@@ -1561,8 +1556,8 @@ impl LSTMModel {
                 for (batch_idx, batch_start) in
                     (0..val_samples_used).step_by(batch_size).enumerate()
                 {
-                    let batch_end = batch_start + batch_size; // Always complete batch
-                    let actual_batch_size = batch_size; // Always full batch size
+                    let batch_end = (batch_start + batch_size).min(val_samples_used);
+                    let actual_batch_size = batch_end - batch_start;
 
                     // Extract shuffled validation batch indices (MATCHING TRAINING APPROACH)
                     let batch_indices = &val_sample_indices[batch_start..batch_end];
@@ -3723,15 +3718,44 @@ impl LSTMModel {
             }
         }
 
+        // When the XGBoost hybrid is active, inference bias-corrects the BLENDED
+        // distribution — compute the RF component here so the corrector is fitted
+        // on exactly what it will transform in production
+        let xgb_val_probs: Option<Array2<f64>> = if let Some(ref xgb_model) = self.xgboost_model {
+            let latents = self.extract_all_lstm_features(val_sequences)?;
+            let preds = xgb_model.predict(&latents)?;
+            let n = preds.dims()[0];
+            let k = preds.dims()[1];
+            let data: Vec<f64> = preds
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .map(|&v| v as f64)
+                .collect();
+            Some(Array2::from_shape_vec((n, k), data).map_err(|e| {
+                VangaError::ModelError(format!("Failed to build XGBoost prob array: {}", e))
+            })?)
+        } else {
+            None
+        };
+
         // Calibrate bias correction on the SAME distribution inference produces:
         // apply_to_logits already returns softmax(z/T), so softmaxing its result
         // again would double-softmax — mirror the single-softmax inference path
         if let Some(ref mut corrector) = self.bias_corrector {
-            let inference_probabilities = match &self.ensemble_calibrator {
+            let lstm_probabilities = match &self.ensemble_calibrator {
                 Some(ensemble_cal) if ensemble_cal.is_calibrated => {
                     ensemble_cal.apply_to_logits(&total_logits)?
                 }
                 _ => softmax_rows(&total_logits),
+            };
+
+            let inference_probabilities = match &xgb_val_probs {
+                Some(xgb_probs) => {
+                    let w = crate::model::lstm::inference::LSTM_BLEND_WEIGHT as f64;
+                    &lstm_probabilities * w + xgb_probs * (1.0 - w)
+                }
+                None => lstm_probabilities,
             };
 
             corrector.calibrate_from_validation(&inference_probabilities, &val_targets_one_hot)?;
