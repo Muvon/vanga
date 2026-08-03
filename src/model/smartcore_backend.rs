@@ -807,20 +807,8 @@ impl SmartCoreRegressor {
                 }
             }
 
-            // Add small random variations for realism
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = DefaultHasher::new();
-            (idx, pred_class, self as *const _ as usize).hash(&mut hasher);
-            let seed = hasher.finish();
-
-            for (i, class_prob) in class_probs.iter_mut().enumerate() {
-                // Add small noise to all probabilities
-                let noise = ((seed.wrapping_add(i as u64)) % 100) as f32 / 500.0 - 0.1; // -0.1 to +0.1
-                *class_prob = (*class_prob + noise).clamp(0.01, 0.95);
-            }
-
+            // Deterministic distribution: no artificial noise — it destroyed signal
+            // in the 80%-weighted blend and made confidences irreproducible
             // Normalize to sum to 1.0
             let sum: f32 = class_probs.iter().sum();
             for prob in &mut class_probs {

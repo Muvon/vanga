@@ -43,6 +43,10 @@ pub struct ReduceOnPlateauScheduler {
     patience: u32,
     /// Factor to multiply LR by when reducing
     factor: f64,
+    /// Floor below which the LR is never reduced
+    min_lr: f64,
+    /// Minimum improvement to count as progress (resets patience)
+    threshold: f64,
     /// Whether this is the first step (no previous loss to compare)
     is_first_step: bool,
 }
@@ -56,8 +60,17 @@ impl ReduceOnPlateauScheduler {
             patience_counter: 0,
             patience,
             factor,
+            min_lr: 0.0,
+            threshold: 0.0,
             is_first_step: true,
         }
+    }
+
+    /// Set LR floor and significant-improvement threshold from config
+    pub fn with_bounds(mut self, min_lr: f64, threshold: f64) -> Self {
+        self.min_lr = min_lr;
+        self.threshold = threshold;
+        self
     }
 
     /// Step the scheduler with the current loss.
@@ -69,8 +82,10 @@ impl ReduceOnPlateauScheduler {
             self.is_first_step = false;
             self.best_loss = loss;
             false
-        } else if loss < self.best_loss {
-            // Improvement: reset patience, keep current LR
+        } else if loss < self.best_loss - self.threshold {
+            // Significant improvement: reset patience, keep current LR
+            // (without the threshold, a 1e-12 improvement on a noisy loss
+            // resets patience forever and the LR is never reduced)
             self.best_loss = loss;
             self.patience_counter = 0;
             false
@@ -81,10 +96,12 @@ impl ReduceOnPlateauScheduler {
             // CRITICAL FIX: Use > instead of >= to reduce AFTER patience exceeded, not AT patience
             // patience=3 means: wait 3 epochs (counter: 1, 2, 3), then reduce on 4th epoch
             if self.patience_counter > self.patience {
-                // Patience exceeded: reduce LR
-                self.current_lr *= self.factor;
+                // Patience exceeded: reduce LR, respecting the configured floor
+                let new_lr = (self.current_lr * self.factor).max(self.min_lr);
+                let was_reduced = new_lr < self.current_lr;
+                self.current_lr = new_lr;
                 self.patience_counter = 0;
-                true
+                was_reduced
             } else {
                 false
             }
@@ -1041,8 +1058,13 @@ impl LSTMModel {
                 Some(crate::config::training::LearningScheduleConfig::ReduceOnPlateau {
                     patience,
                     factor,
+                    min_lr,
+                    threshold,
                     ..
-                }) => Some(ReduceOnPlateauScheduler::new(target_lr, *patience, *factor)),
+                }) => Some(
+                    ReduceOnPlateauScheduler::new(target_lr, *patience, *factor)
+                        .with_bounds(min_lr.unwrap_or(0.0), threshold.unwrap_or(1e-4)),
+                ),
                 _ => None,
             };
 
@@ -3377,20 +3399,23 @@ impl LSTMModel {
                 // We CANNOT call backward() and then backward_step() - this causes accumulation!
 
                 // Step 1: Compute gradients ONCE
-                let grads = base_loss.backward()?;
+                let mut grads = base_loss.backward()?;
                 let grad_norm = self.calculate_gradstore_norm(&grads)?;
 
                 if grad_norm > threshold {
-                    // CLIPPING REQUIRED: Scale the loss and recompute
-                    // CRITICAL: We must drop the first gradients before recomputing
-                    drop(grads); // Explicitly drop to ensure no accumulation
-
+                    // CLIPPING REQUIRED: scale the already-computed gradients in place
+                    // (a second backward pass with a scaled loss doubles training cost)
                     let clip_ratio = threshold / grad_norm;
-                    let clip_ratio_tensor = Tensor::new(clip_ratio as f32, &self.device)?;
-                    let scaled_loss = base_loss.mul(&clip_ratio_tensor)?;
-
-                    // Recompute with scaled loss (this is the ONLY backward pass that applies)
-                    optimizer.backward_step(&scaled_loss)?;
+                    for var in self.varmap.all_vars().iter() {
+                        let scaled = grads
+                            .get(var)
+                            .map(|g| g.affine(clip_ratio, 0.0))
+                            .transpose()?;
+                        if let Some(scaled) = scaled {
+                            grads.insert(var, scaled);
+                        }
+                    }
+                    optimizer.step(&grads)?;
 
                     // Log clipping activity (reduced frequency for performance)
                     if batch_idx.is_multiple_of(10) {
@@ -3411,7 +3436,9 @@ impl LSTMModel {
                         );
                     }
 
-                    Ok(threshold)
+                    // Report the MEASURED pre-clip norm, not the threshold constant —
+                    // downstream diagnostics (explosion warnings, clip ratio) need it
+                    Ok(grad_norm)
                 } else {
                     // NO CLIPPING NEEDED: Use the already-computed gradients
                     // CRITICAL FIX: Use step() with existing grads, NOT backward_step()
@@ -3697,14 +3724,15 @@ impl LSTMModel {
         }
 
         // Calibrate bias correction on the SAME distribution inference produces:
-        // temperature-scaled logits -> softmax -> bias factors (see inference predict path)
+        // apply_to_logits already returns softmax(z/T), so softmaxing its result
+        // again would double-softmax — mirror the single-softmax inference path
         if let Some(ref mut corrector) = self.bias_corrector {
-            let scaled_logits = if let Some(ref ensemble_cal) = self.ensemble_calibrator {
-                ensemble_cal.apply_to_logits(&total_logits)?
-            } else {
-                total_logits.clone()
+            let inference_probabilities = match &self.ensemble_calibrator {
+                Some(ensemble_cal) if ensemble_cal.is_calibrated => {
+                    ensemble_cal.apply_to_logits(&total_logits)?
+                }
+                _ => softmax_rows(&total_logits),
             };
-            let inference_probabilities = softmax_rows(&scaled_logits);
 
             corrector.calibrate_from_validation(&inference_probabilities, &val_targets_one_hot)?;
 

@@ -268,18 +268,8 @@ impl MultiTargetParser {
             )));
         }
 
-        // Apply softmax to convert logits to probabilities
-        let max_logit = logits.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let exp_logits: Vec<f64> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
-        let sum_exp: f64 = exp_logits.iter().sum();
-
-        if sum_exp == 0.0 {
-            return Err(VangaError::PredictionError(
-                "Invalid direction logits: sum of exponentials is zero".to_string(),
-            ));
-        }
-
-        let probabilities: Vec<f64> = exp_logits.iter().map(|&x| x / sum_exp).collect();
+        // Model output is already softmaxed upstream (predict path); only renormalize
+        let probabilities = self.normalize(logits);
 
         Ok(DirectionOutput {
             dump_probability: probabilities[0],     // New: Extreme down
@@ -302,8 +292,8 @@ impl MultiTargetParser {
             )));
         }
 
-        // Apply softmax to convert logits to probabilities
-        let probabilities = self.softmax(values);
+        // Model output is already softmaxed upstream (predict path); only renormalize
+        let probabilities = self.normalize(values);
 
         Ok(VolatilityOutput {
             very_low_probability: probabilities[0],
@@ -326,8 +316,8 @@ impl MultiTargetParser {
             )));
         }
 
-        // Apply softmax to convert logits to probabilities
-        let probabilities = self.softmax(values);
+        // Model output is already softmaxed upstream (predict path); only renormalize
+        let probabilities = self.normalize(values);
 
         Ok(SentimentOutput {
             very_bearish_probability: probabilities[0],
@@ -350,8 +340,8 @@ impl MultiTargetParser {
             )));
         }
 
-        // Apply softmax to convert logits to probabilities
-        let probabilities = self.softmax(values);
+        // Model output is already softmaxed upstream (predict path); only renormalize
+        let probabilities = self.normalize(values);
 
         Ok(VolumeOutput {
             very_low_probability: probabilities[0],
@@ -362,17 +352,15 @@ impl MultiTargetParser {
         })
     }
 
-    /// Apply softmax to convert logits to probabilities
-    fn softmax(&self, logits: &ArrayView1<f64>) -> Vec<f64> {
-        let max_logit = logits.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let exp_logits: Vec<f64> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
-        let sum_exp: f64 = exp_logits.iter().sum();
-
-        if sum_exp == 0.0 {
+    /// Renormalize a probability vector. The predict path already applies softmax
+    /// exactly once; softmaxing again here would cap the max class at e/(e+4)≈0.40.
+    fn normalize(&self, values: &ArrayView1<f64>) -> Vec<f64> {
+        let sum: f64 = values.iter().sum();
+        if sum <= 0.0 {
             // Return uniform distribution if sum is zero
-            vec![1.0 / logits.len() as f64; logits.len()]
+            vec![1.0 / values.len() as f64; values.len()]
         } else {
-            exp_logits.iter().map(|&x| x / sum_exp).collect()
+            values.iter().map(|&x| x / sum).collect()
         }
     }
 
@@ -387,19 +375,8 @@ impl MultiTargetParser {
             )));
         }
 
-        // Apply softmax to convert logits to probabilities
-        let max_logit = logits.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let exp_logits: Vec<f64> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
-        let sum_exp: f64 = exp_logits.iter().sum();
-
-        if sum_exp == 0.0 {
-            return Err(VangaError::PredictionError(
-                "Invalid logits: sum of exponentials is zero".to_string(),
-            ));
-        }
-
-        let probabilities: Vec<f64> = exp_logits.iter().map(|&x| x / sum_exp).collect();
-        Ok(probabilities)
+        // Model output is already softmaxed upstream (predict path); only renormalize
+        Ok(self.normalize(logits))
     }
 }
 

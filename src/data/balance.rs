@@ -1174,15 +1174,15 @@ impl SequenceBalancer {
             test_size_per_class
         );
 
-        let mut train_indices = Vec::new();
-        let mut val_indices = Vec::new();
-        let mut test_indices = Vec::new();
-
         // CRITICAL: Sort classes for deterministic processing order (avoid HashMap randomness)
         let mut sorted_classes: Vec<_> = class_sequences.into_iter().collect();
         sorted_classes.sort_by_key(|(class, _)| *class);
 
-        // Split each class using IDENTICAL sizes
+        // Phase 1: per class, sort temporally and pick val/test with even spacing.
+        // (validation_gap is enforced as a train-vs-val/test PURGE in phase 2, in BAR
+        // units — a stride between val picks in list positions never separated
+        // validation from its adjacent training sequences)
+        let mut drafts: Vec<(i32, Vec<usize>, Vec<usize>, Vec<usize>)> = Vec::new();
         for (class, class_indices) in sorted_classes {
             let class_size = class_indices.len();
 
@@ -1199,31 +1199,130 @@ impl SequenceBalancer {
                 &class_indices[..]
             };
 
+            let mut temporal: Vec<(usize, usize)> = Vec::with_capacity(indices_to_use.len());
+            for &idx in indices_to_use {
+                let seq = sequence_map.get(&idx).ok_or_else(|| {
+                    VangaError::DataError(format!("Missing sequence {} in map", idx))
+                })?;
+                temporal.push((idx, seq.start_idx));
+            }
+            temporal.sort_by_key(|(_, start_idx)| *start_idx);
+            let sorted: Vec<usize> = temporal.into_iter().map(|(idx, _)| idx).collect();
+
+            let val = Self::select_evenly_spaced(&sorted, val_size_per_class);
+            let after_val: Vec<usize> = sorted
+                .iter()
+                .filter(|idx| !val.contains(idx))
+                .copied()
+                .collect();
+            let test = Self::select_evenly_spaced(&after_val, test_size_per_class);
+
             log::debug!(
-                "   Class {}: {} total → {} train, {} val, {} test",
+                "   Class {}: {} total → {} val, {} test selected",
                 class,
-                indices_to_use.len(),
-                train_size_per_class,
-                val_size_per_class,
-                test_size_per_class
+                sorted.len(),
+                val.len(),
+                test.len()
             );
 
-            // Use our fast diversity selection for each split (with gap enforcement for validation)
-            let (class_train, class_val, class_test) = self.create_diverse_class_splits(
-                all_sequences,
-                indices_to_use,
-                train_size_per_class,
-                val_size_per_class,
-                test_size_per_class,
-                validation_gap_steps,
-            )?;
+            drafts.push((class, sorted, val, test));
+        }
 
-            train_indices.extend(class_train);
-            val_indices.extend(class_val);
-            test_indices.extend(class_test);
+        // Anchors for the purge: every val/test sequence across ALL classes
+        let mut anchors: Vec<(usize, usize)> = Vec::new();
+        for (_, _, val, test) in &drafts {
+            for idx in val.iter().chain(test.iter()) {
+                let seq = sequence_map.get(idx).ok_or_else(|| {
+                    VangaError::DataError(format!("Missing sequence {} in map", idx))
+                })?;
+                anchors.push((seq.start_idx, seq.end_idx));
+            }
+        }
+
+        // Phase 2: purge training candidates within validation_gap_steps BARS of any
+        // val/test sequence, so no training window overlaps a validation window
+        let mut train_pools: Vec<Vec<usize>> = Vec::new();
+        for (_, sorted, val, test) in &drafts {
+            let pool: Vec<usize> = sorted
+                .iter()
+                .filter(|idx| !val.contains(idx) && !test.contains(idx))
+                .filter(|idx| {
+                    if validation_gap_steps == 0 {
+                        return true;
+                    }
+                    let seq = match sequence_map.get(*idx) {
+                        Some(seq) => seq,
+                        None => return false,
+                    };
+                    !anchors.iter().any(|&(a_start, a_end)| {
+                        let gap = if seq.start_idx >= a_end {
+                            seq.start_idx - a_end
+                        } else {
+                            a_start.saturating_sub(seq.end_idx)
+                        };
+                        gap < validation_gap_steps
+                    })
+                })
+                .copied()
+                .collect();
+            train_pools.push(pool);
+        }
+
+        // Phase 3: common train size across classes preserves perfect balance after purging
+        let common_train = train_pools
+            .iter()
+            .map(|p| p.len())
+            .min()
+            .unwrap_or(0)
+            .min(train_size_per_class);
+        if common_train < train_size_per_class {
+            log::warn!(
+                "🔒 Validation-gap purge reduced train size: {} → {} per class (gap={} bars)",
+                train_size_per_class,
+                common_train,
+                validation_gap_steps
+            );
+        }
+
+        let mut train_indices = Vec::new();
+        let mut val_indices = Vec::new();
+        let mut test_indices = Vec::new();
+        for ((_, _, val, test), pool) in drafts.iter().zip(train_pools.iter()) {
+            train_indices.extend(Self::select_evenly_spaced(pool, common_train));
+            val_indices.extend(val.iter().copied());
+            test_indices.extend(test.iter().copied());
         }
 
         Ok((train_indices, val_indices, test_indices))
+    }
+
+    /// Pick `count` indices from a temporally-sorted list with even spacing,
+    /// filling any dedup shortfall deterministically from the front
+    fn select_evenly_spaced(sorted_indices: &[usize], count: usize) -> Vec<usize> {
+        let mut picked = Vec::new();
+        if count == 0 || sorted_indices.is_empty() {
+            return picked;
+        }
+        let step = (sorted_indices.len() as f64 / count as f64).max(1.0);
+        for i in 0..count {
+            let pos = ((i as f64 * step) as usize).min(sorted_indices.len() - 1);
+            let idx = sorted_indices[pos];
+            if !picked.contains(&idx) {
+                picked.push(idx);
+            }
+        }
+        if picked.len() < count {
+            for &idx in sorted_indices {
+                if !picked.contains(&idx) {
+                    picked.push(idx);
+                    if picked.len() >= count {
+                        break;
+                    }
+                }
+            }
+        }
+        picked.sort();
+        picked
     }
 
     /// Create diverse splits within a single class using PRIORITY-BASED STRATEGY

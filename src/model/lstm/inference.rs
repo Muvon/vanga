@@ -207,16 +207,27 @@ impl LSTMModel {
                 drop(forward_hidden_states);
                 drop(forward_states);
 
-                // Process backward direction with same logic
+                // Process backward direction on the TIME-REVERSED sequence — feeding the
+                // unreversed input would make this a second forward LSTM with no
+                // reverse-time context (defeating the point of bidirectionality)
+                let seq_len_bi = current_input.dim(1)?;
+                let rev_indices = Tensor::from_vec(
+                    (0..seq_len_bi as u32).rev().collect::<Vec<u32>>(),
+                    seq_len_bi,
+                    current_input.device(),
+                )?;
+                let reversed_input = current_input.index_select(&rev_indices, 1)?.contiguous()?;
+
                 let backward_states = if training {
                     // Training mode: maintain hidden states
-                    backward_layer.seq(&current_input)?
+                    backward_layer.seq(&reversed_input)?
                 } else {
                     // Validation mode: reset hidden states
-                    let batch_size = current_input.dim(0)?;
+                    let batch_size = reversed_input.dim(0)?;
                     let zero_state = backward_layer.zero_state(batch_size)?;
-                    backward_layer.seq_init(&current_input, &zero_state)?
+                    backward_layer.seq_init(&reversed_input, &zero_state)?
                 };
+                drop(reversed_input);
 
                 if backward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
@@ -229,7 +240,11 @@ impl LSTMModel {
                     .iter()
                     .map(|state| state.h().clone())
                     .collect();
-                let backward_output = Tensor::stack(&backward_hidden_states, 1)?.contiguous()?;
+                // Re-reverse so timestep t holds the backward state that has seen bars t..T-1,
+                // aligning it with the forward output for per-timestep concatenation
+                let backward_output = Tensor::stack(&backward_hidden_states, 1)?
+                    .index_select(&rev_indices, 1)?
+                    .contiguous()?;
                 drop(backward_hidden_states);
                 drop(backward_states);
 
@@ -428,15 +443,33 @@ impl LSTMModel {
                 VangaError::ModelError(format!("Failed to get sequence length: {}", e))
             })?;
 
-            // Take the last timestep hidden state for sequence-to-one prediction
-            lstm_output
-                .narrow(1, seq_len - 1, 1)?
-                .contiguous()?
-                .squeeze(1)?
-                .contiguous()
-                .map_err(|e| {
-                    VangaError::ModelError(format!("Failed to squeeze last timestep: {}", e))
-                })?
+            // Take the final hidden state for sequence-to-one prediction.
+            // Bidirectional: the forward half has full context at t=T-1, but the
+            // backward half has it at t=0 (after time-alignment re-reversal)
+            if is_bidirectional {
+                let feat_dim = lstm_output.dim(2)?;
+                let half = feat_dim / 2;
+                let fwd_last = lstm_output.narrow(1, seq_len - 1, 1)?.narrow(2, 0, half)?;
+                let bwd_first = lstm_output
+                    .narrow(1, 0, 1)?
+                    .narrow(2, half, feat_dim - half)?;
+                Tensor::cat(&[&fwd_last, &bwd_first], 2)?
+                    .contiguous()?
+                    .squeeze(1)?
+                    .contiguous()
+                    .map_err(|e| {
+                        VangaError::ModelError(format!("Failed to squeeze last timestep: {}", e))
+                    })?
+            } else {
+                lstm_output
+                    .narrow(1, seq_len - 1, 1)?
+                    .contiguous()?
+                    .squeeze(1)?
+                    .contiguous()
+                    .map_err(|e| {
+                        VangaError::ModelError(format!("Failed to squeeze last timestep: {}", e))
+                    })?
+            }
         };
 
         // Apply output layer to final hidden state
@@ -592,7 +625,10 @@ impl LSTMModel {
 
             // IMPROVEMENT: Blend XGBoost with LSTM predictions for better stability
             // While paper uses pure XGBoost output, blending improves robustness
-            let lstm_predictions = self.forward(&input_tensor, false)?;
+            let lstm_logits = self.forward(&input_tensor, false)?;
+            // Blend in probability space: XGBoost outputs are probabilities, so the
+            // LSTM logits must be softmaxed first or the mixture ratio is meaningless
+            let lstm_predictions = candle_nn::ops::softmax(&lstm_logits, 1)?;
             log::debug!(
                 "📊 LSTM predictions (for blending): {:?}",
                 lstm_predictions.shape()
@@ -642,12 +678,13 @@ impl LSTMModel {
                         ensemble_cal.temperature_scaling.temperature
                     );
 
+                    // apply_to_logits returns softmax(z/T): already probabilities
                     calibrated_logits
                 } else {
-                    raw_logits
+                    candle_nn::ops::softmax(&raw_logits, 1)?
                 }
             } else {
-                raw_logits
+                candle_nn::ops::softmax(&raw_logits, 1)?
             }
         };
 
@@ -774,9 +811,9 @@ impl LSTMModel {
             }
         };
 
-        // CRITICAL FIX: Apply softmax to convert logits to probabilities before bias correction
-        // The output layer produces raw logits, but bias correction expects probabilities
-        let predictions_probs = candle_nn::ops::softmax(&final_predictions_tensor, 1)?;
+        // Every branch above already produced probabilities (softmaxed exactly once);
+        // softmaxing again here would cap the max class probability at e/(e+4)≈0.40
+        let predictions_probs = final_predictions_tensor;
 
         // Convert back to ndarray
         let mut predictions_array = self.tensor_to_array2(&predictions_probs)?;
@@ -1106,10 +1143,18 @@ impl LSTMModel {
                 })?;
                 let forward_output = forward_last.h().unsqueeze(1)?.contiguous()?;
 
-                // Process backward direction - CRITICAL FIX: Use seq_init with zero_state for deterministic predictions
+                // Process backward direction on the TIME-REVERSED sequence so the final
+                // backward state carries reverse-time context (matches forward() semantics)
+                let seq_len_bi = current_input.dim(1)?;
+                let rev_indices = Tensor::from_vec(
+                    (0..seq_len_bi as u32).rev().collect::<Vec<u32>>(),
+                    seq_len_bi,
+                    current_input.device(),
+                )?;
+                let reversed_input = current_input.index_select(&rev_indices, 1)?.contiguous()?;
                 let backward_zero_state = backward_layer.zero_state(batch_size)?;
                 let backward_states =
-                    backward_layer.seq_init(&current_input, &backward_zero_state)?;
+                    backward_layer.seq_init(&reversed_input, &backward_zero_state)?;
                 if backward_states.is_empty() {
                     return Err(VangaError::ModelError(format!(
                         "Backward layer {} produced no states",
