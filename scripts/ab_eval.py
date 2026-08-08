@@ -12,20 +12,29 @@ Scoring is mistake-based — lower is better everywhere:
                   sideways call is an abstention, not a veto — sideways + up is
                   an up signal. Only a real contradiction (up vs down) kills it.
 
-Everything else is scored as a HIT TEST along that side, because a level is only
-right or wrong relative to the trade you would have taken. A long target is
-reached from below by the path HIGH; a short target from above by the path LOW.
-Scoring the closing price instead marks a target that was hit mid-horizon as a
-miss, which is not what happens to a real order.
+Two questions are scored separately, because mixing them is how you end up
+blaming the model for something it never claimed:
 
-  target hit      did price trade into the predicted price_levels zone
-  target full     did it reach the far edge
+ACCURACY — each target on its own axis, over every anchor:
+  price err       distance from the predicted band centre to the realised
+                  EXPONENTIALLY-WEIGHTED CLOSE, which is what price_levels
+                  classifies (price_levels.rs:236)
+  stop err        same against the realised WEIGHTED WORST ADVERSE measured
+                  from the sequence's weighted close (stop_levels.rs:441),
+                  on the side the direction head implied
+
+TRADING — a hit test along the signal side, over signals only. An order fills
+on a touch, so a long target is reached from below by the path HIGH and a short
+from above by the path LOW; the closing price never enters it.
+  target hit/full did price trade into the zone / reach the far edge
   price bias      + zone sat beyond where price got to (over-reaching)
                   - price ran past the far edge (under-reaching), 0 inside
-  stop held       did price stay out of the predicted stop_levels zone
-  stop blown      did it run clean through the far edge
+  stop held/blown did price stay out of the zone / run clean through it
   stop bias       + stop wider than the real drawdown, - too tight, 0 inside
-  price/stop err  abs(bias) — the magnitude, for A/B comparison
+  R multiple      the trade, run bar by bar: whichever order fills first wins
+  edge vs coin    R minus the same trade with the side picked blind. This is
+                  the only number that says the model knows anything: for a
+                  driftless price the blind baseline is ~0 at every RR.
 
   scripts/ab_eval.py --csv data/BTCUSDT.csv --horizon 8h,16h --window 2d --gap 4h \
       --a-bin /old/vanga --a-models /old/models \
@@ -47,6 +56,7 @@ METRICS = (
     ("targ err%", "price_err", False),
     ("stop err%", "stop_err", False),
     ("R multiple", "r_multiple", True),
+    ("edge vs coin", "edge_r", True),
 )
 
 # Serialized field order of the 5-class targets, each mapped to a trade side.
@@ -182,7 +192,12 @@ def read_predictions(path, horizons):
             cls, prob = argmax_bin(stops, STOP_BINS)
             band = stops[STOP_BINS[cls]]["price"]
             pred.update(stop_class=cls, stop_prob=prob,
-                        stop_lo=min(band), stop_hi=max(band))
+                        stop_lo=min(band), stop_hi=max(band),
+                        # Whole distribution kept so the stop can be chosen by
+                        # tail mass instead of by mode — see stop_band_at_tail.
+                        stop_bins=[(stops[n].get("probability", 0.0),
+                                    min(stops[n]["price"]), max(stops[n]["price"]))
+                                   for n in STOP_BINS if n in stops])
 
         out[horizon] = pred
     return out
@@ -204,6 +219,71 @@ def realised_acceleration(rows, k, end_idx, seq_len):
     return (hor_end - hor_start) / hor_start - (seq_end - seq_start) / seq_start
 
 
+def stop_band_at_tail(bins, tail):
+    """Pick the stop band by CUMULATIVE tail mass instead of by mode.
+
+    stop_levels bins run extreme_adverse(0) -> minimal_adverse(4), worst to
+    mildest, so accumulating from index 0 gives P(adverse at least this bad).
+    Return the first band where that mass reaches `tail`: beyond it lies at most
+    `tail` of the model's own predicted probability.
+
+    The argmax picks the MODE, and a stop at the modal depth is breached by the
+    whole cumulative mass of the worse classes — 40-60% with five balanced
+    classes. Placing a stop is a tail question, not a mode question.
+    """
+    cum = 0.0
+    for prob, lo, hi in bins:
+        cum += prob
+        if cum >= tail:
+            return lo, hi
+    return bins[-1][1], bins[-1][2]
+
+
+def exp_weighted_close(bars):
+    """get_sequence_exponential_weighted_close (price_levels.rs:236-256):
+    weight ((i+1)/n)^2 over closes, so recent bars dominate. This is what
+    price_levels actually classifies — an average, never an extreme."""
+    n = len(bars)
+    num = den = 0.0
+    for i, b in enumerate(bars):
+        w = ((i + 1) / n) ** 2
+        num += b["close"] * w
+        den += w
+    return num / den
+
+
+def weighted_worst_adverse(bars, bullish, reference):
+    """find_weighted_worst_adverse (stop_levels.rs:441-476): the low (bullish)
+    or high (bearish) that maximises severity x weight, weight = 0.5 + 0.5*r^2.
+    Severity is measured from the sequence's weighted close, not from entry."""
+    worst, best_severity = reference, 0.0
+    n = len(bars)
+    for i, b in enumerate(bars):
+        w = 0.5 + 0.5 * ((i + 1) / n) ** 2
+        price = b["low"] if bullish else b["high"]
+        severity = max(0.0, reference - price if bullish else price - reference)
+        if severity * w > best_severity:
+            best_severity, worst = severity * w, price
+    return worst
+
+
+def walk(path, entry, side, reward, risk):
+    """Barrier race over the horizon: which order fills first. reward/risk are
+    distances in % of entry. Returns (outcome, exit % in trade direction).
+
+    Stop is tested before target, so a bar containing both resolves as a loss —
+    intrabar sequence is unknowable at this resolution and the pessimistic read
+    is the one that will not flatter the model."""
+    tgt = entry * (1.0 + side * reward / 100.0)
+    stp = entry * (1.0 - side * risk / 100.0)
+    for b in path:
+        if b["low"] <= stp if side > 0 else b["high"] >= stp:
+            return "loss", -risk
+        if b["high"] >= tgt if side > 0 else b["low"] <= tgt:
+            return "win", reward
+    return "open", (path[-1]["close"] - entry) * side / entry * 100.0
+
+
 def zone_error(reached, near, far):
     """How far `reached` fell short of, or ran past, the predicted [near, far]
     zone. Everything is already in trade-direction coordinates (bigger = further
@@ -221,14 +301,41 @@ def zone_error(reached, near, far):
     return 0.0
 
 
-def measure(pred, entry, path, accel):
-    """Turn one prediction + the bars that followed it into trading mistakes.
-    `path` is every bar after the anchor up to the horizon end, in order — the
-    order matters, because target-before-stop is a win and stop-before-target is
-    a loss and min/max alone cannot tell them apart. All in % of entry."""
+def measure(pred, entry, path, accel, ref_price):
+    """Score one prediction against the bars that followed it, on two separate
+    questions that must not be mixed:
+
+      ACCURACY  — was the model right about what it actually predicts? Each
+                  target is scored on its own axis: price_levels against the
+                  realised exponentially-weighted close, stop_levels against
+                  the realised weighted worst adverse. Anything else penalises
+                  the model for a claim it never made.
+      TRADING   — would the trade have paid? A hit test along the signal side,
+                  because an order fills on a touch, not on a close.
+
+    `path` is every bar after the anchor to the horizon end, in order — order
+    matters for the barrier race. `ref_price` is the sequence's weighted close,
+    which is what stop_levels measures adverse excursion from."""
     end, low = path[-1]["close"], min(r["low"] for r in path)
     high = max(r["high"] for r in path)
     m = {"move_pct": (end - entry) / entry * 100.0}
+
+    # --- ACCURACY: each target on its own axis --------------------------------
+    if "pl_lo" in pred:
+        realised = exp_weighted_close(path)
+        lo, hi = pred["pl_lo"], pred["pl_hi"]
+        m["price_in_band"] = lo <= realised <= hi
+        m["price_err"] = abs(realised - (lo + hi) / 2.0) / entry * 100.0
+
+    if "stop_lo" in pred:
+        # The band was built for the side the DIRECTION head implied
+        # (formatter.rs:484-490, bullish when absent), so it must be scored on
+        # that side — not on the side our signal rule ended up taking.
+        bullish = pred.get("dir_side", 0) >= 0
+        realised = weighted_worst_adverse(path, bullish, ref_price)
+        lo, hi = pred["stop_lo"], pred["stop_hi"]
+        m["stop_in_band"] = lo <= realised <= hi
+        m["stop_err"] = abs(realised - (lo + hi) / 2.0) / entry * 100.0
 
     if accel is not None and "dir_side" in pred:
         m["accel_pct"] = accel * 100.0
@@ -260,6 +367,7 @@ def measure(pred, entry, path, accel):
         """% of entry that `price` sits in the direction the trade profits."""
         return (price - entry) * side / entry * 100.0
 
+    # --- TRADING: hit test along the side we would have taken ------------------
     if "pl_lo" in pred:
         # Longs reach their target from below via the path high, shorts from
         # above via the path low. sorted() puts the near edge first for both.
@@ -269,7 +377,6 @@ def measure(pred, entry, path, accel):
         m["target_hit"] = reach >= near
         m["target_full"] = reach >= far
         m["price_bias"] = zone_error(reach, near, far)
-        m["price_err"] = abs(m["price_bias"])
 
     if "stop_lo" in pred:
         # Same test mirrored: adverse coordinates, where bigger = worse for us.
@@ -279,28 +386,15 @@ def measure(pred, entry, path, accel):
         m["stop_hit"] = adverse >= near
         m["stop_blown"] = adverse > far
         m["stop_bias"] = zone_error(adverse, near, far)
-        m["stop_err"] = abs(m["stop_bias"])
 
     if "pl_lo" in pred and "stop_lo" in pred:
         # The combined score: run the trade. Enter at the anchor close, take the
         # near edge of each zone as the working order, and walk the bars in
         # order — whichever fills first ends it.
-        tgt = pred["pl_lo"] if side > 0 else pred["pl_hi"]
-        stp = pred["stop_hi"] if side > 0 else pred["stop_lo"]
-        reward, risk = favour(tgt), -favour(stp)
+        reward = favour(pred["pl_lo"] if side > 0 else pred["pl_hi"])
+        risk = -favour(pred["stop_hi"] if side > 0 else pred["stop_lo"])
 
-        outcome, exit_pct = "open", m["edge_pct"]
-        for bar in path:
-            stopped = bar["low"] <= stp if side > 0 else bar["high"] >= stp
-            filled = bar["high"] >= tgt if side > 0 else bar["low"] <= tgt
-            # Both inside one bar is unresolvable at this resolution, so it is
-            # resolved against us rather than flattering the model.
-            if stopped:
-                outcome, exit_pct = "loss", -risk
-                break
-            if filled:
-                outcome, exit_pct = "win", reward
-                break
+        outcome, exit_pct = walk(path, entry, side, reward, risk)
         m["outcome"] = outcome
         m["exit_pct"] = exit_pct
         # risk <= 0 means the stop sat on the profitable side of entry — the
@@ -309,6 +403,16 @@ def measure(pred, entry, path, accel):
         if risk > 0:
             m["r_multiple"] = exit_pct / risk
             m["planned_rr"] = reward / risk
+            # No-edge baseline: the SAME bars and the SAME geometry, with the
+            # side chosen blind. Averaging both sides is exactly what you earn
+            # with no directional information, so r_multiple - baseline_r is the
+            # part of the result that came from picking a side rather than from
+            # the reward/risk you happened to set. For a driftless price this
+            # baseline is ~0 at every RR, which is why a better RR alone cannot
+            # make a losing system profitable.
+            _, flip_pct = walk(path, entry, -side, reward, risk)
+            m["baseline_r"] = (exit_pct + flip_pct) / 2.0 / risk
+            m["edge_r"] = m["r_multiple"] - m["baseline_r"]
     return m
 
 
@@ -406,6 +510,42 @@ def verdict(measured, horizons):
         if field == "r_multiple":
             summary = (a_mean, b_mean, decisive, prob, higher_better)
 
+    # The table above only says which side is less bad. This says whether either
+    # has any edge at all, which is the question that decides whether retraining
+    # is worth doing: same bars, same levels, only the side selection differs.
+    print(f"\n  EDGE vs coin flip — is the side selection worth anything?")
+    print(f"  {'side':>5} {'trades':>7} {'R':>8} {'baseline':>9} {'edge':>8}"
+          f" {'beat':>9} {'P(real)':>9}")
+    # A trade where both sides would have won is a tie: the side choice was
+    # worth nothing, so it is evidence for neither. Only decisive trades count,
+    # and MIN_DECISIVE stops a 2-sample fluke from reading as a real edge.
+    MIN_DECISIVE = 15
+    verdicts = {}
+    for s in ("A", "B"):
+        rows_s = [r for h in horizons for r in measured[(s, h)] if "edge_r" in r]
+        if not rows_s:
+            print(f"  {s:>5} {0:>7}   no complete trades")
+            continue
+        decisive = sum(1 for r in rows_s if r["edge_r"] != 0)
+        beat = sum(1 for r in rows_s if r["edge_r"] > 0)
+        conf = prob_better(beat, decisive)
+        verdicts[s] = (mean(r["edge_r"] for r in rows_s), conf, decisive)
+        print(f"  {s:>5} {len(rows_s):>7} {mean(r['r_multiple'] for r in rows_s):>8.3f}"
+              f" {mean(r['baseline_r'] for r in rows_s):>9.3f}"
+              f" {verdicts[s][0]:>8.3f} {f'{beat}/{decisive}':>9} {conf:>8.1%}")
+
+    thin = [s for s, (_, _, d) in verdicts.items() if d < MIN_DECISIVE]
+    if thin:
+        print(f"\n  Side(s) {'+'.join(thin)} have under {MIN_DECISIVE} decisive trades —"
+              " their P(real) is not usable.\n  Ties are whipsaws where both sides won;"
+              " tight targets (RR < 1) produce a lot of them.")
+    proven = [s for s, (e, c, d) in verdicts.items() if e > 0 and c >= 0.8 and d >= MIN_DECISIVE]
+    if verdicts and not proven:
+        print("\n  ⚠️  NEITHER side is shown to beat a blind coin flip on the same bars"
+              "\n      and the same levels. The head-to-head below is then a comparison"
+              "\n      between two things not yet distinguishable from no signal — a"
+              "\n      better RR cannot rescue that, only a real directional edge can.")
+
     if not summary:
         print("\n  No anchor produced a complete trade on both sides — nothing to"
               " score in money terms.")
@@ -446,14 +586,28 @@ def bias_word(bias, over, under):
 def report(rows, label, vetoed, attempted):
     """rows: every measured anchor for one side/horizon."""
     signals = [r for r in rows if r["signal"]]
-    priced = [r for r in signals if "price_err" in r]
-    stopped = [r for r in signals if "stop_err" in r]
+    priced = [r for r in signals if "target_hit" in r]
+    stopped = [r for r in signals if "stop_hit" in r]
     traded = [r for r in signals if "r_multiple" in r]
 
     print(f"\n{label}")
     if attempted:
         print(f"  declined      {vetoed}/{attempted} anchors ({vetoed / attempted:.1%})"
               " — vanga's own consistency protection")
+
+    # Accuracy first: every anchor, each target on its own axis.
+    acc_p = [r for r in rows if "price_err" in r]
+    acc_s = [r for r in rows if "stop_err" in r]
+    if acc_p:
+        hit = sum(1 for r in acc_p if r["price_in_band"]) / len(acc_p)
+        print(f"  price_levels  n={len(acc_p):<4} in-band {hit:>6.1%}"
+              f"  err {cell(mean(r['price_err'] for r in acc_p))}%"
+              "   (vs realised weighted close)")
+    if acc_s:
+        hit = sum(1 for r in acc_s if r["stop_in_band"]) / len(acc_s)
+        print(f"  stop_levels   n={len(acc_s):<4} in-band {hit:>6.1%}"
+              f"  err {cell(mean(r['stop_err'] for r in acc_s))}%"
+              "   (vs realised weighted worst adverse)")
 
     scored = [r for r in rows if "dir_called" in r]
     called = [r for r in scored if r["dir_called"]]
@@ -479,7 +633,6 @@ def report(rows, label, vetoed, attempted):
         full = sum(1 for r in priced if r["target_full"]) / len(priced)
         bias = mean(r["price_bias"] for r in priced)
         print(f"  target        n={len(priced):<4} hit     {hit:>6.1%}  full {full:>6.1%}"
-              f"  err {cell(mean(r['price_err'] for r in priced))}%"
               f"  bias {cell(bias, 6)}% {bias_word(bias, 'over-reaching', 'under-reaching')}")
 
     if stopped:
@@ -487,7 +640,6 @@ def report(rows, label, vetoed, attempted):
         blown = sum(1 for r in stopped if r["stop_blown"]) / len(stopped)
         bias = mean(r["stop_bias"] for r in stopped)
         print(f"  stop          n={len(stopped):<4} held    {held:>6.1%}  blown {blown:>6.1%}"
-              f"  err {cell(mean(r['stop_err'] for r in stopped))}%"
               f"  bias {cell(bias, 6)}% {bias_word(bias, 'too wide', 'too tight')}")
 
     if traded:
@@ -499,6 +651,16 @@ def report(rows, label, vetoed, attempted):
               f"  R {cell(mean(r['r_multiple'] for r in traded))}"
               f"  planned RR {cell(mean(r['planned_rr'] for r in traded))}"
               + (f"  [{bad} unusable: stop on the wrong side of entry]" if bad else ""))
+        # Ties are trades where BOTH sides would have won — with RR < 1 the two
+        # targets sit inside the two stops, so a whipsaw fills both. The side
+        # choice was genuinely worth nothing there, so they carry no evidence.
+        decisive = sum(1 for r in traded if r["edge_r"] != 0)
+        beat = sum(1 for r in traded if r["edge_r"] > 0)
+        print(f"  vs coin flip  same bars, same levels, side picked blind:"
+              f"  baseline R {cell(mean(r['baseline_r'] for r in traded))}"
+              f"  edge {cell(mean(r['edge_r'] for r in traded))}"
+              f"  beat {beat}/{decisive} decisive of {len(traded)}"
+              f" ({prob_better(beat, decisive):.0%} sure real)")
 
 
 def main():
@@ -516,6 +678,12 @@ def main():
     ap.add_argument("--gate", type=float, default=0.42,
                     help="live gate to translate between the two scales; reporting only,"
                          " it never filters the scoring")
+    ap.add_argument("--stop-tail", type=float, default=None, metavar="P",
+                    help="place the stop where the model gives at most P probability to a"
+                         " worse adverse move (e.g. 0.15), instead of at the most likely"
+                         " bin. Targets are NOT symmetric to this: the bins describe where"
+                         " the weighted close LANDS, not the extreme price REACHES, so the"
+                         " same query does not transfer to the target side")
     ap.add_argument("--min-confidence", type=float, default=None,
                     help="passed through to the binaries only when given; omit to use"
                          " each binary's own default")
@@ -605,8 +773,16 @@ def main():
             row = {"timestamp": stamp, "horizon": h}
             for side in ("A", "B"):
                 pred = preds[side][h]
-                accel = realised_acceleration(rows, k, end_idx, pred.get("seq_len", 0))
-                m = measure(pred, entry, path, accel)
+                if args.stop_tail is not None and pred.get("stop_bins"):
+                    pred["stop_lo"], pred["stop_hi"] = \
+                        stop_band_at_tail(pred["stop_bins"], args.stop_tail)
+                seq_len = pred.get("seq_len", 0)
+                accel = realised_acceleration(rows, k, end_idx, seq_len)
+                # stop_levels measures adverse excursion from the sequence's
+                # weighted close, not from entry (stop_levels.rs:405).
+                seq = rows[max(0, k - seq_len + 1): k + 1]
+                ref_price = exp_weighted_close(seq) if seq else entry
+                m = measure(pred, entry, path, accel, ref_price)
                 for key in ("confidence", "dir_conf", "pl_conf"):
                     if key in pred:
                         m[key] = pred[key]
@@ -640,7 +816,7 @@ def main():
     print(f"\n{'=' * 72}\nSUMMARY — signals only, scored as trades")
     print(f"  {'horizon':>8} {'side':>5} {'sig':>4} {'declined':>9} | {'hit':>6}"
           f" {'targ err%':>9} {'targ bias':>9} | {'held':>6} {'stop err%':>9}"
-          f" {'stop bias':>9} | {'R':>6} {'win/loss':>9}")
+          f" {'stop bias':>9} | {'R':>6} {'edge':>6} {'win/loss':>9}")
     for h in horizons:
         for side in ("A", "B"):
             rows_h = measured[(side, h)]
@@ -650,9 +826,11 @@ def main():
                 print(f"  {h:>8} {side:>5} {len(signals):>4}"
                       f" {cell(decline and decline * 100, 8, 1, '%')} | no signals")
                 continue
-            priced = [r for r in signals if "price_err" in r]
-            stopped = [r for r in signals if "stop_err" in r]
+            priced = [r for r in signals if "target_hit" in r]
+            stopped = [r for r in signals if "stop_hit" in r]
             traded = [r for r in signals if "r_multiple" in r]
+            acc_p = [r for r in rows_h if "price_err" in r]
+            acc_s = [r for r in rows_h if "stop_err" in r]
             hit = (sum(1 for r in priced if r["target_hit"]) / len(priced)) if priced else None
             held = (sum(1 for r in stopped if not r["stop_hit"]) / len(stopped)
                     if stopped else None)
@@ -661,20 +839,23 @@ def main():
             print(f"  {h:>8} {side:>5} {len(signals):>4}"
                   f" {cell(decline and decline * 100, 8, 1, '%')} |"
                   f" {cell(hit and hit * 100, 5, 1, '%')}"
-                  f" {cell(mean(r['price_err'] for r in priced), 9)}"
+                  f" {cell(mean(r['price_err'] for r in acc_p), 9)}"
                   f" {cell(mean(r['price_bias'] for r in priced), 9)} |"
                   f" {cell(held and held * 100, 5, 1, '%')}"
-                  f" {cell(mean(r['stop_err'] for r in stopped), 9)}"
+                  f" {cell(mean(r['stop_err'] for r in acc_s), 9)}"
                   f" {cell(mean(r['stop_bias'] for r in stopped), 9)} |"
                   f" {cell(mean(r['r_multiple'] for r in traded), 6)}"
+                  f" {cell(mean(r['edge_r'] for r in traded), 6)}"
                   f" {wl:>9}")
 
     verdict(measured, horizons)
 
     if args.out:
-        cols = ["signal", "outcome", "r_multiple", "planned_rr", "exit_pct",
-                "target_hit", "target_full", "target_reach_pct", "price_err", "price_bias",
-                "stop_hit", "stop_blown", "adverse_pct", "stop_err", "stop_bias",
+        cols = ["signal", "outcome", "r_multiple", "baseline_r", "edge_r",
+                "planned_rr", "exit_pct",
+                "price_err", "price_in_band", "stop_err", "stop_in_band",
+                "target_hit", "target_full", "target_reach_pct", "price_bias",
+                "stop_hit", "stop_blown", "adverse_pct", "stop_bias",
                 "dir_called", "dir_wrong", "dir_paid", "accel_pct",
                 "edge_pct", "bad_geometry",
                 "confidence", "dir_conf", "pl_conf"]
