@@ -39,7 +39,7 @@ pub async fn calibrate_price_levels(
         "momentum_factor".to_string(),
     ];
 
-    // Objective function: minimize balance_score (not composite_quality_score)
+    // Objective function: minimize composite_quality_score
     let objective_fn = |params: &[f64]| -> Result<f64> {
         let test_params = PriceLevelEvalParams {
             bandwidth: params[0],
@@ -50,8 +50,10 @@ pub async fn calibrate_price_levels(
 
         let balance = evaluate_price_level_params(&utils, context, &test_params)?;
 
-        // Price levels use balance_score, not composite_quality_score
-        Ok(balance.balance_score)
+        // Score thresholds on balance AND sample diversity (temporal spread,
+        // feature spread, market-regime coverage) — balance alone lets a
+        // boundary land wherever it needs to to equalise counts
+        Ok(balance.composite_quality_score)
     };
 
     // Bayesian optimization configuration

@@ -37,7 +37,7 @@ pub async fn calibrate_stop_levels(
         "neutral_band_factor".to_string(),
     ];
 
-    // Objective function: minimize balance_score
+    // Objective function: minimize composite_quality_score
     let objective_fn = |params: &[f64]| -> Result<f64> {
         let test_params = StopLevelEvalParams {
             bandwidth: params[0],
@@ -48,8 +48,9 @@ pub async fn calibrate_stop_levels(
 
         let balance = evaluate_stop_level_params(&utils, context, &test_params)?;
 
-        // Use balance_score (same as price_levels)
-        Ok(balance.balance_score)
+        // Same as price_levels: balance AND diversity, so adverse boundaries
+        // are not placed purely to equalise class counts
+        Ok(balance.composite_quality_score)
     };
 
     // Bayesian optimization configuration

@@ -1051,7 +1051,14 @@ impl LSTMModel {
         // full-sequence layer stacking, attention, endpoint extraction) so the
         // latent z consumed by the XGBoost hybrid can never diverge from what
         // the output head sees in forward()
-        let features = self.forward_features(sequences, false)?;
+        //
+        // detach() is load-bearing, not cosmetic: candle keeps a tensor's whole
+        // ancestry alive through its BackpropOp, and extract_all_lstm_features
+        // holds every batch until the final cat. Without this, each stored batch
+        // pins a full [batch, seq_len, hidden] graph (per layer, per direction,
+        // plus the per-timestep states and attention intermediates) and the run
+        // OOMs. XGBoost features never need gradients.
+        let features = self.forward_features(sequences, false)?.detach();
 
         let expected_dim = self.get_xgboost_feature_dim();
         let actual_dim = features.dim(1)?;
