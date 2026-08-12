@@ -387,32 +387,36 @@ impl LinearBiasCorrector {
             log::info!("📊 Bias Correction Factors: {:?}", self.class_bias_factors);
         }
 
-        // Calculate overall confidence scaling
+        let overall_accuracy =
+            self.calculate_accuracy(validation_predictions, validation_targets)?;
+
+        // Confidence calibration DIAGNOSTIC, not a correction — see
+        // get_combined_factors for why it cannot scale anything.
+        //
+        // A calibrated model's mean top-class probability equals its accuracy.
+        // The reference used to be the mean row-max of the ONE-HOT targets,
+        // which is 1.0 for every possible label, so this always reported
+        // "underconfident by 1/mean_confidence" no matter how well calibrated
+        // the model was.
         let predicted_confidence = self.calculate_average_confidence(validation_predictions)?;
-        let actual_confidence = self.calculate_average_confidence(validation_targets)?;
 
         let raw_confidence_scaling = if predicted_confidence > 1e-6 {
-            (actual_confidence / predicted_confidence) * self.config.confidence_adjustment
+            (overall_accuracy / predicted_confidence) * self.config.confidence_adjustment
         } else {
             self.config.confidence_adjustment
         };
 
-        // CRITICAL FIX: Bound confidence scaling to prevent gradient explosion
-        // When used as temperature (1/confidence_scaling), extreme values cause instability
-        // Bound to [0.5, 2.0] to keep temperature in reasonable range [0.5, 2.0]
+        // > 1 underconfident, < 1 overconfident, ~1 calibrated. Bounded so a
+        // near-degenerate mean confidence cannot report an absurd ratio.
         self.confidence_scaling = raw_confidence_scaling.clamp(0.5, 2.0);
 
         if (raw_confidence_scaling - self.confidence_scaling).abs() > 0.1 {
             log::warn!(
-                "⚠️ Confidence scaling bounded: {:.3} → {:.3} to prevent gradient instability",
+                "⚠️ Confidence/accuracy ratio bounded: {:.3} → {:.3}",
                 raw_confidence_scaling,
                 self.confidence_scaling
             );
         }
-
-        // Store validation statistics
-        let overall_accuracy =
-            self.calculate_accuracy(validation_predictions, validation_targets)?;
 
         // Apply decay to prevent runaway bias factors
         // If overall accuracy is improving, gently decay factors toward 1.0
@@ -447,7 +451,13 @@ impl LinearBiasCorrector {
             // Detailed logging when print_info is true
             log::info!("✅ Bias correction calibrated successfully");
             log::info!("📊 Class bias factors: {:?}", self.class_bias_factors);
-            log::info!("🎯 Confidence scaling: {:.4}", self.confidence_scaling);
+            log::info!(
+                "🎯 Confidence/accuracy ratio: {:.4} (mean confidence {:.4} vs accuracy {:.4}; \
+                 1.0 = calibrated, >1 underconfident, <1 overconfident — diagnostic only)",
+                self.confidence_scaling,
+                predicted_confidence,
+                overall_accuracy
+            );
             log::info!("📈 Validation accuracy: {:.4}", overall_accuracy);
             log::info!(
                 "🔧 Configuration: enabled={}, smoothing={:.3}",
@@ -532,17 +542,16 @@ impl LinearBiasCorrector {
     }
 
     /// Get combined correction factors (cached)
+    ///
+    /// confidence_scaling is deliberately NOT folded in here. It is one scalar
+    /// applied to all five classes, and every caller renormalizes afterwards,
+    /// so it cancels exactly: p[i]f[i]S / Σ p[j]f[j]S = p[i]f[i] / Σ p[j]f[j].
+    /// Only the per-class ratios survive. Sharpening a distribution needs an
+    /// exponent, not a multiplier, and that job already belongs to the
+    /// ensemble calibrator's temperature scaling.
     fn get_combined_factors(&self) -> [f64; 5] {
-        // Return cached value if available, otherwise compute and cache
-        if let Some(cached) = self.cached_combined_factors {
-            cached
-        } else {
-            let mut combined = [0.0; 5];
-            for (idx, &factor) in self.class_bias_factors.iter().enumerate() {
-                combined[idx] = factor * self.confidence_scaling;
-            }
-            combined
-        }
+        self.cached_combined_factors
+            .unwrap_or(self.class_bias_factors)
     }
 
     /// Renormalize probability distributions to sum to 1.0
@@ -888,11 +897,12 @@ impl LinearBiasCorrector {
         // Get device from input tensor
         let device = probabilities.device();
 
-        // OPTIMIZATION: Combine bias factors and confidence scaling into single tensor
+        // Per-class factors only — confidence_scaling cancels under the
+        // renormalization below (see get_combined_factors).
         let combined_factors: Vec<f32> = self
-            .class_bias_factors
+            .get_combined_factors()
             .iter()
-            .map(|&x| (x * self.confidence_scaling) as f32)
+            .map(|&x| x as f32)
             .collect();
 
         let correction_tensor =
