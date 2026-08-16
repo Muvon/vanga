@@ -27,6 +27,8 @@ pub mod volume;
 #[cfg(test)]
 mod math_consistency_test;
 #[cfg(test)]
+mod prepared_targets_test;
+#[cfg(test)]
 mod price_level_test;
 
 #[cfg(test)]
@@ -225,28 +227,23 @@ impl PreparedTargets {
         let horizons = self.get_horizons();
 
         for horizon in &horizons {
-            let price_len = self.price_levels.get(horizon).map(|v| v.len());
-            let direction_len = self.direction.get(horizon).map(|v| v.len());
-            let volatility_len = self.volatility.get(horizon).map(|v| v.len());
-            let sentiment_len = self.sentiment.get(horizon).map(|v| v.len());
-            let volume_len = self.volume.get(horizon).map(|v| v.len());
+            let target_lengths = [
+                ("price_level", self.price_levels.get(horizon).map(Vec::len)),
+                ("stop_level", self.stop_levels.get(horizon).map(Vec::len)),
+                ("direction", self.direction.get(horizon).map(Vec::len)),
+                ("volatility", self.volatility.get(horizon).map(Vec::len)),
+                ("sentiment", self.sentiment.get(horizon).map(Vec::len)),
+                ("volume", self.volume.get(horizon).map(Vec::len)),
+            ];
 
-            if price_len != direction_len
-                || direction_len != volatility_len
-                || volatility_len != sentiment_len
-                || sentiment_len != volume_len
-            {
-                return Err(crate::utils::error::VangaError::DataError(format!(
-                    "Target length mismatch for horizon {}: price={:?}, direction={:?}, volatility={:?}, sentiment={:?}, volume={:?}",
-                    horizon, price_len, direction_len, volatility_len, sentiment_len, volume_len
-                )));
-            }
-
-            if let Some(len) = price_len {
+            for (target_name, target_len) in target_lengths {
+                let Some(len) = target_len else {
+                    continue;
+                };
                 if len != self.data_length {
                     return Err(crate::utils::error::VangaError::DataError(format!(
-                        "Target length {} does not match data length {} for horizon {}",
-                        len, self.data_length, horizon
+                        "{} target length {} does not match data length {} for horizon {}",
+                        target_name, len, self.data_length, horizon
                     )));
                 }
             }

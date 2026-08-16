@@ -582,19 +582,18 @@ pub struct StopLevelReconstruction {
 /// Stop level training is direction-aware: for bullish samples it builds boundaries
 /// from sequence LOWS (deepest dip = class 0), for bearish samples it builds boundaries
 /// from sequence HIGHS (highest bounce = class 0). At prediction time, we don't know
-/// the realized direction, so we derive it from the model's direction prediction.
+/// the realized direction, so the caller supplies the future-level direction estimated
+/// by the price-level model.
 ///
 /// # Arguments
-/// * `direction_probabilities` - Optional [DUMP, DOWN, SIDEWAYS, UP, PUMP] probabilities
-///   from the direction head. If `Some`, `is_bullish` is set to `(UP + PUMP) >= (DUMP + DOWN)`,
-///   matching the training rule `target_price >= reference_price`. SIDEWAYS does not
-///   tip either way. If `None`, falls back to bullish (legacy behavior).
+/// * `is_bullish` - Estimated result of the training rule
+///   `target_price >= reference_price`. If absent, falls back to bullish for legacy callers.
 pub fn reconstruct_stop_levels(
     probabilities: &[f64],
     sequence_ohlcv: &[MarketDataRow],
     current_price: f64,
     calibrated_params: &crate::targets::calibration::StopLevelParams,
-    direction_probabilities: Option<&[f64]>,
+    is_bullish: Option<bool>,
 ) -> Result<StopLevelReconstruction> {
     if probabilities.len() != 5 {
         return Err(crate::utils::error::VangaError::DataError(
@@ -614,30 +613,15 @@ pub fn reconstruct_stop_levels(
         ));
     }
 
-    // Determine direction from the model's direction head to mirror the training-time
-    // rule (`target_price >= reference_price`). Bullish samples were labeled against
-    // sequence LOWS; bearish against sequence HIGHS. Without this, the reconstructed
-    // price ranges are systematically wrong for bearish predictions.
-    let is_bullish = match direction_probabilities {
-        Some(probs) if probs.len() == 5 => {
-            let bull_score = probs[3] + probs[4]; // UP + PUMP
-            let bear_score = probs[0] + probs[1]; // DUMP + DOWN
-                                                  // Tie (including the all-SIDEWAYS case) defaults to bullish so behavior
-                                                  // matches training's `>=` rule.
-            bull_score >= bear_score
-        }
-        Some(_) => {
-            log::warn!(
-                "Stop level reconstruction received direction_probabilities with unexpected length ({}); defaulting to bullish",
-                direction_probabilities.map(|p| p.len()).unwrap_or(0)
-            );
-            true
-        }
-        None => {
-            log::debug!("Stop level reconstruction: no direction prediction available, defaulting to bullish");
-            true
-        }
-    };
+    // Bullish samples were labeled against sequence LOWS; bearish samples against
+    // sequence HIGHS. Preserve the legacy bullish fallback when no price-level
+    // estimate is available.
+    let is_bullish = is_bullish.unwrap_or_else(|| {
+        log::debug!(
+            "Stop level reconstruction: no future-level direction available, defaulting to bullish"
+        );
+        true
+    });
 
     // Calculate adverse boundaries using same logic as classification
     let boundaries = calculate_adverse_boundaries(sequence_ohlcv, is_bullish, calibrated_params)?;

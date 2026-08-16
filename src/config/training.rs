@@ -1816,6 +1816,19 @@ impl TrainingConfig {
             ))
         })?;
 
+        // Horizons are a top-level training contract. Keep the caller-provided
+        // symbol/data path, but merge configured horizons unless the CLI replaces
+        // them later through the builder.
+        if let Some(horizons_value) = parsed.get("horizons") {
+            let horizons: Vec<String> = horizons_value.clone().try_into().map_err(|e| {
+                crate::utils::error::VangaError::ConfigError(format!(
+                    "Failed to parse horizons: {}",
+                    e
+                ))
+            })?;
+            self.horizons = horizons;
+        }
+
         // Load training section if present
         if let Some(training_value) = parsed.get("training") {
             let training_params: TrainingParams =
@@ -1870,6 +1883,7 @@ impl TrainingConfig {
                 self.targets = targets;
                 log::info!("📋 Loaded targets configuration from file");
                 log::info!("   - price_level: {}", self.targets.price_level);
+                log::info!("   - stop_level: {}", self.targets.stop_level);
                 log::info!("   - direction: {}", self.targets.direction);
                 log::info!("   - volatility: {}", self.targets.volatility);
                 log::info!("   - sentiment: {}", self.targets.sentiment);
@@ -1990,6 +2004,7 @@ impl TargetsConfig {
     /// Validate that at least one target is enabled
     pub fn validate(&self) -> Result<()> {
         if !self.price_level
+            && !self.stop_level
             && !self.direction
             && !self.volatility
             && !self.sentiment
@@ -2007,6 +2022,9 @@ impl TargetsConfig {
         let mut enabled = Vec::new();
         if self.price_level {
             enabled.push("price_level");
+        }
+        if self.stop_level {
+            enabled.push("stop_level");
         }
         if self.direction {
             enabled.push("direction");
@@ -2027,6 +2045,9 @@ impl TargetsConfig {
     pub fn count_enabled(&self) -> usize {
         let mut count = 0;
         if self.price_level {
+            count += 1;
+        }
+        if self.stop_level {
             count += 1;
         }
         if self.direction {

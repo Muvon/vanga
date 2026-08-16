@@ -7,6 +7,8 @@ pub mod confidence_calculator;
 #[cfg(test)]
 pub mod confidence_calculator_test;
 pub mod formatter;
+#[cfg(test)]
+mod formatter_test;
 pub mod metadata;
 pub mod model_boundaries;
 pub mod multi_target_parser;

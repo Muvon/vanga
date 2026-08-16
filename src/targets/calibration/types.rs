@@ -67,41 +67,62 @@ impl CalibratedParameters {
 
     /// Get all calibrated horizons
     pub fn get_horizons(&self) -> Vec<String> {
-        // Use direction as reference (all targets should have same horizons)
-        self.direction.keys().cloned().collect()
+        if !self.metadata.horizons.is_empty() {
+            let mut horizons = Vec::new();
+            for horizon in &self.metadata.horizons {
+                if !horizons.contains(horizon) {
+                    horizons.push(horizon.clone());
+                }
+            }
+            return horizons;
+        }
+
+        // Backward-compatible fallback for older serialized models without
+        // metadata horizons. Any target may have been the only enabled one.
+        let mut horizons: Vec<String> = self
+            .direction
+            .keys()
+            .chain(self.price_levels.keys())
+            .chain(self.stop_levels.keys())
+            .chain(self.volatility.keys())
+            .chain(self.sentiment.keys())
+            .chain(self.volume.keys())
+            .cloned()
+            .collect();
+        horizons.sort();
+        horizons.dedup();
+        horizons
     }
 
-    /// Validate that all targets have parameters for all horizons
     /// Validate that all targets have parameters for all horizons
     pub fn validate(&self) -> Result<(), String> {
         let horizons = self.get_horizons();
 
-        for horizon in &horizons {
-            if !self.price_levels.contains_key(horizon) {
-                return Err(format!(
-                    "Missing price_levels params for horizon: {}",
-                    horizon
-                ));
+        fn validate_target_map<T>(
+            target_name: &str,
+            target_map: &HashMap<String, T>,
+            horizons: &[String],
+        ) -> Result<(), String> {
+            if target_map.is_empty() {
+                return Ok(());
             }
-            if !self.stop_levels.contains_key(horizon) {
-                return Err(format!(
-                    "Missing stop_levels params for horizon: {}",
-                    horizon
-                ));
+            for horizon in horizons {
+                if !target_map.contains_key(horizon) {
+                    return Err(format!(
+                        "Missing {} params for horizon: {}",
+                        target_name, horizon
+                    ));
+                }
             }
-            if !self.volatility.contains_key(horizon) {
-                return Err(format!(
-                    "Missing volatility params for horizon: {}",
-                    horizon
-                ));
-            }
-            if !self.sentiment.contains_key(horizon) {
-                return Err(format!("Missing sentiment params for horizon: {}", horizon));
-            }
-            if !self.volume.contains_key(horizon) {
-                return Err(format!("Missing volume params for horizon: {}", horizon));
-            }
+            Ok(())
         }
+
+        validate_target_map("direction", &self.direction, &horizons)?;
+        validate_target_map("price_levels", &self.price_levels, &horizons)?;
+        validate_target_map("stop_levels", &self.stop_levels, &horizons)?;
+        validate_target_map("volatility", &self.volatility, &horizons)?;
+        validate_target_map("sentiment", &self.sentiment, &horizons)?;
+        validate_target_map("volume", &self.volume, &horizons)?;
 
         Ok(())
     }

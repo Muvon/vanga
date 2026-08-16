@@ -15,6 +15,8 @@ pub mod price_levels;
 pub mod sentiment;
 pub mod stop_levels;
 pub mod types;
+#[cfg(test)]
+mod types_test;
 pub mod utils;
 pub mod volatility;
 pub mod volume;

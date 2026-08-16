@@ -95,7 +95,9 @@ impl Predictor {
 
     /// Make predictions using either single or multi-target model
     pub async fn predict(&self, model: ModelWrapper<'_>) -> Result<Vec<PredictionResult>> {
-        let symbol = &self.config.symbols[0]; // Use first symbol for single-symbol prediction
+        let symbol = self.config.symbols.first().ok_or_else(|| {
+            VangaError::ConfigError("Prediction requires at least one symbol".to_string())
+        })?;
         log::info!("Starting prediction for symbol: {}", symbol);
 
         // Initialize device from configuration
@@ -125,7 +127,7 @@ impl Predictor {
         // Load and prepare prediction data
         log::info!("Loading prediction data from: {}", data_file_path.display());
         let prepared_data = data_pipeline
-            .prepare_prediction_data(&data_file_path, &self.config)
+            .prepare_prediction_data(&data_file_path, &self.config, model.get_training_config())
             .await?;
 
         log::info!(
@@ -409,7 +411,7 @@ impl Predictor {
             // Generate predictions for this specific horizon
             let formatted_predictions = formatter.format_predictions_with_targets(
                 &raw_predictions,
-                &self.config.symbols[0],
+                symbol,
                 &horizon,
                 current_price,
                 None, // No prepared targets available during prediction - use model uncertainty instead

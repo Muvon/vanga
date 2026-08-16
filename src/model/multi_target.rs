@@ -731,6 +731,14 @@ impl MultiTargetLSTMModel {
             VangaError::SerializationError(format!("Failed to deserialize metadata: {}", e))
         })?;
 
+        if state.num_targets != state.target_names.len() {
+            return Err(VangaError::SerializationError(format!(
+                "Model metadata target count mismatch: num_targets={} but target_names has {} entries",
+                state.num_targets,
+                state.target_names.len()
+            )));
+        }
+
         // Load individual models
         let mut models = Vec::with_capacity(state.num_targets);
         for i in 0..state.num_targets {

@@ -411,7 +411,6 @@ impl ParameterCalibrator {
                     // Clone prefix for each target task
                     let prefix1 = prefix.clone();
                     let prefix2 = prefix.clone();
-                    let _prefix3 = prefix.clone(); // Used by stop_levels when enabled
                     let prefix4 = prefix.clone();
                     let prefix5 = prefix.clone();
                     let prefix6 = prefix.clone();

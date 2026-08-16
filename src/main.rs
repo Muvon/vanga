@@ -514,20 +514,10 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
         // Create training config
         let mut config = if let Some(config_path) = params.config {
             log::info!("🔧 Loading training config from: {:?}", config_path);
-            match TrainingConfig::default()
+            TrainingConfig::default()
                 .symbol(symbol.clone())
                 .data_path(params.data.clone())
-                .with_config_from_file(&config_path)
-            {
-                Ok(file_config) => file_config,
-                Err(e) => {
-                    log::error!("Failed to load config file: {}", e);
-                    log::info!("Falling back to default configuration");
-                    TrainingConfig::default()
-                        .symbol(symbol.clone())
-                        .data_path(params.data)
-                }
-            }
+                .with_config_from_file(&config_path)?
         } else {
             log::info!("🔧 Using default intelligent training configuration");
             TrainingConfig::default()
@@ -576,11 +566,8 @@ async fn handle_train_command(params: TrainParams) -> Result<()> {
             api::train_model(config.clone()).await
         };
 
-        let mut model = training_result?;
+        let model = training_result?;
         monitor.checkpoint("Model training completed");
-
-        // Set complete training configuration in model metadata for prediction use
-        model.set_training_config(config.clone());
 
         // Save model
         let model_path = vanga::utils::model_path::get_model_path(&config.symbol);

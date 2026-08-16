@@ -222,15 +222,11 @@ fn test_reconstruction_direction_awareness() {
         balance: Default::default(),
     };
 
-    // Bullish direction probs: UP+PUMP dominant
-    let bull_dir = vec![0.05, 0.05, 0.10, 0.40, 0.40];
-    let bull = reconstruct_stop_levels(&probabilities, &sequence, 105.0, &params, Some(&bull_dir))
+    let bull = reconstruct_stop_levels(&probabilities, &sequence, 105.0, &params, Some(true))
         .expect("Bullish reconstruction failed");
     assert!(bull.is_bullish);
 
-    // Bearish direction probs: DUMP+DOWN dominant
-    let bear_dir = vec![0.40, 0.40, 0.10, 0.05, 0.05];
-    let bear = reconstruct_stop_levels(&probabilities, &sequence, 105.0, &params, Some(&bear_dir))
+    let bear = reconstruct_stop_levels(&probabilities, &sequence, 105.0, &params, Some(false))
         .expect("Bearish reconstruction failed");
     assert!(!bear.is_bullish);
 

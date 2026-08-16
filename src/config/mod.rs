@@ -5,6 +5,8 @@ pub mod training;
 
 #[cfg(test)]
 mod training_augmentation_test;
+#[cfg(test)]
+mod training_targets_test;
 
 pub use features::FeatureConfig;
 pub use model::ModelConfig;

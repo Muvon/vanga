@@ -22,6 +22,38 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use std::collections::HashMap;
 
+pub(super) fn infer_stop_is_bullish(
+    price_levels: &PriceLevelPrediction,
+    reference_price: f64,
+) -> Option<bool> {
+    if !reference_price.is_finite() || reference_price <= 0.0 {
+        return None;
+    }
+
+    let (weighted_price, probability_sum) = price_levels
+        .bins
+        .values()
+        .filter(|bin| {
+            bin.probability.is_finite()
+                && bin.probability >= 0.0
+                && bin.price[0].is_finite()
+                && bin.price[1].is_finite()
+        })
+        .fold((0.0, 0.0), |(weighted, total), bin| {
+            let midpoint = (bin.price[0] + bin.price[1]) / 2.0;
+            (
+                weighted + midpoint * bin.probability,
+                total + bin.probability,
+            )
+        });
+
+    if probability_sum <= 0.0 {
+        None
+    } else {
+        Some(weighted_price / probability_sum >= reference_price)
+    }
+}
+
 /// Output formatter that converts raw LSTM predictions to structured formats
 pub struct OutputFormatter {
     config: OutputConfig,
@@ -481,22 +513,13 @@ impl OutputFormatter {
                     .map(|stop_params| stop_params.percentiles)
                     .or(horizon_percentiles);
 
-                // Stop level reconstruction is direction-aware. Training uses the future
-                // realized direction to pick whether boundaries come from sequence lows
-                // (bullish/dip-risk) or highs (bearish/bounce-risk). At prediction time
-                // we don't know the realized future, so we use the model's direction head
-                // as a stand-in. If the direction head was disabled or absent, we pass
-                // None and fall back to bullish.
-                let direction_probs_for_stop: Option<Vec<f64>> =
-                    parsed_output.direction.as_ref().map(|d| {
-                        vec![
-                            d.dump_probability,
-                            d.down_probability,
-                            d.sideways_probability,
-                            d.up_probability,
-                            d.pump_probability,
-                        ]
-                    });
+                // Training chooses low-side vs high-side stop boundaries from the
+                // future price level relative to the sequence reference. The price
+                // head estimates that same quantity; the direction head estimates
+                // momentum acceleration and therefore cannot stand in for its sign.
+                let stop_is_bullish = result.price_levels.as_ref().and_then(|price_levels| {
+                    infer_stop_is_bullish(price_levels, result.current_vwap_price)
+                });
 
                 // Create stop level prediction with adverse-specific bin names
                 result = result.with_stop_levels(self.create_stop_level_prediction(
@@ -505,7 +528,7 @@ impl OutputFormatter {
                     horizon,
                     stop_bandwidth,
                     stop_percentiles,
-                    direction_probs_for_stop.as_deref(),
+                    stop_is_bullish,
                 )?);
             }
 
@@ -956,7 +979,7 @@ impl OutputFormatter {
         horizon: &str,
         _bandwidth_size: Option<f64>,
         _percentiles: Option<[f64; 2]>,
-        direction_probabilities: Option<&[f64]>,
+        is_bullish: Option<bool>,
     ) -> Result<crate::output::prediction_types::StopLevelPrediction> {
         if probabilities.len() != NUM_CLASSES {
             return Err(VangaError::PredictionError(format!(
@@ -982,15 +1005,14 @@ impl OutputFormatter {
                 ))
             })?;
 
-            // Use stop_levels reconstruction function, threading direction probabilities
-            // so the reconstruction can pick the correct adverse boundary scheme
-            // (dips for bullish, bounces for bearish) — matching training.
+            // Use the future-level direction estimated by the price-level model so
+            // reconstruction selects the same adverse boundary scheme as training.
             crate::targets::reconstruct_stop_levels(
                 probabilities,
                 sequence_ohlcv,
                 current_price,
                 horizon_params,
-                direction_probabilities,
+                is_bullish,
             )?
         } else {
             return Err(VangaError::ConfigError(

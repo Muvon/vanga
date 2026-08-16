@@ -77,6 +77,10 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use std::collections::HashMap;
 
+pub(super) fn minimum_target_sample_count(counts: &[usize]) -> Option<usize> {
+    counts.iter().copied().min()
+}
+
 /// Perfect balance validation for PreparedTargets
 /// Ensures all 5 classes have exactly the same number of samples for each target type and horizon
 fn validate_prepared_targets_balance(targets: &PreparedTargets, data_name: &str) -> Result<()> {
@@ -352,6 +356,7 @@ impl ModelTrainer {
     /// - "🎯 Using 985 train samples" → Individual LSTMModel training log (correct per-target count)
     pub async fn train(&mut self) -> Result<MultiTargetLSTMModel> {
         log::info!("Starting model training for symbol: {}", self.config.symbol);
+        self.config.validate()?;
 
         // Initialize device from configuration with seed support
         let device_string = self.config.training.device.to_device_string();
@@ -461,14 +466,21 @@ impl ModelTrainer {
                     )
                     .await?;
 
-                // Count actual balanced samples from first target (train + val)
-                let balanced_count = target_windows
+                // The configured count describes the complete balanced dataset before
+                // its train/validation/test split. Use the least-populated enabled
+                // target so reaching the threshold guarantees it for every model.
+                let balanced_counts: Vec<usize> = target_windows
                     .windows_by_target
                     .values()
-                    .next()
-                    .and_then(|windows| windows.first())
-                    .map(|w| w.train_samples + w.val_samples)
-                    .unwrap_or(0);
+                    .filter_map(|windows| windows.first())
+                    .map(|window| window.train_samples + window.val_samples + window.test_samples)
+                    .collect();
+                let balanced_count =
+                    minimum_target_sample_count(&balanced_counts).ok_or_else(|| {
+                        VangaError::DataError(
+                            "Calibration produced no target training windows".to_string(),
+                        )
+                    })?;
 
                 log::info!(
                     "📊 Iteration {} result: {} balanced samples (target: {})",
@@ -776,7 +788,16 @@ impl ModelTrainer {
 
         // COLLECT ALL TRAINED MODELS: Extract final models from HashMap
         log::info!("🔗 Collecting all trained models from window-based training");
-        for ((target_type, horizon), model) in target_models {
+        let mut trained_targets: Vec<_> = target_models.into_iter().collect();
+        trained_targets.sort_by(
+            |((left_target, left_horizon), _), ((right_target, right_horizon), _)| {
+                left_target
+                    .cmp(right_target)
+                    .then_with(|| left_horizon.cmp(right_horizon))
+            },
+        );
+
+        for ((target_type, horizon), model) in trained_targets {
             // Extract the single LSTMModel from the MultiTargetLSTMModel wrapper
             let single_models = model.extract_models()?;
             if single_models.len() != 1 {
@@ -805,6 +826,14 @@ impl ModelTrainer {
             );
         }
 
+        all_horizons.sort_by_key(|horizon| {
+            self.config
+                .horizons
+                .iter()
+                .position(|configured| configured == horizon)
+                .unwrap_or(usize::MAX)
+        });
+
         // COMBINE ALL MODELS: Create final MultiTargetLSTMModel containing ALL trained targets
         // ARCHITECTURE: MultiTargetLSTMModel = wrapper containing Vec<LSTMModel> (one per target)
         if all_target_models.is_empty() {
@@ -820,19 +849,17 @@ impl ModelTrainer {
         );
 
         // CREATE FINAL MODEL: All targets combined, each trained on its own sequences
+        let input_size = all_target_models[0].get_input_size();
         let mut final_model = MultiTargetLSTMModel::from_trained_models(
             all_target_models, // Vec<LSTMModel> - one per target
             all_target_names,  // ["price_level_12h", "direction_12h", "volatility_12h"]
             all_horizons,      // ["12h", "12h", "12h"]
-            target_windows.windows_by_target.values().next().unwrap()[0]
-                .train_data
-                .sequences
-                .shape()[2], // input_size
+            input_size,
             Some(calibrated_params.clone()), // Calibrated parameters for reconstruction
         )?;
 
         // Set complete training config on model before saving
-        final_model.set_training_config(self.config.clone());
+        final_model.set_training_config(final_config);
 
         // CRITICAL: Set calibrated target parameters for consistent prediction reconstruction
         final_model.set_calibrated_parameters(calibrated_params);
@@ -1400,6 +1427,7 @@ pub async fn train_xgboost_only_model(config: TrainingConfig) -> Result<MultiTar
         "🌲 Starting XGBoost-only training for symbol: {}",
         config.symbol
     );
+    config.validate()?;
 
     // Load existing LSTM model - let the load method handle all validation
     let model_path = crate::utils::model_path::get_model_path(&config.symbol);

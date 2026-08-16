@@ -1,5 +1,15 @@
 use ndarray::Array2;
 
+use super::trainer::minimum_target_sample_count;
+
+#[test]
+fn calibration_counts_complete_split_for_least_populated_target() {
+    let target_totals = vec![5000, 5250, 5100];
+
+    assert_eq!(minimum_target_sample_count(&target_totals), Some(5000));
+    assert_eq!(minimum_target_sample_count(&[]), None);
+}
+
 #[test]
 fn test_truncation_respects_validation_split() {
     // Simulate truncation with validation_split = 0.1 (10%)
