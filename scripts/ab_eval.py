@@ -52,10 +52,15 @@ import sys
 from datetime import datetime, timezone
 
 # (label, field, higher_is_better) — what the A/B verdict scores.
+# ponytail: temporary hack — A was trained on the old recency-weighted adverse,
+# B on the new entry-proximity one; make this a CLI flag if the pairing changes.
+STOP_WEIGHT = {"A": "recency", "B": "entry"}
+
 METRICS = (
     ("targ err%", "price_err", False),
     ("stop err%", "stop_err", False),
     ("R multiple", "r_multiple", True),
+    ("maker R", "maker_r", True),
     ("edge vs coin", "edge_r", True),
 )
 
@@ -252,14 +257,19 @@ def exp_weighted_close(bars):
     return num / den
 
 
-def weighted_worst_adverse(bars, bullish, reference):
+def weighted_worst_adverse(bars, bullish, reference, weighting):
     """find_weighted_worst_adverse (stop_levels.rs:441-476): the low (bullish)
-    or high (bearish) that maximises severity x weight, weight = 0.5 + 0.5*r^2.
-    Severity is measured from the sequence's weighted close, not from entry."""
+    or high (bearish) that maximises severity x weight. Severity is measured
+    from the sequence's weighted close, not from entry. The weighting must
+    match what the side's model was TRAINED on, or its accuracy is scored
+    against a claim it never made: 'entry' = 1.0 - 0.5*r^2 (early bars
+    heaviest, wrong-entry protection), 'recency' = 0.5 + 0.5*r^2 (late bars
+    heaviest, the pre-change definition)."""
     worst, best_severity = reference, 0.0
     n = len(bars)
     for i, b in enumerate(bars):
-        w = 0.5 + 0.5 * ((i + 1) / n) ** 2
+        r = ((i + 1) / n) ** 2
+        w = 1.0 - 0.5 * r if weighting == "entry" else 0.5 + 0.5 * r
         price = b["low"] if bullish else b["high"]
         severity = max(0.0, reference - price if bullish else price - reference)
         if severity * w > best_severity:
@@ -301,7 +311,7 @@ def zone_error(reached, near, far):
     return 0.0
 
 
-def measure(pred, entry, path, accel, ref_price):
+def measure(pred, entry, path, accel, ref_price, stop_weight):
     """Score one prediction against the bars that followed it, on two separate
     questions that must not be mixed:
 
@@ -332,7 +342,7 @@ def measure(pred, entry, path, accel, ref_price):
         # (formatter.rs:484-490, bullish when absent), so it must be scored on
         # that side — not on the side our signal rule ended up taking.
         bullish = pred.get("dir_side", 0) >= 0
-        realised = weighted_worst_adverse(path, bullish, ref_price)
+        realised = weighted_worst_adverse(path, bullish, ref_price, stop_weight)
         lo, hi = pred["stop_lo"], pred["stop_hi"]
         m["stop_in_band"] = lo <= realised <= hi
         m["stop_err"] = abs(realised - (lo + hi) / 2.0) / entry * 100.0
@@ -394,13 +404,14 @@ def measure(pred, entry, path, accel, ref_price):
         reward = favour(pred["pl_lo"] if side > 0 else pred["pl_hi"])
         risk = -favour(pred["stop_hi"] if side > 0 else pred["stop_lo"])
 
-        outcome, exit_pct = walk(path, entry, side, reward, risk)
-        m["outcome"] = outcome
-        m["exit_pct"] = exit_pct
-        # risk <= 0 means the stop sat on the profitable side of entry — the
-        # levels contradict the signal, so there is no trade to size.
-        m["bad_geometry"] = risk <= 0
-        if risk > 0:
+        # A placeable bracket needs entry between the exits: stop on the losing
+        # side AND target on the winning side. Anything else the exchange
+        # rejects or fills instantly — there is no trade to win or lose.
+        m["bad_geometry"] = risk <= 0 or reward <= 0
+        if not m["bad_geometry"]:
+            outcome, exit_pct = walk(path, entry, side, reward, risk)
+            m["outcome"] = outcome
+            m["exit_pct"] = exit_pct
             m["r_multiple"] = exit_pct / risk
             m["planned_rr"] = reward / risk
             # No-edge baseline: the SAME bars and the SAME geometry, with the
@@ -413,6 +424,29 @@ def measure(pred, entry, path, accel, ref_price):
             _, flip_pct = walk(path, entry, -side, reward, risk)
             m["baseline_r"] = (exit_pct + flip_pct) / 2.0 / risk
             m["edge_r"] = m["r_multiple"] - m["baseline_r"]
+
+        # MAKER leg — one limit order instead of a market entry: entry at the
+        # adverse zone's near edge, stop past its far edge, same target. It only becomes a trade if price pulls back to touch the
+        # entry; untouched by the horizon end means no position, not a loss.
+        # ponytail: single E1 leg, no qty ladder and no fees — add if this row
+        # starts driving decisions.
+        e = pred["stop_hi"] if side > 0 else pred["stop_lo"]
+        s = pred["stop_lo"] if side > 0 else pred["stop_hi"]
+        t = pred["pl_lo"] if side > 0 else pred["pl_hi"]
+        mk_reward = (t - e) * side / e * 100.0
+        mk_risk = -(s - e) * side / e * 100.0
+        # A pullback limit must sit on the adverse side of live price and still
+        # form a placeable bracket from where it would fill.
+        if (e - entry) * side < 0 and mk_reward > 0 and mk_risk > 0:
+            for i, b in enumerate(path):
+                if b["low"] <= e if side > 0 else b["high"] >= e:
+                    outcome, exit_pct = walk(path[i:], e, side, mk_reward, mk_risk)
+                    m["maker_outcome"] = outcome
+                    m["maker_r"] = exit_pct / mk_risk
+                    m["maker_rr"] = mk_reward / mk_risk
+                    break
+            else:
+                m["maker_outcome"] = "unfilled"
     return m
 
 
@@ -646,11 +680,20 @@ def report(rows, label, vetoed, attempted):
         tally = {o: sum(1 for r in traded if r["outcome"] == o)
                  for o in ("win", "loss", "open")}
         bad = sum(1 for r in signals if r.get("bad_geometry"))
-        print(f"  trade         n={len(traded):<4} win {tally['win']}  loss {tally['loss']}"
+        print(f"  taker         n={len(traded):<4} win {tally['win']}  loss {tally['loss']}"
               f"  open {tally['open']}"
               f"  R {cell(mean(r['r_multiple'] for r in traded))}"
               f"  planned RR {cell(mean(r['planned_rr'] for r in traded))}"
-              + (f"  [{bad} unusable: stop on the wrong side of entry]" if bad else ""))
+              + (f"  [{bad} unusable: target or stop on the wrong side of entry]" if bad else ""))
+        makers = [r for r in signals if "maker_outcome" in r]
+        if makers:
+            filled = [r for r in makers if "maker_r" in r]
+            mt = {o: sum(1 for r in filled if r["maker_outcome"] == o)
+                  for o in ("win", "loss", "open")}
+            print(f"  maker         n={len(makers):<4} filled {len(filled) / len(makers):>6.1%}"
+                  f"  win {mt['win']}  loss {mt['loss']}  open {mt['open']}"
+                  f"  R {cell(mean(r['maker_r'] for r in filled))}"
+                  f"  planned RR {cell(mean(r['maker_rr'] for r in filled))}")
         # Ties are trades where BOTH sides would have won — with RR < 1 the two
         # targets sit inside the two stops, so a whipsaw fills both. The side
         # choice was genuinely worth nothing there, so they carry no evidence.
@@ -710,6 +753,8 @@ def main():
 
     print(f"{symbol}: {len(rows)} bars @ {bar / 3600:g}h, window {args.window}, "
           f"gap {args.gap}, horizons {'/'.join(horizons)}")
+    print(f"stop accuracy axis: A={STOP_WEIGHT['A']}, B={STOP_WEIGHT['B']}"
+          " (each side scored on its own trained definition)")
     print(f"anchors: {len(anchors)} from {fmt_ts(rows[anchors[0]]['ts'])} "
           f"to {fmt_ts(rows[anchors[-1]]['ts'])}")
     for h in horizons:
@@ -782,7 +827,7 @@ def main():
                 # weighted close, not from entry (stop_levels.rs:405).
                 seq = rows[max(0, k - seq_len + 1): k + 1]
                 ref_price = exp_weighted_close(seq) if seq else entry
-                m = measure(pred, entry, path, accel, ref_price)
+                m = measure(pred, entry, path, accel, ref_price, STOP_WEIGHT[side])
                 for key in ("confidence", "dir_conf", "pl_conf"):
                     if key in pred:
                         m[key] = pred[key]
@@ -848,11 +893,47 @@ def main():
                   f" {cell(mean(r['edge_r'] for r in traded), 6)}"
                   f" {wl:>9}")
 
+    # Secondary metric — both horizons at once: the first listed horizon is
+    # primary and drives the trade, any other horizon calling the direct
+    # opposite side vetoes the anchor. Reuses the primary's measures.
+    if len(horizons) > 1:
+        primary = horizons[0]
+        by_ts = {}
+        for r in per_anchor:
+            by_ts.setdefault(r["timestamp"], {})[r["horizon"]] = r
+        print(f"\n{'=' * 72}\nCOMBINED — {primary} primary, other horizons veto on"
+              " direct conflict")
+        for s in ("A", "B"):
+            kept, veto = [], 0
+            for hs in by_ts.values():
+                if primary not in hs:
+                    continue
+                m = hs[primary][s]
+                if not m["signal"]:
+                    continue
+                if any(h != primary and hs[h][s]["signal"] == -m["signal"]
+                       for h in hs):
+                    veto += 1
+                    continue
+                kept.append(m)
+            traded = [r for r in kept if "r_multiple" in r]
+            fills = [r for r in kept if "maker_r" in r]
+            wl = lambda rows, key: (sum(1 for r in rows if r[key] == "win"),
+                                    sum(1 for r in rows if r[key] == "loss"))
+            tw, tl = wl(traded, "outcome") if traded else (0, 0)
+            mw, ml = wl(fills, "maker_outcome") if fills else (0, 0)
+            print(f"  {s}  signals {len(kept):<3} vetoed {veto:<3}"
+                  f" | taker n={len(traded):<3} {tw}/{tl}"
+                  f" R {cell(mean(r['r_multiple'] for r in traded), 6)}"
+                  f" | maker fills={len(fills):<3} {mw}/{ml}"
+                  f" R {cell(mean(r['maker_r'] for r in fills), 6)}")
+
     verdict(measured, horizons)
 
     if args.out:
         cols = ["signal", "outcome", "r_multiple", "baseline_r", "edge_r",
                 "planned_rr", "exit_pct",
+                "maker_outcome", "maker_r", "maker_rr",
                 "price_err", "price_in_band", "stop_err", "stop_in_band",
                 "target_hit", "target_full", "target_reach_pct", "price_bias",
                 "stop_hit", "stop_blown", "adverse_pct", "stop_bias",

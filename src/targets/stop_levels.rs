@@ -12,7 +12,7 @@
 //! 1. Determine expected direction (target vs reference price)
 //! 2. Collect ADVERSE prices from sequence (lows for bullish, highs for bearish)
 //! 3. Build boundaries from SAME adverse price distribution
-//! 4. Find worst adverse price during horizon (weighted by recency)
+//! 4. Find worst adverse price during horizon (weighted by entry proximity)
 //! 5. Classify adverse severity against sequence-derived boundaries
 //! ```
 //!
@@ -410,7 +410,7 @@ pub fn classify_stop_level_with_calibrated_params(
     // 2. Calculate adverse boundaries from sequence
     let boundaries = calculate_adverse_boundaries(sequence_ohlcv, is_bullish, calibrated_params)?;
 
-    // 3. Find worst adverse price in horizon (with exponential weighting for recency)
+    // 3. Find worst adverse price in horizon (weighted toward entry proximity)
     let worst_adverse = find_weighted_worst_adverse(horizon_ohlcv, is_bullish, reference_price);
 
     // 4. Classify using boundaries
@@ -433,11 +433,12 @@ pub fn classify_stop_level_with_calibrated_params(
     Ok((class, strength))
 }
 
-/// Find the worst adverse price in horizon with exponential weighting
+/// Find the worst adverse price in horizon with entry-proximity weighting
 ///
-/// Recent adverse prices are weighted more heavily because:
-/// - Recent drawdowns are more relevant for stop-loss placement
-/// - Early drawdowns that recover are less concerning
+/// Bars closest to entry (start of horizon) are weighted most because:
+/// - A wrong entry shows its adverse immediately, not at horizon end
+/// - An early dip hits the stop before the target can be reached
+/// - Stops protect entries, so the adverse right after entry matters most
 fn find_weighted_worst_adverse(
     horizon_ohlcv: &[MarketDataRow],
     is_bullish: bool,
@@ -452,9 +453,10 @@ fn find_weighted_worst_adverse(
     let mut max_weighted_severity = 0.0;
 
     for (i, candle) in horizon_ohlcv.iter().enumerate() {
-        // Exponential weight: recent candles weighted more (0.5 to 1.0 range)
+        // Entry-proximity weight: first bar = 1.0, last bar ≈ 0.5
+        // Early adverse movements are more dangerous for stop placement
         let position_ratio = (i as f64 + 1.0) / len;
-        let weight = 0.5 + 0.5 * position_ratio.powi(2);
+        let weight = 1.0 - 0.5 * position_ratio.powi(2);
 
         let adverse_price = if is_bullish { candle.low } else { candle.high };
 

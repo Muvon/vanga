@@ -2,3 +2,4 @@
 /examples/*.csv
 /models
 /backtest_results
+/scripts/__pycache__

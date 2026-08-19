@@ -118,21 +118,25 @@ fn test_adverse_direction_awareness() {
 }
 
 #[test]
-fn test_adverse_exponential_weighting() {
-    // Test that recent adverse prices are weighted more heavily
+fn test_adverse_entry_proximity_weighting() {
+    // Test that early adverse prices (closest to entry) are weighted more heavily
     let sequence = create_test_sequence(100.0, 110.0, 10);
 
-    // Both have same worst adverse, but at different positions
-    let horizon_early_adverse = vec![
-        create_candle(105.0, 95.0, 105.0, 100.0), // Early adverse
-        create_candle(100.0, 100.0, 110.0, 110.0),
-        create_candle(110.0, 105.0, 115.0, 115.0),
+    // Reference (exp-weighted sequence close) is ~106.86, boundaries [92.0, 102.4, 105.6, 116.0].
+    // Early dip to 104 (weight ~0.94) vs deeper late dip to 102 (weight 0.5):
+    // entry-proximity weighting picks the early 104 (class 2); recency weighting
+    // would pick the late 102 (class 1).
+    let horizon_early_and_late = vec![
+        create_candle(105.0, 104.0, 108.0, 108.0), // Early adverse (weighted more)
+        create_candle(108.0, 106.0, 109.0, 109.0),
+        create_candle(109.0, 102.0, 110.0, 110.0), // Deeper late adverse (weighted less)
     ];
 
-    let horizon_late_adverse = vec![
-        create_candle(105.0, 105.0, 110.0, 110.0),
-        create_candle(110.0, 105.0, 112.0, 110.0),
-        create_candle(110.0, 95.0, 115.0, 115.0), // Late adverse (weighted more)
+    // Only the late dip to 102: always classified from 102 (class 1)
+    let horizon_late_only = vec![
+        create_candle(107.0, 106.0, 108.0, 108.0),
+        create_candle(108.0, 106.0, 109.0, 109.0),
+        create_candle(109.0, 102.0, 110.0, 110.0),
     ];
 
     let params = StopLevelParams {
@@ -144,16 +148,18 @@ fn test_adverse_exponential_weighting() {
     };
 
     let (class_early, _) =
-        classify_stop_level_with_calibrated_params(&sequence, &horizon_early_adverse, &params)
+        classify_stop_level_with_calibrated_params(&sequence, &horizon_early_and_late, &params)
             .expect("Classification failed");
     let (class_late, _) =
-        classify_stop_level_with_calibrated_params(&sequence, &horizon_late_adverse, &params)
+        classify_stop_level_with_calibrated_params(&sequence, &horizon_late_only, &params)
             .expect("Classification failed");
 
-    // Both have same worst adverse, but late adverse gets more weight
+    // The moderate early dip must outweigh the deeper late dip
     assert!(
-        class_late <= class_early,
-        "Recent adverse movements should be weighted more heavily"
+        class_early > class_late,
+        "Early adverse should outweigh deeper late adverse (got {} vs {})",
+        class_early,
+        class_late
     );
 }
 
