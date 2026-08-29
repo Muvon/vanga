@@ -2,8 +2,9 @@
 name = "vanga"
 version = "0.1.0"
 edition = "2021"
-description = "LSTM-based cryptocurrency forecasting system with automatic feature engineering"
-license = "MIT"
+rust-version = "1.87"
+description = "Multi-target LSTM forecasting for cryptocurrency with trading-aware ordinal loss and adaptive calibration"
+license = "Apache-2.0"
 
 [features]
 default = []
