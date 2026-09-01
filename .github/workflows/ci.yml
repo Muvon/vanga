@@ -23,86 +23,18 @@ jobs:
       # the report on the run page and as an artifact (same as octomind).
       coverage: false
 
-  # Source-based coverage via cargo-llvm-cov (more accurate than tarpaulin).
-  # The TOTAL line + per-file table land on the workflow run's summary page;
-  # lcov.info is uploaded as an artifact for local diffing or a future badge.
+  # Source-based coverage via the shared llvm-cov workflow: run summary,
+  # lcov artifact, and a shields.io badge on the orphan `badges` branch.
   coverage:
     name: Coverage Report
-    runs-on: ubuntu-latest
     permissions:
       contents: write # push the badge JSON to the `badges` branch
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: 1.87.0
-        components: llvm-tools-preview
-
-    - name: Setup protoc
-      uses: arduino/setup-protoc@v3
-      with:
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-llvm-cov
-
-    - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
-      with:
-        cache-on-failure: true
-
-    - name: Generate coverage
-      shell: bash
-      run: |
-        # Run the suite once with instrumentation, then render both formats
-        # from the collected profiles. Test-only files (*_test.rs) are excluded
-        # from the report so percentages describe product code.
-        cargo llvm-cov --no-report --no-default-features
-        cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex '_test\.rs$'
-        {
-          echo '## Coverage'
-          echo '```'
-          cargo llvm-cov report --summary-only --ignore-filename-regex '_test\.rs$' | tail -1
-          echo '```'
-          echo '<details><summary>Per-file coverage</summary>'
-          echo ''
-          echo '```'
-          cargo llvm-cov report --summary-only --ignore-filename-regex '_test\.rs$'
-          echo '```'
-          echo '</details>'
-        } >> "$GITHUB_STEP_SUMMARY"
-
-    - name: Upload lcov artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: coverage-lcov
-        path: lcov.info
-
-    # README badge: shields.io endpoint reads coverage.json from the orphan
-    # `badges` branch (force-pushed, single file, no history). Master pushes
-    # only — PR runs (esp. from forks) have no write access.
-    - name: Publish coverage badge
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        pct=$(cargo llvm-cov report --summary-only --ignore-filename-regex '_test\.rs$' | tail -1 | awk '{print $10}' | tr -d '%')
-        color=$(awk -v p="$pct" 'BEGIN { print (p < 50 ? "e05d44" : p < 65 ? "fe7d37" : p < 80 ? "dfb317" : "4c1") }')
-        badge_dir=$(mktemp -d)
-        printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$pct" "$color" > "$badge_dir/coverage.json"
-        cd "$badge_dir"
-        git init -q -b badges
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add coverage.json
-        git commit -q -m "chore: update coverage badge to ${pct}%"
-        git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+    uses: muvon/ci-workflow/.github/workflows/rust-coverage.yml@master
+    with:
+      toolchain: '1.87.0'
+      feature-flags: '--no-default-features'
+      setup-protoc: true
+      ignore-filename-regex: '_test\.rs$|(^|/)tests/'
 
   brief:
     uses: muvon/ci-workflow/.github/workflows/brief.yml@master

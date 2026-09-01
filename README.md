@@ -3,6 +3,7 @@
 > Multi-target LSTM forecasting for cryptocurrency — trading-aware, calibrated, and real-time.
 
 [![CI](https://github.com/Muvon/vanga/actions/workflows/ci.yml/badge.svg)](https://github.com/Muvon/vanga/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmuvon%2Fvanga%2Fbadges%2Fcoverage.json&style=flat-square)](https://github.com/Muvon/vanga/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
