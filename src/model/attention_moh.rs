@@ -564,7 +564,11 @@ impl MixtureOfHeadAttention {
 
         // Dropout
         let attn_weights = if training && self.config.dropout_rate > 0.0 {
-            ops::dropout(&attn_weights, self.config.dropout_rate as f32)?
+            crate::model::lstm::seeded_weights::SeededTensorUtils::deterministic_dropout(
+                &attn_weights,
+                self.config.dropout_rate as f32,
+                training,
+            )?
         } else {
             attn_weights
         };
@@ -640,7 +644,11 @@ impl MixtureOfHeadAttention {
         // Softmax + dropout (batched)
         let attn_weights = ops::softmax(&masked_scores, D::Minus1)?;
         let attn_weights = if training && self.config.dropout_rate > 0.0 {
-            ops::dropout(&attn_weights, self.config.dropout_rate as f32)?
+            crate::model::lstm::seeded_weights::SeededTensorUtils::deterministic_dropout(
+                &attn_weights,
+                self.config.dropout_rate as f32,
+                training,
+            )?
         } else {
             attn_weights
         };

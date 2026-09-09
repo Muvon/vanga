@@ -58,11 +58,16 @@ impl Default for DiversityConfig {
 /// Advanced diversity-based sequence selector
 pub struct DiversitySelector {
     config: DiversityConfig,
+    seed: u64,
 }
 
 impl DiversitySelector {
     pub fn new(config: DiversityConfig) -> Self {
-        Self { config }
+        Self { config, seed: 42 }
+    }
+
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
     }
 
     /// SENIOR-LEVEL: Fast diversity selection using efficient algorithms
@@ -402,7 +407,9 @@ impl DiversitySelector {
         let remainder = target_count % num_buckets;
 
         let mut selected = Vec::new();
-        let mut rng = rand::rng();
+        let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(
+            self.seed.wrapping_add(0x444956),
+        );
 
         for bucket_idx in 0..num_buckets {
             let start = bucket_idx * bucket_size;

@@ -269,7 +269,7 @@ impl MultiTargetParser {
         }
 
         // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(logits);
+        let probabilities = self.normalize(logits)?;
 
         Ok(DirectionOutput {
             dump_probability: probabilities[0],     // New: Extreme down
@@ -293,7 +293,7 @@ impl MultiTargetParser {
         }
 
         // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(values);
+        let probabilities = self.normalize(values)?;
 
         Ok(VolatilityOutput {
             very_low_probability: probabilities[0],
@@ -317,7 +317,7 @@ impl MultiTargetParser {
         }
 
         // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(values);
+        let probabilities = self.normalize(values)?;
 
         Ok(SentimentOutput {
             very_bearish_probability: probabilities[0],
@@ -341,7 +341,7 @@ impl MultiTargetParser {
         }
 
         // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(values);
+        let probabilities = self.normalize(values)?;
 
         Ok(VolumeOutput {
             very_low_probability: probabilities[0],
@@ -354,13 +354,26 @@ impl MultiTargetParser {
 
     /// Renormalize a probability vector. The predict path already applies softmax
     /// exactly once; softmaxing again here would cap the max class at e/(e+4)≈0.40.
-    fn normalize(&self, values: &ArrayView1<f64>) -> Vec<f64> {
+    fn normalize(&self, values: &ArrayView1<f64>) -> Result<Vec<f64>> {
+        for (index, value) in values.iter().enumerate() {
+            if !value.is_finite() || *value < 0.0 {
+                return Err(VangaError::PredictionError(format!(
+                    "Invalid probability at class {}: {} (expected finite and non-negative)",
+                    index, value
+                )));
+            }
+        }
         let sum: f64 = values.iter().sum();
+        if !sum.is_finite() {
+            return Err(VangaError::PredictionError(
+                "Probability sum is non-finite".to_string(),
+            ));
+        }
         if sum <= 0.0 {
             // Return uniform distribution if sum is zero
-            vec![1.0 / values.len() as f64; values.len()]
+            Ok(vec![1.0 / values.len() as f64; values.len()])
         } else {
-            values.iter().map(|&x| x / sum).collect()
+            Ok(values.iter().map(|&x| x / sum).collect())
         }
     }
 
@@ -376,7 +389,7 @@ impl MultiTargetParser {
         }
 
         // Model output is already softmaxed upstream (predict path); only renormalize
-        Ok(self.normalize(logits))
+        self.normalize(logits)
     }
 }
 

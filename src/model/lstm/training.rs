@@ -139,14 +139,9 @@ pub fn shuffle_indices_deterministic(indices: &mut [usize], seed_components: &[u
 
     let seed = hasher.finish();
 
-    // Fisher-Yates shuffle with linear congruential generator (same as validation)
-    let mut rng_state = seed;
-    for i in (1..indices.len()).rev() {
-        // Linear congruential generator with proven parameters
-        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-        let j = (rng_state as usize) % (i + 1);
-        indices.swap(i, j);
-    }
+    use rand::{seq::SliceRandom, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    indices.shuffle(&mut rng);
 
     seed
 }
@@ -597,6 +592,7 @@ impl LSTMModel {
 
         // Initialize network if not already done (with weight initialization for training)
         if self.lstm_layers.is_none() || self.output_layer.is_none() {
+            self.seed = (config.training.seed != 0).then_some(config.training.seed);
             log::info!("🆕 FRESH TRAINING: Initializing new LSTM network layers and weights");
             self.initialize_network(Some(false))?; // Ensure weight initialization for training
 
@@ -1413,7 +1409,16 @@ impl LSTMModel {
                 // Forward pass (training mode - enable dropout)
                 // CRITICAL: Each batch gets fresh hidden states via seq_init() in forward()
                 // This prevents hidden state contamination between batches
-                let predictions = self.forward(&input_tensor, true)?;
+                let dropout_seed = config
+                    .training
+                    .seed
+                    .wrapping_add(0x44524f50)
+                    .wrapping_add((epoch as u64).wrapping_mul(1_000_003))
+                    .wrapping_add(batch_idx as u64);
+                let predictions =
+                    crate::model::lstm::seeded_weights::with_seeded_rng(dropout_seed, || {
+                        self.forward(&input_tensor, true)
+                    })?;
 
                 // Bias correction is POST-HOC only (calibrated after training completes).
                 // Applying validation-fitted corrections inside the training loss would leak
@@ -1540,10 +1545,10 @@ impl LSTMModel {
                 let mut val_sample_indices: Vec<usize> = (0..val_samples_used).collect();
                 let val_shuffle_seed_components = [
                     epoch as u64,
-                    42u64, // Different base seed for validation
+                    config.training.seed.wrapping_add(0x56414c),
                     val_samples_used as u64,
                 ];
-                let _val_shuffle_seed = shuffle_indices_deterministic(
+                shuffle_indices_deterministic(
                     &mut val_sample_indices,
                     &val_shuffle_seed_components,
                 );
@@ -3067,6 +3072,9 @@ impl LSTMModel {
         // Create XGBoost regressor
         let mut xgb_regressor =
             crate::model::xgboost::XGBoostRegressor::new(xgb_config, self.device.clone());
+        if let Some(backend) = xgb_regressor.get_backend() {
+            backend.set_seed(config.training.seed);
+        }
 
         // Generate validation LSTM features if validation data is available
         let val_lstm_features = if let Some(val_seqs) = val_sequences {

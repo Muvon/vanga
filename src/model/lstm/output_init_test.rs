@@ -247,3 +247,173 @@ fn test_initial_predictions_are_balanced() {
 
     println!("✅ Initial predictions are well-balanced across all classes");
 }
+
+#[test]
+fn seeded_weights_dropout_and_saved_calibration_roundtrip() {
+    use crate::model::lstm::seeded_weights::{with_seeded_rng, SeededTensorUtils};
+    let config = ModelConfig {
+        architecture: LSTMArchitecture::MultiLSTM { layers: 1 },
+        hidden_units: HiddenUnitsConfig::Fixed(vec![8]),
+        sequence_length: crate::config::model::SequenceLengthConfig::Fixed(4),
+        ..Default::default()
+    };
+    let create = |seed| {
+        let mut model =
+            LSTMModel::from_model_config_with_seed(&config, 3, 5, Some(seed), Some(Device::Cpu))
+                .unwrap();
+        model.initialize_network(None).unwrap();
+        model
+    };
+    let mut first = create(91);
+    let second = create(91);
+    let different = create(92);
+    let first_vars = first.varmap.data().lock().unwrap();
+    let second_vars = second.varmap.data().lock().unwrap();
+    let other_vars = different.varmap.data().lock().unwrap();
+    for (name, var) in first_vars.iter() {
+        let values = var.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(
+            values,
+            second_vars[name]
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            "{name}"
+        );
+    }
+    assert_ne!(
+        first_vars["output.weight"]
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap(),
+        other_vars["output.weight"]
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+    );
+    drop(first_vars);
+    drop(second_vars);
+    drop(other_vars);
+    let input =
+        candle_core::Tensor::ones((8, 4, 16), candle_core::DType::F32, &Device::Cpu).unwrap();
+    let dropout = |seed| {
+        with_seeded_rng(seed, || {
+            SeededTensorUtils::variational_dropout(&input, 0.3, true)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        })
+    };
+    assert_eq!(dropout(91), dropout(91));
+    assert_ne!(dropout(91), dropout(92));
+    let mut calibrator = crate::model::calibration::EnsembleCalibrator::new();
+    calibrator.temperature_scaling.temperature = 2.75;
+    calibrator.temperature_scaling.is_optimized = true;
+    calibrator.is_calibrated = true;
+    first.ensemble_calibrator = Some(calibrator);
+    let mut bias = crate::model::bias_correction::LinearBiasCorrector::new(Default::default());
+    bias.class_bias_factors = [0.8, 0.9, 1.0, 1.1, 1.2];
+    bias.is_calibrated = true;
+    first.bias_corrector = Some(bias);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("T_0");
+    first.save(&path).unwrap();
+    let reloaded = LSTMModel::load_with_model_config(&path, &config, 3, 5).unwrap();
+    assert_eq!(
+        reloaded
+            .ensemble_calibrator
+            .as_ref()
+            .unwrap()
+            .temperature_scaling
+            .temperature,
+        2.75
+    );
+    assert!(reloaded.ensemble_calibrator.as_ref().unwrap().is_calibrated);
+    assert_eq!(
+        reloaded.bias_corrector.as_ref().unwrap().class_bias_factors,
+        [0.8, 0.9, 1.0, 1.1, 1.2]
+    );
+    let mut wrapper = crate::model::multi_target::MultiTargetLSTMModel::from_trained_models(
+        vec![first],
+        vec!["price_level_8h".to_string()],
+        vec!["8h".to_string()],
+        3,
+        None,
+    )
+    .unwrap();
+    let names = vec!["close".to_string(), "volume".to_string(), "rsi".to_string()];
+    wrapper.set_feature_names(names.clone()).unwrap();
+    let wrapper_path = dir.path().join("T");
+    wrapper.save(&wrapper_path).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(wrapper_path.with_extension("meta")).unwrap())
+            .unwrap();
+    assert_eq!(saved["feature_names"], serde_json::json!(names));
+    let loaded = crate::model::multi_target::MultiTargetLSTMModel::load(&wrapper_path).unwrap();
+    assert_eq!(loaded.get_feature_names(), Some(names.as_slice()));
+    println!("B3: every initialized CPU variable and dropout mask identical; B5: reloaded temperature=2.75");
+}
+
+#[tokio::test]
+async fn same_seed_training_produces_identical_safetensors() {
+    use crate::config::training::{BatchSizeConfig, DeviceConfig, EpochConfig};
+    let mut config = crate::config::TrainingConfig {
+        horizons: vec!["8h".to_string()],
+        ..Default::default()
+    };
+    config.training.device = DeviceConfig::CPU;
+    config.training.seed = 91;
+    config.training.epochs = EpochConfig::Fixed(1);
+    config.training.batch_size = BatchSizeConfig::Fixed(10);
+    config.training.warmup_epochs = 0;
+    config.training.learning_schedule = None;
+    config.model.architecture = LSTMArchitecture::MultiLSTM { layers: 2 };
+    config.model.hidden_units = HiddenUnitsConfig::Fixed(vec![8, 8]);
+    config.model.sequence_length = crate::config::model::SequenceLengthConfig::Fixed(4);
+    config.model.attention.enabled = false;
+    config.model.xgboost.enabled = false;
+    config.model.bias_correction.enabled = false;
+    config.model.bias_correction.use_ensemble_calibration = false;
+    config.model.dropout.enabled = true;
+    config.model.dropout.variational = true;
+    config.model.dropout.rate = crate::config::model::DropoutRate::Fixed(0.2);
+    let input =
+        ndarray::Array3::from_shape_fn((50, 4, 3), |(i, j, k)| ((i * 7 + j * 3 + k) as f64).sin());
+    let targets = ndarray::Array2::from_shape_fn(
+        (50, 5),
+        |(i, class)| if i % 5 == class { 1.0 } else { 0.0 },
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let mut bytes = Vec::new();
+    for run in 0..2 {
+        let mut model = LSTMModel::from_model_config_with_seed(
+            &config.model,
+            3,
+            5,
+            Some(config.training.seed),
+            Some(Device::Cpu),
+        )
+        .unwrap();
+        model.set_target_context(
+            "price_level_8h".to_string(),
+            crate::targets::TargetType::PriceLevel,
+        );
+        model
+            .train(&input, &targets, &config, Some(&input), Some(&targets))
+            .await
+            .unwrap();
+        let path = directory.path().join(format!("T_{run}"));
+        model.save(&path).unwrap();
+        bytes.push(std::fs::read(path.with_extension("safetensors")).unwrap());
+    }
+    assert_eq!(
+        bytes[0], bytes[1],
+        "same seeded training produced different safetensors"
+    );
+    println!("B3 observable: two one-epoch CPU training runs with dropout produced {} byte-identical safetensors bytes", bytes[0].len());
+}

@@ -17,14 +17,28 @@ pub struct OhlcvData<'a> {
 
 /// Generate comprehensive technical indicators for cryptocurrency data - PARALLELIZED
 pub async fn generate_technical_indicators(
-    mut df: DataFrame,
+    df: DataFrame,
     config: &TechnicalIndicatorsConfig,
 ) -> Result<DataFrame> {
-    log::info!("Generating comprehensive technical indicators with parallel processing...");
+    generate_technical_indicators_with_window(
+        df,
+        config,
+        crate::config::features::default_stats_window_bars(),
+    )
+    .await
+}
 
-    // Detect timeframe for window adjustments
-    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(&df)? as f64;
-    let timeframe_multiplier = timeframe_minutes / 60.0; // Relative to 1h baseline
+pub async fn generate_technical_indicators_with_window(
+    mut df: DataFrame,
+    config: &TechnicalIndicatorsConfig,
+    stats_window_bars: usize,
+) -> Result<DataFrame> {
+    if stats_window_bars == 0 {
+        return Err(VangaError::ConfigError(
+            "features.stats_window_bars must be at least 1, got 0".to_string(),
+        ));
+    }
+    log::info!("Generating comprehensive technical indicators with parallel processing...");
 
     // Extract OHLCV data for calculations - PARALLEL EXTRACTION
     let close_prices = extract_numeric_column(&df, "close")?;
@@ -135,7 +149,9 @@ pub async fn generate_technical_indicators(
     for (name, result) in results.0 {
         match result {
             Ok(updated_df) => {
-                df = updated_df;
+                for column in updated_df.get_columns() {
+                    df.with_column(column.clone())?;
+                }
                 log::debug!("Applied {} indicators", name);
             }
             Err(e) => log::warn!("Failed to apply {} indicators: {}", name, e),
@@ -146,7 +162,9 @@ pub async fn generate_technical_indicators(
     for (name, result) in results.1 {
         match result {
             Ok(updated_df) => {
-                df = updated_df;
+                for column in updated_df.get_columns() {
+                    df.with_column(column.clone())?;
+                }
                 log::debug!("Applied {} indicators", name);
             }
             Err(e) => log::warn!("Failed to apply {} indicators: {}", name, e),
@@ -255,7 +273,7 @@ pub async fn generate_technical_indicators(
             close: &close_prices,
             volume: &volume,
             advanced_config: &config.trend.advanced,
-            timeframe_multiplier,
+            stats_window_bars,
         },
     )?;
 
@@ -669,6 +687,20 @@ fn add_zlema_indicators(
     Ok(df)
 }
 
+fn calculate_ema_after_warmup(data: &[f64], period: usize) -> Result<Vec<f64>> {
+    // Cascaded indicators must not feed leading warmup NaNs into the next EMA.
+    let first = data
+        .iter()
+        .position(|value| value.is_finite())
+        .ok_or_else(|| {
+            VangaError::FeatureError("EMA input contains no finite values".to_string())
+        })?;
+    let ema = calculate_ema_ta(&data[first..], period)?;
+    let mut result = vec![f64::NAN; data.len()];
+    result[first..].copy_from_slice(&ema);
+    Ok(result)
+}
+
 /// Calculate DEMA (Double Exponential Moving Average)
 /// Formula: DEMA = 2 * EMA(n) - EMA(EMA(n))
 fn calculate_dema(prices: &[f64], period: usize) -> Vec<f64> {
@@ -685,7 +717,7 @@ fn calculate_dema(prices: &[f64], period: usize) -> Vec<f64> {
     };
 
     // Calculate EMA of EMA
-    let ema2 = match calculate_ema_ta(&ema1, period) {
+    let ema2 = match calculate_ema_after_warmup(&ema1, period) {
         Ok(ema) => ema,
         Err(_) => return result,
     };
@@ -716,13 +748,13 @@ fn calculate_tema(prices: &[f64], period: usize) -> Vec<f64> {
     };
 
     // Calculate EMA of EMA
-    let ema2 = match calculate_ema_ta(&ema1, period) {
+    let ema2 = match calculate_ema_after_warmup(&ema1, period) {
         Ok(ema) => ema,
         Err(_) => return result,
     };
 
     // Calculate EMA of EMA of EMA
-    let ema3 = match calculate_ema_ta(&ema2, period) {
+    let ema3 = match calculate_ema_after_warmup(&ema2, period) {
         Ok(ema) => ema,
         Err(_) => return result,
     };
@@ -801,7 +833,7 @@ fn calculate_zlema(prices: &[f64], period: usize) -> Vec<f64> {
     }
 
     // Calculate EMA on lag-adjusted data
-    let zlema = match calculate_ema_ta(&ema_data, period) {
+    let zlema = match calculate_ema_after_warmup(&ema_data, period) {
         Ok(ema) => ema,
         Err(_) => return result,
     };
@@ -1316,7 +1348,7 @@ struct CryptoIndicatorParams<'a> {
     close: &'a [f64],
     volume: &'a [f64],
     advanced_config: &'a crate::config::features::AdvancedIndicatorsConfig,
-    timeframe_multiplier: f64,
+    stats_window_bars: usize,
 }
 
 /// Add cryptocurrency-specific indicators
@@ -1331,7 +1363,7 @@ fn add_crypto_specific_indicators(
         close,
         volume,
         advanced_config,
-        timeframe_multiplier,
+        stats_window_bars,
     } = params;
     // Price velocity (rate of change)
     let mut price_velocity = vec![f64::NAN; close.len()];
@@ -1404,7 +1436,7 @@ fn add_crypto_specific_indicators(
             close,
             volume,
             advanced_config.regime_window,
-            timeframe_multiplier,
+            stats_window_bars,
         );
         let clustering_values =
             calculate_volatility_clustering(close, advanced_config.clustering_window);
@@ -1790,7 +1822,7 @@ fn calculate_regime_indicator(
     prices: &[f64],
     volume: &[f64],
     window: usize,
-    _timeframe_multiplier: f64,
+    stats_window_bars: usize,
 ) -> Vec<f64> {
     let mut regime_values = vec![f64::NAN; prices.len()];
 
@@ -1804,42 +1836,8 @@ fn calculate_regime_indicator(
         return regime_values;
     }
 
-    // Calculate historical statistics for adaptive thresholds
     let mut all_volatilities = Vec::new();
     let mut all_trend_strengths = Vec::new();
-
-    for i in window..prices.len() {
-        let price_window = &prices[i - window..i];
-
-        let returns: Vec<f64> = price_window
-            .windows(2)
-            .map(|w| (w[1] / w[0]).ln())
-            .collect();
-
-        if !returns.is_empty() {
-            let volatility = returns.iter().map(|r| r.powi(2)).sum::<f64>() / returns.len() as f64;
-            all_volatilities.push(volatility);
-
-            let price_start = price_window[0];
-            let price_end = price_window[price_window.len() - 1];
-            let price_change = (price_end - price_start) / price_start;
-            all_trend_strengths.push(price_change.abs());
-        }
-    }
-
-    if all_volatilities.is_empty() || all_trend_strengths.is_empty() {
-        log::error!("Failed to calculate regime statistics: no valid returns computed");
-        return regime_values;
-    }
-
-    // Use 75th percentile as threshold (adaptive to market conditions)
-    let mut sorted_vols = all_volatilities.clone();
-    sorted_vols.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let vol_threshold = sorted_vols[(sorted_vols.len() as f64 * 0.75) as usize];
-
-    let mut sorted_trends = all_trend_strengths.clone();
-    sorted_trends.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let trend_threshold = sorted_trends[(sorted_trends.len() as f64 * 0.75) as usize];
 
     for i in window..prices.len() {
         let price_window = &prices[i - window..i];
@@ -1857,6 +1855,11 @@ fn calculate_regime_indicator(
 
         // 1. Volatility regime (high/low volatility)
         let volatility = returns.iter().map(|r| r.powi(2)).sum::<f64>() / returns.len() as f64;
+        all_volatilities.push(volatility);
+        let first = all_volatilities.len().saturating_sub(stats_window_bars);
+        let mut sorted_vols = all_volatilities[first..].to_vec();
+        sorted_vols.sort_by(f64::total_cmp);
+        let vol_threshold = sorted_vols[(sorted_vols.len() as f64 * 0.75) as usize];
         let vol_regime = if volatility > vol_threshold { 1.0 } else { 0.0 };
 
         // 2. Trend regime (trending/ranging)
@@ -1864,6 +1867,10 @@ fn calculate_regime_indicator(
         let price_end = price_window[price_window.len() - 1];
         let price_change = (price_end - price_start) / price_start;
         let trend_strength = price_change.abs();
+        all_trend_strengths.push(trend_strength);
+        let mut sorted_trends = all_trend_strengths[first..].to_vec();
+        sorted_trends.sort_by(f64::total_cmp);
+        let trend_threshold = sorted_trends[(sorted_trends.len() as f64 * 0.75) as usize];
         let trend_regime = if trend_strength > trend_threshold {
             1.0
         } else {

@@ -197,6 +197,12 @@ pub fn parse_horizon_to_steps(horizon: &str, timeframe_minutes: usize) -> Result
         )));
     };
 
+    if timeframe_minutes == 0 || horizon_minutes % timeframe_minutes != 0 {
+        return Err(crate::utils::error::VangaError::DataError(format!(
+            "Horizon {} minutes must be an exact multiple of timeframe {} minutes",
+            horizon_minutes, timeframe_minutes
+        )));
+    }
     let steps = horizon_minutes / timeframe_minutes;
     if steps == 0 {
         return Err(crate::utils::error::VangaError::DataError(format!(
@@ -207,3 +213,7 @@ pub fn parse_horizon_to_steps(horizon: &str, timeframe_minutes: usize) -> Result
 
     Ok(steps)
 }
+
+#[cfg(test)]
+#[path = "parser_test.rs"]
+mod parser_test;

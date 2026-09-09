@@ -130,6 +130,20 @@ pub fn extract_ohlcv_data(df: &DataFrame) -> Result<Vec<MarketDataRow>> {
             i,
         )?;
 
+        for (column, value) in [
+            ("open", open),
+            ("high", high),
+            ("low", low),
+            ("close", close),
+            ("volume", volume),
+        ] {
+            if !value.is_finite() {
+                return Err(crate::utils::error::VangaError::DataError(format!(
+                    "Non-finite {} value at row {}: {}",
+                    column, i, value
+                )));
+            }
+        }
         ohlcv_data.push(MarketDataRow::new(
             timestamp, open, high, low, close, volume,
         ));

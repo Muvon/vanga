@@ -11,7 +11,7 @@ enum ReplacementStrategy {
     Cap,
     /// Replace with median/center value (maximum stability)
     Median,
-    /// Interpolate from surrounding values (now implemented)
+    /// Carry the previous finite value without reading future bars.
     Interpolate,
 }
 
@@ -48,15 +48,18 @@ impl DataPreprocessor {
             ));
         }
 
+        crate::utils::market_data::extract_ohlcv_data(&df)?;
+
         // Apply feature engineering pipeline
         if let Some(features_config) = features_config {
             // STEP 1: Generate technical indicators if enabled (50+ indicators)
             if features_config.technical_indicators.enabled {
                 log::info!("🔧 Generating technical indicators (50+ indicators)...");
                 let initial_columns = df.width();
-                df = crate::features::technical::generate_technical_indicators(
+                df = crate::features::technical::generate_technical_indicators_with_window(
                     df,
                     &features_config.technical_indicators,
+                    features_config.stats_window_bars,
                 )
                 .await?;
                 let final_columns = df.width();
@@ -104,17 +107,15 @@ impl DataPreprocessor {
 
             let original_rows = df.height();
 
-            let processed_df = match config.outlier_handling.method {
-                crate::config::training::OutlierMethod::IQR => {
-                    self.remove_outliers_iqr(df, config.outlier_handling.threshold)?
-                }
-                crate::config::training::OutlierMethod::ZScore => {
-                    self.remove_outliers_zscore(df, config.outlier_handling.threshold)?
-                }
-                crate::config::training::OutlierMethod::ModifiedZScore => {
-                    self.remove_outliers_modified_zscore(df, config.outlier_handling.threshold)?
-                }
-            };
+            let processed_df = self.remove_outliers_causal(
+                df,
+                &config.outlier_handling.method,
+                config.outlier_handling.threshold,
+                features_config.map_or_else(
+                    crate::config::features::default_stats_window_bars,
+                    |features| features.stats_window_bars,
+                ),
+            )?;
 
             let remaining_rows = processed_df.height();
             if remaining_rows == 0 {
@@ -181,17 +182,15 @@ impl DataPreprocessor {
 
             let original_rows = df.height();
 
-            let processed_df = match config.outlier_handling.method {
-                crate::config::training::OutlierMethod::IQR => {
-                    self.remove_outliers_iqr(df, config.outlier_handling.threshold)?
-                }
-                crate::config::training::OutlierMethod::ZScore => {
-                    self.remove_outliers_zscore(df, config.outlier_handling.threshold)?
-                }
-                crate::config::training::OutlierMethod::ModifiedZScore => {
-                    self.remove_outliers_modified_zscore(df, config.outlier_handling.threshold)?
-                }
-            };
+            let processed_df = self.remove_outliers_causal(
+                df,
+                &config.outlier_handling.method,
+                config.outlier_handling.threshold,
+                features_config.map_or_else(
+                    crate::config::features::default_stats_window_bars,
+                    |features| features.stats_window_bars,
+                ),
+            )?;
 
             let remaining_rows = processed_df.height();
             if remaining_rows == 0 {
@@ -582,326 +581,96 @@ impl DataPreprocessor {
         }
     }
 
-    /// Remove outliers using Interquartile Range (IQR) method with time-series preservation
-    fn remove_outliers_iqr(&self, mut df: DataFrame, threshold: f64) -> Result<DataFrame> {
-        log::info!(
-            "Applying IQR outlier handling with time-series preservation, threshold: {}",
-            threshold
-        );
-
-        let original_len = df.height();
-        let mut processed_columns = Vec::new();
-        let mut outlier_stats = Vec::new();
-
-        // Process each column
-        for column_name in df.get_column_names() {
-            if let Ok(series) = df.column(column_name) {
-                if self.should_process_column_for_outliers(column_name)
-                    && series.dtype().is_numeric()
-                {
-                    if let Ok(float_series) = series.f64() {
-                        log::debug!("Processing column '{}' for IQR outliers", column_name);
-
-                        // Calculate IQR statistics
-                        let values: Vec<f64> = float_series
-                            .into_iter()
-                            .filter_map(|v| v.filter(|x| x.is_finite()))
-                            .collect();
-
-                        if values.is_empty() {
-                            log::warn!(
-                                "Column '{}' has no valid values, skipping outlier processing",
-                                column_name
-                            );
-                            processed_columns.push(series.clone().into_column());
-                            continue;
-                        }
-
-                        let mut sorted_values = values.clone();
-                        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-                        let q1 = self.calculate_percentile(&sorted_values, 0.25);
-                        let q3 = self.calculate_percentile(&sorted_values, 0.75);
-                        let iqr = q3 - q1;
-
-                        if iqr == 0.0 {
-                            log::warn!("Column '{}' has zero IQR (constant values), skipping outlier processing", column_name);
-                            processed_columns.push(series.clone().into_column());
-                            continue;
-                        }
-
-                        let lower_bound = q1 - threshold * iqr;
-                        let upper_bound = q3 + threshold * iqr;
-
-                        // Replace outlier values instead of removing rows
-                        let (processed_series, outlier_count) = self.replace_outlier_values_iqr(
-                            float_series,
-                            column_name,
-                            lower_bound,
-                            upper_bound,
-                            q1,
-                            q3,
-                        )?;
-
-                        processed_columns.push(processed_series.into_column());
-
-                        if outlier_count > 0 {
-                            outlier_stats.push(format!(
-                                "{}: {} outliers replaced ({:.1}%), bounds=[{:.4}, {:.4}]",
-                                column_name,
-                                outlier_count,
-                                (outlier_count as f64 / original_len as f64) * 100.0,
-                                lower_bound,
-                                upper_bound
-                            ));
-                        }
-
-                        log::debug!("Column '{}': Q1={:.4}, Q3={:.4}, IQR={:.4}, bounds=[{:.4}, {:.4}], {} outliers replaced",
-                                   column_name, q1, q3, iqr, lower_bound, upper_bound, outlier_count);
-                    } else {
-                        processed_columns.push(series.clone().into_column());
-                    }
-                } else {
-                    // Keep non-numeric columns and protected columns as-is
-                    processed_columns.push(series.clone().into_column());
-                }
-            }
-        }
-
-        // Create new DataFrame with processed columns
-        df = DataFrame::new(processed_columns)?;
-
-        if !outlier_stats.is_empty() {
-            log::info!(
-                "IQR outlier processing completed: {}",
-                outlier_stats.join("; ")
-            );
-        } else {
-            log::info!(
-                "No outliers detected using IQR method with threshold {}",
-                threshold
-            );
-        }
-
-        log::info!(
-            "Time-series integrity preserved: {} rows maintained",
-            df.height()
-        );
-        Ok(df)
-    }
-
-    /// Remove outliers using Z-Score method with time-series preservation
-    fn remove_outliers_zscore(&self, mut df: DataFrame, threshold: f64) -> Result<DataFrame> {
-        log::info!(
-            "Applying Z-Score outlier handling with time-series preservation, threshold: {}",
-            threshold
-        );
-
-        let original_len = df.height();
-        let mut processed_columns = Vec::new();
-        let mut outlier_stats = Vec::new();
-
-        // Process each column
-        for column_name in df.get_column_names() {
-            if let Ok(series) = df.column(column_name) {
-                if self.should_process_column_for_outliers(column_name)
-                    && series.dtype().is_numeric()
-                {
-                    if let Ok(float_series) = series.f64() {
-                        log::debug!("Processing column '{}' for Z-Score outliers", column_name);
-
-                        // Calculate mean and standard deviation
-                        let values: Vec<f64> = float_series
-                            .into_iter()
-                            .filter_map(|v| v.filter(|x| x.is_finite()))
-                            .collect();
-
-                        if values.is_empty() {
-                            log::warn!(
-                                "Column '{}' has no valid values, skipping outlier processing",
-                                column_name
-                            );
-                            processed_columns.push(series.clone().into_column());
-                            continue;
-                        }
-
-                        let mean = values.iter().sum::<f64>() / values.len() as f64;
-                        let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                            / values.len() as f64;
-                        let std_dev = variance.sqrt();
-
-                        if std_dev == 0.0 {
-                            log::warn!("Column '{}' has zero standard deviation (constant values), skipping outlier processing", column_name);
-                            processed_columns.push(series.clone().into_column());
-                            continue;
-                        }
-
-                        // Replace outlier values instead of removing rows
-                        let (processed_series, outlier_count) = self
-                            .replace_outlier_values_zscore(
-                                float_series,
-                                column_name,
-                                mean,
-                                std_dev,
-                                threshold,
-                            )?;
-
-                        processed_columns.push(processed_series.into_column());
-
-                        if outlier_count > 0 {
-                            outlier_stats.push(format!(
-                                "{}: {} outliers replaced ({:.1}%), mean={:.4}, std={:.4}",
-                                column_name,
-                                outlier_count,
-                                (outlier_count as f64 / original_len as f64) * 100.0,
-                                mean,
-                                std_dev
-                            ));
-                        }
-
-                        log::debug!("Column '{}': mean={:.4}, std={:.4}, threshold={:.2}, {} outliers replaced",
-                                   column_name, mean, std_dev, threshold, outlier_count);
-                    } else {
-                        processed_columns.push(series.clone().into_column());
-                    }
-                } else {
-                    // Keep non-numeric columns and protected columns as-is
-                    processed_columns.push(series.clone().into_column());
-                }
-            }
-        }
-
-        // Create new DataFrame with processed columns
-        df = DataFrame::new(processed_columns)?;
-
-        if !outlier_stats.is_empty() {
-            log::info!(
-                "Z-Score outlier processing completed: {}",
-                outlier_stats.join("; ")
-            );
-        } else {
-            log::info!(
-                "No outliers detected using Z-Score method with threshold {}",
-                threshold
-            );
-        }
-
-        log::info!(
-            "Time-series integrity preserved: {} rows maintained",
-            df.height()
-        );
-        Ok(df)
-    }
-
-    /// Remove outliers using Modified Z-Score method with time-series preservation (most robust)
-    fn remove_outliers_modified_zscore(
+    pub(crate) fn remove_outliers_causal(
         &self,
         mut df: DataFrame,
+        method: &crate::config::training::OutlierMethod,
         threshold: f64,
+        window: usize,
     ) -> Result<DataFrame> {
-        log::info!("Applying Modified Z-Score outlier handling with time-series preservation, threshold: {}", threshold);
-
-        let original_len = df.height();
-        let mut processed_columns = Vec::new();
-        let mut outlier_stats = Vec::new();
-
-        // Process each column
-        for column_name in df.get_column_names() {
-            if let Ok(series) = df.column(column_name) {
-                if self.should_process_column_for_outliers(column_name)
-                    && series.dtype().is_numeric()
-                {
-                    if let Ok(float_series) = series.f64() {
-                        log::debug!(
-                            "Processing column '{}' for Modified Z-Score outliers",
-                            column_name
-                        );
-
-                        // Calculate median and MAD (Median Absolute Deviation)
-                        let values: Vec<f64> = float_series
-                            .into_iter()
-                            .filter_map(|v| v.filter(|x| x.is_finite()))
-                            .collect();
-
-                        if values.is_empty() {
-                            log::warn!(
-                                "Column '{}' has no valid values, skipping outlier processing",
-                                column_name
-                            );
-                            processed_columns.push(series.clone().into_column());
-                            continue;
-                        }
-
-                        let mut sorted_values = values.clone();
-                        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        let median = self.calculate_percentile(&sorted_values, 0.5);
-
-                        // Calculate MAD
+        use crate::config::training::OutlierMethod;
+        if window == 0 {
+            return Err(VangaError::ConfigError(
+                "features.stats_window_bars must be at least 1, got 0".to_string(),
+            ));
+        }
+        for name in df.get_column_names_owned() {
+            if !self.should_process_column_for_outliers(&name) {
+                continue;
+            }
+            let column = df.column(&name)?;
+            let Ok(series) = column.f64() else { continue };
+            let values: Vec<Option<f64>> = series.into_iter().collect();
+            let strategy = self.get_replacement_strategy(&name);
+            let mut output = Vec::with_capacity(values.len());
+            let mut previous = None;
+            let mut count = 0;
+            for (index, value) in values.iter().copied().enumerate() {
+                let Some(value) = value.filter(|v| v.is_finite()) else {
+                    output.push(value);
+                    continue;
+                };
+                let start = (index + 1).saturating_sub(window);
+                let mut sorted: Vec<f64> = values[start..=index]
+                    .iter()
+                    .filter_map(|v| v.filter(|v| v.is_finite()))
+                    .collect();
+                sorted.sort_by(f64::total_cmp);
+                let (center, lower, upper, spread) = match method {
+                    OutlierMethod::IQR => {
+                        let q1 = self.calculate_percentile(&sorted, 0.25);
+                        let q3 = self.calculate_percentile(&sorted, 0.75);
+                        let iqr = q3 - q1;
+                        (
+                            (q1 + q3) / 2.0,
+                            q1 - threshold * iqr,
+                            q3 + threshold * iqr,
+                            iqr,
+                        )
+                    }
+                    OutlierMethod::ZScore => {
+                        let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+                        let std = (sorted.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                            / sorted.len() as f64)
+                            .sqrt();
+                        (mean, mean - threshold * std, mean + threshold * std, std)
+                    }
+                    OutlierMethod::ModifiedZScore => {
+                        let median = self.calculate_percentile(&sorted, 0.5);
                         let mut deviations: Vec<f64> =
-                            values.iter().map(|x| (x - median).abs()).collect();
-                        deviations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                            sorted.iter().map(|v| (v - median).abs()).collect();
+                        deviations.sort_by(f64::total_cmp);
                         let mad = self.calculate_percentile(&deviations, 0.5);
-
-                        if mad == 0.0 {
-                            log::warn!("Column '{}' has zero MAD (constant values), skipping outlier processing", column_name);
-                            processed_columns.push(series.clone().into_column());
-                            continue;
+                        let range = threshold * mad / 0.6745;
+                        (median, median - range, median + range, mad)
+                    }
+                };
+                let replacement = if spread > 0.0 && (value < lower || value > upper) {
+                    count += 1;
+                    match strategy {
+                        ReplacementStrategy::Cap => value.clamp(lower, upper),
+                        ReplacementStrategy::Median => center,
+                        ReplacementStrategy::Interpolate => {
+                            previous.unwrap_or_else(|| value.clamp(lower, upper))
                         }
-
-                        // Replace outlier values instead of removing rows
-                        let (processed_series, outlier_count) = self
-                            .replace_outlier_values_modified_zscore(
-                                float_series,
-                                column_name,
-                                median,
-                                mad,
-                                threshold,
-                            )?;
-
-                        processed_columns.push(processed_series.into_column());
-
-                        if outlier_count > 0 {
-                            outlier_stats.push(format!(
-                                "{}: {} outliers replaced ({:.1}%), median={:.4}, MAD={:.4}",
-                                column_name,
-                                outlier_count,
-                                (outlier_count as f64 / original_len as f64) * 100.0,
-                                median,
-                                mad
-                            ));
-                        }
-
-                        log::debug!("Column '{}': median={:.4}, MAD={:.4}, threshold={:.2}, {} outliers replaced",
-                                   column_name, median, mad, threshold, outlier_count);
-                    } else {
-                        processed_columns.push(series.clone().into_column());
                     }
                 } else {
-                    // Keep non-numeric columns and protected columns as-is
-                    processed_columns.push(series.clone().into_column());
-                }
+                    value
+                };
+                output.push(Some(replacement));
+                previous = Some(replacement);
             }
+            if count > 0 {
+                log::info!(
+                    "Causal {:?} outliers: {}: {} replaced, window={} bars",
+                    method,
+                    name,
+                    count,
+                    window
+                );
+            }
+            df.with_column(Series::new(name, output))?;
         }
-
-        // Create new DataFrame with processed columns
-        df = DataFrame::new(processed_columns)?;
-
-        if !outlier_stats.is_empty() {
-            log::info!(
-                "Modified Z-Score outlier processing completed: {}",
-                outlier_stats.join("; ")
-            );
-        } else {
-            log::info!(
-                "No outliers detected using Modified Z-Score method with threshold {}",
-                threshold
-            );
-        }
-
-        log::info!(
-            "Time-series integrity preserved: {} rows maintained",
-            df.height()
-        );
         Ok(df)
     }
 
@@ -925,167 +694,6 @@ impl DataPreprocessor {
             // Process all other columns (volume, indicators, etc.)
             _ => true,
         }
-    }
-
-    /// Replace outlier values using IQR method with column-aware strategies
-    fn replace_outlier_values_iqr(
-        &self,
-        float_series: &polars::chunked_array::ChunkedArray<polars::datatypes::Float64Type>,
-        column_name: &str,
-        lower_bound: f64,
-        upper_bound: f64,
-        q1: f64,
-        q3: f64,
-    ) -> Result<(Series, usize)> {
-        let mut outlier_count = 0;
-        let replacement_strategy = self.get_replacement_strategy(column_name);
-
-        let processed_values: Vec<Option<f64>> = float_series
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                if let Some(v) = value {
-                    if v.is_finite() && (v < lower_bound || v > upper_bound) {
-                        outlier_count += 1;
-                        // Replace outlier with appropriate value based on strategy
-                        let replacement_value = match replacement_strategy {
-                            ReplacementStrategy::Interpolate => self.interpolate_outlier_value(
-                                float_series,
-                                index,
-                                v,
-                                (q1 + q3) / 2.0,
-                            ),
-                            _ => self.get_replacement_value(
-                                v,
-                                &replacement_strategy,
-                                (q1 + q3) / 2.0,
-                                q1,
-                                lower_bound,
-                                upper_bound,
-                            ),
-                        };
-                        Some(replacement_value)
-                    } else {
-                        Some(v)
-                    }
-                } else {
-                    value
-                }
-            })
-            .collect();
-
-        let processed_series = Series::new(column_name.into(), processed_values);
-        Ok((processed_series, outlier_count))
-    }
-
-    /// Replace outlier values using Z-Score method with column-aware strategies
-    fn replace_outlier_values_zscore(
-        &self,
-        float_series: &polars::chunked_array::ChunkedArray<polars::datatypes::Float64Type>,
-        column_name: &str,
-        mean: f64,
-        std_dev: f64,
-        threshold: f64,
-    ) -> Result<(Series, usize)> {
-        let mut outlier_count = 0;
-        let replacement_strategy = self.get_replacement_strategy(column_name);
-
-        let processed_values: Vec<Option<f64>> = float_series
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                if let Some(v) = value {
-                    if v.is_finite() {
-                        let z_score = (v - mean).abs() / std_dev;
-                        if z_score > threshold {
-                            outlier_count += 1;
-                            // Replace outlier with appropriate value based on strategy
-                            let lower_bound = mean - threshold * std_dev;
-                            let upper_bound = mean + threshold * std_dev;
-                            let replacement_value = match replacement_strategy {
-                                ReplacementStrategy::Interpolate => {
-                                    self.interpolate_outlier_value(float_series, index, v, mean)
-                                }
-                                _ => self.get_replacement_value(
-                                    v,
-                                    &replacement_strategy,
-                                    mean,
-                                    mean,
-                                    lower_bound,
-                                    upper_bound,
-                                ),
-                            };
-                            Some(replacement_value)
-                        } else {
-                            Some(v)
-                        }
-                    } else {
-                        Some(v)
-                    }
-                } else {
-                    value
-                }
-            })
-            .collect();
-
-        let processed_series = Series::new(column_name.into(), processed_values);
-        Ok((processed_series, outlier_count))
-    }
-
-    /// Replace outlier values using Modified Z-Score method with column-aware strategies
-    fn replace_outlier_values_modified_zscore(
-        &self,
-        float_series: &polars::chunked_array::ChunkedArray<polars::datatypes::Float64Type>,
-        column_name: &str,
-        median: f64,
-        mad: f64,
-        threshold: f64,
-    ) -> Result<(Series, usize)> {
-        let mut outlier_count = 0;
-        let replacement_strategy = self.get_replacement_strategy(column_name);
-        let scale_factor = 0.6745;
-
-        let processed_values: Vec<Option<f64>> = float_series
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                if let Some(v) = value {
-                    if v.is_finite() {
-                        let modified_z_score = scale_factor * (v - median).abs() / mad;
-                        if modified_z_score > threshold {
-                            outlier_count += 1;
-                            // Replace outlier with appropriate value based on strategy
-                            let bound_range = threshold * mad / scale_factor;
-                            let lower_bound = median - bound_range;
-                            let upper_bound = median + bound_range;
-                            let replacement_value = match replacement_strategy {
-                                ReplacementStrategy::Interpolate => {
-                                    self.interpolate_outlier_value(float_series, index, v, median)
-                                }
-                                _ => self.get_replacement_value(
-                                    v,
-                                    &replacement_strategy,
-                                    median,
-                                    median,
-                                    lower_bound,
-                                    upper_bound,
-                                ),
-                            };
-                            Some(replacement_value)
-                        } else {
-                            Some(v)
-                        }
-                    } else {
-                        Some(v)
-                    }
-                } else {
-                    value
-                }
-            })
-            .collect();
-
-        let processed_series = Series::new(column_name.into(), processed_values);
-        Ok((processed_series, outlier_count))
     }
 
     /// Determine replacement strategy based on column type
@@ -1123,129 +731,6 @@ impl DataPreprocessor {
             strategy
         );
         strategy
-    }
-
-    /// Get replacement value based on strategy and outlier characteristics
-    fn get_replacement_value(
-        &self,
-        outlier_value: f64,
-        strategy: &ReplacementStrategy,
-        center_value: f64,
-        _fallback_center: f64,
-        lower_bound: f64,
-        upper_bound: f64,
-    ) -> f64 {
-        match strategy {
-            ReplacementStrategy::Cap => {
-                // Cap to bounds - preserves direction of outlier but limits magnitude
-                if outlier_value > upper_bound {
-                    upper_bound
-                } else if outlier_value < lower_bound {
-                    lower_bound
-                } else {
-                    outlier_value
-                }
-            }
-            ReplacementStrategy::Median => {
-                // Replace with median/center value for stability
-                center_value
-            }
-            ReplacementStrategy::Interpolate => {
-                // Interpolation now fully implemented with surrounding values
-                log::debug!("Using interpolation strategy for outlier replacement");
-                center_value // This path should not be reached as interpolation is handled in replacement methods
-            }
-        }
-    }
-
-    /// Interpolate outlier value using surrounding valid values
-    fn interpolate_outlier_value(
-        &self,
-        series: &polars::chunked_array::ChunkedArray<polars::datatypes::Float64Type>,
-        outlier_index: usize,
-        outlier_value: f64,
-        fallback_value: f64,
-    ) -> f64 {
-        let series_len = series.len();
-
-        // Handle edge cases
-        if series_len <= 2 {
-            log::debug!("Series too short for interpolation, using fallback value");
-            return fallback_value;
-        }
-
-        // Find previous valid value
-        let mut prev_value = None;
-        let mut prev_index = None;
-        for i in (0..outlier_index).rev() {
-            if let Some(val) = series.get(i) {
-                if val.is_finite() {
-                    prev_value = Some(val);
-                    prev_index = Some(i);
-                    break;
-                }
-            }
-        }
-
-        // Find next valid value
-        let mut next_value = None;
-        let mut next_index = None;
-        for i in (outlier_index + 1)..series_len {
-            if let Some(val) = series.get(i) {
-                if val.is_finite() {
-                    next_value = Some(val);
-                    next_index = Some(i);
-                    break;
-                }
-            }
-        }
-
-        // Perform interpolation based on available surrounding values
-        match (prev_value, next_value, prev_index, next_index) {
-            (Some(prev), Some(next), Some(prev_idx), Some(next_idx)) => {
-                // Linear interpolation between previous and next values
-                let distance_from_prev = (outlier_index - prev_idx) as f64;
-                let total_distance = (next_idx - prev_idx) as f64;
-                let interpolation_ratio = distance_from_prev / total_distance;
-
-                let interpolated = prev + (next - prev) * interpolation_ratio;
-
-                log::debug!(
-                    "Interpolated outlier at index {} (value={:.4}) between prev={:.4} and next={:.4} -> {:.4}",
-                    outlier_index, outlier_value, prev, next, interpolated
-                );
-
-                interpolated
-            }
-            (Some(prev), Some(_), None, _)
-            | (Some(prev), None, _, _)
-            | (Some(prev), Some(_), Some(_), None) => {
-                // Only previous value available or index issues, use previous value
-                log::debug!(
-                    "Using previous value {:.4} for outlier at index {} (no next value or index issues)",
-                    prev, outlier_index
-                );
-                prev
-            }
-            (None, Some(next), _, _) => {
-                // Only next value available, use it
-                log::debug!(
-                    "Using next value {:.4} for outlier at index {} (no previous value)",
-                    next,
-                    outlier_index
-                );
-                next
-            }
-            (None, None, _, _) => {
-                // No surrounding values available, use fallback
-                log::debug!(
-                    "No surrounding values for interpolation at index {}, using fallback {:.4}",
-                    outlier_index,
-                    fallback_value
-                );
-                fallback_value
-            }
-        }
     }
 
     /// Calculate comprehensive statistics for all numeric columns
@@ -2176,124 +1661,5 @@ impl DataPreprocessor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_interpolation_strategy_selection() {
-        let preprocessor = DataPreprocessor;
-
-        // Test that interpolation is selected for price-derived features
-        assert!(matches!(
-            preprocessor.get_replacement_strategy("price_return"),
-            ReplacementStrategy::Interpolate
-        ));
-        assert!(matches!(
-            preprocessor.get_replacement_strategy("momentum_5"),
-            ReplacementStrategy::Interpolate
-        ));
-        assert!(matches!(
-            preprocessor.get_replacement_strategy("volatility_10"),
-            ReplacementStrategy::Interpolate
-        ));
-
-        // Test that median is selected for technical indicators
-        assert!(matches!(
-            preprocessor.get_replacement_strategy("rsi_14"),
-            ReplacementStrategy::Median
-        ));
-        assert!(matches!(
-            preprocessor.get_replacement_strategy("sma_20"),
-            ReplacementStrategy::Median
-        ));
-
-        // Test that cap is selected for volume and other features
-        assert!(matches!(
-            preprocessor.get_replacement_strategy("volume"),
-            ReplacementStrategy::Cap
-        ));
-        assert!(matches!(
-            preprocessor.get_replacement_strategy("some_other_feature"),
-            ReplacementStrategy::Cap
-        ));
-    }
-
-    #[test]
-    fn test_interpolation_logic() {
-        let preprocessor = DataPreprocessor;
-
-        // Create test series: [1.0, 2.0, OUTLIER, 4.0, 5.0]
-        let values = vec![Some(1.0), Some(2.0), Some(100.0), Some(4.0), Some(5.0)];
-        let series = Series::new("test".into(), values)
-            .into_column()
-            .f64()
-            .unwrap()
-            .clone();
-
-        // Test interpolation at index 2 (outlier value 100.0)
-        let interpolated = preprocessor.interpolate_outlier_value(&series, 2, 100.0, 3.0);
-
-        // Should interpolate between 2.0 and 4.0, giving 3.0
-        assert!((interpolated - 3.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_extract_recent_clean_data() {
-        use polars::prelude::*;
-
-        let preprocessor = DataPreprocessor::new();
-
-        // Create test data with NaN in middle but clean at end
-        let data = vec![
-            1.0,
-            2.0,
-            f64::NAN,
-            4.0,
-            5.0,
-            6.0,
-            7.0,
-            8.0,
-            9.0,
-            10.0, // 10 rows
-        ];
-        let df = DataFrame::new(
-            vec![
-                Series::new("price".into(), data),
-                Series::new("volume".into(), vec![100.0; 10]),
-            ]
-            .into_iter()
-            .map(|s| s.into_column())
-            .collect(),
-        )
-        .unwrap();
-
-        // Extract 5 most recent clean rows
-        let result = preprocessor.extract_recent_clean_data(df, 5).unwrap();
-
-        // Should get rows 5-9 (6.0, 7.0, 8.0, 9.0, 10.0)
-        assert_eq!(result.height(), 5);
-        let price_col = result.column("price").unwrap().f64().unwrap();
-        assert_eq!(price_col.get(0).unwrap(), 6.0);
-        assert_eq!(price_col.get(4).unwrap(), 10.0);
-    }
-
-    #[test]
-    fn test_extract_recent_clean_data_insufficient() {
-        use polars::prelude::*;
-
-        let preprocessor = DataPreprocessor::new();
-
-        // Create test data with only 3 rows
-        let df = DataFrame::new(
-            vec![Series::new("price".into(), vec![1.0, 2.0, 3.0])]
-                .into_iter()
-                .map(|s| s.into_column())
-                .collect(),
-        )
-        .unwrap();
-
-        // Try to extract 5 rows - should fail
-        let result = preprocessor.extract_recent_clean_data(df, 5);
-        assert!(result.is_err());
-    }
-}
+#[path = "preprocessor_test.rs"]
+mod preprocessor_test;

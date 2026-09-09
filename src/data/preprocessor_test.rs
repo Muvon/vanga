@@ -1,41 +1,62 @@
-// Tests for data preprocessor module
-use crate::config::training::{DataConfig, MissingDataStrategy};
-use crate::data::preprocessor::{DataPreprocessor, ReplacementStrategy};
+use super::{DataPreprocessor, ReplacementStrategy};
+use crate::config::training::OutlierMethod;
 use polars::prelude::*;
 
-fn make_df_with_missing() -> DataFrame {
-    let ts = Series::new("timestamp".into(), &["2024-01-01T00:00:00Z"]).into_column();
-    let open = Series::new("open".into(), &[Some(42000.0), None]).into_column();
-    let high = Series::new("high".into(), &[42500.0, 42600.0]).into_column();
-    let low = Series::new("low".into(), &[41800.0, 41900.0]).into_column();
-    let close = Series::new("close".into(), &[42300.0, 42400.0]).into_column();
-    let volume = Series::new("volume".into(), &[1000.0, 1200.0]).into_column();
-    DataFrame::new(
-        vec![ts, open, high, low, close, volume]
-            .into_iter()
-            .map(|s| s.into_column())
-            .collect(),
-    )
-    .unwrap()
+#[test]
+fn all_outlier_statistics_and_replacements_are_causal() {
+    let preprocessor = DataPreprocessor::new();
+    let prefix = vec![10.0, 11.0, 9.0, 12.0, 8.0, 10.0, 11.0, 9.0, 1000.0];
+    let mut values = prefix.clone();
+    values.extend([1e9, -1e9, 1e12, -1e12]);
+    for method in [
+        OutlierMethod::IQR,
+        OutlierMethod::ZScore,
+        OutlierMethod::ModifiedZScore,
+    ] {
+        for name in ["volume", "rsi_14", "price_return"] {
+            let a = DataFrame::new(vec![Series::new(name.into(), prefix.clone()).into_column()])
+                .unwrap();
+            let b = DataFrame::new(vec![Series::new(name.into(), values.clone()).into_column()])
+                .unwrap();
+            let a = preprocessor
+                .remove_outliers_causal(a, &method, 1.5, 7)
+                .unwrap();
+            let b = preprocessor
+                .remove_outliers_causal(b, &method, 1.5, 7)
+                .unwrap();
+            let left: Vec<_> = a.column(name).unwrap().f64().unwrap().into_iter().collect();
+            let right: Vec<_> = b
+                .column(name)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .take(prefix.len())
+                .collect();
+            assert_eq!(left, right, "{method:?} {name}");
+            assert!(
+                left[8].unwrap() < 1000.0,
+                "outlier unchanged for {method:?} {name}"
+            );
+            if name == "price_return" {
+                assert_eq!(left[8], Some(9.0));
+            }
+        }
+    }
 }
 
-#[tokio::test]
-async fn process_for_training_forward_fill() {
-    let mut df = make_df_with_missing();
-    let config = DataConfig::default();
-    let pre = DataPreprocessor::new();
-    let df2 = pre.process_for_training(df, &config, None).await.unwrap();
-    assert_eq!(df2.height(), 2);
-    assert!(df2.column("open").unwrap().null_count() == 0);
-}
-
-#[tokio::test]
-async fn process_for_training_drop_missing() {
-    let mut df = make_df_with_missing();
-    let config = DataConfig::default();
-    let pre = DataPreprocessor::new();
-    let df2 = pre.process_for_training(df, &config, None).await.unwrap();
-    assert!(df2.height() < 2); // Should drop the row with missing open
+#[test]
+fn statistics_window_defaults_and_rejects_zero() {
+    let config = crate::config::FeatureConfig::default();
+    assert_eq!(config.stats_window_bars, 720);
+    let mut json = serde_json::to_value(&config).unwrap();
+    json.as_object_mut().unwrap().remove("stats_window_bars");
+    let restored: crate::config::FeatureConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.stats_window_bars, 720);
+    let frame = df!("volume" => [1.0, 2.0]).unwrap();
+    assert!(DataPreprocessor::new()
+        .remove_outliers_causal(frame, &OutlierMethod::IQR, 1.5, 0)
+        .is_err());
 }
 
 #[test]
@@ -78,26 +99,9 @@ fn test_interpolation_strategy_selection() {
 }
 
 #[test]
-fn test_interpolation_logic() {
-    let preprocessor = DataPreprocessor;
-
-    // Create test series: [1.0, 2.0, OUTLIER, 4.0, 5.0]
-    let values = vec![Some(1.0), Some(2.0), Some(100.0), Some(4.0), Some(5.0)];
-    let series = Series::new("test".into(), values)
-        .into_column()
-        .f64()
-        .unwrap()
-        .clone();
-
-    // Test interpolation at index 2 (outlier value 100.0)
-    let interpolated = preprocessor.interpolate_outlier_value(&series, 2, 100.0, 3.0);
-
-    // Should interpolate between 2.0 and 4.0, giving 3.0
-    assert!((interpolated - 3.0).abs() < 0.001);
-}
-
-#[test]
 fn test_extract_recent_clean_data() {
+    use polars::prelude::*;
+
     let preprocessor = DataPreprocessor::new();
 
     // Create test data with NaN in middle but clean at end
@@ -136,6 +140,8 @@ fn test_extract_recent_clean_data() {
 
 #[test]
 fn test_extract_recent_clean_data_insufficient() {
+    use polars::prelude::*;
+
     let preprocessor = DataPreprocessor::new();
 
     // Create test data with only 3 rows

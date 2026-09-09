@@ -859,6 +859,7 @@ impl ModelTrainer {
         )?;
 
         // Set complete training config on model before saving
+        final_model.set_feature_names(target_windows.feature_names.clone())?;
         final_model.set_training_config(final_config);
 
         // CRITICAL: Set calibrated target parameters for consistent prediction reconstruction

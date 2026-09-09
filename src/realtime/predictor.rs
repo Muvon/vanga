@@ -3,12 +3,15 @@
 //! This module provides real-time prediction capabilities for cryptocurrency markets,
 //! integrating with the trained VANGA LSTM models for live forecasting.
 
+use crate::api::predictor::prediction_history_requirements;
 use crate::api::{ModelWrapper, Predictor};
 use crate::config::PredictionConfig;
 use crate::data::structures::MarketDataRow;
 use crate::model::multi_target::MultiTargetLSTMModel;
 use crate::output::PredictionResult;
-use crate::realtime::{CsvStreamer, FileWatcher, OutputFormat, RealtimeConfig};
+use crate::realtime::{
+    CsvStreamer, FileWatcher, OutputFormat, RealtimeConfig, AUTO_FEATURE_WINDOW,
+};
 use crate::utils::error::{Result, VangaError};
 use crate::utils::model_path::get_model_path;
 use std::collections::VecDeque;
@@ -59,7 +62,7 @@ impl StreamingPredictor {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn new(config: RealtimeConfig) -> Result<Self> {
+    pub async fn new(mut config: RealtimeConfig) -> Result<Self> {
         log::info!(
             "Initializing streaming predictor for symbol: {}",
             config.symbol
@@ -77,6 +80,35 @@ impl StreamingPredictor {
         })?;
 
         log::info!("✅ Model loaded successfully for symbol: {}", config.symbol);
+
+        let training_config = model.get_training_config().ok_or_else(|| {
+            VangaError::ModelError(format!(
+                "Model for {} has no saved training config; cannot derive the realtime prediction history requirement",
+                config.symbol
+            ))
+        })?;
+        let (stats_window_bars, sequence_length, required_rows) =
+            prediction_history_requirements(training_config)?;
+        let uses_model_default = config.feature_window == AUTO_FEATURE_WINDOW;
+        if uses_model_default {
+            config.feature_window = required_rows;
+            config.buffer_size = config.buffer_size.max(required_rows);
+        } else if config.feature_window < required_rows {
+            return Err(VangaError::ConfigError(format!(
+                "Realtime feature_window {} is too short: required {}, stats_window_bars {}, sequence_length {}",
+                config.feature_window, required_rows, stats_window_bars, sequence_length
+            )));
+        }
+        if config.buffer_size < config.feature_window {
+            return Err(VangaError::ConfigError(format!(
+                "Realtime buffer_size {} is smaller than feature_window {} (required {}, stats_window_bars {}, sequence_length {})",
+                config.buffer_size,
+                config.feature_window,
+                required_rows,
+                stats_window_bars,
+                sequence_length
+            )));
+        }
 
         // Create predictor configuration for realtime use
         let _prediction_config = PredictionConfig {

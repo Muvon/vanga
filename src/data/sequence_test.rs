@@ -78,3 +78,44 @@ mod tests {
         assert!(res.is_err());
     }
 }
+
+#[tokio::test]
+async fn saved_feature_order_restores_identical_prediction_tensor() {
+    let frame = df!(
+        "timestamp" => vec![1704067200_i64, 1704070800, 1704074400],
+        "open" => vec![10.0, 11.0, 12.0],
+        "high" => vec![12.0, 14.0, 13.0],
+        "low" => vec![9.0, 10.0, 11.0],
+        "close" => vec![11.0, 12.0, 12.5],
+        "volume" => vec![100.0, 140.0, 120.0]
+    )
+    .unwrap();
+    let names = ["open", "high", "low", "close", "volume"].map(str::to_string);
+    let reordered = frame
+        .select(["volume", "close", "timestamp", "low", "high", "open"])
+        .unwrap();
+    let restored = SequenceGenerator::reorder_features(reordered, &names).unwrap();
+    let config = crate::config::ModelConfig {
+        sequence_length: SequenceLengthConfig::Fixed(3),
+        ..Default::default()
+    };
+    let generator = SequenceGenerator::default();
+    let a = generator
+        .generate_prediction_sequences(frame.clone(), "T", &config)
+        .await
+        .unwrap();
+    let b = generator
+        .generate_prediction_sequences(restored, "T", &config)
+        .await
+        .unwrap();
+    assert_eq!(a.sequences, b.sequences);
+    let mut wrong = names.to_vec();
+    wrong[0] = "missing_open".to_string();
+    let error = SequenceGenerator::reorder_features(frame, &wrong)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("missing_open") && error.contains("extra=[\"open\"]"),
+        "{error}"
+    );
+}

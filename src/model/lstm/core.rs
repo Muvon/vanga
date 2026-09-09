@@ -1125,6 +1125,15 @@ impl LSTMModel {
 
         // Create model with provided model configuration (not saved config)
         let mut model = Self::from_model_config(model_config, input_size, output_size)?;
+        let config_path = path.with_extension("config");
+        let data = std::fs::read(&config_path)
+            .map_err(|e| VangaError::IoError(format!("Failed to read config file: {}", e)))?;
+        let saved: ModelState = bincode::deserialize(&data).map_err(|e| {
+            VangaError::SerializationError(format!("Config deserialization failed: {}", e))
+        })?;
+        model.ensemble_calibrator = saved.ensemble_calibrator;
+        model.bias_corrector = saved.bias_corrector;
+        model.calibrated_parameters = saved.calibrated_parameters;
 
         // Initialize network structure FIRST to create tensor placeholders
         // Skip weight initialization since we'll load trained weights from safetensors

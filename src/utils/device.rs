@@ -56,6 +56,10 @@ impl DeviceManager {
                     seed_value
                 );
                 // Handle CPU seeding limitation gracefully (Candle doesn't support CPU seeding)
+                if matches!(device, Device::Cpu) {
+                    log::debug!("CPU initialization and dropout use seeded host sampling");
+                    return Ok(device);
+                }
                 match device.set_seed(seed_value) {
                     Ok(()) => {}
                     Err(e) => {

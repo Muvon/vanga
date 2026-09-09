@@ -17,6 +17,41 @@ impl Default for SequenceGenerator {
 }
 
 impl SequenceGenerator {
+    pub fn reorder_features(df: DataFrame, names: &[String]) -> Result<DataFrame> {
+        let actual: Vec<&str> = df
+            .get_column_names()
+            .into_iter()
+            .map(|name| name.as_str())
+            .filter(|name| *name != "timestamp")
+            .collect();
+        let missing: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !actual.contains(name))
+            .collect();
+        let extra: Vec<&str> = actual
+            .iter()
+            .copied()
+            .filter(|name| !names.iter().any(|expected| expected == name))
+            .collect();
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        if actual.len() != names.len()
+            || !missing.is_empty()
+            || !extra.is_empty()
+            || unique.len() != names.len()
+        {
+            return Err(VangaError::DataError(format!("Feature schema mismatch: expected {} names, got {}; missing={:?}, extra={:?}, unique expected={}", names.len(), actual.len(), missing, extra, unique.len())));
+        }
+        let mut columns = Vec::with_capacity(df.width());
+        if let Ok(timestamp) = df.column("timestamp") {
+            columns.push(timestamp.clone());
+        }
+        for name in names {
+            columns.push(df.column(name)?.clone());
+        }
+        Ok(DataFrame::new(columns)?)
+    }
+
     pub fn new() -> Self {
         Self {}
     }
@@ -251,7 +286,7 @@ impl SequenceGenerator {
     }
 
     // Helper methods for sequence generation
-    fn extract_feature_matrix(
+    pub(crate) fn extract_feature_matrix(
         &self,
         df: &DataFrame,
         feature_columns: &[String],
@@ -415,7 +450,7 @@ impl SequenceGenerator {
     /// Normalize a sequence window using only data within that window
     /// This is the CORRECT approach for time series ML - each sequence is self-contained
     /// 🚀 OPTIMIZED: Parallel column processing for maximum performance
-    fn normalize_sequence_window(&self, window_df: &DataFrame) -> Result<DataFrame> {
+    pub(crate) fn normalize_sequence_window(&self, window_df: &DataFrame) -> Result<DataFrame> {
         let column_names: Vec<String> = window_df
             .get_column_names()
             .iter()

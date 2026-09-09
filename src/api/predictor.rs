@@ -6,6 +6,71 @@ use crate::model::multi_target::MultiTargetLSTMModel;
 use crate::output::{OutputFormatter, PostProcessor, PredictionResult};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
+use std::path::Path;
+
+fn sequence_length_from_training_config(training_config: &crate::config::TrainingConfig) -> usize {
+    match &training_config.model.sequence_length {
+        crate::config::model::SequenceLengthConfig::Fixed(length) => *length as usize,
+        crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
+        crate::config::model::SequenceLengthConfig::Adaptive => 60,
+    }
+}
+
+pub(crate) fn prediction_history_requirements(
+    training_config: &crate::config::TrainingConfig,
+) -> Result<(usize, usize, usize)> {
+    let stats_window_bars = training_config.features.stats_window_bars;
+    let sequence_length = sequence_length_from_training_config(training_config);
+    let required_rows = stats_window_bars
+        .checked_add(sequence_length)
+        .ok_or_else(|| {
+            VangaError::ConfigError(format!(
+                "Prediction history requirement overflow: stats_window_bars {}, sequence_length {}",
+                stats_window_bars, sequence_length
+            ))
+        })?;
+    Ok((stats_window_bars, sequence_length, required_rows))
+}
+
+pub(crate) fn validate_prediction_history(
+    rows_given: usize,
+    training_config: &crate::config::TrainingConfig,
+) -> Result<()> {
+    let (stats_window_bars, sequence_length, required_rows) =
+        prediction_history_requirements(training_config)?;
+    if rows_given < required_rows {
+        return Err(VangaError::DataError(format!(
+            "Insufficient prediction history: rows given {}, required {}, stats_window_bars {}, sequence_length {}",
+            rows_given, required_rows, stats_window_bars, sequence_length
+        )));
+    }
+    Ok(())
+}
+
+fn count_csv_rows(path: &Path) -> Result<usize> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(path)
+        .map_err(|error| {
+            VangaError::DataError(format!(
+                "Failed to open prediction CSV {} before feature generation: {}",
+                path.display(),
+                error
+            ))
+        })?;
+    let mut rows = 0usize;
+    for record in reader.records() {
+        record.map_err(|error| {
+            VangaError::DataError(format!(
+                "Failed to read prediction CSV {} before feature generation: {}",
+                path.display(),
+                error
+            ))
+        })?;
+        rows += 1;
+    }
+    Ok(rows)
+}
 
 /// Unified model wrapper for both single and multi-target models
 pub enum ModelWrapper<'a> {
@@ -30,13 +95,17 @@ impl<'a> ModelWrapper<'a> {
         }
     }
 
+    pub fn get_feature_names(&self) -> Option<&[String]> {
+        match self {
+            Self::Single(_) => None,
+            Self::MultiTarget(model) => model.get_feature_names(),
+        }
+    }
+
     /// Get training configuration if available
     pub fn get_training_config(&self) -> Option<&crate::config::TrainingConfig> {
         match self {
-            ModelWrapper::Single(_model) => {
-                // Single models don't store training config yet
-                None
-            }
+            ModelWrapper::Single(model) => model.get_training_config(),
             ModelWrapper::MultiTarget(model) => model.get_training_config(),
         }
     }
@@ -121,8 +190,17 @@ impl Predictor {
 
         log::info!("📂 Using data file: {}", data_file_path.display());
 
+        let training_config = model.get_training_config().ok_or_else(|| {
+            VangaError::ModelError(
+                "Model has no saved training config; cannot validate prediction history"
+                    .to_string(),
+            )
+        })?;
+        let rows_given = count_csv_rows(&data_file_path)?;
+        validate_prediction_history(rows_given, training_config)?;
+
         // Initialize data pipeline
-        let data_pipeline = DataPipeline::new();
+        let data_pipeline = DataPipeline::new().with_feature_names(model.get_feature_names());
 
         // Load and prepare prediction data
         log::info!("Loading prediction data from: {}", data_file_path.display());
@@ -511,3 +589,7 @@ pub async fn predict(config: PredictionConfig, model: &LSTMModel) -> Result<Vec<
     let predictor = Predictor::new(config);
     predictor.predict(ModelWrapper::Single(model)).await
 }
+
+#[cfg(test)]
+#[path = "predictor_test.rs"]
+mod predictor_test;

@@ -139,6 +139,7 @@ fn test_truncation_before_split_maintains_perfect_balance() {
             &[TargetType::PriceLevel],
             &["1h".to_string()],
             0, // No validation gap for this test
+            1,
         )
         .unwrap();
 

@@ -30,9 +30,12 @@ pub(super) fn infer_stop_is_bullish(
         return None;
     }
 
-    let (weighted_price, probability_sum) = price_levels
-        .bins
-        .values()
+    // Stable summation prevents hash iteration order from flipping a near-flat trade side.
+    let mut bins: Vec<_> = price_levels.bins.iter().collect();
+    bins.sort_by(|a, b| a.0.cmp(b.0));
+    let (weighted_price, probability_sum) = bins
+        .into_iter()
+        .map(|(_, bin)| bin)
         .filter(|bin| {
             bin.probability.is_finite()
                 && bin.probability >= 0.0
@@ -517,19 +520,32 @@ impl OutputFormatter {
                 // future price level relative to the sequence reference. The price
                 // head estimates that same quantity; the direction head estimates
                 // momentum acceleration and therefore cannot stand in for its sign.
-                let stop_is_bullish = result.price_levels.as_ref().and_then(|price_levels| {
-                    infer_stop_is_bullish(price_levels, result.current_vwap_price)
-                });
+                if let Some(price_levels) = result.price_levels.as_ref() {
+                    let stop_is_bullish =
+                        infer_stop_is_bullish(price_levels, result.current_vwap_price).ok_or_else(
+                            || {
+                                VangaError::PredictionError(format!(
+                                    "A valid price-level prediction is required to determine the stop-level trade side for {}",
+                                    horizon
+                                ))
+                            },
+                        )?;
 
-                // Create stop level prediction with adverse-specific bin names
-                result = result.with_stop_levels(self.create_stop_level_prediction(
-                    &stop_level_probs,
-                    current_price,
-                    horizon,
-                    stop_bandwidth,
-                    stop_percentiles,
-                    stop_is_bullish,
-                )?);
+                    // Create stop level prediction with adverse-specific bin names
+                    result = result.with_stop_levels(self.create_stop_level_prediction(
+                        &stop_level_probs,
+                        current_price,
+                        horizon,
+                        stop_bandwidth,
+                        stop_percentiles,
+                        Some(stop_is_bullish),
+                    )?);
+                } else {
+                    log::warn!(
+                        "Skipping stop_level output for horizon {} because the price_level target was not trained",
+                        horizon
+                    );
+                }
             }
 
             if let Some(direction_output) = parsed_output.direction {

@@ -40,11 +40,12 @@ pub enum TrainingContext<'a> {
 /// - This design avoids training PriceLevel models on Direction-specific sequences
 pub struct MultiTargetLSTMModel {
     /// Individual LSTM models, one per target
-    models: Vec<LSTMModel>,
+    pub(crate) models: Vec<LSTMModel>,
     /// Names/descriptions of each target
     target_names: Vec<String>,
     /// Input feature size (shared across all models)
     input_size: usize,
+    feature_names: Option<Vec<String>>,
     /// Number of targets
     num_targets: usize,
     /// Prediction horizons the model was trained on
@@ -60,6 +61,8 @@ pub struct MultiTargetLSTMModel {
 /// Serializable state for multi-target model persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MultiTargetModelState {
+    #[serde(default)]
+    feature_names: Option<Vec<String>>,
     target_names: Vec<String>,
     input_size: usize,
     num_targets: usize,
@@ -327,6 +330,7 @@ impl MultiTargetLSTMModel {
             models,
             target_names,
             input_size,
+            feature_names: None,
             num_targets,
             trained_horizons,
             training_config: None, // Will be set during training
@@ -690,6 +694,7 @@ impl MultiTargetLSTMModel {
         let state = MultiTargetModelState {
             target_names: self.target_names.clone(),
             input_size: self.input_size,
+            feature_names: self.feature_names.clone(),
             num_targets: self.num_targets,
             trained_horizons: Some(self.trained_horizons.clone()),
             training_config: self.training_config.clone(),
@@ -698,9 +703,11 @@ impl MultiTargetLSTMModel {
         };
 
         let metadata_path = base_path.with_extension("meta");
-        let serialized = serde_json::to_string_pretty(&state).map_err(|e| {
-            VangaError::SerializationError(format!("Failed to serialize metadata: {}", e))
-        })?;
+        let serialized = serde_json::to_value(&state)
+            .and_then(|value| serde_json::to_string_pretty(&value))
+            .map_err(|e| {
+                VangaError::SerializationError(format!("Failed to serialize metadata: {}", e))
+            })?;
 
         std::fs::write(&metadata_path, serialized)
             .map_err(|e| VangaError::DataError(format!("Failed to write metadata: {}", e)))?;
@@ -737,6 +744,18 @@ impl MultiTargetLSTMModel {
                 state.num_targets,
                 state.target_names.len()
             )));
+        }
+
+        if let Some(names) = &state.feature_names {
+            if names.len() != state.input_size {
+                return Err(VangaError::SerializationError(format!(
+                    "Feature names count {} does not match input_size {}",
+                    names.len(),
+                    state.input_size
+                )));
+            }
+        } else {
+            log::warn!("⚠️ Model has no feature_names; using count-only feature validation");
         }
 
         // Load individual models
@@ -797,12 +816,29 @@ impl MultiTargetLSTMModel {
             models,
             target_names: state.target_names,
             input_size: state.input_size,
+            feature_names: state.feature_names,
             num_targets: state.num_targets,
             trained_horizons,
             training_config: state.training_config,
             feature_config: state.feature_config,
             calibrated_parameters: state.calibrated_parameters,
         })
+    }
+
+    pub fn set_feature_names(&mut self, names: Vec<String>) -> Result<()> {
+        if names.len() != self.input_size {
+            return Err(VangaError::ModelError(format!(
+                "Feature names count {} does not match input_size {}",
+                names.len(),
+                self.input_size
+            )));
+        }
+        self.feature_names = Some(names);
+        Ok(())
+    }
+
+    pub fn get_feature_names(&self) -> Option<&[String]> {
+        self.feature_names.as_deref()
     }
 
     /// Get target names
@@ -1000,6 +1036,7 @@ impl MultiTargetLSTMModel {
             models,
             target_names,
             input_size,
+            feature_names: None,
             num_targets,
             trained_horizons,
             feature_config: None,

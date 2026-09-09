@@ -1,4 +1,7 @@
 pub mod backtester;
+pub mod evaluator;
+#[cfg(test)]
+mod evaluator_test;
 pub mod predictor;
 pub mod trainer;
 #[cfg(test)]

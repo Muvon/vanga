@@ -408,3 +408,40 @@ async fn test_smartcore_performance() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn random_forest_uses_the_training_seed() {
+    let device = Device::Cpu;
+    let features = Tensor::from_vec(
+        (0..240)
+            .map(|i| ((i * 13) as f32).sin())
+            .collect::<Vec<_>>(),
+        (80, 3),
+        &device,
+    )
+    .unwrap();
+    let targets = Tensor::from_vec(
+        (0..80).map(|i| (i % 5) as f32).collect::<Vec<_>>(),
+        (80, 1),
+        &device,
+    )
+    .unwrap();
+    let directory = tempdir().unwrap();
+    let mut artifacts = Vec::new();
+    for (run, seed) in [91, 91, 92].into_iter().enumerate() {
+        let config = XGBoostConfig {
+            feature_dim: 3,
+            n_estimators: 5,
+            max_depth: 3,
+            ..Default::default()
+        };
+        let mut model = SmartCoreRegressor::new(config, device.clone());
+        model.set_seed(seed);
+        model.train(&features, &targets, None, None).unwrap();
+        let path = directory.path().join(format!("rf_{run}"));
+        model.save_model(path.to_str().unwrap()).unwrap();
+        artifacts.push(std::fs::read(format!("{}.smartcore.model", path.display())).unwrap());
+    }
+    assert_eq!(artifacts[0], artifacts[1]);
+    assert_ne!(artifacts[0], artifacts[2]);
+}

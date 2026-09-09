@@ -46,6 +46,7 @@ pub struct DataPipeline {
     loader: DataLoader,
     preprocessor: DataPreprocessor,
     sequence_generator: SequenceGenerator,
+    feature_names: Option<Vec<String>>,
 }
 
 impl Default for DataPipeline {
@@ -57,10 +58,16 @@ impl Default for DataPipeline {
 impl DataPipeline {
     pub fn new() -> Self {
         Self {
+            feature_names: None,
             loader: DataLoader::new(),
             preprocessor: DataPreprocessor::new(),
             sequence_generator: SequenceGenerator::default(), // Uses no overlap by default
         }
+    }
+
+    pub fn with_feature_names(mut self, names: Option<&[String]>) -> Self {
+        self.feature_names = names.map(<[String]>::to_vec);
+        self
     }
 
     /// Load and preprocess data for training with walk-forward analysis and balanced sampling
@@ -413,7 +420,8 @@ impl DataPipeline {
             min_sequences_per_class: 10,
         };
 
-        let balancer = crate::data::balance::SequenceBalancer::new(balance_config);
+        let mut balancer = crate::data::balance::SequenceBalancer::new(balance_config);
+        balancer.set_seed(config.training.seed);
 
         // STEP 5: Extract target-specific balanced datasets
         // CRITICAL: Each target gets its own optimal balance (no global minimum constraint)
@@ -683,6 +691,19 @@ impl DataPipeline {
                             &[*target_type],
                             std::slice::from_ref(horizon),
                             validation_gap_steps,
+                            config
+                                .horizons
+                                .iter()
+                                .map(|horizon| {
+                                    crate::utils::parser::parse_horizon_to_steps(
+                                        horizon,
+                                        detected_timeframe_minutes,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>>>()?
+                                .into_iter()
+                                .max()
+                                .unwrap_or(0),
                         )?;
 
                     // Extract training indices for this specific target from the balanced dataset
@@ -803,6 +824,7 @@ impl DataPipeline {
                         &train_indices_map,
                         &all_sequences, // Original sequences only
                         augment_config.as_ref(),
+                        config.training.seed,
                     )?;
 
                     // Validation data: NO augmentation (pristine data for proper evaluation)
@@ -811,6 +833,7 @@ impl DataPipeline {
                         &val_indices_map,
                         &all_sequences, // Original sequences only
                         None,           // NO augmentation for validation
+                        config.training.seed,
                     )?;
 
                     // TEST DATA: Use diverse test split from create_diverse_splits
@@ -834,6 +857,7 @@ impl DataPipeline {
                                 &test_indices_map,
                                 &all_sequences, // Original sequences only
                                 None,           // NO augmentation for test data
+                                config.training.seed,
                             )?;
 
                             log::info!(
@@ -1001,6 +1025,7 @@ impl DataPipeline {
         indices_by_target: &HashMap<(crate::targets::TargetType, String), Vec<usize>>,
         all_sequences: &[crate::data::balance::SequenceWithTargets],
         augment_config: Option<&crate::data::augmentation::AugmentationConfig>,
+        seed: u64,
     ) -> Result<PreparedData> {
         // Get unique indices across all targets
         let mut unique_indices: HashSet<usize> = HashSet::new();
@@ -1073,7 +1098,8 @@ impl DataPipeline {
         // CRITICAL: Augmentation is only applied here for training data
         // Augmentation ONLY affects technical indicators, NOT price/volume columns
         let mut augmented_count = 0;
-        let mut rng = rand::rng();
+        let mut rng =
+            <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed.wrapping_add(0x415547));
 
         // Price/volume columns to skip (indices that determine targets)
         // These correspond to: open(0), high(1), low(2), close(3), volume(4) typically
@@ -1334,6 +1360,13 @@ impl DataPipeline {
             self.preprocessor
                 .process_for_prediction(raw_data, symbol, None)
                 .await?
+        };
+
+        let processed_data = if let Some(names) = &self.feature_names {
+            SequenceGenerator::reorder_features(processed_data, names)?
+        } else {
+            log::warn!("⚠️ No saved feature_names; prediction uses count-only feature validation");
+            processed_data
         };
 
         // Generate prediction sequences using model config from training

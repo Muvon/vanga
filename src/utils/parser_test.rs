@@ -1,5 +1,4 @@
 use crate::utils::parser::*;
-use polars::prelude::*;
 
 #[test]
 fn test_detect_timeframe_minutes_1h() {
@@ -134,4 +133,32 @@ fn test_parse_horizon_to_steps_too_small() {
     // Horizon smaller than timeframe should error
     assert!(parse_horizon_to_steps("5m", 60).is_err()); // 5 minutes < 60 minute timeframe
     assert!(parse_horizon_to_steps("30m", 60).is_err()); // 30 minutes < 60 minute timeframe
+}
+
+#[test]
+fn nonintegral_horizon_reports_both_minute_counts() {
+    let error = parse_horizon_to_steps("90m", 60).unwrap_err().to_string();
+    assert!(error.contains("90") && error.contains("60"), "{error}");
+    assert!(parse_horizon_to_steps("1h", 0).is_err());
+}
+
+#[test]
+fn ingestion_rejects_each_nonfinite_ohlcv_column() {
+    for name in ["open", "high", "low", "close", "volume"] {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut frame = df!(
+                "timestamp" => [1704067200_i64, 1704070800],
+                "open" => [10.0, 10.0], "high" => [11.0, 11.0],
+                "low" => [9.0, 9.0], "close" => [10.0, 10.0], "volume" => [100.0, 100.0]
+            )
+            .unwrap();
+            frame
+                .with_column(Series::new(name.into(), [10.0, value]))
+                .unwrap();
+            let error = crate::utils::market_data::extract_ohlcv_data(&frame)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(name) && error.contains("row 1"), "{error}");
+        }
+    }
 }

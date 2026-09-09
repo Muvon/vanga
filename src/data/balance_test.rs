@@ -622,6 +622,7 @@ fn test_validation_gap_enforcement_basic() {
         &[TargetType::PriceLevel],
         &["1h".to_string()],
         150, // 150 steps gap
+        1,
     );
 
     match result {
@@ -725,6 +726,7 @@ fn test_validation_gap_with_overlapping_sequences() {
         &[TargetType::PriceLevel],
         &["1h".to_string()],
         80, // 80 steps gap - significant separation
+        1,
     );
 
     match result {
@@ -824,6 +826,7 @@ fn test_validation_gap_zero_disabled() {
             &[TargetType::PriceLevel],
             &["1h".to_string()],
             0, // No gap enforcement
+            1,
         )
         .expect("Split should succeed");
 
@@ -890,6 +893,7 @@ fn test_validation_gap_edge_case_insufficient_data() {
                 &[TargetType::PriceLevel],
                 &["1h".to_string()],
                 200, // Large gap that might not be satisfiable
+                1,
             );
 
             match split_result {
@@ -962,6 +966,7 @@ fn test_validation_gap_preserves_balance() {
         &[TargetType::PriceLevel],
         &["1h".to_string()],
         200, // 200 steps gap
+        1,
     );
 
     match result {
@@ -1009,4 +1014,161 @@ fn test_validation_gap_preserves_balance() {
             println!("Expected error with large gap: {}", e);
         }
     }
+}
+
+#[test]
+fn chronological_validation_purges_label_horizon_and_rebalances() {
+    use std::collections::HashMap;
+    let sequences: Vec<_> = (0..500)
+        .map(|i| SequenceWithTargets {
+            sequence_idx: i,
+            start_idx: i * 2,
+            end_idx: i * 2 + 30,
+            sequence_data: Array2::zeros((30, 1)),
+            targets: vec![TargetData {
+                target_type: TargetType::PriceLevel,
+                horizon: "8h".to_string(),
+                class: (i % 5) as i32,
+                strength: 0.5,
+            }],
+        })
+        .collect();
+    let key = (TargetType::PriceLevel, "8h".to_string());
+    let dataset = GloballyBalancedDataset {
+        balanced_indices: HashMap::from([(key.clone(), (0..500).collect())]),
+        class_distribution: HashMap::from([(
+            key.clone(),
+            (0..5).map(|class| (class, 100)).collect(),
+        )]),
+        global_min_class_count: 100,
+        total_balanced_samples: 500,
+        overloaded_classes: HashMap::new(),
+    };
+    for test_ratio in [0.0, 0.1] {
+        let (train, val, test) = SequenceBalancer::new(BalanceConfig::default())
+            .create_diverse_splits(
+                &dataset,
+                &sequences,
+                0.2,
+                test_ratio,
+                &[TargetType::PriceLevel],
+                &["8h".to_string()],
+                7,
+                48,
+            )
+            .unwrap();
+        assert_eq!(
+            val[&key]
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            (400..500).collect()
+        );
+        if test_ratio > 0.0 {
+            assert_eq!(
+                test[&key]
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                (350..400).collect()
+            );
+        }
+        let first_val = val[&key]
+            .iter()
+            .map(|idx| sequences[*idx].end_idx - 1)
+            .min()
+            .unwrap();
+        assert!(!train.balanced_indices[&key].is_empty());
+        for idx in &train.balanced_indices[&key] {
+            assert!(sequences[*idx].end_idx - 1 + 48 + 7 < first_val);
+        }
+        assert!(train.class_distribution[&key]
+            .values()
+            .all(|count| *count == train.global_min_class_count));
+        assert_eq!(
+            train.total_balanced_samples,
+            train.balanced_indices[&key].len()
+        );
+        println!(
+            "T2: first val anchor={first_val}, retained train={}",
+            train.total_balanced_samples
+        );
+    }
+}
+
+#[test]
+fn chronological_purge_keeps_exact_gap_and_purges_one_bar_later() {
+    use std::collections::HashMap;
+
+    let sequence_length = 32;
+    let max_horizon = 16;
+    let validation_gap = 12;
+    let horizon = "8h".to_string();
+    let key = (TargetType::PriceLevel, horizon.clone());
+    let mut sequences = Vec::new();
+    let mut kept_boundary_idx = None;
+    let mut purged_boundary_idx = None;
+
+    for class in 0..5 {
+        let anchors = if class == 0 {
+            [971, 972, 1000]
+        } else {
+            [970, 971, 1000 + class as usize]
+        };
+        for anchor in anchors {
+            let sequence_idx = sequences.len();
+            if class == 0 && anchor == 971 {
+                kept_boundary_idx = Some(sequence_idx);
+            }
+            if class == 0 && anchor == 972 {
+                purged_boundary_idx = Some(sequence_idx);
+            }
+            sequences.push(SequenceWithTargets {
+                sequence_idx,
+                start_idx: anchor + 1 - sequence_length,
+                end_idx: anchor + 1,
+                sequence_data: Array2::zeros((sequence_length, 1)),
+                targets: vec![TargetData {
+                    target_type: TargetType::PriceLevel,
+                    horizon: horizon.clone(),
+                    class,
+                    strength: 0.5,
+                }],
+            });
+        }
+    }
+
+    let all_indices: Vec<_> = (0..sequences.len()).collect();
+    let dataset = GloballyBalancedDataset {
+        balanced_indices: HashMap::from([(key.clone(), all_indices)]),
+        class_distribution: HashMap::from([(
+            key.clone(),
+            (0..5).map(|class| (class, 3)).collect(),
+        )]),
+        global_min_class_count: 3,
+        total_balanced_samples: sequences.len(),
+        overloaded_classes: HashMap::new(),
+    };
+
+    let (train, validation, _) = SequenceBalancer::new(BalanceConfig::default())
+        .create_diverse_splits(
+            &dataset,
+            &sequences,
+            0.34,
+            0.0,
+            &[TargetType::PriceLevel],
+            &[horizon],
+            validation_gap,
+            max_horizon,
+        )
+        .unwrap();
+
+    let earliest_validation_anchor = validation[&key]
+        .iter()
+        .map(|idx| sequences[*idx].end_idx - 1)
+        .min()
+        .unwrap();
+    assert_eq!(earliest_validation_anchor, 1000);
+    assert!(train.balanced_indices[&key].contains(&kept_boundary_idx.unwrap()));
+    assert!(!train.balanced_indices[&key].contains(&purged_boundary_idx.unwrap()));
 }

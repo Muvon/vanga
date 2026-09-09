@@ -129,6 +129,7 @@ mod tests {
             &target_types,
             &horizons,
             0, // validation_gap_steps
+            6,
         )?;
 
         let duration = start_time.elapsed();

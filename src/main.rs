@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 use vanga::api;
 use vanga::config::{PredictionConfig, TrainingConfig};
-use vanga::realtime::{start_realtime_prediction, OutputFormat, RealtimeConfig};
+use vanga::realtime::{
+    start_realtime_prediction, OutputFormat, RealtimeConfig, AUTO_FEATURE_WINDOW,
+};
 use vanga::utils::error::{Result, VangaError};
 use vanga::utils::file_discovery;
 
@@ -197,6 +199,36 @@ enum ModelCommands {
         /// Test data path
         #[arg(long)]
         test_data: PathBuf,
+
+        /// First holdout row: fraction of CSV rows or ISO timestamp
+        #[arg(long, required_unless_present = "backtest")]
+        holdout_from: Option<String>,
+
+        /// Feature and evaluation configuration
+        #[arg(long, required_unless_present = "backtest")]
+        config: Option<PathBuf>,
+
+        /// Directory containing saved SYMBOL.meta and model files
+        #[arg(long, default_value = "./models")]
+        models_dir: PathBuf,
+
+        /// Horizons to score (defaults to saved trained horizons)
+        #[arg(long, value_delimiter = ',')]
+        horizons: Option<Vec<String>>,
+
+        #[arg(long, default_value = "000-base")]
+        run_id: String,
+
+        #[arg(long, default_value = "none")]
+        change: String,
+
+        /// Append one summary row per head
+        #[arg(long)]
+        results_csv: Option<PathBuf>,
+
+        /// Detailed deterministic evaluation output
+        #[arg(long, default_value = "eval.json")]
+        eval_json: PathBuf,
 
         /// Enable backtesting mode (train/test split)
         #[arg(long)]
@@ -594,7 +626,7 @@ async fn handle_predict_command(params: PredictParams) -> Result<()> {
             symbol: params.symbol,
             poll_interval: Duration::from_secs(1), // Default 1 second
             buffer_size: 1000,
-            feature_window: 100,
+            feature_window: AUTO_FEATURE_WINDOW,
             output_format: OutputFormat::Json,
             debug: false,
         };
@@ -1067,6 +1099,14 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
             train_split,
             batch,
             symbols,
+            holdout_from,
+            config,
+            models_dir,
+            horizons,
+            run_id,
+            change,
+            results_csv,
+            eval_json,
         } => {
             if backtest {
                 if batch && symbols.is_some() {
@@ -1114,15 +1154,30 @@ async fn handle_model_commands(action: ModelCommands) -> Result<()> {
                         "Symbol is required when not using batch mode".to_string(),
                     ));
                 }
-            } else if symbol.is_some() {
-                // Traditional evaluation (existing placeholder)
-                let symbol = symbol.unwrap();
-                log::info!(
-                    "Evaluating model for symbol: {} with test data: {:?}",
+            } else if let Some(symbol) = symbol {
+                if batch || symbols.is_some() {
+                    return Err(vanga::utils::error::VangaError::config(
+                        "Saved-model evaluation requires one --symbol; batch is for --backtest",
+                    ));
+                }
+                log::info!("📊 Scoring saved model for {}", symbol);
+                vanga::api::evaluator::evaluate(vanga::api::evaluator::EvaluationOptions {
                     symbol,
-                    test_data
-                );
-                log::warn!("Traditional model evaluation not yet implemented - use --backtest flag for comprehensive evaluation");
+                    test_data,
+                    holdout_from: holdout_from.ok_or_else(|| {
+                        vanga::utils::error::VangaError::config("--holdout-from is required")
+                    })?,
+                    config: config.ok_or_else(|| {
+                        vanga::utils::error::VangaError::config("--config is required")
+                    })?,
+                    models_dir,
+                    horizons,
+                    run_id,
+                    change,
+                    results_csv,
+                    eval_json,
+                })
+                .await?;
             } else {
                 log::error!("❌ Symbol is required for evaluation");
                 return Err(vanga::utils::error::VangaError::DataError(

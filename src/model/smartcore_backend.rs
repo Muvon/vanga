@@ -13,13 +13,16 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use smartcore::ensemble::random_forest_classifier::RandomForestClassifier;
+use smartcore::ensemble::random_forest_classifier::{
+    RandomForestClassifier, RandomForestClassifierParameters,
+};
 use smartcore::linalg::basic::arrays::Array;
 use smartcore::linalg::basic::matrix::DenseMatrix;
 use smartcore::tree::decision_tree_classifier::DecisionTreeClassifier;
 
 /// SmartCore-based ML model for hybrid LSTM+ML training
 pub struct SmartCoreRegressor {
+    seed: std::sync::atomic::AtomicU64,
     /// Trained SmartCore model (None if not trained)
     model: Option<RandomForestClassifier<f64, i32, DenseMatrix<f64>, Vec<i32>>>,
 
@@ -60,6 +63,9 @@ impl SmartCoreRegressor {
     /// Create new SmartCore regressor
     pub fn new(config: XGBoostConfig, device: Device) -> Self {
         Self {
+            seed: std::sync::atomic::AtomicU64::new(
+                RandomForestClassifierParameters::default().seed,
+            ),
             model: None,
             decision_tree: None,
             config,
@@ -70,6 +76,10 @@ impl SmartCoreRegressor {
             training_labels: None,
             use_ordinal: false,
         }
+    }
+
+    pub fn set_seed(&self, seed: u64) {
+        self.seed.store(seed, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Update feature dimension to match actual LSTM output
@@ -187,7 +197,8 @@ impl SmartCoreRegressor {
 
         let rf_params = smartcore::ensemble::random_forest_classifier::RandomForestClassifierParameters::default()
             .with_n_trees(self.config.n_estimators as u16)
-            .with_max_depth(self.config.max_depth as u16);
+            .with_max_depth(self.config.max_depth as u16)
+            .with_seed(self.seed.load(std::sync::atomic::Ordering::Relaxed));
 
         // Simulate epoch-like progress for user feedback
         log::info!("🔄 Training Progress:");

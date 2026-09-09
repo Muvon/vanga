@@ -40,6 +40,12 @@ type DiverseSplitsResult = (
     HashMap<(TargetType, String), Vec<usize>>,
 );
 
+struct ChronologicalSplit {
+    train: Vec<usize>,
+    validation: Vec<usize>,
+    test: Vec<usize>,
+}
+
 /// Globally balanced dataset extracted from full available data
 #[derive(Debug, Clone)]
 pub struct GloballyBalancedDataset {
@@ -165,6 +171,7 @@ pub struct BalancedSelection {
 /// Main balancer for sequence selection
 pub struct SequenceBalancer {
     _config: BalanceConfig, // Stored for future use, currently algorithm uses minimum class count
+    seed: u64,
     diversity_selector: DiversitySelector, // NEW: Advanced diversity-based selection
 }
 
@@ -172,8 +179,14 @@ impl SequenceBalancer {
     pub fn new(config: BalanceConfig) -> Self {
         Self {
             _config: config,
+            seed: 42,
             diversity_selector: DiversitySelector::new(DiversityConfig::default()),
         }
+    }
+
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
+        self.diversity_selector.set_seed(seed);
     }
 
     /// Intelligently oversample minority classes using augmentation
@@ -230,7 +243,15 @@ impl SequenceBalancer {
         let mut total_synthetic = 0;
         let mut class_final_counts: HashMap<i32, usize> = HashMap::new();
 
-        for (class, sequences) in &sequences_by_class {
+        let mut next_synthetic_id = all_sequences
+            .iter()
+            .map(|sequence| sequence.sequence_idx)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut ordered_classes: Vec<_> = sequences_by_class.iter().collect();
+        ordered_classes.sort_by_key(|(class, _)| **class);
+        for (class, sequences) in ordered_classes {
             let current_count = sequences.len();
 
             if current_count >= target_count {
@@ -284,9 +305,8 @@ impl SequenceBalancer {
                         sequences,
                         synthetic_to_generate,
                         augment_config,
-                        target_type,
-                        horizon,
                         *class,
+                        &mut next_synthetic_id,
                     )?;
 
                     let synthetic_count = synthetic.len();
@@ -354,6 +374,8 @@ impl SequenceBalancer {
             }
         }
 
+        balanced_sequences.sort_by_key(|sequence| (sequence.start_idx, sequence.sequence_idx));
+
         log::info!(
             "✅ Balanced with augmentation: {} total sequences ({} synthetic, {:.1}% augmented), {} per class",
             balanced_sequences.len(),
@@ -382,18 +404,14 @@ impl SequenceBalancer {
         seed_sequences: &[&SequenceWithTargets],
         count: usize,
         augment_config: &crate::data::augmentation::AugmentationConfig,
-        _target_type: TargetType,
-        _horizon: &str,
         expected_class: i32,
+        next_synthetic_id: &mut usize,
     ) -> Result<Vec<SequenceWithTargets>> {
         use rand::Rng;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        // Global counter for synthetic sequence IDs to prevent collisions
-        static SYNTHETIC_COUNTER: AtomicUsize = AtomicUsize::new(1_000_000);
-
         let mut synthetic_sequences = Vec::new();
-        let mut rng = rand::rng();
+        let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(
+            self.seed.wrapping_add(0x42414c),
+        );
 
         // Identify price/volume columns to skip during augmentation
         let price_volume_cols = identify_price_volume_columns(&seed_sequences[0].sequence_data);
@@ -417,9 +435,10 @@ impl SequenceBalancer {
                 &price_volume_cols,
             );
 
-            // 3. Generate UNIQUE synthetic sequence ID using atomic counter
-            // This prevents collisions across all classes and target/horizon combinations
-            let synthetic_id = SYNTHETIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let synthetic_id = *next_synthetic_id;
+            *next_synthetic_id = next_synthetic_id.checked_add(1).ok_or_else(|| {
+                VangaError::DataError("Synthetic sequence ID overflow".to_string())
+            })?;
 
             let synthetic = SequenceWithTargets {
                 sequence_idx: synthetic_id,
@@ -1071,6 +1090,7 @@ impl SequenceBalancer {
         target_types: &[TargetType],
         horizons: &[String],
         validation_gap_steps: usize,
+        max_horizon_steps: usize,
     ) -> Result<DiverseSplitsResult> {
         log::info!(
             "🎯 DIVERSE SPLITS: Creating diverse train ({:.1}%) / val ({:.1}%) / test ({:.1}%) splits",
@@ -1106,6 +1126,7 @@ impl SequenceBalancer {
                             *target_type,
                             horizon,
                             validation_gap_steps,
+                            max_horizon_steps,
                         )?;
 
                     remaining_training_indices.insert(target_key.clone(), train_indices);
@@ -1124,14 +1145,32 @@ impl SequenceBalancer {
             }
         }
 
-        // Create remaining training dataset
+        let sequence_map: HashMap<_, _> = all_sequences
+            .iter()
+            .map(|sequence| (sequence.sequence_idx, sequence))
+            .collect();
+        let class_distribution: HashMap<_, HashMap<i32, usize>> = remaining_training_indices
+            .iter()
+            .map(|(key, indices)| {
+                let mut counts = HashMap::new();
+                for idx in indices {
+                    if let Some(class) = sequence_map[idx].get_target_class(key.0, &key.1) {
+                        *counts.entry(class).or_insert(0) += 1;
+                    }
+                }
+                (key.clone(), counts)
+            })
+            .collect();
         let remaining_training_dataset = GloballyBalancedDataset {
+            global_min_class_count: class_distribution
+                .values()
+                .flat_map(|counts| counts.values())
+                .copied()
+                .min()
+                .unwrap_or(0),
+            total_balanced_samples: remaining_training_indices.values().map(Vec::len).sum(),
             balanced_indices: remaining_training_indices,
-            class_distribution: balanced_dataset.class_distribution.clone(),
-            global_min_class_count: balanced_dataset.global_min_class_count,
-            total_balanced_samples: balanced_dataset.total_balanced_samples
-                - validation_indices.values().map(|v| v.len()).sum::<usize>()
-                - test_indices.values().map(|v| v.len()).sum::<usize>(),
+            class_distribution,
             overloaded_classes: HashMap::new(),
         };
 
@@ -1151,9 +1190,8 @@ impl SequenceBalancer {
         target_type: TargetType,
         horizon: &str,
         validation_gap_steps: usize,
+        max_horizon_steps: usize,
     ) -> Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
-        let _target_key = (target_type, horizon.to_string());
-
         // Create lookup map from sequence_idx to sequence (handles synthetic sequences)
         let sequence_map: HashMap<usize, &SequenceWithTargets> = all_sequences
             .iter()
@@ -1192,115 +1230,49 @@ impl SequenceBalancer {
         let mut sorted_classes: Vec<_> = class_sequences.into_iter().collect();
         sorted_classes.sort_by_key(|(class, _)| *class);
 
-        // Phase 1: per class, sort temporally and pick val/test with even spacing.
-        // (validation_gap is enforced as a train-vs-val/test PURGE in phase 2, in BAR
-        // units — a stride between val picks in list positions never separated
-        // validation from its adjacent training sequences)
-        let mut drafts: Vec<(i32, Vec<usize>, Vec<usize>, Vec<usize>)> = Vec::new();
-        for (class, class_indices) in sorted_classes {
-            let class_size = class_indices.len();
-
-            // Trim to min_class_size if this class has more
-            let indices_to_use = if class_size > min_class_size {
-                log::debug!(
-                    "   Class {}: trimming {} → {} for perfect balance",
-                    class,
-                    class_size,
-                    min_class_size
-                );
-                &class_indices[..min_class_size]
-            } else {
-                &class_indices[..]
-            };
-
-            let mut temporal: Vec<(usize, usize)> = Vec::with_capacity(indices_to_use.len());
-            for &idx in indices_to_use {
-                let seq = sequence_map.get(&idx).ok_or_else(|| {
-                    VangaError::DataError(format!("Missing sequence {} in map", idx))
-                })?;
-                temporal.push((idx, seq.start_idx));
-            }
-            temporal.sort_by_key(|(_, start_idx)| *start_idx);
-            let sorted: Vec<usize> = temporal.into_iter().map(|(idx, _)| idx).collect();
-
-            let val = Self::select_evenly_spaced(&sorted, val_size_per_class);
-            let after_val: Vec<usize> = sorted
-                .iter()
-                .filter(|idx| !val.contains(idx))
-                .copied()
-                .collect();
-            let test = Self::select_evenly_spaced(&after_val, test_size_per_class);
-
-            log::debug!(
-                "   Class {}: {} total → {} val, {} test selected",
-                class,
-                sorted.len(),
-                val.len(),
-                test.len()
-            );
-
-            drafts.push((class, sorted, val, test));
+        let mut drafts = Vec::new();
+        for (_, mut sorted) in sorted_classes {
+            sorted.sort_by_key(|idx| (sequence_map[idx].end_idx, *idx));
+            let val_start = sorted.len() - val_size_per_class;
+            let test_start = val_start - test_size_per_class;
+            let val = sorted[val_start..].to_vec();
+            let test = sorted[test_start..val_start].to_vec();
+            let train = sorted[..test_start].to_vec();
+            drafts.push(ChronologicalSplit {
+                train,
+                validation: val,
+                test,
+            });
         }
 
-        // Anchors for the purge: every val/test sequence across ALL classes
-        let mut anchors: Vec<(usize, usize)> = Vec::new();
-        for (_, _, val, test) in &drafts {
-            for idx in val.iter().chain(test.iter()) {
-                let seq = sequence_map.get(idx).ok_or_else(|| {
-                    VangaError::DataError(format!("Missing sequence {} in map", idx))
-                })?;
-                anchors.push((seq.start_idx, seq.end_idx));
-            }
-        }
-
-        // Phase 2: purge training candidates within validation_gap_steps BARS of any
-        // val/test sequence. BEST-EFFORT: with interleaved validation the anchors can
-        // cover the whole timeline and empty the pool — in that case the purge is
-        // skipped for that class (old behavior) instead of starving training.
+        // Anchors are the final input bar; the label reaches max_horizon_steps beyond it.
+        let first_val_anchor = drafts
+            .iter()
+            .flat_map(|split| &split.validation)
+            .map(|idx| sequence_map[idx].end_idx - 1)
+            .min();
+        let mut removed = 0;
         let mut train_pools: Vec<Vec<usize>> = Vec::new();
-        for (class, sorted, val, test) in &drafts {
-            let unpurged: Vec<usize> = sorted
+        for split in &drafts {
+            let train = &split.train;
+            let pool: Vec<usize> = train
                 .iter()
-                .filter(|idx| !val.contains(idx) && !test.contains(idx))
                 .copied()
-                .collect();
-
-            let pool = if validation_gap_steps == 0 {
-                unpurged
-            } else {
-                let purged: Vec<usize> = unpurged
-                    .iter()
-                    .filter(|idx| {
-                        let seq = match sequence_map.get(*idx) {
-                            Some(seq) => seq,
-                            None => return false,
-                        };
-                        !anchors.iter().any(|&(a_start, a_end)| {
-                            let gap = if seq.start_idx >= a_end {
-                                seq.start_idx - a_end
-                            } else {
-                                a_start.saturating_sub(seq.end_idx)
-                            };
-                            gap < validation_gap_steps
-                        })
+                .filter(|idx| {
+                    first_val_anchor.is_none_or(|first| {
+                        let sequence = sequence_map[idx];
+                        (sequence.end_idx - 1)
+                            .saturating_add(max_horizon_steps)
+                            .saturating_add(validation_gap_steps)
+                            < first
                     })
-                    .copied()
-                    .collect();
-
-                if purged.len() >= train_size_per_class {
-                    purged
-                } else {
-                    log::warn!(
-                        "🔒 Class {}: validation-gap purge would leave {}/{} train samples — purge SKIPPED for this class (val/test anchors too dense for gap={} bars)",
-                        class,
-                        purged.len(),
-                        train_size_per_class,
-                        validation_gap_steps
-                    );
-                    unpurged
-                }
-            };
+                })
+                .collect();
+            removed += train.len() - pool.len();
             train_pools.push(pool);
+        }
+        if let Some(first) = first_val_anchor {
+            log::info!("🔒 Chronological validation starts at anchor index {}: purged {} train sequences (horizon={} bars, gap={} bars)", first, removed, max_horizon_steps, validation_gap_steps);
         }
 
         // Phase 3: common train size across classes preserves perfect balance after purging
@@ -1310,6 +1282,9 @@ impl SequenceBalancer {
             .min()
             .unwrap_or(0)
             .min(train_size_per_class);
+        if common_train == 0 {
+            return Err(VangaError::DataError(format!("Chronological purge leaves 0 training samples per class; at least 1 required (horizon={} bars, gap={} bars)", max_horizon_steps, validation_gap_steps)));
+        }
         if common_train < train_size_per_class {
             log::warn!(
                 "🔒 Validation-gap purge reduced train size: {} → {} per class (gap={} bars)",
@@ -1322,10 +1297,10 @@ impl SequenceBalancer {
         let mut train_indices = Vec::new();
         let mut val_indices = Vec::new();
         let mut test_indices = Vec::new();
-        for ((_, _, val, test), pool) in drafts.iter().zip(train_pools.iter()) {
+        for (split, pool) in drafts.iter().zip(train_pools.iter()) {
             train_indices.extend(Self::select_evenly_spaced(pool, common_train));
-            val_indices.extend(val.iter().copied());
-            test_indices.extend(test.iter().copied());
+            val_indices.extend(split.validation.iter().copied());
+            test_indices.extend(split.test.iter().copied());
         }
 
         Ok((train_indices, val_indices, test_indices))

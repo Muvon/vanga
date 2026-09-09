@@ -405,3 +405,56 @@ fn test_max_synthetic_ratio_concept() {
         "Total should be 30, not 105"
     );
 }
+
+#[test]
+fn minority_augmentation_repeats_data_and_ids_for_the_same_seed() {
+    let sequences: Vec<_> = (0..23)
+        .map(|index| SequenceWithTargets {
+            sequence_idx: index,
+            start_idx: index * 2,
+            end_idx: index * 2 + 10,
+            sequence_data: Array2::from_shape_fn((10, 6), |(row, column)| {
+                (index + row + column + 1) as f64
+            }),
+            targets: vec![TargetData {
+                target_type: TargetType::PriceLevel,
+                horizon: "8h".to_string(),
+                class: if index < 3 {
+                    0
+                } else {
+                    ((index - 3) / 5 + 1) as i32
+                },
+                strength: 0.5,
+            }],
+        })
+        .collect();
+    let run = |seed| {
+        let mut balancer = SequenceBalancer::new(BalanceConfig::default());
+        balancer.set_seed(seed);
+        balancer
+            .balance_with_minority_augmentation(
+                &sequences,
+                TargetType::PriceLevel,
+                "8h",
+                &Default::default(),
+                0.5,
+                1.0,
+            )
+            .unwrap()
+    };
+    let first = run(91);
+    let second = run(91);
+    let different = run(92);
+    assert_eq!(first.len(), 25);
+    let ids: std::collections::HashSet<_> =
+        first.iter().map(|sequence| sequence.sequence_idx).collect();
+    assert_eq!(ids.len(), 25);
+    for (left, right) in first.iter().zip(second.iter()) {
+        assert_eq!(left.sequence_idx, right.sequence_idx);
+        assert_eq!(left.sequence_data, right.sequence_data);
+    }
+    assert!(first
+        .iter()
+        .zip(different.iter())
+        .any(|(left, right)| left.sequence_data != right.sequence_data));
+}

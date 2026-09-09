@@ -5,6 +5,81 @@
 
 use candle_core::{DType, Device, Result, Tensor, Var};
 
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use std::cell::RefCell;
+
+thread_local! {
+    static SCOPED_RNG: RefCell<Option<StdRng>> = const { RefCell::new(None) };
+}
+
+pub fn with_seeded_rng<T>(seed: u64, operation: impl FnOnce() -> T) -> T {
+    struct Restore(Option<StdRng>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCOPED_RNG.with(|rng| {
+                rng.replace(self.0.take());
+            });
+        }
+    }
+    // The scope is synchronous, so no async task can consume another task's stream.
+    let restore = Restore(SCOPED_RNG.with(|rng| rng.replace(Some(StdRng::seed_from_u64(seed)))));
+    let result = operation();
+    drop(restore);
+    result
+}
+
+fn random_tensor(
+    shape: impl Into<candle_core::Shape>,
+    device: &Device,
+    normal: bool,
+    center: f32,
+    scale: f32,
+) -> Result<Tensor> {
+    let shape = shape.into();
+    let values = SCOPED_RNG.with(|state| {
+        let mut state = state.borrow_mut();
+        state.as_mut().map(|rng| {
+            (0..shape.elem_count())
+                .map(|_| {
+                    if normal {
+                        let radius = (-2.0 * (1.0 - rng.random::<f64>()).ln()).sqrt();
+                        let angle = std::f64::consts::TAU * rng.random::<f64>();
+                        center + scale * (radius * angle.cos()) as f32
+                    } else {
+                        rng.random_range(center..scale)
+                    }
+                })
+                .collect::<Vec<f32>>()
+        })
+    });
+    if let Some(values) = values {
+        Tensor::from_vec(values, shape, device)
+    } else if normal {
+        Tensor::randn(center, scale, shape, device)
+    } else {
+        Tensor::rand(center, scale, shape, device)
+    }
+}
+
+fn normal_tensor(
+    mean: f32,
+    std: f32,
+    shape: impl Into<candle_core::Shape>,
+    device: &Device,
+) -> Result<Tensor> {
+    random_tensor(shape, device, true, mean, std)
+}
+
+fn uniform_tensor(
+    low: f32,
+    high: f32,
+    shape: impl Into<candle_core::Shape>,
+    device: &Device,
+) -> Result<Tensor> {
+    random_tensor(shape, device, false, low, high)
+}
+
 /// Gram-Schmidt orthogonalization process for creating orthogonal matrices
 ///
 /// This is used for LSTM recurrent weight initialization to prevent
@@ -56,7 +131,7 @@ fn gram_schmidt_orthogonalization(matrix: &Tensor) -> Result<Tensor> {
         } else {
             // If vector becomes zero, use a random unit vector
             orthogonal_col =
-                Tensor::randn(0.0, 1.0, &[rows, 1], device)?.to_dtype(candle_core::DType::F64)?;
+                normal_tensor(0.0, 1.0, &[rows, 1], device)?.to_dtype(candle_core::DType::F64)?;
             let norm = (orthogonal_col.mul(&orthogonal_col)?)
                 .sum_all()?
                 .to_scalar::<f64>()?
@@ -89,7 +164,7 @@ impl SeededTensorUtils {
         let std_dev = (2.0 / (fan_in + fan_out) as f64).sqrt();
 
         // Use Candle's native randn with device seed for reproducibility
-        let tensor = Tensor::randn(0.0, std_dev as f32, shape, device)?;
+        let tensor = normal_tensor(0.0, std_dev as f32, shape, device)?;
         tensor.to_dtype(dtype)
     }
 
@@ -117,7 +192,7 @@ impl SeededTensorUtils {
         };
 
         // Generate random matrix with device seed
-        let random_matrix = Tensor::randn(0.0, 1.0, &[m, n], device)?;
+        let random_matrix = normal_tensor(0.0, 1.0, &[m, n], device)?;
 
         // Perform QR decomposition to get orthogonal matrix
         // Since Candle doesn't have built-in QR, we'll use Gram-Schmidt process
@@ -150,7 +225,7 @@ impl SeededTensorUtils {
         let std_dev = (2.0 / fan_in as f64).sqrt();
 
         // Use Candle's native randn with device seed for reproducibility
-        let tensor = Tensor::randn(0.0, std_dev as f32, shape, device)?;
+        let tensor = normal_tensor(0.0, std_dev as f32, shape, device)?;
         tensor.to_dtype(dtype)
     }
 
@@ -165,7 +240,7 @@ impl SeededTensorUtils {
         dtype: DType,
     ) -> Result<Tensor> {
         // Use Candle's native randn with device seed for reproducibility
-        let tensor = Tensor::randn(mean as f32, std as f32, shape, device)?;
+        let tensor = normal_tensor(mean as f32, std as f32, shape, device)?;
         tensor.to_dtype(dtype)
     }
 
@@ -207,7 +282,7 @@ impl SeededTensorUtils {
 
         // Create random tensor using device's current seed state
         // This will be deterministic if device seed was set
-        let random_tensor = Tensor::rand(0.0, 1.0, shape, device)?;
+        let random_tensor = uniform_tensor(0.0, 1.0, shape, device)?;
 
         // Create dropout mask: keep values where random > dropout_rate
         let keep_mask = random_tensor.gt(dropout_rate)?;
@@ -249,13 +324,13 @@ impl SeededTensorUtils {
         // For [batch, seq_len, features]: sample the mask over (batch, features)
         // and broadcast across the time axis; otherwise mask the full shape
         let mask = if dims.len() == 3 {
-            let random_tensor = Tensor::rand(0.0, 1.0, (dims[0], 1, dims[2]), device)?;
+            let random_tensor = uniform_tensor(0.0, 1.0, (dims[0], 1, dims[2]), device)?;
             random_tensor
                 .gt(dropout_rate)?
                 .to_dtype(tensor.dtype())?
                 .broadcast_as(tensor.shape())?
         } else {
-            let random_tensor = Tensor::rand(0.0, 1.0, tensor.shape(), device)?;
+            let random_tensor = uniform_tensor(0.0, 1.0, tensor.shape(), device)?;
             random_tensor.gt(dropout_rate)?.to_dtype(tensor.dtype())?
         };
 
@@ -293,7 +368,7 @@ impl SeededTensorUtils {
         let shape = hidden_tensor.shape();
 
         // Create random tensor for recurrent connections
-        let random_tensor = Tensor::rand(0.0, 1.0, shape, device)?;
+        let random_tensor = uniform_tensor(0.0, 1.0, shape, device)?;
 
         // Create dropout mask: keep values where random > dropout_rate
         let keep_mask = random_tensor.gt(dropout_rate)?;
@@ -318,18 +393,21 @@ impl SeededTensorUtils {
         device: &Device,
         seed: Option<u64>,
     ) -> Result<()> {
-        // Set device seed if provided
-        if let Some(seed_value) = seed {
-            set_device_seed_with_logging(device, Some(seed_value))?;
+        if let Some(seed) = seed.filter(|value| *value != 0) {
+            return with_seeded_rng(seed, || {
+                Self::apply_lstm_weight_initialization(varmap, device, None)
+            });
         }
 
-        let name_var_pairs: Vec<(String, Var)> = {
+        let mut name_var_pairs: Vec<(String, Var)> = {
             let var_data = varmap.data().lock().unwrap();
             var_data
                 .iter()
                 .map(|(name, var)| (name.clone(), var.clone()))
                 .collect()
         };
+
+        name_var_pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut initialized_count = 0;
         let mut recurrent_count = 0;
@@ -356,7 +434,12 @@ impl SeededTensorUtils {
             log::debug!("🔍 Processing tensor '{}': shape={:?}", var_name_str, dims);
 
             // Determine weight type based on tensor name and shape
-            if dims.len() == 2 {
+            if dims.len() == 3 && var_name_str.ends_with("o_proj_weights") {
+                let fan_in = dims[1] * dims[2];
+                let bound = (6.0 / fan_in as f32).sqrt();
+                var.set(&uniform_tensor(-bound, bound, dims, device)?.to_dtype(var.dtype())?)?;
+                initialized_count += 1;
+            } else if dims.len() == 2 {
                 // 2D tensors are weight matrices
                 let (rows, cols) = (dims[0], dims[1]);
 
@@ -385,7 +468,7 @@ impl SeededTensorUtils {
                     let xavier_std = (2.0 / (fan_in + fan_out) as f64).sqrt();
 
                     // Generate Xavier-initialized weights
-                    let xavier_weights = Tensor::randn(0.0, xavier_std as f32, dims, device)?
+                    let xavier_weights = normal_tensor(0.0, xavier_std as f32, dims, device)?
                         .to_dtype(var.dtype())?;
 
                     log::info!(
@@ -506,7 +589,7 @@ impl SeededTensorUtils {
                     // CRITICAL: With zero-initialized LSTM states, all samples start with identical
                     // hidden states, leading to identical outputs. Small random bias breaks this symmetry.
                     let bias_tensor =
-                        Tensor::randn(0.0, 0.02, &[5], device)?.to_dtype(var.dtype())?;
+                        normal_tensor(0.0, 0.02, &[5], device)?.to_dtype(var.dtype())?;
                     var.set(&bias_tensor)?;
                     bias_count += 1;
 
@@ -680,6 +763,10 @@ pub fn set_device_seed_with_logging(device: &Device, seed: Option<u64>) -> Resul
                 "🎲 Setting device seed to {} for reproducible weight initialization",
                 seed_value
             );
+            if matches!(device, Device::Cpu) {
+                log::debug!("CPU random sampling uses the seeded host RNG at initialization and training scopes");
+                return Ok(());
+            }
             match device.set_seed(seed_value) {
                 Ok(()) => Ok(()),
                 Err(e) => {

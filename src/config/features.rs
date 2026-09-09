@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureConfig {
+    #[serde(default = "default_stats_window_bars")]
+    pub stats_window_bars: usize,
+
     /// Technical indicators configuration
     pub technical_indicators: TechnicalIndicatorsConfig,
 
@@ -34,6 +37,27 @@ pub struct FeatureConfig {
     /// All outputs are scale-invariant. Disabled by default for backward compatibility.
     #[serde(default)]
     pub regime_features: RegimeFeaturesConfig,
+}
+
+pub fn default_stats_window_bars() -> usize {
+    720
+}
+
+impl Default for FeatureConfig {
+    fn default() -> Self {
+        Self {
+            stats_window_bars: default_stats_window_bars(),
+            technical_indicators: Default::default(),
+            market_microstructure: Default::default(),
+            volatility_features: Default::default(),
+            custom_features: Default::default(),
+            engineering: Default::default(),
+            selection: Default::default(),
+            cross_asset: Default::default(),
+            liquidity_features: Default::default(),
+            regime_features: Default::default(),
+        }
+    }
 }
 
 impl FeatureConfig {

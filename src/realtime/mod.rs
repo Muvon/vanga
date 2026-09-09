@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Sentinel used to derive the history window from the loaded model's training config.
+pub const AUTO_FEATURE_WINDOW: usize = 0;
+
 /// Configuration for real-time prediction streaming
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealtimeConfig {
@@ -34,7 +37,8 @@ pub struct RealtimeConfig {
     pub poll_interval: Duration,
     /// Maximum size of the feature buffer
     pub buffer_size: usize,
-    /// Minimum number of data points required for prediction
+    /// Minimum number of data points required for prediction. Zero derives the
+    /// value from the loaded model's stats window and sequence length.
     pub feature_window: usize,
     /// Output format for predictions
     pub output_format: OutputFormat,
@@ -60,7 +64,7 @@ impl Default for RealtimeConfig {
             symbol: "BTCUSDT".to_string(),
             poll_interval: Duration::from_secs(1),
             buffer_size: 1000,
-            feature_window: 100,
+            feature_window: AUTO_FEATURE_WINDOW,
             output_format: OutputFormat::Json,
             debug: false,
         }
