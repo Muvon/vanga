@@ -22,7 +22,7 @@ use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
 use std::collections::HashMap;
 
-pub(super) fn infer_stop_is_bullish(
+pub(crate) fn infer_stop_is_bullish(
     price_levels: &PriceLevelPrediction,
     reference_price: f64,
 ) -> Option<bool> {

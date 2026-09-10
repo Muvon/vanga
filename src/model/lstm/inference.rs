@@ -1194,25 +1194,30 @@ impl LSTMModel {
 
     /// Get expected XGBoost feature dimension from configuration
     pub fn get_xgboost_feature_dim(&self) -> usize {
-        // Use XGBoost config feature_dim if available, otherwise calculate from LSTM architecture
-        if let Some(ref xgboost_model) = self.xgboost_model {
-            xgboost_model.get_config().feature_dim
+        // The latent width is a property of the LSTM architecture; the TOML
+        // xgboost.feature_dim is only a stale copy of it and must not win.
+        let base_hidden_size = self.config.hidden_sizes.last().copied().unwrap_or(64);
+        let is_bidirectional = matches!(
+            self.architecture,
+            Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
+        );
+        let derived = if is_bidirectional {
+            base_hidden_size * 2
         } else {
-            // Calculate based on LSTM architecture
-            let base_hidden_size = self.config.hidden_sizes.last().copied().unwrap_or(64);
-
-            // Check if this is bidirectional architecture - doubles the feature dimension
-            let is_bidirectional = matches!(
-                self.architecture,
-                Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
-            );
-
-            if is_bidirectional {
-                base_hidden_size * 2 // Bidirectional concatenates forward + backward
-            } else {
-                base_hidden_size // Standard architectures use base size
+            base_hidden_size
+        };
+        if let Some(ref xgboost_model) = self.xgboost_model {
+            let configured = xgboost_model.get_config().feature_dim;
+            if configured != derived {
+                log::warn!(
+                    "xgboost.feature_dim={} in config does not match the LSTM latent width {}; using {}",
+                    configured,
+                    derived,
+                    derived
+                );
             }
         }
+        derived
     }
 
     /// Get expected XGBoost feature dimension with explicit config parameter

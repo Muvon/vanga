@@ -17,6 +17,11 @@ fn row(true_bin: usize, pred_bin: usize, max_prob: f64, confidence: f64) -> Scor
         fut_max_high_rel: 0.1,
         fut_min_low_rel: -0.1,
         fut_close_rel: 0.05,
+        band_lo: None,
+        band_hi: None,
+        ref_price: None,
+        stop_price: None,
+        stop_is_bullish: None,
     }
 }
 
@@ -406,22 +411,54 @@ async fn saved_model_round_trip_is_byte_identical_and_preserves_full_holdout() {
     assert_eq!(report["heads"]["direction_4h"]["n"], 83);
     let first_row = &report["heads"]["price_level_2h"]["rows"][0];
     // split 100 + embargo(5+4) => input start 109 => anchor 113.
+    let anchor_epoch = 1_767_225_600 + 113 * 3600;
     let anchor_ts = DateTime::from_timestamp(1_767_225_600 + 113 * 3600, 0)
         .unwrap()
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     assert_eq!(first_row["ts"], anchor_ts);
+    let processed_anchor = processed
+        .column("timestamp")
+        .unwrap()
+        .i64()
+        .unwrap()
+        .into_no_null_iter()
+        .position(|ts| ts == anchor_epoch)
+        .unwrap();
+    let processed_anchor_close = processed
+        .column("close")
+        .unwrap()
+        .f64()
+        .unwrap()
+        .get(processed_anchor)
+        .unwrap();
+    assert!(first_row["band_lo"].as_f64().unwrap() <= first_row["band_hi"].as_f64().unwrap());
+    assert_abs_diff_eq!(
+        first_row["ref_price"].as_f64().unwrap(),
+        processed_anchor_close,
+        epsilon = 1e-14
+    );
     let close_at = |i: usize| 100.0 + i as f64 * 0.05 + (i as f64 * 0.4).sin();
     assert_abs_diff_eq!(
         first_row["fut_close_rel"].as_f64().unwrap(),
         close_at(115) / close_at(113) - 1.0,
         epsilon = 1e-14
     );
-    for head in report["heads"].as_object().unwrap().values() {
+    for (name, head) in report["heads"].as_object().unwrap() {
         let rows = head["rows"].as_array().unwrap();
         let refused = rows.iter().filter(|row| row["no_signal"] == true).count();
         assert_eq!(head["n_no_signal"], refused);
         for row in rows.iter().filter(|row| row["no_signal"] == true) {
             assert_eq!(row["confidence"], 0.0);
+        }
+        for row in rows {
+            if name.starts_with("price_level_") {
+                assert!(row["band_lo"].is_number());
+                assert!(row["band_hi"].is_number());
+                assert!(row["ref_price"].is_number());
+            } else if name.starts_with("stop_level_") {
+                assert!(row["stop_price"].is_number());
+                assert!(row["stop_is_bullish"].is_boolean());
+            }
         }
     }
     // MoH sparse routing must match an isolated production predict call exactly.

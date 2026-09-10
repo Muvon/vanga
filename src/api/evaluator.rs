@@ -12,6 +12,7 @@ use crate::config::TrainingConfig;
 use crate::data::{CryptoDataSchema, DataLoader, DataPreprocessor, SequenceGenerator};
 use crate::model::multi_target::MultiTargetLSTMModel;
 use crate::output::multi_target_parser::{MultiTargetParser, ParsedOutput};
+use crate::output::prediction_types::{PriceLevelPrediction, StopLevelPrediction};
 use crate::output::{OutputFormatter, PredictionResult};
 use crate::targets::{MultiTargetConfig, TargetGenerator, TargetType};
 use crate::utils::error::{Result, VangaError};
@@ -73,6 +74,89 @@ pub(crate) struct ScoredRow {
     pub fut_max_high_rel: f64,
     pub fut_min_low_rel: f64,
     pub fut_close_rel: f64,
+    pub band_lo: Option<f64>,
+    pub band_hi: Option<f64>,
+    pub ref_price: Option<f64>,
+    pub stop_price: Option<f64>,
+    pub stop_is_bullish: Option<bool>,
+}
+
+struct ReconstructedActionPrices {
+    price_levels: Option<PriceLevelPrediction>,
+    stop_levels: Option<StopLevelPrediction>,
+    ref_price: Option<f64>,
+    stop_is_bullish: Option<bool>,
+}
+
+#[derive(Default)]
+struct HeadActionPrices {
+    band_lo: Option<f64>,
+    band_hi: Option<f64>,
+    ref_price: Option<f64>,
+    stop_price: Option<f64>,
+    stop_is_bullish: Option<bool>,
+}
+
+impl ReconstructedActionPrices {
+    fn for_head(&self, kind: TargetType, pred_bin: usize) -> Result<HeadActionPrices> {
+        const PRICE_BIN_NAMES: [&str; CLASSES] = [
+            "strong_down",
+            "moderate_down",
+            "neutral",
+            "moderate_up",
+            "strong_up",
+        ];
+        const STOP_BIN_NAMES: [&str; CLASSES] = [
+            "extreme_adverse",
+            "high_adverse",
+            "moderate_adverse",
+            "low_adverse",
+            "minimal_adverse",
+        ];
+
+        match kind {
+            TargetType::PriceLevel => {
+                let Some(prediction) = self.price_levels.as_ref() else {
+                    return Ok(HeadActionPrices::default());
+                };
+                let name = PRICE_BIN_NAMES
+                    .get(pred_bin)
+                    .ok_or_else(|| VangaError::model("Invalid predicted price bin"))?;
+                let band = prediction
+                    .bins
+                    .get(*name)
+                    .ok_or_else(|| VangaError::model("Formatter omitted predicted price bin"))?
+                    .price;
+                Ok(HeadActionPrices {
+                    band_lo: Some(band[0]),
+                    band_hi: Some(band[1]),
+                    ref_price: self.ref_price,
+                    ..Default::default()
+                })
+            }
+            TargetType::StopLevel => {
+                let (Some(prediction), Some(is_bullish)) =
+                    (self.stop_levels.as_ref(), self.stop_is_bullish)
+                else {
+                    return Ok(HeadActionPrices::default());
+                };
+                let name = STOP_BIN_NAMES
+                    .get(pred_bin)
+                    .ok_or_else(|| VangaError::model("Invalid predicted stop bin"))?;
+                let band = prediction
+                    .bins
+                    .get(*name)
+                    .ok_or_else(|| VangaError::model("Formatter omitted predicted stop bin"))?
+                    .price;
+                Ok(HeadActionPrices {
+                    stop_price: Some(if is_bullish { band[0] } else { band[1] }),
+                    stop_is_bullish: Some(is_bullish),
+                    ..Default::default()
+                })
+            }
+            _ => Ok(HeadActionPrices::default()),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -323,6 +407,63 @@ pub(crate) fn head_confidence(result: Option<&PredictionResult>, kind: TargetTyp
         return Err(VangaError::model("Formatter returned invalid confidence"));
     }
     Ok(confidence)
+}
+
+fn reconstruct_action_prices_without_veto(
+    formatter: &OutputFormatter,
+    parsed: &ParsedOutput,
+    current_price: f64,
+    horizon: &str,
+    calibrated: &crate::targets::calibration::CalibratedParameters,
+    sequence_ohlcv: &[crate::data::structures::MarketDataRow],
+) -> Result<ReconstructedActionPrices> {
+    let price_params = calibrated.get_price_levels(horizon);
+    let price_levels = parsed
+        .price_levels
+        .as_ref()
+        .map(|probabilities| {
+            formatter.create_price_level_prediction(
+                probabilities,
+                current_price,
+                horizon,
+                price_params.map(|params| params.bandwidth),
+                price_params.map(|params| params.percentiles),
+            )
+        })
+        .transpose()?;
+    let ref_price = price_levels.as_ref().map(|_| current_price);
+
+    let formatter_reference_price =
+        crate::targets::get_sequence_exponential_weighted_close(sequence_ohlcv)
+            .unwrap_or(current_price);
+    let stop_is_bullish = price_levels.as_ref().and_then(|prediction| {
+        crate::output::formatter::infer_stop_is_bullish(prediction, formatter_reference_price)
+    });
+    let stop_params = calibrated.get_stop_levels(horizon);
+    let stop_levels = match (parsed.stop_levels.as_ref(), stop_is_bullish) {
+        (Some(probabilities), Some(is_bullish)) => Some(
+            formatter.create_stop_level_prediction(
+                probabilities,
+                current_price,
+                horizon,
+                stop_params
+                    .map(|params| params.bandwidth)
+                    .or_else(|| price_params.map(|params| params.bandwidth)),
+                stop_params
+                    .map(|params| params.percentiles)
+                    .or_else(|| price_params.map(|params| params.percentiles)),
+                Some(is_bullish),
+            )?,
+        ),
+        _ => None,
+    };
+
+    Ok(ReconstructedActionPrices {
+        price_levels,
+        stop_levels,
+        ref_price,
+        stop_is_bullish,
+    })
 }
 
 /// Compare the complete serialized feature/data sections, including parameters
@@ -735,6 +876,14 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
                 }
             }
             let parsed = parser.parse_output(ndarray::ArrayView1::from(&local))?;
+            let action_prices = reconstruct_action_prices_without_veto(
+                &formatter,
+                &parsed,
+                processed_ohlcv[end - 1].close,
+                horizon,
+                calibrated,
+                &processed_ohlcv[start..end],
+            )?;
             for (head_index, kind) in kinds.iter().enumerate() {
                 let probs = head_probabilities(&parsed, *kind)?;
                 // Production reconstruction resolves argmax ties to the last class.
@@ -744,6 +893,7 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
                     .max_by(|a, b| a.1.total_cmp(b.1))
                     .map(|(index, _)| index)
                     .ok_or_else(|| VangaError::model("Empty probabilities"))?;
+                let action = action_prices.for_head(*kind, pred_bin)?;
                 let true_bin = *labels
                     .get_targets(horizon, *kind)
                     .and_then(|values| values.get(anchor_index))
@@ -772,6 +922,11 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
                         / close
                         - 1.0,
                     fut_close_rel: raw_ohlcv[anchor + head_h].close / close - 1.0,
+                    band_lo: action.band_lo,
+                    band_hi: action.band_hi,
+                    ref_price: action.ref_price,
+                    stop_price: action.stop_price,
+                    stop_is_bullish: action.stop_is_bullish,
                 });
             }
         }
