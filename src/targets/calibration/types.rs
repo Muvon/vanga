@@ -139,24 +139,353 @@ pub struct DirectionParams {
     pub balance: ClassBalance,
 }
 
-/// Price level target parameters
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Price level target parameters. Legacy binary records retain their exact
+/// five-field layout; experimental records use a reserved bandwidth sentinel.
+#[derive(Debug, Clone, Default)]
 pub struct PriceLevelParams {
-    pub bandwidth: f64,
-    pub percentiles: [f64; 2], // Base percentiles for adaptive calculation
-    pub neutral_band_factor: f64, // Replaces hardcoded 0.4 (was called neutral_band)
-    pub momentum_factor: f64,  // NEW: Replaces hardcoded 1.2
-    pub balance: ClassBalance,
-}
-
-/// Stop level target parameters
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct StopLevelParams {
+    pub definition: crate::config::training::PriceLevelDefinition,
+    pub thresholds: Option<[f64; 4]>,
     pub bandwidth: f64,
     pub percentiles: [f64; 2],
     pub neutral_band_factor: f64,
     pub momentum_factor: f64,
     pub balance: ClassBalance,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PriceLevelParamsJson {
+    #[serde(flatten)]
+    definition: crate::config::training::PriceLevelDefinition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thresholds: Option<[f64; 4]>,
+    bandwidth: f64,
+    percentiles: [f64; 2],
+    neutral_band_factor: f64,
+    momentum_factor: f64,
+    balance: ClassBalance,
+}
+
+impl Serialize for PriceLevelParams {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            return PriceLevelParamsJson {
+                definition: self.definition,
+                thresholds: self.thresholds,
+                bandwidth: self.bandwidth,
+                percentiles: self.percentiles,
+                neutral_band_factor: self.neutral_band_factor,
+                momentum_factor: self.momentum_factor,
+                balance: self.balance.clone(),
+            }
+            .serialize(serializer);
+        }
+        if self
+            .definition
+            .uses_anchor_volatility()
+            .map_err(serde::ser::Error::custom)?
+        {
+            let thresholds = self.thresholds.ok_or_else(|| {
+                serde::ser::Error::custom("Anchor price levels require calibrated thresholds")
+            })?;
+            // Negative infinity cannot be a valid legacy bandwidth. A version
+            // byte follows it so new fields never shift an old record's layout.
+            (
+                f64::NEG_INFINITY,
+                1u8,
+                (self.definition.reference, self.definition.scale),
+                thresholds,
+                self.bandwidth,
+                self.percentiles,
+                self.neutral_band_factor,
+                self.momentum_factor,
+                &self.balance,
+            )
+                .serialize(serializer)
+        } else {
+            (
+                self.bandwidth,
+                self.percentiles,
+                self.neutral_band_factor,
+                self.momentum_factor,
+                &self.balance,
+            )
+                .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PriceLevelParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            let value = PriceLevelParamsJson::deserialize(deserializer)?;
+            return Ok(Self {
+                definition: value.definition,
+                thresholds: value.thresholds,
+                bandwidth: value.bandwidth,
+                percentiles: value.percentiles,
+                neutral_band_factor: value.neutral_band_factor,
+                momentum_factor: value.momentum_factor,
+                balance: value.balance,
+            });
+        }
+        struct BinaryPriceLevelVisitor;
+        impl<'de> serde::de::Visitor<'de> for BinaryPriceLevelVisitor {
+            type Value = PriceLevelParams;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("legacy or versioned price-level parameters")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                fn next<'de, T: Deserialize<'de>, A: serde::de::SeqAccess<'de>>(
+                    sequence: &mut A,
+                ) -> Result<T, A::Error> {
+                    sequence
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::custom("Truncated price-level parameters"))
+                }
+                let first: f64 = next(&mut sequence)?;
+                let mut value = PriceLevelParams::default();
+                if first == f64::NEG_INFINITY {
+                    let version: u8 = next(&mut sequence)?;
+                    if version != 1 {
+                        return Err(serde::de::Error::custom(
+                            "Unsupported price-level parameter version",
+                        ));
+                    }
+                    let (reference, scale) = next(&mut sequence)?;
+                    value.definition =
+                        crate::config::training::PriceLevelDefinition { reference, scale };
+                    value
+                        .definition
+                        .uses_anchor_volatility()
+                        .map_err(serde::de::Error::custom)?;
+                    value.thresholds = Some(next(&mut sequence)?);
+                    value.bandwidth = next(&mut sequence)?;
+                } else {
+                    value.bandwidth = first;
+                }
+                value.percentiles = next(&mut sequence)?;
+                value.neutral_band_factor = next(&mut sequence)?;
+                value.momentum_factor = next(&mut sequence)?;
+                value.balance = next(&mut sequence)?;
+                Ok(value)
+            }
+        }
+        // Bincode reads only the fields consumed by the visitor; legacy records
+        // consume five, versioned records nine, including in enclosing models.
+        deserializer.deserialize_tuple(9, BinaryPriceLevelVisitor)
+    }
+}
+
+/// Stop level target parameters. Legacy binary records retain their exact
+/// five-field layout; experimental records use a reserved bandwidth sentinel.
+#[derive(Debug, Clone, Default)]
+pub struct StopLevelParams {
+    pub definition: crate::config::training::StopLevelDefinition,
+    pub thresholds: Option<[f64; 4]>,
+    pub regime_window_bars: Option<usize>,
+    pub bandwidth: f64,
+    pub percentiles: [f64; 2],
+    pub neutral_band_factor: f64,
+    pub momentum_factor: f64,
+    pub balance: ClassBalance,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StopLevelParamsJson {
+    #[serde(flatten)]
+    definition: crate::config::training::StopLevelDefinition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thresholds: Option<[f64; 4]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    regime_window_bars: Option<usize>,
+    bandwidth: f64,
+    percentiles: [f64; 2],
+    neutral_band_factor: f64,
+    momentum_factor: f64,
+    balance: ClassBalance,
+}
+
+impl Serialize for StopLevelParams {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            return StopLevelParamsJson {
+                definition: self.definition,
+                thresholds: self.thresholds,
+                regime_window_bars: self.regime_window_bars,
+                bandwidth: self.bandwidth,
+                percentiles: self.percentiles,
+                neutral_band_factor: self.neutral_band_factor,
+                momentum_factor: self.momentum_factor,
+                balance: self.balance.clone(),
+            }
+            .serialize(serializer);
+        }
+        if self
+            .definition
+            .uses_anchor_volatility()
+            .map_err(serde::ser::Error::custom)?
+        {
+            let thresholds = self.thresholds.ok_or_else(|| {
+                serde::ser::Error::custom("Anchor stop levels require calibrated thresholds")
+            })?;
+            // Negative infinity cannot be a valid legacy bandwidth. A version
+            // byte follows it so new fields never shift an old record's layout.
+            if self.definition.uses_regime_volatility() {
+                let regime_window_bars = self
+                    .regime_window_bars
+                    .filter(|window| *window >= 2)
+                    .ok_or_else(|| {
+                        serde::ser::Error::custom(
+                            "Regime-volatility stop levels require regime_window_bars >= 2",
+                        )
+                    })?;
+                (
+                    f64::NEG_INFINITY,
+                    2u8,
+                    (
+                        self.definition.reference,
+                        self.definition.scale,
+                        self.definition.side,
+                    ),
+                    thresholds,
+                    regime_window_bars,
+                    self.bandwidth,
+                    self.percentiles,
+                    self.neutral_band_factor,
+                    self.momentum_factor,
+                    &self.balance,
+                )
+                    .serialize(serializer)
+            } else {
+                (
+                    f64::NEG_INFINITY,
+                    1u8,
+                    (
+                        self.definition.reference,
+                        self.definition.scale,
+                        self.definition.side,
+                    ),
+                    thresholds,
+                    self.bandwidth,
+                    self.percentiles,
+                    self.neutral_band_factor,
+                    self.momentum_factor,
+                    &self.balance,
+                )
+                    .serialize(serializer)
+            }
+        } else {
+            (
+                self.bandwidth,
+                self.percentiles,
+                self.neutral_band_factor,
+                self.momentum_factor,
+                &self.balance,
+            )
+                .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StopLevelParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            let value = StopLevelParamsJson::deserialize(deserializer)?;
+            if value.definition.uses_regime_volatility()
+                && value.regime_window_bars.is_none_or(|window| window < 2)
+            {
+                return Err(serde::de::Error::custom(
+                    "Regime-volatility stop levels require regime_window_bars >= 2",
+                ));
+            }
+            return Ok(Self {
+                definition: value.definition,
+                thresholds: value.thresholds,
+                regime_window_bars: value.regime_window_bars,
+                bandwidth: value.bandwidth,
+                percentiles: value.percentiles,
+                neutral_band_factor: value.neutral_band_factor,
+                momentum_factor: value.momentum_factor,
+                balance: value.balance,
+            });
+        }
+        struct BinaryStopLevelVisitor;
+        impl<'de> serde::de::Visitor<'de> for BinaryStopLevelVisitor {
+            type Value = StopLevelParams;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("legacy or versioned stop-level parameters")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                fn next<'de, T: Deserialize<'de>, A: serde::de::SeqAccess<'de>>(
+                    sequence: &mut A,
+                ) -> Result<T, A::Error> {
+                    sequence
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::custom("Truncated stop-level parameters"))
+                }
+                let first: f64 = next(&mut sequence)?;
+                let mut value = StopLevelParams::default();
+                if first == f64::NEG_INFINITY {
+                    let version: u8 = next(&mut sequence)?;
+                    if version != 1 && version != 2 {
+                        return Err(serde::de::Error::custom(
+                            "Unsupported stop-level parameter version",
+                        ));
+                    }
+                    let (reference, scale, side) = next(&mut sequence)?;
+                    value.definition = crate::config::training::StopLevelDefinition {
+                        reference,
+                        scale,
+                        side,
+                    };
+                    value
+                        .definition
+                        .uses_anchor_volatility()
+                        .map_err(serde::de::Error::custom)?;
+                    value.thresholds = Some(next(&mut sequence)?);
+                    if version == 2 {
+                        if !value.definition.uses_regime_volatility() {
+                            return Err(serde::de::Error::custom(
+                                "Stop-level parameter version 2 requires regime_volatility",
+                            ));
+                        }
+                        let window_bars = next(&mut sequence)?;
+                        if window_bars < 2 {
+                            return Err(serde::de::Error::custom(
+                                "Regime-volatility stop levels require regime_window_bars >= 2",
+                            ));
+                        }
+                        value.regime_window_bars = Some(window_bars);
+                    } else if value.definition.uses_regime_volatility() {
+                        return Err(serde::de::Error::custom(
+                            "Regime-volatility stop levels require parameter version 2",
+                        ));
+                    }
+                    value.bandwidth = next(&mut sequence)?;
+                } else {
+                    value.bandwidth = first;
+                }
+                value.percentiles = next(&mut sequence)?;
+                value.neutral_band_factor = next(&mut sequence)?;
+                value.momentum_factor = next(&mut sequence)?;
+                value.balance = next(&mut sequence)?;
+                Ok(value)
+            }
+        }
+        // Bincode reads only the fields consumed by the visitor; legacy records
+        // consume five, and versioned records consume only their encoded fields.
+        deserializer.deserialize_tuple(10, BinaryStopLevelVisitor)
+    }
 }
 
 /// Volatility target parameters

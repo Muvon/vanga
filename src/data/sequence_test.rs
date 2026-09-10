@@ -29,27 +29,49 @@ mod tests {
     #[tokio::test]
     async fn generate_training_sequences_fixed_ok() {
         let df = make_df(32);
-        let horizons = vec!["1h".to_string()];
-        let training_config = TrainingConfig {
+        let horizons = vec!["1m".to_string()];
+        let mut training_config = TrainingConfig {
+            horizons: horizons.clone(),
             model: crate::config::model::ModelConfig {
                 sequence_length: SequenceLengthConfig::Fixed(10),
                 ..Default::default()
             },
             ..Default::default()
         };
+        training_config.targets.price_level = false;
+        training_config.targets.direction = false;
+        training_config.targets.volatility = false;
+        training_config.targets.sentiment = false;
+        training_config.targets.volume = false;
         let gen = SequenceGenerator::default(); // Use default (no overlap)
         let data_config = DataConfig::default();
-        let feature_config = FeatureConfig::default();
+        let mut feature_config = FeatureConfig::default();
+        feature_config.technical_indicators.enabled = false;
+        feature_config.volatility_features.enabled = false;
+        feature_config.engineering.lag_features.enabled = false;
+        feature_config.engineering.rolling_features.enabled = false;
+        let mut calibrated = crate::targets::calibration::CalibratedParameters::default();
+        calibrated.stop_levels.insert(
+            "1m".to_string(),
+            crate::targets::calibration::StopLevelParams {
+                bandwidth: 1.0,
+                percentiles: [0.1, 0.9],
+                neutral_band_factor: 0.4,
+                momentum_factor: 1.0,
+                ..Default::default()
+            },
+        );
         let res = gen
-            .generate_training_sequences(
+            .generate_training_sequences_with_calibrated_params(
                 df,
                 &horizons,
                 &training_config,
                 &data_config,
                 &feature_config,
+                Some(&calibrated),
             )
             .await;
-        assert!(res.is_ok());
+        assert!(res.is_ok(), "{res:?}");
     }
 
     #[tokio::test]

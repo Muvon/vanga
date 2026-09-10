@@ -26,7 +26,10 @@ pub struct ParameterCalibrator {
 
     // Target enablement from config
     enabled_price_level: bool,
+    pub(super) price_level_definition: crate::config::training::PriceLevelDefinition,
     enabled_stop_level: bool,
+    pub(super) stop_level_definition: crate::config::training::StopLevelDefinition,
+    pub(super) regime_window_bars: Option<usize>,
     enabled_direction: bool,
     enabled_volatility: bool,
     enabled_sentiment: bool,
@@ -135,7 +138,10 @@ impl ParameterCalibrator {
             diversity_weight: 0.6,
             seed: None, // Will be set via from_config_with_seed if needed
             enabled_price_level: targets_config.price_level,
+            price_level_definition: targets_config.price_level_definition,
             enabled_stop_level: targets_config.stop_level,
+            stop_level_definition: targets_config.stop_level_definition,
+            regime_window_bars: None,
             enabled_direction: targets_config.direction,
             enabled_volatility: targets_config.volatility,
             enabled_sentiment: targets_config.sentiment,
@@ -155,12 +161,24 @@ impl ParameterCalibrator {
             diversity_weight: 0.6,
             seed,
             enabled_price_level: targets_config.price_level,
+            price_level_definition: targets_config.price_level_definition,
             enabled_stop_level: targets_config.stop_level,
+            stop_level_definition: targets_config.stop_level_definition,
+            regime_window_bars: None,
             enabled_direction: targets_config.direction,
             enabled_volatility: targets_config.volatility,
             enabled_sentiment: targets_config.sentiment,
             enabled_volume: targets_config.volume,
         }
+    }
+
+    pub fn from_training_config_with_seed(
+        training_config: &crate::config::training::TrainingConfig,
+        seed: Option<u64>,
+    ) -> Self {
+        let mut calibrator = Self::from_config_with_seed(&training_config.targets, seed);
+        calibrator.regime_window_bars = Some(training_config.features.stats_window_bars);
+        calibrator
     }
 
     /// Create new calibrator with configuration (all targets enabled by default)
@@ -178,7 +196,10 @@ impl ParameterCalibrator {
 
             // All targets enabled by default
             enabled_price_level: true,
+            price_level_definition: Default::default(),
             enabled_stop_level: true,
+            stop_level_definition: Default::default(),
+            regime_window_bars: None,
             enabled_direction: true,
             enabled_volatility: true,
             enabled_sentiment: true,
@@ -196,7 +217,10 @@ impl ParameterCalibrator {
             diversity_weight: diversity_weight / total,
             seed: None,
             enabled_price_level: true,
+            price_level_definition: Default::default(),
             enabled_stop_level: true,
+            stop_level_definition: Default::default(),
+            regime_window_bars: None,
             enabled_direction: true,
             enabled_volatility: true,
             enabled_sentiment: true,
@@ -213,7 +237,10 @@ impl ParameterCalibrator {
             diversity_weight: 0.6,
             seed: None,
             enabled_price_level: true,
+            price_level_definition: Default::default(),
             enabled_stop_level: true,
+            stop_level_definition: Default::default(),
+            regime_window_bars: None,
             enabled_direction: true,
             enabled_volatility: true,
             enabled_sentiment: true,
@@ -841,7 +868,10 @@ impl Default for ParameterCalibrator {
             diversity_weight: 0.6,
             seed: None, // Random by default
             enabled_price_level: true,
+            price_level_definition: Default::default(),
             enabled_stop_level: true,
+            stop_level_definition: Default::default(),
+            regime_window_bars: None,
             enabled_direction: true,
             enabled_volatility: true,
             enabled_sentiment: true,
@@ -941,7 +971,31 @@ impl ParameterCalibrator {
             config.tolerance
         );
 
+        if config
+            .objective_floor
+            .is_some_and(|floor| !floor.is_finite())
+        {
+            return Err(crate::utils::error::VangaError::config(
+                "Bayesian objective floor must be finite",
+            ));
+        }
+        if let Some(candidate) = &config.initial_candidate {
+            if candidate.len() != param_bounds.len()
+                || candidate
+                    .iter()
+                    .zip(&param_bounds)
+                    .any(|(value, (low, high))| !value.is_finite() || value < low || value > high)
+            {
+                return Err(crate::utils::error::VangaError::config(
+                    "Bayesian initial candidate must be finite and within parameter bounds",
+                ));
+            }
+        }
+
         let mut optimizer = BayesianOptimizer::new(param_bounds, param_names, &config, self.seed);
+        if let Some(candidate) = &config.initial_candidate {
+            optimizer.add_observation(candidate.clone(), objective_fn(candidate)?);
+        }
 
         // Phase 1: Initial random exploration (Latin Hypercube Sampling)
         log::info!(
@@ -970,6 +1024,23 @@ impl ParameterCalibrator {
                 best_score,
                 config.n_initial
             );
+
+            if config
+                .objective_floor
+                .is_some_and(|floor| best_score <= floor)
+            {
+                log::info!(
+                    "{} Reached known objective minimum: {:.6}",
+                    prefix,
+                    best_score
+                );
+                return optimizer
+                    .get_best()
+                    .map(|(params, _)| params)
+                    .ok_or_else(|| {
+                        crate::utils::error::VangaError::config("Missing best Bayesian candidate")
+                    });
+            }
 
             // CRITICAL: Check for zero variance (indicates flat objective landscape)
             let scores: Vec<f64> = optimizer.get_observation_scores().to_vec();

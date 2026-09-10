@@ -230,6 +230,11 @@ pub enum AcquisitionFunction {
 /// Configuration for Bayesian Optimization
 #[derive(Debug, Clone)]
 pub struct BayesianConfig {
+    /// Optional observed candidate to seed the existing search. None preserves
+    /// the original initialization and random-number sequence.
+    pub initial_candidate: Option<Vec<f64>>,
+    /// Known lower bound on the objective, when the caller can prove one.
+    pub objective_floor: Option<f64>,
     /// Number of initial random samples (Latin Hypercube)
     pub n_initial: usize,
     /// Maximum number of iterations
@@ -259,9 +264,11 @@ impl Default for BayesianConfig {
     /// Uses all performance improvements WITHOUT sacrificing exploration quality
     fn default() -> Self {
         Self {
-            n_initial: 50,       // Full initial exploration for quality (6D optimal: 5*D + 5)
+            initial_candidate: None,
+            objective_floor: None,
+            n_initial: 50, // Full initial exploration for quality (6D optimal: 5*D + 5)
             max_iterations: 150, // Allow thorough exploration (early stopping prevents waste)
-            tolerance: 1e-4,     // Adaptive tolerance
+            tolerance: 1e-4, // Adaptive tolerance
             acquisition: AcquisitionFunction::EpsilonGreedyThompsonSampling { epsilon: 0.3 }, // 30% exploration
             gp_length_scale: 0.8, // Slightly shorter for local structure
             gp_noise: 1e-5,       // Lower noise for deterministic objectives
@@ -278,6 +285,8 @@ impl BayesianConfig {
     /// Uses more initial samples and iterations for complex parameter spaces
     pub fn for_high_dimensional() -> Self {
         Self {
+            initial_candidate: None,
+            objective_floor: None,
             n_initial: 40,       // More samples for 6D space
             max_iterations: 200, // More iterations for complex optimization
             tolerance: 1e-5,
@@ -297,6 +306,8 @@ impl BayesianConfig {
     /// Expected: 1.5-2x faster than default with minimal quality trade-off
     pub fn for_balanced_speed() -> Self {
         Self {
+            initial_candidate: None,
+            objective_floor: None,
             n_initial: 30,       // Reduced initial exploration
             max_iterations: 100, // Fewer max iterations
             tolerance: 1e-4,
@@ -314,6 +325,8 @@ impl BayesianConfig {
     /// Trades quality for speed - NOT recommended for production
     pub fn for_quick_testing() -> Self {
         Self {
+            initial_candidate: None,
+            objective_floor: None,
             n_initial: 10,
             max_iterations: 30,
             tolerance: 1e-4,
@@ -331,6 +344,8 @@ impl BayesianConfig {
     /// Uses extensive exploration with Epsilon-Greedy TS and trust regions
     pub fn for_maximum_quality() -> Self {
         Self {
+            initial_candidate: None,
+            objective_floor: None,
             n_initial: 50,       // Extensive initial exploration
             max_iterations: 300, // Maximum exploration time
             tolerance: 1e-5,     // Very strict convergence

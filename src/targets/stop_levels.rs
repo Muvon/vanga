@@ -135,6 +135,7 @@ pub fn generate_stop_level_targets_with_calibrated_params(
                 horizon
             ))
         })?;
+        let regime_window_bars = stop_level_regime_window_bars(params)?;
 
         log::debug!(
             "  Horizon {}: bandwidth={:.2}, percentiles=[{:.2}, {:.2}]",
@@ -147,17 +148,21 @@ pub fn generate_stop_level_targets_with_calibrated_params(
         let horizon_steps = parse_horizon_to_steps(horizon, timeframe_minutes)?;
         let mut horizon_targets = vec![-1; sequence_indices.len()];
         let mut horizon_strengths = vec![0.5; sequence_indices.len()];
-
         for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
             let sequence_end_idx = seq_idx + sequence_length;
             let target_end_idx = sequence_end_idx + horizon_steps;
 
             if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
+                if regime_window_bars.is_some_and(|window| sequence_end_idx < window) {
+                    continue;
+                }
                 let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
+                let history_ohlcv = &ohlcv_data[..sequence_end_idx];
                 let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                let (target_class, strength) = classify_stop_level_with_calibrated_params(
+                let (target_class, strength) = classify_stop_level_with_history(
                     sequence_ohlcv,
+                    history_ohlcv,
                     horizon_ohlcv,
                     params,
                 )?;
@@ -165,7 +170,6 @@ pub fn generate_stop_level_targets_with_calibrated_params(
                 horizon_strengths[seq_position] = strength;
             }
         }
-
         let valid_targets: Vec<i32> = horizon_targets
             .iter()
             .filter(|&&x| x != -1)
@@ -296,6 +300,179 @@ impl AdverseBoundaries {
     }
 }
 
+/// Worst horizon extreme on the realised side, or on whichever side wanders
+/// farther from the anchor. No entry-proximity weighting in anchor mode.
+fn anchor_stop_level_adverse(
+    anchor: f64,
+    future: &[MarketDataRow],
+    side: crate::config::training::StopLevelSide,
+) -> Result<(f64, bool)> {
+    use crate::config::training::StopLevelSide;
+    use crate::utils::error::VangaError;
+
+    if future.is_empty()
+        || future.iter().any(|bar| {
+            [bar.low, bar.high, bar.close]
+                .iter()
+                .any(|price| !price.is_finite() || *price <= 0.0)
+                || bar.low > bar.high
+        })
+    {
+        return Err(VangaError::data(
+            "Anchor stop levels require finite, positive horizon prices and low <= high",
+        ));
+    }
+    let low = future
+        .iter()
+        .map(|bar| bar.low)
+        .fold(f64::INFINITY, f64::min);
+    let high = future
+        .iter()
+        .map(|bar| bar.high)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let is_bullish = match side {
+        StopLevelSide::Either => anchor - low >= high - anchor,
+        StopLevelSide::Realised => {
+            let close =
+                crate::targets::price_levels::get_horizon_exponential_weighted_close(future)?;
+            if !close.is_finite() || close <= 0.0 {
+                return Err(VangaError::data(
+                    "Invalid anchor stop-level future weighted close",
+                ));
+            }
+            close >= anchor
+        }
+    };
+    Ok((if is_bullish { low } else { high }, is_bullish))
+}
+
+/// Dimensionless excursion used to seed the existing calibration search.
+pub(crate) fn anchor_stop_level_statistic(
+    sequence: &[MarketDataRow],
+    future: &[MarketDataRow],
+    side: crate::config::training::StopLevelSide,
+) -> Result<f64> {
+    let (anchor, volatility) =
+        crate::targets::price_levels::price_level_anchor_volatility(sequence)?;
+    let (adverse, is_bullish) = anchor_stop_level_adverse(anchor, future, side)?;
+    let distance = if is_bullish {
+        anchor - adverse
+    } else {
+        adverse - anchor
+    };
+    let statistic = distance / anchor / volatility;
+    if !statistic.is_finite() {
+        return Err(crate::utils::error::VangaError::data(
+            "Non-finite anchor stop-level excursion",
+        ));
+    }
+    Ok(statistic)
+}
+
+pub(crate) fn stop_level_regime_window_bars(
+    params: &crate::targets::calibration::StopLevelParams,
+) -> Result<Option<usize>> {
+    if !params.definition.uses_regime_volatility() {
+        return Ok(None);
+    }
+    match params.regime_window_bars {
+        Some(window) if window >= 2 => Ok(Some(window)),
+        _ => Err(crate::utils::error::VangaError::config(
+            "Regime-volatility stop levels require a saved regime_window_bars >= 2",
+        )),
+    }
+}
+
+pub(crate) fn validate_stop_level_regime_window(
+    params: &crate::targets::calibration::StopLevelParams,
+    configured_window_bars: usize,
+) -> Result<()> {
+    if let Some(saved_window_bars) = stop_level_regime_window_bars(params)? {
+        if saved_window_bars != configured_window_bars {
+            return Err(crate::utils::error::VangaError::config(format!(
+                "Stop-level regime window mismatch: model metadata uses {}, loaded features.stats_window_bars is {}",
+                saved_window_bars, configured_window_bars
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn stop_level_anchor_scale(
+    sequence: &[MarketDataRow],
+    history: &[MarketDataRow],
+    params: &crate::targets::calibration::StopLevelParams,
+) -> Result<(f64, f64)> {
+    let scale_window = if let Some(window_bars) = stop_level_regime_window_bars(params)? {
+        if history.len() < window_bars {
+            return Err(crate::utils::error::VangaError::data(format!(
+                "Insufficient stop-level regime history: {} bars available, {} required",
+                history.len(),
+                window_bars
+            )));
+        }
+        &history[history.len() - window_bars..]
+    } else {
+        sequence
+    };
+    let (scale_anchor, volatility) =
+        crate::targets::price_levels::price_level_anchor_volatility(scale_window)?;
+    let sequence_anchor = sequence.last().ok_or_else(|| {
+        crate::utils::error::VangaError::data("Stop-level input sequence is empty")
+    })?;
+    let history_anchor = scale_window
+        .last()
+        .ok_or_else(|| crate::utils::error::VangaError::data("Stop-level scale window is empty"))?;
+    if sequence_anchor.timestamp != history_anchor.timestamp
+        || sequence_anchor.close != scale_anchor
+    {
+        return Err(crate::utils::error::VangaError::data(
+            "Stop-level history must end at the input sequence anchor",
+        ));
+    }
+    Ok((scale_anchor, volatility))
+}
+
+pub(crate) fn anchor_stop_level_statistic_with_history(
+    sequence: &[MarketDataRow],
+    history: &[MarketDataRow],
+    future: &[MarketDataRow],
+    params: &crate::targets::calibration::StopLevelParams,
+) -> Result<f64> {
+    let (anchor, volatility) = stop_level_anchor_scale(sequence, history, params)?;
+    let (adverse, is_bullish) = anchor_stop_level_adverse(anchor, future, params.definition.side)?;
+    let distance = if is_bullish {
+        anchor - adverse
+    } else {
+        adverse - anchor
+    };
+    let statistic = distance / anchor / volatility;
+    if !statistic.is_finite() {
+        return Err(crate::utils::error::VangaError::data(
+            "Non-finite anchor stop-level excursion",
+        ));
+    }
+    Ok(statistic)
+}
+
+pub(crate) fn anchor_stop_level_thresholds(
+    params: &crate::targets::calibration::StopLevelParams,
+) -> Result<[f64; 4]> {
+    let thresholds = params.thresholds.ok_or_else(|| {
+        crate::utils::error::VangaError::config(
+            "Anchor stop levels require saved calibrated thresholds",
+        )
+    })?;
+    if thresholds.iter().any(|value| !value.is_finite())
+        || thresholds.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(crate::utils::error::VangaError::config(
+            "Stop-level thresholds must be finite and strictly increasing",
+        ));
+    }
+    Ok(thresholds)
+}
+
 /// Calculate adverse boundaries from sequence data
 ///
 /// **KEY FIX**: Builds boundaries from the SAME type of prices we classify:
@@ -309,6 +486,51 @@ pub fn calculate_adverse_boundaries(
     is_bullish: bool,
     calibrated_params: &crate::targets::calibration::StopLevelParams,
 ) -> Result<AdverseBoundaries> {
+    calculate_adverse_boundaries_with_history(
+        sequence_ohlcv,
+        sequence_ohlcv,
+        is_bullish,
+        calibrated_params,
+    )
+}
+
+pub(crate) fn calculate_adverse_boundaries_with_history(
+    sequence_ohlcv: &[MarketDataRow],
+    history_ohlcv: &[MarketDataRow],
+    is_bullish: bool,
+    calibrated_params: &crate::targets::calibration::StopLevelParams,
+) -> Result<AdverseBoundaries> {
+    if calibrated_params.definition.uses_anchor_volatility()? {
+        let thresholds = anchor_stop_level_thresholds(calibrated_params)?;
+        let (anchor, volatility) =
+            stop_level_anchor_scale(sequence_ohlcv, history_ohlcv, calibrated_params)?;
+        // Classification and serving share these exact price-space boundaries.
+        // Equality belongs to the shallower bin on both sides of the anchor.
+        let mut boundaries = if is_bullish {
+            thresholds.map(|threshold| anchor * (1.0 - threshold * volatility))
+        } else {
+            thresholds.map(|threshold| anchor * (1.0 + threshold * volatility))
+        };
+        if is_bullish {
+            boundaries.reverse();
+        }
+        if boundaries.iter().any(|price| !price.is_finite())
+            || boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(crate::utils::error::VangaError::data(
+                "Reconstructed stop-level boundaries must be finite and strictly increasing",
+            ));
+        }
+        return Ok(AdverseBoundaries {
+            adverse_min: boundaries[0],
+            adverse_max: boundaries[3],
+            bandwidth: boundaries[3] - boundaries[0],
+            reference_price: anchor,
+            boundaries,
+            is_bullish,
+        });
+    }
+
     if sequence_ohlcv.len() < 2 {
         return Err(crate::utils::error::VangaError::DataError(
             "Insufficient sequence data for adverse boundary calculation".to_string(),
@@ -396,6 +618,35 @@ pub fn classify_stop_level_with_calibrated_params(
     horizon_ohlcv: &[MarketDataRow],
     calibrated_params: &crate::targets::calibration::StopLevelParams,
 ) -> Result<(i32, f64)> {
+    classify_stop_level_with_history(
+        sequence_ohlcv,
+        sequence_ohlcv,
+        horizon_ohlcv,
+        calibrated_params,
+    )
+}
+
+pub(crate) fn classify_stop_level_with_history(
+    sequence_ohlcv: &[MarketDataRow],
+    history_ohlcv: &[MarketDataRow],
+    horizon_ohlcv: &[MarketDataRow],
+    calibrated_params: &crate::targets::calibration::StopLevelParams,
+) -> Result<(i32, f64)> {
+    if calibrated_params.definition.uses_anchor_volatility()? {
+        let (anchor, _) =
+            stop_level_anchor_scale(sequence_ohlcv, history_ohlcv, calibrated_params)?;
+        let (adverse, is_bullish) =
+            anchor_stop_level_adverse(anchor, horizon_ohlcv, calibrated_params.definition.side)?;
+        let boundaries = calculate_adverse_boundaries_with_history(
+            sequence_ohlcv,
+            history_ohlcv,
+            is_bullish,
+            calibrated_params,
+        )?;
+        let class = boundaries.classify_adverse(adverse);
+        return Ok((class, boundaries.calculate_strength(adverse, class)));
+    }
+
     if sequence_ohlcv.is_empty() || horizon_ohlcv.is_empty() {
         return Ok((2, 0.5));
     }
@@ -597,6 +848,24 @@ pub fn reconstruct_stop_levels(
     calibrated_params: &crate::targets::calibration::StopLevelParams,
     is_bullish: Option<bool>,
 ) -> Result<StopLevelReconstruction> {
+    reconstruct_stop_levels_with_history(
+        probabilities,
+        sequence_ohlcv,
+        sequence_ohlcv,
+        current_price,
+        calibrated_params,
+        is_bullish,
+    )
+}
+
+pub(crate) fn reconstruct_stop_levels_with_history(
+    probabilities: &[f64],
+    sequence_ohlcv: &[MarketDataRow],
+    history_ohlcv: &[MarketDataRow],
+    current_price: f64,
+    calibrated_params: &crate::targets::calibration::StopLevelParams,
+    is_bullish: Option<bool>,
+) -> Result<StopLevelReconstruction> {
     if probabilities.len() != 5 {
         return Err(crate::utils::error::VangaError::DataError(
             "Stop level reconstruction requires exactly 5 class probabilities".to_string(),
@@ -626,7 +895,12 @@ pub fn reconstruct_stop_levels(
     });
 
     // Calculate adverse boundaries using same logic as classification
-    let boundaries = calculate_adverse_boundaries(sequence_ohlcv, is_bullish, calibrated_params)?;
+    let boundaries = calculate_adverse_boundaries_with_history(
+        sequence_ohlcv,
+        history_ohlcv,
+        is_bullish,
+        calibrated_params,
+    )?;
 
     // Build price ranges from boundaries.
     // `boundaries.boundaries` is always sorted b0 < b1 < b2 < b3 where
@@ -640,13 +914,22 @@ pub fn reconstruct_stop_levels(
     // For BULLISH we track dips (lows), so lower adverse = worse: Class 0 sits below b0.
     // For BEARISH we track bounces (highs), so higher adverse = worse: Class 0 sits above b3.
     let bw = boundaries.bandwidth;
+    let either_anchor_mode = calibrated_params.definition.uses_anchor_volatility()?
+        && calibrated_params.definition.side == crate::config::training::StopLevelSide::Either;
     let adverse_price_ranges = if is_bullish {
         vec![
             [boundaries.boundaries[0] - bw, boundaries.boundaries[0]], // Class 0: Extreme dip (deepest)
             [boundaries.boundaries[0], boundaries.boundaries[1]],      // Class 1: High dip
             [boundaries.boundaries[1], boundaries.boundaries[2]],      // Class 2: Moderate dip
             [boundaries.boundaries[2], boundaries.boundaries[3]],      // Class 3: Low dip
-            [boundaries.boundaries[3], boundaries.boundaries[3] + bw], // Class 4: Minimal dip (shallowest)
+            [
+                boundaries.boundaries[3],
+                if either_anchor_mode {
+                    boundaries.reference_price
+                } else {
+                    boundaries.boundaries[3] + bw
+                },
+            ], // Class 4: Minimal dip (shallowest)
         ]
     } else {
         vec![
@@ -654,9 +937,27 @@ pub fn reconstruct_stop_levels(
             [boundaries.boundaries[2], boundaries.boundaries[3]],      // Class 1: High bounce
             [boundaries.boundaries[1], boundaries.boundaries[2]],      // Class 2: Moderate bounce
             [boundaries.boundaries[0], boundaries.boundaries[1]],      // Class 3: Low bounce
-            [boundaries.boundaries[0] - bw, boundaries.boundaries[0]], // Class 4: Minimal bounce (smallest)
+            [
+                if either_anchor_mode {
+                    boundaries.reference_price
+                } else {
+                    boundaries.boundaries[0] - bw
+                },
+                boundaries.boundaries[0],
+            ], // Class 4: Minimal bounce (smallest)
         ]
     };
+
+    if calibrated_params.definition.uses_anchor_volatility()?
+        && adverse_price_ranges
+            .iter()
+            .flatten()
+            .any(|price| !price.is_finite())
+    {
+        return Err(crate::utils::error::VangaError::data(
+            "Non-finite reconstructed stop-level band",
+        ));
+    }
 
     let (most_likely_class, max_prob) = probabilities
         .iter()

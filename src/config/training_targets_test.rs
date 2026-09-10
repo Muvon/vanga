@@ -4,6 +4,8 @@ use std::io::Write;
 fn targets_with_only_stop_level() -> TargetsConfig {
     TargetsConfig {
         price_level: false,
+        price_level_definition: Default::default(),
+        stop_level_definition: Default::default(),
         stop_level: true,
         direction: false,
         volatility: false,
@@ -25,6 +27,8 @@ fn stop_level_is_a_valid_enabled_target() {
 fn configured_active_targets_include_stop_level() {
     let targets = TargetsConfig {
         price_level: true,
+        price_level_definition: Default::default(),
+        stop_level_definition: Default::default(),
         stop_level: true,
         direction: true,
         volatility: false,

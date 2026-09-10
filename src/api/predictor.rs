@@ -6,71 +6,8 @@ use crate::model::multi_target::MultiTargetLSTMModel;
 use crate::output::{OutputFormatter, PostProcessor, PredictionResult};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
-use std::path::Path;
 
-fn sequence_length_from_training_config(training_config: &crate::config::TrainingConfig) -> usize {
-    match &training_config.model.sequence_length {
-        crate::config::model::SequenceLengthConfig::Fixed(length) => *length as usize,
-        crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
-        crate::config::model::SequenceLengthConfig::Adaptive => 60,
-    }
-}
-
-pub(crate) fn prediction_history_requirements(
-    training_config: &crate::config::TrainingConfig,
-) -> Result<(usize, usize, usize)> {
-    let stats_window_bars = training_config.features.stats_window_bars;
-    let sequence_length = sequence_length_from_training_config(training_config);
-    let required_rows = stats_window_bars
-        .checked_add(sequence_length)
-        .ok_or_else(|| {
-            VangaError::ConfigError(format!(
-                "Prediction history requirement overflow: stats_window_bars {}, sequence_length {}",
-                stats_window_bars, sequence_length
-            ))
-        })?;
-    Ok((stats_window_bars, sequence_length, required_rows))
-}
-
-pub(crate) fn validate_prediction_history(
-    rows_given: usize,
-    training_config: &crate::config::TrainingConfig,
-) -> Result<()> {
-    let (stats_window_bars, sequence_length, required_rows) =
-        prediction_history_requirements(training_config)?;
-    if rows_given < required_rows {
-        return Err(VangaError::DataError(format!(
-            "Insufficient prediction history: rows given {}, required {}, stats_window_bars {}, sequence_length {}",
-            rows_given, required_rows, stats_window_bars, sequence_length
-        )));
-    }
-    Ok(())
-}
-
-fn count_csv_rows(path: &Path) -> Result<usize> {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(path)
-        .map_err(|error| {
-            VangaError::DataError(format!(
-                "Failed to open prediction CSV {} before feature generation: {}",
-                path.display(),
-                error
-            ))
-        })?;
-    let mut rows = 0usize;
-    for record in reader.records() {
-        record.map_err(|error| {
-            VangaError::DataError(format!(
-                "Failed to read prediction CSV {} before feature generation: {}",
-                path.display(),
-                error
-            ))
-        })?;
-        rows += 1;
-    }
-    Ok(rows)
-}
+pub(crate) use crate::data::prediction_history_requirements;
 
 /// Unified model wrapper for both single and multi-target models
 pub enum ModelWrapper<'a> {
@@ -196,9 +133,25 @@ impl Predictor {
                     .to_string(),
             )
         })?;
-        let rows_given = count_csv_rows(&data_file_path)?;
-        validate_prediction_history(rows_given, training_config)?;
-
+        let calibrated_params = model.get_calibrated_parameters().ok_or_else(|| {
+            VangaError::PredictionError(
+                "FATAL: No adaptive target parameters found in model. \
+                 The model must have calibrated parameters from training for consistent prediction. \
+                 This model may have been trained with an older version. \
+                 Please retrain the model with the current version to ensure proper calibration."
+                    .to_string(),
+            )
+        })?;
+        for params in calibrated_params.stop_levels.values() {
+            crate::targets::stop_levels::validate_stop_level_regime_window(
+                params,
+                training_config.features.stats_window_bars,
+            )?;
+        }
+        let needs_regime_history = calibrated_params
+            .stop_levels
+            .values()
+            .any(|params| params.definition.uses_regime_volatility());
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new().with_feature_names(model.get_feature_names());
 
@@ -280,13 +233,33 @@ impl Predictor {
         // Confidence calculation for predictions should use model uncertainty, not target generation
         // Target generation is inappropriate for prediction data as it requires full historical context
         // Extract sequence data for VWAP calculations - REQUIRED!
-        let sequence_ohlc = prepared_data.sequence_ohlc.clone()
+        let processed_history = prepared_data.sequence_ohlc.clone()
             .ok_or_else(|| VangaError::PredictionError(
                 "FATAL: No sequence OHLC data available for VWAP calculations. This is required for proper price level analysis.".to_string()
             ))?;
-
-        // Extract OHLCV data for VWAP-based range calculation (matches training approach)
-        let sequence_ohlcv = sequence_ohlc.clone();
+        if processed_history.len() < sequence_length {
+            return Err(VangaError::PredictionError(format!(
+                "Processed prediction history has {} rows but the LSTM sequence requires {}",
+                processed_history.len(),
+                sequence_length
+            )));
+        }
+        let sequence_ohlcv =
+            processed_history[processed_history.len() - sequence_length..].to_vec();
+        if needs_regime_history {
+            for params in calibrated_params.stop_levels.values() {
+                if let Some(window_bars) =
+                    crate::targets::stop_levels::stop_level_regime_window_bars(params)?
+                {
+                    if processed_history.len() < window_bars {
+                        return Err(VangaError::DataError(format!(
+                            "Insufficient stop-level regime history after preprocessing: {} bars available, {} required",
+                            processed_history.len(), window_bars
+                        )));
+                    }
+                }
+            }
+        }
 
         log::info!(
             "✅ Sequence OHLCV data loaded: {} rows for VWAP-based calculations",
@@ -322,6 +295,10 @@ impl Predictor {
 
         // Pass OHLCV data to formatter for VWAP-based range calculation - REQUIRED!
         formatter = formatter.with_sequence_ohlcv(sequence_ohlcv);
+        if needs_regime_history {
+            formatter = formatter.with_stop_level_history(processed_history);
+        }
+        formatter = formatter.with_stats_window_bars(training_config.features.stats_window_bars);
 
         // Pass metadata to formatter for accurate PredictionResult creation
         formatter = formatter.with_metadata(input_feature_count, sequence_length);
@@ -331,16 +308,6 @@ impl Predictor {
 
         // CRITICAL: Adaptive parameters are REQUIRED for consistent prediction reconstruction
         // These parameters were calibrated during training to achieve balanced classification
-        let calibrated_params = model.get_calibrated_parameters().ok_or_else(|| {
-            VangaError::PredictionError(
-                "FATAL: No adaptive target parameters found in model. \
-                 The model must have calibrated parameters from training for consistent prediction. \
-                 This model may have been trained with an older version. \
-                 Please retrain the model with the current version to ensure proper calibration."
-                    .to_string(),
-            )
-        })?;
-
         formatter = formatter.with_calibrated_parameters(calibrated_params.clone());
         log::info!(
             "✅ Using calibrated target parameters for consistent prediction reconstruction"

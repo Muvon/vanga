@@ -1911,6 +1911,14 @@ impl TrainingConfig {
         // Validate targets configuration
         self.targets.validate()?;
 
+        if self.targets.stop_level_definition.uses_regime_volatility()
+            && self.features.stats_window_bars < 2
+        {
+            return Err(VangaError::config(
+                "stop_level scale = regime_volatility requires features.stats_window_bars >= 2",
+            ));
+        }
+
         // Validate training parameters
         self.training.validate()?;
 
@@ -1964,15 +1972,236 @@ impl TrainingConfig {
     }
 }
 
+/// Price-level label reference. Omitted settings preserve the legacy definition.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceLevelReference {
+    #[default]
+    WindowWeighted,
+    AnchorClose,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceLevelScale {
+    #[default]
+    WindowRange,
+    Volatility,
+    RegimeVolatility,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PriceLevelDefinition {
+    #[serde(skip_serializing_if = "PriceLevelReference::is_default")]
+    pub reference: PriceLevelReference,
+    #[serde(skip_serializing_if = "PriceLevelScale::is_default")]
+    pub scale: PriceLevelScale,
+}
+
+impl PriceLevelReference {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl PriceLevelScale {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl PriceLevelDefinition {
+    pub fn uses_anchor_volatility(&self) -> Result<bool> {
+        match (self.reference, self.scale) {
+            (PriceLevelReference::WindowWeighted, PriceLevelScale::WindowRange) => Ok(false),
+            (PriceLevelReference::AnchorClose, PriceLevelScale::Volatility) => Ok(true),
+            (_, PriceLevelScale::RegimeVolatility) => Err(VangaError::config(
+                "price_level does not support scale = regime_volatility",
+            )),
+            _ => Err(VangaError::config(
+                "price_level requires window_weighted/window_range or anchor_close/volatility",
+            )),
+        }
+    }
+}
+
+/// Stop labels retain the legacy reference/range unless explicitly opted in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopLevelSide {
+    #[default]
+    Realised,
+    Either,
+}
+
+impl StopLevelSide {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StopLevelDefinition {
+    #[serde(skip_serializing_if = "PriceLevelReference::is_default")]
+    pub reference: PriceLevelReference,
+    #[serde(skip_serializing_if = "PriceLevelScale::is_default")]
+    pub scale: PriceLevelScale,
+    #[serde(skip_serializing_if = "StopLevelSide::is_default")]
+    pub side: StopLevelSide,
+}
+
+impl StopLevelDefinition {
+    pub fn uses_anchor_volatility(&self) -> Result<bool> {
+        match (self.reference, self.scale, self.side) {
+            (PriceLevelReference::WindowWeighted, PriceLevelScale::WindowRange, StopLevelSide::Realised) => Ok(false),
+            (
+                PriceLevelReference::AnchorClose,
+                PriceLevelScale::Volatility | PriceLevelScale::RegimeVolatility,
+                _,
+            ) => Ok(true),
+            _ => Err(VangaError::config(
+                "stop_level requires window_weighted/window_range/realised or anchor_close with volatility or regime_volatility and realised or either side",
+            )),
+        }
+    }
+
+    pub fn uses_regime_volatility(&self) -> bool {
+        self.reference == PriceLevelReference::AnchorClose
+            && self.scale == PriceLevelScale::RegimeVolatility
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StopLevelSetting {
+    Enabled(bool),
+    Definition {
+        #[serde(
+            default = "price_level_enabled_by_default",
+            skip_serializing_if = "price_level_is_enabled"
+        )]
+        enabled: bool,
+        #[serde(flatten)]
+        definition: StopLevelDefinition,
+    },
+}
+
+// Preserve existing boolean TOMLs and metadata, while accepting
+// [model.targets.price_level] reference = "anchor_close", scale = "volatility".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PriceLevelSetting {
+    Enabled(bool),
+    Definition {
+        #[serde(
+            default = "price_level_enabled_by_default",
+            skip_serializing_if = "price_level_is_enabled"
+        )]
+        enabled: bool,
+        #[serde(flatten)]
+        definition: PriceLevelDefinition,
+    },
+}
+
+fn price_level_enabled_by_default() -> bool {
+    true
+}
+fn price_level_is_enabled(value: &bool) -> bool {
+    *value
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TargetsConfigWire {
+    price_level: PriceLevelSetting,
+    stop_level: StopLevelSetting,
+    direction: bool,
+    volatility: bool,
+    sentiment: bool,
+    volume: bool,
+}
+
+impl TryFrom<TargetsConfigWire> for TargetsConfig {
+    type Error = VangaError;
+
+    fn try_from(value: TargetsConfigWire) -> Result<Self> {
+        let (price_level, price_level_definition) = match value.price_level {
+            PriceLevelSetting::Enabled(enabled) => (enabled, PriceLevelDefinition::default()),
+            PriceLevelSetting::Definition {
+                enabled,
+                definition,
+            } => {
+                definition.uses_anchor_volatility()?;
+                (enabled, definition)
+            }
+        };
+        let (stop_level, stop_level_definition) = match value.stop_level {
+            StopLevelSetting::Enabled(enabled) => (enabled, StopLevelDefinition::default()),
+            StopLevelSetting::Definition {
+                enabled,
+                definition,
+            } => {
+                definition.uses_anchor_volatility()?;
+                (enabled, definition)
+            }
+        };
+        Ok(Self {
+            price_level,
+            price_level_definition,
+            stop_level,
+            stop_level_definition,
+            direction: value.direction,
+            volatility: value.volatility,
+            sentiment: value.sentiment,
+            volume: value.volume,
+        })
+    }
+}
+
+impl From<TargetsConfig> for TargetsConfigWire {
+    fn from(value: TargetsConfig) -> Self {
+        let price_level = if value.price_level_definition == PriceLevelDefinition::default() {
+            PriceLevelSetting::Enabled(value.price_level)
+        } else {
+            PriceLevelSetting::Definition {
+                enabled: value.price_level,
+                definition: value.price_level_definition,
+            }
+        };
+        let stop_level = if value.stop_level_definition == StopLevelDefinition::default() {
+            StopLevelSetting::Enabled(value.stop_level)
+        } else {
+            StopLevelSetting::Definition {
+                enabled: value.stop_level,
+                definition: value.stop_level_definition,
+            }
+        };
+        Self {
+            price_level,
+            stop_level,
+            direction: value.direction,
+            volatility: value.volatility,
+            sentiment: value.sentiment,
+            volume: value.volume,
+        }
+    }
+}
+
 /// Target configuration - simple enable/disable flags
 /// All parameters come from automatic calibration system
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "TargetsConfigWire", into = "TargetsConfigWire")]
 pub struct TargetsConfig {
     /// Enable price level targets (VWAP-weighted price classification)
     pub price_level: bool,
 
+    pub price_level_definition: PriceLevelDefinition,
+
     /// Enable stop level targets (worst-case drawdown/bounce detection)
     pub stop_level: bool,
+
+    pub stop_level_definition: StopLevelDefinition,
 
     /// Enable direction targets (directional movement classification)
     pub direction: bool,
@@ -1991,7 +2220,9 @@ impl Default for TargetsConfig {
     fn default() -> Self {
         Self {
             price_level: true,
+            price_level_definition: PriceLevelDefinition::default(),
             stop_level: true,
+            stop_level_definition: StopLevelDefinition::default(),
             direction: true,
             volatility: true,
             sentiment: true,
@@ -2003,6 +2234,8 @@ impl Default for TargetsConfig {
 impl TargetsConfig {
     /// Validate that at least one target is enabled
     pub fn validate(&self) -> Result<()> {
+        self.price_level_definition.uses_anchor_volatility()?;
+        self.stop_level_definition.uses_anchor_volatility()?;
         if !self.price_level
             && !self.stop_level
             && !self.direction

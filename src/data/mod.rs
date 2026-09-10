@@ -33,6 +33,45 @@ use crate::utils::error::{Result, VangaError};
 pub use augmentation::{augment_sequence, AugmentationConfig};
 pub use balance::SequenceWithTargets;
 pub use loader::DataLoader;
+
+fn prediction_sequence_length(training_config: &crate::config::TrainingConfig) -> usize {
+    match &training_config.model.sequence_length {
+        crate::config::model::SequenceLengthConfig::Fixed(length) => *length as usize,
+        crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
+        crate::config::model::SequenceLengthConfig::Adaptive => 60,
+    }
+}
+
+pub(crate) fn prediction_history_requirements(
+    training_config: &crate::config::TrainingConfig,
+) -> Result<(usize, usize, usize)> {
+    let stats_window_bars = training_config.features.stats_window_bars;
+    let sequence_length = prediction_sequence_length(training_config);
+    let required_rows = stats_window_bars
+        .checked_add(sequence_length)
+        .ok_or_else(|| {
+            VangaError::ConfigError(format!(
+                "Prediction history requirement overflow: stats_window_bars {}, sequence_length {}",
+                stats_window_bars, sequence_length
+            ))
+        })?;
+    Ok((stats_window_bars, sequence_length, required_rows))
+}
+
+pub(crate) fn validate_prediction_history(
+    rows_given: usize,
+    training_config: &crate::config::TrainingConfig,
+) -> Result<()> {
+    let (stats_window_bars, sequence_length, required_rows) =
+        prediction_history_requirements(training_config)?;
+    if rows_given < required_rows {
+        return Err(VangaError::DataError(format!(
+            "Insufficient prediction history: rows given {}, required {}, stats_window_bars {}, sequence_length {}",
+            rows_given, required_rows, stats_window_bars, sequence_length
+        )));
+    }
+    Ok(())
+}
 pub use preprocessor::DataPreprocessor;
 pub use schema::{CryptoDataSchema, DataValidationError};
 pub use sequence::SequenceGenerator;
@@ -398,6 +437,7 @@ impl DataPipeline {
                 calibrated_params,
             )
             .await?;
+        let all_sequences_data = retain_computable_target_rows(all_sequences_data)?;
 
         // STEP 3: Convert to SequenceWithTargets format
         let all_sequences = crate::data::balance::create_sequences_with_targets(
@@ -1329,6 +1369,9 @@ impl DataPipeline {
 
         // Validate schema
         CryptoDataSchema::validate(&raw_data)?;
+        if let Some(training_config) = training_config {
+            validate_prediction_history(raw_data.height(), training_config)?;
+        }
 
         // Use the configuration attached to the exact model being served. Reloading
         // a model by symbol here can silently preprocess for a different model than
@@ -1378,10 +1421,12 @@ impl DataPipeline {
             &default_model_config
         };
 
-        let sequences = self
+        let history_ohlc = crate::utils::market_data::extract_ohlcv_data(&processed_data)?;
+        let mut sequences = self
             .sequence_generator
             .generate_prediction_sequences(processed_data, symbol, model_config)
             .await?;
+        retain_prediction_history(&mut sequences.sequence_ohlc, history_ohlc)?;
 
         Ok(sequences)
     }
@@ -1439,14 +1484,94 @@ pub struct PreparedData {
     pub sequence_indices: Vec<(usize, usize)>,
 }
 
+pub(crate) fn retain_computable_target_rows(data: PreparedData) -> Result<PreparedData> {
+    let row_count = data.sequences.shape()[0];
+    if data.sequence_indices.len() != row_count {
+        return Err(VangaError::DataError(format!(
+            "Sequence count mismatch before target eligibility filtering: {} sequences but {} indices",
+            row_count,
+            data.sequence_indices.len()
+        )));
+    }
+    if data.targets.valid_indices.len() == row_count
+        && data.targets.valid_indices.iter().copied().eq(0..row_count)
+    {
+        return Ok(data);
+    }
+    if data.targets.valid_indices.is_empty() {
+        return Err(VangaError::DataError(
+            "No sequences have computable labels for every enabled head".to_string(),
+        ));
+    }
+    if data
+        .targets
+        .valid_indices
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+        || data
+            .targets
+            .valid_indices
+            .iter()
+            .any(|index| *index >= row_count)
+    {
+        return Err(VangaError::DataError(
+            "Computable target indices must be unique, ordered, and within the sequence array"
+                .to_string(),
+        ));
+    }
+
+    let retained = data.targets.valid_indices.clone();
+    let removed = row_count - retained.len();
+    let sequences = data.sequences.select(ndarray::Axis(0), &retained);
+    let targets = data.targets.select_by_indices(&retained);
+    let sequence_indices = retained
+        .iter()
+        .map(|index| data.sequence_indices[*index])
+        .collect();
+    log::warn!(
+        "Skipped {} training sequences because regime stop labels lacked sufficient history; all heads retained {} aligned rows",
+        removed,
+        retained.len()
+    );
+    Ok(PreparedData {
+        sequences,
+        targets,
+        feature_names: data.feature_names,
+        metadata: data.metadata,
+        sequence_indices,
+    })
+}
+
 /// Prepared prediction data
 #[derive(Debug)]
 pub struct PreparedPredictionData {
     pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
     pub feature_names: Vec<String>,
     pub metadata: DataMetadata,
-    /// OHLC data for the sequence used in prediction (for ATR calculation)
+    /// Processed OHLC history ending at the sequence anchor.
     pub sequence_ohlc: Option<Vec<crate::data::structures::MarketDataRow>>,
+}
+
+pub(crate) fn retain_prediction_history(
+    sequence_ohlc: &mut Option<Vec<crate::data::structures::MarketDataRow>>,
+    history_ohlc: Vec<crate::data::structures::MarketDataRow>,
+) -> Result<()> {
+    let sequence_anchor = sequence_ohlc
+        .as_ref()
+        .and_then(|rows| rows.last())
+        .ok_or_else(|| VangaError::data("Prediction sequence has no OHLC anchor"))?;
+    let history_anchor = history_ohlc
+        .last()
+        .ok_or_else(|| VangaError::data("Processed prediction history is empty"))?;
+    if sequence_anchor.timestamp != history_anchor.timestamp
+        || sequence_anchor.close != history_anchor.close
+    {
+        return Err(VangaError::data(
+            "Processed prediction history does not end at the LSTM sequence anchor",
+        ));
+    }
+    *sequence_ohlc = Some(history_ohlc);
+    Ok(())
 }
 
 /// Normalization statistics for features

@@ -15,6 +15,10 @@ pub async fn calibrate_stop_levels(
 ) -> Result<StopLevelParams> {
     use super::bayesian::BayesianConfig;
 
+    if calibrator.stop_level_definition.uses_anchor_volatility()? {
+        return calibrate_anchor_stop_levels(calibrator, context, prefix).await;
+    }
+
     log::info!(
         "{} 🔬 Starting Bayesian Optimization for Stop Levels calibration",
         prefix
@@ -83,6 +87,7 @@ pub async fn calibrate_stop_levels(
         neutral_band_factor: best_params[3],
         momentum_factor: 1.0, // Fixed default
         balance: final_balance,
+        ..Default::default()
     };
 
     log::info!(
@@ -117,6 +122,7 @@ fn evaluate_stop_level_params(
         neutral_band_factor: params.neutral_band,
         momentum_factor: params.momentum_factor,
         balance: ClassBalance::default(),
+        ..Default::default()
     };
 
     // Generate targets with these parameters
@@ -157,4 +163,165 @@ fn evaluate_stop_level_params(
     let balance = utils.calculate_balance(&class_counts, targets.len())?;
 
     Ok(balance)
+}
+
+/// Empirical gaps seed the same Bayesian threshold search used by price levels.
+async fn calibrate_anchor_stop_levels(
+    calibrator: &ParameterCalibrator,
+    context: &EvaluationContext<'_>,
+    prefix: &str,
+) -> Result<StopLevelParams> {
+    use crate::targets::stop_levels::{
+        anchor_stop_level_statistic, anchor_stop_level_statistic_with_history,
+        anchor_stop_level_thresholds, classify_stop_level_with_history,
+    };
+    use crate::utils::error::VangaError;
+
+    let mut statistics = Vec::new();
+    let mut valid_indices = Vec::new();
+    let regime_window_bars = if calibrator.stop_level_definition.uses_regime_volatility() {
+        let window_bars = calibrator.regime_window_bars.ok_or_else(|| {
+            VangaError::config(
+                "Regime-volatility stop calibration requires features.stats_window_bars",
+            )
+        })?;
+        if window_bars < 2 {
+            return Err(VangaError::config(
+                "Regime-volatility stop calibration requires features.stats_window_bars >= 2",
+            ));
+        }
+        Some(window_bars)
+    } else {
+        None
+    };
+    let base_params = StopLevelParams {
+        definition: calibrator.stop_level_definition,
+        regime_window_bars,
+        ..Default::default()
+    };
+    let mut insufficient_history = 0usize;
+    for &start in context.sample_indices {
+        let end = start
+            .checked_add(context.sequence_length)
+            .ok_or_else(|| VangaError::data("Stop-level sequence index overflow"))?;
+        let future_end = end
+            .checked_add(context.horizon_steps)
+            .ok_or_else(|| VangaError::data("Stop-level horizon index overflow"))?;
+        if future_end <= context.ohlcv_data.len() {
+            if regime_window_bars.is_some_and(|window_bars| end < window_bars) {
+                insufficient_history += 1;
+                continue;
+            }
+            let sequence = &context.ohlcv_data[start..end];
+            let history = if regime_window_bars.is_some() {
+                &context.ohlcv_data[..end]
+            } else {
+                sequence
+            };
+            let future = &context.ohlcv_data[end..future_end];
+            statistics.push(if regime_window_bars.is_some() {
+                anchor_stop_level_statistic_with_history(sequence, history, future, &base_params)?
+            } else {
+                anchor_stop_level_statistic(
+                    sequence,
+                    future,
+                    calibrator.stop_level_definition.side,
+                )?
+            });
+            valid_indices.push(start);
+        }
+    }
+    if insufficient_history > 0 {
+        log::warn!(
+            "{} Skipped {} stop-level calibration anchors because regime history was incomplete",
+            prefix,
+            insufficient_history
+        );
+    }
+    if statistics.len() < 5 {
+        return Err(VangaError::data(
+            "Stop-level calibration requires at least five valid samples",
+        ));
+    }
+    statistics.sort_by(f64::total_cmp);
+    let seed = super::price_levels::distinct_gap_seed(&statistics).ok_or_else(|| {
+        VangaError::data("Stop-level calibration requires at least five distinct excursions")
+    })?;
+    let mut result = StopLevelParams {
+        definition: calibrator.stop_level_definition,
+        regime_window_bars,
+        ..Default::default()
+    };
+    let utils = calibrator.get_utils();
+    let evaluate = |thresholds: [f64; 4]| -> Result<ClassBalance> {
+        let params = StopLevelParams {
+            thresholds: Some(thresholds),
+            ..result.clone()
+        };
+        let mut counts = [0usize; 5];
+        // Evaluate in the same price space as labels and served stops, avoiding
+        // a second floating-point convention at exact threshold prices.
+        for &start in &valid_indices {
+            let end = start + context.sequence_length;
+            let sequence = &context.ohlcv_data[start..end];
+            let history = if regime_window_bars.is_some() {
+                &context.ohlcv_data[..end]
+            } else {
+                sequence
+            };
+            let (class, _) = classify_stop_level_with_history(
+                sequence,
+                history,
+                &context.ohlcv_data[end..end + context.horizon_steps],
+                &params,
+            )?;
+            counts[class as usize] += 1;
+        }
+        utils.calculate_balance_with_diversity(
+            &counts,
+            statistics.len(),
+            context.ohlcv_data,
+            &valid_indices,
+            context.sequence_length,
+        )
+    };
+    let sorted_thresholds = |values: &[f64]| {
+        let mut thresholds = [values[0], values[1], values[2], values[3]];
+        thresholds.sort_by(f64::total_cmp);
+        thresholds
+    };
+    let seed_balance = evaluate(seed)?;
+    let best = calibrator
+        .calibrate_with_bayesian(
+            vec![(statistics[0], statistics[statistics.len() - 1]); 4],
+            (0..4)
+                .map(|index| format!("stop_level_threshold_{index}"))
+                .collect(),
+            |values: &[f64]| {
+                let thresholds = sorted_thresholds(values);
+                if thresholds.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return Ok(f64::INFINITY);
+                }
+                Ok(evaluate(thresholds)?.composite_quality_score)
+            },
+            super::bayesian::BayesianConfig {
+                initial_candidate: Some(seed.to_vec()),
+                objective_floor: (seed_balance.balance_score == 0.0)
+                    .then_some(seed_balance.composite_quality_score),
+                ..Default::default()
+            },
+            prefix,
+        )
+        .await?;
+    let thresholds = sorted_thresholds(&best);
+    let balance = evaluate(thresholds)?;
+    if balance.class_percentages.contains(&0.0) {
+        return Err(VangaError::data(
+            "Final stop-level thresholds must produce five non-empty calibration classes",
+        ));
+    }
+    result.thresholds = Some(thresholds);
+    anchor_stop_level_thresholds(&result)?;
+    result.balance = balance;
+    Ok(result)
 }

@@ -310,6 +310,8 @@ async fn saved_model_round_trip_is_byte_identical_and_preserves_full_holdout() {
         calibration.price_levels.insert(
             h.clone(),
             PriceLevelParams {
+                definition: Default::default(),
+                thresholds: None,
                 bandwidth: 1.0,
                 percentiles: [0.1, 0.9],
                 neutral_band_factor: 0.4,
@@ -325,6 +327,7 @@ async fn saved_model_round_trip_is_byte_identical_and_preserves_full_holdout() {
                 neutral_band_factor: 0.4,
                 momentum_factor: 1.2,
                 balance: balance.clone(),
+                ..Default::default()
             },
         );
     }
@@ -618,4 +621,27 @@ fn cadence_guard_rejects_changed_detector_window_and_gaps_after_first_100_rows()
     let mut jitter = dense;
     jitter[180] += chrono::Duration::milliseconds(1);
     assert!(validate_cadence(&jitter, 60, 60).is_err());
+}
+
+#[test]
+fn evaluator_rejects_insufficient_regime_stop_history() {
+    let mut calibrated = crate::targets::calibration::CalibratedParameters::default();
+    calibrated.stop_levels.insert(
+        "1h".to_string(),
+        crate::targets::calibration::StopLevelParams {
+            definition: crate::config::training::StopLevelDefinition {
+                reference: crate::config::training::PriceLevelReference::AnchorClose,
+                scale: crate::config::training::PriceLevelScale::RegimeVolatility,
+                side: crate::config::training::StopLevelSide::Either,
+            },
+            thresholds: Some([1.0, 2.0, 3.0, 4.0]),
+            regime_window_bars: Some(5),
+            ..Default::default()
+        },
+    );
+    let error = validate_evaluator_stop_history(&calibrated, "1h", 4)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("4 bars available, 5 required"), "{error}");
+    validate_evaluator_stop_history(&calibrated, "1h", 5).unwrap();
 }

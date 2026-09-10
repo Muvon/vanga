@@ -415,10 +415,11 @@ impl ModelTrainer {
         );
 
         // Use clean calibration interface with PER-HORIZON calibration
-        let calibrator = crate::targets::calibration::ParameterCalibrator::from_config_with_seed(
-            &self.config.targets,
-            Some(self.config.training.seed),
-        );
+        let calibrator =
+            crate::targets::calibration::ParameterCalibrator::from_training_config_with_seed(
+                &self.config,
+                Some(self.config.training.seed),
+            );
 
         // Iterative calibration to reach target balanced samples
         let mut current_overlap = self.config.data.sequence_overlap;

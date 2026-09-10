@@ -84,6 +84,7 @@ pub use volume::{
 pub struct MultiTargetConfig {
     pub price_level_config: PriceLevelConfig,
     pub horizons: Vec<String>,
+    pub stats_window_bars: usize,
     pub price_level: TargetTypeConfig,
     pub stop_level: TargetTypeConfig,
     pub direction: TargetTypeConfig,
@@ -102,6 +103,7 @@ impl Default for MultiTargetConfig {
         Self {
             price_level_config: PriceLevelConfig::default(),
             horizons: vec!["1h".to_string()],
+            stats_window_bars: crate::config::features::default_stats_window_bars(),
             price_level: TargetTypeConfig { enabled: true },
             stop_level: TargetTypeConfig { enabled: true },
             direction: TargetTypeConfig { enabled: true },
@@ -118,6 +120,7 @@ impl MultiTargetConfig {
         Self {
             price_level_config: PriceLevelConfig::default(),
             horizons: training_config.horizons.clone(),
+            stats_window_bars: training_config.features.stats_window_bars,
             price_level: TargetTypeConfig {
                 enabled: training_config.targets.price_level,
             },
@@ -204,6 +207,18 @@ impl PreparedTargets {
             TargetType::Sentiment => self.sentiment_strength.get(horizon),
             TargetType::Volume => self.volume_strength.get(horizon),
         }
+    }
+
+    pub(crate) fn computable_stop_indices(&self) -> Vec<usize> {
+        (0..self.data_length)
+            .filter(|index| {
+                self.stop_levels.values().all(|labels| {
+                    labels
+                        .get(*index)
+                        .is_some_and(|label| (0..=4).contains(label))
+                })
+            })
+            .collect()
     }
 
     /// Get all horizons available from ANY target type
@@ -564,6 +579,12 @@ impl TargetGenerator {
 
         if self.config.stop_level.enabled {
             log::debug!("🛑 Generating stop level targets");
+            for params in stop_level_params.values() {
+                stop_levels::validate_stop_level_regime_window(
+                    params,
+                    self.config.stats_window_bars,
+                )?;
+            }
             let (stop_targets, stop_strengths) =
                 generate_stop_level_targets_with_calibrated_params(
                     df,
@@ -635,8 +656,15 @@ impl TargetGenerator {
         // Set target names for enabled targets only
         prepared_targets.target_names = self.get_target_names();
 
-        // Validate that we have targets for all sequences
-        prepared_targets.valid_indices = (0..data_length).collect();
+        let needs_regime_stop_history = self.config.stop_level.enabled
+            && stop_level_params
+                .values()
+                .any(|params| params.definition.uses_regime_volatility());
+        prepared_targets.valid_indices = if needs_regime_stop_history {
+            prepared_targets.computable_stop_indices()
+        } else {
+            (0..data_length).collect()
+        };
 
         log::info!(
             "✅ Generated {} target types across {} horizons for {} sequences",

@@ -57,11 +57,30 @@ pub(crate) fn infer_stop_is_bullish(
     }
 }
 
+pub(crate) fn stop_level_reference_price(
+    sequence_ohlcv: &[MarketDataRow],
+    history_ohlcv: &[MarketDataRow],
+    stop_params: &crate::targets::calibration::StopLevelParams,
+) -> Result<f64> {
+    if stop_params.definition.uses_anchor_volatility()? {
+        crate::targets::stop_levels::stop_level_anchor_scale(
+            sequence_ohlcv,
+            history_ohlcv,
+            stop_params,
+        )
+        .map(|(anchor, _)| anchor)
+    } else {
+        crate::targets::get_sequence_exponential_weighted_close(sequence_ohlcv)
+    }
+}
+
 /// Output formatter that converts raw LSTM predictions to structured formats
 pub struct OutputFormatter {
     config: OutputConfig,
     parser: Option<MultiTargetParser>,
     sequence_ohlcv: Option<Vec<MarketDataRow>>,
+    stop_level_history_ohlcv: Option<Vec<MarketDataRow>>,
+    stats_window_bars: Option<usize>,
     /// Model config bandwidth_size: sequence bandwidth multiplier (e.g., 1.0, 1.5, 2.0)
     /// Used in target generation as: sequence_bandwidth = (max - min) * bandwidth_size
     bandwidth_size: Option<f64>,
@@ -87,6 +106,8 @@ impl OutputFormatter {
             config,
             parser: Some(MultiTargetParser::new()), // Always initialize parser - all targets enabled with NUM_CLASSES=5
             sequence_ohlcv: None,
+            stop_level_history_ohlcv: None,
+            stats_window_bars: None,
             bandwidth_size: None,
             percentiles: None,
             feature_count: None,
@@ -101,6 +122,16 @@ impl OutputFormatter {
     /// Set OHLCV sequence data for VWAP-based range calculation (matches training approach)
     pub fn with_sequence_ohlcv(mut self, sequence_ohlcv: Vec<MarketDataRow>) -> Self {
         self.sequence_ohlcv = Some(sequence_ohlcv);
+        self
+    }
+
+    pub fn with_stop_level_history(mut self, history_ohlcv: Vec<MarketDataRow>) -> Self {
+        self.stop_level_history_ohlcv = Some(history_ohlcv);
+        self
+    }
+
+    pub fn with_stats_window_bars(mut self, stats_window_bars: usize) -> Self {
+        self.stats_window_bars = Some(stats_window_bars);
         self
     }
 
@@ -521,8 +552,41 @@ impl OutputFormatter {
                 // head estimates that same quantity; the direction head estimates
                 // momentum acceleration and therefore cannot stand in for its sign.
                 if let Some(price_levels) = result.price_levels.as_ref() {
-                    let stop_is_bullish =
-                        infer_stop_is_bullish(price_levels, result.current_vwap_price).ok_or_else(
+                    let stop_params = self
+                        .calibrated_parameters
+                        .as_ref()
+                        .and_then(|params| params.get_stop_levels(horizon))
+                        .ok_or_else(|| {
+                            VangaError::ConfigError(format!(
+                                "No calibrated stop level parameters found for horizon: {}",
+                                horizon
+                            ))
+                        })?;
+                    let sequence_ohlcv = self.sequence_ohlcv.as_deref().ok_or_else(|| {
+                        VangaError::PredictionError(
+                            "OHLCV sequence data not available for stop side inference".to_string(),
+                        )
+                    })?;
+                    if stop_params.definition.uses_regime_volatility() {
+                        let configured_window = self.stats_window_bars.ok_or_else(|| {
+                            VangaError::ConfigError(
+                                "features.stats_window_bars is required for regime-volatility stop serving"
+                                    .to_string(),
+                            )
+                        })?;
+                        crate::targets::stop_levels::validate_stop_level_regime_window(
+                            stop_params,
+                            configured_window,
+                        )?;
+                    }
+                    let history_ohlcv = self
+                        .stop_level_history_ohlcv
+                        .as_deref()
+                        .unwrap_or(sequence_ohlcv);
+                    let stop_reference =
+                        stop_level_reference_price(sequence_ohlcv, history_ohlcv, stop_params)?;
+                    let stop_is_bullish = infer_stop_is_bullish(price_levels, stop_reference)
+                        .ok_or_else(
                             || {
                                 VangaError::PredictionError(format!(
                                     "A valid price-level prediction is required to determine the stop-level trade side for {}",
@@ -1021,11 +1085,29 @@ impl OutputFormatter {
                 ))
             })?;
 
+            if horizon_params.definition.uses_regime_volatility() {
+                let configured_window = self.stats_window_bars.ok_or_else(|| {
+                    VangaError::ConfigError(
+                        "features.stats_window_bars is required for regime-volatility stop serving"
+                            .to_string(),
+                    )
+                })?;
+                crate::targets::stop_levels::validate_stop_level_regime_window(
+                    horizon_params,
+                    configured_window,
+                )?;
+            }
+            let history_ohlcv = self
+                .stop_level_history_ohlcv
+                .as_deref()
+                .unwrap_or(sequence_ohlcv);
+
             // Use the future-level direction estimated by the price-level model so
             // reconstruction selects the same adverse boundary scheme as training.
-            crate::targets::reconstruct_stop_levels(
+            crate::targets::stop_levels::reconstruct_stop_levels_with_history(
                 probabilities,
                 sequence_ohlcv,
+                history_ohlcv,
                 current_price,
                 horizon_params,
                 is_bullish,

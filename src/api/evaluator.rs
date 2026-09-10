@@ -394,6 +394,11 @@ pub(crate) fn head_confidence(result: Option<&PredictionResult>, kind: TargetTyp
     let Some(result) = result else {
         return Ok(0.0);
     };
+    // Production cannot serve a stop without the price head that picks its side;
+    // that is a veto of the stop head, not a scoring failure.
+    if kind == TargetType::StopLevel && result.price_levels.is_none() {
+        return Ok(0.0);
+    }
     let confidence = match kind {
         TargetType::PriceLevel => result.price_levels.as_ref().map(|p| p.confidence),
         TargetType::StopLevel => result.stop_levels.as_ref().map(|p| p.confidence),
@@ -416,6 +421,7 @@ fn reconstruct_action_prices_without_veto(
     horizon: &str,
     calibrated: &crate::targets::calibration::CalibratedParameters,
     sequence_ohlcv: &[crate::data::structures::MarketDataRow],
+    history_ohlcv: &[crate::data::structures::MarketDataRow],
 ) -> Result<ReconstructedActionPrices> {
     let price_params = calibrated.get_price_levels(horizon);
     let price_levels = parsed
@@ -433,13 +439,21 @@ fn reconstruct_action_prices_without_veto(
         .transpose()?;
     let ref_price = price_levels.as_ref().map(|_| current_price);
 
-    let formatter_reference_price =
-        crate::targets::get_sequence_exponential_weighted_close(sequence_ohlcv)
-            .unwrap_or(current_price);
-    let stop_is_bullish = price_levels.as_ref().and_then(|prediction| {
-        crate::output::formatter::infer_stop_is_bullish(prediction, formatter_reference_price)
-    });
     let stop_params = calibrated.get_stop_levels(horizon);
+    let formatter_reference_price = stop_params
+        .map(|params| {
+            crate::output::formatter::stop_level_reference_price(
+                sequence_ohlcv,
+                history_ohlcv,
+                params,
+            )
+        })
+        .transpose()?;
+    let stop_is_bullish = price_levels.as_ref().and_then(|prediction| {
+        formatter_reference_price.and_then(|reference_price| {
+            crate::output::formatter::infer_stop_is_bullish(prediction, reference_price)
+        })
+    });
     let stop_levels = match (parsed.stop_levels.as_ref(), stop_is_bullish) {
         (Some(probabilities), Some(is_bullish)) => Some(
             formatter.create_stop_level_prediction(
@@ -464,6 +478,27 @@ fn reconstruct_action_prices_without_veto(
         ref_price,
         stop_is_bullish,
     })
+}
+
+pub(crate) fn validate_evaluator_stop_history(
+    calibrated: &crate::targets::calibration::CalibratedParameters,
+    horizon: &str,
+    available_bars: usize,
+) -> Result<()> {
+    if let Some(window_bars) = calibrated
+        .get_stop_levels(horizon)
+        .map(crate::targets::stop_levels::stop_level_regime_window_bars)
+        .transpose()?
+        .flatten()
+    {
+        if available_bars < window_bars {
+            return Err(VangaError::data(format!(
+                "Insufficient stop-level regime history for evaluator anchor: {} bars available, {} required",
+                available_bars, window_bars
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Compare the complete serialized feature/data sections, including parameters
@@ -601,6 +636,12 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
     let calibrated = model
         .get_calibrated_parameters()
         .ok_or_else(|| VangaError::model("Missing saved calibration"))?;
+    for params in calibrated.stop_levels.values() {
+        crate::targets::stop_levels::validate_stop_level_regime_window(
+            params,
+            saved.features.stats_window_bars,
+        )?;
+    }
     if model.models.is_empty() {
         return Err(VangaError::model("Saved model has no heads"));
     }
@@ -777,6 +818,7 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
                 "No holdout anchors for {horizon} after embargo"
             )));
         }
+        validate_evaluator_stop_history(calibrated, horizon, starts[0] + sequence_length)?;
         let head_names: Vec<String> = model
             .get_target_names()
             .iter()
@@ -852,6 +894,8 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
             let formatter = OutputFormatter::new(Default::default())
                 .with_target_names(model.get_target_names())
                 .with_sequence_ohlcv(processed_ohlcv[start..end].to_vec())
+                .with_stop_level_history(processed_ohlcv[..end].to_vec())
+                .with_stats_window_bars(saved.features.stats_window_bars)
                 .with_metadata(feature_names.len(), sequence_length)
                 .with_min_confidence(0.0)
                 .with_calibrated_parameters(calibrated.clone());
@@ -883,6 +927,7 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
                 horizon,
                 calibrated,
                 &processed_ohlcv[start..end],
+                &processed_ohlcv[..end],
             )?;
             for (head_index, kind) in kinds.iter().enumerate() {
                 let probs = head_probabilities(&parsed, *kind)?;
