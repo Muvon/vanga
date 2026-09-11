@@ -346,6 +346,16 @@ pub struct XGBoostConfig {
     /// Feature importance analysis
     pub save_feature_importance: bool,
     pub importance_method: String, // "permutation" for SmartCore
+
+    /// Weight of the LSTM probabilities in the hybrid blend (the forest gets the
+    /// rest). Used by inference and by the post-hoc bias-corrector fit so the
+    /// calibrated distribution always matches the served one.
+    #[serde(default = "default_lstm_blend_weight")]
+    pub lstm_blend_weight: f32,
+}
+
+fn default_lstm_blend_weight() -> f32 {
+    0.2
 }
 
 /// Mixture-of-Head Attention configuration for dynamic head routing
@@ -745,6 +755,7 @@ impl Default for XGBoostConfig {
             eval_metric: "multiclass_accuracy".to_string(), // SmartCore evaluation metric
             save_feature_importance: true,                  // Enable feature analysis
             importance_method: "permutation".to_string(),   // Use permutation-based importance
+            lstm_blend_weight: default_lstm_blend_weight(),
         }
     }
 }

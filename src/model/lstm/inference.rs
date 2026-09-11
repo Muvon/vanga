@@ -14,11 +14,6 @@ use ndarray::{s, Array2, Array3};
 // Import deterministic dropout
 use super::seeded_weights::SeededTensorUtils;
 
-/// Weight of the LSTM probabilities in the hybrid blend (XGBoost gets the rest).
-/// Referenced by both inference blending and post-hoc bias-corrector fitting so
-/// the calibrated distribution always matches the served one.
-pub const LSTM_BLEND_WEIGHT: f32 = 0.2;
-
 impl LSTMModel {
     pub fn convert_sequences_to_tensors(
         &self,
@@ -653,7 +648,11 @@ impl LSTMModel {
 
             // Weighted average preserves some LSTM temporal patterns while
             // leveraging XGBoost's power
-            self.blend_predictions(&lstm_predictions, &xgb_predictions, LSTM_BLEND_WEIGHT)?
+            self.blend_predictions(
+                &lstm_predictions,
+                &xgb_predictions,
+                xgb_model.get_config().lstm_blend_weight,
+            )?
         } else {
             log::info!("🔄 Using pure LSTM prediction");
 
@@ -1299,6 +1298,7 @@ mod tests {
             eval_metric: "multiclass_accuracy".to_string(),
             save_feature_importance: true,
             importance_method: "permutation".to_string(),
+            lstm_blend_weight: 0.2,
         };
 
         // Test that the method returns the config value, not calculated value

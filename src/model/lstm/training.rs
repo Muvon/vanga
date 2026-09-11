@@ -3760,7 +3760,16 @@ impl LSTMModel {
 
             let inference_probabilities = match &xgb_val_probs {
                 Some(xgb_probs) => {
-                    let w = crate::model::lstm::inference::LSTM_BLEND_WEIGHT as f64;
+                    let w = self
+                        .xgboost_model
+                        .as_ref()
+                        .ok_or_else(|| {
+                            VangaError::ModelError(
+                                "XGBoost validation probabilities without a model".to_string(),
+                            )
+                        })?
+                        .get_config()
+                        .lstm_blend_weight as f64;
                     &lstm_probabilities * w + xgb_probs * (1.0 - w)
                 }
                 None => lstm_probabilities,
