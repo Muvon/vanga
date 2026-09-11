@@ -526,7 +526,8 @@ impl ModelTrainer {
 
                 // Calculate new overlap based on ratio
                 let adjustment_ratio = target_count as f64 / balanced_count as f64;
-                current_overlap = (current_overlap * adjustment_ratio).min(0.95);
+                // 1.0 = stride of one bar, the most sequences the history can give
+                current_overlap = (current_overlap * adjustment_ratio).min(1.0);
 
                 log::info!(
                     "🔧 Adjusting overlap: {:.1}% → {:.1}% (ratio: {:.2})",
