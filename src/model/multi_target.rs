@@ -922,6 +922,24 @@ impl MultiTargetLSTMModel {
         Ok(self.models)
     }
 
+    pub fn take_model_by_target_name(&mut self, target_name: &str) -> Result<LSTMModel> {
+        let model_index = self
+            .target_names
+            .iter()
+            .position(|name| name == target_name)
+            .ok_or_else(|| {
+                VangaError::ModelError(format!(
+                    "Saved model does not contain target '{}'. Available targets: {:?}",
+                    target_name, self.target_names
+                ))
+            })?;
+
+        self.target_names.remove(model_index);
+        let model = self.models.remove(model_index);
+        self.num_targets = self.models.len();
+        Ok(model)
+    }
+
     /// COMBINE MODELS: Create MultiTargetLSTMModel from multiple pre-trained LSTM models
     /// PURPOSE: Fixes critical bug where only first target was kept
     /// ARCHITECTURE: Vec<LSTMModel> → MultiTargetLSTMModel wrapper (all targets preserved)

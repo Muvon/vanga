@@ -1,5 +1,125 @@
 use std::collections::HashMap;
 
+use crate::config::model::HiddenUnitsConfig;
+use crate::config::TrainingConfig;
+use crate::utils::error::Result;
+
+use super::trainer::validate_continue_training_compatibility;
+
+struct ContinueTrainingCompatibilityFixture {
+    saved_config: TrainingConfig,
+    current_config: TrainingConfig,
+    saved_feature_names: Vec<String>,
+    prepared_feature_names: Vec<String>,
+    saved_target_names: Vec<String>,
+    prepared_target_names: Vec<String>,
+}
+
+impl ContinueTrainingCompatibilityFixture {
+    fn new() -> Self {
+        let saved_config = TrainingConfig::default();
+        Self {
+            current_config: saved_config.clone(),
+            saved_config,
+            saved_feature_names: vec!["close".to_string(), "volume".to_string()],
+            prepared_feature_names: vec!["close".to_string(), "volume".to_string()],
+            saved_target_names: vec!["direction_1h".to_string()],
+            prepared_target_names: vec!["direction_1h".to_string()],
+        }
+    }
+
+    fn validate(&self, saved_config: Option<&TrainingConfig>) -> Result<()> {
+        validate_continue_training_compatibility(
+            saved_config,
+            &self.current_config,
+            Some(&self.saved_feature_names),
+            &self.saved_target_names,
+            &self.prepared_feature_names,
+            &self.prepared_target_names,
+        )
+    }
+}
+
+#[test]
+fn continue_training_compatibility_accepts_matching_model() {
+    let fixture = ContinueTrainingCompatibilityFixture::new();
+
+    fixture.validate(Some(&fixture.saved_config)).unwrap();
+}
+
+#[test]
+fn continue_training_compatibility_rejects_missing_training_config() {
+    let fixture = ContinueTrainingCompatibilityFixture::new();
+
+    let error = fixture.validate(None).unwrap_err();
+
+    assert!(error.to_string().contains("missing training_config"));
+}
+
+#[test]
+fn continue_training_compatibility_rejects_hidden_units_change() {
+    let mut fixture = ContinueTrainingCompatibilityFixture::new();
+    fixture.saved_config.model.hidden_units = HiddenUnitsConfig::Fixed(vec![64]);
+    fixture.current_config = fixture.saved_config.clone();
+    fixture.current_config.model.hidden_units = HiddenUnitsConfig::Fixed(vec![128]);
+
+    let error = fixture.validate(Some(&fixture.saved_config)).unwrap_err();
+
+    assert!(error.to_string().contains("section(s): model"));
+}
+
+#[test]
+fn continue_training_compatibility_rejects_xgboost_change() {
+    let mut fixture = ContinueTrainingCompatibilityFixture::new();
+    fixture.saved_config.model.xgboost.enabled = true;
+    fixture.current_config = fixture.saved_config.clone();
+    fixture.current_config.model.xgboost.enabled = false;
+
+    let error = fixture.validate(Some(&fixture.saved_config)).unwrap_err();
+
+    assert!(error.to_string().contains("section(s): model"));
+}
+
+#[test]
+fn continue_training_compatibility_rejects_features_change() {
+    let mut fixture = ContinueTrainingCompatibilityFixture::new();
+    fixture.current_config.features.stats_window_bars += 1;
+
+    let error = fixture.validate(Some(&fixture.saved_config)).unwrap_err();
+
+    assert!(error.to_string().contains("section(s): features"));
+}
+
+#[test]
+fn continue_training_compatibility_rejects_targets_change() {
+    let mut fixture = ContinueTrainingCompatibilityFixture::new();
+    fixture.current_config.targets.volume = !fixture.saved_config.targets.volume;
+
+    let error = fixture.validate(Some(&fixture.saved_config)).unwrap_err();
+
+    assert!(error.to_string().contains("section(s): targets"));
+}
+
+#[test]
+fn continue_training_compatibility_rejects_feature_name_mismatch() {
+    let mut fixture = ContinueTrainingCompatibilityFixture::new();
+    fixture.prepared_feature_names.reverse();
+
+    let error = fixture.validate(Some(&fixture.saved_config)).unwrap_err();
+
+    assert!(error.to_string().contains("feature mismatch"));
+}
+
+#[test]
+fn continue_training_compatibility_rejects_target_set_mismatch() {
+    let mut fixture = ContinueTrainingCompatibilityFixture::new();
+    fixture.prepared_target_names = vec!["volatility_1h".to_string()];
+
+    let error = fixture.validate(Some(&fixture.saved_config)).unwrap_err();
+
+    assert!(error.to_string().contains("target mismatch"));
+}
+
 #[test]
 fn test_truncation_maintains_perfect_class_balance() {
     // Simulate the exact scenario from the bug report

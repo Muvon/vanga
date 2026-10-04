@@ -75,10 +75,93 @@ use crate::model::multi_target::{MultiTargetLSTMModel, TrainingContext};
 use crate::targets::{PreparedTargets, TargetType};
 use crate::utils::error::{Result, VangaError};
 use ndarray::Array2;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 pub(super) fn minimum_target_sample_count(counts: &[usize]) -> Option<usize> {
     counts.iter().copied().min()
+}
+
+fn config_section_differs<T: serde::Serialize>(saved: &T, current: &T) -> Result<bool> {
+    let to_value = |section: &T| {
+        serde_json::to_value(section).map_err(|error| {
+            VangaError::SerializationError(format!("Failed to serialize config section: {error}"))
+        })
+    };
+    Ok(to_value(saved)? != to_value(current)?)
+}
+
+pub(super) fn validate_continue_training_compatibility(
+    loaded_training_config: Option<&TrainingConfig>,
+    current_training_config: &TrainingConfig,
+    loaded_feature_names: Option<&[String]>,
+    loaded_target_names: &[String],
+    prepared_feature_names: &[String],
+    prepared_target_names: &[String],
+) -> Result<()> {
+    let loaded_training_config = loaded_training_config.ok_or_else(|| {
+        VangaError::ModelError(
+            "Continue-training compatibility error: saved model is missing training_config"
+                .to_string(),
+        )
+    })?;
+
+    let changed_sections: Vec<&str> = [
+        (
+            "model",
+            config_section_differs(
+                &loaded_training_config.model,
+                &current_training_config.model,
+            )?,
+        ),
+        (
+            "features",
+            config_section_differs(
+                &loaded_training_config.features,
+                &current_training_config.features,
+            )?,
+        ),
+        (
+            "targets",
+            config_section_differs(
+                &loaded_training_config.targets,
+                &current_training_config.targets,
+            )?,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, changed)| *changed)
+    .map(|(section, _)| section)
+    .collect();
+    if !changed_sections.is_empty() {
+        return Err(VangaError::ModelError(format!(
+            "Continue-training configuration mismatch in section(s): {}",
+            changed_sections.join(", ")
+        )));
+    }
+
+    let loaded_feature_names = loaded_feature_names.ok_or_else(|| {
+        VangaError::ModelError(
+            "Continue-training compatibility error: saved model is missing feature names"
+                .to_string(),
+        )
+    })?;
+    if loaded_feature_names != prepared_feature_names {
+        return Err(VangaError::ModelError(format!(
+            "Continue-training feature mismatch: saved model has {:?}, prepared data has {:?}",
+            loaded_feature_names, prepared_feature_names
+        )));
+    }
+
+    let loaded_targets: BTreeSet<_> = loaded_target_names.iter().collect();
+    let prepared_targets: BTreeSet<_> = prepared_target_names.iter().collect();
+    if loaded_targets != prepared_targets {
+        return Err(VangaError::ModelError(format!(
+            "Continue-training target mismatch: saved model has {:?}, this run trains {:?}",
+            loaded_targets, prepared_targets
+        )));
+    }
+
+    Ok(())
 }
 
 /// Perfect balance validation for PreparedTargets
@@ -380,8 +463,40 @@ impl ModelTrainer {
         // Initialize data pipeline
         let data_pipeline = DataPipeline::new();
 
+        let (mut continued_model, continued_calibrated_params) = if self.config.continue_training {
+            let model_path = crate::utils::model_path::get_model_path(&self.config.symbol);
+            log::info!(
+                "📂 Loading model for continued training from: {}",
+                model_path.display()
+            );
+            let model = MultiTargetLSTMModel::load(&model_path).map_err(|error| {
+                VangaError::model(format!(
+                    "Failed to load model for continued training from {}: {}",
+                    model_path.display(),
+                    error
+                ))
+            })?;
+            let calibrated_params = model
+                .get_calibrated_parameters()
+                .ok_or_else(|| {
+                    VangaError::model(format!(
+                        "Model for continued training at {} is missing calibrated parameters",
+                        model_path.display()
+                    ))
+                })?
+                .clone();
+            log::info!("✅ Loaded saved model and calibrated parameters for continued training");
+            (Some(model), Some(calibrated_params))
+        } else {
+            (None, None)
+        };
+
         // CRITICAL: Calibrate target parameters BEFORE data pipeline
-        log::info!("🎯 Calibrating target parameters for balanced class distributions...");
+        if self.config.continue_training {
+            log::info!("🎯 Reusing saved target parameters for class definitions");
+        } else {
+            log::info!("🎯 Calibrating target parameters for balanced class distributions...");
+        }
         let data_loader = crate::data::DataLoader::new();
         let raw_data = data_loader.load_csv(&self.config.data_path).await?;
 
@@ -444,16 +559,20 @@ impl ModelTrainer {
                     current_overlap * 100.0
                 );
 
-                let params = calibrator
-                    .calibrate(
-                        &ohlcv_data,
-                        sequence_length,
-                        &self.config.horizons,
-                        None,
-                        current_overlap,
-                        timeframe_minutes,
-                    )
-                    .await?;
+                let params = if let Some(saved_params) = &continued_calibrated_params {
+                    saved_params.clone()
+                } else {
+                    calibrator
+                        .calibrate(
+                            &ohlcv_data,
+                            sequence_length,
+                            &self.config.horizons,
+                            None,
+                            current_overlap,
+                            timeframe_minutes,
+                        )
+                        .await?
+                };
 
                 // Load data with these params to count ACTUAL balanced samples
                 let mut temp_config = self.config.clone();
@@ -542,16 +661,20 @@ impl ModelTrainer {
             (params, current_overlap)
         } else {
             // No target, run calibration once with baseline overlap
-            let params = calibrator
-                .calibrate(
-                    &ohlcv_data,
-                    sequence_length,
-                    &self.config.horizons,
-                    None,
-                    current_overlap,
-                    timeframe_minutes,
-                )
-                .await?;
+            let params = if let Some(saved_params) = &continued_calibrated_params {
+                saved_params.clone()
+            } else {
+                calibrator
+                    .calibrate(
+                        &ohlcv_data,
+                        sequence_length,
+                        &self.config.horizons,
+                        None,
+                        current_overlap,
+                        timeframe_minutes,
+                    )
+                    .await?
+            };
             (params, current_overlap)
         };
 
@@ -576,6 +699,23 @@ impl ModelTrainer {
                 Some(&calibrated_params),
             )
             .await?;
+
+        if let Some(model) = &continued_model {
+            let prepared_target_names: Vec<_> = target_windows
+                .windows_by_target
+                .keys()
+                .map(|(target_type, horizon)| generate_target_name(*target_type, horizon))
+                .collect();
+            validate_continue_training_compatibility(
+                model.get_training_config(),
+                &self.config,
+                model.get_feature_names(),
+                model.get_target_names(),
+                &target_windows.feature_names,
+                &prepared_target_names,
+            )?;
+            log::info!("✅ Saved model is compatible with prepared training data");
+        }
 
         // Truncation is now handled in the data pipeline BEFORE splitting
         // This ensures perfect alignment between sequences and targets
@@ -715,21 +855,45 @@ impl ModelTrainer {
                 );
 
                 if window_idx == 0 {
-                    // WINDOW 1: Train fresh model from scratch with initial data
-                    log::info!(
-                        "🆕 {:?} {} Window 1: Training fresh model from scratch",
-                        target_type,
-                        horizon
-                    );
-                    let new_model = self
-                        .train_window_from_scratch(
+                    let new_model = if let Some(saved_model) = &mut continued_model {
+                        let target_name = generate_target_name(*target_type, horizon);
+                        log::info!(
+                            "🔄 {} Window 1: Continuing from the saved model",
+                            target_name
+                        );
+                        let loaded_lstm = saved_model.take_model_by_target_name(&target_name)?;
+                        let single_target_model = MultiTargetLSTMModel::from_trained_models(
+                            vec![loaded_lstm],
+                            vec![target_name],
+                            vec![horizon.clone()],
+                            saved_model.get_input_size(),
+                            Some(calibrated_params.clone()),
+                        )?;
+                        self.continue_training_window(
+                            single_target_model,
+                            window,
+                            window_idx,
+                            *target_type,
+                            horizon,
+                            window_lr,
+                        )
+                        .await?
+                    } else {
+                        // WINDOW 1: Train fresh model from scratch with initial data
+                        log::info!(
+                            "🆕 {:?} {} Window 1: Training fresh model from scratch",
+                            target_type,
+                            horizon
+                        );
+                        self.train_window_from_scratch(
                             window,
                             window_idx,
                             *target_type,
                             horizon,
                             &device,
                         )
-                        .await?;
+                        .await?
+                    };
                     target_models.insert(target_key, new_model);
                 } else {
                     // WINDOW 2+: Continue training with EXTENDED data (preserves learned weights)
