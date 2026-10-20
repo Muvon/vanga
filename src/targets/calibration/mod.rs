@@ -25,7 +25,7 @@ pub mod volume;
 pub use bayesian::{BayesianConfig, BayesianOptimizer};
 pub use core::ParameterCalibrator;
 pub use overlap_optimizer::{
-    calculate_optimal_overlap, find_optimal_overlap_with_calibration, truncate_balanced_sequences,
+	calculate_optimal_overlap, find_optimal_overlap_with_calibration, truncate_balanced_sequences,
 };
 pub use types::*;
 

@@ -29,22 +29,17 @@ pub mod smartcore_test;
 pub use attention::{AttentionFactory, AttentionModule, MultiHeadAttention};
 pub use attention_loss::{AttentionLossConfig, AttentionLossFactory, AttentionWeightedLoss};
 pub use attention_moh::MixtureOfHeadAttention;
-pub use attention_moh_wrapper::{
-    EnhancedAttentionFactory, MoHAttentionWrapper, MoHMetrics, MoHTrainingLoss,
-};
+pub use attention_moh_wrapper::{EnhancedAttentionFactory, MoHAttentionWrapper, MoHMetrics, MoHTrainingLoss};
 pub use bias_correction::{BiasCorrection, LinearBiasCorrector};
 pub use calibration::{
-    AdaptiveLabelSmoothing, AdaptiveMixup, AdaptiveTemperatureScaling, EnsembleCalibrator,
-    ReliabilityDiagram,
+	AdaptiveLabelSmoothing, AdaptiveMixup, AdaptiveTemperatureScaling, EnsembleCalibrator, ReliabilityDiagram,
 };
 pub use lstm::{LSTMConfig, LSTMModel}; // Use new modular LSTM
 pub use lstm_simple::*; // Backward compatibility
 pub use multi_target::MultiTargetLSTMModel;
 pub use smartcore_backend::{SmartCoreMetadata, SmartCoreRegressor};
 pub use tft::{
-    QuantileMultiTargetModel, QuantileOutputConfig, QuantileRegressionHead,
-    VariableSelectionAttention, VariableSelectionConfig, VariableSelectionNetwork,
+	QuantileMultiTargetModel, QuantileOutputConfig, QuantileRegressionHead, VariableSelectionAttention,
+	VariableSelectionConfig, VariableSelectionNetwork,
 };
-pub use xgboost::{
-    get_eval_metric_for_target, get_objective_for_target, XGBoostMetadata, XGBoostRegressor,
-};
+pub use xgboost::{get_eval_metric_for_target, get_objective_for_target, XGBoostMetadata, XGBoostRegressor};

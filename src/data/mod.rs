@@ -35,42 +35,39 @@ pub use balance::SequenceWithTargets;
 pub use loader::DataLoader;
 
 fn prediction_sequence_length(training_config: &crate::config::TrainingConfig) -> usize {
-    match &training_config.model.sequence_length {
-        crate::config::model::SequenceLengthConfig::Fixed(length) => *length as usize,
-        crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
-        crate::config::model::SequenceLengthConfig::Adaptive => 60,
-    }
+	match &training_config.model.sequence_length {
+		crate::config::model::SequenceLengthConfig::Fixed(length) => *length as usize,
+		crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
+		crate::config::model::SequenceLengthConfig::Adaptive => 60,
+	}
 }
 
 pub(crate) fn prediction_history_requirements(
-    training_config: &crate::config::TrainingConfig,
+	training_config: &crate::config::TrainingConfig,
 ) -> Result<(usize, usize, usize)> {
-    let stats_window_bars = training_config.features.stats_window_bars;
-    let sequence_length = prediction_sequence_length(training_config);
-    let required_rows = stats_window_bars
-        .checked_add(sequence_length)
-        .ok_or_else(|| {
-            VangaError::ConfigError(format!(
-                "Prediction history requirement overflow: stats_window_bars {}, sequence_length {}",
-                stats_window_bars, sequence_length
-            ))
-        })?;
-    Ok((stats_window_bars, sequence_length, required_rows))
+	let stats_window_bars = training_config.features.stats_window_bars;
+	let sequence_length = prediction_sequence_length(training_config);
+	let required_rows = stats_window_bars.checked_add(sequence_length).ok_or_else(|| {
+		VangaError::ConfigError(format!(
+			"Prediction history requirement overflow: stats_window_bars {}, sequence_length {}",
+			stats_window_bars, sequence_length
+		))
+	})?;
+	Ok((stats_window_bars, sequence_length, required_rows))
 }
 
 pub(crate) fn validate_prediction_history(
-    rows_given: usize,
-    training_config: &crate::config::TrainingConfig,
+	rows_given: usize,
+	training_config: &crate::config::TrainingConfig,
 ) -> Result<()> {
-    let (stats_window_bars, sequence_length, required_rows) =
-        prediction_history_requirements(training_config)?;
-    if rows_given < required_rows {
-        return Err(VangaError::DataError(format!(
-            "Insufficient prediction history: rows given {}, required {}, stats_window_bars {}, sequence_length {}",
-            rows_given, required_rows, stats_window_bars, sequence_length
-        )));
-    }
-    Ok(())
+	let (stats_window_bars, sequence_length, required_rows) = prediction_history_requirements(training_config)?;
+	if rows_given < required_rows {
+		return Err(VangaError::DataError(format!(
+			"Insufficient prediction history: rows given {}, required {}, stats_window_bars {}, sequence_length {}",
+			rows_given, required_rows, stats_window_bars, sequence_length
+		)));
+	}
+	Ok(())
 }
 pub use preprocessor::DataPreprocessor;
 pub use schema::{CryptoDataSchema, DataValidationError};
@@ -82,1552 +79,1471 @@ use std::path::Path;
 
 /// Main data pipeline orchestrator
 pub struct DataPipeline {
-    loader: DataLoader,
-    preprocessor: DataPreprocessor,
-    sequence_generator: SequenceGenerator,
-    feature_names: Option<Vec<String>>,
+	loader: DataLoader,
+	preprocessor: DataPreprocessor,
+	sequence_generator: SequenceGenerator,
+	feature_names: Option<Vec<String>>,
 }
 
 impl Default for DataPipeline {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl DataPipeline {
-    pub fn new() -> Self {
-        Self {
-            feature_names: None,
-            loader: DataLoader::new(),
-            preprocessor: DataPreprocessor::new(),
-            sequence_generator: SequenceGenerator::default(), // Uses no overlap by default
-        }
-    }
+	pub fn new() -> Self {
+		Self {
+			feature_names: None,
+			loader: DataLoader::new(),
+			preprocessor: DataPreprocessor::new(),
+			sequence_generator: SequenceGenerator::default(), // Uses no overlap by default
+		}
+	}
 
-    pub fn with_feature_names(mut self, names: Option<&[String]>) -> Self {
-        self.feature_names = names.map(<[String]>::to_vec);
-        self
-    }
+	pub fn with_feature_names(mut self, names: Option<&[String]>) -> Self {
+		self.feature_names = names.map(<[String]>::to_vec);
+		self
+	}
 
-    /// Load and preprocess data for training with walk-forward analysis and balanced sampling
-    pub async fn prepare_training_data<P: AsRef<Path>>(
-        &self,
-        data_path: P,
-        config: &crate::config::TrainingConfig,
-    ) -> Result<TargetSpecificWindows> {
-        self.prepare_training_data_with_calibrated_params(data_path, config, None)
-            .await
-    }
+	/// Load and preprocess data for training with walk-forward analysis and balanced sampling
+	pub async fn prepare_training_data<P: AsRef<Path>>(
+		&self,
+		data_path: P,
+		config: &crate::config::TrainingConfig,
+	) -> Result<TargetSpecificWindows> {
+		self.prepare_training_data_with_calibrated_params(data_path, config, None)
+			.await
+	}
 
-    /// Load and preprocess data for training with pre-calibrated parameters
-    pub async fn prepare_training_data_with_calibrated_params<P: AsRef<Path>>(
-        &self,
-        data_path: P,
-        config: &crate::config::TrainingConfig,
-        calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
-    ) -> Result<TargetSpecificWindows> {
-        // Load raw data
-        let raw_data = self.loader.load_csv(data_path).await?;
+	/// Load and preprocess data for training with pre-calibrated parameters
+	pub async fn prepare_training_data_with_calibrated_params<P: AsRef<Path>>(
+		&self,
+		data_path: P,
+		config: &crate::config::TrainingConfig,
+		calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
+	) -> Result<TargetSpecificWindows> {
+		// Load raw data
+		let raw_data = self.loader.load_csv(data_path).await?;
 
-        // Validate schema
-        CryptoDataSchema::validate(&raw_data)?;
+		// Validate schema
+		CryptoDataSchema::validate(&raw_data)?;
 
-        // Apply feature engineering but NO global normalization
-        let processed_data = self
-            .preprocessor
-            .process_features_only(raw_data, &config.data, Some(&config.features))
-            .await?;
+		// Apply feature engineering but NO global normalization
+		let processed_data = self
+			.preprocessor
+			.process_features_only(raw_data, &config.data, Some(&config.features))
+			.await?;
 
-        // Use target-specific balanced approach
-        let target_windows = self
-            .create_target_specific_balanced_windows(processed_data, config, calibrated_params)
-            .await?;
+		// Use target-specific balanced approach
+		let target_windows = self
+			.create_target_specific_balanced_windows(processed_data, config, calibrated_params)
+			.await?;
 
-        log::info!(
-            "🎯 Target-specific balanced analysis: {} targets with independent balancing",
-            target_windows.windows_by_target.len()
-        );
+		log::info!(
+			"🎯 Target-specific balanced analysis: {} targets with independent balancing",
+			target_windows.windows_by_target.len()
+		);
 
-        Ok(target_windows)
-    }
+		Ok(target_windows)
+	}
 
-    /// Calculate optimal walk-forward window configuration for maximum data utilization
-    /// Balances between data efficiency and validation quality
-    fn calculate_optimal_window_configuration(
-        available_for_training: usize,
-        base_validation_size: usize,
-        min_train_size: usize,
-        gap_steps: usize,
-        min_increment_ratio: f64, // NEW: Minimum increment ratio for sufficient new data
-    ) -> OptimalWindowConfig {
-        let min_validation_size = std::cmp::max(base_validation_size / 2, 1000);
-        let max_validation_size = base_validation_size * 2;
-        let data_for_expansion = available_for_training - min_train_size;
+	/// Calculate optimal walk-forward window configuration for maximum data utilization
+	/// Balances between data efficiency and validation quality
+	fn calculate_optimal_window_configuration(
+		available_for_training: usize,
+		base_validation_size: usize,
+		min_train_size: usize,
+		gap_steps: usize,
+		min_increment_ratio: f64, // NEW: Minimum increment ratio for sufficient new data
+	) -> OptimalWindowConfig {
+		let min_validation_size = std::cmp::max(base_validation_size / 2, 1000);
+		let max_validation_size = base_validation_size * 2;
+		let data_for_expansion = available_for_training - min_train_size;
 
-        let mut best_config = None;
-        let mut best_score = 0.0;
+		let mut best_config = None;
+		let mut best_score = 0.0;
 
-        // 🚀 EFFICIENCY-FOCUSED WINDOW ALGORITHM
-        // Try different window counts with efficiency considerations
-        let max_reasonable_windows = std::cmp::min(6, available_for_training / 1000); // Cap based on data size
-        let window_range = 2..=max_reasonable_windows;
+		// 🚀 EFFICIENCY-FOCUSED WINDOW ALGORITHM
+		// Try different window counts with efficiency considerations
+		let max_reasonable_windows = std::cmp::min(6, available_for_training / 1000); // Cap based on data size
+		let window_range = 2..=max_reasonable_windows;
 
-        log::info!(
-            "🧠 Efficiency-focused algorithm: testing {}-{} windows (capped at {} for efficiency)",
-            window_range.start(),
-            window_range.end(),
-            max_reasonable_windows
-        );
+		log::info!(
+			"🧠 Efficiency-focused algorithm: testing {}-{} windows (capped at {} for efficiency)",
+			window_range.start(),
+			window_range.end(),
+			max_reasonable_windows
+		);
 
-        for window_count in window_range {
-            // 🚀 FIXED: Progressive increment calculation based on PREVIOUS window size
-            // Each increment should be min_increment_ratio of the IMMEDIATE PREVIOUS window
+		for window_count in window_range {
+			// 🚀 FIXED: Progressive increment calculation based on PREVIOUS window size
+			// Each increment should be min_increment_ratio of the IMMEDIATE PREVIOUS window
 
-            let mut progressive_increments = Vec::new();
-            let mut previous_window_size = min_train_size; // Start with first window size
-            let mut total_increment_needed = 0;
+			let mut progressive_increments = Vec::new();
+			let mut previous_window_size = min_train_size; // Start with first window size
+			let mut total_increment_needed = 0;
 
-            // Calculate progressive increments for each subsequent window
-            for window_idx in 1..window_count {
-                // ✅ CORRECT: Calculate increment based on PREVIOUS window size
-                let min_increment_for_this_window =
-                    (previous_window_size as f64 * min_increment_ratio) as usize;
+			// Calculate progressive increments for each subsequent window
+			for window_idx in 1..window_count {
+				// ✅ CORRECT: Calculate increment based on PREVIOUS window size
+				let min_increment_for_this_window = (previous_window_size as f64 * min_increment_ratio) as usize;
 
-                progressive_increments.push(min_increment_for_this_window);
-                total_increment_needed += min_increment_for_this_window;
+				progressive_increments.push(min_increment_for_this_window);
+				total_increment_needed += min_increment_for_this_window;
 
-                // Update previous_window_size for next iteration
-                previous_window_size += min_increment_for_this_window;
+				// Update previous_window_size for next iteration
+				previous_window_size += min_increment_for_this_window;
 
-                log::debug!(
-                    "📈 Window {} increment: {} samples ({:.1}% of previous window size {})",
-                    window_idx + 1, // Window number (1-indexed)
-                    min_increment_for_this_window,
-                    min_increment_ratio * 100.0,
-                    previous_window_size - min_increment_for_this_window // Previous window size
-                );
-            }
+				log::debug!(
+					"📈 Window {} increment: {} samples ({:.1}% of previous window size {})",
+					window_idx + 1, // Window number (1-indexed)
+					min_increment_for_this_window,
+					min_increment_ratio * 100.0,
+					previous_window_size - min_increment_for_this_window // Previous window size
+				);
+			}
 
-            // Check if we have enough data for progressive increments
-            if total_increment_needed > data_for_expansion {
-                log::debug!(
-                    "⚠️  Skipping {} windows: progressive increments need {} > available {} samples",
-                    window_count, total_increment_needed, data_for_expansion
-                );
-                continue;
-            }
+			// Check if we have enough data for progressive increments
+			if total_increment_needed > data_for_expansion {
+				log::debug!(
+					"⚠️  Skipping {} windows: progressive increments need {} > available {} samples",
+					window_count,
+					total_increment_needed,
+					data_for_expansion
+				);
+				continue;
+			}
 
-            // Also check the old validation for backward compatibility
-            let avg_increment = data_for_expansion / window_count;
-            if avg_increment < available_for_training / 20 {
-                continue;
-            }
+			// Also check the old validation for backward compatibility
+			let avg_increment = data_for_expansion / window_count;
+			if avg_increment < available_for_training / 20 {
+				continue;
+			}
 
-            let mut windows = Vec::new();
-            let mut train_end = min_train_size;
-            let mut total_used = min_train_size;
-            let mut next_fresh_validation_start = min_train_size + gap_steps;
+			let mut windows = Vec::new();
+			let mut train_end = min_train_size;
+			let mut total_used = min_train_size;
+			let mut next_fresh_validation_start = min_train_size + gap_steps;
 
-            for i in 0..window_count {
-                // Calculate remaining data after this window's training
-                let remaining_after_train = available_for_training - train_end - gap_steps;
+			for i in 0..window_count {
+				// Calculate remaining data after this window's training
+				let remaining_after_train = available_for_training - train_end - gap_steps;
 
-                if remaining_after_train == 0 {
-                    break;
-                }
+				if remaining_after_train == 0 {
+					break;
+				}
 
-                // For final window, use all remaining data for validation
-                let validation_size = if i == window_count - 1 {
-                    remaining_after_train
-                } else {
-                    // Distribute remaining data across remaining windows
-                    let remaining_windows = window_count - i;
-                    let avg_val_per_remaining = remaining_after_train / remaining_windows;
-                    std::cmp::min(
-                        std::cmp::max(avg_val_per_remaining, min_validation_size),
-                        max_validation_size,
-                    )
-                };
+				// For final window, use all remaining data for validation
+				let validation_size = if i == window_count - 1 {
+					remaining_after_train
+				} else {
+					// Distribute remaining data across remaining windows
+					let remaining_windows = window_count - i;
+					let avg_val_per_remaining = remaining_after_train / remaining_windows;
+					std::cmp::min(
+						std::cmp::max(avg_val_per_remaining, min_validation_size),
+						max_validation_size,
+					)
+				};
 
-                // Check if we have enough data
-                if train_end + gap_steps + validation_size > available_for_training {
-                    break;
-                }
+				// Check if we have enough data
+				if train_end + gap_steps + validation_size > available_for_training {
+					break;
+				}
 
-                // 🧠 SMART VALIDATION SCHEDULING
-                if next_fresh_validation_start + validation_size <= available_for_training {
-                    // Use fresh validation data
-                    next_fresh_validation_start += validation_size + (gap_steps * 2);
-                    // Reserve space
-                }
+				// 🧠 SMART VALIDATION SCHEDULING
+				if next_fresh_validation_start + validation_size <= available_for_training {
+					// Use fresh validation data
+					next_fresh_validation_start += validation_size + (gap_steps * 2);
+					// Reserve space
+				}
 
-                windows.push(WindowConfig { train_end });
+				windows.push(WindowConfig { train_end });
 
-                total_used = train_end + gap_steps + validation_size;
+				total_used = train_end + gap_steps + validation_size;
 
-                // 🚀 NEW: Use progressive increments instead of fixed avg_increment
-                if i < window_count - 1 {
-                    if i < progressive_increments.len() {
-                        let progressive_increment = progressive_increments[i];
-                        train_end += progressive_increment;
+				// 🚀 NEW: Use progressive increments instead of fixed avg_increment
+				if i < window_count - 1 {
+					if i < progressive_increments.len() {
+						let progressive_increment = progressive_increments[i];
+						train_end += progressive_increment;
 
-                        log::debug!(
-                            "📈 Window {}: train_end={}, increment=+{} ({:.1}% of previous window)",
-                            i + 2, // Next window number
-                            train_end,
-                            progressive_increment,
-                            (progressive_increment as f64
-                                / (train_end - progressive_increment) as f64)
-                                * 100.0
-                        );
-                    } else {
-                        // Fallback to avg_increment for safety (shouldn't happen with new logic)
-                        train_end += avg_increment;
-                    }
-                }
-            }
+						log::debug!(
+							"📈 Window {}: train_end={}, increment=+{} ({:.1}% of previous window)",
+							i + 2, // Next window number
+							train_end,
+							progressive_increment,
+							(progressive_increment as f64 / (train_end - progressive_increment) as f64) * 100.0
+						);
+					} else {
+						// Fallback to avg_increment for safety (shouldn't happen with new logic)
+						train_end += avg_increment;
+					}
+				}
+			}
 
-            // Only consider complete configurations
-            if windows.len() != window_count {
-                continue;
-            }
+			// Only consider complete configurations
+			if windows.len() != window_count {
+				continue;
+			}
 
-            let utilization = (total_used as f64 / available_for_training as f64) * 100.0;
+			let utilization = (total_used as f64 / available_for_training as f64) * 100.0;
 
-            // 🚀 EFFICIENCY-FOCUSED SCORING FUNCTION
-            // Balance data utilization with training efficiency
+			// 🚀 EFFICIENCY-FOCUSED SCORING FUNCTION
+			// Balance data utilization with training efficiency
 
-            // Base quality score with stronger diminishing returns
-            let window_quality_score = if window_count <= 3 {
-                window_count as f64 // Linear for 2-3 windows
-            } else if window_count <= 5 {
-                3.0 + (window_count as f64 - 3.0) * 0.7 // Moderate returns for 4-5 windows
-            } else {
-                4.4 + (window_count as f64 - 5.0) * 0.3 // Strong diminishing returns for 6+ windows
-            };
+			// Base quality score with stronger diminishing returns
+			let window_quality_score = if window_count <= 3 {
+				window_count as f64 // Linear for 2-3 windows
+			} else if window_count <= 5 {
+				3.0 + (window_count as f64 - 3.0) * 0.7 // Moderate returns for 4-5 windows
+			} else {
+				4.4 + (window_count as f64 - 5.0) * 0.3 // Strong diminishing returns for 6+ windows
+			};
 
-            // Efficiency bonus: favor 4-5 windows (sweet spot)
-            let efficiency_bonus = match window_count {
-                4 | 5 => 0.3, // Sweet spot bonus
-                3 | 6 => 0.1, // Slight bonus for reasonable choices
-                _ => 0.0,     // No bonus for extreme choices
-            };
+			// Efficiency bonus: favor 4-5 windows (sweet spot)
+			let efficiency_bonus = match window_count {
+				4 | 5 => 0.3, // Sweet spot bonus
+				3 | 6 => 0.1, // Slight bonus for reasonable choices
+				_ => 0.0,     // No bonus for extreme choices
+			};
 
-            // Training time penalty for excessive windows
-            let time_penalty = if window_count > 5 {
-                (window_count as f64 - 5.0) * 0.2 // Penalty for > 5 windows
-            } else {
-                0.0
-            };
+			// Training time penalty for excessive windows
+			let time_penalty = if window_count > 5 {
+				(window_count as f64 - 5.0) * 0.2 // Penalty for > 5 windows
+			} else {
+				0.0
+			};
 
-            // Data utilization bonus (encourage high utilization)
-            let utilization_bonus = if utilization > 95.0 {
-                0.2
-            } else if utilization > 90.0 {
-                0.1
-            } else {
-                0.0
-            };
+			// Data utilization bonus (encourage high utilization)
+			let utilization_bonus = if utilization > 95.0 {
+				0.2
+			} else if utilization > 90.0 {
+				0.1
+			} else {
+				0.0
+			};
 
-            // Final efficiency-focused score
-            let score =
-                (utilization * window_quality_score / 100.0) + efficiency_bonus + utilization_bonus
-                    - time_penalty;
+			// Final efficiency-focused score
+			let score =
+				(utilization * window_quality_score / 100.0) + efficiency_bonus + utilization_bonus - time_penalty;
 
-            log::debug!(
+			log::debug!(
                 "   {} windows: util={:.1}%, quality={:.2}, efficiency_bonus={:.2}, time_penalty={:.2}, final_score={:.3}",
                 window_count, utilization, window_quality_score, efficiency_bonus, time_penalty, score
             );
 
-            if score > best_score {
-                best_score = score;
+			if score > best_score {
+				best_score = score;
 
-                // Progressive increments calculated and used above
+				// Progressive increments calculated and used above
 
-                best_config = Some(OptimalWindowConfig { windows });
+				best_config = Some(OptimalWindowConfig { windows });
 
-                log::debug!(
-                    "   🏆 NEW BEST: {} windows, score={:.3}, progressive_increments={:?}",
-                    window_count,
-                    score,
-                    progressive_increments
-                );
-            }
-        }
+				log::debug!(
+					"   🏆 NEW BEST: {} windows, score={:.3}, progressive_increments={:?}",
+					window_count,
+					score,
+					progressive_increments
+				);
+			}
+		}
 
-        // Fallback to simple 3-window configuration if no optimal found
-        best_config.unwrap_or_else(|| {
-            let simple_increment = data_for_expansion / 3;
-            let mut windows = Vec::new();
-            let mut train_end = min_train_size;
-            let mut next_fresh_validation_start = min_train_size + gap_steps;
+		// Fallback to simple 3-window configuration if no optimal found
+		best_config.unwrap_or_else(|| {
+			let simple_increment = data_for_expansion / 3;
+			let mut windows = Vec::new();
+			let mut train_end = min_train_size;
+			let mut next_fresh_validation_start = min_train_size + gap_steps;
 
-            for i in 0..3 {
-                let validation_size = if i == 2 {
-                    available_for_training - train_end - gap_steps
-                } else {
-                    base_validation_size
-                };
+			for i in 0..3 {
+				let validation_size = if i == 2 {
+					available_for_training - train_end - gap_steps
+				} else {
+					base_validation_size
+				};
 
-                // 🧠 SMART VALIDATION SCHEDULING (Fallback)
-                if next_fresh_validation_start + validation_size <= available_for_training {
-                    // Use fresh validation data
-                    next_fresh_validation_start += validation_size + (gap_steps * 2);
-                    // Reserve space
-                }
+				// 🧠 SMART VALIDATION SCHEDULING (Fallback)
+				if next_fresh_validation_start + validation_size <= available_for_training {
+					// Use fresh validation data
+					next_fresh_validation_start += validation_size + (gap_steps * 2);
+					// Reserve space
+				}
 
-                windows.push(WindowConfig { train_end });
+				windows.push(WindowConfig { train_end });
 
-                if i < 2 {
-                    train_end += simple_increment;
-                }
-            }
+				if i < 2 {
+					train_end += simple_increment;
+				}
+			}
 
-            OptimalWindowConfig {
-                windows: vec![WindowConfig {
-                    train_end: available_for_training,
-                }],
-            }
-        })
-    }
+			OptimalWindowConfig {
+				windows: vec![WindowConfig {
+					train_end: available_for_training,
+				}],
+			}
+		})
+	}
 
-    /// Create target-specific walk-forward analysis windows with independent balancing per target
-    /// Create target-specific balanced windows with 100% balanced training and validation
-    ///
-    /// CRITICAL ARCHITECTURE:
-    /// 1. Each target (PriceLevel, Direction, Volatility) gets independent balanced datasets
-    /// 2. Each target's balanced dataset is split using smart_validation_split_from_balanced()
-    /// 3. Both training and validation maintain perfect class balance for each target
-    /// 4. Progressive windows use portions of balanced training data (still balanced)
-    /// 5. Result: Each target trains on optimal balanced data without waste
-    async fn create_target_specific_balanced_windows(
-        &self,
-        raw_processed_data: polars::prelude::DataFrame,
-        config: &crate::config::TrainingConfig,
-        calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
-    ) -> Result<TargetSpecificWindows> {
-        let total_samples = raw_processed_data.height();
+	/// Create target-specific walk-forward analysis windows with independent balancing per target
+	/// Create target-specific balanced windows with 100% balanced training and validation
+	///
+	/// CRITICAL ARCHITECTURE:
+	/// 1. Each target (PriceLevel, Direction, Volatility) gets independent balanced datasets
+	/// 2. Each target's balanced dataset is split using smart_validation_split_from_balanced()
+	/// 3. Both training and validation maintain perfect class balance for each target
+	/// 4. Progressive windows use portions of balanced training data (still balanced)
+	/// 5. Result: Each target trains on optimal balanced data without waste
+	async fn create_target_specific_balanced_windows(
+		&self,
+		raw_processed_data: polars::prelude::DataFrame,
+		config: &crate::config::TrainingConfig,
+		calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
+	) -> Result<TargetSpecificWindows> {
+		let total_samples = raw_processed_data.height();
 
-        // STEP 1: Use ALL data for sequence generation (test extraction happens later in balanced pipeline)
-        // CRITICAL FIX: Don't waste data with early test reservation - balanced pipeline handles test split properly
-        let available_for_training = total_samples; // Use ALL data
-        let test_size = 0; // No early reservation
+		// STEP 1: Use ALL data for sequence generation (test extraction happens later in balanced pipeline)
+		// CRITICAL FIX: Don't waste data with early test reservation - balanced pipeline handles test split properly
+		let available_for_training = total_samples; // Use ALL data
+		let test_size = 0; // No early reservation
 
-        log::info!(
-            "📊 Data split: total={}, early_test_reserved={} (FIXED: no early waste), available_for_training={}",
-            total_samples,
-            test_size,
-            available_for_training
-        );
+		log::info!(
+			"📊 Data split: total={}, early_test_reserved={} (FIXED: no early waste), available_for_training={}",
+			total_samples,
+			test_size,
+			available_for_training
+		);
 
-        log::info!("🔧 Test data will be extracted later using balanced pipeline (no data waste)");
+		log::info!("🔧 Test data will be extracted later using balanced pipeline (no data waste)");
 
-        // STEP 2: Generate ALL sequences from ALL available data
-        log::info!("🔄 Generating all possible sequences with overlap from ALL data...");
+		// STEP 2: Generate ALL sequences from ALL available data
+		log::info!("🔄 Generating all possible sequences with overlap from ALL data...");
 
-        let training_df = raw_processed_data.clone(); // Use ALL data, not sliced
-        let all_sequences_data = self
-            .sequence_generator
-            .generate_training_sequences_with_calibrated_params(
-                training_df,
-                &config.horizons,
-                config,
-                &config.data,
-                &config.features,
-                calibrated_params,
-            )
-            .await?;
-        let all_sequences_data = retain_computable_target_rows(all_sequences_data)?;
+		let training_df = raw_processed_data.clone(); // Use ALL data, not sliced
+		let all_sequences_data = self
+			.sequence_generator
+			.generate_training_sequences_with_calibrated_params(
+				training_df,
+				&config.horizons,
+				config,
+				&config.data,
+				&config.features,
+				calibrated_params,
+			)
+			.await?;
+		let all_sequences_data = retain_computable_target_rows(all_sequences_data)?;
 
-        // STEP 3: Convert to SequenceWithTargets format
-        let all_sequences = crate::data::balance::create_sequences_with_targets(
-            all_sequences_data.sequences.clone(),
-            &all_sequences_data.targets,
-            all_sequences_data.sequence_indices.clone(),
-        )
-        .await?;
+		// STEP 3: Convert to SequenceWithTargets format
+		let all_sequences = crate::data::balance::create_sequences_with_targets(
+			all_sequences_data.sequences.clone(),
+			&all_sequences_data.targets,
+			all_sequences_data.sequence_indices.clone(),
+		)
+		.await?;
 
-        log::info!(
-            "✅ Generated {} total sequences from {} available samples",
-            all_sequences.len(),
-            available_for_training
-        );
+		log::info!(
+			"✅ Generated {} total sequences from {} available samples",
+			all_sequences.len(),
+			available_for_training
+		);
 
-        // STEP 4: Create sequence balancer
-        let balance_config = crate::data::balance::BalanceConfig {
-            max_overlap: config.data.sequence_overlap,
-            prefer_non_overlapping: config.data.sequence_overlap < 0.3,
-            min_sequences_per_class: 10,
-        };
+		// STEP 4: Create sequence balancer
+		let balance_config = crate::data::balance::BalanceConfig {
+			max_overlap: config.data.sequence_overlap,
+			prefer_non_overlapping: config.data.sequence_overlap < 0.3,
+			min_sequences_per_class: 10,
+		};
 
-        let mut balancer = crate::data::balance::SequenceBalancer::new(balance_config);
-        balancer.set_seed(config.training.seed);
+		let mut balancer = crate::data::balance::SequenceBalancer::new(balance_config);
+		balancer.set_seed(config.training.seed);
 
-        // STEP 5: Extract target-specific balanced datasets
-        // CRITICAL: Each target gets its own optimal balance (no global minimum constraint)
-        // FIXED: Only use enabled targets from config instead of hardcoding all targets
-        let mut target_types = Vec::new();
-        if config.targets.price_level {
-            target_types.push(crate::targets::TargetType::PriceLevel);
-        }
-        if config.targets.stop_level {
-            target_types.push(crate::targets::TargetType::StopLevel);
-        }
-        if config.targets.direction {
-            target_types.push(crate::targets::TargetType::Direction);
-        }
-        if config.targets.volatility {
-            target_types.push(crate::targets::TargetType::Volatility);
-        }
-        if config.targets.sentiment {
-            target_types.push(crate::targets::TargetType::Sentiment);
-        }
-        if config.targets.volume {
-            target_types.push(crate::targets::TargetType::Volume);
-        }
+		// STEP 5: Extract target-specific balanced datasets
+		// CRITICAL: Each target gets its own optimal balance (no global minimum constraint)
+		// FIXED: Only use enabled targets from config instead of hardcoding all targets
+		let mut target_types = Vec::new();
+		if config.targets.price_level {
+			target_types.push(crate::targets::TargetType::PriceLevel);
+		}
+		if config.targets.stop_level {
+			target_types.push(crate::targets::TargetType::StopLevel);
+		}
+		if config.targets.direction {
+			target_types.push(crate::targets::TargetType::Direction);
+		}
+		if config.targets.volatility {
+			target_types.push(crate::targets::TargetType::Volatility);
+		}
+		if config.targets.sentiment {
+			target_types.push(crate::targets::TargetType::Sentiment);
+		}
+		if config.targets.volume {
+			target_types.push(crate::targets::TargetType::Volume);
+		}
 
-        // Validate we have at least one target enabled
-        if target_types.is_empty() {
-            return Err(VangaError::ConfigError(
-                "No targets enabled in configuration. At least one target must be enabled."
-                    .to_string(),
-            ));
-        }
+		// Validate we have at least one target enabled
+		if target_types.is_empty() {
+			return Err(VangaError::ConfigError(
+				"No targets enabled in configuration. At least one target must be enabled.".to_string(),
+			));
+		}
 
-        log::info!("🎯 Enabled targets for training: {:?}", target_types);
+		log::info!("🎯 Enabled targets for training: {:?}", target_types);
 
-        // STEP 5: Extract target-specific balanced datasets
-        log::info!("🎯 TARGET-SPECIFIC BALANCE EXTRACTION: Each target balanced independently");
+		// STEP 5: Extract target-specific balanced datasets
+		log::info!("🎯 TARGET-SPECIFIC BALANCE EXTRACTION: Each target balanced independently");
 
-        // CRITICAL: Create balanced datasets WITHOUT augmentation for proper splitting
-        // Augmentation will be applied ONLY to training data later in create_data_from_indices()
-        // This ensures validation/test splits use ONLY real sequences
-        log::info!("📊 Creating balanced datasets for splitting (no augmentation at this stage)");
+		// CRITICAL: Create balanced datasets WITHOUT augmentation for proper splitting
+		// Augmentation will be applied ONLY to training data later in create_data_from_indices()
+		// This ensures validation/test splits use ONLY real sequences
+		log::info!("📊 Creating balanced datasets for splitting (no augmentation at this stage)");
 
-        let target_balanced_datasets = balancer.extract_target_specific_balanced_datasets(
-            &all_sequences,
-            &target_types,
-            &config.horizons,
-        )?;
+		let target_balanced_datasets =
+			balancer.extract_target_specific_balanced_datasets(&all_sequences, &target_types, &config.horizons)?;
 
-        // Log per-target balance summary (sorted for consistent logging)
-        let mut sorted_log_targets: Vec<_> = target_balanced_datasets.keys().collect();
-        sorted_log_targets.sort_by(|a, b| match a.0.cmp(&b.0) {
-            std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-            other => other,
-        });
-        for (target_type, horizon) in sorted_log_targets {
-            let dataset = target_balanced_datasets
-                .get(&(*target_type, horizon.clone()))
-                .unwrap();
-            log::info!(
-                "   {:?} {}: {} balanced sequences ({} per class × {} classes)",
-                target_type,
-                horizon,
-                dataset.total_balanced_samples,
-                dataset.global_min_class_count,
-                dataset
-                    .class_distribution
-                    .get(&(*target_type, horizon.clone()))
-                    .map(|d| d.len())
-                    .unwrap_or(0)
-            );
-        }
+		// Log per-target balance summary (sorted for consistent logging)
+		let mut sorted_log_targets: Vec<_> = target_balanced_datasets.keys().collect();
+		sorted_log_targets.sort_by(|a, b| match a.0.cmp(&b.0) {
+			std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+			other => other,
+		});
+		for (target_type, horizon) in sorted_log_targets {
+			let dataset = target_balanced_datasets.get(&(*target_type, horizon.clone())).unwrap();
+			log::info!(
+				"   {:?} {}: {} balanced sequences ({} per class × {} classes)",
+				target_type,
+				horizon,
+				dataset.total_balanced_samples,
+				dataset.global_min_class_count,
+				dataset
+					.class_distribution
+					.get(&(*target_type, horizon.clone()))
+					.map(|d| d.len())
+					.unwrap_or(0)
+			);
+		}
 
-        // STEP 6: Parse validation_gap from config using detected timeframe
-        let detected_timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(
-            &raw_processed_data,
-        )
-        .unwrap_or_else(|e| {
-            log::warn!(
-                "⚠️ Failed to detect timeframe, defaulting to 60 minutes: {}",
-                e
-            );
-            60
-        });
+		// STEP 6: Parse validation_gap from config using detected timeframe
+		let detected_timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(&raw_processed_data)
+			.unwrap_or_else(|e| {
+				log::warn!("⚠️ Failed to detect timeframe, defaulting to 60 minutes: {}", e);
+				60
+			});
 
-        let validation_gap_steps = if !config.training.validation_gap.is_empty() {
-            crate::utils::parser::parse_horizon_to_steps(
-                &config.training.validation_gap,
-                detected_timeframe_minutes,
-            )
-            .unwrap_or(0)
-        } else {
-            0
-        };
+		let validation_gap_steps = if !config.training.validation_gap.is_empty() {
+			crate::utils::parser::parse_horizon_to_steps(&config.training.validation_gap, detected_timeframe_minutes)
+				.unwrap_or(0)
+		} else {
+			0
+		};
 
-        log::info!(
-            "🔒 Validation gap: {} (parsed to {} steps based on {}m timeframe)",
-            config.training.validation_gap,
-            validation_gap_steps,
-            detected_timeframe_minutes
-        );
+		log::info!(
+			"🔒 Validation gap: {} (parsed to {} steps based on {}m timeframe)",
+			config.training.validation_gap,
+			validation_gap_steps,
+			detected_timeframe_minutes
+		);
 
-        // STEP 7: Calculate window configuration
-        // FIXED: Validation is 20% of training data (after test split), not 20% of total
-        let test_split = config.training.test_split;
-        let validation_ratio = config.training.validation_split;
-        let first_target_validation_size = target_balanced_datasets
-            .values()
-            .next()
-            .map(|dataset| {
-                // Calculate validation as % of (total * (1 - test_split))
-                let samples_for_train_val =
-                    dataset.total_balanced_samples as f64 * (1.0 - test_split);
-                (samples_for_train_val * validation_ratio) as usize
-            })
-            .unwrap_or(0);
+		// STEP 7: Calculate window configuration
+		// FIXED: Validation is 20% of training data (after test split), not 20% of total
+		let test_split = config.training.test_split;
+		let validation_ratio = config.training.validation_split;
+		let first_target_validation_size = target_balanced_datasets
+			.values()
+			.next()
+			.map(|dataset| {
+				// Calculate validation as % of (total * (1 - test_split))
+				let samples_for_train_val = dataset.total_balanced_samples as f64 * (1.0 - test_split);
+				(samples_for_train_val * validation_ratio) as usize
+			})
+			.unwrap_or(0);
 
-        log::info!(
-            "📊 Split calculation: test_split={:.1}%, validation_split={:.1}%, validation_size={}, gap={} steps",
-            test_split * 100.0,
-            validation_ratio * 100.0,
-            first_target_validation_size,
-            validation_gap_steps
-        );
+		log::info!(
+			"📊 Split calculation: test_split={:.1}%, validation_split={:.1}%, validation_size={}, gap={} steps",
+			test_split * 100.0,
+			validation_ratio * 100.0,
+			first_target_validation_size,
+			validation_gap_steps
+		);
 
-        let window_config = self.calculate_window_configuration_for_balanced(
-            available_for_training,
-            first_target_validation_size,
-            config,
-        )?;
+		let window_config = self.calculate_window_configuration_for_balanced(
+			available_for_training,
+			first_target_validation_size,
+			config,
+		)?;
 
-        // STEP 8: Create target-specific windows with 100% balanced train/val splits
-        let mut target_specific_windows: HashMap<
-            (crate::targets::TargetType, String),
-            Vec<TrainingWindow>,
-        > = HashMap::new();
-        let validation_ratio = config.training.validation_split;
+		// STEP 8: Create target-specific windows with 100% balanced train/val splits
+		let mut target_specific_windows: HashMap<(crate::targets::TargetType, String), Vec<TrainingWindow>> =
+			HashMap::new();
+		let validation_ratio = config.training.validation_split;
 
-        log::info!("🏗️ CREATING TARGET-SPECIFIC BALANCED WINDOWS:");
+		log::info!("🏗️ CREATING TARGET-SPECIFIC BALANCED WINDOWS:");
 
-        // Process each target independently with balanced train/val splits
-        // CRITICAL: Sort keys for deterministic processing order (avoid random HashMap iteration)
-        let mut sorted_targets: Vec<_> = target_balanced_datasets.keys().collect();
-        sorted_targets.sort_by(|a, b| {
-            // Sort by target type first, then by horizon
-            match a.0.cmp(&b.0) {
-                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-                other => other,
-            }
-        });
+		// Process each target independently with balanced train/val splits
+		// CRITICAL: Sort keys for deterministic processing order (avoid random HashMap iteration)
+		let mut sorted_targets: Vec<_> = target_balanced_datasets.keys().collect();
+		sorted_targets.sort_by(|a, b| {
+			// Sort by target type first, then by horizon
+			match a.0.cmp(&b.0) {
+				std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+				other => other,
+			}
+		});
 
-        for (target_type, horizon) in sorted_targets {
-            let mut target_dataset = target_balanced_datasets
-                .get(&(*target_type, horizon.clone()))
-                .unwrap()
-                .clone();
-            let target_key = (*target_type, horizon.clone());
+		for (target_type, horizon) in sorted_targets {
+			let mut target_dataset = target_balanced_datasets
+				.get(&(*target_type, horizon.clone()))
+				.unwrap()
+				.clone();
+			let target_key = (*target_type, horizon.clone());
 
-            log::info!(
-                "🎯 Creating windows for {:?} {} with {} balanced sequences",
-                target_type,
-                horizon,
-                target_dataset.total_balanced_samples
-            );
+			log::info!(
+				"🎯 Creating windows for {:?} {} with {} balanced sequences",
+				target_type,
+				horizon,
+				target_dataset.total_balanced_samples
+			);
 
-            // CRITICAL: Apply truncation BEFORE splitting into train/val/test
-            // This ensures val/test splits are from the FINAL truncated dataset
-            let target_count = config.data.target_samples.count;
-            if target_count > 0 && config.data.target_samples.truncate {
-                let current_total = target_dataset.total_balanced_samples;
+			// CRITICAL: Apply truncation BEFORE splitting into train/val/test
+			// This ensures val/test splits are from the FINAL truncated dataset
+			let target_count = config.data.target_samples.count;
+			if target_count > 0 && config.data.target_samples.truncate {
+				let current_total = target_dataset.total_balanced_samples;
 
-                if current_total > target_count {
-                    // Ensure truncation preserves perfect balance (multiple of 5 for 5 classes)
-                    let samples_to_keep = (target_count / 5) * 5;
+				if current_total > target_count {
+					// Ensure truncation preserves perfect balance (multiple of 5 for 5 classes)
+					let samples_to_keep = (target_count / 5) * 5;
 
-                    log::info!(
-                        "✂️  Truncating {:?} {} from {} to {} samples (maintaining perfect balance)",
-                        target_type,
-                        horizon,
-                        current_total,
-                        samples_to_keep
-                    );
+					log::info!(
+						"✂️  Truncating {:?} {} from {} to {} samples (maintaining perfect balance)",
+						target_type,
+						horizon,
+						current_total,
+						samples_to_keep
+					);
 
-                    // Get balanced indices for this target
-                    if let Some(balanced_indices) = target_dataset.balanced_indices.get(&target_key)
-                    {
-                        // Group indices by class for balanced truncation
-                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
-                            std::collections::HashMap::new();
+					// Get balanced indices for this target
+					if let Some(balanced_indices) = target_dataset.balanced_indices.get(&target_key) {
+						// Group indices by class for balanced truncation
+						let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
+							std::collections::HashMap::new();
 
-                        for &idx in balanced_indices {
-                            if let Some(seq) = all_sequences.iter().find(|s| s.sequence_idx == idx)
-                            {
-                                if let Some(class) = seq.get_target_class(*target_type, horizon) {
-                                    class_indices.entry(class).or_default().push(idx);
-                                }
-                            }
-                        }
+						for &idx in balanced_indices {
+							if let Some(seq) = all_sequences.iter().find(|s| s.sequence_idx == idx) {
+								if let Some(class) = seq.get_target_class(*target_type, horizon) {
+									class_indices.entry(class).or_default().push(idx);
+								}
+							}
+						}
 
-                        // Calculate samples per class (must be exact for perfect balance)
-                        let samples_per_class = samples_to_keep / 5;
+						// Calculate samples per class (must be exact for perfect balance)
+						let samples_per_class = samples_to_keep / 5;
 
-                        // Select balanced indices using stride-based sampling for diversity
-                        let mut truncated_indices = Vec::with_capacity(samples_to_keep);
+						// Select balanced indices using stride-based sampling for diversity
+						let mut truncated_indices = Vec::with_capacity(samples_to_keep);
 
-                        for class in 0..5 {
-                            if let Some(indices) = class_indices.get(&class) {
-                                let class_stride = indices.len() as f64 / samples_per_class as f64;
+						for class in 0..5 {
+							if let Some(indices) = class_indices.get(&class) {
+								let class_stride = indices.len() as f64 / samples_per_class as f64;
 
-                                for i in 0..samples_per_class {
-                                    let idx_in_class = ((i as f64 * class_stride).round() as usize)
-                                        .min(indices.len() - 1);
-                                    truncated_indices.push(indices[idx_in_class]);
-                                }
-                            }
-                        }
+								for i in 0..samples_per_class {
+									let idx_in_class =
+										((i as f64 * class_stride).round() as usize).min(indices.len() - 1);
+									truncated_indices.push(indices[idx_in_class]);
+								}
+							}
+						}
 
-                        // Update dataset with truncated indices
-                        target_dataset
-                            .balanced_indices
-                            .insert(target_key.clone(), truncated_indices.clone());
-                        target_dataset.total_balanced_samples = samples_to_keep;
-                        target_dataset.global_min_class_count = samples_per_class;
+						// Update dataset with truncated indices
+						target_dataset
+							.balanced_indices
+							.insert(target_key.clone(), truncated_indices.clone());
+						target_dataset.total_balanced_samples = samples_to_keep;
+						target_dataset.global_min_class_count = samples_per_class;
 
-                        // Update class distribution
-                        let mut new_distribution = std::collections::HashMap::new();
-                        for class in 0..5 {
-                            new_distribution.insert(class, samples_per_class);
-                        }
-                        target_dataset
-                            .class_distribution
-                            .insert(target_key.clone(), new_distribution);
+						// Update class distribution
+						let mut new_distribution = std::collections::HashMap::new();
+						for class in 0..5 {
+							new_distribution.insert(class, samples_per_class);
+						}
+						target_dataset
+							.class_distribution
+							.insert(target_key.clone(), new_distribution);
 
-                        log::info!(
-                            "✅ Truncation complete: {} samples ({} per class × 5 classes)",
-                            samples_to_keep,
-                            samples_per_class
-                        );
-                    }
-                }
-            }
+						log::info!(
+							"✅ Truncation complete: {} samples ({} per class × 5 classes)",
+							samples_to_keep,
+							samples_per_class
+						);
+					}
+				}
+			}
 
-            let mut target_windows = Vec::new();
+			let mut target_windows = Vec::new();
 
-            // Get balanced indices for this target (used for validation in smart split)
-            if target_dataset.balanced_indices.contains_key(&target_key) {
-                // Create windows for this specific target
-                for (window_idx, window_range) in window_config.windows.iter().enumerate() {
-                    log::info!(
-                        "📊 {:?} {} Window {}/{}: range [0..{}]",
-                        target_type,
-                        horizon,
-                        window_idx + 1,
-                        window_config.windows.len(),
-                        window_range.train_end
-                    );
+			// Get balanced indices for this target (used for validation in smart split)
+			if target_dataset.balanced_indices.contains_key(&target_key) {
+				// Create windows for this specific target
+				for (window_idx, window_range) in window_config.windows.iter().enumerate() {
+					log::info!(
+						"📊 {:?} {} Window {}/{}: range [0..{}]",
+						target_type,
+						horizon,
+						window_idx + 1,
+						window_config.windows.len(),
+						window_range.train_end
+					);
 
-                    // DIVERSE SPLITS: Create diverse train/validation/test splits
-                    // CRITICAL: Use ONLY original sequences for split creation
-                    // Synthetic sequences from augmentation should NEVER be in validation/test
-                    // NOW: Splitting happens AFTER truncation, ensuring perfect alignment
-                    let (balanced_training_dataset, target_validation_indices, target_test_indices) =
-                        balancer.create_diverse_splits(
-                            &target_dataset,
-                            &all_sequences, // Use original sequences ONLY
-                            validation_ratio,
-                            config.training.test_split,
-                            &[*target_type],
-                            std::slice::from_ref(horizon),
-                            validation_gap_steps,
-                            config
-                                .horizons
-                                .iter()
-                                .map(|horizon| {
-                                    crate::utils::parser::parse_horizon_to_steps(
-                                        horizon,
-                                        detected_timeframe_minutes,
-                                    )
-                                })
-                                .collect::<Result<Vec<_>>>()?
-                                .into_iter()
-                                .max()
-                                .unwrap_or(0),
-                        )?;
+					// DIVERSE SPLITS: Create diverse train/validation/test splits
+					// CRITICAL: Use ONLY original sequences for split creation
+					// Synthetic sequences from augmentation should NEVER be in validation/test
+					// NOW: Splitting happens AFTER truncation, ensuring perfect alignment
+					let (balanced_training_dataset, target_validation_indices, target_test_indices) = balancer
+						.create_diverse_splits(
+							&target_dataset,
+							&all_sequences, // Use original sequences ONLY
+							validation_ratio,
+							config.training.test_split,
+							&[*target_type],
+							std::slice::from_ref(horizon),
+							validation_gap_steps,
+							config
+								.horizons
+								.iter()
+								.map(|horizon| {
+									crate::utils::parser::parse_horizon_to_steps(horizon, detected_timeframe_minutes)
+								})
+								.collect::<Result<Vec<_>>>()?
+								.into_iter()
+								.max()
+								.unwrap_or(0),
+						)?;
 
-                    // Extract training indices for this specific target from the balanced dataset
-                    let train_indices = balanced_training_dataset
-                        .balanced_indices
-                        .get(&target_key)
-                        .cloned()
-                        .unwrap_or_default();
+					// Extract training indices for this specific target from the balanced dataset
+					let train_indices = balanced_training_dataset
+						.balanced_indices
+						.get(&target_key)
+						.cloned()
+						.unwrap_or_default();
 
-                    // Extract validation indices for this specific target
-                    let val_indices = target_validation_indices
-                        .get(&target_key)
-                        .cloned()
-                        .unwrap_or_default();
+					// Extract validation indices for this specific target
+					let val_indices = target_validation_indices.get(&target_key).cloned().unwrap_or_default();
 
-                    // CRITICAL FIX: Create augmentation config ONLY for training data
-                    // Augmentation is applied AFTER the split to avoid data leakage into val/test
-                    let augment_config = if config.data.sequence_augment {
-                        Some(crate::data::augmentation::AugmentationConfig::from_overlap(
-                            config.data.sequence_overlap,
-                        ))
-                    } else {
-                        None
-                    };
+					// CRITICAL FIX: Create augmentation config ONLY for training data
+					// Augmentation is applied AFTER the split to avoid data leakage into val/test
+					let augment_config = if config.data.sequence_augment {
+						Some(crate::data::augmentation::AugmentationConfig::from_overlap(
+							config.data.sequence_overlap,
+						))
+					} else {
+						None
+					};
 
-                    if let Some(ref config_aug) = augment_config {
-                        log::debug!(
+					if let Some(ref config_aug) = augment_config {
+						log::debug!(
                             "   🎨 Augmentation enabled for training: sigma_jitter={:.3}, sigma_magnitude={:.2}, sigma_time={:.2}, sigma_scale={:.2}",
                             config_aug.jitter_sigma,
                             config_aug.magnitude_sigma,
                             config_aug.time_warp_sigma,
                             config_aug.scaling_sigma
                         );
-                    }
+					}
 
-                    log::debug!(
-                        "   🎯 {:?} {} balanced split: {} train (balanced), {} val (balanced)",
-                        target_type,
-                        horizon,
-                        train_indices.len(),
-                        val_indices.len()
-                    );
+					log::debug!(
+						"   🎯 {:?} {} balanced split: {} train (balanced), {} val (balanced)",
+						target_type,
+						horizon,
+						train_indices.len(),
+						val_indices.len()
+					);
 
-                    // CRITICAL: Progressive windows create CUMULATIVE data (Window1: 2880, Window2: 3744, etc.)
-                    // This is CORRECT - continuation training uses expanded data while preserving weights
-                    let samples_for_window = if window_config.windows.len() == 1 {
-                        train_indices.len()
-                    } else {
-                        let window_progress =
-                            (window_idx + 1) as f64 / window_config.windows.len() as f64;
-                        let min_samples = train_indices.len() / window_config.windows.len();
-                        let progressive_samples =
-                            (train_indices.len() as f64 * window_progress) as usize;
-                        std::cmp::max(min_samples, progressive_samples)
-                    };
+					// CRITICAL: Progressive windows create CUMULATIVE data (Window1: 2880, Window2: 3744, etc.)
+					// This is CORRECT - continuation training uses expanded data while preserving weights
+					let samples_for_window = if window_config.windows.len() == 1 {
+						train_indices.len()
+					} else {
+						let window_progress = (window_idx + 1) as f64 / window_config.windows.len() as f64;
+						let min_samples = train_indices.len() / window_config.windows.len();
+						let progressive_samples = (train_indices.len() as f64 * window_progress) as usize;
+						std::cmp::max(min_samples, progressive_samples)
+					};
 
-                    // CRITICAL FIX: Take BALANCED subset for progressive windows
-                    // Maintain perfect balance while taking progressive amounts
-                    let window_train = if samples_for_window >= train_indices.len() {
-                        // Use all data if requesting more than available
-                        train_indices.clone()
-                    } else {
-                        // Take balanced subset: samples_for_window / 5 classes = samples per class
-                        let samples_per_class = samples_for_window / 5;
-                        let mut balanced_subset = Vec::new();
+					// CRITICAL FIX: Take BALANCED subset for progressive windows
+					// Maintain perfect balance while taking progressive amounts
+					let window_train = if samples_for_window >= train_indices.len() {
+						// Use all data if requesting more than available
+						train_indices.clone()
+					} else {
+						// Take balanced subset: samples_for_window / 5 classes = samples per class
+						let samples_per_class = samples_for_window / 5;
+						let mut balanced_subset = Vec::new();
 
-                        // Group indices by class and take equal amounts from each
-                        let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
-                            std::collections::HashMap::new();
-                        for &idx in &train_indices {
-                            if let Some(seq) = all_sequences.get(idx) {
-                                if let Some(target_value) =
-                                    seq.get_target_class(*target_type, horizon)
-                                {
-                                    class_indices.entry(target_value).or_default().push(idx);
-                                }
-                            }
-                        }
+						// Group indices by class and take equal amounts from each
+						let mut class_indices: std::collections::HashMap<i32, Vec<usize>> =
+							std::collections::HashMap::new();
+						for &idx in &train_indices {
+							if let Some(seq) = all_sequences.get(idx) {
+								if let Some(target_value) = seq.get_target_class(*target_type, horizon) {
+									class_indices.entry(target_value).or_default().push(idx);
+								}
+							}
+						}
 
-                        // Take samples_per_class from each class to maintain balance
-                        for class_value in 0..5 {
-                            if let Some(class_idx_list) = class_indices.get(&class_value) {
-                                let take_count = samples_per_class.min(class_idx_list.len());
-                                balanced_subset.extend(&class_idx_list[..take_count]);
-                            }
-                        }
+						// Take samples_per_class from each class to maintain balance
+						for class_value in 0..5 {
+							if let Some(class_idx_list) = class_indices.get(&class_value) {
+								let take_count = samples_per_class.min(class_idx_list.len());
+								balanced_subset.extend(&class_idx_list[..take_count]);
+							}
+						}
 
-                        log::debug!(
-                            "🎯 Progressive Window {}: Taking {} samples ({} per class × 5) from {} total balanced",
-                            window_idx + 1, balanced_subset.len(), samples_per_class, train_indices.len()
-                        );
+						log::debug!(
+							"🎯 Progressive Window {}: Taking {} samples ({} per class × 5) from {} total balanced",
+							window_idx + 1,
+							balanced_subset.len(),
+							samples_per_class,
+							train_indices.len()
+						);
 
-                        balanced_subset
-                    };
+						balanced_subset
+					};
 
-                    // Create target-specific indices map
-                    let mut train_indices_map = HashMap::new();
-                    train_indices_map.insert(target_key.clone(), window_train);
+					// Create target-specific indices map
+					let mut train_indices_map = HashMap::new();
+					train_indices_map.insert(target_key.clone(), window_train);
 
-                    let mut val_indices_map = HashMap::new();
-                    val_indices_map.insert(target_key.clone(), val_indices.clone());
+					let mut val_indices_map = HashMap::new();
+					val_indices_map.insert(target_key.clone(), val_indices.clone());
 
-                    // CRITICAL: Apply augmentation ONLY to training data, NOT to validation/test
-                    // Augmentation ONLY affects technical indicators, NOT price/volume columns
-                    let augment_config = if config.data.sequence_augment {
-                        Some(crate::data::augmentation::AugmentationConfig::from_overlap(
-                            config.data.sequence_overlap,
-                        ))
-                    } else {
-                        None
-                    };
+					// CRITICAL: Apply augmentation ONLY to training data, NOT to validation/test
+					// Augmentation ONLY affects technical indicators, NOT price/volume columns
+					let augment_config = if config.data.sequence_augment {
+						Some(crate::data::augmentation::AugmentationConfig::from_overlap(
+							config.data.sequence_overlap,
+						))
+					} else {
+						None
+					};
 
-                    // Create window data using target-specific indices
-                    // CRITICAL: Use original all_sequences, NOT augmented
-                    // Augmentation is applied inside create_data_from_indices() ONLY for training
-                    let train_data = self.create_data_from_indices(
-                        &all_sequences_data,
-                        &train_indices_map,
-                        &all_sequences, // Original sequences only
-                        augment_config.as_ref(),
-                        config.training.seed,
-                    )?;
+					// Create window data using target-specific indices
+					// CRITICAL: Use original all_sequences, NOT augmented
+					// Augmentation is applied inside create_data_from_indices() ONLY for training
+					let train_data = self.create_data_from_indices(
+						&all_sequences_data,
+						&train_indices_map,
+						&all_sequences, // Original sequences only
+						augment_config.as_ref(),
+						config.training.seed,
+					)?;
 
-                    // Validation data: NO augmentation (pristine data for proper evaluation)
-                    let val_data = self.create_data_from_indices(
-                        &all_sequences_data,
-                        &val_indices_map,
-                        &all_sequences, // Original sequences only
-                        None,           // NO augmentation for validation
-                        config.training.seed,
-                    )?;
+					// Validation data: NO augmentation (pristine data for proper evaluation)
+					let val_data = self.create_data_from_indices(
+						&all_sequences_data,
+						&val_indices_map,
+						&all_sequences, // Original sequences only
+						None,           // NO augmentation for validation
+						config.training.seed,
+					)?;
 
-                    // TEST DATA: Use diverse test split from create_diverse_splits
-                    let test_data = if config.training.test_split > 0.0 {
-                        // Extract test indices for this specific target
-                        let test_indices = target_test_indices
-                            .get(&target_key)
-                            .cloned()
-                            .unwrap_or_default();
+					// TEST DATA: Use diverse test split from create_diverse_splits
+					let test_data = if config.training.test_split > 0.0 {
+						// Extract test indices for this specific target
+						let test_indices = target_test_indices.get(&target_key).cloned().unwrap_or_default();
 
-                        if !test_indices.is_empty() {
-                            // Create test indices map
-                            let mut test_indices_map = HashMap::new();
-                            test_indices_map.insert(target_key.clone(), test_indices.clone());
+						if !test_indices.is_empty() {
+							// Create test indices map
+							let mut test_indices_map = HashMap::new();
+							test_indices_map.insert(target_key.clone(), test_indices.clone());
 
-                            // Create test data using target-specific indices
-                            // TEST DATA: NO augmentation (pristine data for final evaluation)
-                            // CRITICAL: Use original all_sequences, NOT augmented
-                            let test_data = self.create_data_from_indices(
-                                &all_sequences_data,
-                                &test_indices_map,
-                                &all_sequences, // Original sequences only
-                                None,           // NO augmentation for test data
-                                config.training.seed,
-                            )?;
+							// Create test data using target-specific indices
+							// TEST DATA: NO augmentation (pristine data for final evaluation)
+							// CRITICAL: Use original all_sequences, NOT augmented
+							let test_data = self.create_data_from_indices(
+								&all_sequences_data,
+								&test_indices_map,
+								&all_sequences, // Original sequences only
+								None,           // NO augmentation for test data
+								config.training.seed,
+							)?;
 
-                            log::info!(
-                                "🧪 {:?} {} diverse test split: {} test samples (diverse & balanced)",
-                                target_type,
-                                horizon,
-                                test_indices.len()
-                            );
+							log::info!(
+								"🧪 {:?} {} diverse test split: {} test samples (diverse & balanced)",
+								target_type,
+								horizon,
+								test_indices.len()
+							);
 
-                            test_data
-                        } else {
-                            // No test data available - create empty
-                            let mut empty_targets = crate::targets::PreparedTargets::new(0);
-                            empty_targets.valid_indices = Vec::new();
-                            PreparedData {
-                                sequences: ndarray::Array3::zeros((
-                                    0,
-                                    train_data.sequences.shape()[1],
-                                    train_data.sequences.shape()[2],
-                                )),
-                                targets: empty_targets,
-                                feature_names: train_data.feature_names.clone(),
-                                metadata: train_data.metadata.clone(),
-                                sequence_indices: Vec::new(),
-                            }
-                        }
-                    } else {
-                        // No test split configured - create empty test data
-                        let mut empty_targets = crate::targets::PreparedTargets::new(0);
-                        empty_targets.valid_indices = Vec::new();
-                        PreparedData {
-                            sequences: ndarray::Array3::zeros((
-                                0,
-                                train_data.sequences.shape()[1],
-                                train_data.sequences.shape()[2],
-                            )),
-                            targets: empty_targets,
-                            feature_names: train_data.feature_names.clone(),
-                            metadata: train_data.metadata.clone(),
-                            sequence_indices: Vec::new(),
-                        }
-                    };
+							test_data
+						} else {
+							// No test data available - create empty
+							let mut empty_targets = crate::targets::PreparedTargets::new(0);
+							empty_targets.valid_indices = Vec::new();
+							PreparedData {
+								sequences: ndarray::Array3::zeros((
+									0,
+									train_data.sequences.shape()[1],
+									train_data.sequences.shape()[2],
+								)),
+								targets: empty_targets,
+								feature_names: train_data.feature_names.clone(),
+								metadata: train_data.metadata.clone(),
+								sequence_indices: Vec::new(),
+							}
+						}
+					} else {
+						// No test split configured - create empty test data
+						let mut empty_targets = crate::targets::PreparedTargets::new(0);
+						empty_targets.valid_indices = Vec::new();
+						PreparedData {
+							sequences: ndarray::Array3::zeros((
+								0,
+								train_data.sequences.shape()[1],
+								train_data.sequences.shape()[2],
+							)),
+							targets: empty_targets,
+							feature_names: train_data.feature_names.clone(),
+							metadata: train_data.metadata.clone(),
+							sequence_indices: Vec::new(),
+						}
+					};
 
-                    let val_samples = val_data.sequences.shape()[0];
-                    let train_sequences = train_data.sequences.shape()[0];
-                    let num_targets = train_data.targets.target_names.len();
+					let val_samples = val_data.sequences.shape()[0];
+					let train_sequences = train_data.sequences.shape()[0];
+					let num_targets = train_data.targets.target_names.len();
 
-                    let window = TrainingWindow {
-                        train_data,
-                        val_data,
-                        test_data: test_data.clone(),
-                        window_id: window_idx,
-                        train_samples: train_sequences, // ✅ FIX: Use actual training sequence count
-                        val_samples,
-                        test_samples: test_data.sequences.shape()[0],
-                    };
+					let window = TrainingWindow {
+						train_data,
+						val_data,
+						test_data: test_data.clone(),
+						window_id: window_idx,
+						train_samples: train_sequences, // ✅ FIX: Use actual training sequence count
+						val_samples,
+						test_samples: test_data.sequences.shape()[0],
+					};
 
-                    target_windows.push(window);
+					target_windows.push(window);
 
-                    // Log target-specific balanced window summary
-                    log::info!(
-                        "   → {:?} {} W{}: train {} seq (balanced), val {} seq (balanced), targets: {}",
-                        target_type, horizon, window_idx + 1,
-                        train_sequences,
-                        val_samples,
-                        num_targets
-                    );
-                }
-            } else {
-                log::error!(
-                    "❌ CRITICAL: No balanced indices found for {:?} {} in target_dataset.balanced_indices",
-                    target_type, horizon
-                );
-                log::debug!(
-                    "Available keys in balanced_indices: {:?}",
-                    target_dataset.balanced_indices.keys().collect::<Vec<_>>()
-                );
-                return Err(VangaError::DataError(format!(
+					// Log target-specific balanced window summary
+					log::info!(
+						"   → {:?} {} W{}: train {} seq (balanced), val {} seq (balanced), targets: {}",
+						target_type,
+						horizon,
+						window_idx + 1,
+						train_sequences,
+						val_samples,
+						num_targets
+					);
+				}
+			} else {
+				log::error!(
+					"❌ CRITICAL: No balanced indices found for {:?} {} in target_dataset.balanced_indices",
+					target_type,
+					horizon
+				);
+				log::debug!(
+					"Available keys in balanced_indices: {:?}",
+					target_dataset.balanced_indices.keys().collect::<Vec<_>>()
+				);
+				return Err(VangaError::DataError(format!(
                     "No balanced indices found for target {:?} horizon {}. This indicates a balance extraction failure.",
                     target_type, horizon
                 )));
-            }
+			}
 
-            // Only insert if we have windows (should always have windows after the check above)
-            if !target_windows.is_empty() {
-                target_specific_windows.insert(target_key, target_windows);
-            } else {
-                log::error!(
-                    "❌ CRITICAL: Empty target_windows for {:?} {} - this should not happen",
-                    target_type,
-                    horizon
-                );
-            }
-        }
+			// Only insert if we have windows (should always have windows after the check above)
+			if !target_windows.is_empty() {
+				target_specific_windows.insert(target_key, target_windows);
+			} else {
+				log::error!(
+					"❌ CRITICAL: Empty target_windows for {:?} {} - this should not happen",
+					target_type,
+					horizon
+				);
+			}
+		}
 
-        log::info!("✅ Created target-specific balanced windows:");
+		log::info!("✅ Created target-specific balanced windows:");
 
-        // Log per-target window summary
-        for ((target_type, horizon), windows) in &target_specific_windows {
-            if let Some(dataset) = target_balanced_datasets.get(&(*target_type, horizon.clone())) {
-                log::info!(
-                    "   {:?} {}: {} windows, {} balanced sequences total ({} per class × {} classes)",
-                    target_type,
-                    horizon,
-                    windows.len(),
-                    dataset.total_balanced_samples,
-                    dataset.global_min_class_count,
-                    dataset.class_distribution.get(&(*target_type, horizon.clone()))
-                        .map(|d| d.len()).unwrap_or(0)
-                );
-            }
-        }
+		// Log per-target window summary
+		for ((target_type, horizon), windows) in &target_specific_windows {
+			if let Some(dataset) = target_balanced_datasets.get(&(*target_type, horizon.clone())) {
+				log::info!(
+					"   {:?} {}: {} windows, {} balanced sequences total ({} per class × {} classes)",
+					target_type,
+					horizon,
+					windows.len(),
+					dataset.total_balanced_samples,
+					dataset.global_min_class_count,
+					dataset
+						.class_distribution
+						.get(&(*target_type, horizon.clone()))
+						.map(|d| d.len())
+						.unwrap_or(0)
+				);
+			}
+		}
 
-        // Extract shared metadata from first window
-        let feature_names = target_specific_windows
-            .values()
-            .next()
-            .and_then(|windows| windows.first())
-            .map(|window| window.train_data.feature_names.clone())
-            .unwrap_or_default();
+		// Extract shared metadata from first window
+		let feature_names = target_specific_windows
+			.values()
+			.next()
+			.and_then(|windows| windows.first())
+			.map(|window| window.train_data.feature_names.clone())
+			.unwrap_or_default();
 
-        Ok(TargetSpecificWindows {
-            windows_by_target: target_specific_windows,
-            feature_names,
-        })
-    }
+		Ok(TargetSpecificWindows {
+			windows_by_target: target_specific_windows,
+			feature_names,
+		})
+	}
 
-    /// Calculate window configuration for balanced approach
-    fn calculate_window_configuration_for_balanced(
-        &self,
-        available_samples: usize,
-        validation_size: usize,
-        config: &crate::config::TrainingConfig,
-    ) -> Result<OptimalWindowConfig> {
-        // Similar to existing logic but adapted for balanced approach
-        let min_train_size = (available_samples as f64 * config.training.min_train_ratio) as usize;
-        let data_for_expansion = available_samples.saturating_sub(min_train_size);
+	/// Calculate window configuration for balanced approach
+	fn calculate_window_configuration_for_balanced(
+		&self,
+		available_samples: usize,
+		validation_size: usize,
+		config: &crate::config::TrainingConfig,
+	) -> Result<OptimalWindowConfig> {
+		// Similar to existing logic but adapted for balanced approach
+		let min_train_size = (available_samples as f64 * config.training.min_train_ratio) as usize;
+		let data_for_expansion = available_samples.saturating_sub(min_train_size);
 
-        let use_single_window =
-            config.training.min_train_ratio >= 0.8 || data_for_expansion < (available_samples / 10);
+		let use_single_window = config.training.min_train_ratio >= 0.8 || data_for_expansion < (available_samples / 10);
 
-        if use_single_window {
-            Ok(OptimalWindowConfig {
-                windows: vec![WindowConfig {
-                    train_end: available_samples,
-                }],
-            })
-        } else {
-            // Use existing optimal window calculation
-            Ok(Self::calculate_optimal_window_configuration(
-                available_samples,
-                validation_size,
-                min_train_size,
-                0, // No gap needed with balanced approach
-                config.training.min_increment_ratio,
-            ))
-        }
-    }
+		if use_single_window {
+			Ok(OptimalWindowConfig {
+				windows: vec![WindowConfig {
+					train_end: available_samples,
+				}],
+			})
+		} else {
+			// Use existing optimal window calculation
+			Ok(Self::calculate_optimal_window_configuration(
+				available_samples,
+				validation_size,
+				min_train_size,
+				0, // No gap needed with balanced approach
+				config.training.min_increment_ratio,
+			))
+		}
+	}
 
-    /// Create PreparedData from selected sequence indices with PROPER target alignment
-    /// Optionally applies augmentation to training sequences only
-    fn create_data_from_indices(
-        &self,
-        all_data: &PreparedData,
-        indices_by_target: &HashMap<(crate::targets::TargetType, String), Vec<usize>>,
-        all_sequences: &[crate::data::balance::SequenceWithTargets],
-        augment_config: Option<&crate::data::augmentation::AugmentationConfig>,
-        seed: u64,
-    ) -> Result<PreparedData> {
-        // Get unique indices across all targets
-        let mut unique_indices: HashSet<usize> = HashSet::new();
-        for indices in indices_by_target.values() {
-            unique_indices.extend(indices);
-        }
+	/// Create PreparedData from selected sequence indices with PROPER target alignment
+	/// Optionally applies augmentation to training sequences only
+	fn create_data_from_indices(
+		&self,
+		all_data: &PreparedData,
+		indices_by_target: &HashMap<(crate::targets::TargetType, String), Vec<usize>>,
+		all_sequences: &[crate::data::balance::SequenceWithTargets],
+		augment_config: Option<&crate::data::augmentation::AugmentationConfig>,
+		seed: u64,
+	) -> Result<PreparedData> {
+		// Get unique indices across all targets
+		let mut unique_indices: HashSet<usize> = HashSet::new();
+		for indices in indices_by_target.values() {
+			unique_indices.extend(indices);
+		}
 
-        let mut sorted_indices: Vec<usize> = unique_indices.into_iter().collect();
-        sorted_indices.sort();
+		let mut sorted_indices: Vec<usize> = unique_indices.into_iter().collect();
+		sorted_indices.sort();
 
-        // Validate indices and build sequence map for synthetic sequences
-        let max_available_idx = all_data.sequences.shape()[0];
+		// Validate indices and build sequence map for synthetic sequences
+		let max_available_idx = all_data.sequences.shape()[0];
 
-        // Create lookup map for all sequences (including synthetic)
-        let sequence_map: HashMap<usize, &crate::data::balance::SequenceWithTargets> =
-            all_sequences
-                .iter()
-                .map(|seq| (seq.sequence_idx, seq))
-                .collect();
+		// Create lookup map for all sequences (including synthetic)
+		let sequence_map: HashMap<usize, &crate::data::balance::SequenceWithTargets> =
+			all_sequences.iter().map(|seq| (seq.sequence_idx, seq)).collect();
 
-        // Separate real and synthetic indices
-        let mut real_indices = Vec::new();
-        let mut synthetic_indices = Vec::new();
+		// Separate real and synthetic indices
+		let mut real_indices = Vec::new();
+		let mut synthetic_indices = Vec::new();
 
-        for &idx in &sorted_indices {
-            if idx < 1_000_000 {
-                // Real sequence - validate against all_data
-                if idx >= max_available_idx {
-                    return Err(VangaError::DataError(format!(
-                        "Invalid real sequence index: {} (max available: {})",
-                        idx,
-                        max_available_idx - 1
-                    )));
-                }
-                real_indices.push(idx);
-            } else {
-                // Synthetic sequence - must exist in sequence_map
-                if !sequence_map.contains_key(&idx) {
-                    return Err(VangaError::DataError(format!(
-                        "Synthetic sequence {} not found in sequence map",
-                        idx
-                    )));
-                }
-                synthetic_indices.push(idx);
-            }
-        }
+		for &idx in &sorted_indices {
+			if idx < 1_000_000 {
+				// Real sequence - validate against all_data
+				if idx >= max_available_idx {
+					return Err(VangaError::DataError(format!(
+						"Invalid real sequence index: {} (max available: {})",
+						idx,
+						max_available_idx - 1
+					)));
+				}
+				real_indices.push(idx);
+			} else {
+				// Synthetic sequence - must exist in sequence_map
+				if !sequence_map.contains_key(&idx) {
+					return Err(VangaError::DataError(format!(
+						"Synthetic sequence {} not found in sequence map",
+						idx
+					)));
+				}
+				synthetic_indices.push(idx);
+			}
+		}
 
-        log::debug!(
-            "   • Processing {} real + {} synthetic sequences",
-            real_indices.len(),
-            synthetic_indices.len()
-        );
+		log::debug!(
+			"   • Processing {} real + {} synthetic sequences",
+			real_indices.len(),
+			synthetic_indices.len()
+		);
 
-        // Extract sequences
-        let num_sequences = sorted_indices.len();
-        let sequence_length = all_data.sequences.shape()[1];
-        let num_features = all_data.sequences.shape()[2];
+		// Extract sequences
+		let num_sequences = sorted_indices.len();
+		let sequence_length = all_data.sequences.shape()[1];
+		let num_features = all_data.sequences.shape()[2];
 
-        log::debug!(
-            "   • Creating array with shape: ({}, {}, {})",
-            num_sequences,
-            sequence_length,
-            num_features
-        );
+		log::debug!(
+			"   • Creating array with shape: ({}, {}, {})",
+			num_sequences,
+			sequence_length,
+			num_features
+		);
 
-        let mut sequences = ndarray::Array3::zeros((num_sequences, sequence_length, num_features));
-        let mut sequence_indices = Vec::new();
+		let mut sequences = ndarray::Array3::zeros((num_sequences, sequence_length, num_features));
+		let mut sequence_indices = Vec::new();
 
-        // Apply augmentation if configured
-        // CRITICAL: Augmentation is only applied here for training data
-        // Augmentation ONLY affects technical indicators, NOT price/volume columns
-        let mut augmented_count = 0;
-        let mut rng =
-            <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed.wrapping_add(0x415547));
+		// Apply augmentation if configured
+		// CRITICAL: Augmentation is only applied here for training data
+		// Augmentation ONLY affects technical indicators, NOT price/volume columns
+		let mut augmented_count = 0;
+		let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed.wrapping_add(0x415547));
 
-        // Price/volume columns to skip (indices that determine targets)
-        // These correspond to: open(0), high(1), low(2), close(3), volume(4) typically
-        let price_volume_cols: Vec<usize> = (0..5).collect();
+		// Price/volume columns to skip (indices that determine targets)
+		// These correspond to: open(0), high(1), low(2), close(3), volume(4) typically
+		let price_volume_cols: Vec<usize> = (0..5).collect();
 
-        for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
-            if orig_idx < 1_000_000 {
-                // Real sequence - extract from all_data
-                sequences
-                    .slice_mut(ndarray::s![new_idx, .., ..])
-                    .assign(&all_data.sequences.slice(ndarray::s![orig_idx, .., ..]));
-                sequence_indices.push(all_data.sequence_indices[orig_idx]);
-            } else {
-                // Synthetic sequence - extract from sequence_map
-                if let Some(seq_with_targets) = sequence_map.get(&orig_idx) {
-                    sequences
-                        .slice_mut(ndarray::s![new_idx, .., ..])
-                        .assign(&seq_with_targets.sequence_data);
-                    sequence_indices.push((seq_with_targets.start_idx, seq_with_targets.end_idx));
-                } else {
-                    return Err(VangaError::DataError(format!(
-                        "Synthetic sequence {} not found",
-                        orig_idx
-                    )));
-                }
-            }
+		for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
+			if orig_idx < 1_000_000 {
+				// Real sequence - extract from all_data
+				sequences
+					.slice_mut(ndarray::s![new_idx, .., ..])
+					.assign(&all_data.sequences.slice(ndarray::s![orig_idx, .., ..]));
+				sequence_indices.push(all_data.sequence_indices[orig_idx]);
+			} else {
+				// Synthetic sequence - extract from sequence_map
+				if let Some(seq_with_targets) = sequence_map.get(&orig_idx) {
+					sequences
+						.slice_mut(ndarray::s![new_idx, .., ..])
+						.assign(&seq_with_targets.sequence_data);
+					sequence_indices.push((seq_with_targets.start_idx, seq_with_targets.end_idx));
+				} else {
+					return Err(VangaError::DataError(format!(
+						"Synthetic sequence {} not found",
+						orig_idx
+					)));
+				}
+			}
 
-            // Apply augmentation if enabled and configured
-            // Note: We augment based on overlap with the PREVIOUS sequence in THIS dataset
-            if let Some(config) = augment_config {
-                if new_idx > 0 {
-                    // Check overlap with previous sequence in this subset
-                    let (prev_start, prev_end) = sequence_indices[new_idx - 1];
-                    let (curr_start, curr_end) = sequence_indices[new_idx];
+			// Apply augmentation if enabled and configured
+			// Note: We augment based on overlap with the PREVIOUS sequence in THIS dataset
+			if let Some(config) = augment_config {
+				if new_idx > 0 {
+					// Check overlap with previous sequence in this subset
+					let (prev_start, prev_end) = sequence_indices[new_idx - 1];
+					let (curr_start, curr_end) = sequence_indices[new_idx];
 
-                    if crate::data::augmentation::sequences_overlap(
-                        prev_start, prev_end, curr_start, curr_end,
-                    ) {
-                        // Augment this sequence - ONLY technical indicators, NOT price/volume
-                        let mut sequence_2d =
-                            sequences.slice(ndarray::s![new_idx, .., ..]).to_owned();
-                        sequence_2d = crate::data::augmentation::augment_sequence(
-                            &sequence_2d,
-                            config,
-                            &mut rng,
-                            &price_volume_cols,
-                        );
-                        // Copy back
-                        let mut seq_view_mut = sequences.slice_mut(ndarray::s![new_idx, .., ..]);
-                        seq_view_mut.assign(&sequence_2d);
-                        augmented_count += 1;
-                    }
-                }
-            }
-        }
+					if crate::data::augmentation::sequences_overlap(prev_start, prev_end, curr_start, curr_end) {
+						// Augment this sequence - ONLY technical indicators, NOT price/volume
+						let mut sequence_2d = sequences.slice(ndarray::s![new_idx, .., ..]).to_owned();
+						sequence_2d = crate::data::augmentation::augment_sequence(
+							&sequence_2d,
+							config,
+							&mut rng,
+							&price_volume_cols,
+						);
+						// Copy back
+						let mut seq_view_mut = sequences.slice_mut(ndarray::s![new_idx, .., ..]);
+						seq_view_mut.assign(&sequence_2d);
+						augmented_count += 1;
+					}
+				}
+			}
+		}
 
-        if augmented_count > 0 {
-            log::debug!(
-                "   • Applied augmentation to {} overlapping sequences (price/volume preserved)",
-                augmented_count
-            );
-        }
+		if augmented_count > 0 {
+			log::debug!(
+				"   • Applied augmentation to {} overlapping sequences (price/volume preserved)",
+				augmented_count
+			);
+		}
 
-        // Create targets using EMBEDDED targets from SequenceWithTargets (CRITICAL FIX!)
-        let mut targets = crate::targets::PreparedTargets::new(num_sequences);
+		// Create targets using EMBEDDED targets from SequenceWithTargets (CRITICAL FIX!)
+		let mut targets = crate::targets::PreparedTargets::new(num_sequences);
 
-        // CRITICAL FIX: Create target-specific PreparedTargets with ONLY current target data
-        // Determine which target types are present in indices_by_target
-        let target_types_present: std::collections::HashSet<crate::targets::TargetType> =
-            indices_by_target
-                .keys()
-                .map(|(target_type, _)| *target_type)
-                .collect();
+		// CRITICAL FIX: Create target-specific PreparedTargets with ONLY current target data
+		// Determine which target types are present in indices_by_target
+		let target_types_present: std::collections::HashSet<crate::targets::TargetType> =
+			indices_by_target.keys().map(|(target_type, _)| *target_type).collect();
 
-        log::debug!(
-            "🎯 Creating target-specific PreparedTargets for: {:?}",
-            target_types_present
-        );
+		log::debug!(
+			"🎯 Creating target-specific PreparedTargets for: {:?}",
+			target_types_present
+		);
 
-        // Only initialize and populate target arrays for the SPECIFIC target types present
-        // CRITICAL FIX: Sort keys for deterministic processing order (avoid HashMap randomness)
-        let mut sorted_keys: Vec<_> = indices_by_target.keys().collect();
-        sorted_keys.sort_by(|a, b| {
-            // Sort by target type first, then by horizon
-            match a.0.cmp(&b.0) {
-                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-                other => other,
-            }
-        });
+		// Only initialize and populate target arrays for the SPECIFIC target types present
+		// CRITICAL FIX: Sort keys for deterministic processing order (avoid HashMap randomness)
+		let mut sorted_keys: Vec<_> = indices_by_target.keys().collect();
+		sorted_keys.sort_by(|a, b| {
+			// Sort by target type first, then by horizon
+			match a.0.cmp(&b.0) {
+				std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+				other => other,
+			}
+		});
 
-        for (target_type, horizon) in sorted_keys {
-            let target_name = match target_type {
-                crate::targets::TargetType::PriceLevel => format!("price_level_{}", horizon),
-                crate::targets::TargetType::StopLevel => format!("stop_level_{}", horizon),
-                crate::targets::TargetType::Direction => format!("direction_{}", horizon),
-                crate::targets::TargetType::Volatility => format!("volatility_{}", horizon),
-                crate::targets::TargetType::Sentiment => format!("sentiment_{}", horizon),
-                crate::targets::TargetType::Volume => format!("volume_{}", horizon),
-            };
-            targets.target_names.push(target_name);
+		for (target_type, horizon) in sorted_keys {
+			let target_name = match target_type {
+				crate::targets::TargetType::PriceLevel => format!("price_level_{}", horizon),
+				crate::targets::TargetType::StopLevel => format!("stop_level_{}", horizon),
+				crate::targets::TargetType::Direction => format!("direction_{}", horizon),
+				crate::targets::TargetType::Volatility => format!("volatility_{}", horizon),
+				crate::targets::TargetType::Sentiment => format!("sentiment_{}", horizon),
+				crate::targets::TargetType::Volume => format!("volume_{}", horizon),
+			};
+			targets.target_names.push(target_name);
 
-            match target_type {
-                crate::targets::TargetType::PriceLevel => {
-                    targets
-                        .price_levels
-                        .insert(horizon.clone(), vec![-1; num_sequences]);
-                }
-                crate::targets::TargetType::StopLevel => {
-                    targets
-                        .stop_levels
-                        .insert(horizon.clone(), vec![-1; num_sequences]);
-                }
-                crate::targets::TargetType::Direction => {
-                    targets
-                        .direction
-                        .insert(horizon.clone(), vec![-1; num_sequences]);
-                }
-                crate::targets::TargetType::Volatility => {
-                    targets
-                        .volatility
-                        .insert(horizon.clone(), vec![-1; num_sequences]);
-                }
-                crate::targets::TargetType::Sentiment => {
-                    targets
-                        .sentiment
-                        .insert(horizon.clone(), vec![-1; num_sequences]);
-                }
-                crate::targets::TargetType::Volume => {
-                    targets
-                        .volume
-                        .insert(horizon.clone(), vec![-1; num_sequences]);
-                }
-            }
-        }
+			match target_type {
+				crate::targets::TargetType::PriceLevel => {
+					targets.price_levels.insert(horizon.clone(), vec![-1; num_sequences]);
+				}
+				crate::targets::TargetType::StopLevel => {
+					targets.stop_levels.insert(horizon.clone(), vec![-1; num_sequences]);
+				}
+				crate::targets::TargetType::Direction => {
+					targets.direction.insert(horizon.clone(), vec![-1; num_sequences]);
+				}
+				crate::targets::TargetType::Volatility => {
+					targets.volatility.insert(horizon.clone(), vec![-1; num_sequences]);
+				}
+				crate::targets::TargetType::Sentiment => {
+					targets.sentiment.insert(horizon.clone(), vec![-1; num_sequences]);
+				}
+				crate::targets::TargetType::Volume => {
+					targets.volume.insert(horizon.clone(), vec![-1; num_sequences]);
+				}
+			}
+		}
 
-        // Extract targets from SequenceWithTargets (TARGET-SPECIFIC FILTERING!)
-        // CRITICAL: Use sequence_map to look up synthetic sequences by sequence_idx
-        // Synthetic sequences have idx >= 1_000_000 and are NOT at array index positions
-        for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
-            if let Some(seq_with_targets) = sequence_map.get(&orig_idx) {
-                // Copy ONLY the target types that are present in indices_by_target
-                for target_data in &seq_with_targets.targets {
-                    let target_key = (target_data.target_type, target_data.horizon.clone());
-                    // CRITICAL FIX: Only copy targets that are in indices_by_target
-                    if indices_by_target.contains_key(&target_key) {
-                        match target_data.target_type {
-                            crate::targets::TargetType::PriceLevel => {
-                                if let Some(targets_vec) =
-                                    targets.price_levels.get_mut(&target_data.horizon)
-                                {
-                                    targets_vec[new_idx] = target_data.class;
-                                }
-                            }
-                            crate::targets::TargetType::StopLevel => {
-                                if let Some(targets_vec) =
-                                    targets.stop_levels.get_mut(&target_data.horizon)
-                                {
-                                    targets_vec[new_idx] = target_data.class;
-                                }
-                            }
-                            crate::targets::TargetType::Direction => {
-                                if let Some(targets_vec) =
-                                    targets.direction.get_mut(&target_data.horizon)
-                                {
-                                    targets_vec[new_idx] = target_data.class;
-                                }
-                            }
-                            crate::targets::TargetType::Volatility => {
-                                if let Some(targets_vec) =
-                                    targets.volatility.get_mut(&target_data.horizon)
-                                {
-                                    targets_vec[new_idx] = target_data.class;
-                                }
-                            }
-                            crate::targets::TargetType::Sentiment => {
-                                if let Some(targets_vec) =
-                                    targets.sentiment.get_mut(&target_data.horizon)
-                                {
-                                    targets_vec[new_idx] = target_data.class;
-                                }
-                            }
-                            crate::targets::TargetType::Volume => {
-                                if let Some(targets_vec) =
-                                    targets.volume.get_mut(&target_data.horizon)
-                                {
-                                    targets_vec[new_idx] = target_data.class;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+		// Extract targets from SequenceWithTargets (TARGET-SPECIFIC FILTERING!)
+		// CRITICAL: Use sequence_map to look up synthetic sequences by sequence_idx
+		// Synthetic sequences have idx >= 1_000_000 and are NOT at array index positions
+		for (new_idx, &orig_idx) in sorted_indices.iter().enumerate() {
+			if let Some(seq_with_targets) = sequence_map.get(&orig_idx) {
+				// Copy ONLY the target types that are present in indices_by_target
+				for target_data in &seq_with_targets.targets {
+					let target_key = (target_data.target_type, target_data.horizon.clone());
+					// CRITICAL FIX: Only copy targets that are in indices_by_target
+					if indices_by_target.contains_key(&target_key) {
+						match target_data.target_type {
+							crate::targets::TargetType::PriceLevel => {
+								if let Some(targets_vec) = targets.price_levels.get_mut(&target_data.horizon) {
+									targets_vec[new_idx] = target_data.class;
+								}
+							}
+							crate::targets::TargetType::StopLevel => {
+								if let Some(targets_vec) = targets.stop_levels.get_mut(&target_data.horizon) {
+									targets_vec[new_idx] = target_data.class;
+								}
+							}
+							crate::targets::TargetType::Direction => {
+								if let Some(targets_vec) = targets.direction.get_mut(&target_data.horizon) {
+									targets_vec[new_idx] = target_data.class;
+								}
+							}
+							crate::targets::TargetType::Volatility => {
+								if let Some(targets_vec) = targets.volatility.get_mut(&target_data.horizon) {
+									targets_vec[new_idx] = target_data.class;
+								}
+							}
+							crate::targets::TargetType::Sentiment => {
+								if let Some(targets_vec) = targets.sentiment.get_mut(&target_data.horizon) {
+									targets_vec[new_idx] = target_data.class;
+								}
+							}
+							crate::targets::TargetType::Volume => {
+								if let Some(targets_vec) = targets.volume.get_mut(&target_data.horizon) {
+									targets_vec[new_idx] = target_data.class;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 
-        // CRITICAL FIX: Populate valid_indices with all sequence indices
-        // All sequences in balanced selection are valid by definition
-        targets.valid_indices = (0..num_sequences).collect();
+		// CRITICAL FIX: Populate valid_indices with all sequence indices
+		// All sequences in balanced selection are valid by definition
+		targets.valid_indices = (0..num_sequences).collect();
 
-        log::debug!(
-            "Balanced data: {} sequences, {} targets/horizon",
-            num_sequences,
-            targets.target_names.len()
-        );
+		log::debug!(
+			"Balanced data: {} sequences, {} targets/horizon",
+			num_sequences,
+			targets.target_names.len()
+		);
 
-        Ok(PreparedData {
-            sequences,
-            targets,
-            feature_names: all_data.feature_names.clone(),
-            metadata: all_data.metadata.clone(),
-            sequence_indices,
-        })
-    }
+		Ok(PreparedData {
+			sequences,
+			targets,
+			feature_names: all_data.feature_names.clone(),
+			metadata: all_data.metadata.clone(),
+			sequence_indices,
+		})
+	}
 
-    /// Load and preprocess data for prediction
-    pub async fn prepare_prediction_data<P: AsRef<Path>>(
-        &self,
-        data_path: P,
-        config: &crate::config::PredictionConfig,
-        training_config: Option<&crate::config::TrainingConfig>,
-    ) -> Result<PreparedPredictionData> {
-        let symbol = config.symbols.first().ok_or_else(|| {
-            VangaError::ConfigError("Prediction requires at least one symbol".to_string())
-        })?;
+	/// Load and preprocess data for prediction
+	pub async fn prepare_prediction_data<P: AsRef<Path>>(
+		&self,
+		data_path: P,
+		config: &crate::config::PredictionConfig,
+		training_config: Option<&crate::config::TrainingConfig>,
+	) -> Result<PreparedPredictionData> {
+		let symbol = config
+			.symbols
+			.first()
+			.ok_or_else(|| VangaError::ConfigError("Prediction requires at least one symbol".to_string()))?;
 
-        // Load raw data
-        let raw_data = self.loader.load_csv(data_path).await?;
+		// Load raw data
+		let raw_data = self.loader.load_csv(data_path).await?;
 
-        // Validate schema
-        CryptoDataSchema::validate(&raw_data)?;
-        if let Some(training_config) = training_config {
-            validate_prediction_history(raw_data.height(), training_config)?;
-        }
+		// Validate schema
+		CryptoDataSchema::validate(&raw_data)?;
+		if let Some(training_config) = training_config {
+			validate_prediction_history(raw_data.height(), training_config)?;
+		}
 
-        // Use the configuration attached to the exact model being served. Reloading
-        // a model by symbol here can silently preprocess for a different model than
-        // the caller passed to Predictor.
-        let processed_data = if let Some(training_config) = training_config {
-            log::info!("Using stored training config for consistent preprocessing");
+		// Use the configuration attached to the exact model being served. Reloading
+		// a model by symbol here can silently preprocess for a different model than
+		// the caller passed to Predictor.
+		let processed_data = if let Some(training_config) = training_config {
+			log::info!("Using stored training config for consistent preprocessing");
 
-            // Apply EXACT same preprocessing as training (feature engineering + remove_nan_rows)
-            let df = self
-                .preprocessor
-                .process_features_only(
-                    raw_data,
-                    &training_config.data,
-                    Some(&training_config.features),
-                )
-                .await?;
+			// Apply EXACT same preprocessing as training (feature engineering + remove_nan_rows)
+			let df = self
+				.preprocessor
+				.process_features_only(raw_data, &training_config.data, Some(&training_config.features))
+				.await?;
 
-            log::info!(
-                "✅ Applied same preprocessing as training: {} rows, {} columns",
-                df.height(),
-                df.width()
-            );
-            log::info!("✅ Per-sequence normalization will be applied during sequence generation");
+			log::info!(
+				"✅ Applied same preprocessing as training: {} rows, {} columns",
+				df.height(),
+				df.width()
+			);
+			log::info!("✅ Per-sequence normalization will be applied during sequence generation");
 
-            df
-        } else {
-            // Fallback for old models without stored training config
-            log::warn!("No training config found in model - using basic preprocessing (may cause feature mismatch)");
-            self.preprocessor
-                .process_for_prediction(raw_data, symbol, None)
-                .await?
-        };
+			df
+		} else {
+			// Fallback for old models without stored training config
+			log::warn!("No training config found in model - using basic preprocessing (may cause feature mismatch)");
+			self.preprocessor.process_for_prediction(raw_data, symbol, None).await?
+		};
 
-        let processed_data = if let Some(names) = &self.feature_names {
-            SequenceGenerator::reorder_features(processed_data, names)?
-        } else {
-            log::warn!("⚠️ No saved feature_names; prediction uses count-only feature validation");
-            processed_data
-        };
+		let processed_data = if let Some(names) = &self.feature_names {
+			SequenceGenerator::reorder_features(processed_data, names)?
+		} else {
+			log::warn!("⚠️ No saved feature_names; prediction uses count-only feature validation");
+			processed_data
+		};
 
-        // Generate prediction sequences using model config from training
-        let default_model_config = crate::config::ModelConfig::default();
-        let model_config = if let Some(training_config) = training_config {
-            &training_config.model
-        } else {
-            // Fallback for old models
-            &default_model_config
-        };
+		// Generate prediction sequences using model config from training
+		let default_model_config = crate::config::ModelConfig::default();
+		let model_config = if let Some(training_config) = training_config {
+			&training_config.model
+		} else {
+			// Fallback for old models
+			&default_model_config
+		};
 
-        let history_ohlc = crate::utils::market_data::extract_ohlcv_data(&processed_data)?;
-        let mut sequences = self
-            .sequence_generator
-            .generate_prediction_sequences(processed_data, symbol, model_config)
-            .await?;
-        retain_prediction_history(&mut sequences.sequence_ohlc, history_ohlc)?;
+		let history_ohlc = crate::utils::market_data::extract_ohlcv_data(&processed_data)?;
+		let mut sequences = self
+			.sequence_generator
+			.generate_prediction_sequences(processed_data, symbol, model_config)
+			.await?;
+		retain_prediction_history(&mut sequences.sequence_ohlc, history_ohlc)?;
 
-        Ok(sequences)
-    }
+		Ok(sequences)
+	}
 
-    /// Load and preprocess data for multi-symbol cross-asset prediction
-    pub async fn prepare_cross_asset_prediction_data(
-        &self,
-        symbol_paths: &std::collections::HashMap<String, std::path::PathBuf>,
-        _config: &crate::config::PredictionConfig,
-        features_config: &crate::config::FeatureConfig,
-    ) -> Result<std::collections::HashMap<String, PreparedPredictionData>> {
-        log::info!(
-            "Preparing cross-asset prediction data for {} symbols",
-            symbol_paths.len()
-        );
+	/// Load and preprocess data for multi-symbol cross-asset prediction
+	pub async fn prepare_cross_asset_prediction_data(
+		&self,
+		symbol_paths: &std::collections::HashMap<String, std::path::PathBuf>,
+		_config: &crate::config::PredictionConfig,
+		features_config: &crate::config::FeatureConfig,
+	) -> Result<std::collections::HashMap<String, PreparedPredictionData>> {
+		log::info!(
+			"Preparing cross-asset prediction data for {} symbols",
+			symbol_paths.len()
+		);
 
-        // Load raw data for all symbols
-        let mut symbol_data = std::collections::HashMap::new();
-        for (symbol, path) in symbol_paths {
-            let raw_data = self.loader.load_csv(path).await?;
-            CryptoDataSchema::validate(&raw_data)?;
-            symbol_data.insert(symbol.clone(), raw_data);
-        }
+		// Load raw data for all symbols
+		let mut symbol_data = std::collections::HashMap::new();
+		for (symbol, path) in symbol_paths {
+			let raw_data = self.loader.load_csv(path).await?;
+			CryptoDataSchema::validate(&raw_data)?;
+			symbol_data.insert(symbol.clone(), raw_data);
+		}
 
-        // Apply cross-asset preprocessing
-        let processed_symbol_data = self
-            .preprocessor
-            .process_for_cross_asset_prediction(symbol_data, features_config)
-            .await?;
+		// Apply cross-asset preprocessing
+		let processed_symbol_data = self
+			.preprocessor
+			.process_for_cross_asset_prediction(symbol_data, features_config)
+			.await?;
 
-        // Generate prediction sequences for each symbol
-        let mut prepared_data = std::collections::HashMap::new();
-        let default_model_config = crate::config::ModelConfig::default();
+		// Generate prediction sequences for each symbol
+		let mut prepared_data = std::collections::HashMap::new();
+		let default_model_config = crate::config::ModelConfig::default();
 
-        for (symbol, processed_df) in processed_symbol_data {
-            let sequences = self
-                .sequence_generator
-                .generate_prediction_sequences(processed_df, &symbol, &default_model_config)
-                .await?;
-            prepared_data.insert(symbol, sequences);
-        }
+		for (symbol, processed_df) in processed_symbol_data {
+			let sequences = self
+				.sequence_generator
+				.generate_prediction_sequences(processed_df, &symbol, &default_model_config)
+				.await?;
+			prepared_data.insert(symbol, sequences);
+		}
 
-        Ok(prepared_data)
-    }
+		Ok(prepared_data)
+	}
 }
 
 /// Prepared training data with sequences and targets
 #[derive(Debug, Clone)]
 pub struct PreparedData {
-    pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
-    pub targets: PreparedTargets,
-    pub feature_names: Vec<String>,
-    pub metadata: DataMetadata,
-    /// Start and end indices for each sequence in the original data
-    pub sequence_indices: Vec<(usize, usize)>,
+	pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
+	pub targets: PreparedTargets,
+	pub feature_names: Vec<String>,
+	pub metadata: DataMetadata,
+	/// Start and end indices for each sequence in the original data
+	pub sequence_indices: Vec<(usize, usize)>,
 }
 
 pub(crate) fn retain_computable_target_rows(data: PreparedData) -> Result<PreparedData> {
-    let row_count = data.sequences.shape()[0];
-    if data.sequence_indices.len() != row_count {
-        return Err(VangaError::DataError(format!(
-            "Sequence count mismatch before target eligibility filtering: {} sequences but {} indices",
-            row_count,
-            data.sequence_indices.len()
-        )));
-    }
-    if data.targets.valid_indices.len() == row_count
-        && data.targets.valid_indices.iter().copied().eq(0..row_count)
-    {
-        return Ok(data);
-    }
-    if data.targets.valid_indices.is_empty() {
-        return Err(VangaError::DataError(
-            "No sequences have computable labels for every enabled head".to_string(),
-        ));
-    }
-    if data
-        .targets
-        .valid_indices
-        .windows(2)
-        .any(|pair| pair[0] >= pair[1])
-        || data
-            .targets
-            .valid_indices
-            .iter()
-            .any(|index| *index >= row_count)
-    {
-        return Err(VangaError::DataError(
-            "Computable target indices must be unique, ordered, and within the sequence array"
-                .to_string(),
-        ));
-    }
+	let row_count = data.sequences.shape()[0];
+	if data.sequence_indices.len() != row_count {
+		return Err(VangaError::DataError(format!(
+			"Sequence count mismatch before target eligibility filtering: {} sequences but {} indices",
+			row_count,
+			data.sequence_indices.len()
+		)));
+	}
+	if data.targets.valid_indices.len() == row_count && data.targets.valid_indices.iter().copied().eq(0..row_count) {
+		return Ok(data);
+	}
+	if data.targets.valid_indices.is_empty() {
+		return Err(VangaError::DataError(
+			"No sequences have computable labels for every enabled head".to_string(),
+		));
+	}
+	if data.targets.valid_indices.windows(2).any(|pair| pair[0] >= pair[1])
+		|| data.targets.valid_indices.iter().any(|index| *index >= row_count)
+	{
+		return Err(VangaError::DataError(
+			"Computable target indices must be unique, ordered, and within the sequence array".to_string(),
+		));
+	}
 
-    let retained = data.targets.valid_indices.clone();
-    let removed = row_count - retained.len();
-    let sequences = data.sequences.select(ndarray::Axis(0), &retained);
-    let targets = data.targets.select_by_indices(&retained);
-    let sequence_indices = retained
-        .iter()
-        .map(|index| data.sequence_indices[*index])
-        .collect();
-    log::warn!(
+	let retained = data.targets.valid_indices.clone();
+	let removed = row_count - retained.len();
+	let sequences = data.sequences.select(ndarray::Axis(0), &retained);
+	let targets = data.targets.select_by_indices(&retained);
+	let sequence_indices = retained.iter().map(|index| data.sequence_indices[*index]).collect();
+	log::warn!(
         "Skipped {} training sequences because regime stop labels lacked sufficient history; all heads retained {} aligned rows",
         removed,
         retained.len()
     );
-    Ok(PreparedData {
-        sequences,
-        targets,
-        feature_names: data.feature_names,
-        metadata: data.metadata,
-        sequence_indices,
-    })
+	Ok(PreparedData {
+		sequences,
+		targets,
+		feature_names: data.feature_names,
+		metadata: data.metadata,
+		sequence_indices,
+	})
 }
 
 /// Prepared prediction data
 #[derive(Debug)]
 pub struct PreparedPredictionData {
-    pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
-    pub feature_names: Vec<String>,
-    pub metadata: DataMetadata,
-    /// Processed OHLC history ending at the sequence anchor.
-    pub sequence_ohlc: Option<Vec<crate::data::structures::MarketDataRow>>,
+	pub sequences: ndarray::Array3<f64>, // [batch, sequence, features]
+	pub feature_names: Vec<String>,
+	pub metadata: DataMetadata,
+	/// Processed OHLC history ending at the sequence anchor.
+	pub sequence_ohlc: Option<Vec<crate::data::structures::MarketDataRow>>,
 }
 
 pub(crate) fn retain_prediction_history(
-    sequence_ohlc: &mut Option<Vec<crate::data::structures::MarketDataRow>>,
-    history_ohlc: Vec<crate::data::structures::MarketDataRow>,
+	sequence_ohlc: &mut Option<Vec<crate::data::structures::MarketDataRow>>,
+	history_ohlc: Vec<crate::data::structures::MarketDataRow>,
 ) -> Result<()> {
-    let sequence_anchor = sequence_ohlc
-        .as_ref()
-        .and_then(|rows| rows.last())
-        .ok_or_else(|| VangaError::data("Prediction sequence has no OHLC anchor"))?;
-    let history_anchor = history_ohlc
-        .last()
-        .ok_or_else(|| VangaError::data("Processed prediction history is empty"))?;
-    if sequence_anchor.timestamp != history_anchor.timestamp
-        || sequence_anchor.close != history_anchor.close
-    {
-        return Err(VangaError::data(
-            "Processed prediction history does not end at the LSTM sequence anchor",
-        ));
-    }
-    *sequence_ohlc = Some(history_ohlc);
-    Ok(())
+	let sequence_anchor = sequence_ohlc
+		.as_ref()
+		.and_then(|rows| rows.last())
+		.ok_or_else(|| VangaError::data("Prediction sequence has no OHLC anchor"))?;
+	let history_anchor = history_ohlc
+		.last()
+		.ok_or_else(|| VangaError::data("Processed prediction history is empty"))?;
+	if sequence_anchor.timestamp != history_anchor.timestamp || sequence_anchor.close != history_anchor.close {
+		return Err(VangaError::data(
+			"Processed prediction history does not end at the LSTM sequence anchor",
+		));
+	}
+	*sequence_ohlc = Some(history_ohlc);
+	Ok(())
 }
 
 /// Normalization statistics for features
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NormalizationStats {
-    pub means: Vec<f64>,
-    pub stds: Vec<f64>,
-    pub mins: Vec<f64>,
-    pub maxs: Vec<f64>,
-    pub medians: Vec<f64>,
-    pub q25: Vec<f64>,
-    pub q75: Vec<f64>,
+	pub means: Vec<f64>,
+	pub stds: Vec<f64>,
+	pub mins: Vec<f64>,
+	pub maxs: Vec<f64>,
+	pub medians: Vec<f64>,
+	pub q25: Vec<f64>,
+	pub q75: Vec<f64>,
 }
 
 /// Data metadata
 #[derive(Debug, Clone)]
 pub struct DataMetadata {
-    pub symbol: String,
-    pub start_time: chrono::DateTime<chrono::Utc>,
-    pub end_time: chrono::DateTime<chrono::Utc>,
-    pub total_records: usize,
-    pub feature_count: usize,
-    pub sequence_length: usize,
-    pub horizons: Vec<String>,
+	pub symbol: String,
+	pub start_time: chrono::DateTime<chrono::Utc>,
+	pub end_time: chrono::DateTime<chrono::Utc>,
+	pub total_records: usize,
+	pub feature_count: usize,
+	pub sequence_length: usize,
+	pub horizons: Vec<String>,
 }
 
 /// Configuration for a single walk-forward window
 #[derive(Debug, Clone)]
 struct WindowConfig {
-    pub train_end: usize,
+	pub train_end: usize,
 }
 
 /// Optimal walk-forward window configuration
 #[derive(Debug)]
 struct OptimalWindowConfig {
-    pub windows: Vec<WindowConfig>,
+	pub windows: Vec<WindowConfig>,
 }
 
 /// Walk-forward training window with proper three-way split and sequence tracking
 #[derive(Debug, Clone)]
 pub struct TrainingWindow {
-    pub train_data: PreparedData,
-    pub val_data: PreparedData,
-    /// Test data - empty for intermediate windows, populated for final evaluation
-    pub test_data: PreparedData,
-    pub window_id: usize,
-    pub train_samples: usize,
-    pub val_samples: usize,
-    pub test_samples: usize,
+	pub train_data: PreparedData,
+	pub val_data: PreparedData,
+	/// Test data - empty for intermediate windows, populated for final evaluation
+	pub test_data: PreparedData,
+	pub window_id: usize,
+	pub train_samples: usize,
+	pub val_samples: usize,
+	pub test_samples: usize,
 }
 
 /// Container for target-specific balanced windows
 #[derive(Debug)]
 pub struct TargetSpecificWindows {
-    /// Windows organized by target: (TargetType, Horizon) -> Vec<TrainingWindow>
-    pub windows_by_target: HashMap<(crate::targets::TargetType, String), Vec<TrainingWindow>>,
-    /// Shared metadata
-    pub feature_names: Vec<String>,
+	/// Windows organized by target: (TargetType, Horizon) -> Vec<TrainingWindow>
+	pub windows_by_target: HashMap<(crate::targets::TargetType, String), Vec<TrainingWindow>>,
+	/// Shared metadata
+	pub feature_names: Vec<String>,
 }

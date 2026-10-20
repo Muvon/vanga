@@ -19,24 +19,22 @@ use crate::config::{PredictionConfig, TrainingConfig};
 use crate::utils::error::Result;
 
 /// High-level training function
-pub async fn train_model(
-    config: TrainingConfig,
-) -> Result<crate::model::multi_target::MultiTargetLSTMModel> {
-    let mut trainer = ModelTrainer::new(config);
-    trainer.train().await
+pub async fn train_model(config: TrainingConfig) -> Result<crate::model::multi_target::MultiTargetLSTMModel> {
+	let mut trainer = ModelTrainer::new(config);
+	trainer.train().await
 }
 
 /// XGBoost-only training function using existing LSTM model
 pub async fn train_xgboost_only_model(
-    config: TrainingConfig,
+	config: TrainingConfig,
 ) -> Result<crate::model::multi_target::MultiTargetLSTMModel> {
-    trainer::train_xgboost_only_model(config).await
+	trainer::train_xgboost_only_model(config).await
 }
 
 /// High-level prediction function for single-target models
 pub async fn predict_single(
-    config: PredictionConfig,
-    model: &crate::model::lstm_simple::LSTMModel,
+	config: PredictionConfig,
+	model: &crate::model::lstm_simple::LSTMModel,
 ) -> Result<Vec<crate::output::PredictionResult>> {
-    predict(config, model).await
+	predict(config, model).await
 }

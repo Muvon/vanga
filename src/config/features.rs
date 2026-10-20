@@ -3,745 +3,733 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureConfig {
-    #[serde(default = "default_stats_window_bars")]
-    pub stats_window_bars: usize,
+	#[serde(default = "default_stats_window_bars")]
+	pub stats_window_bars: usize,
 
-    /// Technical indicators configuration
-    pub technical_indicators: TechnicalIndicatorsConfig,
+	/// Technical indicators configuration
+	pub technical_indicators: TechnicalIndicatorsConfig,
 
-    /// Market microstructure features
-    pub market_microstructure: MarketMicrostructureConfig,
+	/// Market microstructure features
+	pub market_microstructure: MarketMicrostructureConfig,
 
-    /// Volatility features
-    pub volatility_features: VolatilityFeaturesConfig,
+	/// Volatility features
+	pub volatility_features: VolatilityFeaturesConfig,
 
-    /// Custom features (any additional columns in CSV)
-    pub custom_features: CustomFeaturesConfig,
+	/// Custom features (any additional columns in CSV)
+	pub custom_features: CustomFeaturesConfig,
 
-    /// Feature engineering settings
-    pub engineering: FeatureEngineeringConfig,
+	/// Feature engineering settings
+	pub engineering: FeatureEngineeringConfig,
 
-    /// Feature selection settings
-    pub selection: FeatureSelectionConfig,
+	/// Feature selection settings
+	pub selection: FeatureSelectionConfig,
 
-    /// Cross-asset features (multi-symbol analysis)
-    pub cross_asset: CrossAssetConfig,
+	/// Cross-asset features (multi-symbol analysis)
+	pub cross_asset: CrossAssetConfig,
 
-    /// Liquidity-aware features (stop hunts, wick anatomy, CVD slope).
-    /// All outputs are scale-invariant and aligned with VANGA's per-sequence
-    /// normalization. Disabled by default for backward compatibility.
-    #[serde(default)]
-    pub liquidity_features: LiquidityFeaturesConfig,
+	/// Liquidity-aware features (stop hunts, wick anatomy, CVD slope).
+	/// All outputs are scale-invariant and aligned with VANGA's per-sequence
+	/// normalization. Disabled by default for backward compatibility.
+	#[serde(default)]
+	pub liquidity_features: LiquidityFeaturesConfig,
 
-    /// Regime features (range position, BB/KC squeeze, range compression).
-    /// All outputs are scale-invariant. Disabled by default for backward compatibility.
-    #[serde(default)]
-    pub regime_features: RegimeFeaturesConfig,
+	/// Regime features (range position, BB/KC squeeze, range compression).
+	/// All outputs are scale-invariant. Disabled by default for backward compatibility.
+	#[serde(default)]
+	pub regime_features: RegimeFeaturesConfig,
 }
 
 pub fn default_stats_window_bars() -> usize {
-    720
+	720
 }
 
 impl Default for FeatureConfig {
-    fn default() -> Self {
-        Self {
-            stats_window_bars: default_stats_window_bars(),
-            technical_indicators: Default::default(),
-            market_microstructure: Default::default(),
-            volatility_features: Default::default(),
-            custom_features: Default::default(),
-            engineering: Default::default(),
-            selection: Default::default(),
-            cross_asset: Default::default(),
-            liquidity_features: Default::default(),
-            regime_features: Default::default(),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			stats_window_bars: default_stats_window_bars(),
+			technical_indicators: Default::default(),
+			market_microstructure: Default::default(),
+			volatility_features: Default::default(),
+			custom_features: Default::default(),
+			engineering: Default::default(),
+			selection: Default::default(),
+			cross_asset: Default::default(),
+			liquidity_features: Default::default(),
+			regime_features: Default::default(),
+		}
+	}
 }
 
 impl FeatureConfig {
-    /// Load feature configuration from TOML file
-    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            crate::utils::error::VangaError::IoError(format!(
-                "Failed to read features config file: {}",
-                e
-            ))
-        })?;
+	/// Load feature configuration from TOML file
+	pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> crate::utils::error::Result<Self> {
+		let content = std::fs::read_to_string(path).map_err(|e| {
+			crate::utils::error::VangaError::IoError(format!("Failed to read features config file: {}", e))
+		})?;
 
-        toml::from_str(&content).map_err(|e| {
-            crate::utils::error::VangaError::ConfigError(format!(
-                "Failed to parse features config file: {}",
-                e
-            ))
-        })
-    }
+		toml::from_str(&content).map_err(|e| {
+			crate::utils::error::VangaError::ConfigError(format!("Failed to parse features config file: {}", e))
+		})
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TechnicalIndicatorsConfig {
-    pub enabled: bool,
+	pub enabled: bool,
 
-    /// Moving averages
-    pub moving_averages: MovingAveragesConfig,
+	/// Moving averages
+	pub moving_averages: MovingAveragesConfig,
 
-    /// Momentum indicators
-    pub momentum: MomentumConfig,
+	/// Momentum indicators
+	pub momentum: MomentumConfig,
 
-    /// Volatility indicators
-    pub volatility: VolatilityIndicatorsConfig,
+	/// Volatility indicators
+	pub volatility: VolatilityIndicatorsConfig,
 
-    /// Volume indicators
-    pub volume: VolumeIndicatorsConfig,
+	/// Volume indicators
+	pub volume: VolumeIndicatorsConfig,
 
-    /// Trend indicators
-    pub trend: TrendIndicatorsConfig,
+	/// Trend indicators
+	pub trend: TrendIndicatorsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MovingAveragesConfig {
-    pub sma_periods: Vec<u32>,
-    pub ema_periods: Vec<u32>,
-    pub wma_periods: Vec<u32>,
-    pub hull_periods: Vec<u32>,
-    pub dema_periods: Vec<u32>,
-    pub tema_periods: Vec<u32>,
-    pub kama_periods: Vec<u32>,
-    pub zlema_periods: Vec<u32>,
+	pub sma_periods: Vec<u32>,
+	pub ema_periods: Vec<u32>,
+	pub wma_periods: Vec<u32>,
+	pub hull_periods: Vec<u32>,
+	pub dema_periods: Vec<u32>,
+	pub tema_periods: Vec<u32>,
+	pub kama_periods: Vec<u32>,
+	pub zlema_periods: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MomentumConfig {
-    pub rsi_periods: Vec<u32>,
-    pub stochastic: bool,
-    pub williams_r: bool,
-    pub cci_periods: Vec<u32>,
-    pub momentum_periods: Vec<u32>,
+	pub rsi_periods: Vec<u32>,
+	pub stochastic: bool,
+	pub williams_r: bool,
+	pub cci_periods: Vec<u32>,
+	pub momentum_periods: Vec<u32>,
 
-    /// Enable ATR momentum features for volatility target
-    #[serde(default = "default_true")]
-    pub atr_momentum_enabled: bool,
-    /// Enable volume momentum features for volume target
-    #[serde(default = "default_true")]
-    pub volume_momentum_enabled: bool,
-    /// Enable price-volume divergence features for sentiment target
-    #[serde(default = "default_true")]
-    pub pv_divergence_enabled: bool,
+	/// Enable ATR momentum features for volatility target
+	#[serde(default = "default_true")]
+	pub atr_momentum_enabled: bool,
+	/// Enable volume momentum features for volume target
+	#[serde(default = "default_true")]
+	pub volume_momentum_enabled: bool,
+	/// Enable price-volume divergence features for sentiment target
+	#[serde(default = "default_true")]
+	pub pv_divergence_enabled: bool,
 }
 
 fn default_true() -> bool {
-    true
+	true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityIndicatorsConfig {
-    pub bollinger_bands: BollingerBandsConfig,
-    pub atr_periods: Vec<u32>,
-    pub keltner_channels: bool,
-    pub donchian_channels: bool,
+	pub bollinger_bands: BollingerBandsConfig,
+	pub atr_periods: Vec<u32>,
+	pub keltner_channels: bool,
+	pub donchian_channels: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BollingerBandsConfig {
-    pub enabled: bool,
-    pub period: u32,
-    pub std_dev: f64,
+	pub enabled: bool,
+	pub period: u32,
+	pub std_dev: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeIndicatorsConfig {
-    pub obv: bool,
-    pub volume_sma_periods: Vec<u32>,
-    pub mfi_periods: Vec<u32>,
-    pub ad_line: bool,
-    pub chaikin_oscillator: bool,
+	pub obv: bool,
+	pub volume_sma_periods: Vec<u32>,
+	pub mfi_periods: Vec<u32>,
+	pub ad_line: bool,
+	pub chaikin_oscillator: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrendIndicatorsConfig {
-    pub macd: MACDConfig,
-    pub adx_periods: Vec<u32>,
-    pub parabolic_sar: bool,
-    pub aroon: bool,
-    /// Advanced mathematical indicators
-    pub advanced: AdvancedIndicatorsConfig,
-    /// Consolidation/neutral-detection features for Class 2 learning
-    pub consolidation: ConsolidationFeaturesConfig,
+	pub macd: MACDConfig,
+	pub adx_periods: Vec<u32>,
+	pub parabolic_sar: bool,
+	pub aroon: bool,
+	/// Advanced mathematical indicators
+	pub advanced: AdvancedIndicatorsConfig,
+	/// Consolidation/neutral-detection features for Class 2 learning
+	pub consolidation: ConsolidationFeaturesConfig,
 }
 
 impl Default for TrendIndicatorsConfig {
-    fn default() -> Self {
-        Self {
-            macd: MACDConfig {
-                enabled: true,
-                fast_period: 12,
-                slow_period: 26,
-                signal_period: 9,
-            },
-            adx_periods: vec![14],
-            parabolic_sar: true,
-            aroon: true,
-            advanced: AdvancedIndicatorsConfig::default(),
-            consolidation: ConsolidationFeaturesConfig::default(),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			macd: MACDConfig {
+				enabled: true,
+				fast_period: 12,
+				slow_period: 26,
+				signal_period: 9,
+			},
+			adx_periods: vec![14],
+			parabolic_sar: true,
+			aroon: true,
+			advanced: AdvancedIndicatorsConfig::default(),
+			consolidation: ConsolidationFeaturesConfig::default(),
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidationFeaturesConfig {
-    /// Enable consolidation features (critical for Class 2 neutral detection)
-    pub enabled: bool,
-    /// Choppiness Index periods (high values = consolidation)
-    pub choppiness_periods: Vec<u32>,
-    /// Price Efficiency Ratio periods (low values = choppy/sideways)
-    pub efficiency_periods: Vec<u32>,
-    /// Directional Movement Balance periods (low values = balanced/sideways)
-    pub dm_balance_periods: Vec<u32>,
+	/// Enable consolidation features (critical for Class 2 neutral detection)
+	pub enabled: bool,
+	/// Choppiness Index periods (high values = consolidation)
+	pub choppiness_periods: Vec<u32>,
+	/// Price Efficiency Ratio periods (low values = choppy/sideways)
+	pub efficiency_periods: Vec<u32>,
+	/// Directional Movement Balance periods (low values = balanced/sideways)
+	pub dm_balance_periods: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MACDConfig {
-    pub enabled: bool,
-    pub fast_period: u32,
-    pub slow_period: u32,
-    pub signal_period: u32,
+	pub enabled: bool,
+	pub fast_period: u32,
+	pub slow_period: u32,
+	pub signal_period: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvancedIndicatorsConfig {
-    pub enabled: bool,
-    pub hurst_window: usize,
-    pub fractal_window: usize,
-    pub regime_window: usize,
-    pub clustering_window: usize,
-    pub reversion_window: usize,
+	pub enabled: bool,
+	pub hurst_window: usize,
+	pub fractal_window: usize,
+	pub regime_window: usize,
+	pub clustering_window: usize,
+	pub reversion_window: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketMicrostructureConfig {
-    pub enabled: bool,
+	pub enabled: bool,
 
-    /// Price velocity and acceleration
-    pub price_dynamics: PriceDynamicsConfig,
+	/// Price velocity and acceleration
+	pub price_dynamics: PriceDynamicsConfig,
 
-    /// Volume-price relationship
-    pub volume_price: VolumePriceConfig,
+	/// Volume-price relationship
+	pub volume_price: VolumePriceConfig,
 
-    /// Trade intensity metrics
-    pub trade_intensity: TradeIntensityConfig,
+	/// Trade intensity metrics
+	pub trade_intensity: TradeIntensityConfig,
 
-    /// Market depth proxies
-    pub market_depth: MarketDepthConfig,
+	/// Market depth proxies
+	pub market_depth: MarketDepthConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceDynamicsConfig {
-    pub velocity_periods: Vec<u32>,
-    pub acceleration_periods: Vec<u32>,
-    pub jerk_periods: Vec<u32>,
+	pub velocity_periods: Vec<u32>,
+	pub acceleration_periods: Vec<u32>,
+	pub jerk_periods: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumePriceConfig {
-    pub vwap_periods: Vec<u32>,
-    pub volume_price_trend: bool,
-    pub ease_of_movement: bool,
-    pub negative_volume_index: bool,
+	pub vwap_periods: Vec<u32>,
+	pub volume_price_trend: bool,
+	pub ease_of_movement: bool,
+	pub negative_volume_index: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeIntensityConfig {
-    pub enabled: bool,
-    pub lookback_periods: Vec<u32>,
-    pub intensity_metrics: Vec<IntensityMetric>,
+	pub enabled: bool,
+	pub lookback_periods: Vec<u32>,
+	pub intensity_metrics: Vec<IntensityMetric>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IntensityMetric {
-    TradesPerMinute,
-    VolumePerTrade,
-    PriceImpact,
-    OrderFlow,
+	TradesPerMinute,
+	VolumePerTrade,
+	PriceImpact,
+	OrderFlow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketDepthConfig {
-    pub bid_ask_spread_proxy: bool,
-    pub order_book_imbalance_proxy: bool,
-    pub market_impact_proxy: bool,
+	pub bid_ask_spread_proxy: bool,
+	pub order_book_imbalance_proxy: bool,
+	pub market_impact_proxy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityFeaturesConfig {
-    pub enabled: bool,
+	pub enabled: bool,
 
-    /// Realized volatility
-    pub realized_volatility: RealizedVolatilityConfig,
+	/// Realized volatility
+	pub realized_volatility: RealizedVolatilityConfig,
 
-    /// GARCH-based features
-    pub garch_features: GARCHFeaturesConfig,
+	/// GARCH-based features
+	pub garch_features: GARCHFeaturesConfig,
 
-    /// Volatility clustering
-    pub clustering: VolatilityClusteringConfig,
+	/// Volatility clustering
+	pub clustering: VolatilityClusteringConfig,
 
-    /// Regime detection
-    pub regime_detection: RegimeDetectionConfig,
+	/// Regime detection
+	pub regime_detection: RegimeDetectionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealizedVolatilityConfig {
-    pub periods: Vec<String>, // e.g., ["1h", "4h", "24h"]
-    pub estimators: Vec<VolatilityEstimator>,
+	pub periods: Vec<String>, // e.g., ["1h", "4h", "24h"]
+	pub estimators: Vec<VolatilityEstimator>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VolatilityEstimator {
-    Standard,
-    RangeBasedYangZhang,
-    RangeBasedGarmanKlass,
-    RangeBasedRogers,
+	Standard,
+	RangeBasedYangZhang,
+	RangeBasedGarmanKlass,
+	RangeBasedRogers,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GARCHFeaturesConfig {
-    pub enabled: bool,
-    pub model_orders: Vec<(u32, u32)>, // (p, q) orders
-    pub conditional_volatility: bool,
-    pub volatility_forecasts: bool,
+	pub enabled: bool,
+	pub model_orders: Vec<(u32, u32)>, // (p, q) orders
+	pub conditional_volatility: bool,
+	pub volatility_forecasts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolatilityClusteringConfig {
-    pub enabled: bool,
-    pub clustering_strength: bool,
-    pub persistence_measures: bool,
+	pub enabled: bool,
+	pub clustering_strength: bool,
+	pub persistence_measures: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegimeDetectionConfig {
-    pub enabled: bool,
-    pub methods: Vec<RegimeMethod>,
-    pub sensitivity: f64,
+	pub enabled: bool,
+	pub methods: Vec<RegimeMethod>,
+	pub sensitivity: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RegimeMethod {
-    VolatilityBased,
-    TrendBased,
-    HiddenMarkov,
-    ChangePoint,
+	VolatilityBased,
+	TrendBased,
+	HiddenMarkov,
+	ChangePoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomFeaturesConfig {
-    /// Whether to automatically include all additional CSV columns
-    pub auto_include_all: bool,
+	/// Whether to automatically include all additional CSV columns
+	pub auto_include_all: bool,
 
-    /// Specific custom features to include
-    pub include_features: Vec<String>,
+	/// Specific custom features to include
+	pub include_features: Vec<String>,
 
-    /// Features to exclude
-    pub exclude_features: Vec<String>,
+	/// Features to exclude
+	pub exclude_features: Vec<String>,
 
-    /// Custom feature transformations
-    pub transformations: HashMap<String, FeatureTransformation>,
+	/// Custom feature transformations
+	pub transformations: HashMap<String, FeatureTransformation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FeatureTransformation {
-    Log,
-    Sqrt,
-    Square,
-    Diff,
-    PercentChange,
-    ZScore,
-    MinMaxScale,
-    RobustScale,
+	Log,
+	Sqrt,
+	Square,
+	Diff,
+	PercentChange,
+	ZScore,
+	MinMaxScale,
+	RobustScale,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureEngineeringConfig {
-    /// Polynomial features
-    pub polynomial_features: PolynomialFeaturesConfig,
+	/// Polynomial features
+	pub polynomial_features: PolynomialFeaturesConfig,
 
-    /// Interaction features
-    pub interaction_features: InteractionFeaturesConfig,
+	/// Interaction features
+	pub interaction_features: InteractionFeaturesConfig,
 
-    /// Lag features
-    pub lag_features: LagFeaturesConfig,
+	/// Lag features
+	pub lag_features: LagFeaturesConfig,
 
-    /// Rolling window features
-    pub rolling_features: RollingFeaturesConfig,
+	/// Rolling window features
+	pub rolling_features: RollingFeaturesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolynomialFeaturesConfig {
-    pub enabled: bool,
-    pub degree: u32,
-    pub include_bias: bool,
-    pub interaction_only: bool,
+	pub enabled: bool,
+	pub degree: u32,
+	pub include_bias: bool,
+	pub interaction_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionFeaturesConfig {
-    pub enabled: bool,
-    pub max_interactions: u32,
-    pub feature_pairs: Vec<(String, String)>,
+	pub enabled: bool,
+	pub max_interactions: u32,
+	pub feature_pairs: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LagFeaturesConfig {
-    pub enabled: bool,
-    pub lag_periods: Vec<u32>,
-    pub features_to_lag: Vec<String>,
+	pub enabled: bool,
+	pub lag_periods: Vec<u32>,
+	pub features_to_lag: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollingFeaturesConfig {
-    pub enabled: bool,
-    pub window_sizes: Vec<u32>,
-    pub statistics: Vec<RollingStatistic>,
+	pub enabled: bool,
+	pub window_sizes: Vec<u32>,
+	pub statistics: Vec<RollingStatistic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RollingStatistic {
-    Mean,
-    Std,
-    Min,
-    Max,
-    Median,
-    Skew,
-    Kurtosis,
-    Quantile(f64),
+	Mean,
+	Std,
+	Min,
+	Max,
+	Median,
+	Skew,
+	Kurtosis,
+	Quantile(f64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureSelectionConfig {
-    pub enabled: bool,
+	pub enabled: bool,
 
-    /// Maximum number of features to select
-    pub max_features: Option<usize>,
+	/// Maximum number of features to select
+	pub max_features: Option<usize>,
 
-    /// Correlation threshold for removing highly correlated features
-    pub correlation_threshold: f64,
+	/// Correlation threshold for removing highly correlated features
+	pub correlation_threshold: f64,
 
-    /// Minimum importance threshold
-    pub importance_threshold: f64,
+	/// Minimum importance threshold
+	pub importance_threshold: f64,
 
-    /// Feature selection methods
-    pub methods: Vec<FeatureSelectionMethod>,
+	/// Feature selection methods
+	pub methods: Vec<FeatureSelectionMethod>,
 
-    /// Whether to keep crypto-specific features regardless of selection
-    pub keep_crypto_features: bool,
+	/// Whether to keep crypto-specific features regardless of selection
+	pub keep_crypto_features: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FeatureSelectionMethod {
-    CorrelationFilter,
-    VarianceThreshold,
-    UnivariateSelection,
-    RecursiveElimination,
-    ImportanceBased,
-    LassoBased,
+	CorrelationFilter,
+	VarianceThreshold,
+	UnivariateSelection,
+	RecursiveElimination,
+	ImportanceBased,
+	LassoBased,
 }
 
 impl Default for TechnicalIndicatorsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            moving_averages: MovingAveragesConfig {
-                sma_periods: vec![5, 10, 20, 50, 200],
-                ema_periods: vec![5, 10, 20, 50, 200],
-                wma_periods: vec![10, 20],
-                hull_periods: vec![9, 21],
-                dema_periods: vec![9, 21, 50],
-                tema_periods: vec![9, 21, 50],
-                kama_periods: vec![10, 20, 30],
-                zlema_periods: vec![9, 21],
-            },
-            momentum: MomentumConfig {
-                rsi_periods: vec![14, 21],
-                stochastic: true,
-                williams_r: true,
-                cci_periods: vec![14, 20],
-                momentum_periods: vec![10, 20],
-                atr_momentum_enabled: true,
-                volume_momentum_enabled: true,
-                pv_divergence_enabled: true,
-            },
-            volatility: VolatilityIndicatorsConfig {
-                bollinger_bands: BollingerBandsConfig {
-                    enabled: true,
-                    period: 20,
-                    std_dev: 2.0,
-                },
-                atr_periods: vec![14, 21],
-                keltner_channels: true,
-                donchian_channels: true,
-            },
-            volume: VolumeIndicatorsConfig {
-                obv: true,
-                volume_sma_periods: vec![10, 20],
-                mfi_periods: vec![14],
-                ad_line: true,
-                chaikin_oscillator: true,
-            },
-            trend: TrendIndicatorsConfig {
-                macd: MACDConfig {
-                    enabled: true,
-                    fast_period: 12,
-                    slow_period: 26,
-                    signal_period: 9,
-                },
-                adx_periods: vec![14],
-                parabolic_sar: true,
-                aroon: true,
-                advanced: AdvancedIndicatorsConfig::default(),
-                consolidation: ConsolidationFeaturesConfig::default(),
-            },
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			moving_averages: MovingAveragesConfig {
+				sma_periods: vec![5, 10, 20, 50, 200],
+				ema_periods: vec![5, 10, 20, 50, 200],
+				wma_periods: vec![10, 20],
+				hull_periods: vec![9, 21],
+				dema_periods: vec![9, 21, 50],
+				tema_periods: vec![9, 21, 50],
+				kama_periods: vec![10, 20, 30],
+				zlema_periods: vec![9, 21],
+			},
+			momentum: MomentumConfig {
+				rsi_periods: vec![14, 21],
+				stochastic: true,
+				williams_r: true,
+				cci_periods: vec![14, 20],
+				momentum_periods: vec![10, 20],
+				atr_momentum_enabled: true,
+				volume_momentum_enabled: true,
+				pv_divergence_enabled: true,
+			},
+			volatility: VolatilityIndicatorsConfig {
+				bollinger_bands: BollingerBandsConfig {
+					enabled: true,
+					period: 20,
+					std_dev: 2.0,
+				},
+				atr_periods: vec![14, 21],
+				keltner_channels: true,
+				donchian_channels: true,
+			},
+			volume: VolumeIndicatorsConfig {
+				obv: true,
+				volume_sma_periods: vec![10, 20],
+				mfi_periods: vec![14],
+				ad_line: true,
+				chaikin_oscillator: true,
+			},
+			trend: TrendIndicatorsConfig {
+				macd: MACDConfig {
+					enabled: true,
+					fast_period: 12,
+					slow_period: 26,
+					signal_period: 9,
+				},
+				adx_periods: vec![14],
+				parabolic_sar: true,
+				aroon: true,
+				advanced: AdvancedIndicatorsConfig::default(),
+				consolidation: ConsolidationFeaturesConfig::default(),
+			},
+		}
+	}
 }
 
 impl Default for MarketMicrostructureConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            price_dynamics: PriceDynamicsConfig {
-                velocity_periods: vec![5, 10, 20],
-                acceleration_periods: vec![5, 10],
-                jerk_periods: vec![5],
-            },
-            volume_price: VolumePriceConfig {
-                vwap_periods: vec![20, 50],
-                volume_price_trend: true,
-                ease_of_movement: true,
-                negative_volume_index: true,
-            },
-            trade_intensity: TradeIntensityConfig {
-                enabled: true,
-                lookback_periods: vec![10, 20, 50],
-                intensity_metrics: vec![
-                    IntensityMetric::TradesPerMinute,
-                    IntensityMetric::VolumePerTrade,
-                ],
-            },
-            market_depth: MarketDepthConfig {
-                bid_ask_spread_proxy: true,
-                order_book_imbalance_proxy: true,
-                market_impact_proxy: true,
-            },
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			price_dynamics: PriceDynamicsConfig {
+				velocity_periods: vec![5, 10, 20],
+				acceleration_periods: vec![5, 10],
+				jerk_periods: vec![5],
+			},
+			volume_price: VolumePriceConfig {
+				vwap_periods: vec![20, 50],
+				volume_price_trend: true,
+				ease_of_movement: true,
+				negative_volume_index: true,
+			},
+			trade_intensity: TradeIntensityConfig {
+				enabled: true,
+				lookback_periods: vec![10, 20, 50],
+				intensity_metrics: vec![IntensityMetric::TradesPerMinute, IntensityMetric::VolumePerTrade],
+			},
+			market_depth: MarketDepthConfig {
+				bid_ask_spread_proxy: true,
+				order_book_imbalance_proxy: true,
+				market_impact_proxy: true,
+			},
+		}
+	}
 }
 
 impl Default for VolatilityFeaturesConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            realized_volatility: RealizedVolatilityConfig {
-                periods: vec!["1h".to_string(), "4h".to_string(), "24h".to_string()],
-                estimators: vec![
-                    VolatilityEstimator::Standard,
-                    VolatilityEstimator::RangeBasedYangZhang,
-                ],
-            },
-            garch_features: GARCHFeaturesConfig {
-                enabled: true,
-                model_orders: vec![(1, 1), (1, 2), (2, 1)],
-                conditional_volatility: true,
-                volatility_forecasts: true,
-            },
-            clustering: VolatilityClusteringConfig {
-                enabled: true,
-                clustering_strength: true,
-                persistence_measures: true,
-            },
-            regime_detection: RegimeDetectionConfig {
-                enabled: true,
-                methods: vec![RegimeMethod::VolatilityBased, RegimeMethod::TrendBased],
-                sensitivity: 0.5,
-            },
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			realized_volatility: RealizedVolatilityConfig {
+				periods: vec!["1h".to_string(), "4h".to_string(), "24h".to_string()],
+				estimators: vec![VolatilityEstimator::Standard, VolatilityEstimator::RangeBasedYangZhang],
+			},
+			garch_features: GARCHFeaturesConfig {
+				enabled: true,
+				model_orders: vec![(1, 1), (1, 2), (2, 1)],
+				conditional_volatility: true,
+				volatility_forecasts: true,
+			},
+			clustering: VolatilityClusteringConfig {
+				enabled: true,
+				clustering_strength: true,
+				persistence_measures: true,
+			},
+			regime_detection: RegimeDetectionConfig {
+				enabled: true,
+				methods: vec![RegimeMethod::VolatilityBased, RegimeMethod::TrendBased],
+				sensitivity: 0.5,
+			},
+		}
+	}
 }
 
 impl Default for CustomFeaturesConfig {
-    fn default() -> Self {
-        Self {
-            auto_include_all: true,
-            include_features: vec![],
-            exclude_features: vec![],
-            transformations: HashMap::new(),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			auto_include_all: true,
+			include_features: vec![],
+			exclude_features: vec![],
+			transformations: HashMap::new(),
+		}
+	}
 }
 
 impl Default for FeatureEngineeringConfig {
-    fn default() -> Self {
-        Self {
-            polynomial_features: PolynomialFeaturesConfig {
-                enabled: false,
-                degree: 2,
-                include_bias: false,
-                interaction_only: true,
-            },
-            interaction_features: InteractionFeaturesConfig {
-                enabled: true,
-                max_interactions: 10,
-                feature_pairs: vec![],
-            },
-            lag_features: LagFeaturesConfig {
-                enabled: true,
-                lag_periods: vec![1, 2, 3, 5, 10],
-                features_to_lag: vec!["close".to_string(), "volume".to_string()],
-            },
-            rolling_features: RollingFeaturesConfig {
-                enabled: true,
-                window_sizes: vec![5, 10, 20],
-                statistics: vec![
-                    RollingStatistic::Mean,
-                    RollingStatistic::Std,
-                    RollingStatistic::Min,
-                    RollingStatistic::Max,
-                ],
-            },
-        }
-    }
+	fn default() -> Self {
+		Self {
+			polynomial_features: PolynomialFeaturesConfig {
+				enabled: false,
+				degree: 2,
+				include_bias: false,
+				interaction_only: true,
+			},
+			interaction_features: InteractionFeaturesConfig {
+				enabled: true,
+				max_interactions: 10,
+				feature_pairs: vec![],
+			},
+			lag_features: LagFeaturesConfig {
+				enabled: true,
+				lag_periods: vec![1, 2, 3, 5, 10],
+				features_to_lag: vec!["close".to_string(), "volume".to_string()],
+			},
+			rolling_features: RollingFeaturesConfig {
+				enabled: true,
+				window_sizes: vec![5, 10, 20],
+				statistics: vec![
+					RollingStatistic::Mean,
+					RollingStatistic::Std,
+					RollingStatistic::Min,
+					RollingStatistic::Max,
+				],
+			},
+		}
+	}
 }
 
 impl Default for FeatureSelectionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_features: None,
-            correlation_threshold: 0.95,
-            importance_threshold: 0.001,
-            methods: vec![
-                FeatureSelectionMethod::CorrelationFilter,
-                FeatureSelectionMethod::ImportanceBased,
-            ],
-            keep_crypto_features: true,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			max_features: None,
+			correlation_threshold: 0.95,
+			importance_threshold: 0.001,
+			methods: vec![
+				FeatureSelectionMethod::CorrelationFilter,
+				FeatureSelectionMethod::ImportanceBased,
+			],
+			keep_crypto_features: true,
+		}
+	}
 }
 
 impl Default for AdvancedIndicatorsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            hurst_window: 100,
-            fractal_window: 50,
-            regime_window: 50,
-            clustering_window: 50,
-            reversion_window: 50,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			hurst_window: 100,
+			fractal_window: 50,
+			regime_window: 50,
+			clustering_window: 50,
+			reversion_window: 50,
+		}
+	}
 }
 
 impl Default for ConsolidationFeaturesConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            choppiness_periods: vec![14, 20],
-            efficiency_periods: vec![10, 20],
-            dm_balance_periods: vec![14, 20],
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			choppiness_periods: vec![14, 20],
+			efficiency_periods: vec![10, 20],
+			dm_balance_periods: vec![14, 20],
+		}
+	}
 }
 
 /// Cross-asset feature configuration for multi-symbol analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossAssetConfig {
-    /// Enable cross-asset features (requires multiple symbols)
-    pub enabled: bool,
+	/// Enable cross-asset features (requires multiple symbols)
+	pub enabled: bool,
 
-    /// Minimum symbols required for cross-asset analysis
-    pub min_symbols_required: usize,
+	/// Minimum symbols required for cross-asset analysis
+	pub min_symbols_required: usize,
 
-    /// Required symbols for cross-asset analysis (e.g., ["BTCUSDT"] for BTC dominance)
-    pub required_symbols: Vec<String>,
+	/// Required symbols for cross-asset analysis (e.g., ["BTCUSDT"] for BTC dominance)
+	pub required_symbols: Vec<String>,
 
-    /// Calculate BTC dominance (requires BTCUSDT)
-    pub btc_dominance_enabled: bool,
+	/// Calculate BTC dominance (requires BTCUSDT)
+	pub btc_dominance_enabled: bool,
 
-    /// Calculate ETH/BTC ratio (optional, requires both ETHUSDT and BTCUSDT)
-    pub eth_btc_ratio_enabled: bool,
+	/// Calculate ETH/BTC ratio (optional, requires both ETHUSDT and BTCUSDT)
+	pub eth_btc_ratio_enabled: bool,
 
-    /// Market sentiment analysis configuration
-    pub sentiment_analysis: SentimentAnalysisConfig,
+	/// Market sentiment analysis configuration
+	pub sentiment_analysis: SentimentAnalysisConfig,
 
-    /// Price correlation analysis configuration
-    pub correlation_analysis: CorrelationAnalysisConfig,
+	/// Price correlation analysis configuration
+	pub correlation_analysis: CorrelationAnalysisConfig,
 }
 
 /// Market sentiment analysis configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SentimentAnalysisConfig {
-    /// Enable sentiment analysis
-    pub enabled: bool,
+	/// Enable sentiment analysis
+	pub enabled: bool,
 
-    /// Number of periods to look back for sentiment calculation
-    pub lookback_periods: usize,
+	/// Number of periods to look back for sentiment calculation
+	pub lookback_periods: usize,
 
-    /// Weight for price velocity component (0.0-1.0)
-    pub price_velocity_weight: f64,
+	/// Weight for price velocity component (0.0-1.0)
+	pub price_velocity_weight: f64,
 
-    /// Weight for volume spike component (0.0-1.0)
-    pub volume_spike_weight: f64,
+	/// Weight for volume spike component (0.0-1.0)
+	pub volume_spike_weight: f64,
 
-    /// Weight for volatility component (0.0-1.0)
-    pub volatility_weight: f64,
+	/// Weight for volatility component (0.0-1.0)
+	pub volatility_weight: f64,
 }
 
 /// Price correlation analysis configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrelationAnalysisConfig {
-    /// Enable correlation analysis
-    pub enabled: bool,
+	/// Enable correlation analysis
+	pub enabled: bool,
 
-    /// Minimum periods required for correlation calculation
-    pub min_periods: usize,
+	/// Minimum periods required for correlation calculation
+	pub min_periods: usize,
 
-    /// Rolling window size for correlation calculation
-    pub correlation_window: usize,
+	/// Rolling window size for correlation calculation
+	pub correlation_window: usize,
 }
 
 impl Default for CrossAssetConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false, // Disabled by default
-            min_symbols_required: 2,
-            required_symbols: vec![], // No strict requirements by default
-            btc_dominance_enabled: true,
-            eth_btc_ratio_enabled: true, // Optional - only works if both symbols present
-            sentiment_analysis: SentimentAnalysisConfig::default(),
-            correlation_analysis: CorrelationAnalysisConfig::default(),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: false, // Disabled by default
+			min_symbols_required: 2,
+			required_symbols: vec![], // No strict requirements by default
+			btc_dominance_enabled: true,
+			eth_btc_ratio_enabled: true, // Optional - only works if both symbols present
+			sentiment_analysis: SentimentAnalysisConfig::default(),
+			correlation_analysis: CorrelationAnalysisConfig::default(),
+		}
+	}
 }
 
 impl Default for SentimentAnalysisConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            lookback_periods: 24,
-            price_velocity_weight: 0.3,
-            volume_spike_weight: 0.3,
-            volatility_weight: 0.4,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			lookback_periods: 24,
+			price_velocity_weight: 0.3,
+			volume_spike_weight: 0.3,
+			volatility_weight: 0.4,
+		}
+	}
 }
 
 impl Default for CorrelationAnalysisConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            min_periods: 50,
-            correlation_window: 20,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			min_periods: 50,
+			correlation_window: 20,
+		}
+	}
 }
 
 /// Liquidity-aware features configuration.
@@ -751,30 +739,30 @@ impl Default for CorrelationAnalysisConfig {
 /// pass through per-sequence normalization without losing information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiquidityFeaturesConfig {
-    /// Master switch. Off by default to preserve existing feature counts.
-    pub enabled: bool,
+	/// Master switch. Off by default to preserve existing feature counts.
+	pub enabled: bool,
 
-    /// Lookback windows (in bars) used to define the prior high / low that a
-    /// sweep must penetrate. One feature triplet per entry.
-    pub sweep_lookbacks: Vec<u32>,
+	/// Lookback windows (in bars) used to define the prior high / low that a
+	/// sweep must penetrate. One feature triplet per entry.
+	pub sweep_lookbacks: Vec<u32>,
 
-    /// ATR period used to normalize sweep strength. Independent of the lookbacks
-    /// because the strength normalization is purely about local volatility scale.
-    pub atr_period: usize,
+	/// ATR period used to normalize sweep strength. Independent of the lookbacks
+	/// because the strength normalization is purely about local volatility scale.
+	pub atr_period: usize,
 
-    /// Rolling window sizes (in bars) for CVD slope and price/CVD divergence.
-    pub cvd_windows: Vec<u32>,
+	/// Rolling window sizes (in bars) for CVD slope and price/CVD divergence.
+	pub cvd_windows: Vec<u32>,
 }
 
 impl Default for LiquidityFeaturesConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            sweep_lookbacks: vec![20, 50],
-            atr_period: 14,
-            cvd_windows: vec![10, 20],
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: false,
+			sweep_lookbacks: vec![20, 50],
+			atr_period: 14,
+			cvd_windows: vec![10, 20],
+		}
+	}
 }
 
 /// Regime features configuration.
@@ -784,39 +772,39 @@ impl Default for LiquidityFeaturesConfig {
 /// and directional resolutions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegimeFeaturesConfig {
-    /// Master switch. Off by default.
-    pub enabled: bool,
+	/// Master switch. Off by default.
+	pub enabled: bool,
 
-    /// Window sizes for `regime_position_in_range_<N>`.
-    pub range_position_windows: Vec<u32>,
+	/// Window sizes for `regime_position_in_range_<N>`.
+	pub range_position_windows: Vec<u32>,
 
-    /// Periods for the squeeze indicator. Each period emits an `on` flag and a
-    /// `duration` counter.
-    pub squeeze_periods: Vec<u32>,
+	/// Periods for the squeeze indicator. Each period emits an `on` flag and a
+	/// `duration` counter.
+	pub squeeze_periods: Vec<u32>,
 
-    /// Bollinger Band standard-deviation multiplier (typical: 2.0).
-    pub bb_std_dev: f64,
+	/// Bollinger Band standard-deviation multiplier (typical: 2.0).
+	pub bb_std_dev: f64,
 
-    /// Keltner Channel ATR-proxy multiplier (typical: 1.5).
-    pub kc_atr_mult: f64,
+	/// Keltner Channel ATR-proxy multiplier (typical: 1.5).
+	pub kc_atr_mult: f64,
 
-    /// Short window for `regime_range_compression_<short>_<long>`. Skipped if None.
-    pub range_compression_short: Option<u32>,
+	/// Short window for `regime_range_compression_<short>_<long>`. Skipped if None.
+	pub range_compression_short: Option<u32>,
 
-    /// Long window for `regime_range_compression_<short>_<long>`. Must exceed short.
-    pub range_compression_long: Option<u32>,
+	/// Long window for `regime_range_compression_<short>_<long>`. Must exceed short.
+	pub range_compression_long: Option<u32>,
 }
 
 impl Default for RegimeFeaturesConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            range_position_windows: vec![20, 50],
-            squeeze_periods: vec![20],
-            bb_std_dev: 2.0,
-            kc_atr_mult: 1.5,
-            range_compression_short: Some(10),
-            range_compression_long: Some(50),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			enabled: false,
+			range_position_windows: vec![20, 50],
+			squeeze_periods: vec![20],
+			bb_std_dev: 2.0,
+			kc_atr_mult: 1.5,
+			range_compression_short: Some(10),
+			range_compression_long: Some(50),
+		}
+	}
 }

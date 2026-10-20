@@ -45,56 +45,52 @@ use polars::prelude::*;
 const RANGE_EPSILON: f64 = 1e-12;
 
 /// Generate liquidity-aware features and append them as columns to `df`.
-pub async fn generate_liquidity_features(
-    mut df: DataFrame,
-    config: &LiquidityFeaturesConfig,
-) -> Result<DataFrame> {
-    if !config.enabled {
-        log::debug!("Liquidity features disabled, skipping");
-        return Ok(df);
-    }
+pub async fn generate_liquidity_features(mut df: DataFrame, config: &LiquidityFeaturesConfig) -> Result<DataFrame> {
+	if !config.enabled {
+		log::debug!("Liquidity features disabled, skipping");
+		return Ok(df);
+	}
 
-    log::info!("Generating liquidity features with config: {:?}", config);
+	log::info!("Generating liquidity features with config: {:?}", config);
 
-    let open = extract_numeric_column(&df, "open")?;
-    let high = extract_numeric_column(&df, "high")?;
-    let low = extract_numeric_column(&df, "low")?;
-    let close = extract_numeric_column(&df, "close")?;
-    let volume = extract_numeric_column(&df, "volume")?;
+	let open = extract_numeric_column(&df, "open")?;
+	let high = extract_numeric_column(&df, "high")?;
+	let low = extract_numeric_column(&df, "low")?;
+	let close = extract_numeric_column(&df, "close")?;
+	let volume = extract_numeric_column(&df, "volume")?;
 
-    // Wick anatomy (no warmup, per-candle).
-    let (upper_wick, lower_wick, body, asymmetry) = compute_wick_ratios(&open, &high, &low, &close);
+	// Wick anatomy (no warmup, per-candle).
+	let (upper_wick, lower_wick, body, asymmetry) = compute_wick_ratios(&open, &high, &low, &close);
 
-    df = with_f64_column(df, "liq_upper_wick_ratio", upper_wick)?;
-    df = with_f64_column(df, "liq_lower_wick_ratio", lower_wick)?;
-    df = with_f64_column(df, "liq_body_ratio", body)?;
-    df = with_f64_column(df, "liq_wick_asymmetry", asymmetry)?;
+	df = with_f64_column(df, "liq_upper_wick_ratio", upper_wick)?;
+	df = with_f64_column(df, "liq_lower_wick_ratio", lower_wick)?;
+	df = with_f64_column(df, "liq_body_ratio", body)?;
+	df = with_f64_column(df, "liq_wick_asymmetry", asymmetry)?;
 
-    // Liquidity sweeps need ATR for the strength normalization. Compute ATR once
-    // at the configured period and reuse for every lookback.
-    let atr = calculate_atr_ta(&open, &high, &low, &close, &volume, config.atr_period)?;
+	// Liquidity sweeps need ATR for the strength normalization. Compute ATR once
+	// at the configured period and reuse for every lookback.
+	let atr = calculate_atr_ta(&open, &high, &low, &close, &volume, config.atr_period)?;
 
-    for &lookback in &config.sweep_lookbacks {
-        let lb = lookback as usize;
-        let (sweep_up, sweep_down, strength) =
-            compute_liquidity_sweeps(&high, &low, &close, &atr, lb);
-        df = with_f64_column(df, &format!("liq_sweep_up_{}", lookback), sweep_up)?;
-        df = with_f64_column(df, &format!("liq_sweep_down_{}", lookback), sweep_down)?;
-        df = with_f64_column(df, &format!("liq_sweep_strength_{}", lookback), strength)?;
-    }
+	for &lookback in &config.sweep_lookbacks {
+		let lb = lookback as usize;
+		let (sweep_up, sweep_down, strength) = compute_liquidity_sweeps(&high, &low, &close, &atr, lb);
+		df = with_f64_column(df, &format!("liq_sweep_up_{}", lookback), sweep_up)?;
+		df = with_f64_column(df, &format!("liq_sweep_down_{}", lookback), sweep_down)?;
+		df = with_f64_column(df, &format!("liq_sweep_strength_{}", lookback), strength)?;
+	}
 
-    // CVD slope and CVD/price divergence per configured window.
-    let cvd = compute_cumulative_volume_delta(&high, &low, &close, &volume);
+	// CVD slope and CVD/price divergence per configured window.
+	let cvd = compute_cumulative_volume_delta(&high, &low, &close, &volume);
 
-    for &window in &config.cvd_windows {
-        let w = window as usize;
-        let cvd_slope = compute_normalized_rolling_slope(&cvd, w);
-        let cvd_price_div = compute_rolling_divergence(&close, &cvd, w);
-        df = with_f64_column(df, &format!("liq_cvd_slope_{}", window), cvd_slope)?;
-        df = with_f64_column(df, &format!("liq_cvd_price_div_{}", window), cvd_price_div)?;
-    }
+	for &window in &config.cvd_windows {
+		let w = window as usize;
+		let cvd_slope = compute_normalized_rolling_slope(&cvd, w);
+		let cvd_price_div = compute_rolling_divergence(&close, &cvd, w);
+		df = with_f64_column(df, &format!("liq_cvd_slope_{}", window), cvd_slope)?;
+		df = with_f64_column(df, &format!("liq_cvd_price_div_{}", window), cvd_price_div)?;
+	}
 
-    Ok(df)
+	Ok(df)
 }
 
 /// Decompose each candle into upper-wick / lower-wick / body ratios and wick asymmetry.
@@ -102,38 +98,38 @@ pub async fn generate_liquidity_features(
 /// `asymmetry` which is in `[-1, 1]`). For zero-range candles (high == low) the
 /// epsilon guard makes every ratio equal to zero — a defensible "no signal" value.
 fn compute_wick_ratios(
-    open: &[f64],
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
+	open: &[f64],
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let n = open.len();
-    let mut upper = Vec::with_capacity(n);
-    let mut lower = Vec::with_capacity(n);
-    let mut body = Vec::with_capacity(n);
-    let mut asym = Vec::with_capacity(n);
+	let n = open.len();
+	let mut upper = Vec::with_capacity(n);
+	let mut lower = Vec::with_capacity(n);
+	let mut body = Vec::with_capacity(n);
+	let mut asym = Vec::with_capacity(n);
 
-    for i in 0..n {
-        let h = high[i];
-        let l = low[i];
-        let o = open[i];
-        let c = close[i];
-        let range = (h - l).max(RANGE_EPSILON);
+	for i in 0..n {
+		let h = high[i];
+		let l = low[i];
+		let o = open[i];
+		let c = close[i];
+		let range = (h - l).max(RANGE_EPSILON);
 
-        let body_top = if o > c { o } else { c };
-        let body_bottom = if o < c { o } else { c };
+		let body_top = if o > c { o } else { c };
+		let body_bottom = if o < c { o } else { c };
 
-        let upper_wick = ((h - body_top) / range).clamp(0.0, 1.0);
-        let lower_wick = ((body_bottom - l) / range).clamp(0.0, 1.0);
-        let body_ratio = ((c - o).abs() / range).clamp(0.0, 1.0);
+		let upper_wick = ((h - body_top) / range).clamp(0.0, 1.0);
+		let lower_wick = ((body_bottom - l) / range).clamp(0.0, 1.0);
+		let body_ratio = ((c - o).abs() / range).clamp(0.0, 1.0);
 
-        upper.push(upper_wick);
-        lower.push(lower_wick);
-        body.push(body_ratio);
-        asym.push(upper_wick - lower_wick);
-    }
+		upper.push(upper_wick);
+		lower.push(lower_wick);
+		body.push(body_ratio);
+		asym.push(upper_wick - lower_wick);
+	}
 
-    (upper, lower, body, asym)
+	(upper, lower, body, asym)
 }
 
 /// Detect liquidity sweeps against the prior `lookback`-bar high/low.
@@ -152,54 +148,48 @@ fn compute_wick_ratios(
 /// Warmup: first `lookback` candles are zero (no prior window to compare). NaN
 /// values from the ATR helper during its own warmup also produce zero strength.
 fn compute_liquidity_sweeps(
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    atr: &[f64],
-    lookback: usize,
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	atr: &[f64],
+	lookback: usize,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let n = high.len();
-    let mut sweep_up = vec![0.0; n];
-    let mut sweep_down = vec![0.0; n];
-    let mut strength = vec![0.0; n];
+	let n = high.len();
+	let mut sweep_up = vec![0.0; n];
+	let mut sweep_down = vec![0.0; n];
+	let mut strength = vec![0.0; n];
 
-    if lookback == 0 || n <= lookback {
-        return (sweep_up, sweep_down, strength);
-    }
+	if lookback == 0 || n <= lookback {
+		return (sweep_up, sweep_down, strength);
+	}
 
-    for i in lookback..n {
-        let window_start = i - lookback;
-        let prior_high = high[window_start..i]
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let prior_low = low[window_start..i]
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+	for i in lookback..n {
+		let window_start = i - lookback;
+		let prior_high = high[window_start..i].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+		let prior_low = low[window_start..i].iter().copied().fold(f64::INFINITY, f64::min);
 
-        // ATR is the normalizer; zero or NaN ATR means no strength can be computed.
-        let atr_i = atr[i];
-        let atr_usable = atr_i.is_finite() && atr_i > 0.0;
+		// ATR is the normalizer; zero or NaN ATR means no strength can be computed.
+		let atr_i = atr[i];
+		let atr_usable = atr_i.is_finite() && atr_i > 0.0;
 
-        if high[i] > prior_high && close[i] < prior_high {
-            sweep_up[i] = 1.0;
-            if atr_usable {
-                strength[i] = (high[i] - prior_high) / atr_i;
-            }
-        }
+		if high[i] > prior_high && close[i] < prior_high {
+			sweep_up[i] = 1.0;
+			if atr_usable {
+				strength[i] = (high[i] - prior_high) / atr_i;
+			}
+		}
 
-        if low[i] < prior_low && close[i] > prior_low {
-            sweep_down[i] = 1.0;
-            if atr_usable {
-                // Signed negative so the model sees up-sweeps and down-sweeps
-                // as distinct directions in a single column.
-                strength[i] = -((prior_low - low[i]) / atr_i);
-            }
-        }
-    }
+		if low[i] < prior_low && close[i] > prior_low {
+			sweep_down[i] = 1.0;
+			if atr_usable {
+				// Signed negative so the model sees up-sweeps and down-sweeps
+				// as distinct directions in a single column.
+				strength[i] = -((prior_low - low[i]) / atr_i);
+			}
+		}
+	}
 
-    (sweep_up, sweep_down, strength)
+	(sweep_up, sweep_down, strength)
 }
 
 /// Compute a per-candle Cumulative Volume Delta (CVD) proxy from OHLCV.
@@ -214,26 +204,21 @@ fn compute_liquidity_sweeps(
 ///   sell_share = (high - close) / range
 ///   delta      = (buy_share - sell_share) * volume
 ///   CVD[i]     = CVD[i-1] + delta[i]
-fn compute_cumulative_volume_delta(
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    volume: &[f64],
-) -> Vec<f64> {
-    let n = close.len();
-    let mut cvd = Vec::with_capacity(n);
-    let mut running = 0.0;
+fn compute_cumulative_volume_delta(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
+	let n = close.len();
+	let mut cvd = Vec::with_capacity(n);
+	let mut running = 0.0;
 
-    for i in 0..n {
-        let range = (high[i] - low[i]).max(RANGE_EPSILON);
-        let buy_share = ((close[i] - low[i]) / range).clamp(0.0, 1.0);
-        let sell_share = ((high[i] - close[i]) / range).clamp(0.0, 1.0);
-        let delta = (buy_share - sell_share) * volume[i];
-        running += delta;
-        cvd.push(running);
-    }
+	for i in 0..n {
+		let range = (high[i] - low[i]).max(RANGE_EPSILON);
+		let buy_share = ((close[i] - low[i]) / range).clamp(0.0, 1.0);
+		let sell_share = ((high[i] - close[i]) / range).clamp(0.0, 1.0);
+		let delta = (buy_share - sell_share) * volume[i];
+		running += delta;
+		cvd.push(running);
+	}
 
-    cvd
+	cvd
 }
 
 /// Compute a rolling-window normalized slope of `series`.
@@ -246,51 +231,47 @@ fn compute_cumulative_volume_delta(
 /// NaN-safe: if the window has zero variance (flat series) the slope is set
 /// to zero rather than infinity.
 fn compute_normalized_rolling_slope(series: &[f64], window: usize) -> Vec<f64> {
-    let n = series.len();
-    let mut out = vec![0.0; n];
+	let n = series.len();
+	let mut out = vec![0.0; n];
 
-    if window < 2 || n < window {
-        return out;
-    }
+	if window < 2 || n < window {
+		return out;
+	}
 
-    let window_f = window as f64;
-    let x_mean = (window_f - 1.0) / 2.0;
-    // Σ (x - x_mean)² for x = 0..window-1. Constant across windows.
-    let x_var_sum: f64 = (0..window)
-        .map(|j| {
-            let dx = j as f64 - x_mean;
-            dx * dx
-        })
-        .sum();
+	let window_f = window as f64;
+	let x_mean = (window_f - 1.0) / 2.0;
+	// Σ (x - x_mean)² for x = 0..window-1. Constant across windows.
+	let x_var_sum: f64 = (0..window)
+		.map(|j| {
+			let dx = j as f64 - x_mean;
+			dx * dx
+		})
+		.sum();
 
-    if x_var_sum <= 0.0 {
-        return out;
-    }
+	if x_var_sum <= 0.0 {
+		return out;
+	}
 
-    for i in (window - 1)..n {
-        let slice = &series[i + 1 - window..=i];
-        let y_mean = slice.iter().sum::<f64>() / window_f;
+	for i in (window - 1)..n {
+		let slice = &series[i + 1 - window..=i];
+		let y_mean = slice.iter().sum::<f64>() / window_f;
 
-        let mut cov = 0.0;
-        let mut y_var = 0.0;
-        for (j, &y) in slice.iter().enumerate() {
-            let dx = j as f64 - x_mean;
-            let dy = y - y_mean;
-            cov += dx * dy;
-            y_var += dy * dy;
-        }
+		let mut cov = 0.0;
+		let mut y_var = 0.0;
+		for (j, &y) in slice.iter().enumerate() {
+			let dx = j as f64 - x_mean;
+			let dy = y - y_mean;
+			cov += dx * dy;
+			y_var += dy * dy;
+		}
 
-        let slope = cov / x_var_sum;
-        let y_std = (y_var / window_f).sqrt();
+		let slope = cov / x_var_sum;
+		let y_std = (y_var / window_f).sqrt();
 
-        out[i] = if y_std > RANGE_EPSILON {
-            slope / y_std
-        } else {
-            0.0
-        };
-    }
+		out[i] = if y_std > RANGE_EPSILON { slope / y_std } else { 0.0 };
+	}
 
-    out
+	out
 }
 
 /// Compute rolling divergence between two series: the difference between their
@@ -304,62 +285,57 @@ fn compute_normalized_rolling_slope(series: &[f64], window: usize) -> Vec<f64> {
 /// large-magnitude series (like price). When the window is flat (std ≈ 0)
 /// the contribution from that series is zero rather than infinity.
 fn compute_rolling_divergence(a: &[f64], b: &[f64], window: usize) -> Vec<f64> {
-    let n = a.len();
-    let mut out = vec![0.0; n];
+	let n = a.len();
+	let mut out = vec![0.0; n];
 
-    if window < 2 || n < window || a.len() != b.len() {
-        return out;
-    }
+	if window < 2 || n < window || a.len() != b.len() {
+		return out;
+	}
 
-    let window_f = window as f64;
+	let window_f = window as f64;
 
-    for i in (window - 1)..n {
-        let a_now = a[i];
-        let a_then = a[i + 1 - window];
-        let b_now = b[i];
-        let b_then = b[i + 1 - window];
+	for i in (window - 1)..n {
+		let a_now = a[i];
+		let a_then = a[i + 1 - window];
+		let b_now = b[i];
+		let b_then = b[i + 1 - window];
 
-        let a_slice = &a[i + 1 - window..=i];
-        let b_slice = &b[i + 1 - window..=i];
+		let a_slice = &a[i + 1 - window..=i];
+		let b_slice = &b[i + 1 - window..=i];
 
-        let a_mean = a_slice.iter().sum::<f64>() / window_f;
-        let b_mean = b_slice.iter().sum::<f64>() / window_f;
+		let a_mean = a_slice.iter().sum::<f64>() / window_f;
+		let b_mean = b_slice.iter().sum::<f64>() / window_f;
 
-        let a_var = a_slice.iter().map(|v| (v - a_mean).powi(2)).sum::<f64>() / window_f;
-        let b_var = b_slice.iter().map(|v| (v - b_mean).powi(2)).sum::<f64>() / window_f;
+		let a_var = a_slice.iter().map(|v| (v - a_mean).powi(2)).sum::<f64>() / window_f;
+		let b_var = b_slice.iter().map(|v| (v - b_mean).powi(2)).sum::<f64>() / window_f;
 
-        let a_std = a_var.sqrt();
-        let b_std = b_var.sqrt();
+		let a_std = a_var.sqrt();
+		let b_std = b_var.sqrt();
 
-        let a_change = if a_std > RANGE_EPSILON {
-            (a_now - a_then) / a_std
-        } else {
-            0.0
-        };
-        let b_change = if b_std > RANGE_EPSILON {
-            (b_now - b_then) / b_std
-        } else {
-            0.0
-        };
+		let a_change = if a_std > RANGE_EPSILON {
+			(a_now - a_then) / a_std
+		} else {
+			0.0
+		};
+		let b_change = if b_std > RANGE_EPSILON {
+			(b_now - b_then) / b_std
+		} else {
+			0.0
+		};
 
-        out[i] = a_change - b_change;
-    }
+		out[i] = a_change - b_change;
+	}
 
-    out
+	out
 }
 
 /// Append an f64 column to the DataFrame, returning an owned DataFrame.
 /// Mirrors the with_column-and-clone pattern used elsewhere in this module so
 /// failure paths surface as proper VangaError::DataError values.
 fn with_f64_column(mut df: DataFrame, name: &str, values: Vec<f64>) -> Result<DataFrame> {
-    df = df
-        .with_column(Series::new(name.into(), values).into_column())
-        .map_err(|e| {
-            crate::utils::error::VangaError::DataError(format!(
-                "Failed to add {} column: {}",
-                name, e
-            ))
-        })?
-        .clone();
-    Ok(df)
+	df = df
+		.with_column(Series::new(name.into(), values).into_column())
+		.map_err(|e| crate::utils::error::VangaError::DataError(format!("Failed to add {} column: {}", name, e)))?
+		.clone();
+	Ok(df)
 }

@@ -4,9 +4,5 @@
 pub mod quantile_regression;
 pub mod variable_selection;
 
-pub use quantile_regression::{
-    QuantileMultiTargetModel, QuantileOutputConfig, QuantileRegressionHead,
-};
-pub use variable_selection::{
-    VariableSelectionAttention, VariableSelectionConfig, VariableSelectionNetwork,
-};
+pub use quantile_regression::{QuantileMultiTargetModel, QuantileOutputConfig, QuantileRegressionHead};
+pub use variable_selection::{VariableSelectionAttention, VariableSelectionConfig, VariableSelectionNetwork};

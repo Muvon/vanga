@@ -23,7 +23,7 @@ pub use metadata::{ConfidenceScore, DataQuality, PredictionMetadata};
 pub use multi_target_parser::{DirectionOutput, MultiTargetParser, ParsedOutput};
 pub use post_processor::PostProcessor;
 pub use prediction_types::{
-    DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, SentimentPrediction,
-    VolatilityPrediction, VolumePrediction,
+	DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, SentimentPrediction, VolatilityPrediction,
+	VolumePrediction,
 };
 pub use sequence_statistics::SequenceStatistics;

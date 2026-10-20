@@ -7,6 +7,6 @@
 // Re-export all types from the new modular structure
 pub use super::metadata::{ConfidenceScore, DataQuality, PredictionMetadata};
 pub use super::prediction_types::{
-    DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, SentimentPrediction,
-    VolatilityPrediction, VolumePrediction,
+	DirectionPrediction, PredictionResult, PriceBin, PriceLevelPrediction, SentimentPrediction, VolatilityPrediction,
+	VolumePrediction,
 };

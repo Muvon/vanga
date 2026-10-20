@@ -14,57 +14,53 @@ use std::sync::Arc;
 /// Target parameter calibrator - single clean interface with diversity optimization
 #[derive(Clone)]
 pub struct ParameterCalibrator {
-    target_balance: f64,
-    max_iterations: usize,
+	target_balance: f64,
+	max_iterations: usize,
 
-    // NEW: Diversity optimization weights
-    balance_weight: f64,   // Weight for class balance (default: 0.6)
-    diversity_weight: f64, // Weight for sample diversity (default: 0.4)
+	// NEW: Diversity optimization weights
+	balance_weight: f64,   // Weight for class balance (default: 0.6)
+	diversity_weight: f64, // Weight for sample diversity (default: 0.4)
 
-    // Random seed for reproducible calibration (None = random, Some(0) = random, Some(n) = seeded)
-    seed: Option<u64>,
+	// Random seed for reproducible calibration (None = random, Some(0) = random, Some(n) = seeded)
+	seed: Option<u64>,
 
-    // Target enablement from config
-    enabled_price_level: bool,
-    pub(super) price_level_definition: crate::config::training::PriceLevelDefinition,
-    enabled_stop_level: bool,
-    pub(super) stop_level_definition: crate::config::training::StopLevelDefinition,
-    pub(super) regime_window_bars: Option<usize>,
-    enabled_direction: bool,
-    enabled_volatility: bool,
-    enabled_sentiment: bool,
-    enabled_volume: bool,
+	// Target enablement from config
+	enabled_price_level: bool,
+	pub(super) price_level_definition: crate::config::training::PriceLevelDefinition,
+	enabled_stop_level: bool,
+	pub(super) stop_level_definition: crate::config::training::StopLevelDefinition,
+	pub(super) regime_window_bars: Option<usize>,
+	enabled_direction: bool,
+	enabled_volatility: bool,
+	enabled_sentiment: bool,
+	enabled_volume: bool,
 }
 
 impl ParameterCalibrator {
-    /// Generate diverse calibration sample indices using sequence generation logic + diversity selection
-    fn generate_diverse_calibration_indices(
-        &self,
-        total_data_length: usize,
-        sequence_length: usize,
-        horizon_steps: usize,
-        sample_size: Option<usize>,
-        sequence_overlap: f64,
-    ) -> Result<Vec<usize>> {
-        use crate::utils::sequence_utils::{calculate_sequence_indices, calculate_step_size};
+	/// Generate diverse calibration sample indices using sequence generation logic + diversity selection
+	fn generate_diverse_calibration_indices(
+		&self,
+		total_data_length: usize,
+		sequence_length: usize,
+		horizon_steps: usize,
+		sample_size: Option<usize>,
+		sequence_overlap: f64,
+	) -> Result<Vec<usize>> {
+		use crate::utils::sequence_utils::{calculate_sequence_indices, calculate_step_size};
 
-        // Step 1: Generate ALL possible sequence indices using same logic as training
-        // Use the SAME overlap as configured for training
-        let step_size = calculate_step_size(sequence_overlap, sequence_length);
+		// Step 1: Generate ALL possible sequence indices using same logic as training
+		// Use the SAME overlap as configured for training
+		let step_size = calculate_step_size(sequence_overlap, sequence_length);
 
-        let all_possible_indices = calculate_sequence_indices(
-            total_data_length,
-            sequence_length,
-            step_size,
-            horizon_steps,
-        )?;
+		let all_possible_indices =
+			calculate_sequence_indices(total_data_length, sequence_length, step_size, horizon_steps)?;
 
-        // Step 2: Use ALL available samples for QUALITY calibration (no artificial limits)
-        // Only limit if explicitly requested via sample_size parameter
-        let max_available = all_possible_indices.len();
-        let target_samples = sample_size.unwrap_or(max_available); // Use ALL samples by default
+		// Step 2: Use ALL available samples for QUALITY calibration (no artificial limits)
+		// Only limit if explicitly requested via sample_size parameter
+		let max_available = all_possible_indices.len();
+		let target_samples = sample_size.unwrap_or(max_available); // Use ALL samples by default
 
-        log::info!(
+		log::info!(
             "🎯 Calibration sampling: {} total possible sequences, targeting {} diverse samples ({:.1}% coverage, overlap={:.1}%)",
             max_available,
             target_samples,
@@ -72,1212 +68,1159 @@ impl ParameterCalibrator {
             sequence_overlap * 100.0
         );
 
-        // Step 3: If we need fewer samples than available, use diversity selection
-        if target_samples >= max_available {
-            log::info!(
-                "✅ Using all {} available sequences for calibration",
-                max_available
-            );
-            return Ok(all_possible_indices);
-        }
-
-        // Step 4: Use temporal stratification for diversity (reuse existing logic)
-        let selected_indices =
-            self.select_diverse_temporal_samples(&all_possible_indices, target_samples)?;
-
-        log::info!(
-            "✅ Selected {} diverse samples from {} available using temporal stratification",
-            selected_indices.len(),
-            max_available
-        );
-
-        Ok(selected_indices)
-    }
-
-    /// Select diverse samples using UNIFORM temporal stratification for maximum diversity
-    fn select_diverse_temporal_samples(
-        &self,
-        all_indices: &[usize],
-        target_count: usize,
-    ) -> Result<Vec<usize>> {
-        if target_count >= all_indices.len() {
-            return Ok(all_indices.to_vec());
-        }
-
-        // Sort by temporal position
-        let mut temporal_sorted: Vec<usize> = all_indices.to_vec();
-        temporal_sorted.sort_unstable();
-
-        // Use UNIFORM sampling for maximum temporal spread
-        // This ensures samples are evenly distributed across time
-        let step = all_indices.len() as f64 / target_count as f64;
-        let mut selected = Vec::with_capacity(target_count);
-
-        for i in 0..target_count {
-            let idx = (i as f64 * step) as usize;
-            if idx < temporal_sorted.len() {
-                selected.push(temporal_sorted[idx]);
-            }
-        }
-
-        log::debug!(
-            "Uniform temporal sampling: selected {} samples with step size {:.2}",
-            selected.len(),
-            step
-        );
-
-        Ok(selected)
-    }
-
-    /// Create new calibrator from TargetsConfig
-    pub fn from_config(targets_config: &crate::config::training::TargetsConfig) -> Self {
-        Self {
-            target_balance: 0.2,
-            max_iterations: 100,
-            balance_weight: 0.4,
-            diversity_weight: 0.6,
-            seed: None, // Will be set via from_config_with_seed if needed
-            enabled_price_level: targets_config.price_level,
-            price_level_definition: targets_config.price_level_definition,
-            enabled_stop_level: targets_config.stop_level,
-            stop_level_definition: targets_config.stop_level_definition,
-            regime_window_bars: None,
-            enabled_direction: targets_config.direction,
-            enabled_volatility: targets_config.volatility,
-            enabled_sentiment: targets_config.sentiment,
-            enabled_volume: targets_config.volume,
-        }
-    }
-
-    /// Create new calibrator from TargetsConfig with seed for reproducible calibration
-    pub fn from_config_with_seed(
-        targets_config: &crate::config::training::TargetsConfig,
-        seed: Option<u64>,
-    ) -> Self {
-        Self {
-            target_balance: 0.2,
-            max_iterations: 100,
-            balance_weight: 0.4,
-            diversity_weight: 0.6,
-            seed,
-            enabled_price_level: targets_config.price_level,
-            price_level_definition: targets_config.price_level_definition,
-            enabled_stop_level: targets_config.stop_level,
-            stop_level_definition: targets_config.stop_level_definition,
-            regime_window_bars: None,
-            enabled_direction: targets_config.direction,
-            enabled_volatility: targets_config.volatility,
-            enabled_sentiment: targets_config.sentiment,
-            enabled_volume: targets_config.volume,
-        }
-    }
-
-    pub fn from_training_config_with_seed(
-        training_config: &crate::config::training::TrainingConfig,
-        seed: Option<u64>,
-    ) -> Self {
-        let mut calibrator = Self::from_config_with_seed(&training_config.targets, seed);
-        calibrator.regime_window_bars = Some(training_config.features.stats_window_bars);
-        calibrator
-    }
-
-    /// Create new calibrator with configuration (all targets enabled by default)
-    pub fn new() -> Self {
-        Self {
-            target_balance: 0.2, // 20% per class target
-            max_iterations: 100,
-
-            // NEW: Diversity optimization configuration
-            balance_weight: 0.4,   // Consider diversity but prioritize it
-            diversity_weight: 0.6, // MORE weight for feature-space diversity
-
-            // Random seed for reproducibility
-            seed: None, // None = random initialization
-
-            // All targets enabled by default
-            enabled_price_level: true,
-            price_level_definition: Default::default(),
-            enabled_stop_level: true,
-            stop_level_definition: Default::default(),
-            regime_window_bars: None,
-            enabled_direction: true,
-            enabled_volatility: true,
-            enabled_sentiment: true,
-            enabled_volume: true,
-        }
-    }
-
-    /// Create calibrator with custom diversity weighting
-    pub fn with_diversity_weights(balance_weight: f64, diversity_weight: f64) -> Self {
-        let total = balance_weight + diversity_weight;
-        Self {
-            target_balance: 0.2,
-            max_iterations: 100,
-            balance_weight: balance_weight / total, // Normalize weights
-            diversity_weight: diversity_weight / total,
-            seed: None,
-            enabled_price_level: true,
-            price_level_definition: Default::default(),
-            enabled_stop_level: true,
-            stop_level_definition: Default::default(),
-            regime_window_bars: None,
-            enabled_direction: true,
-            enabled_volatility: true,
-            enabled_sentiment: true,
-            enabled_volume: true,
-        }
-    }
-
-    /// Create calibrator with custom diversity threshold (deprecated - kept for compatibility)
-    pub fn with_diversity_threshold(_threshold: f64) -> Self {
-        Self {
-            target_balance: 0.2,
-            max_iterations: 100,
-            balance_weight: 0.4,
-            diversity_weight: 0.6,
-            seed: None,
-            enabled_price_level: true,
-            price_level_definition: Default::default(),
-            enabled_stop_level: true,
-            stop_level_definition: Default::default(),
-            regime_window_bars: None,
-            enabled_direction: true,
-            enabled_volatility: true,
-            enabled_sentiment: true,
-            enabled_volume: true,
-        }
-    }
-
-    /// Validate sample quality to ensure diverse, representative calibration data
-    fn validate_sample_quality(
-        &self,
-        ohlcv_data: &[MarketDataRow],
-        sample_indices: &[usize],
-        sequence_length: usize,
-    ) -> Result<()> {
-        use super::utils::CalibrationUtils;
-
-        log::info!("🔍 Validating calibration sample quality...");
-
-        // 1. Temporal coverage check
-        let temporal_diversity = CalibrationUtils::calculate_temporal_diversity(sample_indices);
-        log::info!(
-            "  📅 Temporal diversity: {:.2}%",
-            temporal_diversity * 100.0
-        );
-
-        if temporal_diversity < 0.5 {
-            log::warn!(
-                "  ⚠️  Low temporal diversity ({:.1}%) - samples may be clustered in time",
-                temporal_diversity * 100.0
-            );
-        }
-
-        // 2. Feature space coverage check
-        let feature_diversity =
-            CalibrationUtils::calculate_feature_space_diversity(ohlcv_data, sample_indices);
-        log::info!(
-            "  📊 Feature space diversity: {:.2}%",
-            feature_diversity * 100.0
-        );
-
-        if feature_diversity < 0.5 {
-            log::warn!(
-                "  ⚠️  Low feature diversity ({:.1}%) - samples may not cover full price/volatility range",
-                feature_diversity * 100.0
-            );
-        }
-
-        // 3. Market condition balance check (sequence-aware, adaptive thresholds)
-        let market_diversity = CalibrationUtils::calculate_market_condition_diversity(
-            ohlcv_data,
-            sample_indices,
-            sequence_length,
-        );
-        log::info!(
-            "  🎯 Market condition diversity: {:.2}%",
-            market_diversity * 100.0
-        );
-
-        if market_diversity < 0.5 {
-            log::warn!(
-                "  ⚠️  Low market condition diversity ({:.1}%) - samples may be biased toward bull/bear/sideways",
-                market_diversity * 100.0
-            );
-        }
-
-        // 4. Overall quality assessment
-        let overall_quality = (temporal_diversity + feature_diversity + market_diversity) / 3.0;
-        log::info!(
-            "  ✅ Overall sample quality: {:.2}%",
-            overall_quality * 100.0
-        );
-
-        if overall_quality < 0.6 {
-            log::warn!(
-                "  ⚠️  Sample quality below recommended threshold (60%) - calibration may be suboptimal"
-            );
-        } else if overall_quality >= 0.8 {
-            log::info!("  🌟 Excellent sample quality - calibration should be highly reliable");
-        }
-
-        Ok(())
-    }
-
-    /// PER-HORIZON PARALLEL calibration method - returns parameters for ALL targets × ALL horizons
-    ///
-    /// This is the main entry point for parameter calibration. It analyzes the provided
-    /// OHLCV data and finds optimal parameters for all target types (direction, price levels,
-    /// volatility, sentiment, volume) FOR EACH HORIZON SEPARATELY.
-    ///
-    /// **PARALLELIZATION**:
-    /// - Level 1: All horizons calibrated in parallel
-    /// - Level 2: Within each horizon, all 5 targets calibrated in parallel
-    /// - Uses all available CPU cores for maximum performance
-    ///
-    /// # Arguments
-    /// * `ohlcv_data` - Market data for calibration analysis
-    /// * `sequence_length` - Length of input sequences for the model
-    /// * `horizons` - All prediction horizons (e.g., ["1h", "4h", "24h"])
-    /// * `sample_size` - Optional limit on samples to use (default: all available)
-    /// * `sequence_overlap` - Overlap ratio for sequence generation (0.0-1.0)
-    /// * `timeframe_minutes` - Timeframe in minutes for horizon parsing
-    /// * `target_samples_config` - Optional target samples configuration for adaptive overlap
-    ///
-    /// # Returns
-    /// * `CalibratedParameters` - Optimized parameters per horizon for all target types
-    ///
-    /// # Algorithm
-    /// 1. If target_samples configured: optimize overlap to reach target sample count
-    /// 2. For each horizon IN PARALLEL:
-    #[allow(clippy::too_many_arguments)]
-    pub async fn calibrate(
-        &self,
-        ohlcv_data: &[MarketDataRow],
-        sequence_length: usize,
-        horizons: &[String],
-        sample_size: Option<usize>,
-        sequence_overlap: f64,
-        timeframe_minutes: usize,
-    ) -> Result<CalibratedParameters> {
-        let total_start = std::time::Instant::now();
-        let num_cpus = num_cpus::get();
-
-        log::info!(
-            "🎯 Starting PARALLEL PER-HORIZON calibration for {} horizons: {:?}",
-            horizons.len(),
-            horizons
-        );
-        log::info!(
-            "⚡ Parallelization: {} CPU cores available, {} horizons × 5 targets = {} parallel tasks",
-            num_cpus,
-            horizons.len(),
-            horizons.len() * 5
-        );
-
-        // Wrap data in Arc for safe sharing across threads
-        let ohlcv_data_arc = Arc::new(ohlcv_data.to_vec());
-
-        // Calibrate all horizons in parallel
-        let horizon_futures: Vec<_> = horizons
-            .iter()
-            .enumerate()
-            .map(|(horizon_idx, horizon)| {
-                let horizon = horizon.clone();
-                let ohlcv_data = Arc::clone(&ohlcv_data_arc);
-                let calibrator = self.clone();
-
-                async move {
-                    let horizon_start = std::time::Instant::now();
-                    let prefix = format!("[H{}/{}:{}]", horizon_idx + 1, horizons.len(), horizon);
-                    let log_prefix = prefix.clone(); // Clone for final logging after closures
-
-                    log::info!(
-                        "{} 🕐 Starting horizon calibration",
-                        prefix
-                    );
-
-                    // Parse horizon to steps using detected timeframe
-                    let horizon_steps = crate::utils::parser::parse_horizon_to_steps(&horizon, timeframe_minutes)
-                        .map_err(|e| {
-                            crate::utils::error::VangaError::ConfigError(format!(
-                                "Invalid horizon '{}': {}",
-                                horizon, e
-                            ))
-                        })?;
-
-
-                    // Generate diverse sample indices for this horizon
-                    let sample_indices = calibrator.generate_diverse_calibration_indices(
-                        ohlcv_data.len(),
-                        sequence_length,
-                        horizon_steps,
-                        sample_size,
-                        sequence_overlap,
-                    )?;
-
-                    log::info!(
-                        "{} 📊 Calibrating with {} samples",
-                        prefix,
-                        sample_indices.len()
-                    );
-
-                    // Validate sample quality
-                    calibrator.validate_sample_quality(&ohlcv_data, &sample_indices, sequence_length)?;
-
-                    // Count enabled targets
-                    let enabled_count = [
-                        calibrator.enabled_direction,
-                        calibrator.enabled_price_level,
-                        calibrator.enabled_stop_level,
-                        calibrator.enabled_volatility,
-                        calibrator.enabled_sentiment,
-                        calibrator.enabled_volume,
-                    ].iter().filter(|&&x| x).count();
-
-                    // Clone prefix for each target task
-                    let prefix1 = prefix.clone();
-                    let prefix2 = prefix.clone();
-                    let prefix4 = prefix.clone();
-                    let prefix5 = prefix.clone();
-                    let prefix6 = prefix.clone();
-
-                    // Calibrate ONLY enabled targets IN PARALLEL for this horizon using REAL CPU parallelization
-                    log::info!("{} ⚡ Calibrating {} enabled targets in PARALLEL on separate CPU threads", prefix, enabled_count);
-
-                    // Clone data for each parallel task (only for enabled targets)
-                    let ohlcv_clone1 = ohlcv_data.clone();
-                    let ohlcv_clone2 = ohlcv_data.clone();
-                    let ohlcv_clone3 = ohlcv_data.clone();
-                    let ohlcv_clone4 = ohlcv_data.clone();
-                    let ohlcv_clone5 = ohlcv_data.clone();
-                    let ohlcv_clone6 = ohlcv_data.clone();
-
-                    let indices_clone1 = sample_indices.clone();
-                    let indices_clone2 = sample_indices.clone();
-                    let indices_clone3 = sample_indices.clone();
-                    let indices_clone4 = sample_indices.clone();
-                    let indices_clone5 = sample_indices.clone();
-                    let indices_clone6 = sample_indices.clone();
-
-                    let calibrator1 = calibrator.clone();
-                    let calibrator2 = calibrator.clone();
-                    let calibrator3 = calibrator.clone();
-                    let calibrator4 = calibrator.clone();
-                    let calibrator5 = calibrator.clone();
-                    let calibrator6 = calibrator.clone();
-
-                    // Spawn BLOCKING tasks ONLY for enabled targets (runs on separate OS threads)
-                    let direction_handle = if calibrator.enabled_direction {
-                        Some(tokio::task::spawn_blocking(move || {
-                            log::info!("{} [Direction] 🚀 Starting Bayesian optimization on CPU thread...", prefix1);
-                            let context = EvaluationContext {
-                                ohlcv_data: &ohlcv_clone1,
-                                sample_indices: &indices_clone1,
-                                sequence_length,
-                                horizon_steps,
-                            };
-                            let rt = tokio::runtime::Handle::current();
-                            let result = rt.block_on(calibrator1.calibrate_direction(&context, &prefix1));
-                            match &result {
-                                Ok(params) => log::info!(
-                                    "{} [Direction] ✅ Complete - score: {:.3}",
-                                    prefix1,
-                                    params.balance.composite_quality_score
-                                ),
-                                Err(e) => log::error!("{} [Direction] ❌ Failed: {}", prefix1, e),
-                            }
-                            result
-                        }))
-                    } else {
-                        log::info!("{} [Direction] ⏭️  SKIPPED (disabled)", prefix1);
-                        None
-                    };
-
-                    let price_handle = if calibrator.enabled_price_level {
-                        Some(tokio::task::spawn_blocking(move || {
-                            log::info!("{} [PriceLevels] 🚀 Starting Bayesian optimization on CPU thread...", prefix2);
-                            let context = EvaluationContext {
-                                ohlcv_data: &ohlcv_clone2,
-                                sample_indices: &indices_clone2,
-                                sequence_length,
-                                horizon_steps,
-                            };
-                            let rt = tokio::runtime::Handle::current();
-                            let result = rt.block_on(calibrator2.calibrate_price_levels(&context, &prefix2));
-                            match &result {
-                                Ok(params) => log::info!(
-                                    "{} [PriceLevels] ✅ Complete - score: {:.3}",
-                                    prefix2,
-                                    params.balance.composite_quality_score
-                                ),
-                                Err(e) => log::error!("{} [PriceLevels] ❌ Failed: {}", prefix2, e),
-                            }
-                            result
-                        }))
-                    } else {
-                        log::info!("{} [PriceLevels] ⏭️  SKIPPED (disabled)", prefix2);
-                        None
-                    };
-
-                    let stop_handle = if calibrator.enabled_stop_level {
-                        Some(tokio::task::spawn_blocking(move || {
-                            log::info!("{} [StopLevels] 🚀 Starting Bayesian optimization on CPU thread...", prefix);
-                            let context = EvaluationContext {
-                                ohlcv_data: &ohlcv_clone3,
-                                sample_indices: &indices_clone3,
-                                sequence_length,
-                                horizon_steps,
-                            };
-                            let rt = tokio::runtime::Handle::current();
-                            let result = rt.block_on(calibrator3.calibrate_stop_levels(&context, &prefix));
-                            match &result {
-                                Ok(params) => log::info!(
-                                    "{} [StopLevels] ✅ Complete - score: {:.3}",
-                                    prefix,
-                                    params.balance.composite_quality_score
-                                ),
-                                Err(e) => log::error!("{} [StopLevels] ❌ Failed: {}", prefix, e),
-                            }
-                            result
-                        }))
-                    } else {
-                        log::info!("{} [StopLevels] ⏭️  SKIPPED (disabled)", prefix);
-                        None
-                    };
-
-                    let volatility_handle = if calibrator.enabled_volatility {
-                        Some(tokio::task::spawn_blocking(move || {
-                            log::info!("{} [Volatility] 🚀 Starting Bayesian optimization on CPU thread...", prefix4);
-                            let context = EvaluationContext {
-                                ohlcv_data: &ohlcv_clone4,
-                                sample_indices: &indices_clone4,
-                                sequence_length,
-                                horizon_steps,
-                            };
-                            let rt = tokio::runtime::Handle::current();
-                            let result = rt.block_on(calibrator4.calibrate_volatility(&context, &prefix4));
-                            match &result {
-                                Ok(params) => log::info!(
-                                    "{} [Volatility] ✅ Complete - score: {:.3}",
-                                    prefix4,
-                                    params.balance.composite_quality_score
-                                ),
-                                Err(e) => log::error!("{} [Volatility] ❌ Failed: {}", prefix4, e),
-                            }
-                            result
-                        }))
-                    } else {
-                        log::info!("{} [Volatility] ⏭️  SKIPPED (disabled)", prefix4);
-                        None
-                    };
-
-                    let sentiment_handle = if calibrator.enabled_sentiment {
-                        Some(tokio::task::spawn_blocking(move || {
-                            log::info!("{} [Sentiment] 🚀 Starting Bayesian optimization on CPU thread...", prefix5);
-                            let context = EvaluationContext {
-                                ohlcv_data: &ohlcv_clone5,
-                                sample_indices: &indices_clone5,
-                                sequence_length,
-                                horizon_steps,
-                            };
-                            let rt = tokio::runtime::Handle::current();
-                            let result = rt.block_on(calibrator5.calibrate_sentiment(&context, &prefix5));
-                            match &result {
-                                Ok(params) => log::info!(
-                                    "{} [Sentiment] ✅ Complete - score: {:.3}",
-                                    prefix5,
-                                    params.balance.composite_quality_score
-                                ),
-                                Err(e) => log::error!("{} [Sentiment] ❌ Failed: {}", prefix5, e),
-                            }
-                            result
-                        }))
-                    } else {
-                        log::info!("{} [Sentiment] ⏭️  SKIPPED (disabled)", prefix5);
-                        None
-                    };
-
-                    let volume_handle = if calibrator.enabled_volume {
-                        Some(tokio::task::spawn_blocking(move || {
-                            let prefix_for_log = prefix6.clone();
-                            log::info!("{} [Volume] 🚀 Starting Bayesian optimization on CPU thread...", prefix_for_log);
-                            let context = EvaluationContext {
-                                ohlcv_data: &ohlcv_clone6,
-                                sample_indices: &indices_clone6,
-                                sequence_length,
-                                horizon_steps,
-                            };
-                            let rt = tokio::runtime::Handle::current();
-                            let result = rt.block_on(calibrator6.calibrate_volume(&context, &prefix_for_log));
-                            match &result {
-                                Ok(params) => log::info!(
-                                    "{} [Volume] ✅ Complete - score: {:.3}",
-                                    prefix_for_log,
-                                    params.balance.composite_quality_score
-                                ),
-                                Err(e) => log::error!("{} [Volume] ❌ Failed: {}", prefix_for_log, e),
-                            }
-                            result
-                        }))
-                    } else {
-                        None
-                    };
-
-                    // Wait for ONLY enabled CPU threads to complete
-                    let direction_res = if let Some(h) = direction_handle { Some(h.await) } else { None };
-                    let price_res = if let Some(h) = price_handle { Some(h.await) } else { None };
-                    let stop_res = if let Some(h) = stop_handle { Some(h.await) } else { None };
-                    let volatility_res = if let Some(h) = volatility_handle { Some(h.await) } else { None };
-                    let sentiment_res = if let Some(h) = sentiment_handle { Some(h.await) } else { None };
-                    let volume_res = if let Some(h) = volume_handle { Some(h.await) } else { None };
-
-                    // Unwrap JoinHandle results and propagate errors, or use defaults for disabled targets
-                    let direction = if let Some(res) = direction_res {
-                        res.map_err(|e| {
-                            crate::utils::error::VangaError::OptimizationError(format!("Direction task failed: {}", e))
-                        })??
-                    } else {
-                        DirectionParams::default()
-                    };
-
-                    let price_levels = if let Some(res) = price_res {
-                        res.map_err(|e| {
-                            crate::utils::error::VangaError::OptimizationError(format!("PriceLevels task failed: {}", e))
-                        })??
-                    } else {
-                        PriceLevelParams::default()
-                    };
-
-                    let stop_levels = if let Some(res) = stop_res {
-                        res.map_err(|e| {
-                            crate::utils::error::VangaError::OptimizationError(format!("StopLevels task failed: {}", e))
-                        })??
-                    } else {
-                        StopLevelParams::default()
-                    };
-
-                    let volatility = if let Some(res) = volatility_res {
-                        res.map_err(|e| {
-                            crate::utils::error::VangaError::OptimizationError(format!("Volatility task failed: {}", e))
-                        })??
-                    } else {
-                        VolatilityParams::default()
-                    };
-
-                    let sentiment = if let Some(res) = sentiment_res {
-                        res.map_err(|e| {
-                            crate::utils::error::VangaError::OptimizationError(format!("Sentiment task failed: {}", e))
-                        })??
-                    } else {
-                        SentimentParams::default()
-                    };
-
-                    let volume = if let Some(res) = volume_res {
-                        res.map_err(|e| {
-                            crate::utils::error::VangaError::OptimizationError(format!("Volume task failed: {}", e))
-                        })??
-                    } else {
-                        VolumeParams::default()
-                    };
-
-                    // Calculate horizon score from ONLY enabled targets
-                    let mut score_sum = 0.0;
-                    let mut score_count = 0;
-
-                    if calibrator.enabled_direction {
-                        score_sum += direction.balance.composite_quality_score;
-                        score_count += 1;
-                    }
-                    if calibrator.enabled_price_level {
-                        score_sum += price_levels.balance.composite_quality_score;
-                        score_count += 1;
-                    }
-                    if calibrator.enabled_stop_level {
-                        score_sum += stop_levels.balance.composite_quality_score;
-                        score_count += 1;
-                    }
-                    if calibrator.enabled_volatility {
-                        score_sum += volatility.balance.composite_quality_score;
-                        score_count += 1;
-                    }
-                    if calibrator.enabled_sentiment {
-                        score_sum += sentiment.balance.composite_quality_score;
-                        score_count += 1;
-                    }
-                    if calibrator.enabled_volume {
-                        score_sum += volume.balance.composite_quality_score;
-                        score_count += 1;
-                    }
-
-                    let horizon_score = if score_count > 0 {
-                        score_sum / score_count as f64
-                    } else {
-                        0.0
-                    };
-
-                    let horizon_time = horizon_start.elapsed().as_millis() as u64;
-                    log::info!(
-                        "{} ✅ Horizon calibrated in {}ms (score: {:.3})",
-                        log_prefix,
-                        horizon_time,
-                        horizon_score
-                    );
-
-                    Ok::<_, crate::utils::error::VangaError>((
-                        horizon,
-                        direction,
-                        price_levels,
-                        stop_levels,
-                        volatility,
-                        sentiment,
-                        volume,
-                        horizon_score,
-                        horizon_time,
-                    ))
-                }
-            })
-            .collect();
-
-        // Wait for all horizons to complete
-        let results = futures::future::try_join_all(horizon_futures).await?;
-
-        // Collect results into HashMaps
-        let mut direction_params = std::collections::HashMap::new();
-        let mut price_level_params = std::collections::HashMap::new();
-        let mut stop_level_params = std::collections::HashMap::new();
-        let mut volatility_params = std::collections::HashMap::new();
-        let mut sentiment_params = std::collections::HashMap::new();
-        let mut volume_params = std::collections::HashMap::new();
-        let mut overall_scores = Vec::new();
-        let mut total_optimization_time = 0u64;
-        let mut sample_count = 0usize;
-
-        for (
-            horizon,
-            direction,
-            price_levels,
-            stop_levels,
-            volatility,
-            sentiment,
-            volume,
-            score,
-            time,
-        ) in &results
-        {
-            // Only insert parameters for targets that were actually calibrated (not defaults)
-            if direction.balance.total_samples > 0 {
-                direction_params.insert(horizon.clone(), direction.clone());
-            }
-            if price_levels.balance.total_samples > 0 {
-                price_level_params.insert(horizon.clone(), price_levels.clone());
-            }
-            if stop_levels.balance.total_samples > 0 {
-                stop_level_params.insert(horizon.clone(), stop_levels.clone());
-            }
-            if volatility.balance.total_samples > 0 {
-                volatility_params.insert(horizon.clone(), volatility.clone());
-            }
-            if sentiment.balance.total_samples > 0 {
-                sentiment_params.insert(horizon.clone(), sentiment.clone());
-            }
-            if volume.balance.total_samples > 0 {
-                volume_params.insert(horizon.clone(), volume.clone());
-            }
-            overall_scores.push(*score);
-            total_optimization_time += time;
-        }
-
-        // Get sample count from first horizon
-        if !results.is_empty() {
-            let first_horizon = &results[0].0;
-            let horizon_steps =
-                crate::utils::parser::parse_horizon_to_steps(first_horizon, timeframe_minutes)
-                    .unwrap_or(1);
-            sample_count = self
-                .generate_diverse_calibration_indices(
-                    ohlcv_data.len(),
-                    sequence_length,
-                    horizon_steps,
-                    sample_size,
-                    sequence_overlap,
-                )
-                .map(|indices| indices.len())
-                .unwrap_or(0);
-        }
-
-        // Calculate overall statistics
-        let overall_score = overall_scores.iter().sum::<f64>() / overall_scores.len() as f64;
-        let success = overall_score < 1.0;
-        let total_elapsed = total_start.elapsed().as_millis() as u64;
-        let speedup = if horizons.len() > 1 {
-            total_optimization_time as f64 / total_elapsed as f64
-        } else {
-            1.0
-        };
-
-        let metadata = CalibrationMetadata {
-            data_length: ohlcv_data.len(),
-            sequence_length,
-            horizons: horizons.to_vec(),
-            calibration_samples: sample_count,
-            calibration_iterations: self.max_iterations,
-            optimization_time_ms: total_elapsed,
-            target_balance: self.target_balance,
-            overall_balance_score: overall_score,
-            calibration_success: success,
-        };
-
-        log::info!("\n{}", "=".repeat(60));
-        log::info!("🎯 PARALLEL PER-HORIZON CALIBRATION COMPLETE");
-        log::info!("{}", "=".repeat(60));
-        log::info!("  Wall-clock time: {}ms", total_elapsed);
-        log::info!("  CPU time (sum): {}ms", total_optimization_time);
-        log::info!("  Speedup: {:.2}x", speedup);
-        log::info!("  Overall score: {:.3}", overall_score);
-        log::info!("  Success: {}", if success { "✅" } else { "❌" });
-        log::info!("{}\n", "=".repeat(60));
-
-        Ok(CalibratedParameters {
-            direction: direction_params,
-            price_levels: price_level_params,
-            stop_levels: stop_level_params,
-            volatility: volatility_params,
-            sentiment: sentiment_params,
-            volume: volume_params,
-            metadata,
-        })
-    }
-
-    /// Get utility helper for balance calculations
-    pub fn get_utils(&self) -> CalibrationUtils {
-        CalibrationUtils::new(
-            self.balance_weight,
-            self.diversity_weight,
-            self.target_balance,
-        )
-    }
+		// Step 3: If we need fewer samples than available, use diversity selection
+		if target_samples >= max_available {
+			log::info!("✅ Using all {} available sequences for calibration", max_available);
+			return Ok(all_possible_indices);
+		}
+
+		// Step 4: Use temporal stratification for diversity (reuse existing logic)
+		let selected_indices = self.select_diverse_temporal_samples(&all_possible_indices, target_samples)?;
+
+		log::info!(
+			"✅ Selected {} diverse samples from {} available using temporal stratification",
+			selected_indices.len(),
+			max_available
+		);
+
+		Ok(selected_indices)
+	}
+
+	/// Select diverse samples using UNIFORM temporal stratification for maximum diversity
+	fn select_diverse_temporal_samples(&self, all_indices: &[usize], target_count: usize) -> Result<Vec<usize>> {
+		if target_count >= all_indices.len() {
+			return Ok(all_indices.to_vec());
+		}
+
+		// Sort by temporal position
+		let mut temporal_sorted: Vec<usize> = all_indices.to_vec();
+		temporal_sorted.sort_unstable();
+
+		// Use UNIFORM sampling for maximum temporal spread
+		// This ensures samples are evenly distributed across time
+		let step = all_indices.len() as f64 / target_count as f64;
+		let mut selected = Vec::with_capacity(target_count);
+
+		for i in 0..target_count {
+			let idx = (i as f64 * step) as usize;
+			if idx < temporal_sorted.len() {
+				selected.push(temporal_sorted[idx]);
+			}
+		}
+
+		log::debug!(
+			"Uniform temporal sampling: selected {} samples with step size {:.2}",
+			selected.len(),
+			step
+		);
+
+		Ok(selected)
+	}
+
+	/// Create new calibrator from TargetsConfig
+	pub fn from_config(targets_config: &crate::config::training::TargetsConfig) -> Self {
+		Self {
+			target_balance: 0.2,
+			max_iterations: 100,
+			balance_weight: 0.4,
+			diversity_weight: 0.6,
+			seed: None, // Will be set via from_config_with_seed if needed
+			enabled_price_level: targets_config.price_level,
+			price_level_definition: targets_config.price_level_definition,
+			enabled_stop_level: targets_config.stop_level,
+			stop_level_definition: targets_config.stop_level_definition,
+			regime_window_bars: None,
+			enabled_direction: targets_config.direction,
+			enabled_volatility: targets_config.volatility,
+			enabled_sentiment: targets_config.sentiment,
+			enabled_volume: targets_config.volume,
+		}
+	}
+
+	/// Create new calibrator from TargetsConfig with seed for reproducible calibration
+	pub fn from_config_with_seed(targets_config: &crate::config::training::TargetsConfig, seed: Option<u64>) -> Self {
+		Self {
+			target_balance: 0.2,
+			max_iterations: 100,
+			balance_weight: 0.4,
+			diversity_weight: 0.6,
+			seed,
+			enabled_price_level: targets_config.price_level,
+			price_level_definition: targets_config.price_level_definition,
+			enabled_stop_level: targets_config.stop_level,
+			stop_level_definition: targets_config.stop_level_definition,
+			regime_window_bars: None,
+			enabled_direction: targets_config.direction,
+			enabled_volatility: targets_config.volatility,
+			enabled_sentiment: targets_config.sentiment,
+			enabled_volume: targets_config.volume,
+		}
+	}
+
+	pub fn from_training_config_with_seed(
+		training_config: &crate::config::training::TrainingConfig,
+		seed: Option<u64>,
+	) -> Self {
+		let mut calibrator = Self::from_config_with_seed(&training_config.targets, seed);
+		calibrator.regime_window_bars = Some(training_config.features.stats_window_bars);
+		calibrator
+	}
+
+	/// Create new calibrator with configuration (all targets enabled by default)
+	pub fn new() -> Self {
+		Self {
+			target_balance: 0.2, // 20% per class target
+			max_iterations: 100,
+
+			// NEW: Diversity optimization configuration
+			balance_weight: 0.4,   // Consider diversity but prioritize it
+			diversity_weight: 0.6, // MORE weight for feature-space diversity
+
+			// Random seed for reproducibility
+			seed: None, // None = random initialization
+
+			// All targets enabled by default
+			enabled_price_level: true,
+			price_level_definition: Default::default(),
+			enabled_stop_level: true,
+			stop_level_definition: Default::default(),
+			regime_window_bars: None,
+			enabled_direction: true,
+			enabled_volatility: true,
+			enabled_sentiment: true,
+			enabled_volume: true,
+		}
+	}
+
+	/// Create calibrator with custom diversity weighting
+	pub fn with_diversity_weights(balance_weight: f64, diversity_weight: f64) -> Self {
+		let total = balance_weight + diversity_weight;
+		Self {
+			target_balance: 0.2,
+			max_iterations: 100,
+			balance_weight: balance_weight / total, // Normalize weights
+			diversity_weight: diversity_weight / total,
+			seed: None,
+			enabled_price_level: true,
+			price_level_definition: Default::default(),
+			enabled_stop_level: true,
+			stop_level_definition: Default::default(),
+			regime_window_bars: None,
+			enabled_direction: true,
+			enabled_volatility: true,
+			enabled_sentiment: true,
+			enabled_volume: true,
+		}
+	}
+
+	/// Create calibrator with custom diversity threshold (deprecated - kept for compatibility)
+	pub fn with_diversity_threshold(_threshold: f64) -> Self {
+		Self {
+			target_balance: 0.2,
+			max_iterations: 100,
+			balance_weight: 0.4,
+			diversity_weight: 0.6,
+			seed: None,
+			enabled_price_level: true,
+			price_level_definition: Default::default(),
+			enabled_stop_level: true,
+			stop_level_definition: Default::default(),
+			regime_window_bars: None,
+			enabled_direction: true,
+			enabled_volatility: true,
+			enabled_sentiment: true,
+			enabled_volume: true,
+		}
+	}
+
+	/// Validate sample quality to ensure diverse, representative calibration data
+	fn validate_sample_quality(
+		&self,
+		ohlcv_data: &[MarketDataRow],
+		sample_indices: &[usize],
+		sequence_length: usize,
+	) -> Result<()> {
+		use super::utils::CalibrationUtils;
+
+		log::info!("🔍 Validating calibration sample quality...");
+
+		// 1. Temporal coverage check
+		let temporal_diversity = CalibrationUtils::calculate_temporal_diversity(sample_indices);
+		log::info!("  📅 Temporal diversity: {:.2}%", temporal_diversity * 100.0);
+
+		if temporal_diversity < 0.5 {
+			log::warn!(
+				"  ⚠️  Low temporal diversity ({:.1}%) - samples may be clustered in time",
+				temporal_diversity * 100.0
+			);
+		}
+
+		// 2. Feature space coverage check
+		let feature_diversity = CalibrationUtils::calculate_feature_space_diversity(ohlcv_data, sample_indices);
+		log::info!("  📊 Feature space diversity: {:.2}%", feature_diversity * 100.0);
+
+		if feature_diversity < 0.5 {
+			log::warn!(
+				"  ⚠️  Low feature diversity ({:.1}%) - samples may not cover full price/volatility range",
+				feature_diversity * 100.0
+			);
+		}
+
+		// 3. Market condition balance check (sequence-aware, adaptive thresholds)
+		let market_diversity =
+			CalibrationUtils::calculate_market_condition_diversity(ohlcv_data, sample_indices, sequence_length);
+		log::info!("  🎯 Market condition diversity: {:.2}%", market_diversity * 100.0);
+
+		if market_diversity < 0.5 {
+			log::warn!(
+				"  ⚠️  Low market condition diversity ({:.1}%) - samples may be biased toward bull/bear/sideways",
+				market_diversity * 100.0
+			);
+		}
+
+		// 4. Overall quality assessment
+		let overall_quality = (temporal_diversity + feature_diversity + market_diversity) / 3.0;
+		log::info!("  ✅ Overall sample quality: {:.2}%", overall_quality * 100.0);
+
+		if overall_quality < 0.6 {
+			log::warn!("  ⚠️  Sample quality below recommended threshold (60%) - calibration may be suboptimal");
+		} else if overall_quality >= 0.8 {
+			log::info!("  🌟 Excellent sample quality - calibration should be highly reliable");
+		}
+
+		Ok(())
+	}
+
+	/// PER-HORIZON PARALLEL calibration method - returns parameters for ALL targets × ALL horizons
+	///
+	/// This is the main entry point for parameter calibration. It analyzes the provided
+	/// OHLCV data and finds optimal parameters for all target types (direction, price levels,
+	/// volatility, sentiment, volume) FOR EACH HORIZON SEPARATELY.
+	///
+	/// **PARALLELIZATION**:
+	/// - Level 1: All horizons calibrated in parallel
+	/// - Level 2: Within each horizon, all 5 targets calibrated in parallel
+	/// - Uses all available CPU cores for maximum performance
+	///
+	/// # Arguments
+	/// * `ohlcv_data` - Market data for calibration analysis
+	/// * `sequence_length` - Length of input sequences for the model
+	/// * `horizons` - All prediction horizons (e.g., ["1h", "4h", "24h"])
+	/// * `sample_size` - Optional limit on samples to use (default: all available)
+	/// * `sequence_overlap` - Overlap ratio for sequence generation (0.0-1.0)
+	/// * `timeframe_minutes` - Timeframe in minutes for horizon parsing
+	/// * `target_samples_config` - Optional target samples configuration for adaptive overlap
+	///
+	/// # Returns
+	/// * `CalibratedParameters` - Optimized parameters per horizon for all target types
+	///
+	/// # Algorithm
+	/// 1. If target_samples configured: optimize overlap to reach target sample count
+	/// 2. For each horizon IN PARALLEL:
+	#[allow(clippy::too_many_arguments)]
+	pub async fn calibrate(
+		&self,
+		ohlcv_data: &[MarketDataRow],
+		sequence_length: usize,
+		horizons: &[String],
+		sample_size: Option<usize>,
+		sequence_overlap: f64,
+		timeframe_minutes: usize,
+	) -> Result<CalibratedParameters> {
+		let total_start = std::time::Instant::now();
+		let num_cpus = num_cpus::get();
+
+		log::info!(
+			"🎯 Starting PARALLEL PER-HORIZON calibration for {} horizons: {:?}",
+			horizons.len(),
+			horizons
+		);
+		log::info!(
+			"⚡ Parallelization: {} CPU cores available, {} horizons × 5 targets = {} parallel tasks",
+			num_cpus,
+			horizons.len(),
+			horizons.len() * 5
+		);
+
+		// Wrap data in Arc for safe sharing across threads
+		let ohlcv_data_arc = Arc::new(ohlcv_data.to_vec());
+
+		// Calibrate all horizons in parallel
+		let horizon_futures: Vec<_> = horizons
+			.iter()
+			.enumerate()
+			.map(|(horizon_idx, horizon)| {
+				let horizon = horizon.clone();
+				let ohlcv_data = Arc::clone(&ohlcv_data_arc);
+				let calibrator = self.clone();
+
+				async move {
+					let horizon_start = std::time::Instant::now();
+					let prefix = format!("[H{}/{}:{}]", horizon_idx + 1, horizons.len(), horizon);
+					let log_prefix = prefix.clone(); // Clone for final logging after closures
+
+					log::info!("{} 🕐 Starting horizon calibration", prefix);
+
+					// Parse horizon to steps using detected timeframe
+					let horizon_steps = crate::utils::parser::parse_horizon_to_steps(&horizon, timeframe_minutes)
+						.map_err(|e| {
+							crate::utils::error::VangaError::ConfigError(format!(
+								"Invalid horizon '{}': {}",
+								horizon, e
+							))
+						})?;
+
+					// Generate diverse sample indices for this horizon
+					let sample_indices = calibrator.generate_diverse_calibration_indices(
+						ohlcv_data.len(),
+						sequence_length,
+						horizon_steps,
+						sample_size,
+						sequence_overlap,
+					)?;
+
+					log::info!("{} 📊 Calibrating with {} samples", prefix, sample_indices.len());
+
+					// Validate sample quality
+					calibrator.validate_sample_quality(&ohlcv_data, &sample_indices, sequence_length)?;
+
+					// Count enabled targets
+					let enabled_count = [
+						calibrator.enabled_direction,
+						calibrator.enabled_price_level,
+						calibrator.enabled_stop_level,
+						calibrator.enabled_volatility,
+						calibrator.enabled_sentiment,
+						calibrator.enabled_volume,
+					]
+					.iter()
+					.filter(|&&x| x)
+					.count();
+
+					// Clone prefix for each target task
+					let prefix1 = prefix.clone();
+					let prefix2 = prefix.clone();
+					let prefix4 = prefix.clone();
+					let prefix5 = prefix.clone();
+					let prefix6 = prefix.clone();
+
+					// Calibrate ONLY enabled targets IN PARALLEL for this horizon using REAL CPU parallelization
+					log::info!(
+						"{} ⚡ Calibrating {} enabled targets in PARALLEL on separate CPU threads",
+						prefix,
+						enabled_count
+					);
+
+					// Clone data for each parallel task (only for enabled targets)
+					let ohlcv_clone1 = ohlcv_data.clone();
+					let ohlcv_clone2 = ohlcv_data.clone();
+					let ohlcv_clone3 = ohlcv_data.clone();
+					let ohlcv_clone4 = ohlcv_data.clone();
+					let ohlcv_clone5 = ohlcv_data.clone();
+					let ohlcv_clone6 = ohlcv_data.clone();
+
+					let indices_clone1 = sample_indices.clone();
+					let indices_clone2 = sample_indices.clone();
+					let indices_clone3 = sample_indices.clone();
+					let indices_clone4 = sample_indices.clone();
+					let indices_clone5 = sample_indices.clone();
+					let indices_clone6 = sample_indices.clone();
+
+					let calibrator1 = calibrator.clone();
+					let calibrator2 = calibrator.clone();
+					let calibrator3 = calibrator.clone();
+					let calibrator4 = calibrator.clone();
+					let calibrator5 = calibrator.clone();
+					let calibrator6 = calibrator.clone();
+
+					// Spawn BLOCKING tasks ONLY for enabled targets (runs on separate OS threads)
+					let direction_handle = if calibrator.enabled_direction {
+						Some(tokio::task::spawn_blocking(move || {
+							log::info!(
+								"{} [Direction] 🚀 Starting Bayesian optimization on CPU thread...",
+								prefix1
+							);
+							let context = EvaluationContext {
+								ohlcv_data: &ohlcv_clone1,
+								sample_indices: &indices_clone1,
+								sequence_length,
+								horizon_steps,
+							};
+							let rt = tokio::runtime::Handle::current();
+							let result = rt.block_on(calibrator1.calibrate_direction(&context, &prefix1));
+							match &result {
+								Ok(params) => log::info!(
+									"{} [Direction] ✅ Complete - score: {:.3}",
+									prefix1,
+									params.balance.composite_quality_score
+								),
+								Err(e) => log::error!("{} [Direction] ❌ Failed: {}", prefix1, e),
+							}
+							result
+						}))
+					} else {
+						log::info!("{} [Direction] ⏭️  SKIPPED (disabled)", prefix1);
+						None
+					};
+
+					let price_handle = if calibrator.enabled_price_level {
+						Some(tokio::task::spawn_blocking(move || {
+							log::info!(
+								"{} [PriceLevels] 🚀 Starting Bayesian optimization on CPU thread...",
+								prefix2
+							);
+							let context = EvaluationContext {
+								ohlcv_data: &ohlcv_clone2,
+								sample_indices: &indices_clone2,
+								sequence_length,
+								horizon_steps,
+							};
+							let rt = tokio::runtime::Handle::current();
+							let result = rt.block_on(calibrator2.calibrate_price_levels(&context, &prefix2));
+							match &result {
+								Ok(params) => log::info!(
+									"{} [PriceLevels] ✅ Complete - score: {:.3}",
+									prefix2,
+									params.balance.composite_quality_score
+								),
+								Err(e) => log::error!("{} [PriceLevels] ❌ Failed: {}", prefix2, e),
+							}
+							result
+						}))
+					} else {
+						log::info!("{} [PriceLevels] ⏭️  SKIPPED (disabled)", prefix2);
+						None
+					};
+
+					let stop_handle = if calibrator.enabled_stop_level {
+						Some(tokio::task::spawn_blocking(move || {
+							log::info!(
+								"{} [StopLevels] 🚀 Starting Bayesian optimization on CPU thread...",
+								prefix
+							);
+							let context = EvaluationContext {
+								ohlcv_data: &ohlcv_clone3,
+								sample_indices: &indices_clone3,
+								sequence_length,
+								horizon_steps,
+							};
+							let rt = tokio::runtime::Handle::current();
+							let result = rt.block_on(calibrator3.calibrate_stop_levels(&context, &prefix));
+							match &result {
+								Ok(params) => log::info!(
+									"{} [StopLevels] ✅ Complete - score: {:.3}",
+									prefix,
+									params.balance.composite_quality_score
+								),
+								Err(e) => log::error!("{} [StopLevels] ❌ Failed: {}", prefix, e),
+							}
+							result
+						}))
+					} else {
+						log::info!("{} [StopLevels] ⏭️  SKIPPED (disabled)", prefix);
+						None
+					};
+
+					let volatility_handle = if calibrator.enabled_volatility {
+						Some(tokio::task::spawn_blocking(move || {
+							log::info!(
+								"{} [Volatility] 🚀 Starting Bayesian optimization on CPU thread...",
+								prefix4
+							);
+							let context = EvaluationContext {
+								ohlcv_data: &ohlcv_clone4,
+								sample_indices: &indices_clone4,
+								sequence_length,
+								horizon_steps,
+							};
+							let rt = tokio::runtime::Handle::current();
+							let result = rt.block_on(calibrator4.calibrate_volatility(&context, &prefix4));
+							match &result {
+								Ok(params) => log::info!(
+									"{} [Volatility] ✅ Complete - score: {:.3}",
+									prefix4,
+									params.balance.composite_quality_score
+								),
+								Err(e) => log::error!("{} [Volatility] ❌ Failed: {}", prefix4, e),
+							}
+							result
+						}))
+					} else {
+						log::info!("{} [Volatility] ⏭️  SKIPPED (disabled)", prefix4);
+						None
+					};
+
+					let sentiment_handle = if calibrator.enabled_sentiment {
+						Some(tokio::task::spawn_blocking(move || {
+							log::info!(
+								"{} [Sentiment] 🚀 Starting Bayesian optimization on CPU thread...",
+								prefix5
+							);
+							let context = EvaluationContext {
+								ohlcv_data: &ohlcv_clone5,
+								sample_indices: &indices_clone5,
+								sequence_length,
+								horizon_steps,
+							};
+							let rt = tokio::runtime::Handle::current();
+							let result = rt.block_on(calibrator5.calibrate_sentiment(&context, &prefix5));
+							match &result {
+								Ok(params) => log::info!(
+									"{} [Sentiment] ✅ Complete - score: {:.3}",
+									prefix5,
+									params.balance.composite_quality_score
+								),
+								Err(e) => log::error!("{} [Sentiment] ❌ Failed: {}", prefix5, e),
+							}
+							result
+						}))
+					} else {
+						log::info!("{} [Sentiment] ⏭️  SKIPPED (disabled)", prefix5);
+						None
+					};
+
+					let volume_handle = if calibrator.enabled_volume {
+						Some(tokio::task::spawn_blocking(move || {
+							let prefix_for_log = prefix6.clone();
+							log::info!(
+								"{} [Volume] 🚀 Starting Bayesian optimization on CPU thread...",
+								prefix_for_log
+							);
+							let context = EvaluationContext {
+								ohlcv_data: &ohlcv_clone6,
+								sample_indices: &indices_clone6,
+								sequence_length,
+								horizon_steps,
+							};
+							let rt = tokio::runtime::Handle::current();
+							let result = rt.block_on(calibrator6.calibrate_volume(&context, &prefix_for_log));
+							match &result {
+								Ok(params) => log::info!(
+									"{} [Volume] ✅ Complete - score: {:.3}",
+									prefix_for_log,
+									params.balance.composite_quality_score
+								),
+								Err(e) => log::error!("{} [Volume] ❌ Failed: {}", prefix_for_log, e),
+							}
+							result
+						}))
+					} else {
+						None
+					};
+
+					// Wait for ONLY enabled CPU threads to complete
+					let direction_res = if let Some(h) = direction_handle {
+						Some(h.await)
+					} else {
+						None
+					};
+					let price_res = if let Some(h) = price_handle {
+						Some(h.await)
+					} else {
+						None
+					};
+					let stop_res = if let Some(h) = stop_handle { Some(h.await) } else { None };
+					let volatility_res = if let Some(h) = volatility_handle {
+						Some(h.await)
+					} else {
+						None
+					};
+					let sentiment_res = if let Some(h) = sentiment_handle {
+						Some(h.await)
+					} else {
+						None
+					};
+					let volume_res = if let Some(h) = volume_handle {
+						Some(h.await)
+					} else {
+						None
+					};
+
+					// Unwrap JoinHandle results and propagate errors, or use defaults for disabled targets
+					let direction = if let Some(res) = direction_res {
+						res.map_err(|e| {
+							crate::utils::error::VangaError::OptimizationError(format!("Direction task failed: {}", e))
+						})??
+					} else {
+						DirectionParams::default()
+					};
+
+					let price_levels = if let Some(res) = price_res {
+						res.map_err(|e| {
+							crate::utils::error::VangaError::OptimizationError(format!(
+								"PriceLevels task failed: {}",
+								e
+							))
+						})??
+					} else {
+						PriceLevelParams::default()
+					};
+
+					let stop_levels = if let Some(res) = stop_res {
+						res.map_err(|e| {
+							crate::utils::error::VangaError::OptimizationError(format!("StopLevels task failed: {}", e))
+						})??
+					} else {
+						StopLevelParams::default()
+					};
+
+					let volatility = if let Some(res) = volatility_res {
+						res.map_err(|e| {
+							crate::utils::error::VangaError::OptimizationError(format!("Volatility task failed: {}", e))
+						})??
+					} else {
+						VolatilityParams::default()
+					};
+
+					let sentiment = if let Some(res) = sentiment_res {
+						res.map_err(|e| {
+							crate::utils::error::VangaError::OptimizationError(format!("Sentiment task failed: {}", e))
+						})??
+					} else {
+						SentimentParams::default()
+					};
+
+					let volume = if let Some(res) = volume_res {
+						res.map_err(|e| {
+							crate::utils::error::VangaError::OptimizationError(format!("Volume task failed: {}", e))
+						})??
+					} else {
+						VolumeParams::default()
+					};
+
+					// Calculate horizon score from ONLY enabled targets
+					let mut score_sum = 0.0;
+					let mut score_count = 0;
+
+					if calibrator.enabled_direction {
+						score_sum += direction.balance.composite_quality_score;
+						score_count += 1;
+					}
+					if calibrator.enabled_price_level {
+						score_sum += price_levels.balance.composite_quality_score;
+						score_count += 1;
+					}
+					if calibrator.enabled_stop_level {
+						score_sum += stop_levels.balance.composite_quality_score;
+						score_count += 1;
+					}
+					if calibrator.enabled_volatility {
+						score_sum += volatility.balance.composite_quality_score;
+						score_count += 1;
+					}
+					if calibrator.enabled_sentiment {
+						score_sum += sentiment.balance.composite_quality_score;
+						score_count += 1;
+					}
+					if calibrator.enabled_volume {
+						score_sum += volume.balance.composite_quality_score;
+						score_count += 1;
+					}
+
+					let horizon_score = if score_count > 0 {
+						score_sum / score_count as f64
+					} else {
+						0.0
+					};
+
+					let horizon_time = horizon_start.elapsed().as_millis() as u64;
+					log::info!(
+						"{} ✅ Horizon calibrated in {}ms (score: {:.3})",
+						log_prefix,
+						horizon_time,
+						horizon_score
+					);
+
+					Ok::<_, crate::utils::error::VangaError>((
+						horizon,
+						direction,
+						price_levels,
+						stop_levels,
+						volatility,
+						sentiment,
+						volume,
+						horizon_score,
+						horizon_time,
+					))
+				}
+			})
+			.collect();
+
+		// Wait for all horizons to complete
+		let results = futures::future::try_join_all(horizon_futures).await?;
+
+		// Collect results into HashMaps
+		let mut direction_params = std::collections::HashMap::new();
+		let mut price_level_params = std::collections::HashMap::new();
+		let mut stop_level_params = std::collections::HashMap::new();
+		let mut volatility_params = std::collections::HashMap::new();
+		let mut sentiment_params = std::collections::HashMap::new();
+		let mut volume_params = std::collections::HashMap::new();
+		let mut overall_scores = Vec::new();
+		let mut total_optimization_time = 0u64;
+		let mut sample_count = 0usize;
+
+		for (horizon, direction, price_levels, stop_levels, volatility, sentiment, volume, score, time) in &results {
+			// Only insert parameters for targets that were actually calibrated (not defaults)
+			if direction.balance.total_samples > 0 {
+				direction_params.insert(horizon.clone(), direction.clone());
+			}
+			if price_levels.balance.total_samples > 0 {
+				price_level_params.insert(horizon.clone(), price_levels.clone());
+			}
+			if stop_levels.balance.total_samples > 0 {
+				stop_level_params.insert(horizon.clone(), stop_levels.clone());
+			}
+			if volatility.balance.total_samples > 0 {
+				volatility_params.insert(horizon.clone(), volatility.clone());
+			}
+			if sentiment.balance.total_samples > 0 {
+				sentiment_params.insert(horizon.clone(), sentiment.clone());
+			}
+			if volume.balance.total_samples > 0 {
+				volume_params.insert(horizon.clone(), volume.clone());
+			}
+			overall_scores.push(*score);
+			total_optimization_time += time;
+		}
+
+		// Get sample count from first horizon
+		if !results.is_empty() {
+			let first_horizon = &results[0].0;
+			let horizon_steps =
+				crate::utils::parser::parse_horizon_to_steps(first_horizon, timeframe_minutes).unwrap_or(1);
+			sample_count = self
+				.generate_diverse_calibration_indices(
+					ohlcv_data.len(),
+					sequence_length,
+					horizon_steps,
+					sample_size,
+					sequence_overlap,
+				)
+				.map(|indices| indices.len())
+				.unwrap_or(0);
+		}
+
+		// Calculate overall statistics
+		let overall_score = overall_scores.iter().sum::<f64>() / overall_scores.len() as f64;
+		let success = overall_score < 1.0;
+		let total_elapsed = total_start.elapsed().as_millis() as u64;
+		let speedup = if horizons.len() > 1 {
+			total_optimization_time as f64 / total_elapsed as f64
+		} else {
+			1.0
+		};
+
+		let metadata = CalibrationMetadata {
+			data_length: ohlcv_data.len(),
+			sequence_length,
+			horizons: horizons.to_vec(),
+			calibration_samples: sample_count,
+			calibration_iterations: self.max_iterations,
+			optimization_time_ms: total_elapsed,
+			target_balance: self.target_balance,
+			overall_balance_score: overall_score,
+			calibration_success: success,
+		};
+
+		log::info!("\n{}", "=".repeat(60));
+		log::info!("🎯 PARALLEL PER-HORIZON CALIBRATION COMPLETE");
+		log::info!("{}", "=".repeat(60));
+		log::info!("  Wall-clock time: {}ms", total_elapsed);
+		log::info!("  CPU time (sum): {}ms", total_optimization_time);
+		log::info!("  Speedup: {:.2}x", speedup);
+		log::info!("  Overall score: {:.3}", overall_score);
+		log::info!("  Success: {}", if success { "✅" } else { "❌" });
+		log::info!("{}\n", "=".repeat(60));
+
+		Ok(CalibratedParameters {
+			direction: direction_params,
+			price_levels: price_level_params,
+			stop_levels: stop_level_params,
+			volatility: volatility_params,
+			sentiment: sentiment_params,
+			volume: volume_params,
+			metadata,
+		})
+	}
+
+	/// Get utility helper for balance calculations
+	pub fn get_utils(&self) -> CalibrationUtils {
+		CalibrationUtils::new(self.balance_weight, self.diversity_weight, self.target_balance)
+	}
 }
 
 impl Default for ParameterCalibrator {
-    fn default() -> Self {
-        Self {
-            target_balance: 0.2, // 20% per class target
-            max_iterations: 100,
-            balance_weight: 0.4,
-            diversity_weight: 0.6,
-            seed: None, // Random by default
-            enabled_price_level: true,
-            price_level_definition: Default::default(),
-            enabled_stop_level: true,
-            stop_level_definition: Default::default(),
-            regime_window_bars: None,
-            enabled_direction: true,
-            enabled_volatility: true,
-            enabled_sentiment: true,
-            enabled_volume: true,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			target_balance: 0.2, // 20% per class target
+			max_iterations: 100,
+			balance_weight: 0.4,
+			diversity_weight: 0.6,
+			seed: None, // Random by default
+			enabled_price_level: true,
+			price_level_definition: Default::default(),
+			enabled_stop_level: true,
+			stop_level_definition: Default::default(),
+			regime_window_bars: None,
+			enabled_direction: true,
+			enabled_volatility: true,
+			enabled_sentiment: true,
+			enabled_volume: true,
+		}
+	}
 }
 
 // Forward declarations for calibration methods (implemented in separate modules)
 impl ParameterCalibrator {
-    pub async fn calibrate_direction(
-        &self,
-        context: &EvaluationContext<'_>,
-        prefix: &str,
-    ) -> Result<DirectionParams> {
-        super::direction::calibrate_direction(self, context, prefix).await
-    }
+	pub async fn calibrate_direction(&self, context: &EvaluationContext<'_>, prefix: &str) -> Result<DirectionParams> {
+		super::direction::calibrate_direction(self, context, prefix).await
+	}
 
-    pub async fn calibrate_price_levels(
-        &self,
-        context: &EvaluationContext<'_>,
-        prefix: &str,
-    ) -> Result<PriceLevelParams> {
-        super::price_levels::calibrate_price_levels(self, context, prefix).await
-    }
+	pub async fn calibrate_price_levels(
+		&self,
+		context: &EvaluationContext<'_>,
+		prefix: &str,
+	) -> Result<PriceLevelParams> {
+		super::price_levels::calibrate_price_levels(self, context, prefix).await
+	}
 
-    pub async fn calibrate_stop_levels(
-        &self,
-        context: &EvaluationContext<'_>,
-        prefix: &str,
-    ) -> Result<StopLevelParams> {
-        super::stop_levels::calibrate_stop_levels(self, context, prefix).await
-    }
+	pub async fn calibrate_stop_levels(
+		&self,
+		context: &EvaluationContext<'_>,
+		prefix: &str,
+	) -> Result<StopLevelParams> {
+		super::stop_levels::calibrate_stop_levels(self, context, prefix).await
+	}
 
-    pub async fn calibrate_volatility(
-        &self,
-        context: &EvaluationContext<'_>,
-        prefix: &str,
-    ) -> Result<VolatilityParams> {
-        super::volatility::calibrate_volatility(self, context, prefix).await
-    }
+	pub async fn calibrate_volatility(
+		&self,
+		context: &EvaluationContext<'_>,
+		prefix: &str,
+	) -> Result<VolatilityParams> {
+		super::volatility::calibrate_volatility(self, context, prefix).await
+	}
 
-    pub async fn calibrate_sentiment(
-        &self,
-        context: &EvaluationContext<'_>,
-        prefix: &str,
-    ) -> Result<SentimentParams> {
-        super::sentiment::calibrate_sentiment(self, context, prefix).await
-    }
+	pub async fn calibrate_sentiment(&self, context: &EvaluationContext<'_>, prefix: &str) -> Result<SentimentParams> {
+		super::sentiment::calibrate_sentiment(self, context, prefix).await
+	}
 
-    pub async fn calibrate_volume(
-        &self,
-        context: &EvaluationContext<'_>,
-        prefix: &str,
-    ) -> Result<VolumeParams> {
-        super::volume::calibrate_volume(self, context, prefix).await
-    }
+	pub async fn calibrate_volume(&self, context: &EvaluationContext<'_>, prefix: &str) -> Result<VolumeParams> {
+		super::volume::calibrate_volume(self, context, prefix).await
+	}
 
-    /// Calibrate parameters using Bayesian Optimization
-    ///
-    /// This method uses Gaussian Process-based Bayesian Optimization to find
-    /// optimal parameters efficiently. It's significantly faster than grid search
-    /// and finds better parameters by modeling the objective function.
-    ///
-    /// # Arguments
-    /// * `param_bounds` - Min/max bounds for each parameter
-    /// * `param_names` - Names for logging
-    /// * `objective_fn` - Function to minimize (returns score, lower is better)
-    /// * `config` - Bayesian optimization configuration
-    /// * `prefix` - Log prefix for parallel execution tracking
-    ///
-    /// # Returns
-    /// Best parameters found
-    pub async fn calibrate_with_bayesian<F>(
-        &self,
-        param_bounds: Vec<(f64, f64)>,
-        param_names: Vec<String>,
-        objective_fn: F,
-        config: super::bayesian::BayesianConfig,
-        prefix: &str,
-    ) -> Result<Vec<f64>>
-    where
-        F: Fn(&[f64]) -> Result<f64>,
-    {
-        use super::bayesian::BayesianOptimizer;
+	/// Calibrate parameters using Bayesian Optimization
+	///
+	/// This method uses Gaussian Process-based Bayesian Optimization to find
+	/// optimal parameters efficiently. It's significantly faster than grid search
+	/// and finds better parameters by modeling the objective function.
+	///
+	/// # Arguments
+	/// * `param_bounds` - Min/max bounds for each parameter
+	/// * `param_names` - Names for logging
+	/// * `objective_fn` - Function to minimize (returns score, lower is better)
+	/// * `config` - Bayesian optimization configuration
+	/// * `prefix` - Log prefix for parallel execution tracking
+	///
+	/// # Returns
+	/// Best parameters found
+	pub async fn calibrate_with_bayesian<F>(
+		&self,
+		param_bounds: Vec<(f64, f64)>,
+		param_names: Vec<String>,
+		objective_fn: F,
+		config: super::bayesian::BayesianConfig,
+		prefix: &str,
+	) -> Result<Vec<f64>>
+	where
+		F: Fn(&[f64]) -> Result<f64>,
+	{
+		use super::bayesian::BayesianOptimizer;
 
-        log::info!(
-            "{} 🔬 Starting Bayesian Optimization with {} parameters",
-            prefix,
-            param_names.len()
-        );
-        log::info!(
-            "{}    Initial samples: {}, Max iterations: {}, Tolerance: {:.6}",
-            prefix,
-            config.n_initial,
-            config.max_iterations,
-            config.tolerance
-        );
+		log::info!(
+			"{} 🔬 Starting Bayesian Optimization with {} parameters",
+			prefix,
+			param_names.len()
+		);
+		log::info!(
+			"{}    Initial samples: {}, Max iterations: {}, Tolerance: {:.6}",
+			prefix,
+			config.n_initial,
+			config.max_iterations,
+			config.tolerance
+		);
 
-        if config
-            .objective_floor
-            .is_some_and(|floor| !floor.is_finite())
-        {
-            return Err(crate::utils::error::VangaError::config(
-                "Bayesian objective floor must be finite",
-            ));
-        }
-        if let Some(candidate) = &config.initial_candidate {
-            if candidate.len() != param_bounds.len()
-                || candidate
-                    .iter()
-                    .zip(&param_bounds)
-                    .any(|(value, (low, high))| !value.is_finite() || value < low || value > high)
-            {
-                return Err(crate::utils::error::VangaError::config(
-                    "Bayesian initial candidate must be finite and within parameter bounds",
-                ));
-            }
-        }
+		if config.objective_floor.is_some_and(|floor| !floor.is_finite()) {
+			return Err(crate::utils::error::VangaError::config(
+				"Bayesian objective floor must be finite",
+			));
+		}
+		if let Some(candidate) = &config.initial_candidate {
+			if candidate.len() != param_bounds.len()
+				|| candidate
+					.iter()
+					.zip(&param_bounds)
+					.any(|(value, (low, high))| !value.is_finite() || value < low || value > high)
+			{
+				return Err(crate::utils::error::VangaError::config(
+					"Bayesian initial candidate must be finite and within parameter bounds",
+				));
+			}
+		}
 
-        let mut optimizer = BayesianOptimizer::new(param_bounds, param_names, &config, self.seed);
-        if let Some(candidate) = &config.initial_candidate {
-            optimizer.add_observation(candidate.clone(), objective_fn(candidate)?);
-        }
+		let mut optimizer = BayesianOptimizer::new(param_bounds, param_names, &config, self.seed);
+		if let Some(candidate) = &config.initial_candidate {
+			optimizer.add_observation(candidate.clone(), objective_fn(candidate)?);
+		}
 
-        // Phase 1: Initial random exploration (Latin Hypercube Sampling)
-        log::info!(
-            "{} 📊 Phase 1: Initial exploration ({} samples)",
-            prefix,
-            config.n_initial
-        );
-        let initial_samples = optimizer.initialize_latin_hypercube(config.n_initial, prefix);
+		// Phase 1: Initial random exploration (Latin Hypercube Sampling)
+		log::info!(
+			"{} 📊 Phase 1: Initial exploration ({} samples)",
+			prefix,
+			config.n_initial
+		);
+		let initial_samples = optimizer.initialize_latin_hypercube(config.n_initial, prefix);
 
-        for (i, params) in initial_samples.iter().enumerate() {
-            let score = objective_fn(params)?;
-            optimizer.add_observation(params.clone(), score);
-            log::debug!(
-                "{}   Sample {}/{}: score = {:.6}",
-                prefix,
-                i + 1,
-                config.n_initial,
-                score
-            );
-        }
+		for (i, params) in initial_samples.iter().enumerate() {
+			let score = objective_fn(params)?;
+			optimizer.add_observation(params.clone(), score);
+			log::debug!(
+				"{}   Sample {}/{}: score = {:.6}",
+				prefix,
+				i + 1,
+				config.n_initial,
+				score
+			);
+		}
 
-        if let Some((_, best_score)) = optimizer.get_best() {
-            log::info!(
-                "{}   Initial best score: {:.6} (from {} samples)",
-                prefix,
-                best_score,
-                config.n_initial
-            );
+		if let Some((_, best_score)) = optimizer.get_best() {
+			log::info!(
+				"{}   Initial best score: {:.6} (from {} samples)",
+				prefix,
+				best_score,
+				config.n_initial
+			);
 
-            if config
-                .objective_floor
-                .is_some_and(|floor| best_score <= floor)
-            {
-                log::info!(
-                    "{} Reached known objective minimum: {:.6}",
-                    prefix,
-                    best_score
-                );
-                return optimizer
-                    .get_best()
-                    .map(|(params, _)| params)
-                    .ok_or_else(|| {
-                        crate::utils::error::VangaError::config("Missing best Bayesian candidate")
-                    });
-            }
+			if config.objective_floor.is_some_and(|floor| best_score <= floor) {
+				log::info!("{} Reached known objective minimum: {:.6}", prefix, best_score);
+				return optimizer
+					.get_best()
+					.map(|(params, _)| params)
+					.ok_or_else(|| crate::utils::error::VangaError::config("Missing best Bayesian candidate"));
+			}
 
-            // CRITICAL: Check for zero variance (indicates flat objective landscape)
-            let scores: Vec<f64> = optimizer.get_observation_scores().to_vec();
-            let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-            let variance =
-                scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
-            let std_dev = variance.sqrt();
+			// CRITICAL: Check for zero variance (indicates flat objective landscape)
+			let scores: Vec<f64> = optimizer.get_observation_scores().to_vec();
+			let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+			let variance = scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
+			let std_dev = variance.sqrt();
 
-            log::info!(
-                "{}   Score statistics: mean={:.6}, std={:.6}, variance={:.6}",
-                prefix,
-                mean,
-                std_dev,
-                variance
-            );
+			log::info!(
+				"{}   Score statistics: mean={:.6}, std={:.6}, variance={:.6}",
+				prefix,
+				mean,
+				std_dev,
+				variance
+			);
 
-            // Early termination if parameters have no effect
-            if variance < 1e-6 {
-                log::warn!(
-                    "{} ⚠️  ZERO VARIANCE DETECTED (variance={:.9}) - parameters have NO EFFECT on objective!",
-                    prefix,
-                    variance
-                );
-                log::warn!("{}    This indicates:", prefix);
-                log::warn!("{}      1. Parameter bounds may be too narrow", prefix);
-                log::warn!(
-                    "{}      2. Evaluation function may be insensitive to parameters",
-                    prefix
-                );
-                log::warn!(
-                    "{}      3. All samples may have similar characteristics",
-                    prefix
-                );
-                log::warn!(
-                    "{}    Returning best parameters from initial exploration.",
-                    prefix
-                );
+			// Early termination if parameters have no effect
+			if variance < 1e-6 {
+				log::warn!(
+					"{} ⚠️  ZERO VARIANCE DETECTED (variance={:.9}) - parameters have NO EFFECT on objective!",
+					prefix,
+					variance
+				);
+				log::warn!("{}    This indicates:", prefix);
+				log::warn!("{}      1. Parameter bounds may be too narrow", prefix);
+				log::warn!(
+					"{}      2. Evaluation function may be insensitive to parameters",
+					prefix
+				);
+				log::warn!("{}      3. All samples may have similar characteristics", prefix);
+				log::warn!("{}    Returning best parameters from initial exploration.", prefix);
 
-                if let Some((best_params, _)) = optimizer.get_best() {
-                    return Ok(best_params);
-                } else {
-                    return Err(crate::utils::error::VangaError::ConfigError(format!(
-                        "{} Failed to find any valid parameters",
-                        prefix
-                    )));
-                }
-            }
+				if let Some((best_params, _)) = optimizer.get_best() {
+					return Ok(best_params);
+				} else {
+					return Err(crate::utils::error::VangaError::ConfigError(format!(
+						"{} Failed to find any valid parameters",
+						prefix
+					)));
+				}
+			}
 
-            // Warn if variance is very low but not zero
-            if variance < 1e-4 {
-                log::warn!(
-                    "{} ⚠️  LOW VARIANCE (variance={:.6}) - limited parameter sensitivity",
-                    prefix,
-                    variance
-                );
-                log::warn!(
-                    "{}    Optimization may struggle to find improvements.",
-                    prefix
-                );
-            }
-        }
+			// Warn if variance is very low but not zero
+			if variance < 1e-4 {
+				log::warn!(
+					"{} ⚠️  LOW VARIANCE (variance={:.6}) - limited parameter sensitivity",
+					prefix,
+					variance
+				);
+				log::warn!("{}    Optimization may struggle to find improvements.", prefix);
+			}
+		}
 
-        // Phase 2: Bayesian optimization iterations with SMART convergence
-        log::info!(
-            "{} 📊 Phase 2: Bayesian optimization (up to {} iterations)",
-            prefix,
-            config.max_iterations
-        );
+		// Phase 2: Bayesian optimization iterations with SMART convergence
+		log::info!(
+			"{} 📊 Phase 2: Bayesian optimization (up to {} iterations)",
+			prefix,
+			config.max_iterations
+		);
 
-        let mut prev_best_score = f64::INFINITY;
-        let mut no_improvement_count = 0;
-        let mut restart_count = 0; // Track number of restarts performed
-        let max_patience = 25; // Research-backed: 25 iterations for post-restart exploitation
-        let min_iterations = 50; // Research-backed: 10D+1 rule for 5D space
+		let mut prev_best_score = f64::INFINITY;
+		let mut no_improvement_count = 0;
+		let mut restart_count = 0; // Track number of restarts performed
+		let max_patience = 25; // Research-backed: 25 iterations for post-restart exploitation
+		let min_iterations = 50; // Research-backed: 10D+1 rule for 5D space
 
-        for iteration in 0..config.max_iterations {
-            // Suggest next point to evaluate
-            let next_params = optimizer.suggest_next(prefix)?;
+		for iteration in 0..config.max_iterations {
+			// Suggest next point to evaluate
+			let next_params = optimizer.suggest_next(prefix)?;
 
-            // Evaluate objective function
-            let score = objective_fn(&next_params)?;
-            optimizer.add_observation(next_params, score);
+			// Evaluate objective function
+			let score = objective_fn(&next_params)?;
+			optimizer.add_observation(next_params, score);
 
-            // Log progress every 5 iterations
-            if (iteration + 1) % 5 == 0 || iteration == 0 {
-                optimizer.log_progress(optimizer.n_observations(), prefix);
-            }
+			// Log progress every 5 iterations
+			if (iteration + 1) % 5 == 0 || iteration == 0 {
+				optimizer.log_progress(optimizer.n_observations(), prefix);
+			}
 
-            // Check convergence (but enforce minimum iterations)
-            if iteration + 1 >= min_iterations {
-                if let Some((_, best_score)) = optimizer.get_best() {
-                    let absolute_improvement = prev_best_score - best_score;
-                    let relative_improvement = if prev_best_score.abs() > 1e-10 {
-                        absolute_improvement / prev_best_score.abs()
-                    } else {
-                        absolute_improvement
-                    };
+			// Check convergence (but enforce minimum iterations)
+			if iteration + 1 >= min_iterations {
+				if let Some((_, best_score)) = optimizer.get_best() {
+					let absolute_improvement = prev_best_score - best_score;
+					let relative_improvement = if prev_best_score.abs() > 1e-10 {
+						absolute_improvement / prev_best_score.abs()
+					} else {
+						absolute_improvement
+					};
 
-                    // CRITICAL FIX: Only count as "no improvement" when there's ZERO or NEGATIVE improvement
-                    // Small positive improvements should NOT increment the stagnation counter
-                    // This prevents premature convergence when the algorithm is still making progress
-                    let has_no_improvement = absolute_improvement <= 1e-10; // Essentially zero or negative
+					// CRITICAL FIX: Only count as "no improvement" when there's ZERO or NEGATIVE improvement
+					// Small positive improvements should NOT increment the stagnation counter
+					// This prevents premature convergence when the algorithm is still making progress
+					let has_no_improvement = absolute_improvement <= 1e-10; // Essentially zero or negative
 
-                    if has_no_improvement {
-                        no_improvement_count += 1;
+					if has_no_improvement {
+						no_improvement_count += 1;
 
-                        // AGGRESSIVE early exploration to avoid wasting iterations in local minima
-                        // First restart: Quick escape (iteration 5)
-                        // Second restart: Deeper exploration (iteration 10)
-                        // Third restart: Last chance (iteration 15)
-                        // Maximum 3 restarts with more samples per restart
-                        if (no_improvement_count == 5
-                            || no_improvement_count == 10
-                            || no_improvement_count == 15)
-                            && restart_count < 3
-                        {
-                            restart_count += 1;
-                            log::info!(
+						// AGGRESSIVE early exploration to avoid wasting iterations in local minima
+						// First restart: Quick escape (iteration 5)
+						// Second restart: Deeper exploration (iteration 10)
+						// Third restart: Last chance (iteration 15)
+						// Maximum 3 restarts with more samples per restart
+						if (no_improvement_count == 5 || no_improvement_count == 10 || no_improvement_count == 15)
+							&& restart_count < 3
+						{
+							restart_count += 1;
+							log::info!(
                                 "{} 🔄 No improvement for {} iterations, injecting exploration samples (restart {}/3)...",
                                 prefix,
                                 no_improvement_count,
                                 restart_count
                             );
 
-                            // Create seeded RNG for deterministic random restarts
-                            let mut rng: Box<dyn rand::RngCore> = match optimizer.seed() {
-                                Some(0) | None => {
-                                    // seed=0 or None means random
-                                    Box::new(rand::rng())
-                                }
-                                Some(seed_value) => {
-                                    // Use seeded RNG with iteration offset for reproducibility
-                                    // Different offset for each restart
-                                    let restart_seed = seed_value
-                                        .wrapping_add(iteration as u64)
-                                        .wrapping_add(restart_count as u64 * 1000);
-                                    log::debug!(
-                                        "{} 🎲 Using seeded RNG (seed={}) for deterministic random restart {}",
-                                        prefix,
-                                        restart_seed,
-                                        restart_count
-                                    );
-                                    Box::new(StdRng::seed_from_u64(restart_seed))
-                                }
-                            };
+							// Create seeded RNG for deterministic random restarts
+							let mut rng: Box<dyn rand::RngCore> = match optimizer.seed() {
+								Some(0) | None => {
+									// seed=0 or None means random
+									Box::new(rand::rng())
+								}
+								Some(seed_value) => {
+									// Use seeded RNG with iteration offset for reproducibility
+									// Different offset for each restart
+									let restart_seed = seed_value
+										.wrapping_add(iteration as u64)
+										.wrapping_add(restart_count as u64 * 1000);
+									log::debug!(
+										"{} 🎲 Using seeded RNG (seed={}) for deterministic random restart {}",
+										prefix,
+										restart_seed,
+										restart_count
+									);
+									Box::new(StdRng::seed_from_u64(restart_seed))
+								}
+							};
 
-                            // Add 10 random samples for AGGRESSIVE exploration (doubled from 5)
-                            for _ in 0..10 {
-                                let mut random_params = Vec::new();
-                                for (min, max) in &optimizer.bounds {
-                                    let random_val = min + (max - min) * rng.random_range(0.0..1.0);
-                                    random_params.push(random_val);
-                                }
-                                let score = objective_fn(&random_params)?;
-                                optimizer.add_observation(random_params, score);
-                            }
-                            log::info!(
-                                "{} ✨ Added 10 exploration samples (deterministic)",
-                                prefix
-                            );
+							// Add 10 random samples for AGGRESSIVE exploration (doubled from 5)
+							for _ in 0..10 {
+								let mut random_params = Vec::new();
+								for (min, max) in &optimizer.bounds {
+									let random_val = min + (max - min) * rng.random_range(0.0..1.0);
+									random_params.push(random_val);
+								}
+								let score = objective_fn(&random_params)?;
+								optimizer.add_observation(random_params, score);
+							}
+							log::info!("{} ✨ Added 10 exploration samples (deterministic)", prefix);
 
-                            // CRITICAL: Reset patience counter after restart
-                            // Research shows restarts need fresh exploitation window
-                            no_improvement_count = 0;
-                            log::debug!(
-                                "{} 🔄 Reset patience counter for post-restart exploitation",
-                                prefix
-                            );
-                        }
+							// CRITICAL: Reset patience counter after restart
+							// Research shows restarts need fresh exploitation window
+							no_improvement_count = 0;
+							log::debug!("{} 🔄 Reset patience counter for post-restart exploitation", prefix);
+						}
 
-                        if no_improvement_count >= max_patience {
-                            log::info!(
-                                "{} ✅ Converged after {} iterations (no improvement for {} iterations)",
-                                prefix,
-                                iteration + 1,
-                                max_patience
-                            );
-                            log::info!(
-                                "{}    Final score: {:.6}, Absolute improvement: {:.6}, Relative: {:.4}%",
-                                prefix,
-                                best_score,
-                                absolute_improvement,
-                                relative_improvement * 100.0
-                            );
-                            break;
-                        }
-                    } else {
-                        no_improvement_count = 0; // Reset counter on improvement
+						if no_improvement_count >= max_patience {
+							log::info!(
+								"{} ✅ Converged after {} iterations (no improvement for {} iterations)",
+								prefix,
+								iteration + 1,
+								max_patience
+							);
+							log::info!(
+								"{}    Final score: {:.6}, Absolute improvement: {:.6}, Relative: {:.4}%",
+								prefix,
+								best_score,
+								absolute_improvement,
+								relative_improvement * 100.0
+							);
+							break;
+						}
+					} else {
+						no_improvement_count = 0; // Reset counter on improvement
 
-                        if absolute_improvement > 0.0 {
-                            log::debug!(
-                                "{}   Improvement: {:.6} ({:.4}% relative)",
-                                prefix,
-                                absolute_improvement,
-                                relative_improvement * 100.0
-                            );
-                        }
-                    }
+						if absolute_improvement > 0.0 {
+							log::debug!(
+								"{}   Improvement: {:.6} ({:.4}% relative)",
+								prefix,
+								absolute_improvement,
+								relative_improvement * 100.0
+							);
+						}
+					}
 
-                    prev_best_score = best_score;
-                }
-            } else {
-                // Still in minimum iteration phase
-                if let Some((_, best_score)) = optimizer.get_best() {
-                    prev_best_score = best_score;
-                }
-            }
-        }
+					prev_best_score = best_score;
+				}
+			} else {
+				// Still in minimum iteration phase
+				if let Some((_, best_score)) = optimizer.get_best() {
+					prev_best_score = best_score;
+				}
+			}
+		}
 
-        // Return best parameters found
-        if let Some((best_params, best_score)) = optimizer.get_best() {
-            log::info!("{} 🎯 Bayesian Optimization Complete!", prefix);
-            log::info!(
-                "{}   Total evaluations: {}",
-                prefix,
-                optimizer.n_observations()
-            );
-            log::info!("{}   Best Score: {:.6}", prefix, best_score);
+		// Return best parameters found
+		if let Some((best_params, best_score)) = optimizer.get_best() {
+			log::info!("{} 🎯 Bayesian Optimization Complete!", prefix);
+			log::info!("{}   Total evaluations: {}", prefix, optimizer.n_observations());
+			log::info!("{}   Best Score: {:.6}", prefix, best_score);
 
-            // Log performance metrics
-            let perf_summary = optimizer.get_performance_summary(
-                optimizer.n_observations() - config.n_initial,
-                config.max_iterations,
-            );
-            log::info!("{}   {}", prefix, perf_summary);
+			// Log performance metrics
+			let perf_summary =
+				optimizer.get_performance_summary(optimizer.n_observations() - config.n_initial, config.max_iterations);
+			log::info!("{}   {}", prefix, perf_summary);
 
-            log::info!("{}   Best Parameters:", prefix);
-            for (name, &value) in optimizer.param_names.iter().zip(best_params.iter()) {
-                log::info!("{}     {}: {:.6}", prefix, name, value);
-            }
+			log::info!("{}   Best Parameters:", prefix);
+			for (name, &value) in optimizer.param_names.iter().zip(best_params.iter()) {
+				log::info!("{}     {}: {:.6}", prefix, name, value);
+			}
 
-            Ok(best_params)
-        } else {
-            Err(crate::utils::error::VangaError::ConfigError(format!(
-                "{} Bayesian optimization failed to find any valid parameters",
-                prefix
-            )))
-        }
-    }
+			Ok(best_params)
+		} else {
+			Err(crate::utils::error::VangaError::ConfigError(format!(
+				"{} Bayesian optimization failed to find any valid parameters",
+				prefix
+			)))
+		}
+	}
 }

@@ -10,112 +10,112 @@ use ndarray::{s, ArrayView1};
 /// Output segments for multi-target parsing
 #[derive(Debug, Clone)]
 pub struct OutputSegments {
-    /// Price levels segment: (start_idx, end_idx)
-    pub price_levels: Option<(usize, usize)>,
-    /// Stop levels segment: (start_idx, end_idx)
-    pub stop_levels: Option<(usize, usize)>,
-    /// Direction segment: (start_idx, end_idx)
-    pub direction: Option<(usize, usize)>,
-    /// Volatility segment: (start_idx, end_idx)
-    pub volatility: Option<(usize, usize)>,
-    /// Sentiment segment: (start_idx, end_idx)
-    pub sentiment: Option<(usize, usize)>,
-    /// Volume segment: (start_idx, end_idx)
-    pub volume: Option<(usize, usize)>,
+	/// Price levels segment: (start_idx, end_idx)
+	pub price_levels: Option<(usize, usize)>,
+	/// Stop levels segment: (start_idx, end_idx)
+	pub stop_levels: Option<(usize, usize)>,
+	/// Direction segment: (start_idx, end_idx)
+	pub direction: Option<(usize, usize)>,
+	/// Volatility segment: (start_idx, end_idx)
+	pub volatility: Option<(usize, usize)>,
+	/// Sentiment segment: (start_idx, end_idx)
+	pub sentiment: Option<(usize, usize)>,
+	/// Volume segment: (start_idx, end_idx)
+	pub volume: Option<(usize, usize)>,
 }
 
 impl Default for OutputSegments {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl OutputSegments {
-    /// Create output segments for always-enabled 6 targets with NUM_CLASSES=5 each
-    pub fn new() -> Self {
-        // All targets are always enabled with NUM_CLASSES=5 each
-        // Total output size: 6 targets * 5 classes = 30
-        Self {
-            price_levels: Some((0, NUM_CLASSES)),                 // 0-4
-            stop_levels: Some((NUM_CLASSES, NUM_CLASSES * 2)),    // 5-9
-            direction: Some((NUM_CLASSES * 2, NUM_CLASSES * 3)),  // 10-14
-            volatility: Some((NUM_CLASSES * 3, NUM_CLASSES * 4)), // 15-19
-            sentiment: Some((NUM_CLASSES * 4, NUM_CLASSES * 5)),  // 20-24
-            volume: Some((NUM_CLASSES * 5, NUM_CLASSES * 6)),     // 25-29
-        }
-    }
+	/// Create output segments for always-enabled 6 targets with NUM_CLASSES=5 each
+	pub fn new() -> Self {
+		// All targets are always enabled with NUM_CLASSES=5 each
+		// Total output size: 6 targets * 5 classes = 30
+		Self {
+			price_levels: Some((0, NUM_CLASSES)),                 // 0-4
+			stop_levels: Some((NUM_CLASSES, NUM_CLASSES * 2)),    // 5-9
+			direction: Some((NUM_CLASSES * 2, NUM_CLASSES * 3)),  // 10-14
+			volatility: Some((NUM_CLASSES * 3, NUM_CLASSES * 4)), // 15-19
+			sentiment: Some((NUM_CLASSES * 4, NUM_CLASSES * 5)),  // 20-24
+			volume: Some((NUM_CLASSES * 5, NUM_CLASSES * 6)),     // 25-29
+		}
+	}
 
-    /// Create output segments based on actually trained target names
-    ///
-    /// # Arguments
-    /// * `target_names` - List of trained target names (e.g., ["price_levels_18m", "direction_18m"])
-    ///
-    /// # Returns
-    /// OutputSegments with only the trained targets enabled
-    ///
-    /// # Example
-    /// ```
-    /// let target_names = vec!["price_levels_18m".to_string(), "volatility_18m".to_string()];
-    /// let segments = OutputSegments::from_target_names(&target_names);
-    /// // segments.price_levels = Some((0, 5))
-    /// // segments.direction = None
-    /// // segments.volatility = Some((5, 10))
-    /// // segments.sentiment = None
-    /// // segments.volume = None
-    /// ```
-    pub fn from_target_names(target_names: &[String]) -> Self {
-        let mut segments = Self {
-            price_levels: None,
-            stop_levels: None,
-            direction: None,
-            volatility: None,
-            sentiment: None,
-            volume: None,
-        };
+	/// Create output segments based on actually trained target names
+	///
+	/// # Arguments
+	/// * `target_names` - List of trained target names (e.g., ["price_levels_18m", "direction_18m"])
+	///
+	/// # Returns
+	/// OutputSegments with only the trained targets enabled
+	///
+	/// # Example
+	/// ```
+	/// let target_names = vec!["price_levels_18m".to_string(), "volatility_18m".to_string()];
+	/// let segments = OutputSegments::from_target_names(&target_names);
+	/// // segments.price_levels = Some((0, 5))
+	/// // segments.direction = None
+	/// // segments.volatility = Some((5, 10))
+	/// // segments.sentiment = None
+	/// // segments.volume = None
+	/// ```
+	pub fn from_target_names(target_names: &[String]) -> Self {
+		let mut segments = Self {
+			price_levels: None,
+			stop_levels: None,
+			direction: None,
+			volatility: None,
+			sentiment: None,
+			volume: None,
+		};
 
-        let mut current_offset = 0;
+		let mut current_offset = 0;
 
-        // Process each target name and assign segments in order
-        for target_name in target_names {
-            // Extract target type from name (e.g., "price_levels_18m" -> "price_levels")
-            let target_type = if let Some(underscore_pos) = target_name.rfind('_') {
-                &target_name[..underscore_pos]
-            } else {
-                target_name.as_str()
-            };
+		// Process each target name and assign segments in order
+		for target_name in target_names {
+			// Extract target type from name (e.g., "price_levels_18m" -> "price_levels")
+			let target_type = if let Some(underscore_pos) = target_name.rfind('_') {
+				&target_name[..underscore_pos]
+			} else {
+				target_name.as_str()
+			};
 
-            let start = current_offset;
-            let end = current_offset + NUM_CLASSES;
+			let start = current_offset;
+			let end = current_offset + NUM_CLASSES;
 
-            match target_type {
-                "price_levels" | "price_level" => {
-                    segments.price_levels = Some((start, end));
-                }
-                "stop_levels" | "stop_level" => {
-                    segments.stop_levels = Some((start, end));
-                }
-                "direction" => {
-                    segments.direction = Some((start, end));
-                }
-                "volatility" => {
-                    segments.volatility = Some((start, end));
-                }
-                "sentiment" => {
-                    segments.sentiment = Some((start, end));
-                }
-                "volume" => {
-                    segments.volume = Some((start, end));
-                }
-                _ => {
-                    log::warn!("Unknown target type in name: {}", target_name);
-                    continue; // Skip unknown targets
-                }
-            }
+			match target_type {
+				"price_levels" | "price_level" => {
+					segments.price_levels = Some((start, end));
+				}
+				"stop_levels" | "stop_level" => {
+					segments.stop_levels = Some((start, end));
+				}
+				"direction" => {
+					segments.direction = Some((start, end));
+				}
+				"volatility" => {
+					segments.volatility = Some((start, end));
+				}
+				"sentiment" => {
+					segments.sentiment = Some((start, end));
+				}
+				"volume" => {
+					segments.volume = Some((start, end));
+				}
+				_ => {
+					log::warn!("Unknown target type in name: {}", target_name);
+					continue; // Skip unknown targets
+				}
+			}
 
-            current_offset = end;
-        }
+			current_offset = end;
+		}
 
-        log::debug!(
+		log::debug!(
             "Created OutputSegments from {} target names: price_levels={:?}, stop_levels={:?}, direction={:?}, volatility={:?}, sentiment={:?}, volume={:?}",
             target_names.len(),
             segments.price_levels,
@@ -126,466 +126,440 @@ impl OutputSegments {
             segments.volume
         );
 
-        segments
-    }
+		segments
+	}
 }
 
 /// Multi-target output parser
 pub struct MultiTargetParser {
-    pub segments: OutputSegments, // Made public for debugging
+	pub segments: OutputSegments, // Made public for debugging
 }
 
 impl Default for MultiTargetParser {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl MultiTargetParser {
-    /// Create new parser with default configuration (all 5 targets)
-    pub fn new() -> Self {
-        let segments = OutputSegments::new();
-        Self { segments }
-    }
+	/// Create new parser with default configuration (all 5 targets)
+	pub fn new() -> Self {
+		let segments = OutputSegments::new();
+		Self { segments }
+	}
 
-    /// Create new parser with specific target names (only trained targets)
-    ///
-    /// # Arguments
-    /// * `target_names` - List of trained target names (e.g., ["price_levels_18m", "direction_18m"])
-    ///
-    /// # Returns
-    /// Parser configured to only parse the specified targets
-    pub fn with_target_names(target_names: &[String]) -> Self {
-        let segments = OutputSegments::from_target_names(target_names);
-        log::info!(
-            "🎯 Created MultiTargetParser for {} trained targets: {:?}",
-            target_names.len(),
-            target_names
-        );
-        Self { segments }
-    }
+	/// Create new parser with specific target names (only trained targets)
+	///
+	/// # Arguments
+	/// * `target_names` - List of trained target names (e.g., ["price_levels_18m", "direction_18m"])
+	///
+	/// # Returns
+	/// Parser configured to only parse the specified targets
+	pub fn with_target_names(target_names: &[String]) -> Self {
+		let segments = OutputSegments::from_target_names(target_names);
+		log::info!(
+			"🎯 Created MultiTargetParser for {} trained targets: {:?}",
+			target_names.len(),
+			target_names
+		);
+		Self { segments }
+	}
 
-    /// Parse raw LSTM output into structured components
-    pub fn parse_output(&self, raw_output: ArrayView1<f64>) -> Result<ParsedOutput> {
-        let mut parsed = ParsedOutput::new();
+	/// Parse raw LSTM output into structured components
+	pub fn parse_output(&self, raw_output: ArrayView1<f64>) -> Result<ParsedOutput> {
+		let mut parsed = ParsedOutput::new();
 
-        // Parse price levels if enabled
-        if let Some((start, end)) = self.segments.price_levels {
-            if end <= raw_output.len() {
-                let price_level_logits = raw_output.slice(s![start..end]);
-                parsed.price_levels = Some(self.parse_price_levels(&price_level_logits)?);
-            } else {
-                log::warn!(
-                    "Price levels segment out of bounds: {} > {}",
-                    end,
-                    raw_output.len()
-                );
-            }
-        }
+		// Parse price levels if enabled
+		if let Some((start, end)) = self.segments.price_levels {
+			if end <= raw_output.len() {
+				let price_level_logits = raw_output.slice(s![start..end]);
+				parsed.price_levels = Some(self.parse_price_levels(&price_level_logits)?);
+			} else {
+				log::warn!("Price levels segment out of bounds: {} > {}", end, raw_output.len());
+			}
+		}
 
-        // Parse stop levels if enabled
-        if let Some((start, end)) = self.segments.stop_levels {
-            if end <= raw_output.len() {
-                let stop_level_logits = raw_output.slice(s![start..end]);
-                parsed.stop_levels = Some(self.parse_price_levels(&stop_level_logits)?);
-            // Reuse price_levels parser
-            } else {
-                log::warn!(
-                    "Stop levels segment out of bounds: {} > {}",
-                    end,
-                    raw_output.len()
-                );
-            }
-        }
+		// Parse stop levels if enabled
+		if let Some((start, end)) = self.segments.stop_levels {
+			if end <= raw_output.len() {
+				let stop_level_logits = raw_output.slice(s![start..end]);
+				parsed.stop_levels = Some(self.parse_price_levels(&stop_level_logits)?);
+			// Reuse price_levels parser
+			} else {
+				log::warn!("Stop levels segment out of bounds: {} > {}", end, raw_output.len());
+			}
+		}
 
-        // Parse direction if enabled
-        if let Some((start, end)) = self.segments.direction {
-            if end <= raw_output.len() {
-                let direction_logits = raw_output.slice(s![start..end]);
-                parsed.direction = Some(self.parse_direction(&direction_logits)?);
-            } else {
-                log::warn!(
-                    "Direction segment out of bounds: {} > {}",
-                    end,
-                    raw_output.len()
-                );
-            }
-        }
+		// Parse direction if enabled
+		if let Some((start, end)) = self.segments.direction {
+			if end <= raw_output.len() {
+				let direction_logits = raw_output.slice(s![start..end]);
+				parsed.direction = Some(self.parse_direction(&direction_logits)?);
+			} else {
+				log::warn!("Direction segment out of bounds: {} > {}", end, raw_output.len());
+			}
+		}
 
-        // Parse volatility if enabled
-        if let Some((start, end)) = self.segments.volatility {
-            if end <= raw_output.len() {
-                let volatility_values = raw_output.slice(s![start..end]);
-                parsed.volatility = Some(self.parse_volatility(&volatility_values)?);
-            } else {
-                log::warn!(
-                    "Volatility segment out of bounds: {} > {}",
-                    end,
-                    raw_output.len()
-                );
-            }
-        }
+		// Parse volatility if enabled
+		if let Some((start, end)) = self.segments.volatility {
+			if end <= raw_output.len() {
+				let volatility_values = raw_output.slice(s![start..end]);
+				parsed.volatility = Some(self.parse_volatility(&volatility_values)?);
+			} else {
+				log::warn!("Volatility segment out of bounds: {} > {}", end, raw_output.len());
+			}
+		}
 
-        // Parse sentiment if enabled
-        if let Some((start, end)) = self.segments.sentiment {
-            if end <= raw_output.len() {
-                let sentiment_values = raw_output.slice(s![start..end]);
-                parsed.sentiment = Some(self.parse_sentiment(&sentiment_values)?);
-            } else {
-                log::warn!(
-                    "Sentiment segment out of bounds: {} > {}",
-                    end,
-                    raw_output.len()
-                );
-            }
-        }
+		// Parse sentiment if enabled
+		if let Some((start, end)) = self.segments.sentiment {
+			if end <= raw_output.len() {
+				let sentiment_values = raw_output.slice(s![start..end]);
+				parsed.sentiment = Some(self.parse_sentiment(&sentiment_values)?);
+			} else {
+				log::warn!("Sentiment segment out of bounds: {} > {}", end, raw_output.len());
+			}
+		}
 
-        // Parse volume if enabled
-        if let Some((start, end)) = self.segments.volume {
-            if end <= raw_output.len() {
-                let volume_values = raw_output.slice(s![start..end]);
-                parsed.volume = Some(self.parse_volume(&volume_values)?);
-            } else {
-                log::warn!(
-                    "Volume segment out of bounds: {} > {}",
-                    end,
-                    raw_output.len()
-                );
-            }
-        }
+		// Parse volume if enabled
+		if let Some((start, end)) = self.segments.volume {
+			if end <= raw_output.len() {
+				let volume_values = raw_output.slice(s![start..end]);
+				parsed.volume = Some(self.parse_volume(&volume_values)?);
+			} else {
+				log::warn!("Volume segment out of bounds: {} > {}", end, raw_output.len());
+			}
+		}
 
-        Ok(parsed)
-    }
+		Ok(parsed)
+	}
 
-    /// Parse direction logits into class probabilities (5-class system)
-    fn parse_direction(&self, logits: &ArrayView1<f64>) -> Result<DirectionOutput> {
-        let expected_classes = NUM_CLASSES; // DUMP, DOWN, SIDEWAYS, UP, PUMP
-        if logits.len() != expected_classes {
-            return Err(VangaError::PredictionError(format!(
-                "Expected {} direction classes, got {}",
-                expected_classes,
-                logits.len()
-            )));
-        }
+	/// Parse direction logits into class probabilities (5-class system)
+	fn parse_direction(&self, logits: &ArrayView1<f64>) -> Result<DirectionOutput> {
+		let expected_classes = NUM_CLASSES; // DUMP, DOWN, SIDEWAYS, UP, PUMP
+		if logits.len() != expected_classes {
+			return Err(VangaError::PredictionError(format!(
+				"Expected {} direction classes, got {}",
+				expected_classes,
+				logits.len()
+			)));
+		}
 
-        // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(logits)?;
+		// Model output is already softmaxed upstream (predict path); only renormalize
+		let probabilities = self.normalize(logits)?;
 
-        Ok(DirectionOutput {
-            dump_probability: probabilities[0],     // New: Extreme down
-            down_probability: probabilities[1],     // Shifted from index 0
-            sideways_probability: probabilities[2], // Shifted from index 1
-            up_probability: probabilities[3],       // Shifted from index 2
-            pump_probability: probabilities[4],     // New: Extreme up
-        })
-    }
+		Ok(DirectionOutput {
+			dump_probability: probabilities[0],     // New: Extreme down
+			down_probability: probabilities[1],     // Shifted from index 0
+			sideways_probability: probabilities[2], // Shifted from index 1
+			up_probability: probabilities[3],       // Shifted from index 2
+			pump_probability: probabilities[4],     // New: Extreme up
+		})
+	}
 
-    /// Parse volatility values (5-class system)
-    fn parse_volatility(&self, values: &ArrayView1<f64>) -> Result<VolatilityOutput> {
-        let expected_total_classes = NUM_CLASSES;
+	/// Parse volatility values (5-class system)
+	fn parse_volatility(&self, values: &ArrayView1<f64>) -> Result<VolatilityOutput> {
+		let expected_total_classes = NUM_CLASSES;
 
-        if values.len() != expected_total_classes {
-            return Err(VangaError::PredictionError(format!(
-                "Expected {} volatility classes, got {}",
-                expected_total_classes,
-                values.len()
-            )));
-        }
+		if values.len() != expected_total_classes {
+			return Err(VangaError::PredictionError(format!(
+				"Expected {} volatility classes, got {}",
+				expected_total_classes,
+				values.len()
+			)));
+		}
 
-        // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(values)?;
+		// Model output is already softmaxed upstream (predict path); only renormalize
+		let probabilities = self.normalize(values)?;
 
-        Ok(VolatilityOutput {
-            very_low_probability: probabilities[0],
-            low_probability: probabilities[1],
-            medium_probability: probabilities[2],
-            high_probability: probabilities[3],
-            very_high_probability: probabilities[4],
-        })
-    }
+		Ok(VolatilityOutput {
+			very_low_probability: probabilities[0],
+			low_probability: probabilities[1],
+			medium_probability: probabilities[2],
+			high_probability: probabilities[3],
+			very_high_probability: probabilities[4],
+		})
+	}
 
-    /// Parse sentiment output (5-class system)
-    fn parse_sentiment(&self, values: &ArrayView1<f64>) -> Result<SentimentOutput> {
-        let expected_total_classes = NUM_CLASSES;
+	/// Parse sentiment output (5-class system)
+	fn parse_sentiment(&self, values: &ArrayView1<f64>) -> Result<SentimentOutput> {
+		let expected_total_classes = NUM_CLASSES;
 
-        if values.len() != expected_total_classes {
-            return Err(VangaError::PredictionError(format!(
-                "Expected {} sentiment classes, got {}",
-                expected_total_classes,
-                values.len()
-            )));
-        }
+		if values.len() != expected_total_classes {
+			return Err(VangaError::PredictionError(format!(
+				"Expected {} sentiment classes, got {}",
+				expected_total_classes,
+				values.len()
+			)));
+		}
 
-        // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(values)?;
+		// Model output is already softmaxed upstream (predict path); only renormalize
+		let probabilities = self.normalize(values)?;
 
-        Ok(SentimentOutput {
-            very_bearish_probability: probabilities[0],
-            bearish_probability: probabilities[1],
-            neutral_probability: probabilities[2],
-            bullish_probability: probabilities[3],
-            very_bullish_probability: probabilities[4],
-        })
-    }
+		Ok(SentimentOutput {
+			very_bearish_probability: probabilities[0],
+			bearish_probability: probabilities[1],
+			neutral_probability: probabilities[2],
+			bullish_probability: probabilities[3],
+			very_bullish_probability: probabilities[4],
+		})
+	}
 
-    /// Parse volume output (5-class system)
-    fn parse_volume(&self, values: &ArrayView1<f64>) -> Result<VolumeOutput> {
-        let expected_total_classes = NUM_CLASSES;
+	/// Parse volume output (5-class system)
+	fn parse_volume(&self, values: &ArrayView1<f64>) -> Result<VolumeOutput> {
+		let expected_total_classes = NUM_CLASSES;
 
-        if values.len() != expected_total_classes {
-            return Err(VangaError::PredictionError(format!(
-                "Expected {} volume classes, got {}",
-                expected_total_classes,
-                values.len()
-            )));
-        }
+		if values.len() != expected_total_classes {
+			return Err(VangaError::PredictionError(format!(
+				"Expected {} volume classes, got {}",
+				expected_total_classes,
+				values.len()
+			)));
+		}
 
-        // Model output is already softmaxed upstream (predict path); only renormalize
-        let probabilities = self.normalize(values)?;
+		// Model output is already softmaxed upstream (predict path); only renormalize
+		let probabilities = self.normalize(values)?;
 
-        Ok(VolumeOutput {
-            very_low_probability: probabilities[0],
-            low_probability: probabilities[1],
-            medium_probability: probabilities[2],
-            high_probability: probabilities[3],
-            very_high_probability: probabilities[4],
-        })
-    }
+		Ok(VolumeOutput {
+			very_low_probability: probabilities[0],
+			low_probability: probabilities[1],
+			medium_probability: probabilities[2],
+			high_probability: probabilities[3],
+			very_high_probability: probabilities[4],
+		})
+	}
 
-    /// Renormalize a probability vector. The predict path already applies softmax
-    /// exactly once; softmaxing again here would cap the max class at e/(e+4)≈0.40.
-    fn normalize(&self, values: &ArrayView1<f64>) -> Result<Vec<f64>> {
-        for (index, value) in values.iter().enumerate() {
-            if !value.is_finite() || *value < 0.0 {
-                return Err(VangaError::PredictionError(format!(
-                    "Invalid probability at class {}: {} (expected finite and non-negative)",
-                    index, value
-                )));
-            }
-        }
-        let sum: f64 = values.iter().sum();
-        if !sum.is_finite() {
-            return Err(VangaError::PredictionError(
-                "Probability sum is non-finite".to_string(),
-            ));
-        }
-        if sum <= 0.0 {
-            // Return uniform distribution if sum is zero
-            Ok(vec![1.0 / values.len() as f64; values.len()])
-        } else {
-            Ok(values.iter().map(|&x| x / sum).collect())
-        }
-    }
+	/// Renormalize a probability vector. The predict path already applies softmax
+	/// exactly once; softmaxing again here would cap the max class at e/(e+4)≈0.40.
+	fn normalize(&self, values: &ArrayView1<f64>) -> Result<Vec<f64>> {
+		for (index, value) in values.iter().enumerate() {
+			if !value.is_finite() || *value < 0.0 {
+				return Err(VangaError::PredictionError(format!(
+					"Invalid probability at class {}: {} (expected finite and non-negative)",
+					index, value
+				)));
+			}
+		}
+		let sum: f64 = values.iter().sum();
+		if !sum.is_finite() {
+			return Err(VangaError::PredictionError("Probability sum is non-finite".to_string()));
+		}
+		if sum <= 0.0 {
+			// Return uniform distribution if sum is zero
+			Ok(vec![1.0 / values.len() as f64; values.len()])
+		} else {
+			Ok(values.iter().map(|&x| x / sum).collect())
+		}
+	}
 
-    /// Parse price level logits with validation (5-class system)
-    fn parse_price_levels(&self, logits: &ArrayView1<f64>) -> Result<Vec<f64>> {
-        let expected_classes = NUM_CLASSES; // Unified 5-class system
-        if logits.len() != expected_classes {
-            return Err(VangaError::PredictionError(format!(
-                "Expected {} price level classes, got {}",
-                expected_classes,
-                logits.len()
-            )));
-        }
+	/// Parse price level logits with validation (5-class system)
+	fn parse_price_levels(&self, logits: &ArrayView1<f64>) -> Result<Vec<f64>> {
+		let expected_classes = NUM_CLASSES; // Unified 5-class system
+		if logits.len() != expected_classes {
+			return Err(VangaError::PredictionError(format!(
+				"Expected {} price level classes, got {}",
+				expected_classes,
+				logits.len()
+			)));
+		}
 
-        // Model output is already softmaxed upstream (predict path); only renormalize
-        self.normalize(logits)
-    }
+		// Model output is already softmaxed upstream (predict path); only renormalize
+		self.normalize(logits)
+	}
 }
 
 /// Parsed multi-target output
 #[derive(Debug, Clone)]
 pub struct ParsedOutput {
-    /// Price level probabilities (if enabled)
-    pub price_levels: Option<Vec<f64>>,
+	/// Price level probabilities (if enabled)
+	pub price_levels: Option<Vec<f64>>,
 
-    /// Stop level probabilities (if enabled)
-    pub stop_levels: Option<Vec<f64>>,
+	/// Stop level probabilities (if enabled)
+	pub stop_levels: Option<Vec<f64>>,
 
-    /// Direction probabilities (if enabled) - 5-class system
-    pub direction: Option<DirectionOutput>,
+	/// Direction probabilities (if enabled) - 5-class system
+	pub direction: Option<DirectionOutput>,
 
-    /// Volatility values (if enabled) - 5-class system
-    pub volatility: Option<VolatilityOutput>,
+	/// Volatility values (if enabled) - 5-class system
+	pub volatility: Option<VolatilityOutput>,
 
-    /// Sentiment values (if enabled) - 5-class system
-    pub sentiment: Option<SentimentOutput>,
+	/// Sentiment values (if enabled) - 5-class system
+	pub sentiment: Option<SentimentOutput>,
 
-    /// Volume values (if enabled) - 5-class system
-    pub volume: Option<VolumeOutput>,
+	/// Volume values (if enabled) - 5-class system
+	pub volume: Option<VolumeOutput>,
 }
 
 impl Default for ParsedOutput {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl ParsedOutput {
-    pub fn new() -> Self {
-        Self {
-            price_levels: None,
-            stop_levels: None,
-            direction: None,
-            volatility: None,
-            sentiment: None,
-            volume: None,
-        }
-    }
+	pub fn new() -> Self {
+		Self {
+			price_levels: None,
+			stop_levels: None,
+			direction: None,
+			volatility: None,
+			sentiment: None,
+			volume: None,
+		}
+	}
 }
 
 /// Direction prediction output (5-class system)
 #[derive(Debug, Clone)]
 pub struct DirectionOutput {
-    pub dump_probability: f64,     // Extreme down
-    pub down_probability: f64,     // Moderate down
-    pub sideways_probability: f64, // Minimal change
-    pub up_probability: f64,       // Moderate up
-    pub pump_probability: f64,     // Extreme up
+	pub dump_probability: f64,     // Extreme down
+	pub down_probability: f64,     // Moderate down
+	pub sideways_probability: f64, // Minimal change
+	pub up_probability: f64,       // Moderate up
+	pub pump_probability: f64,     // Extreme up
 }
 
 /// Volatility prediction output for a single horizon (5-class system)
 #[derive(Debug, Clone)]
 pub struct VolatilityOutput {
-    pub very_low_probability: f64,  // Class 0: Much below sequence baseline
-    pub low_probability: f64,       // Class 1: Below sequence baseline
-    pub medium_probability: f64,    // Class 2: Around sequence baseline
-    pub high_probability: f64,      // Class 3: Above sequence baseline
-    pub very_high_probability: f64, // Class 4: Much above sequence baseline
+	pub very_low_probability: f64,  // Class 0: Much below sequence baseline
+	pub low_probability: f64,       // Class 1: Below sequence baseline
+	pub medium_probability: f64,    // Class 2: Around sequence baseline
+	pub high_probability: f64,      // Class 3: Above sequence baseline
+	pub very_high_probability: f64, // Class 4: Much above sequence baseline
 }
 
 impl DirectionOutput {
-    /// Get the most likely direction (5-class system)
-    pub fn get_prediction(&self) -> String {
-        let probabilities = [
-            ("DUMP", self.dump_probability),
-            ("DOWN", self.down_probability),
-            ("SIDEWAYS", self.sideways_probability),
-            ("UP", self.up_probability),
-            ("PUMP", self.pump_probability),
-        ];
+	/// Get the most likely direction (5-class system)
+	pub fn get_prediction(&self) -> String {
+		let probabilities = [
+			("DUMP", self.dump_probability),
+			("DOWN", self.down_probability),
+			("SIDEWAYS", self.sideways_probability),
+			("UP", self.up_probability),
+			("PUMP", self.pump_probability),
+		];
 
-        let (prediction, _) = probabilities
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .unwrap();
+		let (prediction, _) = probabilities
+			.iter()
+			.max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+			.unwrap();
 
-        prediction.to_string()
-    }
+		prediction.to_string()
+	}
 
-    /// Get confidence (highest probability across all 5 classes)
-    pub fn get_confidence(&self) -> f64 {
-        self.dump_probability
-            .max(self.down_probability)
-            .max(self.sideways_probability)
-            .max(self.up_probability)
-            .max(self.pump_probability)
-    }
+	/// Get confidence (highest probability across all 5 classes)
+	pub fn get_confidence(&self) -> f64 {
+		self.dump_probability
+			.max(self.down_probability)
+			.max(self.sideways_probability)
+			.max(self.up_probability)
+			.max(self.pump_probability)
+	}
 }
 
 impl VolatilityOutput {
-    /// Get the most likely volatility regime (5-class system)
-    pub fn get_prediction(&self) -> String {
-        let probabilities = [
-            ("VERY_LOW", self.very_low_probability),
-            ("LOW", self.low_probability),
-            ("MEDIUM", self.medium_probability),
-            ("HIGH", self.high_probability),
-            ("VERY_HIGH", self.very_high_probability),
-        ];
+	/// Get the most likely volatility regime (5-class system)
+	pub fn get_prediction(&self) -> String {
+		let probabilities = [
+			("VERY_LOW", self.very_low_probability),
+			("LOW", self.low_probability),
+			("MEDIUM", self.medium_probability),
+			("HIGH", self.high_probability),
+			("VERY_HIGH", self.very_high_probability),
+		];
 
-        let (prediction, _) = probabilities
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .unwrap();
+		let (prediction, _) = probabilities
+			.iter()
+			.max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+			.unwrap();
 
-        prediction.to_string()
-    }
+		prediction.to_string()
+	}
 
-    /// Get confidence (highest probability across all 5 classes)
-    pub fn get_confidence(&self) -> f64 {
-        self.very_low_probability
-            .max(self.low_probability)
-            .max(self.medium_probability)
-            .max(self.high_probability)
-            .max(self.very_high_probability)
-    }
+	/// Get confidence (highest probability across all 5 classes)
+	pub fn get_confidence(&self) -> f64 {
+		self.very_low_probability
+			.max(self.low_probability)
+			.max(self.medium_probability)
+			.max(self.high_probability)
+			.max(self.very_high_probability)
+	}
 }
 
 /// Sentiment output structure (5-class system)
 #[derive(Debug, Clone)]
 pub struct SentimentOutput {
-    pub very_bearish_probability: f64, // Class 0: Very bearish sentiment (strong distribution)
-    pub bearish_probability: f64,      // Class 1: Bearish sentiment (moderate distribution)
-    pub neutral_probability: f64,      // Class 2: Neutral sentiment
-    pub bullish_probability: f64,      // Class 3: Bullish sentiment (moderate accumulation)
-    pub very_bullish_probability: f64, // Class 4: Very bullish sentiment (strong accumulation)
+	pub very_bearish_probability: f64, // Class 0: Very bearish sentiment (strong distribution)
+	pub bearish_probability: f64,      // Class 1: Bearish sentiment (moderate distribution)
+	pub neutral_probability: f64,      // Class 2: Neutral sentiment
+	pub bullish_probability: f64,      // Class 3: Bullish sentiment (moderate accumulation)
+	pub very_bullish_probability: f64, // Class 4: Very bullish sentiment (strong accumulation)
 }
 
 impl SentimentOutput {
-    /// Get the most likely sentiment (5-class system)
-    pub fn get_prediction(&self) -> String {
-        let probabilities = [
-            ("VERY_BEARISH", self.very_bearish_probability),
-            ("BEARISH", self.bearish_probability),
-            ("NEUTRAL", self.neutral_probability),
-            ("BULLISH", self.bullish_probability),
-            ("VERY_BULLISH", self.very_bullish_probability),
-        ];
+	/// Get the most likely sentiment (5-class system)
+	pub fn get_prediction(&self) -> String {
+		let probabilities = [
+			("VERY_BEARISH", self.very_bearish_probability),
+			("BEARISH", self.bearish_probability),
+			("NEUTRAL", self.neutral_probability),
+			("BULLISH", self.bullish_probability),
+			("VERY_BULLISH", self.very_bullish_probability),
+		];
 
-        let (prediction, _) = probabilities
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .unwrap();
+		let (prediction, _) = probabilities
+			.iter()
+			.max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+			.unwrap();
 
-        prediction.to_string()
-    }
+		prediction.to_string()
+	}
 
-    /// Get confidence (highest probability across all 5 classes)
-    pub fn get_confidence(&self) -> f64 {
-        self.very_bearish_probability
-            .max(self.bearish_probability)
-            .max(self.neutral_probability)
-            .max(self.bullish_probability)
-            .max(self.very_bullish_probability)
-    }
+	/// Get confidence (highest probability across all 5 classes)
+	pub fn get_confidence(&self) -> f64 {
+		self.very_bearish_probability
+			.max(self.bearish_probability)
+			.max(self.neutral_probability)
+			.max(self.bullish_probability)
+			.max(self.very_bullish_probability)
+	}
 }
 
 /// Volume prediction output (5-class system)
 #[derive(Debug, Clone)]
 pub struct VolumeOutput {
-    pub very_low_probability: f64,  // Class 0: Very low volume
-    pub low_probability: f64,       // Class 1: Low volume
-    pub medium_probability: f64,    // Class 2: Medium volume
-    pub high_probability: f64,      // Class 3: High volume
-    pub very_high_probability: f64, // Class 4: Very high volume
+	pub very_low_probability: f64,  // Class 0: Very low volume
+	pub low_probability: f64,       // Class 1: Low volume
+	pub medium_probability: f64,    // Class 2: Medium volume
+	pub high_probability: f64,      // Class 3: High volume
+	pub very_high_probability: f64, // Class 4: Very high volume
 }
 
 impl VolumeOutput {
-    /// Get the most likely volume regime (5-class system)
-    pub fn get_prediction(&self) -> String {
-        let probabilities = [
-            ("VERY_LOW", self.very_low_probability),
-            ("LOW", self.low_probability),
-            ("MEDIUM", self.medium_probability),
-            ("HIGH", self.high_probability),
-            ("VERY_HIGH", self.very_high_probability),
-        ];
+	/// Get the most likely volume regime (5-class system)
+	pub fn get_prediction(&self) -> String {
+		let probabilities = [
+			("VERY_LOW", self.very_low_probability),
+			("LOW", self.low_probability),
+			("MEDIUM", self.medium_probability),
+			("HIGH", self.high_probability),
+			("VERY_HIGH", self.very_high_probability),
+		];
 
-        let (prediction, _) = probabilities
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .unwrap();
+		let (prediction, _) = probabilities
+			.iter()
+			.max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+			.unwrap();
 
-        prediction.to_string()
-    }
+		prediction.to_string()
+	}
 
-    /// Get confidence (highest probability across all 5 classes)
-    pub fn get_confidence(&self) -> f64 {
-        self.very_low_probability
-            .max(self.low_probability)
-            .max(self.medium_probability)
-            .max(self.high_probability)
-            .max(self.very_high_probability)
-    }
+	/// Get confidence (highest probability across all 5 classes)
+	pub fn get_confidence(&self) -> f64 {
+		self.very_low_probability
+			.max(self.low_probability)
+			.max(self.medium_probability)
+			.max(self.high_probability)
+			.max(self.very_high_probability)
+	}
 }

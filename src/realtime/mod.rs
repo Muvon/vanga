@@ -29,46 +29,46 @@ pub const AUTO_FEATURE_WINDOW: usize = 0;
 /// Configuration for real-time prediction streaming
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealtimeConfig {
-    /// Path to the CSV file being monitored
-    pub file_path: PathBuf,
-    /// Trading symbol (e.g., BTCUSDT)
-    pub symbol: String,
-    /// Polling interval for health checks
-    pub poll_interval: Duration,
-    /// Maximum size of the feature buffer
-    pub buffer_size: usize,
-    /// Minimum number of data points required for prediction. Zero derives the
-    /// value from the loaded model's stats window and sequence length.
-    pub feature_window: usize,
-    /// Output format for predictions
-    pub output_format: OutputFormat,
-    /// Enable debug logging
-    pub debug: bool,
+	/// Path to the CSV file being monitored
+	pub file_path: PathBuf,
+	/// Trading symbol (e.g., BTCUSDT)
+	pub symbol: String,
+	/// Polling interval for health checks
+	pub poll_interval: Duration,
+	/// Maximum size of the feature buffer
+	pub buffer_size: usize,
+	/// Minimum number of data points required for prediction. Zero derives the
+	/// value from the loaded model's stats window and sequence length.
+	pub feature_window: usize,
+	/// Output format for predictions
+	pub output_format: OutputFormat,
+	/// Enable debug logging
+	pub debug: bool,
 }
 
 /// Output format options for streaming predictions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OutputFormat {
-    /// JSON format with full prediction details
-    Json,
-    /// CSV format for easy integration
-    Csv,
-    /// Human-readable pretty format
-    Pretty,
+	/// JSON format with full prediction details
+	Json,
+	/// CSV format for easy integration
+	Csv,
+	/// Human-readable pretty format
+	Pretty,
 }
 
 impl Default for RealtimeConfig {
-    fn default() -> Self {
-        Self {
-            file_path: PathBuf::from("data/realtime.csv"),
-            symbol: "BTCUSDT".to_string(),
-            poll_interval: Duration::from_secs(1),
-            buffer_size: 1000,
-            feature_window: AUTO_FEATURE_WINDOW,
-            output_format: OutputFormat::Json,
-            debug: false,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			file_path: PathBuf::from("data/realtime.csv"),
+			symbol: "BTCUSDT".to_string(),
+			poll_interval: Duration::from_secs(1),
+			buffer_size: 1000,
+			feature_window: AUTO_FEATURE_WINDOW,
+			output_format: OutputFormat::Json,
+			debug: false,
+		}
+	}
 }
 
 /// Start real-time prediction streaming
@@ -99,9 +99,9 @@ impl Default for RealtimeConfig {
 /// # }
 /// ```
 pub async fn start_realtime_prediction(config: RealtimeConfig) -> Result<()> {
-    log::info!("Initializing real-time prediction system");
-    log::info!("Configuration: {:?}", config);
+	log::info!("Initializing real-time prediction system");
+	log::info!("Configuration: {:?}", config);
 
-    let mut predictor = StreamingPredictor::new(config.clone()).await?;
-    predictor.run().await
+	let mut predictor = StreamingPredictor::new(config.clone()).await?;
+	predictor.run().await
 }

@@ -12,9 +12,7 @@ pub mod parser;
 pub mod sequence_utils;
 
 pub use error::{Result, VangaError};
-pub use feature_window::{
-    calculate_max_feature_window, calculate_min_data_requirements, MinDataRequirements,
-};
+pub use feature_window::{calculate_max_feature_window, calculate_min_data_requirements, MinDataRequirements};
 
 // Re-export diagnostics for easy access
 pub use diagnostics::TrainingDiagnostics;

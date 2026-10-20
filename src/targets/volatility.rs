@@ -115,75 +115,68 @@ use std::collections::HashMap;
 /// Generate volatility targets with calibrated parameters - returns both class and strength
 /// target generation between training and prediction. When None, performs calibration.
 pub fn generate_volatility_targets_with_calibrated_params(
-    df: &DataFrame,
-    horizons: &[String],
-    sequence_indices: &[usize],
-    sequence_length: usize,
-    calibrated_params: &std::collections::HashMap<
-        String,
-        crate::targets::calibration::VolatilityParams,
-    >,
+	df: &DataFrame,
+	horizons: &[String],
+	sequence_indices: &[usize],
+	sequence_length: usize,
+	calibrated_params: &std::collections::HashMap<String, crate::targets::calibration::VolatilityParams>,
 ) -> Result<TargetResult> {
-    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
-    let ohlcv_data = extract_ohlcv_data(df)?;
-    let mut targets = HashMap::new();
-    let mut strengths = HashMap::new();
+	let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
+	let ohlcv_data = extract_ohlcv_data(df)?;
+	let mut targets = HashMap::new();
+	let mut strengths = HashMap::new();
 
-    log::info!("🎯 Generating volatility targets with per-horizon calibrated parameters");
+	log::info!("🎯 Generating volatility targets with per-horizon calibrated parameters");
 
-    for horizon in horizons {
-        let params = calibrated_params.get(horizon).ok_or_else(|| {
-            crate::utils::error::VangaError::ConfigError(format!(
-                "No calibrated volatility parameters found for horizon: {}",
-                horizon
-            ))
-        })?;
+	for horizon in horizons {
+		let params = calibrated_params.get(horizon).ok_or_else(|| {
+			crate::utils::error::VangaError::ConfigError(format!(
+				"No calibrated volatility parameters found for horizon: {}",
+				horizon
+			))
+		})?;
 
-        log::debug!(
-            "  Horizon {}: bandwidth={:.6}, extreme_mult={:.2}",
-            horizon,
-            params.bandwidth,
-            params.extreme_multiplier
-        );
+		log::debug!(
+			"  Horizon {}: bandwidth={:.6}, extreme_mult={:.2}",
+			horizon,
+			params.bandwidth,
+			params.extreme_multiplier
+		);
 
-        let horizon_steps =
-            crate::utils::parser::parse_horizon_to_steps(horizon, timeframe_minutes)?;
-        let mut horizon_targets = vec![-1; sequence_indices.len()];
-        let mut horizon_strengths = vec![0.5; sequence_indices.len()];
+		let horizon_steps = crate::utils::parser::parse_horizon_to_steps(horizon, timeframe_minutes)?;
+		let mut horizon_targets = vec![-1; sequence_indices.len()];
+		let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 
-        for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
-            let sequence_end_idx = seq_idx + sequence_length;
-            let target_end_idx = sequence_end_idx + horizon_steps;
+		for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
+			let sequence_end_idx = seq_idx + sequence_length;
+			let target_end_idx = sequence_end_idx + horizon_steps;
 
-            // Check boundaries - need both sequence and horizon data
-            if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
-                // Get INPUT sequence candles (for baseline volatility)
-                let sequence_candles = &ohlcv_data[seq_idx..sequence_end_idx];
+			// Check boundaries - need both sequence and horizon data
+			if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
+				// Get INPUT sequence candles (for baseline volatility)
+				let sequence_candles = &ohlcv_data[seq_idx..sequence_end_idx];
 
-                // Get HORIZON candles (from sequence end to target horizon)
-                let horizon_candles = &ohlcv_data[sequence_end_idx..target_end_idx];
+				// Get HORIZON candles (from sequence end to target horizon)
+				let horizon_candles = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                // Only classify if we have sufficient data for ATR calculation
-                if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-                    // Use per-horizon calibrated parameters
-                    let (volatility_class, strength) = classify_volatility_with_calibrated_params(
-                        sequence_candles,
-                        horizon_candles,
-                        params,
-                    )?;
+				// Only classify if we have sufficient data for ATR calculation
+				if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
+					// Use per-horizon calibrated parameters
+					let (volatility_class, strength) =
+						classify_volatility_with_calibrated_params(sequence_candles, horizon_candles, params)?;
 
-                    horizon_targets[seq_position] = volatility_class;
-                    horizon_strengths[seq_position] = strength;
-                }
-            }
-        }
+					horizon_targets[seq_position] = volatility_class;
+					horizon_strengths[seq_position] = strength;
+				}
+			}
+		}
 
-        log_volatility_distribution(&horizon_targets, horizon);
-        targets.insert(horizon.clone(), horizon_targets);
-        strengths.insert(horizon.clone(), horizon_strengths);
-    }
+		log_volatility_distribution(&horizon_targets, horizon);
+		targets.insert(horizon.clone(), horizon_targets);
+		strengths.insert(horizon.clone(), horizon_strengths);
+	}
 
-    Ok((targets, strengths))
+	Ok((targets, strengths))
 }
 
 /// Calculate rolling ATR series for distribution analysis
@@ -204,46 +197,46 @@ pub fn generate_volatility_targets_with_calibrated_params(
 /// ## Returns
 /// Vector of normalized ATR values representing volatility distribution
 pub fn calculate_rolling_atr_series(candles: &[MarketDataRow], window: usize) -> Result<Vec<f64>> {
-    if candles.len() < window.max(2) {
-        return Ok(vec![0.02]); // Default 2% volatility for insufficient data
-    }
+	if candles.len() < window.max(2) {
+		return Ok(vec![0.02]); // Default 2% volatility for insufficient data
+	}
 
-    let mut atr_series = Vec::new();
-    let effective_window = window.max(2);
+	let mut atr_series = Vec::new();
+	let effective_window = window.max(2);
 
-    // Calculate rolling ATR for each possible window position
-    for i in 0..=(candles.len() - effective_window) {
-        let window_candles = &candles[i..i + effective_window];
-        let window_atr = get_sequence_atr_baseline(window_candles, 0.005)?;
+	// Calculate rolling ATR for each possible window position
+	for i in 0..=(candles.len() - effective_window) {
+		let window_candles = &candles[i..i + effective_window];
+		let window_atr = get_sequence_atr_baseline(window_candles, 0.005)?;
 
-        if window_atr.is_finite() && window_atr > 0.0 {
-            atr_series.push(window_atr);
-        }
-    }
+		if window_atr.is_finite() && window_atr > 0.0 {
+			atr_series.push(window_atr);
+		}
+	}
 
-    // Ensure we have at least some data points
-    if atr_series.is_empty() {
-        atr_series.push(0.02); // Default fallback
-    }
+	// Ensure we have at least some data points
+	if atr_series.is_empty() {
+		atr_series.push(0.02); // Default fallback
+	}
 
-    log::trace!(
-        "🎯 Rolling ATR Series: {} candles, window={}, {} ATR values, range=[{:.6}, {:.6}]",
-        candles.len(),
-        effective_window,
-        atr_series.len(),
-        atr_series
-            .iter()
-            .cloned()
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(f64::INFINITY),
-        atr_series
-            .iter()
-            .cloned()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(f64::NEG_INFINITY)
-    );
+	log::trace!(
+		"🎯 Rolling ATR Series: {} candles, window={}, {} ATR values, range=[{:.6}, {:.6}]",
+		candles.len(),
+		effective_window,
+		atr_series.len(),
+		atr_series
+			.iter()
+			.cloned()
+			.min_by(|a, b| a.partial_cmp(b).unwrap())
+			.unwrap_or(f64::INFINITY),
+		atr_series
+			.iter()
+			.cloned()
+			.max_by(|a, b| a.partial_cmp(b).unwrap())
+			.unwrap_or(f64::NEG_INFINITY)
+	);
 
-    Ok(atr_series)
+	Ok(atr_series)
 }
 
 /// Calculate statistical distribution metrics for ATR series analysis
@@ -255,70 +248,69 @@ pub fn calculate_rolling_atr_series(candles: &[MarketDataRow], window: usize) ->
 /// Statistical metrics including mean, standard deviation, and percentiles
 /// for adaptive volatility classification.
 pub fn calculate_atr_distribution_stats(atr_series: &[f64]) -> AtrDistributionStats {
-    if atr_series.is_empty() {
-        return AtrDistributionStats {
-            mean: 0.02,
-            std_dev: 0.01,
-            median: 0.02,
-            percentile_25: 0.015,
-            percentile_75: 0.025,
-            coefficient_of_variation: 0.5,
-        };
-    }
+	if atr_series.is_empty() {
+		return AtrDistributionStats {
+			mean: 0.02,
+			std_dev: 0.01,
+			median: 0.02,
+			percentile_25: 0.015,
+			percentile_75: 0.025,
+			coefficient_of_variation: 0.5,
+		};
+	}
 
-    let mean = atr_series.iter().sum::<f64>() / atr_series.len() as f64;
-    let variance =
-        atr_series.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / atr_series.len() as f64;
-    let std_dev = variance.sqrt();
+	let mean = atr_series.iter().sum::<f64>() / atr_series.len() as f64;
+	let variance = atr_series.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / atr_series.len() as f64;
+	let std_dev = variance.sqrt();
 
-    // Calculate percentiles
-    let mut sorted_series = atr_series.to_vec();
-    sorted_series.sort_by(|a, b| a.partial_cmp(b).unwrap());
+	// Calculate percentiles
+	let mut sorted_series = atr_series.to_vec();
+	sorted_series.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let len = sorted_series.len();
-    let median = if len.is_multiple_of(2) {
-        (sorted_series[len / 2 - 1] + sorted_series[len / 2]) / 2.0
-    } else {
-        sorted_series[len / 2]
-    };
+	let len = sorted_series.len();
+	let median = if len.is_multiple_of(2) {
+		(sorted_series[len / 2 - 1] + sorted_series[len / 2]) / 2.0
+	} else {
+		sorted_series[len / 2]
+	};
 
-    let percentile_25 = sorted_series[len / 4];
-    let percentile_75 = sorted_series[3 * len / 4];
+	let percentile_25 = sorted_series[len / 4];
+	let percentile_75 = sorted_series[3 * len / 4];
 
-    let coefficient_of_variation = if mean > 0.0 { std_dev / mean } else { 0.0 };
+	let coefficient_of_variation = if mean > 0.0 { std_dev / mean } else { 0.0 };
 
-    AtrDistributionStats {
-        mean,
-        std_dev,
-        median,
-        percentile_25,
-        percentile_75,
-        coefficient_of_variation,
-    }
+	AtrDistributionStats {
+		mean,
+		std_dev,
+		median,
+		percentile_25,
+		percentile_75,
+		coefficient_of_variation,
+	}
 }
 
 /// Statistical distribution metrics for ATR series
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtrDistributionStats {
-    pub mean: f64,
-    pub std_dev: f64,
-    pub median: f64,
-    pub percentile_25: f64,
-    pub percentile_75: f64,
-    pub coefficient_of_variation: f64,
+	pub mean: f64,
+	pub std_dev: f64,
+	pub median: f64,
+	pub percentile_25: f64,
+	pub percentile_75: f64,
+	pub coefficient_of_variation: f64,
 }
 
 impl Default for AtrDistributionStats {
-    fn default() -> Self {
-        Self {
-            mean: 0.02,
-            std_dev: 0.01,
-            median: 0.02,
-            percentile_25: 0.015,
-            percentile_75: 0.025,
-            coefficient_of_variation: 0.5,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			mean: 0.02,
+			std_dev: 0.01,
+			median: 0.02,
+			percentile_25: 0.015,
+			percentile_75: 0.025,
+			coefficient_of_variation: 0.5,
+		}
+	}
 }
 
 /// Calculate adaptive volatility bandwidth based on ATR distribution analysis
@@ -339,94 +331,92 @@ impl Default for AtrDistributionStats {
 ///
 /// ## Returns
 /// Adaptive bandwidth value optimized for current volatility regime
-pub fn calculate_adaptive_volatility_bandwidth(
-    atr_series: &[f64],
-    base_sensitivity: f64,
-) -> Result<f64> {
-    if atr_series.is_empty() {
-        return Ok(base_sensitivity);
-    }
+pub fn calculate_adaptive_volatility_bandwidth(atr_series: &[f64], base_sensitivity: f64) -> Result<f64> {
+	if atr_series.is_empty() {
+		return Ok(base_sensitivity);
+	}
 
-    let stats = calculate_atr_distribution_stats(atr_series);
+	let stats = calculate_atr_distribution_stats(atr_series);
 
-    // Calculate coefficient of variation for ATR distribution
-    let cv = if stats.mean > 1e-8 {
-        stats.std_dev / stats.mean
-    } else {
-        0.5 // Default CV for edge cases
-    };
+	// Calculate coefficient of variation for ATR distribution
+	let cv = if stats.mean > 1e-8 {
+		stats.std_dev / stats.mean
+	} else {
+		0.5 // Default CV for edge cases
+	};
 
-    // Scale bandwidth based on ATR distribution characteristics
-    // Higher CV (more volatile ATR) = wider bandwidth (less sensitive)
-    // Lower CV (stable ATR) = narrower bandwidth (more sensitive)
-    let cv_multiplier = (cv / 0.5).clamp(0.4, 2.5); // Normalize around 0.5 CV baseline
-    let adaptive_bandwidth = base_sensitivity * cv_multiplier;
+	// Scale bandwidth based on ATR distribution characteristics
+	// Higher CV (more volatile ATR) = wider bandwidth (less sensitive)
+	// Lower CV (stable ATR) = narrower bandwidth (more sensitive)
+	let cv_multiplier = (cv / 0.5).clamp(0.4, 2.5); // Normalize around 0.5 CV baseline
+	let adaptive_bandwidth = base_sensitivity * cv_multiplier;
 
-    // Apply reasonable bounds
-    let final_bandwidth = adaptive_bandwidth.clamp(0.05, 1.0);
+	// Apply reasonable bounds
+	let final_bandwidth = adaptive_bandwidth.clamp(0.05, 1.0);
 
-    log::debug!(
-        "🎯 Adaptive Volatility Bandwidth: atr_mean={:.6}, atr_std={:.6}, cv={:.4}, cv_mult={:.2}, bandwidth={:.4}",
-        stats.mean, stats.std_dev, cv, cv_multiplier, final_bandwidth
-    );
+	log::debug!(
+		"🎯 Adaptive Volatility Bandwidth: atr_mean={:.6}, atr_std={:.6}, cv={:.4}, cv_mult={:.2}, bandwidth={:.4}",
+		stats.mean,
+		stats.std_dev,
+		cv,
+		cv_multiplier,
+		final_bandwidth
+	);
 
-    Ok(final_bandwidth)
+	Ok(final_bandwidth)
 }
 ///
 /// Computes Average True Range for the sequence, using calibrated baseline
 /// instead of hardcoded values. Provides adaptive fallback based on sequence price volatility.
-pub fn get_sequence_atr_baseline(
-    sequence_candles: &[MarketDataRow],
-    min_volatility_baseline: f64,
-) -> Result<f64> {
-    if sequence_candles.len() < 2 {
-        // ADAPTIVE FALLBACK: Use calibrated minimum baseline instead of hardcoded 0.005
-        let fallback_atr = if !sequence_candles.is_empty() {
-            sequence_candles[0].close * min_volatility_baseline
-        } else {
-            min_volatility_baseline // Use calibrated minimum for edge cases
-        };
-        return Ok(fallback_atr);
-    }
+pub fn get_sequence_atr_baseline(sequence_candles: &[MarketDataRow], min_volatility_baseline: f64) -> Result<f64> {
+	if sequence_candles.len() < 2 {
+		// ADAPTIVE FALLBACK: Use calibrated minimum baseline instead of hardcoded 0.005
+		let fallback_atr = if !sequence_candles.is_empty() {
+			sequence_candles[0].close * min_volatility_baseline
+		} else {
+			min_volatility_baseline // Use calibrated minimum for edge cases
+		};
+		return Ok(fallback_atr);
+	}
 
-    let mut true_ranges = Vec::new();
+	let mut true_ranges = Vec::new();
 
-    // Calculate ATR for each candle in the sequence
-    for i in 1..sequence_candles.len() {
-        let current = &sequence_candles[i];
-        let previous = &sequence_candles[i - 1];
+	// Calculate ATR for each candle in the sequence
+	for i in 1..sequence_candles.len() {
+		let current = &sequence_candles[i];
+		let previous = &sequence_candles[i - 1];
 
-        // True Range: max(high-low, |high-prev_close|, |low-prev_close|)
-        let hl = current.high - current.low;
-        let hc = (current.high - previous.close).abs();
-        let lc = (current.low - previous.close).abs();
+		// True Range: max(high-low, |high-prev_close|, |low-prev_close|)
+		let hl = current.high - current.low;
+		let hc = (current.high - previous.close).abs();
+		let lc = (current.low - previous.close).abs();
 
-        let true_range = hl.max(hc).max(lc);
-        if true_range.is_finite() && true_range > 0.0 {
-            true_ranges.push(true_range / current.close); // Normalize by price
-        }
-    }
+		let true_range = hl.max(hc).max(lc);
+		if true_range.is_finite() && true_range > 0.0 {
+			true_ranges.push(true_range / current.close); // Normalize by price
+		}
+	}
 
-    if true_ranges.is_empty() {
-        // ADAPTIVE FALLBACK: Use sequence price range as volatility estimate
-        let prices: Vec<f64> = sequence_candles.iter().map(|c| c.close).collect();
-        let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let price_range = (max_price - min_price) / min_price;
-        return Ok(price_range.max(min_volatility_baseline)); // Use calibrated minimum
-    }
+	if true_ranges.is_empty() {
+		// ADAPTIVE FALLBACK: Use sequence price range as volatility estimate
+		let prices: Vec<f64> = sequence_candles.iter().map(|c| c.close).collect();
+		let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+		let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+		let price_range = (max_price - min_price) / min_price;
+		return Ok(price_range.max(min_volatility_baseline)); // Use calibrated minimum
+	}
 
-    // Average True Range of the sequence - this is our adaptive baseline
-    let sequence_atr = true_ranges.iter().sum::<f64>() / true_ranges.len() as f64;
+	// Average True Range of the sequence - this is our adaptive baseline
+	let sequence_atr = true_ranges.iter().sum::<f64>() / true_ranges.len() as f64;
 
-    log::trace!(
-        "🎯 Sequence ATR Baseline: {} candles, {} true_ranges, atr={:.6}",
-        sequence_candles.len(),
-        true_ranges.len(),
-        sequence_atr
-    );
+	log::trace!(
+		"🎯 Sequence ATR Baseline: {} candles, {} true_ranges, atr={:.6}",
+		sequence_candles.len(),
+		true_ranges.len(),
+		sequence_atr
+	);
 
-    Ok(sequence_atr.max(min_volatility_baseline)) // Use calibrated minimum volatility baseline
+	Ok(sequence_atr.max(min_volatility_baseline)) // Use calibrated minimum volatility baseline
 }
 
 // Removed unused function calculate_proportional_atr_window - no longer needed in simplified approach
@@ -469,51 +459,51 @@ pub fn get_sequence_atr_baseline(
 /// This ensures recent volatility patterns have stronger influence on classification
 /// while maintaining mathematical consistency with the logarithmic ratio approach.
 pub fn get_horizon_weighted_atr_baseline(
-    horizon_candles: &[MarketDataRow],
-    decay_factor: f64,
-    min_volatility_baseline: f64,
+	horizon_candles: &[MarketDataRow],
+	decay_factor: f64,
+	min_volatility_baseline: f64,
 ) -> Result<f64> {
-    // Fallback to uniform weighting for insufficient data or uniform decay factor
-    if horizon_candles.len() < 2 || (decay_factor - 1.0).abs() < f64::EPSILON {
-        return get_sequence_atr_baseline(horizon_candles, min_volatility_baseline);
-    }
+	// Fallback to uniform weighting for insufficient data or uniform decay factor
+	if horizon_candles.len() < 2 || (decay_factor - 1.0).abs() < f64::EPSILON {
+		return get_sequence_atr_baseline(horizon_candles, min_volatility_baseline);
+	}
 
-    let mut weighted_true_ranges = Vec::new();
-    let mut total_weight = 0.0;
+	let mut weighted_true_ranges = Vec::new();
+	let mut total_weight = 0.0;
 
-    // Calculate weighted True Range for each candle pair
-    for i in 1..horizon_candles.len() {
-        let current = &horizon_candles[i];
-        let previous = &horizon_candles[i - 1];
+	// Calculate weighted True Range for each candle pair
+	for i in 1..horizon_candles.len() {
+		let current = &horizon_candles[i];
+		let previous = &horizon_candles[i - 1];
 
-        // Standard True Range calculation
-        let hl = current.high - current.low;
-        let hc = (current.high - previous.close).abs();
-        let lc = (current.low - previous.close).abs();
-        let true_range = hl.max(hc).max(lc);
+		// Standard True Range calculation
+		let hl = current.high - current.low;
+		let hc = (current.high - previous.close).abs();
+		let lc = (current.low - previous.close).abs();
+		let true_range = hl.max(hc).max(lc);
 
-        if true_range.is_finite() && true_range > 0.0 {
-            // Exponential weighting: recent steps get higher weights
-            // steps_from_end = 0 for most recent, increases for older candles
-            let steps_from_end = horizon_candles.len() - i - 1;
-            let weight = decay_factor.powi(steps_from_end as i32);
+		if true_range.is_finite() && true_range > 0.0 {
+			// Exponential weighting: recent steps get higher weights
+			// steps_from_end = 0 for most recent, increases for older candles
+			let steps_from_end = horizon_candles.len() - i - 1;
+			let weight = decay_factor.powi(steps_from_end as i32);
 
-            // Normalize by current price and apply weight
-            let normalized_tr = true_range / current.close;
-            weighted_true_ranges.push(normalized_tr * weight);
-            total_weight += weight;
-        }
-    }
+			// Normalize by current price and apply weight
+			let normalized_tr = true_range / current.close;
+			weighted_true_ranges.push(normalized_tr * weight);
+			total_weight += weight;
+		}
+	}
 
-    // Fallback to uniform calculation if no valid true ranges
-    if weighted_true_ranges.is_empty() || total_weight == 0.0 {
-        return get_sequence_atr_baseline(horizon_candles, min_volatility_baseline);
-    }
+	// Fallback to uniform calculation if no valid true ranges
+	if weighted_true_ranges.is_empty() || total_weight == 0.0 {
+		return get_sequence_atr_baseline(horizon_candles, min_volatility_baseline);
+	}
 
-    // Calculate weighted average ATR
-    let weighted_atr = weighted_true_ranges.iter().sum::<f64>() / total_weight;
+	// Calculate weighted average ATR
+	let weighted_atr = weighted_true_ranges.iter().sum::<f64>() / total_weight;
 
-    log::trace!(
+	log::trace!(
         "🎯 Horizon Weighted ATR: {} candles, decay_factor={:.3}, {} weighted_ranges, weighted_atr={:.6}, total_weight={:.3}",
         horizon_candles.len(),
         decay_factor,
@@ -522,7 +512,7 @@ pub fn get_horizon_weighted_atr_baseline(
         total_weight
     );
 
-    Ok(weighted_atr.max(min_volatility_baseline)) // Use calibrated minimum volatility baseline
+	Ok(weighted_atr.max(min_volatility_baseline)) // Use calibrated minimum volatility baseline
 }
 
 /// Logarithmic volatility thresholds for regime classification
@@ -552,11 +542,11 @@ pub fn get_horizon_weighted_atr_baseline(
 /// - Example: log_threshold = -0.693 → ratio = exp(-0.693) = 0.5 (50% of baseline)
 #[derive(Debug, Clone)]
 pub struct LogVolatilityThresholds {
-    pub very_low_max: f64, // VeryLow threshold (log space)
-    pub low_max: f64,      // Low threshold (log space)
-    pub medium_max: f64,   // Medium threshold (log space)
-    pub high_max: f64,     // High threshold (log space)
-                           // Above high_max = VeryHigh
+	pub very_low_max: f64, // VeryLow threshold (log space)
+	pub low_max: f64,      // Low threshold (log space)
+	pub medium_max: f64,   // Medium threshold (log space)
+	pub high_max: f64,     // High threshold (log space)
+	                       // Above high_max = VeryHigh
 }
 
 /// Simplified volatility classification using ATR momentum approach
@@ -575,72 +565,64 @@ pub struct LogVolatilityThresholds {
 /// - **Volume Integration**: High volume volatility changes are more meaningful
 /// - **Horizon Decay**: Uses calibrated decay factor for weighted ATR calculation
 pub fn classify_volatility_with_calibrated_params(
-    sequence_candles: &[MarketDataRow],
-    horizon_candles: &[MarketDataRow],
-    calibrated_params: &crate::targets::calibration::VolatilityParams,
+	sequence_candles: &[MarketDataRow],
+	horizon_candles: &[MarketDataRow],
+	calibrated_params: &crate::targets::calibration::VolatilityParams,
 ) -> Result<(i32, f64)> {
-    if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
-        return Ok((2, 0.5)); // Default to Medium with neutral strength for insufficient data
-    }
+	if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
+		return Ok((2, 0.5)); // Default to Medium with neutral strength for insufficient data
+	}
 
-    // Calculate sequence ATR (simple, no decay needed for sequence baseline)
-    let sequence_atr = calculate_simple_atr_with_params(
-        sequence_candles,
-        calibrated_params.min_volatility_baseline,
-    )?;
+	// Calculate sequence ATR (simple, no decay needed for sequence baseline)
+	let sequence_atr = calculate_simple_atr_with_params(sequence_candles, calibrated_params.min_volatility_baseline)?;
 
-    // Calculate horizon ATR using calibrated decay factor for weighted average
-    // Higher decay = more weight on recent candles in horizon
-    let horizon_atr = get_horizon_weighted_atr_baseline(
-        horizon_candles,
-        calibrated_params.horizon_decay,
-        calibrated_params.min_volatility_baseline,
-    )?;
+	// Calculate horizon ATR using calibrated decay factor for weighted average
+	// Higher decay = more weight on recent candles in horizon
+	let horizon_atr = get_horizon_weighted_atr_baseline(
+		horizon_candles,
+		calibrated_params.horizon_decay,
+		calibrated_params.min_volatility_baseline,
+	)?;
 
-    // Ensure minimum baseline to avoid division by zero
-    let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline);
+	// Ensure minimum baseline to avoid division by zero
+	let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline);
 
-    // ATR momentum with weighted horizon ATR (uses calibrated horizon_decay)
-    let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
+	// ATR momentum with weighted horizon ATR (uses calibrated horizon_decay)
+	let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
 
-    // Volume conviction (identical to sentiment approach)
-    let sequence_volume = calculate_average_volume(sequence_candles);
-    let horizon_volume = calculate_average_volume(horizon_candles);
-    let volume_conviction = if sequence_volume > 0.0 {
-        (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0) // Log scale, clamped
-    } else {
-        0.0 // Neutral if no volume data
-    };
+	// Volume conviction (identical to sentiment approach)
+	let sequence_volume = calculate_average_volume(sequence_candles);
+	let horizon_volume = calculate_average_volume(horizon_candles);
+	let volume_conviction = if sequence_volume > 0.0 {
+		(horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0) // Log scale, clamped
+	} else {
+		0.0 // Neutral if no volume data
+	};
 
-    // Combine ATR momentum with volume conviction (momentum is primary signal)
-    let volatility_score = atr_momentum + (volume_conviction * calibrated_params.volume_weight);
+	// Combine ATR momentum with volume conviction (momentum is primary signal)
+	let volatility_score = atr_momentum + (volume_conviction * calibrated_params.volume_weight);
 
-    // Use adaptive thresholds for classification (same structure as sentiment)
-    let moderate_threshold = calibrated_params.bandwidth;
-    let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
+	// Use adaptive thresholds for classification (same structure as sentiment)
+	let moderate_threshold = calibrated_params.bandwidth;
+	let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
 
-    // Classify based on combined volatility score
-    let class = if volatility_score <= -extreme_threshold {
-        0 // VeryLow: Large ATR decrease
-    } else if volatility_score <= -moderate_threshold {
-        1 // Low: Moderate ATR decrease
-    } else if volatility_score < moderate_threshold {
-        2 // Medium: Small ATR change in either direction
-    } else if volatility_score < extreme_threshold {
-        3 // High: Moderate ATR increase
-    } else {
-        4 // VeryHigh: Large ATR increase
-    };
+	// Classify based on combined volatility score
+	let class = if volatility_score <= -extreme_threshold {
+		0 // VeryLow: Large ATR decrease
+	} else if volatility_score <= -moderate_threshold {
+		1 // Low: Moderate ATR decrease
+	} else if volatility_score < moderate_threshold {
+		2 // Medium: Small ATR change in either direction
+	} else if volatility_score < extreme_threshold {
+		3 // High: Moderate ATR increase
+	} else {
+		4 // VeryHigh: Large ATR increase
+	};
 
-    // Calculate classification strength based on distance from boundaries
-    let strength = calculate_volatility_strength(
-        volatility_score,
-        moderate_threshold,
-        extreme_threshold,
-        class,
-    );
+	// Calculate classification strength based on distance from boundaries
+	let strength = calculate_volatility_strength(volatility_score, moderate_threshold, extreme_threshold, class);
 
-    log::debug!(
+	log::debug!(
         "🎯 Weighted ATR Momentum: decay={:.2}, seq_atr={:.6}, hor_atr={:.6}, momentum={:.4}, vol_conviction={:.4}, score={:.4}, thresholds=[{:.4}, {:.4}, {:.4}, {:.4}] → class={} ({}) strength={:.3}",
         calibrated_params.horizon_decay,
         baseline_atr, horizon_atr, atr_momentum, volume_conviction, volatility_score,
@@ -648,7 +630,7 @@ pub fn classify_volatility_with_calibrated_params(
         class, ["VeryLow", "Low", "Medium", "High", "VeryHigh"][class as usize], strength
     );
 
-    Ok((class, strength))
+	Ok((class, strength))
 }
 
 /// Calibrate volatility thresholds for balanced class distribution using ATR ratios
@@ -677,133 +659,131 @@ pub fn classify_volatility_with_calibrated_params(
 /// - 0.5 = Moderate (near class boundaries)
 /// - 0.0 = Very weak (just barely in the class)
 fn calculate_volatility_strength(
-    volatility_score: f64,
-    moderate_threshold: f64,
-    extreme_threshold: f64,
-    class: i32,
+	volatility_score: f64,
+	moderate_threshold: f64,
+	extreme_threshold: f64,
+	class: i32,
 ) -> f64 {
-    match class {
-        0 => {
-            // VeryLow: volatility_score <= -extreme_threshold
-            // The more negative beyond extreme, the stronger
-            let distance_beyond = (-volatility_score - extreme_threshold).max(0.0);
-            let max_distance = extreme_threshold; // Reasonable max distance
-            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
-        }
-        1 => {
-            // Low: -extreme_threshold < volatility_score <= -moderate_threshold
-            let range_center = -(extreme_threshold + moderate_threshold) / 2.0;
-            let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
-            let distance_from_center = (volatility_score - range_center).abs();
-            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
-            strength.max(0.1) // At least 0.1 strength
-        }
-        2 => {
-            // Medium: -moderate_threshold < volatility_score < moderate_threshold
-            // Closer to zero = stronger medium signal
-            let distance_from_zero = volatility_score.abs();
-            let strength = 1.0 - (distance_from_zero / moderate_threshold).min(1.0);
-            strength.max(0.1) // At least 0.1 strength
-        }
-        3 => {
-            // High: moderate_threshold <= volatility_score < extreme_threshold
-            let range_center = (moderate_threshold + extreme_threshold) / 2.0;
-            let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
-            let distance_from_center = (volatility_score - range_center).abs();
-            let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
-            strength.max(0.1) // At least 0.1 strength
-        }
-        4 => {
-            // VeryHigh: volatility_score >= extreme_threshold
-            // The more positive beyond extreme, the stronger
-            let distance_beyond = (volatility_score - extreme_threshold).max(0.0);
-            let max_distance = extreme_threshold; // Reasonable max distance
-            (distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
-        }
-        _ => 0.5, // Default neutral strength
-    }
+	match class {
+		0 => {
+			// VeryLow: volatility_score <= -extreme_threshold
+			// The more negative beyond extreme, the stronger
+			let distance_beyond = (-volatility_score - extreme_threshold).max(0.0);
+			let max_distance = extreme_threshold; // Reasonable max distance
+			(distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+		}
+		1 => {
+			// Low: -extreme_threshold < volatility_score <= -moderate_threshold
+			let range_center = -(extreme_threshold + moderate_threshold) / 2.0;
+			let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
+			let distance_from_center = (volatility_score - range_center).abs();
+			let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+			strength.max(0.1) // At least 0.1 strength
+		}
+		2 => {
+			// Medium: -moderate_threshold < volatility_score < moderate_threshold
+			// Closer to zero = stronger medium signal
+			let distance_from_zero = volatility_score.abs();
+			let strength = 1.0 - (distance_from_zero / moderate_threshold).min(1.0);
+			strength.max(0.1) // At least 0.1 strength
+		}
+		3 => {
+			// High: moderate_threshold <= volatility_score < extreme_threshold
+			let range_center = (moderate_threshold + extreme_threshold) / 2.0;
+			let range_half_width = (extreme_threshold - moderate_threshold) / 2.0;
+			let distance_from_center = (volatility_score - range_center).abs();
+			let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+			strength.max(0.1) // At least 0.1 strength
+		}
+		4 => {
+			// VeryHigh: volatility_score >= extreme_threshold
+			// The more positive beyond extreme, the stronger
+			let distance_beyond = (volatility_score - extreme_threshold).max(0.0);
+			let max_distance = extreme_threshold; // Reasonable max distance
+			(distance_beyond / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+		}
+		_ => 0.5, // Default neutral strength
+	}
 }
 
 /// Calibrated base_sensitivity parameter for balanced volatility classification
 pub fn calibrate_volatility_bandwidth(
-    ohlcv_data: &[MarketDataRow],
-    sequence_length: usize,
-    horizon_steps: usize,
-    target_balance: f64,
-    min_baseline: f64,
+	ohlcv_data: &[MarketDataRow],
+	sequence_length: usize,
+	horizon_steps: usize,
+	target_balance: f64,
+	min_baseline: f64,
 ) -> Result<f64> {
-    if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
-        return Ok(0.3); // Default threshold for ratio-based approach
-    }
+	if ohlcv_data.len() < sequence_length + horizon_steps + 10 {
+		return Ok(0.3); // Default threshold for ratio-based approach
+	}
 
-    let mut volatility_ratios = Vec::new();
+	let mut volatility_ratios = Vec::new();
 
-    // Sample ATR ratios from historical sequence→horizon pairs
-    for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
-        let sequence_candles = &ohlcv_data[i..i + sequence_length];
-        let horizon_candles = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
+	// Sample ATR ratios from historical sequence→horizon pairs
+	for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
+		let sequence_candles = &ohlcv_data[i..i + sequence_length];
+		let horizon_candles = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
-        if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
-            // Use the min_baseline parameter passed for calibration testing
-            let sequence_atr = calculate_simple_atr_with_params(sequence_candles, min_baseline)
-                .unwrap_or(min_baseline);
-            let horizon_atr = calculate_simple_atr_with_params(horizon_candles, min_baseline)
-                .unwrap_or(min_baseline);
+		if sequence_candles.len() >= 2 && horizon_candles.len() >= 2 {
+			// Use the min_baseline parameter passed for calibration testing
+			let sequence_atr = calculate_simple_atr_with_params(sequence_candles, min_baseline).unwrap_or(min_baseline);
+			let horizon_atr = calculate_simple_atr_with_params(horizon_candles, min_baseline).unwrap_or(min_baseline);
 
-            // Calculate ratio with the test baseline
-            let baseline_atr = sequence_atr.max(min_baseline);
-            let volatility_ratio = horizon_atr / baseline_atr;
+			// Calculate ratio with the test baseline
+			let baseline_atr = sequence_atr.max(min_baseline);
+			let volatility_ratio = horizon_atr / baseline_atr;
 
-            if volatility_ratio.is_finite() && volatility_ratio > 0.0 {
-                volatility_ratios.push(volatility_ratio);
-            }
-        }
-    }
+			if volatility_ratio.is_finite() && volatility_ratio > 0.0 {
+				volatility_ratios.push(volatility_ratio);
+			}
+		}
+	}
 
-    if volatility_ratios.is_empty() {
-        return Ok(0.3); // Default fallback
-    }
+	if volatility_ratios.is_empty() {
+		return Ok(0.3); // Default fallback
+	}
 
-    // Sort ratios to find percentiles for balanced distribution
-    volatility_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = volatility_ratios.len();
+	// Sort ratios to find percentiles for balanced distribution
+	volatility_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+	let n = volatility_ratios.len();
 
-    // For 5-class system with target_balance per class (e.g., 20% each):
-    // Find percentile boundaries around neutral (1.0 for ratios)
-    let p20_idx = ((n as f64) * target_balance) as usize;
-    let p40_idx = ((n as f64) * (2.0 * target_balance)) as usize;
-    let p60_idx = ((n as f64) * (3.0 * target_balance)) as usize;
-    let p80_idx = ((n as f64) * (4.0 * target_balance)) as usize;
+	// For 5-class system with target_balance per class (e.g., 20% each):
+	// Find percentile boundaries around neutral (1.0 for ratios)
+	let p20_idx = ((n as f64) * target_balance) as usize;
+	let p40_idx = ((n as f64) * (2.0 * target_balance)) as usize;
+	let p60_idx = ((n as f64) * (3.0 * target_balance)) as usize;
+	let p80_idx = ((n as f64) * (4.0 * target_balance)) as usize;
 
-    let p20_value = volatility_ratios[p20_idx.min(n - 1)];
-    let p40_value = volatility_ratios[p40_idx.min(n - 1)];
-    let p60_value = volatility_ratios[p60_idx.min(n - 1)];
-    let p80_value = volatility_ratios[p80_idx.min(n - 1)];
+	let p20_value = volatility_ratios[p20_idx.min(n - 1)];
+	let p40_value = volatility_ratios[p40_idx.min(n - 1)];
+	let p60_value = volatility_ratios[p60_idx.min(n - 1)];
+	let p80_value = volatility_ratios[p80_idx.min(n - 1)];
 
-    // Calculate threshold distances from neutral (1.0 for ratios)
-    let threshold_40 = (1.0 - p40_value).abs();
-    let threshold_60 = (p60_value - 1.0).abs();
+	// Calculate threshold distances from neutral (1.0 for ratios)
+	let threshold_40 = (1.0 - p40_value).abs();
+	let threshold_60 = (p60_value - 1.0).abs();
 
-    // Use the moderate threshold as base sensitivity
-    let moderate_threshold = (threshold_40 + threshold_60) / 2.0;
+	// Use the moderate threshold as base sensitivity
+	let moderate_threshold = (threshold_40 + threshold_60) / 2.0;
 
-    // Ensure reasonable bounds for ratio-based approach
-    let final_sensitivity = moderate_threshold.clamp(0.1, 0.8);
+	// Ensure reasonable bounds for ratio-based approach
+	let final_sensitivity = moderate_threshold.clamp(0.1, 0.8);
 
-    log::info!(
-        "🎯 Calibrated volatility sensitivity: {:.4} (from {} samples)",
-        final_sensitivity,
-        n
-    );
-    log::info!(
-        "🎯 Volatility ratio percentiles: P20={:.3}, P40={:.3}, P60={:.3}, P80={:.3}",
-        p20_value,
-        p40_value,
-        p60_value,
-        p80_value
-    );
+	log::info!(
+		"🎯 Calibrated volatility sensitivity: {:.4} (from {} samples)",
+		final_sensitivity,
+		n
+	);
+	log::info!(
+		"🎯 Volatility ratio percentiles: P20={:.3}, P40={:.3}, P60={:.3}, P80={:.3}",
+		p20_value,
+		p40_value,
+		p60_value,
+		p80_value
+	);
 
-    Ok(final_sensitivity)
+	Ok(final_sensitivity)
 }
 
 /// Comprehensive volatility parameter calibration following sentiment success pattern
@@ -823,146 +803,136 @@ pub fn calibrate_volatility_bandwidth(
 /// 3. Find optimal parameters that achieve balanced 20% per class distribution
 /// 4. Return best parameters with balance quality score
 pub fn calibrate_volatility_comprehensive(
-    ohlcv_data: &[MarketDataRow],
-    sequence_length: usize,
-    horizon_steps: usize,
-    target_balance: f64,
-    min_baseline: f64,
+	ohlcv_data: &[MarketDataRow],
+	sequence_length: usize,
+	horizon_steps: usize,
+	target_balance: f64,
+	min_baseline: f64,
 ) -> Result<(f64, f64, f64)> {
-    if ohlcv_data.len() < sequence_length + horizon_steps + 50 {
-        return Ok((0.02, 0.1, 2.0)); // Default parameters
-    }
+	if ohlcv_data.len() < sequence_length + horizon_steps + 50 {
+		return Ok((0.02, 0.1, 2.0)); // Default parameters
+	}
 
-    // Collect all ATR momentum and volume data for testing
-    let mut test_data = Vec::new();
+	// Collect all ATR momentum and volume data for testing
+	let mut test_data = Vec::new();
 
-    for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
-        let sequence_ohlcv = &ohlcv_data[i..i + sequence_length];
-        let horizon_ohlcv = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
+	for i in 0..(ohlcv_data.len() - sequence_length - horizon_steps) {
+		let sequence_ohlcv = &ohlcv_data[i..i + sequence_length];
+		let horizon_ohlcv = &ohlcv_data[i + sequence_length..i + sequence_length + horizon_steps];
 
-        if sequence_ohlcv.len() >= 3 && horizon_ohlcv.len() >= 3 {
-            // Use the min_baseline parameter for calibration testing
-            let sequence_atr = calculate_simple_atr_with_params(sequence_ohlcv, min_baseline)
-                .unwrap_or(min_baseline);
-            let horizon_atr = calculate_simple_atr_with_params(horizon_ohlcv, min_baseline)
-                .unwrap_or(min_baseline);
-            let sequence_volume = calculate_average_volume(sequence_ohlcv);
-            let horizon_volume = calculate_average_volume(horizon_ohlcv);
+		if sequence_ohlcv.len() >= 3 && horizon_ohlcv.len() >= 3 {
+			// Use the min_baseline parameter for calibration testing
+			let sequence_atr = calculate_simple_atr_with_params(sequence_ohlcv, min_baseline).unwrap_or(min_baseline);
+			let horizon_atr = calculate_simple_atr_with_params(horizon_ohlcv, min_baseline).unwrap_or(min_baseline);
+			let sequence_volume = calculate_average_volume(sequence_ohlcv);
+			let horizon_volume = calculate_average_volume(horizon_ohlcv);
 
-            let baseline_atr = sequence_atr.max(min_baseline);
-            if baseline_atr > 0.0 && sequence_volume > 0.0 {
-                let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
-                let volume_conviction = (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0);
+			let baseline_atr = sequence_atr.max(min_baseline);
+			if baseline_atr > 0.0 && sequence_volume > 0.0 {
+				let atr_momentum = (horizon_atr - baseline_atr) / baseline_atr;
+				let volume_conviction = (horizon_volume / sequence_volume).ln().clamp(-2.0, 2.0);
 
-                if atr_momentum.is_finite() && volume_conviction.is_finite() {
-                    test_data.push((atr_momentum, volume_conviction));
-                }
-            }
-        }
-    }
+				if atr_momentum.is_finite() && volume_conviction.is_finite() {
+					test_data.push((atr_momentum, volume_conviction));
+				}
+			}
+		}
+	}
 
-    if test_data.len() < 100 {
-        return Ok((0.02, 0.1, 2.0)); // Need sufficient data for calibration
-    }
+	if test_data.len() < 100 {
+		return Ok((0.02, 0.1, 2.0)); // Need sufficient data for calibration
+	}
 
-    // Test different parameter combinations to find optimal balance
-    let sensitivity_candidates = vec![
-        0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.08,
-    ];
-    let volume_weight_candidates = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
-    let extreme_multiplier_candidates = vec![1.5, 1.8, 2.0, 2.2, 2.5, 3.0];
+	// Test different parameter combinations to find optimal balance
+	let sensitivity_candidates = vec![0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.08];
+	let volume_weight_candidates = vec![0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
+	let extreme_multiplier_candidates = vec![1.5, 1.8, 2.0, 2.2, 2.5, 3.0];
 
-    let mut best_sensitivity = 0.02;
-    let mut best_volume_weight = 0.1;
-    let mut best_extreme_multiplier = 2.0;
-    let mut best_balance_score = f64::INFINITY;
+	let mut best_sensitivity = 0.02;
+	let mut best_volume_weight = 0.1;
+	let mut best_extreme_multiplier = 2.0;
+	let mut best_balance_score = f64::INFINITY;
 
-    log::info!(
-        "🔍 Testing {} parameter combinations for optimal volatility calibration...",
-        sensitivity_candidates.len()
-            * volume_weight_candidates.len()
-            * extreme_multiplier_candidates.len()
-    );
+	log::info!(
+		"🔍 Testing {} parameter combinations for optimal volatility calibration...",
+		sensitivity_candidates.len() * volume_weight_candidates.len() * extreme_multiplier_candidates.len()
+	);
 
-    for &sensitivity in &sensitivity_candidates {
-        for &volume_weight in &volume_weight_candidates {
-            for &extreme_multiplier in &extreme_multiplier_candidates {
-                // Test this parameter combination
-                let balance_score = test_volatility_parameter_combination(
-                    &test_data,
-                    sensitivity,
-                    volume_weight,
-                    extreme_multiplier,
-                    target_balance,
-                );
+	for &sensitivity in &sensitivity_candidates {
+		for &volume_weight in &volume_weight_candidates {
+			for &extreme_multiplier in &extreme_multiplier_candidates {
+				// Test this parameter combination
+				let balance_score = test_volatility_parameter_combination(
+					&test_data,
+					sensitivity,
+					volume_weight,
+					extreme_multiplier,
+					target_balance,
+				);
 
-                if balance_score < best_balance_score {
-                    best_balance_score = balance_score;
-                    best_sensitivity = sensitivity;
-                    best_volume_weight = volume_weight;
-                    best_extreme_multiplier = extreme_multiplier;
-                }
-            }
-        }
-    }
+				if balance_score < best_balance_score {
+					best_balance_score = balance_score;
+					best_sensitivity = sensitivity;
+					best_volume_weight = volume_weight;
+					best_extreme_multiplier = extreme_multiplier;
+				}
+			}
+		}
+	}
 
-    log::info!(
+	log::info!(
         "🎯 Optimal volatility parameters: sensitivity={:.4}, volume_weight={:.3}, extreme_multiplier={:.2}, balance_score={:.4}",
         best_sensitivity, best_volume_weight, best_extreme_multiplier, best_balance_score
     );
 
-    Ok((
-        best_sensitivity,
-        best_volume_weight,
-        best_extreme_multiplier,
-    ))
+	Ok((best_sensitivity, best_volume_weight, best_extreme_multiplier))
 }
 
 /// Test a specific volatility parameter combination and return balance quality score
 fn test_volatility_parameter_combination(
-    test_data: &[(f64, f64)], // (atr_momentum, volume_conviction) pairs
-    sensitivity: f64,
-    volume_weight: f64,
-    extreme_multiplier: f64,
-    target_balance: f64,
+	test_data: &[(f64, f64)], // (atr_momentum, volume_conviction) pairs
+	sensitivity: f64,
+	volume_weight: f64,
+	extreme_multiplier: f64,
+	target_balance: f64,
 ) -> f64 {
-    let mut class_counts = [0usize; 5];
-    let extreme_threshold = sensitivity * extreme_multiplier;
+	let mut class_counts = [0usize; 5];
+	let extreme_threshold = sensitivity * extreme_multiplier;
 
-    // Classify all test samples with these parameters
-    for &(atr_momentum, volume_conviction) in test_data {
-        let volatility_score = atr_momentum + (volume_conviction * volume_weight);
+	// Classify all test samples with these parameters
+	for &(atr_momentum, volume_conviction) in test_data {
+		let volatility_score = atr_momentum + (volume_conviction * volume_weight);
 
-        let class = if volatility_score <= -extreme_threshold {
-            0 // VeryLow
-        } else if volatility_score <= -sensitivity {
-            1 // Low
-        } else if volatility_score < sensitivity {
-            2 // Medium
-        } else if volatility_score < extreme_threshold {
-            3 // High
-        } else {
-            4 // VeryHigh
-        };
+		let class = if volatility_score <= -extreme_threshold {
+			0 // VeryLow
+		} else if volatility_score <= -sensitivity {
+			1 // Low
+		} else if volatility_score < sensitivity {
+			2 // Medium
+		} else if volatility_score < extreme_threshold {
+			3 // High
+		} else {
+			4 // VeryHigh
+		};
 
-        class_counts[class] += 1;
-    }
+		class_counts[class] += 1;
+	}
 
-    // Calculate balance quality score (lower is better)
-    let total_samples = test_data.len() as f64;
-    let mut balance_score = 0.0;
+	// Calculate balance quality score (lower is better)
+	let total_samples = test_data.len() as f64;
+	let mut balance_score = 0.0;
 
-    for count in &class_counts {
-        let percentage = (*count as f64) / total_samples;
-        let deviation = (percentage - target_balance).abs();
-        balance_score += deviation * deviation; // Squared deviation penalty
-    }
+	for count in &class_counts {
+		let percentage = (*count as f64) / total_samples;
+		let deviation = (percentage - target_balance).abs();
+		balance_score += deviation * deviation; // Squared deviation penalty
+	}
 
-    // Add penalty for empty classes
-    let empty_classes = class_counts.iter().filter(|&&count| count == 0).count();
-    balance_score += (empty_classes as f64) * 0.1; // 10% penalty per empty class
+	// Add penalty for empty classes
+	let empty_classes = class_counts.iter().filter(|&&count| count == 0).count();
+	balance_score += (empty_classes as f64) * 0.1; // 10% penalty per empty class
 
-    balance_score
+	balance_score
 }
 
 /// Calculate simple ATR for sequence→horizon comparison
@@ -985,51 +955,48 @@ fn test_volatility_parameter_combination(
 /// - **Horizon**: Measures target volatility for comparison
 /// - **Ratio**: horizon_atr / sequence_atr shows volatility change
 pub fn calculate_simple_atr(candles: &[MarketDataRow]) -> Result<f64> {
-    calculate_simple_atr_with_params(candles, 0.005) // Default minimum for backward compatibility
+	calculate_simple_atr_with_params(candles, 0.005) // Default minimum for backward compatibility
 }
 
 /// Calculate simple ATR with configurable minimum baseline
-pub fn calculate_simple_atr_with_params(
-    candles: &[MarketDataRow],
-    min_baseline: f64,
-) -> Result<f64> {
-    if candles.len() < 2 {
-        return Ok(min_baseline * 2.0); // Default volatility for insufficient data
-    }
+pub fn calculate_simple_atr_with_params(candles: &[MarketDataRow], min_baseline: f64) -> Result<f64> {
+	if candles.len() < 2 {
+		return Ok(min_baseline * 2.0); // Default volatility for insufficient data
+	}
 
-    let mut true_ranges = Vec::new();
+	let mut true_ranges = Vec::new();
 
-    // Calculate True Range for each candle pair
-    for i in 1..candles.len() {
-        let current = &candles[i];
-        let previous = &candles[i - 1];
+	// Calculate True Range for each candle pair
+	for i in 1..candles.len() {
+		let current = &candles[i];
+		let previous = &candles[i - 1];
 
-        // Standard True Range calculation
-        let high_low = current.high - current.low;
-        let high_close = (current.high - previous.close).abs();
-        let low_close = (current.low - previous.close).abs();
-        let true_range = high_low.max(high_close).max(low_close);
+		// Standard True Range calculation
+		let high_low = current.high - current.low;
+		let high_close = (current.high - previous.close).abs();
+		let low_close = (current.low - previous.close).abs();
+		let true_range = high_low.max(high_close).max(low_close);
 
-        if true_range.is_finite() && true_range > 0.0 && current.close > 0.0 {
-            // Normalize by current price for percentage-based comparison
-            let normalized_tr = true_range / current.close;
-            true_ranges.push(normalized_tr);
-        }
-    }
+		if true_range.is_finite() && true_range > 0.0 && current.close > 0.0 {
+			// Normalize by current price for percentage-based comparison
+			let normalized_tr = true_range / current.close;
+			true_ranges.push(normalized_tr);
+		}
+	}
 
-    if true_ranges.is_empty() {
-        // Fallback: use price range as volatility estimate
-        let prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
-        let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let price_range = (max_price - min_price) / min_price;
-        return Ok(price_range.max(min_baseline));
-    }
+	if true_ranges.is_empty() {
+		// Fallback: use price range as volatility estimate
+		let prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
+		let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+		let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+		let price_range = (max_price - min_price) / min_price;
+		return Ok(price_range.max(min_baseline));
+	}
 
-    // Simple average of normalized true ranges
-    let simple_atr = true_ranges.iter().sum::<f64>() / true_ranges.len() as f64;
+	// Simple average of normalized true ranges
+	let simple_atr = true_ranges.iter().sum::<f64>() / true_ranges.len() as f64;
 
-    Ok(simple_atr.max(min_baseline))
+	Ok(simple_atr.max(min_baseline))
 }
 
 /// Calculate volatility trend change (similar to direction's momentum change approach)
@@ -1047,27 +1014,27 @@ pub fn calculate_simple_atr_with_params(
 /// - Negative: Volatility is decelerating (trend becoming less volatile)
 /// - Zero: Volatility trend is stable
 pub fn calculate_volatility_trend_change(
-    sequence_candles: &[MarketDataRow],
-    horizon_candles: &[MarketDataRow],
+	sequence_candles: &[MarketDataRow],
+	horizon_candles: &[MarketDataRow],
 ) -> Result<f64> {
-    if sequence_candles.len() < 3 || horizon_candles.len() < 3 {
-        return Ok(0.0); // No trend change for insufficient data
-    }
+	if sequence_candles.len() < 3 || horizon_candles.len() < 3 {
+		return Ok(0.0); // No trend change for insufficient data
+	}
 
-    // Calculate rolling ATR values for trend analysis
-    let sequence_atr_values = calculate_rolling_atr_values(sequence_candles)?;
-    let horizon_atr_values = calculate_rolling_atr_values(horizon_candles)?;
+	// Calculate rolling ATR values for trend analysis
+	let sequence_atr_values = calculate_rolling_atr_values(sequence_candles)?;
+	let horizon_atr_values = calculate_rolling_atr_values(horizon_candles)?;
 
-    if sequence_atr_values.len() < 2 || horizon_atr_values.len() < 2 {
-        return Ok(0.0);
-    }
+	if sequence_atr_values.len() < 2 || horizon_atr_values.len() < 2 {
+		return Ok(0.0);
+	}
 
-    // Calculate volatility trend (slope) for each period
-    let sequence_trend = calculate_atr_trend_slope(&sequence_atr_values)?;
-    let horizon_trend = calculate_atr_trend_slope(&horizon_atr_values)?;
+	// Calculate volatility trend (slope) for each period
+	let sequence_trend = calculate_atr_trend_slope(&sequence_atr_values)?;
+	let horizon_trend = calculate_atr_trend_slope(&horizon_atr_values)?;
 
-    // Return trend change (similar to direction's momentum change)
-    Ok(horizon_trend - sequence_trend)
+	// Return trend change (similar to direction's momentum change)
+	Ok(horizon_trend - sequence_trend)
 }
 
 /// Calculate volume-weighted volatility change (similar to price_level's VWAP approach)
@@ -1080,23 +1047,23 @@ pub fn calculate_volatility_trend_change(
 /// 2. Calculate volume-weighted ATR for horizon period
 /// 3. Return the ratio change with volume weighting
 pub fn calculate_volume_weighted_volatility_change(
-    sequence_candles: &[MarketDataRow],
-    horizon_candles: &[MarketDataRow],
+	sequence_candles: &[MarketDataRow],
+	horizon_candles: &[MarketDataRow],
 ) -> Result<f64> {
-    if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
-        return Ok(1.0); // Neutral change for insufficient data
-    }
+	if sequence_candles.len() < 2 || horizon_candles.len() < 2 {
+		return Ok(1.0); // Neutral change for insufficient data
+	}
 
-    // Use a default min_baseline for these helper functions
-    let min_baseline = 0.005;
-    let sequence_vw_atr = calculate_volume_weighted_atr(sequence_candles, min_baseline)?;
-    let horizon_vw_atr = calculate_volume_weighted_atr(horizon_candles, min_baseline)?;
+	// Use a default min_baseline for these helper functions
+	let min_baseline = 0.005;
+	let sequence_vw_atr = calculate_volume_weighted_atr(sequence_candles, min_baseline)?;
+	let horizon_vw_atr = calculate_volume_weighted_atr(horizon_candles, min_baseline)?;
 
-    if sequence_vw_atr <= 0.0 {
-        return Ok(1.0);
-    }
+	if sequence_vw_atr <= 0.0 {
+		return Ok(1.0);
+	}
 
-    Ok(horizon_vw_atr / sequence_vw_atr)
+	Ok(horizon_vw_atr / sequence_vw_atr)
 }
 
 /// Calculate volatility persistence (regime stability measure)
@@ -1109,21 +1076,21 @@ pub fn calculate_volume_weighted_volatility_change(
 /// 2. Calculate volatility consistency within horizon
 /// 3. Return persistence score (higher = more stable regime)
 pub fn calculate_volatility_persistence(
-    sequence_candles: &[MarketDataRow],
-    horizon_candles: &[MarketDataRow],
+	sequence_candles: &[MarketDataRow],
+	horizon_candles: &[MarketDataRow],
 ) -> Result<f64> {
-    if sequence_candles.len() < 3 || horizon_candles.len() < 3 {
-        return Ok(0.5); // Neutral persistence for insufficient data
-    }
+	if sequence_candles.len() < 3 || horizon_candles.len() < 3 {
+		return Ok(0.5); // Neutral persistence for insufficient data
+	}
 
-    let sequence_atr_values = calculate_rolling_atr_values(sequence_candles)?;
-    let horizon_atr_values = calculate_rolling_atr_values(horizon_candles)?;
+	let sequence_atr_values = calculate_rolling_atr_values(sequence_candles)?;
+	let horizon_atr_values = calculate_rolling_atr_values(horizon_candles)?;
 
-    let sequence_consistency = calculate_atr_consistency(&sequence_atr_values);
-    let horizon_consistency = calculate_atr_consistency(&horizon_atr_values);
+	let sequence_consistency = calculate_atr_consistency(&sequence_atr_values);
+	let horizon_consistency = calculate_atr_consistency(&horizon_atr_values);
 
-    // Return average consistency as persistence score
-    Ok((sequence_consistency + horizon_consistency) / 2.0)
+	// Return average consistency as persistence score
+	Ok((sequence_consistency + horizon_consistency) / 2.0)
 }
 
 /// Combine multiple volatility features into enhanced score
@@ -1131,195 +1098,183 @@ pub fn calculate_volatility_persistence(
 /// This function combines all volatility features similar to how direction
 /// and price_level targets use multiple features for robust classification.
 pub fn combine_volatility_features(
-    volatility_ratio: f64,
-    trend_change: f64,
-    volume_weighted_change: f64,
-    persistence: f64,
+	volatility_ratio: f64,
+	trend_change: f64,
+	volume_weighted_change: f64,
+	persistence: f64,
 ) -> f64 {
-    // Weight the features (can be tuned based on performance)
-    let ratio_weight = 0.4; // Basic ratio (existing approach)
-    let trend_weight = 0.3; // Trend change (new, similar to direction)
-    let volume_weight = 0.2; // Volume weighting (new, similar to price_level)
-    let persistence_weight = 0.1; // Persistence (new, regime stability)
+	// Weight the features (can be tuned based on performance)
+	let ratio_weight = 0.4; // Basic ratio (existing approach)
+	let trend_weight = 0.3; // Trend change (new, similar to direction)
+	let volume_weight = 0.2; // Volume weighting (new, similar to price_level)
+	let persistence_weight = 0.1; // Persistence (new, regime stability)
 
-    // Normalize trend_change and combine
-    let normalized_trend = (trend_change * 10.0).tanh(); // Normalize to [-1, 1] range
-    let normalized_volume = volume_weighted_change.ln(); // Log space for ratios
+	// Normalize trend_change and combine
+	let normalized_trend = (trend_change * 10.0).tanh(); // Normalize to [-1, 1] range
+	let normalized_volume = volume_weighted_change.ln(); // Log space for ratios
 
-    // Combine features into enhanced score
-    let base_score = volatility_ratio.ln(); // Log space for ratios
-    let trend_component = normalized_trend * trend_weight / ratio_weight;
-    let volume_component = normalized_volume * volume_weight / ratio_weight;
-    let persistence_component = (persistence - 0.5) * persistence_weight / ratio_weight;
+	// Combine features into enhanced score
+	let base_score = volatility_ratio.ln(); // Log space for ratios
+	let trend_component = normalized_trend * trend_weight / ratio_weight;
+	let volume_component = normalized_volume * volume_weight / ratio_weight;
+	let persistence_component = (persistence - 0.5) * persistence_weight / ratio_weight;
 
-    let enhanced_score = base_score + trend_component + volume_component + persistence_component;
+	let enhanced_score = base_score + trend_component + volume_component + persistence_component;
 
-    // Convert back to ratio space
-    enhanced_score.exp()
+	// Convert back to ratio space
+	enhanced_score.exp()
 }
 
 /// Classify enhanced volatility score using adaptive thresholds
-pub fn classify_enhanced_volatility_score(
-    enhanced_score: f64,
-    moderate_threshold: f64,
-    extreme_threshold: f64,
-) -> i32 {
-    if enhanced_score <= (1.0 - extreme_threshold) {
-        0 // VeryLow
-    } else if enhanced_score <= (1.0 - moderate_threshold) {
-        1 // Low
-    } else if enhanced_score < (1.0 + moderate_threshold) {
-        2 // Medium
-    } else if enhanced_score < (1.0 + extreme_threshold) {
-        3 // High
-    } else {
-        4 // VeryHigh
-    }
+pub fn classify_enhanced_volatility_score(enhanced_score: f64, moderate_threshold: f64, extreme_threshold: f64) -> i32 {
+	if enhanced_score <= (1.0 - extreme_threshold) {
+		0 // VeryLow
+	} else if enhanced_score <= (1.0 - moderate_threshold) {
+		1 // Low
+	} else if enhanced_score < (1.0 + moderate_threshold) {
+		2 // Medium
+	} else if enhanced_score < (1.0 + extreme_threshold) {
+		3 // High
+	} else {
+		4 // VeryHigh
+	}
 }
 
 /// Helper: Calculate rolling ATR values for trend analysis
 fn calculate_rolling_atr_values(candles: &[MarketDataRow]) -> Result<Vec<f64>> {
-    if candles.len() < 2 {
-        return Ok(vec![]);
-    }
+	if candles.len() < 2 {
+		return Ok(vec![]);
+	}
 
-    let mut atr_values = Vec::new();
+	let mut atr_values = Vec::new();
 
-    // Calculate ATR for each possible window
-    for i in 1..candles.len() {
-        let window_candles = &candles[0..=i];
-        if let Ok(atr) = calculate_simple_atr(window_candles) {
-            atr_values.push(atr);
-        }
-    }
+	// Calculate ATR for each possible window
+	for i in 1..candles.len() {
+		let window_candles = &candles[0..=i];
+		if let Ok(atr) = calculate_simple_atr(window_candles) {
+			atr_values.push(atr);
+		}
+	}
 
-    Ok(atr_values)
+	Ok(atr_values)
 }
 
 /// Helper: Calculate trend slope from ATR values
 fn calculate_atr_trend_slope(atr_values: &[f64]) -> Result<f64> {
-    if atr_values.len() < 2 {
-        return Ok(0.0);
-    }
+	if atr_values.len() < 2 {
+		return Ok(0.0);
+	}
 
-    let n = atr_values.len() as f64;
-    let mut sum_x = 0.0;
-    let mut sum_y = 0.0;
-    let mut sum_xy = 0.0;
-    let mut sum_x2 = 0.0;
+	let n = atr_values.len() as f64;
+	let mut sum_x = 0.0;
+	let mut sum_y = 0.0;
+	let mut sum_xy = 0.0;
+	let mut sum_x2 = 0.0;
 
-    for (i, &atr) in atr_values.iter().enumerate() {
-        let x = i as f64;
-        sum_x += x;
-        sum_y += atr;
-        sum_xy += x * atr;
-        sum_x2 += x * x;
-    }
+	for (i, &atr) in atr_values.iter().enumerate() {
+		let x = i as f64;
+		sum_x += x;
+		sum_y += atr;
+		sum_xy += x * atr;
+		sum_x2 += x * x;
+	}
 
-    let denominator = n * sum_x2 - sum_x * sum_x;
-    if denominator.abs() < 1e-10 {
-        return Ok(0.0);
-    }
+	let denominator = n * sum_x2 - sum_x * sum_x;
+	if denominator.abs() < 1e-10 {
+		return Ok(0.0);
+	}
 
-    let slope = (n * sum_xy - sum_x * sum_y) / denominator;
-    Ok(slope)
+	let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+	Ok(slope)
 }
 
 /// Helper: Calculate volume-weighted ATR with configurable minimum baseline
 fn calculate_volume_weighted_atr(candles: &[MarketDataRow], min_baseline: f64) -> Result<f64> {
-    if candles.len() < 2 {
-        return Ok(min_baseline); // Use calibrated minimum
-    }
+	if candles.len() < 2 {
+		return Ok(min_baseline); // Use calibrated minimum
+	}
 
-    let mut weighted_sum = 0.0;
-    let mut total_weight = 0.0;
+	let mut weighted_sum = 0.0;
+	let mut total_weight = 0.0;
 
-    for i in 1..candles.len() {
-        let current = &candles[i];
-        let previous = &candles[i - 1];
+	for i in 1..candles.len() {
+		let current = &candles[i];
+		let previous = &candles[i - 1];
 
-        let high_low = current.high - current.low;
-        let high_close = (current.high - previous.close).abs();
-        let low_close = (current.low - previous.close).abs();
-        let true_range = high_low.max(high_close).max(low_close);
+		let high_low = current.high - current.low;
+		let high_close = (current.high - previous.close).abs();
+		let low_close = (current.low - previous.close).abs();
+		let true_range = high_low.max(high_close).max(low_close);
 
-        if true_range.is_finite() && true_range > 0.0 && current.close > 0.0 {
-            let normalized_tr = true_range / current.close;
-            let weight = current.volume; // Volume weighting
+		if true_range.is_finite() && true_range > 0.0 && current.close > 0.0 {
+			let normalized_tr = true_range / current.close;
+			let weight = current.volume; // Volume weighting
 
-            weighted_sum += normalized_tr * weight;
-            total_weight += weight;
-        }
-    }
+			weighted_sum += normalized_tr * weight;
+			total_weight += weight;
+		}
+	}
 
-    if total_weight <= 0.0 {
-        return calculate_simple_atr_with_params(candles, min_baseline);
-    }
+	if total_weight <= 0.0 {
+		return calculate_simple_atr_with_params(candles, min_baseline);
+	}
 
-    Ok((weighted_sum / total_weight).max(min_baseline))
+	Ok((weighted_sum / total_weight).max(min_baseline))
 }
 
 /// Helper: Calculate ATR consistency (lower = more consistent)
 fn calculate_atr_consistency(atr_values: &[f64]) -> f64 {
-    if atr_values.len() < 2 {
-        return 0.5; // Neutral consistency
-    }
+	if atr_values.len() < 2 {
+		return 0.5; // Neutral consistency
+	}
 
-    let mean = atr_values.iter().sum::<f64>() / atr_values.len() as f64;
-    let variance =
-        atr_values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / atr_values.len() as f64;
+	let mean = atr_values.iter().sum::<f64>() / atr_values.len() as f64;
+	let variance = atr_values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / atr_values.len() as f64;
 
-    let coefficient_of_variation = if mean > 0.0 {
-        variance.sqrt() / mean
-    } else {
-        1.0
-    };
+	let coefficient_of_variation = if mean > 0.0 { variance.sqrt() / mean } else { 1.0 };
 
-    // Convert to consistency score (higher = more consistent)
-    (1.0 / (1.0 + coefficient_of_variation)).clamp(0.0, 1.0)
+	// Convert to consistency score (higher = more consistent)
+	(1.0 / (1.0 + coefficient_of_variation)).clamp(0.0, 1.0)
 }
 
 /// Log volatility class distribution with logarithmic ratio analysis
 fn log_volatility_distribution(targets: &[i32], horizon: &str) {
-    let class_names = ["VeryLow", "Low", "Medium", "High", "VeryHigh"];
-    let mut class_counts = [0usize; 5];
-    let mut valid_targets = 0;
+	let class_names = ["VeryLow", "Low", "Medium", "High", "VeryHigh"];
+	let mut class_counts = [0usize; 5];
+	let mut valid_targets = 0;
 
-    for &target in targets {
-        if (0..5).contains(&target) {
-            class_counts[target as usize] += 1;
-            valid_targets += 1;
-        }
-    }
+	for &target in targets {
+		if (0..5).contains(&target) {
+			class_counts[target as usize] += 1;
+			valid_targets += 1;
+		}
+	}
 
-    if valid_targets == 0 {
-        log::warn!(
-            "📊 Log Ratio Volatility Analysis [{}]: No valid targets found",
-            horizon
-        );
-        return;
-    }
+	if valid_targets == 0 {
+		log::warn!("📊 Log Ratio Volatility Analysis [{}]: No valid targets found", horizon);
+		return;
+	}
 
-    let total_samples = valid_targets as f64;
-    let class_percentages: Vec<String> = class_counts
-        .iter()
-        .enumerate()
-        .map(|(i, &count)| {
-            let percentage = (count as f64 / total_samples) * 100.0;
-            format!("{}:{:.1}%", class_names[i], percentage)
-        })
-        .collect();
+	let total_samples = valid_targets as f64;
+	let class_percentages: Vec<String> = class_counts
+		.iter()
+		.enumerate()
+		.map(|(i, &count)| {
+			let percentage = (count as f64 / total_samples) * 100.0;
+			format!("{}:{:.1}%", class_names[i], percentage)
+		})
+		.collect();
 
-    // Calculate imbalance ratio
-    let min_class_size = class_counts.iter().filter(|&&c| c > 0).min().unwrap_or(&0);
-    let max_class_size = class_counts.iter().max().unwrap_or(&0);
-    let imbalance_ratio = if *min_class_size > 0 {
-        *max_class_size as f64 / *min_class_size as f64
-    } else {
-        f64::INFINITY
-    };
+	// Calculate imbalance ratio
+	let min_class_size = class_counts.iter().filter(|&&c| c > 0).min().unwrap_or(&0);
+	let max_class_size = class_counts.iter().max().unwrap_or(&0);
+	let imbalance_ratio = if *min_class_size > 0 {
+		*max_class_size as f64 / *min_class_size as f64
+	} else {
+		f64::INFINITY
+	};
 
-    log::info!(
+	log::info!(
         "📊 Log Ratio Volatility Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}] (BEFORE balanced selection)",
         horizon,
         valid_targets,
@@ -1335,32 +1290,32 @@ fn log_volatility_distribution(targets: &[i32], horizon: &str) {
 /// Reconstruction result for volatility predictions
 #[derive(Debug, Clone)]
 pub struct VolatilityReconstruction {
-    /// Class probabilities from model [VeryLow, Low, Medium, High, VeryHigh]
-    pub probabilities: Vec<f64>,
-    /// Expected ATR ratios for each class (target_atr / train_atr)
-    pub atr_ratios: Vec<f64>,
-    /// Expected volatility change percentages for each class
-    pub volatility_changes: Vec<f64>,
-    /// Most likely volatility regime class index
-    pub most_likely_class: usize,
-    /// Confidence (probability of most likely class)
-    pub confidence: f64,
-    /// Expected ATR ratio (weighted average)
-    pub expected_atr_ratio: f64,
-    /// Expected volatility change percentage (weighted average)
-    pub expected_volatility_change: f64,
-    /// Low volatility probability (VeryLow + Low)
-    pub low_volatility_probability: f64,
-    /// High volatility probability (High + VeryHigh)
-    pub high_volatility_probability: f64,
-    /// Extreme volatility probability (VeryLow + VeryHigh)
-    pub extreme_volatility_probability: f64,
-    /// Log space thresholds used for classification
-    pub log_thresholds: LogVolatilityThresholds,
-    /// Training ATR baseline for ratio calculations
-    pub train_atr: f64,
-    /// Recommended stop distance multiplier (for direct use in predictions)
-    pub recommended_stop_multiplier: f64,
+	/// Class probabilities from model [VeryLow, Low, Medium, High, VeryHigh]
+	pub probabilities: Vec<f64>,
+	/// Expected ATR ratios for each class (target_atr / train_atr)
+	pub atr_ratios: Vec<f64>,
+	/// Expected volatility change percentages for each class
+	pub volatility_changes: Vec<f64>,
+	/// Most likely volatility regime class index
+	pub most_likely_class: usize,
+	/// Confidence (probability of most likely class)
+	pub confidence: f64,
+	/// Expected ATR ratio (weighted average)
+	pub expected_atr_ratio: f64,
+	/// Expected volatility change percentage (weighted average)
+	pub expected_volatility_change: f64,
+	/// Low volatility probability (VeryLow + Low)
+	pub low_volatility_probability: f64,
+	/// High volatility probability (High + VeryHigh)
+	pub high_volatility_probability: f64,
+	/// Extreme volatility probability (VeryLow + VeryHigh)
+	pub extreme_volatility_probability: f64,
+	/// Log space thresholds used for classification
+	pub log_thresholds: LogVolatilityThresholds,
+	/// Training ATR baseline for ratio calculations
+	pub train_atr: f64,
+	/// Recommended stop distance multiplier (for direct use in predictions)
+	pub recommended_stop_multiplier: f64,
 }
 
 /// Reconstruct volatility predictions from model probabilities using enhanced multi-feature approach
@@ -1377,135 +1332,129 @@ pub struct VolatilityReconstruction {
 /// # Returns
 /// * `VolatilityReconstruction` - Complete reconstruction with enhanced volatility metrics
 pub fn reconstruct_volatility(
-    probabilities: &[f64],
-    sequence_ohlcv: &[MarketDataRow],
-    calibrated_params: &crate::targets::calibration::VolatilityParams,
+	probabilities: &[f64],
+	sequence_ohlcv: &[MarketDataRow],
+	calibrated_params: &crate::targets::calibration::VolatilityParams,
 ) -> Result<VolatilityReconstruction> {
-    // Validate inputs
-    if probabilities.len() != 5 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Volatility reconstruction requires exactly 5 class probabilities".to_string(),
-        ));
-    }
+	// Validate inputs
+	if probabilities.len() != 5 {
+		return Err(crate::utils::error::VangaError::DataError(
+			"Volatility reconstruction requires exactly 5 class probabilities".to_string(),
+		));
+	}
 
-    if sequence_ohlcv.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Sequence OHLCV data is required for volatility reconstruction".to_string(),
-        ));
-    }
+	if sequence_ohlcv.is_empty() {
+		return Err(crate::utils::error::VangaError::DataError(
+			"Sequence OHLCV data is required for volatility reconstruction".to_string(),
+		));
+	}
 
-    // Calculate sequence ATR baseline (same as training)
-    let sequence_atr = calculate_simple_atr_with_params(
-        sequence_ohlcv,
-        calibrated_params.min_volatility_baseline,
-    )?;
-    let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline); // Same minimum as training
+	// Calculate sequence ATR baseline (same as training)
+	let sequence_atr = calculate_simple_atr_with_params(sequence_ohlcv, calibrated_params.min_volatility_baseline)?;
+	let baseline_atr = sequence_atr.max(calibrated_params.min_volatility_baseline); // Same minimum as training
 
-    if baseline_atr <= 0.0 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Invalid sequence ATR baseline for volatility reconstruction".to_string(),
-        ));
-    }
+	if baseline_atr <= 0.0 {
+		return Err(crate::utils::error::VangaError::DataError(
+			"Invalid sequence ATR baseline for volatility reconstruction".to_string(),
+		));
+	}
 
-    // Use calibrated parameters for threshold calculation (same as training)
-    let moderate_threshold = calibrated_params.bandwidth;
-    let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
+	// Use calibrated parameters for threshold calculation (same as training)
+	let moderate_threshold = calibrated_params.bandwidth;
+	let extreme_threshold = calibrated_params.bandwidth * calibrated_params.extreme_multiplier;
 
-    // RECONSTRUCTION MUST MATCH TRAINING LOGIC EXACTLY
-    // Training uses: atr_momentum = (horizon_atr - baseline_atr) / baseline_atr
-    // Which simplifies to: atr_momentum = (horizon_atr / baseline_atr) - 1
-    // Therefore: horizon_atr / baseline_atr = atr_momentum + 1
+	// RECONSTRUCTION MUST MATCH TRAINING LOGIC EXACTLY
+	// Training uses: atr_momentum = (horizon_atr - baseline_atr) / baseline_atr
+	// Which simplifies to: atr_momentum = (horizon_atr / baseline_atr) - 1
+	// Therefore: horizon_atr / baseline_atr = atr_momentum + 1
 
-    // Calculate the ATR momentum values that represent each class midpoint
-    // Based on the classification thresholds used in training
-    // This ensures bidirectional consistency with classification logic
-    let class_atr_momentums = [
-        // VeryLow: midpoint of (-∞, -extreme_threshold]
-        -extreme_threshold - (extreme_threshold - moderate_threshold) / 2.0,
-        // Low: midpoint of (-extreme_threshold, -moderate_threshold]
-        -(extreme_threshold + moderate_threshold) / 2.0,
-        // Medium: midpoint of (-moderate_threshold, +moderate_threshold)
-        0.0,
-        // High: midpoint of [+moderate_threshold, +extreme_threshold)
-        (moderate_threshold + extreme_threshold) / 2.0,
-        // VeryHigh: midpoint of [+extreme_threshold, +∞)
-        extreme_threshold + (extreme_threshold - moderate_threshold) / 2.0,
-    ];
+	// Calculate the ATR momentum values that represent each class midpoint
+	// Based on the classification thresholds used in training
+	// This ensures bidirectional consistency with classification logic
+	let class_atr_momentums = [
+		// VeryLow: midpoint of (-∞, -extreme_threshold]
+		-extreme_threshold - (extreme_threshold - moderate_threshold) / 2.0,
+		// Low: midpoint of (-extreme_threshold, -moderate_threshold]
+		-(extreme_threshold + moderate_threshold) / 2.0,
+		// Medium: midpoint of (-moderate_threshold, +moderate_threshold)
+		0.0,
+		// High: midpoint of [+moderate_threshold, +extreme_threshold)
+		(moderate_threshold + extreme_threshold) / 2.0,
+		// VeryHigh: midpoint of [+extreme_threshold, +∞)
+		extreme_threshold + (extreme_threshold - moderate_threshold) / 2.0,
+	];
 
-    // Convert ATR momentums to ATR ratios (horizon_atr / baseline_atr)
-    // Using the formula: ratio = momentum + 1
-    let class_atr_ratios: Vec<f64> = class_atr_momentums
-        .iter()
-        .map(|&momentum| momentum + 1.0)
-        .collect();
+	// Convert ATR momentums to ATR ratios (horizon_atr / baseline_atr)
+	// Using the formula: ratio = momentum + 1
+	let class_atr_ratios: Vec<f64> = class_atr_momentums.iter().map(|&momentum| momentum + 1.0).collect();
 
-    // These are the actual ATR ratios for each class
-    let atr_ratios = class_atr_ratios.clone();
+	// These are the actual ATR ratios for each class
+	let atr_ratios = class_atr_ratios.clone();
 
-    // Convert ATR ratios to volatility change percentages
-    let volatility_changes: Vec<f64> = atr_ratios
-        .iter()
-        .map(|&ratio| (ratio - 1.0) * 100.0) // Convert to percentage change
-        .collect();
+	// Convert ATR ratios to volatility change percentages
+	let volatility_changes: Vec<f64> = atr_ratios
+		.iter()
+		.map(|&ratio| (ratio - 1.0) * 100.0) // Convert to percentage change
+		.collect();
 
-    // Find most likely class
-    let most_likely_class = probabilities
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(i, _)| i)
-        .unwrap_or(2); // Default to medium
+	// Find most likely class
+	let most_likely_class = probabilities
+		.iter()
+		.enumerate()
+		.max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+		.map(|(i, _)| i)
+		.unwrap_or(2); // Default to medium
 
-    // UNIFIED CONFIDENCE CALCULATION
-    // All targets now use the same research-based calibration function
-    // This eliminates target-specific confidence inflation and ensures consistency
-    let max_prob = probabilities.iter().fold(0.0_f64, |a, &b| a.max(b));
-    let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
+	// UNIFIED CONFIDENCE CALCULATION
+	// All targets now use the same research-based calibration function
+	// This eliminates target-specific confidence inflation and ensures consistency
+	let max_prob = probabilities.iter().fold(0.0_f64, |a, &b| a.max(b));
+	let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
-    // Calculate expected ATR ratio (weighted average of class ratios)
-    let expected_atr_ratio = probabilities
-        .iter()
-        .zip(class_atr_ratios.iter())
-        .map(|(prob, ratio)| prob * ratio)
-        .sum::<f64>();
+	// Calculate expected ATR ratio (weighted average of class ratios)
+	let expected_atr_ratio = probabilities
+		.iter()
+		.zip(class_atr_ratios.iter())
+		.map(|(prob, ratio)| prob * ratio)
+		.sum::<f64>();
 
-    // Calculate expected volatility change percentage
-    let expected_volatility_change = (expected_atr_ratio - 1.0) * 100.0;
+	// Calculate expected volatility change percentage
+	let expected_volatility_change = (expected_atr_ratio - 1.0) * 100.0;
 
-    // Calculate volatility regime probabilities
-    let low_volatility_probability = probabilities[0] + probabilities[1]; // VeryLow + Low
-    let high_volatility_probability = probabilities[3] + probabilities[4]; // High + VeryHigh
-    let extreme_volatility_probability = probabilities[0] + probabilities[4]; // VeryLow + VeryHigh
+	// Calculate volatility regime probabilities
+	let low_volatility_probability = probabilities[0] + probabilities[1]; // VeryLow + Low
+	let high_volatility_probability = probabilities[3] + probabilities[4]; // High + VeryHigh
+	let extreme_volatility_probability = probabilities[0] + probabilities[4]; // VeryLow + VeryHigh
 
-    // Create simplified thresholds structure for compatibility
-    let log_thresholds = LogVolatilityThresholds {
-        very_low_max: (1.0_f64 - extreme_threshold).ln(),
-        low_max: (1.0_f64 - moderate_threshold).ln(),
-        medium_max: (1.0_f64 + moderate_threshold).ln(),
-        high_max: (1.0_f64 + extreme_threshold).ln(),
-    };
+	// Create simplified thresholds structure for compatibility
+	let log_thresholds = LogVolatilityThresholds {
+		very_low_max: (1.0_f64 - extreme_threshold).ln(),
+		low_max: (1.0_f64 - moderate_threshold).ln(),
+		medium_max: (1.0_f64 + moderate_threshold).ln(),
+		high_max: (1.0_f64 + extreme_threshold).ln(),
+	};
 
-    // Calculate recommended stop distance multiplier
-    // This is the same as expected_atr_ratio but clamped to reasonable bounds
-    // Minimum 0.5 (half volatility) to avoid stops that are too tight
-    // Maximum 2.5 (2.5x volatility) to avoid stops that are too wide
-    let recommended_stop_multiplier = expected_atr_ratio.clamp(0.5, 2.5);
+	// Calculate recommended stop distance multiplier
+	// This is the same as expected_atr_ratio but clamped to reasonable bounds
+	// Minimum 0.5 (half volatility) to avoid stops that are too tight
+	// Maximum 2.5 (2.5x volatility) to avoid stops that are too wide
+	let recommended_stop_multiplier = expected_atr_ratio.clamp(0.5, 2.5);
 
-    Ok(VolatilityReconstruction {
-        probabilities: probabilities.to_vec(),
-        atr_ratios,
-        volatility_changes,
-        most_likely_class,
-        confidence,
-        expected_atr_ratio,
-        expected_volatility_change,
-        low_volatility_probability,
-        high_volatility_probability,
-        extreme_volatility_probability,
-        log_thresholds,
-        train_atr: baseline_atr,
-        recommended_stop_multiplier,
-    })
+	Ok(VolatilityReconstruction {
+		probabilities: probabilities.to_vec(),
+		atr_ratios,
+		volatility_changes,
+		most_likely_class,
+		confidence,
+		expected_atr_ratio,
+		expected_volatility_change,
+		low_volatility_probability,
+		high_volatility_probability,
+		extreme_volatility_probability,
+		log_thresholds,
+		train_atr: baseline_atr,
+		recommended_stop_multiplier,
+	})
 }
 
 /// Calculate average volume for volume conviction factor
@@ -1513,15 +1462,15 @@ pub fn reconstruct_volatility(
 /// SIMPLE APPROACH: Returns average volume for volume conviction calculation
 /// Higher volume = higher conviction in volatility moves
 pub fn calculate_average_volume(candles: &[MarketDataRow]) -> f64 {
-    if candles.is_empty() {
-        return 0.0; // No volume if no data
-    }
+	if candles.is_empty() {
+		return 0.0; // No volume if no data
+	}
 
-    // Calculate average volume
-    candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64
+	// Calculate average volume
+	candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64
 }
 
 /// Get volatility regime class names in order
 pub fn get_volatility_class_names() -> Vec<&'static str> {
-    vec!["VeryLow", "Low", "Medium", "High", "VeryHigh"]
+	vec!["VeryLow", "Low", "Medium", "High", "VeryHigh"]
 }

@@ -81,131 +81,121 @@ use std::collections::HashMap;
 /// Configuration for price level target generation
 #[derive(Debug, Clone)]
 pub struct PriceLevelConfig {
-    /// Bandwidth multiplier for breakout sensitivity (default: 1.0)
-    /// - 0.5: More sensitive (smaller breakout thresholds)
-    /// - 1.0: Standard behavior
-    /// - 1.5: Less sensitive (larger breakout thresholds)
-    pub bandwidth_size: f64,
+	/// Bandwidth multiplier for breakout sensitivity (default: 1.0)
+	/// - 0.5: More sensitive (smaller breakout thresholds)
+	/// - 1.0: Standard behavior
+	/// - 1.5: Less sensitive (larger breakout thresholds)
+	pub bandwidth_size: f64,
 
-    /// Neutral band factor for symmetric neutral zone (default: 0.4)
-    /// - 0.2: Small neutral zone (20% of percentile range)
-    /// - 0.4: Balanced neutral zone (40% of percentile range)
-    /// - 0.6: Large neutral zone (60% of percentile range)
-    pub neutral_band_factor: f64,
+	/// Neutral band factor for symmetric neutral zone (default: 0.4)
+	/// - 0.2: Small neutral zone (20% of percentile range)
+	/// - 0.4: Balanced neutral zone (40% of percentile range)
+	/// - 0.6: Large neutral zone (60% of percentile range)
+	pub neutral_band_factor: f64,
 }
 
 impl Default for PriceLevelConfig {
-    fn default() -> Self {
-        Self {
-            bandwidth_size: 1.0,
-            neutral_band_factor: 0.4, // 40% of percentile range becomes neutral zone
-        }
-    }
+	fn default() -> Self {
+		Self {
+			bandwidth_size: 1.0,
+			neutral_band_factor: 0.4, // 40% of percentile range becomes neutral zone
+		}
+	}
 }
 
 impl PriceLevelConfig {
-    /// Validate the configuration parameters
-    pub fn validate(&self) -> Result<()> {
-        if self.bandwidth_size <= 0.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(format!(
-                "bandwidth_size must be positive, got: {}",
-                self.bandwidth_size
-            )));
-        }
+	/// Validate the configuration parameters
+	pub fn validate(&self) -> Result<()> {
+		if self.bandwidth_size <= 0.0 {
+			return Err(crate::utils::error::VangaError::ConfigError(format!(
+				"bandwidth_size must be positive, got: {}",
+				self.bandwidth_size
+			)));
+		}
 
-        if !self.bandwidth_size.is_finite() {
-            return Err(crate::utils::error::VangaError::ConfigError(
-                "bandwidth_size must be a finite number".to_string(),
-            ));
-        }
+		if !self.bandwidth_size.is_finite() {
+			return Err(crate::utils::error::VangaError::ConfigError(
+				"bandwidth_size must be a finite number".to_string(),
+			));
+		}
 
-        if self.neutral_band_factor <= 0.0 || self.neutral_band_factor >= 1.0 {
-            return Err(crate::utils::error::VangaError::ConfigError(format!(
-                "neutral_band_factor must be between 0.0 and 1.0, got: {}",
-                self.neutral_band_factor
-            )));
-        }
+		if self.neutral_band_factor <= 0.0 || self.neutral_band_factor >= 1.0 {
+			return Err(crate::utils::error::VangaError::ConfigError(format!(
+				"neutral_band_factor must be between 0.0 and 1.0, got: {}",
+				self.neutral_band_factor
+			)));
+		}
 
-        if !self.neutral_band_factor.is_finite() {
-            return Err(crate::utils::error::VangaError::ConfigError(
-                "neutral_band_factor must be a finite number".to_string(),
-            ));
-        }
+		if !self.neutral_band_factor.is_finite() {
+			return Err(crate::utils::error::VangaError::ConfigError(
+				"neutral_band_factor must be a finite number".to_string(),
+			));
+		}
 
-        Ok(())
-    }
+		Ok(())
+	}
 }
 
 /// Generate price level targets using PriceLevelConfig - returns both class and strength
 pub fn generate_price_level_targets_with_calibrated_params(
-    df: &DataFrame,
-    horizons: &[String],
-    sequence_indices: &[usize],
-    sequence_length: usize,
-    calibrated_params: &std::collections::HashMap<
-        String,
-        crate::targets::calibration::PriceLevelParams,
-    >,
+	df: &DataFrame,
+	horizons: &[String],
+	sequence_indices: &[usize],
+	sequence_length: usize,
+	calibrated_params: &std::collections::HashMap<String, crate::targets::calibration::PriceLevelParams>,
 ) -> Result<TargetResult> {
-    log::info!("🎯 Generating price level targets with per-horizon calibrated parameters");
-    let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
-    let ohlcv_data = extract_ohlcv_data(df)?;
-    let mut targets = HashMap::new();
-    let mut strengths = HashMap::new();
+	log::info!("🎯 Generating price level targets with per-horizon calibrated parameters");
+	let timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(df)?;
+	let ohlcv_data = extract_ohlcv_data(df)?;
+	let mut targets = HashMap::new();
+	let mut strengths = HashMap::new();
 
-    for horizon in horizons {
-        let params = calibrated_params.get(horizon).ok_or_else(|| {
-            crate::utils::error::VangaError::ConfigError(format!(
-                "No calibrated price level parameters found for horizon: {}",
-                horizon
-            ))
-        })?;
+	for horizon in horizons {
+		let params = calibrated_params.get(horizon).ok_or_else(|| {
+			crate::utils::error::VangaError::ConfigError(format!(
+				"No calibrated price level parameters found for horizon: {}",
+				horizon
+			))
+		})?;
 
-        log::debug!(
-            "  Horizon {}: bandwidth={:.2}, percentiles=[{:.2}, {:.2}]",
-            horizon,
-            params.bandwidth,
-            params.percentiles[0],
-            params.percentiles[1]
-        );
+		log::debug!(
+			"  Horizon {}: bandwidth={:.2}, percentiles=[{:.2}, {:.2}]",
+			horizon,
+			params.bandwidth,
+			params.percentiles[0],
+			params.percentiles[1]
+		);
 
-        let horizon_steps = parse_horizon_to_steps(horizon, timeframe_minutes)?;
-        let mut horizon_targets = vec![-1; sequence_indices.len()];
-        let mut horizon_strengths = vec![0.5; sequence_indices.len()];
+		let horizon_steps = parse_horizon_to_steps(horizon, timeframe_minutes)?;
+		let mut horizon_targets = vec![-1; sequence_indices.len()];
+		let mut horizon_strengths = vec![0.5; sequence_indices.len()];
 
-        for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
-            let sequence_end_idx = seq_idx + sequence_length;
-            let target_end_idx = sequence_end_idx + horizon_steps;
+		for (seq_position, &seq_idx) in sequence_indices.iter().enumerate() {
+			let sequence_end_idx = seq_idx + sequence_length;
+			let target_end_idx = sequence_end_idx + horizon_steps;
 
-            if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
-                let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
-                let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
+			if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
+				let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
+				let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
-                // Use per-horizon calibrated parameters
-                let (target_class, strength) = classify_price_level_with_calibrated_params(
-                    sequence_ohlcv,
-                    horizon_ohlcv,
-                    params,
-                )?;
-                horizon_targets[seq_position] = target_class;
-                horizon_strengths[seq_position] = strength;
-            }
-        }
+				// Use per-horizon calibrated parameters
+				let (target_class, strength) =
+					classify_price_level_with_calibrated_params(sequence_ohlcv, horizon_ohlcv, params)?;
+				horizon_targets[seq_position] = target_class;
+				horizon_strengths[seq_position] = strength;
+			}
+		}
 
-        let valid_targets: Vec<i32> = horizon_targets
-            .iter()
-            .filter(|&&x| x != -1)
-            .cloned()
-            .collect();
-        if !valid_targets.is_empty() {
-            analyze_class_distribution(&valid_targets, horizon, 5)?;
-        }
+		let valid_targets: Vec<i32> = horizon_targets.iter().filter(|&&x| x != -1).cloned().collect();
+		if !valid_targets.is_empty() {
+			analyze_class_distribution(&valid_targets, horizon, 5)?;
+		}
 
-        targets.insert(horizon.clone(), horizon_targets);
-        strengths.insert(horizon.clone(), horizon_strengths);
-    }
+		targets.insert(horizon.clone(), horizon_targets);
+		strengths.insert(horizon.clone(), horizon_strengths);
+	}
 
-    Ok((targets, strengths))
+	Ok((targets, strengths))
 }
 
 /// Get exponentially-weighted close price from OHLCV data (replaces VWAP)
@@ -234,32 +224,32 @@ pub fn generate_price_level_targets_with_calibrated_params(
 /// - If insufficient data (< 2 candles): Returns 0.0
 /// - If single candle: Returns that candle's close price
 pub fn get_sequence_exponential_weighted_close(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    if sequence_ohlcv.is_empty() {
-        return Ok(0.0);
-    }
+	if sequence_ohlcv.is_empty() {
+		return Ok(0.0);
+	}
 
-    if sequence_ohlcv.len() == 1 {
-        return Ok(sequence_ohlcv[0].close);
-    }
+	if sequence_ohlcv.len() == 1 {
+		return Ok(sequence_ohlcv[0].close);
+	}
 
-    let mut weighted_sum = 0.0;
-    let mut total_weight = 0.0;
-    let len = sequence_ohlcv.len() as f64;
+	let mut weighted_sum = 0.0;
+	let mut total_weight = 0.0;
+	let len = sequence_ohlcv.len() as f64;
 
-    for (i, candle) in sequence_ohlcv.iter().enumerate() {
-        // Exponential weighting: recent data gets much more weight
-        let weight = ((i as f64 + 1.0) / len).powf(2.0);
-        weighted_sum += candle.close * weight;
-        total_weight += weight;
-    }
+	for (i, candle) in sequence_ohlcv.iter().enumerate() {
+		// Exponential weighting: recent data gets much more weight
+		let weight = ((i as f64 + 1.0) / len).powf(2.0);
+		weighted_sum += candle.close * weight;
+		total_weight += weight;
+	}
 
-    Ok(weighted_sum / total_weight)
+	Ok(weighted_sum / total_weight)
 }
 
 /// Get horizon exponentially-weighted close price (same calculation as sequence)
 pub fn get_horizon_exponential_weighted_close(horizon_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    // Same calculation as sequence (exponentially-weighted close price)
-    get_sequence_exponential_weighted_close(horizon_ohlcv)
+	// Same calculation as sequence (exponentially-weighted close price)
+	get_sequence_exponential_weighted_close(horizon_ohlcv)
 }
 
 /// Calculate exponentially-weighted center price from sequence data
@@ -268,7 +258,7 @@ pub fn get_horizon_exponential_weighted_close(horizon_ohlcv: &[MarketDataRow]) -
 /// for use in adaptive percentile calculations. The exponentially-weighted center represents
 /// the recent-focused "fair value" price during the sequence period, emphasizing recent price action.
 pub fn calculate_exponential_weighted_center(sequence_ohlcv: &[MarketDataRow]) -> Result<f64> {
-    get_sequence_exponential_weighted_close(sequence_ohlcv)
+	get_sequence_exponential_weighted_close(sequence_ohlcv)
 }
 
 /// Extract individual OHLC4 prices from sequence data
@@ -276,10 +266,10 @@ pub fn calculate_exponential_weighted_center(sequence_ohlcv: &[MarketDataRow]) -
 /// Returns a vector of OHLC4 prices (not volume-weighted) for distribution analysis.
 /// Each price represents the average of open, high, low, close for that candle.
 pub fn extract_sequence_prices(sequence_ohlcv: &[MarketDataRow]) -> Vec<f64> {
-    sequence_ohlcv
-        .iter()
-        .map(|candle| (candle.open + candle.high + candle.low + candle.close) / 4.0)
-        .collect()
+	sequence_ohlcv
+		.iter()
+		.map(|candle| (candle.open + candle.high + candle.low + candle.close) / 4.0)
+		.collect()
 }
 
 /// Calculate adaptive percentiles based on sequence price distribution around volume-weighted center
@@ -315,60 +305,57 @@ pub fn extract_sequence_prices(sequence_ohlcv: &[MarketDataRow]) -> Vec<f64> {
 /// # Returns
 /// * `Result<[f64; 2]>` - Adaptive percentiles [lower, upper] optimized for the sequence
 pub fn calculate_adaptive_percentiles_from_sequence(
-    sequence_ohlcv: &[MarketDataRow],
-    fallback_percentiles: Option<[f64; 2]>,
+	sequence_ohlcv: &[MarketDataRow],
+	fallback_percentiles: Option<[f64; 2]>,
 ) -> Result<[f64; 2]> {
-    if sequence_ohlcv.len() < 5 {
-        // Use calibrated fallback percentiles instead of hardcoded [0.1, 0.9]
-        return Ok(fallback_percentiles.unwrap_or([0.1, 0.9]));
-    }
+	if sequence_ohlcv.len() < 5 {
+		// Use calibrated fallback percentiles instead of hardcoded [0.1, 0.9]
+		return Ok(fallback_percentiles.unwrap_or([0.1, 0.9]));
+	}
 
-    // 1. Calculate exponentially-weighted center (recent-focused fair value)
-    let exponential_weighted_center = calculate_exponential_weighted_center(sequence_ohlcv)?;
+	// 1. Calculate exponentially-weighted center (recent-focused fair value)
+	let exponential_weighted_center = calculate_exponential_weighted_center(sequence_ohlcv)?;
 
-    // 2. Extract individual OHLC4 prices for distribution analysis
-    let sequence_prices = extract_sequence_prices(sequence_ohlcv);
+	// 2. Extract individual OHLC4 prices for distribution analysis
+	let sequence_prices = extract_sequence_prices(sequence_ohlcv);
 
-    // 3. Partition prices around the volume-weighted center
-    let below_center_count = sequence_prices
-        .iter()
-        .filter(|&&price| price < exponential_weighted_center)
-        .count();
+	// 3. Partition prices around the volume-weighted center
+	let below_center_count = sequence_prices
+		.iter()
+		.filter(|&&price| price < exponential_weighted_center)
+		.count();
 
-    let below_center_ratio = below_center_count as f64 / sequence_prices.len() as f64;
+	let below_center_ratio = below_center_count as f64 / sequence_prices.len() as f64;
 
-    // 4. Calculate coefficient of variation for volatility adjustment
-    let price_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
-    let price_variance = sequence_prices
-        .iter()
-        .map(|&p| (p - price_mean).powi(2))
-        .sum::<f64>()
-        / sequence_prices.len() as f64;
-    let coefficient_of_variation = if price_mean > 1e-8 {
-        price_variance.sqrt() / price_mean
-    } else {
-        0.02 // Default 2% volatility
-    };
+	// 4. Calculate coefficient of variation for volatility adjustment
+	let price_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+	let price_variance =
+		sequence_prices.iter().map(|&p| (p - price_mean).powi(2)).sum::<f64>() / sequence_prices.len() as f64;
+	let coefficient_of_variation = if price_mean > 1e-8 {
+		price_variance.sqrt() / price_mean
+	} else {
+		0.02 // Default 2% volatility
+	};
 
-    // 5. Determine base percentiles based on distribution balance
-    let (base_lower, base_upper): (f64, f64) = match below_center_ratio {
-        ratio if ratio < 0.4 => (0.05, 0.85), // Top-heavy: wider lower, tighter upper
-        ratio if ratio > 0.6 => (0.15, 0.95), // Bottom-heavy: tighter lower, wider upper
-        _ => (0.1, 0.9),                      // Balanced: standard percentiles
-    };
+	// 5. Determine base percentiles based on distribution balance
+	let (base_lower, base_upper): (f64, f64) = match below_center_ratio {
+		ratio if ratio < 0.4 => (0.05, 0.85), // Top-heavy: wider lower, tighter upper
+		ratio if ratio > 0.6 => (0.15, 0.95), // Bottom-heavy: tighter lower, wider upper
+		_ => (0.1, 0.9),                      // Balanced: standard percentiles
+	};
 
-    // 6. Apply volatility-based adjustments
-    let volatility_adjustment: f64 = match coefficient_of_variation {
-        cv if cv < 0.01 => 0.05, // Low volatility: contract boundaries (more sensitive)
-        cv if cv > 0.04 => -0.05, // High volatility: expand boundaries (less sensitive)
-        _ => 0.0,                // Medium volatility: no adjustment
-    };
+	// 6. Apply volatility-based adjustments
+	let volatility_adjustment: f64 = match coefficient_of_variation {
+		cv if cv < 0.01 => 0.05,  // Low volatility: contract boundaries (more sensitive)
+		cv if cv > 0.04 => -0.05, // High volatility: expand boundaries (less sensitive)
+		_ => 0.0,                 // Medium volatility: no adjustment
+	};
 
-    let adaptive_lower = (base_lower + volatility_adjustment).clamp(0.02, 0.25);
-    let adaptive_upper = (base_upper - volatility_adjustment).clamp(0.75, 0.98);
+	let adaptive_lower = (base_lower + volatility_adjustment).clamp(0.02, 0.25);
+	let adaptive_upper = (base_upper - volatility_adjustment).clamp(0.75, 0.98);
 
-    // 7. Debug logging for transparency
-    log::debug!(
+	// 7. Debug logging for transparency
+	log::debug!(
         "🎯 Adaptive Percentiles: center={:.6}, below_ratio={:.2}, cv={:.3}, base=[{:.2}, {:.2}], adaptive=[{:.2}, {:.2}]",
         exponential_weighted_center,
         below_center_ratio,
@@ -379,7 +366,7 @@ pub fn calculate_adaptive_percentiles_from_sequence(
         adaptive_upper
     );
 
-    Ok([adaptive_lower, adaptive_upper])
+	Ok([adaptive_lower, adaptive_upper])
 }
 
 /// **ENHANCED**: Calculate adaptive bandwidth based on sequence volatility characteristics
@@ -406,229 +393,201 @@ pub fn calculate_adaptive_percentiles_from_sequence(
 /// - Maintains ~20% class distribution target
 /// - Prevents over-fitting to specific volatility periods
 pub fn calculate_adaptive_bandwidth(
-    sequence_ohlcv: &[MarketDataRow],
-    base_bandwidth: f64,
-    momentum_factor: Option<f64>,
+	sequence_ohlcv: &[MarketDataRow],
+	base_bandwidth: f64,
+	momentum_factor: Option<f64>,
 ) -> Result<f64> {
-    if sequence_ohlcv.len() < 3 {
-        return Ok(base_bandwidth); // Fallback for insufficient data
-    }
+	if sequence_ohlcv.len() < 3 {
+		return Ok(base_bandwidth); // Fallback for insufficient data
+	}
 
-    // 1. Extract sequence prices for volatility calculation
-    let prices: Vec<f64> = sequence_ohlcv
-        .iter()
-        .map(|c| (c.open + c.high + c.low + c.close) / 4.0)
-        .collect();
+	// 1. Extract sequence prices for volatility calculation
+	let prices: Vec<f64> = sequence_ohlcv
+		.iter()
+		.map(|c| (c.open + c.high + c.low + c.close) / 4.0)
+		.collect();
 
-    // 2. Calculate price volatility (coefficient of variation)
-    let price_mean = prices.iter().sum::<f64>() / prices.len() as f64;
-    let price_variance = prices
-        .iter()
-        .map(|&p| (p - price_mean).powi(2))
-        .sum::<f64>()
-        / prices.len() as f64;
-    let price_std = price_variance.sqrt();
-    let coefficient_of_variation = if price_mean > 1e-8 {
-        price_std / price_mean
-    } else {
-        0.02 // Default 2% volatility for edge cases
-    };
+	// 2. Calculate price volatility (coefficient of variation)
+	let price_mean = prices.iter().sum::<f64>() / prices.len() as f64;
+	let price_variance = prices.iter().map(|&p| (p - price_mean).powi(2)).sum::<f64>() / prices.len() as f64;
+	let price_std = price_variance.sqrt();
+	let coefficient_of_variation = if price_mean > 1e-8 {
+		price_std / price_mean
+	} else {
+		0.02 // Default 2% volatility for edge cases
+	};
 
-    // 3. Calculate volatility multiplier with bounds
-    let baseline_volatility = 0.02; // 2% baseline for crypto markets
-    let volatility_ratio = coefficient_of_variation / baseline_volatility;
-    let volatility_multiplier = volatility_ratio.clamp(0.3, 3.0); // Prevent extreme adjustments
+	// 3. Calculate volatility multiplier with bounds
+	let baseline_volatility = 0.02; // 2% baseline for crypto markets
+	let volatility_ratio = coefficient_of_variation / baseline_volatility;
+	let volatility_multiplier = volatility_ratio.clamp(0.3, 3.0); // Prevent extreme adjustments
 
-    // 4. Apply momentum weighting if specified
-    let final_multiplier = if let Some(momentum) = momentum_factor {
-        if momentum > 1.0 {
-            // Higher momentum factor = more recent data weight = potentially higher volatility
-            let momentum_adjustment = 1.0 + (momentum - 1.0) * 0.2; // 20% max adjustment
-            volatility_multiplier * momentum_adjustment
-        } else {
-            volatility_multiplier
-        }
-    } else {
-        volatility_multiplier
-    };
+	// 4. Apply momentum weighting if specified
+	let final_multiplier = if let Some(momentum) = momentum_factor {
+		if momentum > 1.0 {
+			// Higher momentum factor = more recent data weight = potentially higher volatility
+			let momentum_adjustment = 1.0 + (momentum - 1.0) * 0.2; // 20% max adjustment
+			volatility_multiplier * momentum_adjustment
+		} else {
+			volatility_multiplier
+		}
+	} else {
+		volatility_multiplier
+	};
 
-    // 5. Calculate adaptive bandwidth
-    let adaptive_bandwidth = base_bandwidth * final_multiplier;
+	// 5. Calculate adaptive bandwidth
+	let adaptive_bandwidth = base_bandwidth * final_multiplier;
 
-    log::debug!(
-        "🎯 Adaptive Bandwidth: base={:.3}, volatility_ratio={:.3}, multiplier={:.3}, adaptive={:.3}",
-        base_bandwidth,
-        volatility_ratio,
-        final_multiplier,
-        adaptive_bandwidth
-    );
+	log::debug!(
+		"🎯 Adaptive Bandwidth: base={:.3}, volatility_ratio={:.3}, multiplier={:.3}, adaptive={:.3}",
+		base_bandwidth,
+		volatility_ratio,
+		final_multiplier,
+		adaptive_bandwidth
+	);
 
-    Ok(adaptive_bandwidth)
+	Ok(adaptive_bandwidth)
 }
 
 /// Anchor and population standard deviation of the n-1 log returns wholly
 /// inside the n-bar input window. No future bars or global statistics are used.
 pub fn price_level_anchor_volatility(sequence: &[MarketDataRow]) -> Result<(f64, f64)> {
-    if sequence.len() < 2
-        || sequence
-            .iter()
-            .any(|bar| !bar.close.is_finite() || bar.close <= 0.0)
-    {
-        return Err(VangaError::data(
-            "Anchor price levels require at least two finite, positive input closes",
-        ));
-    }
-    let returns: Vec<f64> = sequence
-        .windows(2)
-        .map(|pair| (pair[1].close / pair[0].close).ln())
-        .collect();
-    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-    let variance = returns
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>()
-        / returns.len() as f64;
-    if !variance.is_finite() {
-        return Err(VangaError::data(
-            "Anchor price-level input return variance must be finite",
-        ));
-    }
-    if variance == 0.0 {
-        return Err(VangaError::data(
-            "Anchor price levels require non-zero input return volatility",
-        ));
-    }
-    let volatility = variance.sqrt();
-    Ok((sequence[sequence.len() - 1].close, volatility))
+	if sequence.len() < 2 || sequence.iter().any(|bar| !bar.close.is_finite() || bar.close <= 0.0) {
+		return Err(VangaError::data(
+			"Anchor price levels require at least two finite, positive input closes",
+		));
+	}
+	let returns: Vec<f64> = sequence
+		.windows(2)
+		.map(|pair| (pair[1].close / pair[0].close).ln())
+		.collect();
+	let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+	let variance = returns.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+	if !variance.is_finite() {
+		return Err(VangaError::data(
+			"Anchor price-level input return variance must be finite",
+		));
+	}
+	if variance == 0.0 {
+		return Err(VangaError::data(
+			"Anchor price levels require non-zero input return volatility",
+		));
+	}
+	let volatility = variance.sqrt();
+	Ok((sequence[sequence.len() - 1].close, volatility))
 }
 
 fn anchor_price_level_future_price(future: &[MarketDataRow]) -> Result<f64> {
-    if future.is_empty()
-        || future
-            .iter()
-            .any(|bar| !bar.close.is_finite() || bar.close <= 0.0)
-    {
-        return Err(VangaError::data(
-            "Anchor price levels require finite, positive future closes",
-        ));
-    }
-    let future_price = get_horizon_exponential_weighted_close(future)?;
-    if !future_price.is_finite() || future_price <= 0.0 {
-        return Err(VangaError::data(
-            "Non-finite anchor price-level future price",
-        ));
-    }
-    Ok(future_price)
+	if future.is_empty() || future.iter().any(|bar| !bar.close.is_finite() || bar.close <= 0.0) {
+		return Err(VangaError::data(
+			"Anchor price levels require finite, positive future closes",
+		));
+	}
+	let future_price = get_horizon_exponential_weighted_close(future)?;
+	if !future_price.is_finite() || future_price <= 0.0 {
+		return Err(VangaError::data("Non-finite anchor price-level future price"));
+	}
+	Ok(future_price)
 }
 
 /// The alternative label statistic, shared by calibration and target generation.
-pub fn anchor_price_level_statistic(
-    sequence: &[MarketDataRow],
-    future: &[MarketDataRow],
-) -> Result<f64> {
-    let (anchor, volatility) = price_level_anchor_volatility(sequence)?;
-    let statistic = (anchor_price_level_future_price(future)? / anchor - 1.0) / volatility;
-    if !statistic.is_finite() {
-        return Err(VangaError::data("Non-finite anchor price-level statistic"));
-    }
-    Ok(statistic)
+pub fn anchor_price_level_statistic(sequence: &[MarketDataRow], future: &[MarketDataRow]) -> Result<f64> {
+	let (anchor, volatility) = price_level_anchor_volatility(sequence)?;
+	let statistic = (anchor_price_level_future_price(future)? / anchor - 1.0) / volatility;
+	if !statistic.is_finite() {
+		return Err(VangaError::data("Non-finite anchor price-level statistic"));
+	}
+	Ok(statistic)
 }
 
 pub(crate) fn anchor_price_level_thresholds(
-    params: &crate::targets::calibration::PriceLevelParams,
+	params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<[f64; 4]> {
-    let thresholds = params.thresholds.ok_or_else(|| {
-        VangaError::config("Anchor price levels require saved calibrated thresholds")
-    })?;
-    if thresholds.iter().any(|value| !value.is_finite())
-        || thresholds.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return Err(VangaError::config(
-            "Price-level thresholds must be finite and strictly increasing",
-        ));
-    }
-    Ok(thresholds)
+	let thresholds = params
+		.thresholds
+		.ok_or_else(|| VangaError::config("Anchor price levels require saved calibrated thresholds"))?;
+	if thresholds.iter().any(|value| !value.is_finite()) || thresholds.windows(2).any(|pair| pair[0] >= pair[1]) {
+		return Err(VangaError::config(
+			"Price-level thresholds must be finite and strictly increasing",
+		));
+	}
+	Ok(thresholds)
 }
 
 /// Reconstruct the calibrated statistic thresholds in price space. Both target
 /// classification and output formatting use these exact floating-point values.
 pub(crate) fn anchor_price_level_boundaries(
-    sequence: &[MarketDataRow],
-    params: &crate::targets::calibration::PriceLevelParams,
+	sequence: &[MarketDataRow],
+	params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<crate::targets::sequence_reconstruction::SequenceBoundaries> {
-    let thresholds = anchor_price_level_thresholds(params)?;
-    let (anchor, volatility) = price_level_anchor_volatility(sequence)?;
-    let price_boundaries = thresholds.map(|threshold| anchor * (1.0 + threshold * volatility));
-    if price_boundaries.iter().any(|price| !price.is_finite())
-        || price_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return Err(VangaError::data(
-            "Reconstructed price-level boundaries must be finite and strictly increasing",
-        ));
-    }
-    let bandwidth = price_boundaries[3] - price_boundaries[0];
-    Ok(
-        crate::targets::sequence_reconstruction::SequenceBoundaries {
-            sequence_min: price_boundaries[0],
-            sequence_max: price_boundaries[3],
-            bandwidth,
-            boundaries: price_boundaries,
-            exponential_weighted_prices: Vec::new(),
-        },
-    )
+	let thresholds = anchor_price_level_thresholds(params)?;
+	let (anchor, volatility) = price_level_anchor_volatility(sequence)?;
+	let price_boundaries = thresholds.map(|threshold| anchor * (1.0 + threshold * volatility));
+	if price_boundaries.iter().any(|price| !price.is_finite())
+		|| price_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+	{
+		return Err(VangaError::data(
+			"Reconstructed price-level boundaries must be finite and strictly increasing",
+		));
+	}
+	let bandwidth = price_boundaries[3] - price_boundaries[0];
+	Ok(crate::targets::sequence_reconstruction::SequenceBoundaries {
+		sequence_min: price_boundaries[0],
+		sequence_max: price_boundaries[3],
+		bandwidth,
+		boundaries: price_boundaries,
+		exponential_weighted_prices: Vec::new(),
+	})
 }
 
 pub fn classify_price_level_with_calibrated_params(
-    sequence_ohlcv: &[MarketDataRow],
-    horizon_ohlcv: &[MarketDataRow],
-    calibrated_params: &crate::targets::calibration::PriceLevelParams,
+	sequence_ohlcv: &[MarketDataRow],
+	horizon_ohlcv: &[MarketDataRow],
+	calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<(i32, f64)> {
-    if calibrated_params.definition.uses_anchor_volatility()? {
-        let boundaries = anchor_price_level_boundaries(sequence_ohlcv, calibrated_params)?;
-        let future_price = anchor_price_level_future_price(horizon_ohlcv)?;
-        let class = boundaries.classify_price(future_price);
-        return Ok((
-            class,
-            calculate_price_level_strength(future_price, &boundaries, class),
-        ));
-    }
-    if sequence_ohlcv.is_empty() {
-        return Ok((2, 0.5)); // Default to neutral class with neutral strength
-    }
+	if calibrated_params.definition.uses_anchor_volatility()? {
+		let boundaries = anchor_price_level_boundaries(sequence_ohlcv, calibrated_params)?;
+		let future_price = anchor_price_level_future_price(horizon_ohlcv)?;
+		let class = boundaries.classify_price(future_price);
+		return Ok((class, calculate_price_level_strength(future_price, &boundaries, class)));
+	}
+	if sequence_ohlcv.is_empty() {
+		return Ok((2, 0.5)); // Default to neutral class with neutral strength
+	}
 
-    // 1. Calculate sequence exponentially-weighted close
-    let seq_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
+	// 1. Calculate sequence exponentially-weighted close
+	let seq_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
 
-    // 2. Calculate horizon exponentially-weighted close
-    let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
+	// 2. Calculate horizon exponentially-weighted close
+	let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
-    // 3. FIXED: Use EXACT calibrated parameters - NO adaptive overrides!
-    let exact_percentiles = calibrated_params.percentiles; // Use calibrated percentiles exactly
-    let exact_bandwidth = calibrated_params.bandwidth; // Use calibrated bandwidth exactly
+	// 3. FIXED: Use EXACT calibrated parameters - NO adaptive overrides!
+	let exact_percentiles = calibrated_params.percentiles; // Use calibrated percentiles exactly
+	let exact_bandwidth = calibrated_params.bandwidth; // Use calibrated bandwidth exactly
 
-    // 4. Use enhanced sequence reconstruction with EXACT calibrated parameters
-    let reconstruction_config = SequenceReconstructionConfig {
-        percentiles: exact_percentiles,
-        bandwidth_size: exact_bandwidth,
-        neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
-    };
-    let analyzer = SequenceAnalyzer::new(reconstruction_config);
+	// 4. Use enhanced sequence reconstruction with EXACT calibrated parameters
+	let reconstruction_config = SequenceReconstructionConfig {
+		percentiles: exact_percentiles,
+		bandwidth_size: exact_bandwidth,
+		neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
+	};
+	let analyzer = SequenceAnalyzer::new(reconstruction_config);
 
-    // 5. Calculate boundaries using centralized logic
-    let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
+	// 5. Calculate boundaries using centralized logic
+	let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
 
-    // 6. Handle edge case: flat sequence
-    if boundaries.bandwidth == 0.0 {
-        let class = if hor_exponential_weighted >= boundaries.sequence_min {
-            3
-        } else {
-            2
-        };
-        return Ok((class, 0.3)); // Low strength for edge case
-    }
+	// 6. Handle edge case: flat sequence
+	if boundaries.bandwidth == 0.0 {
+		let class = if hor_exponential_weighted >= boundaries.sequence_min {
+			3
+		} else {
+			2
+		};
+		return Ok((class, 0.3)); // Low strength for edge case
+	}
 
-    // 7. Enhanced debug logging
-    log::debug!(
+	// 7. Enhanced debug logging
+	log::debug!(
         "🚀 Price Level with EXACT Calibrated Params: seq_exponential={:.6}, hor_exponential={:.6}, exact_bandwidth={:.3}, exact_percentiles=[{:.2}, {:.2}]",
         seq_exponential_weighted,
         hor_exponential_weighted,
@@ -637,18 +596,18 @@ pub fn classify_price_level_with_calibrated_params(
         exact_percentiles[1]
     );
 
-    // 8. Use centralized classification logic
-    let class = boundaries.classify_price(hor_exponential_weighted);
+	// 8. Use centralized classification logic
+	let class = boundaries.classify_price(hor_exponential_weighted);
 
-    // 9. Calculate classification strength based on position within the range
-    let strength = calculate_price_level_strength(hor_exponential_weighted, &boundaries, class);
+	// 9. Calculate classification strength based on position within the range
+	let strength = calculate_price_level_strength(hor_exponential_weighted, &boundaries, class);
 
-    log::debug!(
+	log::debug!(
         "🎯 Price Level Result: target={:.6} → class={} strength={:.3} (exact_range: [{:.6}, {:.6}], exact_bandwidth: {:.6})",
         hor_exponential_weighted, class, strength, boundaries.sequence_min, boundaries.sequence_max, boundaries.bandwidth
     );
 
-    Ok((class, strength))
+	Ok((class, strength))
 }
 
 /// Calculate classification strength for price levels based on position within boundaries
@@ -658,149 +617,146 @@ pub fn classify_price_level_with_calibrated_params(
 /// - 0.5 = Moderate (near class boundaries)
 /// - 0.0 = Very weak (just barely in the class)
 fn calculate_price_level_strength(
-    target_price: f64,
-    boundaries: &crate::targets::sequence_reconstruction::SequenceBoundaries,
-    class: i32,
+	target_price: f64,
+	boundaries: &crate::targets::sequence_reconstruction::SequenceBoundaries,
+	class: i32,
 ) -> f64 {
-    match class {
-        0 => {
-            // Strong Down: target_price < boundaries[0]
-            // The further below boundary[0], the stronger
-            let distance_below = (boundaries.boundaries[0] - target_price).max(0.0);
-            let max_distance = boundaries.bandwidth; // Use bandwidth as reference
-            (distance_below / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
-        }
-        1 => {
-            // Moderate Down: boundaries[0] <= target_price < boundaries[1]
-            let range_center = (boundaries.boundaries[0] + boundaries.boundaries[1]) / 2.0;
-            let range_half_width = (boundaries.boundaries[1] - boundaries.boundaries[0]) / 2.0;
-            if range_half_width > 0.0 {
-                let distance_from_center = (target_price - range_center).abs();
-                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
-                strength.max(0.1) // At least 0.1 strength
-            } else {
-                0.5 // Default for zero-width range
-            }
-        }
-        2 => {
-            // Neutral: boundaries[1] <= target_price < boundaries[2]
-            let range_center = (boundaries.boundaries[1] + boundaries.boundaries[2]) / 2.0;
-            let range_half_width = (boundaries.boundaries[2] - boundaries.boundaries[1]) / 2.0;
-            if range_half_width > 0.0 {
-                let distance_from_center = (target_price - range_center).abs();
-                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
-                strength.max(0.1) // At least 0.1 strength
-            } else {
-                0.5 // Default for zero-width range
-            }
-        }
-        3 => {
-            // Moderate Up: boundaries[2] <= target_price < boundaries[3]
-            let range_center = (boundaries.boundaries[2] + boundaries.boundaries[3]) / 2.0;
-            let range_half_width = (boundaries.boundaries[3] - boundaries.boundaries[2]) / 2.0;
-            if range_half_width > 0.0 {
-                let distance_from_center = (target_price - range_center).abs();
-                let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
-                strength.max(0.1) // At least 0.1 strength
-            } else {
-                0.5 // Default for zero-width range
-            }
-        }
-        4 => {
-            // Strong Up: target_price >= boundaries[3]
-            // The further above boundary[3], the stronger
-            let distance_above = (target_price - boundaries.boundaries[3]).max(0.0);
-            let max_distance = boundaries.bandwidth; // Use bandwidth as reference
-            (distance_above / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
-        }
-        _ => 0.5, // Default neutral strength
-    }
+	match class {
+		0 => {
+			// Strong Down: target_price < boundaries[0]
+			// The further below boundary[0], the stronger
+			let distance_below = (boundaries.boundaries[0] - target_price).max(0.0);
+			let max_distance = boundaries.bandwidth; // Use bandwidth as reference
+			(distance_below / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+		}
+		1 => {
+			// Moderate Down: boundaries[0] <= target_price < boundaries[1]
+			let range_center = (boundaries.boundaries[0] + boundaries.boundaries[1]) / 2.0;
+			let range_half_width = (boundaries.boundaries[1] - boundaries.boundaries[0]) / 2.0;
+			if range_half_width > 0.0 {
+				let distance_from_center = (target_price - range_center).abs();
+				let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+				strength.max(0.1) // At least 0.1 strength
+			} else {
+				0.5 // Default for zero-width range
+			}
+		}
+		2 => {
+			// Neutral: boundaries[1] <= target_price < boundaries[2]
+			let range_center = (boundaries.boundaries[1] + boundaries.boundaries[2]) / 2.0;
+			let range_half_width = (boundaries.boundaries[2] - boundaries.boundaries[1]) / 2.0;
+			if range_half_width > 0.0 {
+				let distance_from_center = (target_price - range_center).abs();
+				let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+				strength.max(0.1) // At least 0.1 strength
+			} else {
+				0.5 // Default for zero-width range
+			}
+		}
+		3 => {
+			// Moderate Up: boundaries[2] <= target_price < boundaries[3]
+			let range_center = (boundaries.boundaries[2] + boundaries.boundaries[3]) / 2.0;
+			let range_half_width = (boundaries.boundaries[3] - boundaries.boundaries[2]) / 2.0;
+			if range_half_width > 0.0 {
+				let distance_from_center = (target_price - range_center).abs();
+				let strength = 1.0 - (distance_from_center / range_half_width).min(1.0);
+				strength.max(0.1) // At least 0.1 strength
+			} else {
+				0.5 // Default for zero-width range
+			}
+		}
+		4 => {
+			// Strong Up: target_price >= boundaries[3]
+			// The further above boundary[3], the stronger
+			let distance_above = (target_price - boundaries.boundaries[3]).max(0.0);
+			let max_distance = boundaries.bandwidth; // Use bandwidth as reference
+			(distance_above / max_distance).clamp(0.1, 1.0) // At least 0.1 strength
+		}
+		_ => 0.5, // Default neutral strength
+	}
 }
 
 /// Analyze class distribution and log insights for debugging
 fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Result<()> {
-    let mut class_counts = vec![0usize; bins as usize];
-    let mut valid_targets = 0;
+	let mut class_counts = vec![0usize; bins as usize];
+	let mut valid_targets = 0;
 
-    // Count class occurrences
-    for &target in targets {
-        if target >= 0 && target < bins as i32 {
-            class_counts[target as usize] += 1;
-            valid_targets += 1;
-        }
-    }
+	// Count class occurrences
+	for &target in targets {
+		if target >= 0 && target < bins as i32 {
+			class_counts[target as usize] += 1;
+			valid_targets += 1;
+		}
+	}
 
-    if valid_targets == 0 {
-        log::warn!(
-            "📊 Price Level Analysis [{}]: No valid targets found",
-            horizon
-        );
-        return Ok(());
-    }
+	if valid_targets == 0 {
+		log::warn!("📊 Price Level Analysis [{}]: No valid targets found", horizon);
+		return Ok(());
+	}
 
-    // Calculate class distribution statistics
-    let total_samples = valid_targets as f64;
-    let mut class_percentages = Vec::new();
-    let mut min_class_size = usize::MAX;
-    let mut max_class_size = 0;
+	// Calculate class distribution statistics
+	let total_samples = valid_targets as f64;
+	let mut class_percentages = Vec::new();
+	let mut min_class_size = usize::MAX;
+	let mut max_class_size = 0;
 
-    for &count in class_counts.iter() {
-        let percentage = (count as f64 / total_samples) * 100.0;
-        class_percentages.push(percentage);
+	for &count in class_counts.iter() {
+		let percentage = (count as f64 / total_samples) * 100.0;
+		class_percentages.push(percentage);
 
-        if count > 0 {
-            min_class_size = min_class_size.min(count);
-            max_class_size = max_class_size.max(count);
-        }
-    }
+		if count > 0 {
+			min_class_size = min_class_size.min(count);
+			max_class_size = max_class_size.max(count);
+		}
+	}
 
-    // Calculate imbalance ratio
-    let imbalance_ratio = if min_class_size != usize::MAX && min_class_size > 0 {
-        max_class_size as f64 / min_class_size as f64
-    } else {
-        f64::INFINITY
-    };
+	// Calculate imbalance ratio
+	let imbalance_ratio = if min_class_size != usize::MAX && min_class_size > 0 {
+		max_class_size as f64 / min_class_size as f64
+	} else {
+		f64::INFINITY
+	};
 
-    // Log compact class distribution analysis
-    log::info!(
-        "📊 Price Level Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}] (BEFORE balanced selection)",
-        horizon,
-        valid_targets,
-        imbalance_ratio,
-        class_percentages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| format!("{}:{:.1}%", i, p))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+	// Log compact class distribution analysis
+	log::info!(
+		"📊 Price Level Distribution [{}]: {} samples, {:.1}x imbalance, classes: [{}] (BEFORE balanced selection)",
+		horizon,
+		valid_targets,
+		imbalance_ratio,
+		class_percentages
+			.iter()
+			.enumerate()
+			.map(|(i, p)| format!("{}:{:.1}%", i, p))
+			.collect::<Vec<_>>()
+			.join(", ")
+	);
 
-    // Check for problematic imbalance
-    if imbalance_ratio > 100.0 {
-        log::warn!(
-            "⚠️  Severe class imbalance detected for {} ({:.0}x ratio) - consider class weighting",
-            horizon,
-            imbalance_ratio
-        );
-    }
+	// Check for problematic imbalance
+	if imbalance_ratio > 100.0 {
+		log::warn!(
+			"⚠️  Severe class imbalance detected for {} ({:.0}x ratio) - consider class weighting",
+			horizon,
+			imbalance_ratio
+		);
+	}
 
-    // Identify empty classes
-    let empty_classes: Vec<usize> = class_counts
-        .iter()
-        .enumerate()
-        .filter(|(_, &count)| count == 0)
-        .map(|(idx, _)| idx)
-        .collect();
+	// Identify empty classes
+	let empty_classes: Vec<usize> = class_counts
+		.iter()
+		.enumerate()
+		.filter(|(_, &count)| count == 0)
+		.map(|(idx, _)| idx)
+		.collect();
 
-    if !empty_classes.is_empty() {
-        log::warn!(
-            "⚠️  Empty classes detected for {}: {:?} - may cause training instability",
-            horizon,
-            empty_classes
-        );
-    }
+	if !empty_classes.is_empty() {
+		log::warn!(
+			"⚠️  Empty classes detected for {}: {:?} - may cause training instability",
+			horizon,
+			empty_classes
+		);
+	}
 
-    Ok(())
+	Ok(())
 }
 
 // ============================================================================
@@ -810,24 +766,24 @@ fn analyze_class_distribution(targets: &[i32], horizon: &str, bins: u32) -> Resu
 /// Reconstruction result for price level predictions
 #[derive(Debug, Clone)]
 pub struct PriceLevelReconstruction {
-    /// Percentage ranges for each class [lower_bound, upper_bound]
-    pub percentage_ranges: Vec<[f64; 2]>,
-    /// Absolute price ranges for each class [lower_price, upper_price]
-    pub price_ranges: Vec<[f64; 2]>,
-    /// Exponentially-weighted close relative percentage ranges for each class [lower_bound, upper_bound]
-    pub exponential_weighted_percentage_ranges: Vec<[f64; 2]>,
-    /// Class probabilities from model
-    pub probabilities: Vec<f64>,
-    /// Most likely class index
-    pub most_likely_class: usize,
-    /// Confidence (probability of most likely class)
-    pub confidence: f64,
-    /// Expected price change percentage (weighted average)
-    pub expected_change_percent: f64,
-    /// Sequence boundaries used for calculation
-    pub sequence_min: f64,
-    pub sequence_max: f64,
-    pub bandwidth: f64,
+	/// Percentage ranges for each class [lower_bound, upper_bound]
+	pub percentage_ranges: Vec<[f64; 2]>,
+	/// Absolute price ranges for each class [lower_price, upper_price]
+	pub price_ranges: Vec<[f64; 2]>,
+	/// Exponentially-weighted close relative percentage ranges for each class [lower_bound, upper_bound]
+	pub exponential_weighted_percentage_ranges: Vec<[f64; 2]>,
+	/// Class probabilities from model
+	pub probabilities: Vec<f64>,
+	/// Most likely class index
+	pub most_likely_class: usize,
+	/// Confidence (probability of most likely class)
+	pub confidence: f64,
+	/// Expected price change percentage (weighted average)
+	pub expected_change_percent: f64,
+	/// Sequence boundaries used for calculation
+	pub sequence_min: f64,
+	pub sequence_max: f64,
+	pub bandwidth: f64,
 }
 
 /// Reconstruct price level predictions from model probabilities
@@ -844,196 +800,176 @@ pub struct PriceLevelReconstruction {
 /// # Returns
 /// * `PriceLevelReconstruction` - Complete reconstruction with ranges and metrics
 pub fn reconstruct_price_levels(
-    probabilities: &[f64],
-    sequence_ohlcv: &[MarketDataRow],
-    current_price: f64,
-    calibrated_params: &crate::targets::calibration::PriceLevelParams,
+	probabilities: &[f64],
+	sequence_ohlcv: &[MarketDataRow],
+	current_price: f64,
+	calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<PriceLevelReconstruction> {
-    // Validate inputs
-    if probabilities.len() != 5 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Price level reconstruction requires exactly 5 class probabilities".to_string(),
-        ));
-    }
+	// Validate inputs
+	if probabilities.len() != 5 {
+		return Err(crate::utils::error::VangaError::DataError(
+			"Price level reconstruction requires exactly 5 class probabilities".to_string(),
+		));
+	}
 
-    if sequence_ohlcv.is_empty() {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Sequence OHLCV data is required for price level reconstruction".to_string(),
-        ));
-    }
+	if sequence_ohlcv.is_empty() {
+		return Err(crate::utils::error::VangaError::DataError(
+			"Sequence OHLCV data is required for price level reconstruction".to_string(),
+		));
+	}
 
-    if current_price <= 0.0 {
-        return Err(crate::utils::error::VangaError::DataError(
-            "Current price must be positive for percentage calculations".to_string(),
-        ));
-    }
+	if current_price <= 0.0 {
+		return Err(crate::utils::error::VangaError::DataError(
+			"Current price must be positive for percentage calculations".to_string(),
+		));
+	}
 
-    let anchor_mode = calibrated_params.definition.uses_anchor_volatility()?;
-    let (boundaries, percentage_ranges, price_ranges, exponential_weighted_percentage_ranges) =
-        if anchor_mode {
-            let boundaries = anchor_price_level_boundaries(sequence_ohlcv, calibrated_params)?;
-            let anchor = sequence_ohlcv[sequence_ohlcv.len() - 1].close;
-            // As in the legacy ladder, display the open outer bins with one
-            // bandwidth of finite extension. Inner endpoints are exact thresholds.
-            let endpoints = [
-                boundaries.boundaries[0] - boundaries.bandwidth,
-                boundaries.boundaries[0],
-                boundaries.boundaries[1],
-                boundaries.boundaries[2],
-                boundaries.boundaries[3],
-                boundaries.boundaries[3] + boundaries.bandwidth,
-            ];
-            if endpoints.iter().any(|price| !price.is_finite()) {
-                return Err(VangaError::data(
-                    "Non-finite reconstructed price-level band",
-                ));
-            }
-            let price_ranges: Vec<[f64; 2]> = endpoints
-                .windows(2)
-                .map(|pair| [pair[0], pair[1]])
-                .collect();
-            let percentage_ranges: Vec<[f64; 2]> = endpoints
-                .windows(2)
-                .map(|pair| {
-                    [
-                        (pair[0] / anchor - 1.0) * 100.0,
-                        (pair[1] / anchor - 1.0) * 100.0,
-                    ]
-                })
-                .collect();
-            let exponential_weighted_reference =
-                get_sequence_exponential_weighted_close(sequence_ohlcv)?;
-            if !exponential_weighted_reference.is_finite() || exponential_weighted_reference <= 0.0
-            {
-                return Err(VangaError::data(
-                    "Invalid exponentially weighted price-level reference",
-                ));
-            }
-            let exponential_weighted_percentage_ranges: Vec<[f64; 2]> = endpoints
-                .windows(2)
-                .map(|pair| {
-                    [
-                        (pair[0] / exponential_weighted_reference - 1.0) * 100.0,
-                        (pair[1] / exponential_weighted_reference - 1.0) * 100.0,
-                    ]
-                })
-                .collect();
-            (
-                boundaries,
-                percentage_ranges,
-                price_ranges,
-                exponential_weighted_percentage_ranges,
-            )
-        } else {
-            // CRITICAL FIX: Use EXACT calibrated parameters - NO recalculation during reconstruction!
-            // The calibration process already found the optimal parameters for balanced classification
-            // Recalculating them during prediction would break the training-prediction consistency
+	let anchor_mode = calibrated_params.definition.uses_anchor_volatility()?;
+	let (boundaries, percentage_ranges, price_ranges, exponential_weighted_percentage_ranges) = if anchor_mode {
+		let boundaries = anchor_price_level_boundaries(sequence_ohlcv, calibrated_params)?;
+		let anchor = sequence_ohlcv[sequence_ohlcv.len() - 1].close;
+		// As in the legacy ladder, display the open outer bins with one
+		// bandwidth of finite extension. Inner endpoints are exact thresholds.
+		let endpoints = [
+			boundaries.boundaries[0] - boundaries.bandwidth,
+			boundaries.boundaries[0],
+			boundaries.boundaries[1],
+			boundaries.boundaries[2],
+			boundaries.boundaries[3],
+			boundaries.boundaries[3] + boundaries.bandwidth,
+		];
+		if endpoints.iter().any(|price| !price.is_finite()) {
+			return Err(VangaError::data("Non-finite reconstructed price-level band"));
+		}
+		let price_ranges: Vec<[f64; 2]> = endpoints.windows(2).map(|pair| [pair[0], pair[1]]).collect();
+		let percentage_ranges: Vec<[f64; 2]> = endpoints
+			.windows(2)
+			.map(|pair| [(pair[0] / anchor - 1.0) * 100.0, (pair[1] / anchor - 1.0) * 100.0])
+			.collect();
+		let exponential_weighted_reference = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
+		if !exponential_weighted_reference.is_finite() || exponential_weighted_reference <= 0.0 {
+			return Err(VangaError::data("Invalid exponentially weighted price-level reference"));
+		}
+		let exponential_weighted_percentage_ranges: Vec<[f64; 2]> = endpoints
+			.windows(2)
+			.map(|pair| {
+				[
+					(pair[0] / exponential_weighted_reference - 1.0) * 100.0,
+					(pair[1] / exponential_weighted_reference - 1.0) * 100.0,
+				]
+			})
+			.collect();
+		(
+			boundaries,
+			percentage_ranges,
+			price_ranges,
+			exponential_weighted_percentage_ranges,
+		)
+	} else {
+		// CRITICAL FIX: Use EXACT calibrated parameters - NO recalculation during reconstruction!
+		// The calibration process already found the optimal parameters for balanced classification
+		// Recalculating them during prediction would break the training-prediction consistency
 
-            // Use EXACT calibrated percentiles (no adaptive recalculation)
-            let exact_percentiles = calibrated_params.percentiles;
+		// Use EXACT calibrated percentiles (no adaptive recalculation)
+		let exact_percentiles = calibrated_params.percentiles;
 
-            // Use EXACT calibrated bandwidth (no adaptive recalculation)
-            let exact_bandwidth = calibrated_params.bandwidth;
+		// Use EXACT calibrated bandwidth (no adaptive recalculation)
+		let exact_bandwidth = calibrated_params.bandwidth;
 
-            // Use EXACT calibrated neutral band factor
-            let exact_neutral_band_factor = calibrated_params.neutral_band_factor;
+		// Use EXACT calibrated neutral band factor
+		let exact_neutral_band_factor = calibrated_params.neutral_band_factor;
 
-            // Use centralized sequence reconstruction logic with EXACT calibrated parameters
-            let reconstruction_config = SequenceReconstructionConfig {
-                percentiles: exact_percentiles,  // Use exact calibrated percentiles
-                bandwidth_size: exact_bandwidth, // Use exact calibrated bandwidth
-                neutral_band_factor: exact_neutral_band_factor, // Use exact calibrated neutral band
-            };
-            let analyzer = SequenceAnalyzer::new(reconstruction_config);
-            let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
+		// Use centralized sequence reconstruction logic with EXACT calibrated parameters
+		let reconstruction_config = SequenceReconstructionConfig {
+			percentiles: exact_percentiles,                 // Use exact calibrated percentiles
+			bandwidth_size: exact_bandwidth,                // Use exact calibrated bandwidth
+			neutral_band_factor: exact_neutral_band_factor, // Use exact calibrated neutral band
+		};
+		let analyzer = SequenceAnalyzer::new(reconstruction_config);
+		let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
 
-            // Calculate sequence exponentially-weighted close (this is our reference center)
-            let sequence_exponential_weighted =
-                get_sequence_exponential_weighted_close(sequence_ohlcv)?;
+		// Calculate sequence exponentially-weighted close (this is our reference center)
+		let sequence_exponential_weighted = get_sequence_exponential_weighted_close(sequence_ohlcv)?;
 
-            // Calculate percentage ranges relative to sequence center
-            // This ensures neutral zone is properly centered around 0%
-            let percentage_ranges_from_center =
-                boundaries.get_price_level_ranges(sequence_exponential_weighted);
+		// Calculate percentage ranges relative to sequence center
+		// This ensures neutral zone is properly centered around 0%
+		let percentage_ranges_from_center = boundaries.get_price_level_ranges(sequence_exponential_weighted);
 
-            // Convert percentage ranges to be relative to current price for display
-            // This shows where the levels are relative to current market price
-            let percentage_ranges: Vec<[f64; 2]> = percentage_ranges_from_center
-                .iter()
-                .map(|[lower_pct, upper_pct]| {
-                    // Convert from sequence-center-relative to current-price-relative
-                    let lower_price_abs = sequence_exponential_weighted * (1.0 + lower_pct / 100.0);
-                    let upper_price_abs = sequence_exponential_weighted * (1.0 + upper_pct / 100.0);
-                    let lower_pct_from_current =
-                        ((lower_price_abs - current_price) / current_price) * 100.0;
-                    let upper_pct_from_current =
-                        ((upper_price_abs - current_price) / current_price) * 100.0;
-                    [lower_pct_from_current, upper_pct_from_current]
-                })
-                .collect();
+		// Convert percentage ranges to be relative to current price for display
+		// This shows where the levels are relative to current market price
+		let percentage_ranges: Vec<[f64; 2]> = percentage_ranges_from_center
+			.iter()
+			.map(|[lower_pct, upper_pct]| {
+				// Convert from sequence-center-relative to current-price-relative
+				let lower_price_abs = sequence_exponential_weighted * (1.0 + lower_pct / 100.0);
+				let upper_price_abs = sequence_exponential_weighted * (1.0 + upper_pct / 100.0);
+				let lower_pct_from_current = ((lower_price_abs - current_price) / current_price) * 100.0;
+				let upper_pct_from_current = ((upper_price_abs - current_price) / current_price) * 100.0;
+				[lower_pct_from_current, upper_pct_from_current]
+			})
+			.collect();
 
-            // Calculate absolute price ranges
-            // These are the actual price levels based on the sequence analysis
-            let price_ranges: Vec<[f64; 2]> = percentage_ranges_from_center
-                .iter()
-                .map(|[lower_pct, upper_pct]| {
-                    // Convert from percentages to absolute prices using sequence center
-                    let lower_price = sequence_exponential_weighted * (1.0 + lower_pct / 100.0);
-                    let upper_price = sequence_exponential_weighted * (1.0 + upper_pct / 100.0);
-                    [lower_price, upper_price]
-                })
-                .collect();
+		// Calculate absolute price ranges
+		// These are the actual price levels based on the sequence analysis
+		let price_ranges: Vec<[f64; 2]> = percentage_ranges_from_center
+			.iter()
+			.map(|[lower_pct, upper_pct]| {
+				// Convert from percentages to absolute prices using sequence center
+				let lower_price = sequence_exponential_weighted * (1.0 + lower_pct / 100.0);
+				let upper_price = sequence_exponential_weighted * (1.0 + upper_pct / 100.0);
+				[lower_price, upper_price]
+			})
+			.collect();
 
-            // The exponentially-weighted percentage ranges are the same as from center
-            let exponential_weighted_percentage_ranges: Vec<[f64; 2]> =
-                percentage_ranges_from_center;
+		// The exponentially-weighted percentage ranges are the same as from center
+		let exponential_weighted_percentage_ranges: Vec<[f64; 2]> = percentage_ranges_from_center;
 
-            (
-                boundaries,
-                percentage_ranges,
-                price_ranges,
-                exponential_weighted_percentage_ranges,
-            )
-        };
+		(
+			boundaries,
+			percentage_ranges,
+			price_ranges,
+			exponential_weighted_percentage_ranges,
+		)
+	};
 
-    // Find most likely class
-    let (most_likely_class, max_prob) = probabilities
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(idx, &prob)| (idx, prob))
-        .unwrap_or((2, 0.2)); // Default to neutral class
+	// Find most likely class
+	let (most_likely_class, max_prob) = probabilities
+		.iter()
+		.enumerate()
+		.max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+		.map(|(idx, &prob)| (idx, prob))
+		.unwrap_or((2, 0.2)); // Default to neutral class
 
-    // MATHEMATICALLY CORRECT CONFIDENCE FOR 5-CLASS SYSTEM
-    // Calculate entropy-based confidence
-    // UNIFIED CONFIDENCE CALCULATION
-    // All targets now use the same research-based calibration function
-    // This ensures consistent confidence scores across all prediction types
-    // Based on "On Calibration of Modern Neural Networks" research findings
-    let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
+	// MATHEMATICALLY CORRECT CONFIDENCE FOR 5-CLASS SYSTEM
+	// Calculate entropy-based confidence
+	// UNIFIED CONFIDENCE CALCULATION
+	// All targets now use the same research-based calibration function
+	// This ensures consistent confidence scores across all prediction types
+	// Based on "On Calibration of Modern Neural Networks" research findings
+	let confidence = crate::output::confidence_calculator::calibrate_5_class_confidence(max_prob);
 
-    // Calculate expected price change (weighted average of class midpoints)
-    let class_midpoints: Vec<f64> = percentage_ranges
-        .iter()
-        .map(|[lower, upper]| (lower + upper) / 2.0)
-        .collect();
+	// Calculate expected price change (weighted average of class midpoints)
+	let class_midpoints: Vec<f64> = percentage_ranges
+		.iter()
+		.map(|[lower, upper]| (lower + upper) / 2.0)
+		.collect();
 
-    let expected_change_percent: f64 = probabilities
-        .iter()
-        .zip(class_midpoints.iter())
-        .map(|(&prob, &midpoint)| prob * midpoint)
-        .sum();
+	let expected_change_percent: f64 = probabilities
+		.iter()
+		.zip(class_midpoints.iter())
+		.map(|(&prob, &midpoint)| prob * midpoint)
+		.sum();
 
-    Ok(PriceLevelReconstruction {
-        percentage_ranges,
-        price_ranges,
-        exponential_weighted_percentage_ranges,
-        probabilities: probabilities.to_vec(),
-        most_likely_class,
-        confidence,
-        expected_change_percent,
-        sequence_min: boundaries.sequence_min,
-        sequence_max: boundaries.sequence_max,
-        bandwidth: boundaries.bandwidth,
-    })
+	Ok(PriceLevelReconstruction {
+		percentage_ranges,
+		price_ranges,
+		exponential_weighted_percentage_ranges,
+		probabilities: probabilities.to_vec(),
+		most_likely_class,
+		confidence,
+		expected_change_percent,
+		sequence_min: boundaries.sequence_min,
+		sequence_max: boundaries.sequence_max,
+		bandwidth: boundaries.bandwidth,
+	})
 }
