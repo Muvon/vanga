@@ -11,8 +11,6 @@ jobs:
     name: Rust CI
     uses: muvon/ci-workflow/.github/workflows/rust-ci.yml@master
     with:
-      # MSRV pinned in Cargo.toml (rust-version = 1.87)
-      toolchain: '1.87.0'
       # ONNX Runtime issues force --no-default-features across all cargo jobs
       feature-flags: '--no-default-features'
       setup-protoc: true
@@ -31,7 +29,6 @@ jobs:
       contents: write # push the badge JSON to the `badges` branch
     uses: muvon/ci-workflow/.github/workflows/rust-coverage.yml@master
     with:
-      toolchain: '1.87.0'
       feature-flags: '--no-default-features'
       setup-protoc: true
       ignore-filename-regex: '_test\.rs$|(^|/)tests/'
