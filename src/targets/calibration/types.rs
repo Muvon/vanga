@@ -606,6 +606,19 @@ impl Default for ClassBalance {
 	}
 }
 
+impl ClassBalance {
+	/// True when the five class sizes differ by at most one sample. No other split of the same samples is more
+	/// even, so a threshold search that only scores balance cannot improve on it.
+	pub fn is_most_even_split(&self) -> bool {
+		let counts = self
+			.class_percentages
+			.map(|percentage| (percentage / 100.0 * self.total_samples as f64).round() as usize);
+		let smallest = counts.iter().copied().min().unwrap_or(0);
+		let largest = counts.iter().copied().max().unwrap_or(0);
+		smallest > 0 && counts.iter().sum::<usize>() == self.total_samples && largest - smallest <= 1
+	}
+}
+
 // Legacy compatibility
 pub type ClassDistributionBalance = ClassBalance;
 

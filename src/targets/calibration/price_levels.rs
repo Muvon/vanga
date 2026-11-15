@@ -267,12 +267,13 @@ async fn calibrate_anchor_price_levels(
 	};
 	let objective =
 		|values: &[f64]| -> Result<f64> { Ok(evaluate(sorted_thresholds(values))?.composite_quality_score) };
-	// Diversity depends only on the fixed sample set in this objective. When
-	// class balance is exact, its score is therefore a proven global minimum.
+	// Diversity depends only on the fixed sample set in this objective. The most
+	// even split is therefore a proven global minimum, also when the sample count
+	// is not a multiple of five.
 	let objective_floor = seed
 		.map(evaluate)
 		.transpose()?
-		.filter(|balance| balance.balance_score == 0.0)
+		.filter(ClassBalance::is_most_even_split)
 		.map(|balance| balance.composite_quality_score);
 	let best = calibrator
 		.calibrate_with_bayesian(

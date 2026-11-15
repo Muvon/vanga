@@ -289,7 +289,11 @@ async fn calibrate_anchor_stop_levels(
 			},
 			super::bayesian::BayesianConfig {
 				initial_candidate: Some(seed.to_vec()),
-				objective_floor: (seed_balance.balance_score == 0.0).then_some(seed_balance.composite_quality_score),
+				// Diversity depends only on the fixed sample set, so the most even split is a proven global
+				// minimum of this objective, also when the sample count is not a multiple of five.
+				objective_floor: seed_balance
+					.is_most_even_split()
+					.then_some(seed_balance.composite_quality_score),
 				..Default::default()
 			},
 			prefix,
