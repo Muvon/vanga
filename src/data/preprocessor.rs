@@ -84,6 +84,12 @@ impl DataPreprocessor {
 				final_columns,
 				final_columns - initial_columns
 			);
+
+			// STEP 3: Context inputs, computed from raw prices and volume before any capping
+			if features_config.context.enabled {
+				df = crate::features::context::add_context_features(df, features_config.stats_window_bars)?;
+				log::info!("✅ Context features added: {} columns", df.width());
+			}
 		} else {
 			log::warn!("⚠️ No feature configuration provided - using raw OHLCV data only");
 		}
@@ -649,6 +655,8 @@ impl DataPreprocessor {
 			"timestamp" => false,
 			// Preserve OHLC price data - these are legitimate market movements
 			"open" | "high" | "low" | "close" => false,
+			// Context inputs are levels by design: capping them would remove the extremes they report
+			name if crate::features::context::is_context_column(name) => false,
 			// Process all other columns (volume, indicators, etc.)
 			_ => true,
 		}

@@ -37,6 +37,12 @@ pub struct FeatureConfig {
 	/// All outputs are scale-invariant. Disabled by default for backward compatibility.
 	#[serde(default)]
 	pub regime_features: RegimeFeaturesConfig,
+
+	/// Context inputs (clock, and volatility, volume and trend against the regime window).
+	/// They skip per-sequence normalisation, so the model sees the level that normalisation
+	/// removes. Off by default: turning it on changes the input width of a model.
+	#[serde(default)]
+	pub context: ContextFeaturesConfig,
 }
 
 pub fn default_stats_window_bars() -> usize {
@@ -56,6 +62,7 @@ impl Default for FeatureConfig {
 			cross_asset: Default::default(),
 			liquidity_features: Default::default(),
 			regime_features: Default::default(),
+			context: Default::default(),
 		}
 	}
 }
@@ -71,6 +78,11 @@ impl FeatureConfig {
 			crate::utils::error::VangaError::ConfigError(format!("Failed to parse features config file: {}", e))
 		})
 	}
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextFeaturesConfig {
+	pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

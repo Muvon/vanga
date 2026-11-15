@@ -47,6 +47,77 @@ fn statistics_window_defaults_and_rejects_zero() {
 }
 
 #[test]
+fn outlier_capping_skips_context_columns() {
+	let values = vec![0.1, 0.2, 0.1, 0.2, 0.1, 0.2, 0.1, 0.2, 9.0];
+	let frame = df!("ctx_vol_1" => values.clone(), "volume" => values.clone()).unwrap();
+	let cleaned = DataPreprocessor::new()
+		.remove_outliers_causal(frame, &OutlierMethod::ModifiedZScore, 4.0, 7)
+		.unwrap();
+	let read = |name: &str| -> Vec<f64> {
+		cleaned
+			.column(name)
+			.unwrap()
+			.f64()
+			.unwrap()
+			.into_no_null_iter()
+			.collect()
+	};
+	assert_eq!(read("ctx_vol_1"), values);
+	assert!(
+		read("volume")[8] < 9.0,
+		"the same spike is capped in an ordinary column"
+	);
+}
+
+#[tokio::test]
+async fn context_columns_are_added_only_when_enabled() {
+	let rows = 120usize;
+	let closes: Vec<f64> = (0..rows)
+		.map(|i| 100.0 + (i as f64 * 0.7).sin() * 3.0 + i as f64 * 0.05)
+		.collect();
+	let frame = df!(
+		"timestamp" => (0..rows as i64).map(|i| 1_767_571_200 + i * 3600).collect::<Vec<i64>>(),
+		"open" => closes.clone(),
+		"high" => closes.iter().map(|close| close + 1.0).collect::<Vec<f64>>(),
+		"low" => closes.iter().map(|close| close - 1.0).collect::<Vec<f64>>(),
+		"close" => closes.clone(),
+		"volume" => (0..rows).map(|i| 10.0 + (i % 5) as f64).collect::<Vec<f64>>(),
+	)
+	.unwrap();
+	let data_config = crate::config::training::DataConfig::default();
+	let mut features = crate::config::FeatureConfig::default();
+	features.technical_indicators.enabled = false;
+	features.stats_window_bars = 27;
+	let count_context = |frame: &DataFrame| {
+		frame
+			.get_column_names()
+			.iter()
+			.filter(|name| crate::features::context::is_context_column(name))
+			.count()
+	};
+	let without = DataPreprocessor::new()
+		.process_features_only(frame.clone(), &data_config, Some(&features))
+		.await
+		.unwrap();
+	assert_eq!(count_context(&without), 0);
+	features.context.enabled = true;
+	let with = DataPreprocessor::new()
+		.process_features_only(frame, &data_config, Some(&features))
+		.await
+		.unwrap();
+	assert_eq!(count_context(&with), 11);
+	assert_eq!(with.width(), without.width() + 11);
+	for name in with.get_column_names() {
+		if let Ok(values) = with.column(name).unwrap().f64() {
+			assert!(
+				values.into_iter().all(|value| value.is_some_and(f64::is_finite)),
+				"{name} has a gap"
+			);
+		}
+	}
+}
+
+#[test]
 fn test_interpolation_strategy_selection() {
 	let preprocessor = DataPreprocessor;
 

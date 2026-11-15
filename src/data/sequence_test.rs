@@ -128,3 +128,32 @@ async fn saved_feature_order_restores_identical_prediction_tensor() {
 		"{error}"
 	);
 }
+
+#[test]
+fn window_normalisation_leaves_context_columns_untouched() {
+	let level = vec![0.4, 0.5, 0.6, 0.7];
+	let window = df!(
+		"timestamp" => [0i64, 3600, 7200, 10800],
+		"close" => [10.0, 12.0, 14.0, 16.0],
+		"ctx_vol_1" => level.clone(),
+	)
+	.unwrap();
+	let normalised = SequenceGenerator::new().normalize_sequence_window(&window).unwrap();
+	let kept: Vec<f64> = normalised
+		.column("ctx_vol_1")
+		.unwrap()
+		.f64()
+		.unwrap()
+		.into_no_null_iter()
+		.collect();
+	assert_eq!(kept, level);
+	let close: Vec<f64> = normalised
+		.column("close")
+		.unwrap()
+		.f64()
+		.unwrap()
+		.into_no_null_iter()
+		.collect();
+	assert!(close.iter().sum::<f64>().abs() < 1e-9, "close is centred: {close:?}");
+	assert!(close[0] < 0.0 && close[3] > 0.0);
+}

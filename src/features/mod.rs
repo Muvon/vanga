@@ -1,3 +1,4 @@
+pub mod context;
 pub mod cross_asset;
 pub mod custom;
 pub mod engineering;
@@ -12,6 +13,8 @@ pub mod volatility;
 // Test modules
 #[cfg(test)]
 mod consolidation_test;
+#[cfg(test)]
+mod context_test;
 #[cfg(test)]
 mod feature_validation_test;
 #[cfg(test)]

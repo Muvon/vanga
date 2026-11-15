@@ -433,8 +433,8 @@ impl SequenceGenerator {
 		let normalized_columns: Result<Vec<Column>> = column_names
 			.par_iter() // ← PARALLEL PROCESSING: Each column on different thread
 			.map(|column_name| {
-				if column_name == "timestamp" {
-					// Keep timestamp as-is
+				if column_name == "timestamp" || crate::features::context::is_context_column(column_name) {
+					// Timestamp stays as-is; context inputs carry the level this normalisation removes
 					Ok(window_df.column(column_name)?.clone())
 				} else if let Ok(series) = window_df.column(column_name) {
 					if series.dtype().is_numeric() {
