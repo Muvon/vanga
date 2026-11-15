@@ -99,7 +99,7 @@ fn regime_stop_serving_rejects_config_window_mismatch() {
 	);
 	let formatter = OutputFormatter::new(Default::default())
 		.with_sequence_ohlcv(history[history.len() - 3..].to_vec())
-		.with_stop_level_history(history.clone())
+		.with_regime_history(history.clone())
 		.with_stats_window_bars(history.len() + 1)
 		.with_calibrated_parameters(calibrated);
 	let error = formatter
@@ -139,6 +139,7 @@ fn anchor_price_ranges_use_current_and_vwap_references() {
 			definition: PriceLevelDefinition {
 				reference: PriceLevelReference::AnchorClose,
 				scale: PriceLevelScale::Volatility,
+				..Default::default()
 			},
 			thresholds: Some([-2.0, -1.0, 1.0, 2.0]),
 			..Default::default()

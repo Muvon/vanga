@@ -299,6 +299,7 @@ async fn saved_model_round_trip_is_byte_identical_and_preserves_full_holdout() {
 			PriceLevelParams {
 				definition: Default::default(),
 				thresholds: None,
+				regime_window_bars: None,
 				bandwidth: 1.0,
 				percentiles: [0.1, 0.9],
 				neutral_band_factor: 0.4,
@@ -608,4 +609,29 @@ fn evaluator_rejects_insufficient_regime_stop_history() {
 		.to_string();
 	assert!(error.contains("4 bars available, 5 required"), "{error}");
 	validate_evaluator_stop_history(&calibrated, "1h", 5).unwrap();
+}
+
+#[test]
+fn evaluator_rejects_insufficient_regime_price_history() {
+	let mut calibrated = crate::targets::calibration::CalibratedParameters::default();
+	calibrated.price_levels.insert(
+		"1h".to_string(),
+		crate::targets::calibration::PriceLevelParams {
+			definition: crate::config::training::PriceLevelDefinition {
+				reference: crate::config::training::PriceLevelReference::AnchorClose,
+				scale: crate::config::training::PriceLevelScale::RegimeVolatility,
+				statistic: crate::config::training::PriceLevelStatistic::FurthestTouch,
+			},
+			thresholds: Some([-2.0, -1.0, 1.0, 2.0]),
+			regime_window_bars: Some(5),
+			..Default::default()
+		},
+	);
+	let error = validate_evaluator_price_history(&calibrated, "1h", 4)
+		.unwrap_err()
+		.to_string();
+	assert!(error.contains("4 bars available, 5 required"), "{error}");
+	validate_evaluator_price_history(&calibrated, "1h", 5).unwrap();
+	// A horizon without regime parameters has nothing to check.
+	validate_evaluator_price_history(&calibrated, "4h", 0).unwrap();
 }

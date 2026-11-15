@@ -64,7 +64,7 @@ mod tests {
 }
 
 use crate::config::training::{
-	PriceLevelDefinition, PriceLevelReference, PriceLevelScale, TargetsConfig, TrainingConfig,
+	PriceLevelDefinition, PriceLevelReference, PriceLevelScale, PriceLevelStatistic, TargetsConfig, TrainingConfig,
 };
 use crate::data::structures::MarketDataRow;
 use crate::targets::calibration::{CalibratedParameters, EvaluationContext, ParameterCalibrator, PriceLevelParams};
@@ -89,6 +89,7 @@ fn anchor_definition() -> PriceLevelDefinition {
 	PriceLevelDefinition {
 		reference: PriceLevelReference::AnchorClose,
 		scale: PriceLevelScale::Volatility,
+		..Default::default()
 	}
 }
 
@@ -226,10 +227,13 @@ fn price_level_config_loads_old_and_new_toml_and_roundtrips() {
 		assert!(toml::from_str::<TargetsConfig>(&invalid).is_err());
 	}
 	let regime = experiment.replace("volatility\"", "regime_volatility\"");
-	let error = toml::from_str::<TargetsConfig>(&regime).unwrap_err().to_string();
-	assert!(
-		error.contains("price_level does not support scale = regime_volatility"),
-		"{error}"
+	let targets: TargetsConfig = toml::from_str(&regime).unwrap();
+	assert_eq!(
+		targets.price_level_definition,
+		PriceLevelDefinition {
+			scale: PriceLevelScale::RegimeVolatility,
+			..anchor_definition()
+		}
 	);
 }
 
@@ -463,4 +467,380 @@ fn price_level_experimental_binary_preserves_thresholds_and_record_alignment() {
 	let mut unsupported = binary;
 	unsupported[8] = 255; // Version immediately follows the f64 sentinel.
 	assert!(bincode::deserialize::<(PriceLevelParams, u64)>(&unsupported).is_err());
+}
+
+fn regime_furthest_definition() -> PriceLevelDefinition {
+	PriceLevelDefinition {
+		scale: PriceLevelScale::RegimeVolatility,
+		statistic: PriceLevelStatistic::FurthestTouch,
+		..anchor_definition()
+	}
+}
+
+fn regime_history() -> Vec<MarketDataRow> {
+	price_level_candles(&[100.0, 101.0, 99.0, 102.0, 98.0, 100.0, 103.0, 97.0, 101.0, 100.0])
+}
+
+/// A horizon bar that closes at the anchor, so only its high and low carry information.
+fn touch_bar(anchor: f64, high: f64, low: f64, index: usize) -> MarketDataRow {
+	MarketDataRow {
+		timestamp: index as i64 * 60_000,
+		open: anchor,
+		high,
+		low,
+		close: anchor,
+		volume: 1000.0,
+	}
+}
+
+/// Highs and lows of a touch that moved `statistic` volatilities away from the anchor, on one side only.
+fn one_sided_touch(anchor: f64, volatility: f64, statistic: f64, index: usize) -> MarketDataRow {
+	let touched = anchor * (1.0 + statistic * volatility);
+	if statistic >= 0.0 {
+		touch_bar(anchor, touched, anchor, index)
+	} else {
+		touch_bar(anchor, anchor, touched, index)
+	}
+}
+
+#[test]
+fn price_level_furthest_touch_config_parses_roundtrips_and_rejects_invalid_combinations() {
+	let rest = "stop_level = false\ndirection = false\nvolatility = false\nsentiment = false\nvolume = false\n";
+	let inline = |definition: &str| format!("price_level = {{ {definition} }}\n{rest}");
+
+	let text = inline(r#"reference = "anchor_close", scale = "regime_volatility", statistic = "furthest_touch""#);
+	let targets: TargetsConfig = toml::from_str(&text).unwrap();
+	assert!(targets.price_level);
+	assert_eq!(targets.price_level_definition, regime_furthest_definition());
+
+	let saved = serde_json::to_value(&targets).unwrap();
+	assert_eq!(saved["price_level"]["statistic"], "furthest_touch");
+	let restored: TargetsConfig = serde_json::from_value(saved).unwrap();
+	assert_eq!(restored.price_level_definition, regime_furthest_definition());
+	let written = toml::to_string(&toml::Value::try_from(&targets).unwrap()).unwrap();
+	let reread: TargetsConfig = toml::from_str(&written).unwrap();
+	assert_eq!(reread.price_level_definition, regime_furthest_definition());
+
+	let weighted = inline(r#"reference = "anchor_close", scale = "regime_volatility""#);
+	let weighted: TargetsConfig = toml::from_str(&weighted).unwrap();
+	assert_eq!(
+		weighted.price_level_definition.statistic,
+		PriceLevelStatistic::WeightedClose
+	);
+
+	// Defaults stay absent from saved metadata, so existing files do not change.
+	assert_eq!(
+		serde_json::to_value(PriceLevelDefinition::default()).unwrap(),
+		serde_json::json!({})
+	);
+	let anchor_value = serde_json::to_value(anchor_definition()).unwrap();
+	assert!(anchor_value.get("statistic").is_none());
+
+	for invalid in [
+		r#"reference = "window_weighted", scale = "window_range", statistic = "furthest_touch""#,
+		r#"reference = "anchor_close", scale = "window_range", statistic = "furthest_touch""#,
+		r#"reference = "window_weighted", scale = "regime_volatility""#,
+	] {
+		let error = toml::from_str::<TargetsConfig>(&inline(invalid))
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("price_level requires"), "{error}");
+	}
+	assert!(toml::from_str::<TargetsConfig>(&inline(r#"statistic = "typo""#)).is_err());
+
+	let mut training = TrainingConfig::default();
+	training.targets.price_level_definition = regime_furthest_definition();
+	training.features.stats_window_bars = 1;
+	let error = training.validate().unwrap_err().to_string();
+	assert!(error.contains("regime_volatility"), "{error}");
+}
+
+#[test]
+fn furthest_touch_future_price_uses_highs_and_lows_and_ties_go_up() {
+	let anchor = 100.0;
+	let bar = |high: f64, low: f64| touch_bar(anchor, high, low, 0);
+	let touch =
+		|future: &[MarketDataRow]| anchor_price_level_horizon_price(PriceLevelStatistic::FurthestTouch, anchor, future);
+
+	assert_eq!(touch(&[bar(110.0, 95.0)]).unwrap(), 110.0);
+	assert_eq!(touch(&[bar(105.0, 90.0)]).unwrap(), 90.0);
+	// Equal excursions on both sides resolve to the upper side.
+	assert_eq!(touch(&[bar(150.0, 50.0)]).unwrap(), 150.0);
+	// The extremes come from different bars; every close sits at the anchor.
+	assert_eq!(
+		touch(&[bar(103.0, 99.0), bar(101.0, 80.0), bar(104.0, 98.0)]).unwrap(),
+		80.0
+	);
+	assert_eq!(
+		anchor_price_level_horizon_price(PriceLevelStatistic::WeightedClose, anchor, &[bar(110.0, 95.0)]).unwrap(),
+		anchor
+	);
+
+	for invalid in [
+		vec![],
+		vec![bar(f64::NAN, 95.0)],
+		vec![bar(f64::INFINITY, 95.0)],
+		vec![bar(110.0, 0.0)],
+		vec![bar(110.0, -1.0)],
+	] {
+		assert!(touch(&invalid).is_err());
+	}
+}
+
+#[test]
+fn regime_price_level_scale_matches_stop_level_scale_and_rejects_bad_history() {
+	use crate::config::training::{StopLevelDefinition, StopLevelSide};
+	use crate::targets::calibration::StopLevelParams;
+	use crate::targets::stop_levels::stop_level_anchor_scale;
+
+	let history = regime_history();
+	let sequence = &history[history.len() - 3..];
+	let window_bars = 6;
+	let thresholds = [-2.0, -1.0, 1.0, 2.0];
+	let params = PriceLevelParams {
+		definition: regime_furthest_definition(),
+		thresholds: Some(thresholds),
+		regime_window_bars: Some(window_bars),
+		..Default::default()
+	};
+	let stop_params = StopLevelParams {
+		definition: StopLevelDefinition {
+			reference: PriceLevelReference::AnchorClose,
+			scale: PriceLevelScale::RegimeVolatility,
+			side: StopLevelSide::Either,
+		},
+		thresholds: Some([1.0, 2.0, 3.0, 4.0]),
+		regime_window_bars: Some(window_bars),
+		..Default::default()
+	};
+
+	let (anchor, volatility) = stop_level_anchor_scale(sequence, &history, &stop_params).unwrap();
+	assert_eq!(
+		(anchor, volatility),
+		price_level_anchor_volatility(&history[history.len() - window_bars..]).unwrap()
+	);
+	assert_ne!(volatility, price_level_anchor_volatility(sequence).unwrap().1);
+
+	let boundaries = anchor_price_level_boundaries_with_history(sequence, Some(&history), &params).unwrap();
+	for (boundary, threshold) in boundaries.boundaries.iter().zip(thresholds) {
+		assert_eq!(*boundary, anchor * (1.0 + threshold * volatility));
+	}
+
+	let short_history = &history[history.len() - window_bars + 1..];
+	let error = anchor_price_level_boundaries_with_history(sequence, Some(short_history), &params)
+		.unwrap_err()
+		.to_string();
+	assert!(error.contains("5 bars available, 6 required"), "{error}");
+	// Regime scaling never falls back to the input sequence.
+	assert!(anchor_price_level_boundaries_with_history(sequence, None, &params).is_err());
+	assert!(anchor_price_level_boundaries(sequence, &params).is_err());
+	assert!(
+		anchor_price_level_boundaries_with_history(sequence, Some(&history[..history.len() - 1]), &params).is_err()
+	);
+	assert!(anchor_price_level_statistic_with_history(sequence, None, &history[..1], &params).is_err());
+}
+
+#[test]
+fn regime_furthest_touch_label_and_serving_boundaries_match() {
+	use polars::prelude::*;
+	use std::collections::HashMap;
+
+	let history = regime_history();
+	let sequence_length = 3;
+	let sequence = &history[history.len() - sequence_length..];
+	let params = PriceLevelParams {
+		definition: regime_furthest_definition(),
+		thresholds: Some([-2.0, -1.0, 1.0, 2.0]),
+		regime_window_bars: Some(history.len()),
+		..Default::default()
+	};
+	let (anchor, volatility) = price_level_anchor_volatility(&history).unwrap();
+
+	for (expected_class, statistic) in [-3.0, -1.5, 0.0, 1.5, 3.0].into_iter().enumerate() {
+		let future = vec![one_sided_touch(anchor, volatility, statistic, history.len())];
+		let touched = if statistic >= 0.0 {
+			future[0].high
+		} else {
+			future[0].low
+		};
+		let mut data = history.clone();
+		data.extend(future.clone());
+		let df = df!(
+			"timestamp" => data.iter().map(|bar| bar.timestamp).collect::<Vec<_>>(),
+			"open" => data.iter().map(|bar| bar.open).collect::<Vec<_>>(),
+			"high" => data.iter().map(|bar| bar.high).collect::<Vec<_>>(),
+			"low" => data.iter().map(|bar| bar.low).collect::<Vec<_>>(),
+			"close" => data.iter().map(|bar| bar.close).collect::<Vec<_>>(),
+			"volume" => data.iter().map(|bar| bar.volume).collect::<Vec<_>>()
+		)
+		.unwrap();
+		let mut by_horizon = HashMap::new();
+		by_horizon.insert("1m".to_string(), params.clone());
+		let (labels, _) = generate_price_level_targets_with_calibrated_params(
+			&df,
+			&["1m".to_string()],
+			&[history.len() - sequence_length],
+			sequence_length,
+			&by_horizon,
+		)
+		.unwrap();
+		assert_eq!(labels["1m"][0], expected_class as i32);
+
+		let mut probabilities = [0.0; 5];
+		probabilities[expected_class] = 1.0;
+		let reconstruction =
+			reconstruct_price_levels_with_history(&probabilities, sequence, Some(&history), anchor, &params).unwrap();
+		let band = reconstruction.price_ranges[expected_class];
+		assert!(
+			band[0] <= touched && touched < band[1],
+			"{expected_class}: {band:?} excludes {touched}"
+		);
+		for (index, threshold) in params.thresholds.unwrap().into_iter().enumerate() {
+			assert_eq!(
+				reconstruction.price_ranges[index][1],
+				anchor * (1.0 + threshold * volatility)
+			);
+		}
+	}
+}
+
+#[test]
+fn price_level_regime_params_roundtrip_in_json_and_binary_and_version_one_still_loads() {
+	use crate::targets::calibration::ClassBalance;
+
+	let balance = ClassBalance {
+		composite_quality_score: 0.0,
+		..Default::default()
+	};
+	let thresholds = [-2.0, -1.0, 1.0, 2.0];
+	let window_bars = 8;
+	let params = PriceLevelParams {
+		definition: regime_furthest_definition(),
+		thresholds: Some(thresholds),
+		regime_window_bars: Some(window_bars),
+		balance: balance.clone(),
+		..Default::default()
+	};
+
+	let json = serde_json::to_value(&params).unwrap();
+	assert_eq!(json["statistic"], "furthest_touch");
+	assert_eq!(json["regime_window_bars"], window_bars);
+	let from_json: PriceLevelParams = serde_json::from_value(json.clone()).unwrap();
+	assert_eq!(from_json.definition, params.definition);
+	assert_eq!(from_json.regime_window_bars, Some(window_bars));
+	let mut windowless = json;
+	windowless.as_object_mut().unwrap().remove("regime_window_bars");
+	assert!(serde_json::from_value::<PriceLevelParams>(windowless).is_err());
+
+	let binary = bincode::serialize(&(params.clone(), 123456u64)).unwrap();
+	assert_eq!(binary[8], 2, "regime records are version 2");
+	let (loaded, suffix): (PriceLevelParams, u64) = bincode::deserialize(&binary).unwrap();
+	assert_eq!(suffix, 123456);
+	assert_eq!(loaded.definition, params.definition);
+	assert_eq!(loaded.thresholds, Some(thresholds));
+	assert_eq!(loaded.regime_window_bars, Some(window_bars));
+	assert_eq!(bincode::serialize(&(loaded, suffix)).unwrap(), binary);
+	let without_window = PriceLevelParams {
+		regime_window_bars: None,
+		..params.clone()
+	};
+	assert!(bincode::serialize(&without_window).is_err());
+
+	let touch_only = PriceLevelParams {
+		definition: PriceLevelDefinition {
+			statistic: PriceLevelStatistic::FurthestTouch,
+			..anchor_definition()
+		},
+		regime_window_bars: None,
+		..params.clone()
+	};
+	let binary = bincode::serialize(&touch_only).unwrap();
+	assert_eq!(binary[8], 2);
+	let loaded: PriceLevelParams = bincode::deserialize(&binary).unwrap();
+	assert_eq!(loaded.definition, touch_only.definition);
+	assert_eq!(loaded.regime_window_bars, None);
+
+	// A record written before the statistic and window existed keeps its meaning.
+	let version_one = bincode::serialize(&(
+		f64::NEG_INFINITY,
+		1u8,
+		(PriceLevelReference::AnchorClose, PriceLevelScale::Volatility),
+		thresholds,
+		params.bandwidth,
+		params.percentiles,
+		params.neutral_band_factor,
+		params.momentum_factor,
+		&balance,
+	))
+	.unwrap();
+	let loaded: PriceLevelParams = bincode::deserialize(&version_one).unwrap();
+	assert_eq!(loaded.definition, anchor_definition());
+	assert_eq!(loaded.definition.statistic, PriceLevelStatistic::WeightedClose);
+	assert_eq!(loaded.regime_window_bars, None);
+	assert_eq!(bincode::serialize(&loaded).unwrap(), version_one);
+}
+
+#[tokio::test]
+async fn regime_furthest_touch_calibration_balances_classes_and_skips_short_history() {
+	use polars::prelude::*;
+	use std::collections::HashMap;
+
+	let regime_window_bars = 6;
+	let sequence_length = 3;
+	let sample_indices = vec![0, 10, 20, 30, 40, 50];
+	let pattern = [100.0, 101.0, 99.0, 102.0, 98.0, 100.0];
+	let closes: Vec<f64> = (0..60).map(|index| pattern[index % pattern.len()]).collect();
+	let mut data = price_level_candles(&closes);
+	// The first sample has only sequence_length bars of history and must be skipped; the others
+	// reach one distinct furthest touch each, so five classes of one sample are exactly 20% each.
+	for (position, start) in sample_indices.iter().copied().skip(1).enumerate() {
+		let end = start + sequence_length;
+		let (anchor, volatility) = price_level_anchor_volatility(&data[end - regime_window_bars..end]).unwrap();
+		data[end] = one_sided_touch(anchor, volatility, position as f64 - 2.0, end);
+	}
+
+	let mut training = TrainingConfig::default();
+	training.targets.price_level_definition = regime_furthest_definition();
+	training.features.stats_window_bars = regime_window_bars;
+	let calibrator = ParameterCalibrator::from_training_config_with_seed(&training, Some(42));
+	let params = calibrator
+		.calibrate_price_levels(
+			&EvaluationContext {
+				ohlcv_data: &data,
+				sample_indices: &sample_indices,
+				sequence_length,
+				horizon_steps: 1,
+			},
+			"regime_price_level_test",
+		)
+		.await
+		.unwrap();
+	assert_eq!(params.definition, regime_furthest_definition());
+	assert_eq!(params.regime_window_bars, Some(regime_window_bars));
+	assert_eq!(params.balance.total_samples, sample_indices.len() - 1);
+	assert_eq!(params.balance.class_percentages, [20.0; 5]);
+
+	let df = df!(
+		"timestamp" => data.iter().map(|bar| bar.timestamp).collect::<Vec<_>>(),
+		"open" => data.iter().map(|bar| bar.open).collect::<Vec<_>>(),
+		"high" => data.iter().map(|bar| bar.high).collect::<Vec<_>>(),
+		"low" => data.iter().map(|bar| bar.low).collect::<Vec<_>>(),
+		"close" => data.iter().map(|bar| bar.close).collect::<Vec<_>>(),
+		"volume" => data.iter().map(|bar| bar.volume).collect::<Vec<_>>()
+	)
+	.unwrap();
+	let mut by_horizon = HashMap::new();
+	by_horizon.insert("1m".to_string(), params);
+	let (labels, _) = generate_price_level_targets_with_calibrated_params(
+		&df,
+		&["1m".to_string()],
+		&sample_indices,
+		sequence_length,
+		&by_horizon,
+	)
+	.unwrap();
+	assert_eq!(labels["1m"][0], -1);
+	let mut classes = labels["1m"][1..].to_vec();
+	classes.sort_unstable();
+	assert_eq!(classes, vec![0, 1, 2, 3, 4]);
 }

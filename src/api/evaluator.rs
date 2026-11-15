@@ -474,6 +474,27 @@ pub(crate) fn validate_evaluator_stop_history(
 	Ok(())
 }
 
+pub(crate) fn validate_evaluator_price_history(
+	calibrated: &crate::targets::calibration::CalibratedParameters,
+	horizon: &str,
+	available_bars: usize,
+) -> Result<()> {
+	if let Some(window_bars) = calibrated
+		.get_price_levels(horizon)
+		.map(crate::targets::price_levels::price_level_regime_window_bars)
+		.transpose()?
+		.flatten()
+	{
+		if available_bars < window_bars {
+			return Err(VangaError::data(format!(
+				"Insufficient price-level regime history for evaluator anchor: {} bars available, {} required",
+				available_bars, window_bars
+			)));
+		}
+	}
+	Ok(())
+}
+
 /// Compare the complete serialized feature/data sections, including parameters
 /// that preserve the column count but change the feature values or ordering.
 pub(crate) fn validate_preprocessing_config(saved: &TrainingConfig, requested: &TrainingConfig) -> Result<()> {
@@ -599,6 +620,9 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
 		.ok_or_else(|| VangaError::model("Missing saved calibration"))?;
 	for params in calibrated.stop_levels.values() {
 		crate::targets::stop_levels::validate_stop_level_regime_window(params, saved.features.stats_window_bars)?;
+	}
+	for params in calibrated.price_levels.values() {
+		crate::targets::price_levels::validate_price_level_regime_window(params, saved.features.stats_window_bars)?;
 	}
 	if model.models.is_empty() {
 		return Err(VangaError::model("Saved model has no heads"));
@@ -767,6 +791,7 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
 			)));
 		}
 		validate_evaluator_stop_history(calibrated, horizon, starts[0] + sequence_length)?;
+		validate_evaluator_price_history(calibrated, horizon, starts[0] + sequence_length)?;
 		let head_names: Vec<String> = model
 			.get_target_names()
 			.iter()
@@ -830,7 +855,7 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
 			let formatter = OutputFormatter::new(Default::default())
 				.with_target_names(model.get_target_names())
 				.with_sequence_ohlcv(processed_ohlcv[start..end].to_vec())
-				.with_stop_level_history(processed_ohlcv[..end].to_vec())
+				.with_regime_history(processed_ohlcv[..end].to_vec())
 				.with_stats_window_bars(saved.features.stats_window_bars)
 				.with_metadata(feature_names.len(), sequence_length)
 				.with_min_confidence(0.0)

@@ -1867,9 +1867,12 @@ impl TrainingConfig {
 		// Validate targets configuration
 		self.targets.validate()?;
 
-		if self.targets.stop_level_definition.uses_regime_volatility() && self.features.stats_window_bars < 2 {
+		if (self.targets.stop_level_definition.uses_regime_volatility()
+			|| self.targets.price_level_definition.uses_regime_volatility())
+			&& self.features.stats_window_bars < 2
+		{
 			return Err(VangaError::config(
-				"stop_level scale = regime_volatility requires features.stats_window_bars >= 2",
+				"scale = regime_volatility on price_level or stop_level requires features.stats_window_bars >= 2",
 			));
 		}
 
@@ -1941,6 +1944,21 @@ pub enum PriceLevelScale {
 	RegimeVolatility,
 }
 
+/// Which price inside the horizon the price-level label measures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceLevelStatistic {
+	#[default]
+	WeightedClose,
+	FurthestTouch,
+}
+
+impl PriceLevelStatistic {
+	fn is_default(&self) -> bool {
+		*self == Self::default()
+	}
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PriceLevelDefinition {
@@ -1948,6 +1966,8 @@ pub struct PriceLevelDefinition {
 	pub reference: PriceLevelReference,
 	#[serde(skip_serializing_if = "PriceLevelScale::is_default")]
 	pub scale: PriceLevelScale,
+	#[serde(skip_serializing_if = "PriceLevelStatistic::is_default")]
+	pub statistic: PriceLevelStatistic,
 }
 
 impl PriceLevelReference {
@@ -1964,16 +1984,24 @@ impl PriceLevelScale {
 
 impl PriceLevelDefinition {
 	pub fn uses_anchor_volatility(&self) -> Result<bool> {
-		match (self.reference, self.scale) {
-			(PriceLevelReference::WindowWeighted, PriceLevelScale::WindowRange) => Ok(false),
-			(PriceLevelReference::AnchorClose, PriceLevelScale::Volatility) => Ok(true),
-			(_, PriceLevelScale::RegimeVolatility) => Err(VangaError::config(
-				"price_level does not support scale = regime_volatility",
-			)),
+		match (self.reference, self.scale, self.statistic) {
+			(PriceLevelReference::WindowWeighted, PriceLevelScale::WindowRange, PriceLevelStatistic::WeightedClose) => {
+				Ok(false)
+			}
+			(
+				PriceLevelReference::AnchorClose,
+				PriceLevelScale::Volatility | PriceLevelScale::RegimeVolatility,
+				PriceLevelStatistic::WeightedClose | PriceLevelStatistic::FurthestTouch,
+			) => Ok(true),
 			_ => Err(VangaError::config(
-				"price_level requires window_weighted/window_range or anchor_close/volatility",
+				"price_level requires window_weighted/window_range/weighted_close or anchor_close with volatility or \
+regime_volatility and weighted_close or furthest_touch",
 			)),
 		}
+	}
+
+	pub fn uses_regime_volatility(&self) -> bool {
+		self.reference == PriceLevelReference::AnchorClose && self.scale == PriceLevelScale::RegimeVolatility
 	}
 }
 

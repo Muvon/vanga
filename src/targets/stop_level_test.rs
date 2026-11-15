@@ -1007,7 +1007,7 @@ async fn regime_incomputable_rows_are_removed_before_balancing_with_all_heads_al
 		.direction_strength
 		.insert("1m".to_string(), (0..row_count).map(|index| index as f64).collect());
 	targets.target_names = vec!["stop_level_1m".to_string(), "direction_1m".to_string()];
-	targets.valid_indices = targets.computable_stop_indices();
+	targets.valid_indices = targets.computable_regime_indices(false, true);
 	let now = chrono::Utc::now();
 	let filtered = retain_computable_target_rows(PreparedData {
 		sequences,

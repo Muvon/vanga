@@ -181,11 +181,30 @@ async fn calibrate_anchor_price_levels(
 	context: &EvaluationContext<'_>,
 	prefix: &str,
 ) -> Result<PriceLevelParams> {
-	use crate::targets::price_levels::anchor_price_level_statistic;
+	use crate::targets::price_levels::anchor_price_level_statistic_with_history;
 	use crate::utils::error::VangaError;
 
+	let regime_window_bars = if calibrator.price_level_definition.uses_regime_volatility() {
+		let window_bars = calibrator.regime_window_bars.ok_or_else(|| {
+			VangaError::config("Regime-volatility price-level calibration requires features.stats_window_bars")
+		})?;
+		if window_bars < 2 {
+			return Err(VangaError::config(
+				"Regime-volatility price-level calibration requires features.stats_window_bars >= 2",
+			));
+		}
+		Some(window_bars)
+	} else {
+		None
+	};
+	let mut result = PriceLevelParams {
+		definition: calibrator.price_level_definition,
+		regime_window_bars,
+		..PriceLevelParams::default()
+	};
 	let mut statistics = Vec::new();
 	let mut valid_indices = Vec::new();
+	let mut insufficient_history = 0usize;
 	for &start in context.sample_indices {
 		let end = start
 			.checked_add(context.sequence_length)
@@ -194,12 +213,25 @@ async fn calibrate_anchor_price_levels(
 			.checked_add(context.horizon_steps)
 			.ok_or_else(|| VangaError::data("Price-level horizon index overflow"))?;
 		if future_end <= context.ohlcv_data.len() {
-			statistics.push(anchor_price_level_statistic(
+			if regime_window_bars.is_some_and(|window_bars| end < window_bars) {
+				insufficient_history += 1;
+				continue;
+			}
+			statistics.push(anchor_price_level_statistic_with_history(
 				&context.ohlcv_data[start..end],
+				Some(&context.ohlcv_data[..end]),
 				&context.ohlcv_data[end..future_end],
+				&result,
 			)?);
 			valid_indices.push(start);
 		}
+	}
+	if insufficient_history > 0 {
+		log::warn!(
+			"{} Skipped {} price-level calibration anchors because regime history was incomplete",
+			prefix,
+			insufficient_history
+		);
 	}
 	if statistics.len() < 5 {
 		return Err(VangaError::data(
@@ -209,10 +241,6 @@ async fn calibrate_anchor_price_levels(
 	let mut sorted = statistics.clone();
 	sorted.sort_by(f64::total_cmp);
 	let seed = distinct_gap_seed(&sorted);
-	let mut result = PriceLevelParams {
-		definition: calibrator.price_level_definition,
-		..PriceLevelParams::default()
-	};
 	let utils = calibrator.get_utils();
 	let class_counts = |thresholds: [f64; 4]| {
 		let mut counts = [0usize; 5];

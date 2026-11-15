@@ -92,6 +92,37 @@ pub struct Predictor {
 	config: PredictionConfig,
 }
 
+/// Every regime-volatility window saved with the price-level and stop-level heads, each checked against the
+/// window the loaded features were built with.
+pub(crate) fn collect_regime_window_bars(
+	calibrated_params: &crate::targets::calibration::CalibratedParameters,
+	configured_window_bars: usize,
+) -> Result<Vec<usize>> {
+	let mut window_bars = Vec::new();
+	for params in calibrated_params.price_levels.values() {
+		crate::targets::price_levels::validate_price_level_regime_window(params, configured_window_bars)?;
+		window_bars.extend(crate::targets::price_levels::price_level_regime_window_bars(params)?);
+	}
+	for params in calibrated_params.stop_levels.values() {
+		crate::targets::stop_levels::validate_stop_level_regime_window(params, configured_window_bars)?;
+		window_bars.extend(crate::targets::stop_levels::stop_level_regime_window_bars(params)?);
+	}
+	Ok(window_bars)
+}
+
+pub(crate) fn ensure_regime_history_length(available_bars: usize, regime_window_bars: &[usize]) -> Result<()> {
+	if let Some(required_bars) = regime_window_bars
+		.iter()
+		.find(|window_bars| available_bars < **window_bars)
+	{
+		return Err(VangaError::DataError(format!(
+			"Insufficient regime-volatility history after preprocessing: {available_bars} bars available, \
+			 {required_bars} required"
+		)));
+	}
+	Ok(())
+}
+
 impl Predictor {
 	pub fn new(config: PredictionConfig) -> Self {
 		Self { config }
@@ -136,16 +167,9 @@ impl Predictor {
 					.to_string(),
 			)
 		})?;
-		for params in calibrated_params.stop_levels.values() {
-			crate::targets::stop_levels::validate_stop_level_regime_window(
-				params,
-				training_config.features.stats_window_bars,
-			)?;
-		}
-		let needs_regime_history = calibrated_params
-			.stop_levels
-			.values()
-			.any(|params| params.definition.uses_regime_volatility());
+		let regime_window_bars =
+			collect_regime_window_bars(calibrated_params, training_config.features.stats_window_bars)?;
+		let needs_regime_history = !regime_window_bars.is_empty();
 		// Initialize data pipeline
 		let data_pipeline = DataPipeline::new().with_feature_names(model.get_feature_names());
 
@@ -230,18 +254,7 @@ impl Predictor {
 			)));
 		}
 		let sequence_ohlcv = processed_history[processed_history.len() - sequence_length..].to_vec();
-		if needs_regime_history {
-			for params in calibrated_params.stop_levels.values() {
-				if let Some(window_bars) = crate::targets::stop_levels::stop_level_regime_window_bars(params)? {
-					if processed_history.len() < window_bars {
-						return Err(VangaError::DataError(format!(
-                            "Insufficient stop-level regime history after preprocessing: {} bars available, {} required",
-                            processed_history.len(), window_bars
-                        )));
-					}
-				}
-			}
-		}
+		ensure_regime_history_length(processed_history.len(), &regime_window_bars)?;
 
 		log::info!(
 			"✅ Sequence OHLCV data loaded: {} rows for VWAP-based calculations",
@@ -276,7 +289,7 @@ impl Predictor {
 		// Pass OHLCV data to formatter for VWAP-based range calculation - REQUIRED!
 		formatter = formatter.with_sequence_ohlcv(sequence_ohlcv);
 		if needs_regime_history {
-			formatter = formatter.with_stop_level_history(processed_history);
+			formatter = formatter.with_regime_history(processed_history);
 		}
 		formatter = formatter.with_stats_window_bars(training_config.features.stats_window_bars);
 

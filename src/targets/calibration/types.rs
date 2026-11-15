@@ -142,6 +142,7 @@ pub struct DirectionParams {
 pub struct PriceLevelParams {
 	pub definition: crate::config::training::PriceLevelDefinition,
 	pub thresholds: Option<[f64; 4]>,
+	pub regime_window_bars: Option<usize>,
 	pub bandwidth: f64,
 	pub percentiles: [f64; 2],
 	pub neutral_band_factor: f64,
@@ -155,6 +156,8 @@ struct PriceLevelParamsJson {
 	definition: crate::config::training::PriceLevelDefinition,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	thresholds: Option<[f64; 4]>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	regime_window_bars: Option<usize>,
 	bandwidth: f64,
 	percentiles: [f64; 2],
 	neutral_band_factor: f64,
@@ -168,6 +171,7 @@ impl Serialize for PriceLevelParams {
 			return PriceLevelParamsJson {
 				definition: self.definition,
 				thresholds: self.thresholds,
+				regime_window_bars: self.regime_window_bars,
 				bandwidth: self.bandwidth,
 				percentiles: self.percentiles,
 				neutral_band_factor: self.neutral_band_factor,
@@ -186,18 +190,49 @@ impl Serialize for PriceLevelParams {
 				.ok_or_else(|| serde::ser::Error::custom("Anchor price levels require calibrated thresholds"))?;
 			// Negative infinity cannot be a valid legacy bandwidth. A version
 			// byte follows it so new fields never shift an old record's layout.
-			(
-				f64::NEG_INFINITY,
-				1u8,
-				(self.definition.reference, self.definition.scale),
-				thresholds,
-				self.bandwidth,
-				self.percentiles,
-				self.neutral_band_factor,
-				self.momentum_factor,
-				&self.balance,
-			)
-				.serialize(serializer)
+			// Version 1 stays the exact record older models wrote; version 2 adds
+			// the statistic and the regime window.
+			if self.definition.uses_regime_volatility()
+				|| self.definition.statistic != crate::config::training::PriceLevelStatistic::WeightedClose
+			{
+				let regime_window_bars = if self.definition.uses_regime_volatility() {
+					Some(self.regime_window_bars.filter(|window| *window >= 2).ok_or_else(|| {
+						serde::ser::Error::custom("Regime-volatility price levels require regime_window_bars >= 2")
+					})?)
+				} else {
+					None
+				};
+				(
+					f64::NEG_INFINITY,
+					2u8,
+					(
+						self.definition.reference,
+						self.definition.scale,
+						self.definition.statistic,
+					),
+					thresholds,
+					regime_window_bars,
+					self.bandwidth,
+					self.percentiles,
+					self.neutral_band_factor,
+					self.momentum_factor,
+					&self.balance,
+				)
+					.serialize(serializer)
+			} else {
+				(
+					f64::NEG_INFINITY,
+					1u8,
+					(self.definition.reference, self.definition.scale),
+					thresholds,
+					self.bandwidth,
+					self.percentiles,
+					self.neutral_band_factor,
+					self.momentum_factor,
+					&self.balance,
+				)
+					.serialize(serializer)
+			}
 		} else {
 			(
 				self.bandwidth,
@@ -215,9 +250,15 @@ impl<'de> Deserialize<'de> for PriceLevelParams {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		if deserializer.is_human_readable() {
 			let value = PriceLevelParamsJson::deserialize(deserializer)?;
+			if value.definition.uses_regime_volatility() && value.regime_window_bars.is_none_or(|window| window < 2) {
+				return Err(serde::de::Error::custom(
+					"Regime-volatility price levels require regime_window_bars >= 2",
+				));
+			}
 			return Ok(Self {
 				definition: value.definition,
 				thresholds: value.thresholds,
+				regime_window_bars: value.regime_window_bars,
 				bandwidth: value.bandwidth,
 				percentiles: value.percentiles,
 				neutral_band_factor: value.neutral_band_factor,
@@ -245,16 +286,47 @@ impl<'de> Deserialize<'de> for PriceLevelParams {
 				let mut value = PriceLevelParams::default();
 				if first == f64::NEG_INFINITY {
 					let version: u8 = next(&mut sequence)?;
-					if version != 1 {
+					if version != 1 && version != 2 {
 						return Err(serde::de::Error::custom("Unsupported price-level parameter version"));
 					}
-					let (reference, scale) = next(&mut sequence)?;
-					value.definition = crate::config::training::PriceLevelDefinition { reference, scale };
+					if version == 1 {
+						let (reference, scale) = next(&mut sequence)?;
+						value.definition = crate::config::training::PriceLevelDefinition {
+							reference,
+							scale,
+							..Default::default()
+						};
+					} else {
+						let (reference, scale, statistic) = next(&mut sequence)?;
+						value.definition = crate::config::training::PriceLevelDefinition {
+							reference,
+							scale,
+							statistic,
+						};
+					}
 					value
 						.definition
 						.uses_anchor_volatility()
 						.map_err(serde::de::Error::custom)?;
 					value.thresholds = Some(next(&mut sequence)?);
+					if version == 2 {
+						let window_bars: Option<usize> = next(&mut sequence)?;
+						if value.definition.uses_regime_volatility() != window_bars.is_some() {
+							return Err(serde::de::Error::custom(
+								"Price-level parameter version 2 carries a regime window exactly for regime_volatility",
+							));
+						}
+						if window_bars.is_some_and(|window| window < 2) {
+							return Err(serde::de::Error::custom(
+								"Regime-volatility price levels require regime_window_bars >= 2",
+							));
+						}
+						value.regime_window_bars = window_bars;
+					} else if value.definition.uses_regime_volatility() {
+						return Err(serde::de::Error::custom(
+							"Regime-volatility price levels require parameter version 2",
+						));
+					}
 					value.bandwidth = next(&mut sequence)?;
 				} else {
 					value.bandwidth = first;
@@ -267,8 +339,9 @@ impl<'de> Deserialize<'de> for PriceLevelParams {
 			}
 		}
 		// Bincode reads only the fields consumed by the visitor; legacy records
-		// consume five, versioned records nine, including in enclosing models.
-		deserializer.deserialize_tuple(9, BinaryPriceLevelVisitor)
+		// consume five, version 1 records nine and version 2 records ten,
+		// including in enclosing models.
+		deserializer.deserialize_tuple(10, BinaryPriceLevelVisitor)
 	}
 }
 

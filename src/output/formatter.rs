@@ -14,7 +14,6 @@ use crate::output::structures::{
 use crate::targets::PreparedTargets;
 // Import reconstruction methods from target modules
 use crate::targets::direction::reconstruct_direction;
-use crate::targets::reconstruct_price_levels;
 use crate::targets::sentiment::reconstruct_sentiment;
 use crate::targets::volatility::reconstruct_volatility;
 use crate::targets::volume::reconstruct_volume;
@@ -69,7 +68,7 @@ pub struct OutputFormatter {
 	config: OutputConfig,
 	parser: Option<MultiTargetParser>,
 	sequence_ohlcv: Option<Vec<MarketDataRow>>,
-	stop_level_history_ohlcv: Option<Vec<MarketDataRow>>,
+	regime_history_ohlcv: Option<Vec<MarketDataRow>>,
 	stats_window_bars: Option<usize>,
 	/// Model config bandwidth_size: sequence bandwidth multiplier (e.g., 1.0, 1.5, 2.0)
 	/// Used in target generation as: sequence_bandwidth = (max - min) * bandwidth_size
@@ -96,7 +95,7 @@ impl OutputFormatter {
 			config,
 			parser: Some(MultiTargetParser::new()), // Always initialize parser - all targets enabled with NUM_CLASSES=5
 			sequence_ohlcv: None,
-			stop_level_history_ohlcv: None,
+			regime_history_ohlcv: None,
 			stats_window_bars: None,
 			bandwidth_size: None,
 			percentiles: None,
@@ -115,8 +114,9 @@ impl OutputFormatter {
 		self
 	}
 
-	pub fn with_stop_level_history(mut self, history_ohlcv: Vec<MarketDataRow>) -> Self {
-		self.stop_level_history_ohlcv = Some(history_ohlcv);
+	/// Bars ending at the input sequence anchor, used by every regime-volatility price-level and stop-level head.
+	pub fn with_regime_history(mut self, history_ohlcv: Vec<MarketDataRow>) -> Self {
+		self.regime_history_ohlcv = Some(history_ohlcv);
 		self
 	}
 
@@ -549,7 +549,7 @@ impl OutputFormatter {
 						})?;
 						crate::targets::stop_levels::validate_stop_level_regime_window(stop_params, configured_window)?;
 					}
-					let history_ohlcv = self.stop_level_history_ohlcv.as_deref().unwrap_or(sequence_ohlcv);
+					let history_ohlcv = self.regime_history_ohlcv.as_deref().unwrap_or(sequence_ohlcv);
 					let stop_reference = stop_level_reference_price(sequence_ohlcv, history_ohlcv, stop_params)?;
 					let stop_is_bullish = infer_stop_is_bullish(price_levels, stop_reference).ok_or_else(|| {
 						VangaError::PredictionError(format!(
@@ -912,7 +912,21 @@ impl OutputFormatter {
 				))
 			})?;
 
-			reconstruct_price_levels(probabilities, sequence_ohlcv, current_price, horizon_params)?
+			if horizon_params.definition.uses_regime_volatility() {
+				let configured_window = self.stats_window_bars.ok_or_else(|| {
+					VangaError::ConfigError(
+						"features.stats_window_bars is required for regime-volatility price-level serving".to_string(),
+					)
+				})?;
+				crate::targets::price_levels::validate_price_level_regime_window(horizon_params, configured_window)?;
+			}
+			crate::targets::price_levels::reconstruct_price_levels_with_history(
+				probabilities,
+				sequence_ohlcv,
+				self.regime_history_ohlcv.as_deref(),
+				current_price,
+				horizon_params,
+			)?
 		} else {
 			return Err(VangaError::ConfigError(
 				"Adaptive parameters required for price level reconstruction".to_string(),
@@ -1022,7 +1036,7 @@ impl OutputFormatter {
 				})?;
 				crate::targets::stop_levels::validate_stop_level_regime_window(horizon_params, configured_window)?;
 			}
-			let history_ohlcv = self.stop_level_history_ohlcv.as_deref().unwrap_or(sequence_ohlcv);
+			let history_ohlcv = self.regime_history_ohlcv.as_deref().unwrap_or(sequence_ohlcv);
 
 			// Use the future-level direction estimated by the price-level model so
 			// reconstruction selects the same adverse boundary scheme as training.

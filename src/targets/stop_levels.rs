@@ -364,15 +364,11 @@ pub(crate) fn validate_stop_level_regime_window(
 	params: &crate::targets::calibration::StopLevelParams,
 	configured_window_bars: usize,
 ) -> Result<()> {
-	if let Some(saved_window_bars) = stop_level_regime_window_bars(params)? {
-		if saved_window_bars != configured_window_bars {
-			return Err(crate::utils::error::VangaError::config(format!(
-				"Stop-level regime window mismatch: model metadata uses {}, loaded features.stats_window_bars is {}",
-				saved_window_bars, configured_window_bars
-			)));
-		}
-	}
-	Ok(())
+	crate::targets::price_levels::validate_regime_window_matches(
+		stop_level_regime_window_bars(params)?,
+		configured_window_bars,
+		"stop-level",
+	)
 }
 
 pub(crate) fn stop_level_anchor_scale(
@@ -380,31 +376,12 @@ pub(crate) fn stop_level_anchor_scale(
 	history: &[MarketDataRow],
 	params: &crate::targets::calibration::StopLevelParams,
 ) -> Result<(f64, f64)> {
-	let scale_window = if let Some(window_bars) = stop_level_regime_window_bars(params)? {
-		if history.len() < window_bars {
-			return Err(crate::utils::error::VangaError::data(format!(
-				"Insufficient stop-level regime history: {} bars available, {} required",
-				history.len(),
-				window_bars
-			)));
-		}
-		&history[history.len() - window_bars..]
-	} else {
-		sequence
-	};
-	let (scale_anchor, volatility) = crate::targets::price_levels::price_level_anchor_volatility(scale_window)?;
-	let sequence_anchor = sequence
-		.last()
-		.ok_or_else(|| crate::utils::error::VangaError::data("Stop-level input sequence is empty"))?;
-	let history_anchor = scale_window
-		.last()
-		.ok_or_else(|| crate::utils::error::VangaError::data("Stop-level scale window is empty"))?;
-	if sequence_anchor.timestamp != history_anchor.timestamp || sequence_anchor.close != scale_anchor {
-		return Err(crate::utils::error::VangaError::data(
-			"Stop-level history must end at the input sequence anchor",
-		));
-	}
-	Ok((scale_anchor, volatility))
+	crate::targets::price_levels::anchor_scale_over_regime_window(
+		sequence,
+		history,
+		stop_level_regime_window_bars(params)?,
+		"stop-level",
+	)
 }
 
 pub(crate) fn anchor_stop_level_statistic_with_history(

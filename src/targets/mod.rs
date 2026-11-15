@@ -206,12 +206,15 @@ impl PreparedTargets {
 		}
 	}
 
-	pub(crate) fn computable_stop_indices(&self) -> Vec<usize> {
+	/// Rows whose regime-scaled heads could be computed. A head that is not regime-scaled keeps its trailing
+	/// rows, so each head opts in separately.
+	pub(crate) fn computable_regime_indices(&self, price_levels: bool, stop_levels: bool) -> Vec<usize> {
+		let is_computable =
+			|labels: &[i32], index: usize| labels.get(index).is_some_and(|label| (0..=4).contains(label));
 		(0..self.data_length)
 			.filter(|index| {
-				self.stop_levels
-					.values()
-					.all(|labels| labels.get(*index).is_some_and(|label| (0..=4).contains(label)))
+				(!price_levels || self.price_levels.values().all(|labels| is_computable(labels, *index)))
+					&& (!stop_levels || self.stop_levels.values().all(|labels| is_computable(labels, *index)))
 			})
 			.collect()
 	}
@@ -553,6 +556,9 @@ impl TargetGenerator {
 		// CONDITIONAL GENERATION: Only generate enabled targets
 		if self.config.price_level.enabled {
 			log::debug!("🏷️ Generating price level targets");
+			for params in price_level_params.values() {
+				price_levels::validate_price_level_regime_window(params, self.config.stats_window_bars)?;
+			}
 			let (price_targets, price_strengths) = generate_price_level_targets_with_calibrated_params(
 				df,
 				&self.config.horizons,
@@ -635,12 +641,16 @@ impl TargetGenerator {
 		// Set target names for enabled targets only
 		prepared_targets.target_names = self.get_target_names();
 
+		let needs_regime_price_history = self.config.price_level.enabled
+			&& price_level_params
+				.values()
+				.any(|params| params.definition.uses_regime_volatility());
 		let needs_regime_stop_history = self.config.stop_level.enabled
 			&& stop_level_params
 				.values()
 				.any(|params| params.definition.uses_regime_volatility());
-		prepared_targets.valid_indices = if needs_regime_stop_history {
-			prepared_targets.computable_stop_indices()
+		prepared_targets.valid_indices = if needs_regime_price_history || needs_regime_stop_history {
+			prepared_targets.computable_regime_indices(needs_regime_price_history, needs_regime_stop_history)
 		} else {
 			(0..data_length).collect()
 		};

@@ -69,6 +69,7 @@
 //! - **+ Volatility**: Range breakout + high volatility = significant move
 //! - **Training**: Provides "where" while others provide "how" and "risk"
 
+use crate::config::training::PriceLevelStatistic;
 use crate::data::structures::MarketDataRow;
 use crate::targets::sequence_reconstruction::{SequenceAnalyzer, SequenceReconstructionConfig};
 use crate::targets::TargetResult;
@@ -166,6 +167,7 @@ pub fn generate_price_level_targets_with_calibrated_params(
 			params.percentiles[1]
 		);
 
+		let regime_window_bars = price_level_regime_window_bars(params)?;
 		let horizon_steps = parse_horizon_to_steps(horizon, timeframe_minutes)?;
 		let mut horizon_targets = vec![-1; sequence_indices.len()];
 		let mut horizon_strengths = vec![0.5; sequence_indices.len()];
@@ -175,12 +177,18 @@ pub fn generate_price_level_targets_with_calibrated_params(
 			let target_end_idx = sequence_end_idx + horizon_steps;
 
 			if target_end_idx <= ohlcv_data.len() && sequence_end_idx <= ohlcv_data.len() {
+				// Rows without enough history for the regime window keep the -1 sentinel and are
+				// removed before balancing.
+				if regime_window_bars.is_some_and(|window| sequence_end_idx < window) {
+					continue;
+				}
 				let sequence_ohlcv = &ohlcv_data[seq_idx..sequence_end_idx];
+				let history_ohlcv = &ohlcv_data[..sequence_end_idx];
 				let horizon_ohlcv = &ohlcv_data[sequence_end_idx..target_end_idx];
 
 				// Use per-horizon calibrated parameters
 				let (target_class, strength) =
-					classify_price_level_with_calibrated_params(sequence_ohlcv, horizon_ohlcv, params)?;
+					classify_price_level_with_history(sequence_ohlcv, Some(history_ohlcv), horizon_ohlcv, params)?;
 				horizon_targets[seq_position] = target_class;
 				horizon_strengths[seq_position] = strength;
 			}
@@ -490,14 +498,157 @@ fn anchor_price_level_future_price(future: &[MarketDataRow]) -> Result<f64> {
 	Ok(future_price)
 }
 
-/// The alternative label statistic, shared by calibration and target generation.
-pub fn anchor_price_level_statistic(sequence: &[MarketDataRow], future: &[MarketDataRow]) -> Result<f64> {
-	let (anchor, volatility) = price_level_anchor_volatility(sequence)?;
-	let statistic = (anchor_price_level_future_price(future)? / anchor - 1.0) / volatility;
+/// Furthest price touched inside the horizon, taken on whichever side moved farther from the anchor.
+/// A tie goes to the upper side.
+fn anchor_price_level_furthest_touch(anchor: f64, future: &[MarketDataRow]) -> Result<f64> {
+	if future.is_empty()
+		|| future.iter().any(|bar| {
+			[bar.high, bar.low]
+				.iter()
+				.any(|price| !price.is_finite() || *price <= 0.0)
+		}) {
+		return Err(VangaError::data(
+			"Anchor price levels require finite, positive future highs and lows",
+		));
+	}
+	let highest = future.iter().map(|bar| bar.high).fold(f64::NEG_INFINITY, f64::max);
+	let lowest = future.iter().map(|bar| bar.low).fold(f64::INFINITY, f64::min);
+	let up = highest / anchor - 1.0;
+	let down = 1.0 - lowest / anchor;
+	Ok(if up >= down { highest } else { lowest })
+}
+
+pub(crate) fn anchor_price_level_horizon_price(
+	statistic: PriceLevelStatistic,
+	anchor: f64,
+	future: &[MarketDataRow],
+) -> Result<f64> {
+	match statistic {
+		PriceLevelStatistic::WeightedClose => anchor_price_level_future_price(future),
+		PriceLevelStatistic::FurthestTouch => anchor_price_level_furthest_touch(anchor, future),
+	}
+}
+
+fn price_level_statistic_value(anchor: f64, volatility: f64, future_price: f64) -> Result<f64> {
+	let statistic = (future_price / anchor - 1.0) / volatility;
 	if !statistic.is_finite() {
 		return Err(VangaError::data("Non-finite anchor price-level statistic"));
 	}
 	Ok(statistic)
+}
+
+/// The alternative label statistic for input-window volatility and weighted-close labels.
+pub fn anchor_price_level_statistic(sequence: &[MarketDataRow], future: &[MarketDataRow]) -> Result<f64> {
+	let (anchor, volatility) = price_level_anchor_volatility(sequence)?;
+	price_level_statistic_value(anchor, volatility, anchor_price_level_future_price(future)?)
+}
+
+/// The label statistic shared by calibration and target generation for any anchor definition.
+pub(crate) fn anchor_price_level_statistic_with_history(
+	sequence: &[MarketDataRow],
+	history: Option<&[MarketDataRow]>,
+	future: &[MarketDataRow],
+	params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<f64> {
+	let (anchor, volatility) = price_level_anchor_scale(sequence, history, params)?;
+	let future_price = anchor_price_level_horizon_price(params.definition.statistic, anchor, future)?;
+	price_level_statistic_value(anchor, volatility, future_price)
+}
+
+pub(crate) fn price_level_regime_window_bars(
+	params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<Option<usize>> {
+	if !params.definition.uses_regime_volatility() {
+		return Ok(None);
+	}
+	match params.regime_window_bars {
+		Some(window) if window >= 2 => Ok(Some(window)),
+		_ => Err(VangaError::config(
+			"Regime-volatility price levels require a saved regime_window_bars >= 2",
+		)),
+	}
+}
+
+pub(crate) fn validate_price_level_regime_window(
+	params: &crate::targets::calibration::PriceLevelParams,
+	configured_window_bars: usize,
+) -> Result<()> {
+	validate_regime_window_matches(
+		price_level_regime_window_bars(params)?,
+		configured_window_bars,
+		"price-level",
+	)
+}
+
+/// Labels and serving must scale by the same window the model was calibrated with.
+pub(crate) fn validate_regime_window_matches(
+	saved_window_bars: Option<usize>,
+	configured_window_bars: usize,
+	target_name: &str,
+) -> Result<()> {
+	if let Some(saved_window_bars) = saved_window_bars {
+		if saved_window_bars != configured_window_bars {
+			return Err(VangaError::config(format!(
+				"{target_name} regime window mismatch: model metadata uses {saved_window_bars}, loaded \
+				 features.stats_window_bars is {configured_window_bars}"
+			)));
+		}
+	}
+	Ok(())
+}
+
+/// Anchor and volatility used by anchor-mode labels. Without a regime window the scale comes from the input
+/// sequence; with one it comes from the last `regime_window_bars` bars of `history`, which must end at the
+/// sequence anchor.
+pub(crate) fn anchor_scale_over_regime_window(
+	sequence: &[MarketDataRow],
+	history: &[MarketDataRow],
+	regime_window_bars: Option<usize>,
+	target_name: &str,
+) -> Result<(f64, f64)> {
+	let scale_window = if let Some(window_bars) = regime_window_bars {
+		if history.len() < window_bars {
+			return Err(VangaError::data(format!(
+				"Insufficient {target_name} regime history: {} bars available, {window_bars} required",
+				history.len()
+			)));
+		}
+		&history[history.len() - window_bars..]
+	} else {
+		sequence
+	};
+	let (scale_anchor, volatility) = price_level_anchor_volatility(scale_window)?;
+	let sequence_anchor = sequence
+		.last()
+		.ok_or_else(|| VangaError::data(format!("The {target_name} input sequence is empty")))?;
+	let history_anchor = scale_window
+		.last()
+		.ok_or_else(|| VangaError::data(format!("The {target_name} scale window is empty")))?;
+	if sequence_anchor.timestamp != history_anchor.timestamp || sequence_anchor.close != scale_anchor {
+		return Err(VangaError::data(format!(
+			"The {target_name} history must end at the input sequence anchor"
+		)));
+	}
+	Ok((scale_anchor, volatility))
+}
+
+/// Regime scaling never falls back to the input sequence: a missing history is an error.
+fn price_level_anchor_scale(
+	sequence: &[MarketDataRow],
+	history: Option<&[MarketDataRow]>,
+	params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<(f64, f64)> {
+	let regime_window_bars = price_level_regime_window_bars(params)?;
+	let history = match history {
+		Some(history) => history,
+		None if regime_window_bars.is_some() => {
+			return Err(VangaError::data(
+				"Regime-volatility price levels require history ending at the input sequence anchor",
+			));
+		}
+		None => sequence,
+	};
+	anchor_scale_over_regime_window(sequence, history, regime_window_bars, "price-level")
 }
 
 pub(crate) fn anchor_price_level_thresholds(
@@ -516,12 +667,28 @@ pub(crate) fn anchor_price_level_thresholds(
 
 /// Reconstruct the calibrated statistic thresholds in price space. Both target
 /// classification and output formatting use these exact floating-point values.
-pub(crate) fn anchor_price_level_boundaries(
+pub fn anchor_price_level_boundaries(
 	sequence: &[MarketDataRow],
 	params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<crate::targets::sequence_reconstruction::SequenceBoundaries> {
+	anchor_price_level_boundaries_with_history(sequence, None, params)
+}
+
+pub(crate) fn anchor_price_level_boundaries_with_history(
+	sequence: &[MarketDataRow],
+	history: Option<&[MarketDataRow]>,
+	params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<crate::targets::sequence_reconstruction::SequenceBoundaries> {
+	let (anchor, volatility) = price_level_anchor_scale(sequence, history, params)?;
+	anchor_price_level_boundaries_from_scale(anchor, volatility, params)
+}
+
+fn anchor_price_level_boundaries_from_scale(
+	anchor: f64,
+	volatility: f64,
+	params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<crate::targets::sequence_reconstruction::SequenceBoundaries> {
 	let thresholds = anchor_price_level_thresholds(params)?;
-	let (anchor, volatility) = price_level_anchor_volatility(sequence)?;
 	let price_boundaries = thresholds.map(|threshold| anchor * (1.0 + threshold * volatility));
 	if price_boundaries.iter().any(|price| !price.is_finite())
 		|| price_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
@@ -545,9 +712,22 @@ pub fn classify_price_level_with_calibrated_params(
 	horizon_ohlcv: &[MarketDataRow],
 	calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<(i32, f64)> {
+	classify_price_level_with_history(sequence_ohlcv, None, horizon_ohlcv, calibrated_params)
+}
+
+/// Same as `classify_price_level_with_calibrated_params`; regime-volatility parameters additionally need the
+/// bars ending at the sequence anchor and fail without them.
+pub(crate) fn classify_price_level_with_history(
+	sequence_ohlcv: &[MarketDataRow],
+	history_ohlcv: Option<&[MarketDataRow]>,
+	horizon_ohlcv: &[MarketDataRow],
+	calibrated_params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<(i32, f64)> {
 	if calibrated_params.definition.uses_anchor_volatility()? {
-		let boundaries = anchor_price_level_boundaries(sequence_ohlcv, calibrated_params)?;
-		let future_price = anchor_price_level_future_price(horizon_ohlcv)?;
+		let (anchor, volatility) = price_level_anchor_scale(sequence_ohlcv, history_ohlcv, calibrated_params)?;
+		let boundaries = anchor_price_level_boundaries_from_scale(anchor, volatility, calibrated_params)?;
+		let future_price =
+			anchor_price_level_horizon_price(calibrated_params.definition.statistic, anchor, horizon_ohlcv)?;
 		let class = boundaries.classify_price(future_price);
 		return Ok((class, calculate_price_level_strength(future_price, &boundaries, class)));
 	}
@@ -805,6 +985,18 @@ pub fn reconstruct_price_levels(
 	current_price: f64,
 	calibrated_params: &crate::targets::calibration::PriceLevelParams,
 ) -> Result<PriceLevelReconstruction> {
+	reconstruct_price_levels_with_history(probabilities, sequence_ohlcv, None, current_price, calibrated_params)
+}
+
+/// Same as `reconstruct_price_levels`; regime-volatility parameters additionally need the bars ending at the
+/// sequence anchor and fail without them.
+pub(crate) fn reconstruct_price_levels_with_history(
+	probabilities: &[f64],
+	sequence_ohlcv: &[MarketDataRow],
+	history_ohlcv: Option<&[MarketDataRow]>,
+	current_price: f64,
+	calibrated_params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<PriceLevelReconstruction> {
 	// Validate inputs
 	if probabilities.len() != 5 {
 		return Err(crate::utils::error::VangaError::DataError(
@@ -826,7 +1018,7 @@ pub fn reconstruct_price_levels(
 
 	let anchor_mode = calibrated_params.definition.uses_anchor_volatility()?;
 	let (boundaries, percentage_ranges, price_ranges, exponential_weighted_percentage_ranges) = if anchor_mode {
-		let boundaries = anchor_price_level_boundaries(sequence_ohlcv, calibrated_params)?;
+		let boundaries = anchor_price_level_boundaries_with_history(sequence_ohlcv, history_ohlcv, calibrated_params)?;
 		let anchor = sequence_ohlcv[sequence_ohlcv.len() - 1].close;
 		// As in the legacy ladder, display the open outer bins with one
 		// bandwidth of finite extension. Inner endpoints are exact thresholds.
