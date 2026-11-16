@@ -459,18 +459,23 @@ impl LSTMModel {
 		Ok(Tensor::cat(&[latent, &context], 1)?.contiguous()?)
 	}
 
-	/// The part of the head's input the tree model reads. With context columns it is
-	/// only those: the recurrent state was fitted on the rows the trees train on, so
-	/// trees that read it learn its memorised part and are overconfident on new rows.
-	fn tree_features(&self, head_features: &Tensor) -> Result<Tensor> {
-		let context_width = self.context_input_indices.len();
-		if context_width == 0 {
-			return Ok(head_features.clone());
+	/// The vector the tree model reads. With context columns it is the last step of
+	/// the input: every window-normalised column and the context columns. The trees
+	/// do not read the recurrent state then: it was fitted on the rows the trees train
+	/// on, so trees that read it learn its memorised part and are overconfident on new
+	/// rows. Context columns alone are not enough: the price and direction labels are
+	/// set by the window itself.
+	///
+	/// detach() is load-bearing on the recurrent path: candle keeps a tensor's whole
+	/// ancestry alive through its BackpropOp, and extract_all_lstm_features holds
+	/// every batch until the final cat. Without it each stored batch pins a full
+	/// [batch, seq_len, hidden] graph and the run goes out of memory.
+	fn tree_features(&self, sequences: &Tensor) -> Result<Tensor> {
+		if self.context_input_indices.is_empty() {
+			return Ok(self.forward_features(sequences, false)?.detach());
 		}
-		let width = head_features.dim(1)?;
-		Ok(head_features
-			.narrow(1, width - context_width, context_width)?
-			.contiguous()?)
+		let seq_len = sequences.dim(1)?;
+		Ok(sequences.narrow(1, seq_len - 1, 1)?.squeeze(1)?.contiguous()?)
 	}
 
 	pub async fn predict(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
@@ -990,18 +995,7 @@ impl LSTMModel {
 	/// # Returns
 	/// * `Result<Tensor>` - LSTM features tensor [batch_size, feature_dim]
 	pub fn extract_lstm_features(&self, sequences: &Tensor) -> Result<Tensor> {
-		// Delegate to the exact forward-pass feature pipeline (DAIN, LayerNorm,
-		// full-sequence layer stacking, attention, endpoint extraction) so the
-		// latent z consumed by the XGBoost hybrid can never diverge from what
-		// the output head sees in forward()
-		//
-		// detach() is load-bearing, not cosmetic: candle keeps a tensor's whole
-		// ancestry alive through its BackpropOp, and extract_all_lstm_features
-		// holds every batch until the final cat. Without this, each stored batch
-		// pins a full [batch, seq_len, hidden] graph (per layer, per direction,
-		// plus the per-timestep states and attention intermediates) and the run
-		// OOMs. XGBoost features never need gradients.
-		let features = self.tree_features(&self.forward_features(sequences, false)?.detach())?;
+		let features = self.tree_features(sequences)?;
 
 		let expected_dim = self.get_xgboost_feature_dim();
 		let actual_dim = features.dim(1)?;

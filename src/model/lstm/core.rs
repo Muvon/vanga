@@ -383,13 +383,13 @@ impl LSTMModel {
 		recurrent_width + self.context_input_indices.len()
 	}
 
-	/// Width of the vector the tree model reads: the context columns alone when there
-	/// are any, the whole head input otherwise.
+	/// Width of the vector the tree model reads: one input step when there are context
+	/// columns, the whole head input otherwise.
 	pub fn tree_feature_size(&self) -> usize {
 		if self.context_input_indices.is_empty() {
 			self.latent_size()
 		} else {
-			self.context_input_indices.len()
+			self.config.input_size
 		}
 	}
 

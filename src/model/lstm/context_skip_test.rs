@@ -95,15 +95,14 @@ fn forward_features_width_is_unchanged_without_context() {
 }
 
 #[test]
-fn tree_model_reads_only_the_context_columns() {
+fn tree_model_reads_the_last_input_step_with_context() {
 	let model = build_model(LSTMArchitecture::MultiLSTM { layers: 1 }, &CONTEXT_INDICES);
-	assert_eq!(model.tree_feature_size(), CONTEXT_INDICES.len());
+	assert_eq!(model.tree_feature_size(), INPUT_SIZE);
 	let input = distinct_input();
 	let tree_rows = rows(&model.extract_lstm_features(&input).unwrap());
 	let raw = input.to_vec3::<f32>().unwrap();
 	for (batch, row) in tree_rows.iter().enumerate() {
-		let last_step = &raw[batch][SEQUENCE_LENGTH - 1];
-		assert_eq!(row, &vec![last_step[CONTEXT_INDICES[0]], last_step[CONTEXT_INDICES[1]]]);
+		assert_eq!(row, &raw[batch][SEQUENCE_LENGTH - 1]);
 	}
 }
 
