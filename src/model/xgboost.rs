@@ -85,6 +85,16 @@ impl XGBoostRegressor {
 		self.backend.get_config()
 	}
 
+	/// Store the LSTM share of the blend chosen on validation data
+	pub fn set_lstm_blend_weight(&mut self, weight: f32) {
+		self.backend.set_lstm_blend_weight(weight);
+	}
+
+	/// Store the exponent applied to the forest's vote shares
+	pub fn set_forest_vote_power(&mut self, power: f32) {
+		self.backend.set_forest_vote_power(power);
+	}
+
 	/// Get access to the SmartCore backend for advanced operations
 	pub fn get_backend(&self) -> Option<&SmartCoreRegressor> {
 		Some(&self.backend)

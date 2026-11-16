@@ -371,8 +371,8 @@ impl LSTMModel {
 		);
 	}
 
-	/// Width of the vector the output head and the tree model read: the last recurrent
-	/// state (both directions when bidirectional) followed by the context columns.
+	/// Width of the vector the output head reads: the last recurrent state (both
+	/// directions when bidirectional) followed by the context columns.
 	pub fn latent_size(&self) -> usize {
 		let hidden_size = self.config.get_hidden_size_for_layer(self.config.num_layers - 1);
 		let is_bidirectional = matches!(
@@ -381,6 +381,16 @@ impl LSTMModel {
 		);
 		let recurrent_width = if is_bidirectional { hidden_size * 2 } else { hidden_size };
 		recurrent_width + self.context_input_indices.len()
+	}
+
+	/// Width of the vector the tree model reads: the context columns alone when there
+	/// are any, the whole head input otherwise.
+	pub fn tree_feature_size(&self) -> usize {
+		if self.context_input_indices.is_empty() {
+			self.latent_size()
+		} else {
+			self.context_input_indices.len()
+		}
 	}
 
 	/// Set which input columns feed the output head directly. The output layer is sized

@@ -28,6 +28,17 @@ use candle_optimisers::{
 use ndarray::{s, Array2, Array3};
 use std::collections::hash_map::DefaultHasher;
 
+/// Candidate blend weights are `step / BLEND_WEIGHT_GRID_STEPS` for step in 0..=BLEND_WEIGHT_GRID_STEPS
+const BLEND_WEIGHT_GRID_STEPS: usize = 100;
+/// Candidate forest vote exponents are `VOTE_POWER_GRID_MAX * step / VOTE_POWER_GRID_STEPS`
+const VOTE_POWER_GRID_STEPS: usize = 40;
+/// 2 is as far above "as counted" as 0 (uniform) is below it
+const VOTE_POWER_GRID_MAX: f64 = 2.0;
+/// Exponent that leaves the vote shares as counted
+const NEUTRAL_VOTE_POWER: f64 = 1.0;
+/// Lower bound on a probability inside the log loss so a zero never yields infinity
+const PROBABILITY_FLOOR: f64 = 1e-12;
+
 /// Unified ReduceOnPlateau scheduler with proper state management.
 /// Unlike epoch-based schedulers that only need config, ReduceOnPlateau needs to track
 /// loss history across epochs to make reduction decisions.
@@ -3358,7 +3369,12 @@ impl LSTMModel {
 			log::warn!("⚠️ Ensemble calibrator not initialized, skipping temperature calibration");
 		}
 
-		if !calibrate_temperature && !calibrate_bias {
+		let fit_blend_weight = self
+			.xgboost_model
+			.as_ref()
+			.is_some_and(|model| model.get_config().fit_blend_weight);
+
+		if !calibrate_temperature && !calibrate_bias && !fit_blend_weight {
 			log::debug!("🔧 Post-hoc calibration disabled in configuration");
 			return Ok(());
 		}
@@ -3465,50 +3481,89 @@ impl LSTMModel {
 			}
 		}
 
-		// When the XGBoost hybrid is active, inference bias-corrects the BLENDED
-		// distribution — compute the RF component here so the corrector is fitted
-		// on exactly what it will transform in production
-		let xgb_val_probs: Option<Array2<f64>> = if let Some(ref xgb_model) = self.xgboost_model {
-			let latents = self.extract_all_lstm_features(val_sequences)?;
-			let preds = xgb_model.predict(&latents)?;
-			let n = preds.dims()[0];
-			let k = preds.dims()[1];
-			let data: Vec<f64> = preds
-				.flatten_all()?
-				.to_vec1::<f32>()?
-				.iter()
-				.map(|&v| v as f64)
-				.collect();
-			Some(
-				Array2::from_shape_vec((n, k), data)
-					.map_err(|e| VangaError::ModelError(format!("Failed to build XGBoost prob array: {}", e)))?,
-			)
-		} else {
-			None
+		if fit_blend_weight {
+			if let Some(ref mut xgb_model) = self.xgboost_model {
+				// The fit searches the exponent itself, so it needs the votes as counted
+				xgb_model.set_forest_vote_power(NEUTRAL_VOTE_POWER as f32);
+			}
+		}
+
+		// Forest probabilities on the validation rows: needed to fit the blend and
+		// to fit the bias corrector on exactly what inference serves
+		let mut xgb_val_probs: Option<Array2<f64>> = match self.xgboost_model {
+			Some(ref xgb_model) if fit_blend_weight || calibrate_bias => {
+				let latents = self.extract_all_lstm_features(val_sequences)?;
+				let preds = xgb_model.predict(&latents)?;
+				let n = preds.dims()[0];
+				let k = preds.dims()[1];
+				let data: Vec<f64> = preds
+					.flatten_all()?
+					.to_vec1::<f32>()?
+					.iter()
+					.map(|&v| v as f64)
+					.collect();
+				Some(
+					Array2::from_shape_vec((n, k), data)
+						.map_err(|e| VangaError::ModelError(format!("Failed to build XGBoost prob array: {}", e)))?,
+				)
+			}
+			_ => None,
 		};
 
-		// Calibrate bias correction on the SAME distribution inference produces:
-		// apply_to_logits already returns softmax(z/T), so softmaxing its result
-		// again would double-softmax — mirror the single-softmax inference path
-		if let Some(ref mut corrector) = self.bias_corrector {
-			let lstm_probabilities = match &self.ensemble_calibrator {
-				Some(ensemble_cal) if ensemble_cal.is_calibrated => ensemble_cal.apply_to_logits(&total_logits)?,
-				_ => softmax_rows(&total_logits),
-			};
+		// The LSTM side of the blend is softmax(z/T) when calibrated: the same
+		// distribution inference serves. apply_to_logits already returns it, so
+		// softmaxing again would double-softmax
+		let lstm_probabilities = match &self.ensemble_calibrator {
+			Some(ensemble_cal) if ensemble_cal.is_calibrated => ensemble_cal.apply_to_logits(&total_logits)?,
+			_ => softmax_rows(&total_logits),
+		};
 
-			let inference_probabilities = match &xgb_val_probs {
-				Some(xgb_probs) => {
-					let w = self
-						.xgboost_model
-						.as_ref()
-						.ok_or_else(|| {
-							VangaError::ModelError("XGBoost validation probabilities without a model".to_string())
-						})?
-						.get_config()
-						.lstm_blend_weight as f64;
+		// Fit the blend after the temperature and before the bias corrector, which
+		// must see the final blend
+		if let (true, Some(forest_votes)) = (fit_blend_weight, &xgb_val_probs) {
+			let classes: Vec<usize> = val_targets_one_hot
+				.rows()
+				.into_iter()
+				.map(|row| {
+					row.iter()
+						.enumerate()
+						.fold((0, f64::NEG_INFINITY), |best, (class, &value)| {
+							if value > best.1 {
+								(class, value)
+							} else {
+								best
+							}
+						})
+						.0
+				})
+				.collect();
+			let fit = fit_blend(&lstm_probabilities, forest_votes, &classes);
+			let forest_probabilities = apply_vote_power(forest_votes, fit.forest_vote_power);
+			log::info!(
+				"⚖️ Blend fitted on {} validation samples: LSTM share {:.2}, forest vote exponent {:.2}; validation log loss: LSTM alone {:.4}, forest votes as counted {:.4}, forest with exponent {:.4}, fitted blend {:.4}",
+				num_samples,
+				fit.lstm_weight,
+				fit.forest_vote_power,
+				mean_negative_log_likelihood(&lstm_probabilities, &classes),
+				mean_negative_log_likelihood(forest_votes, &classes),
+				mean_negative_log_likelihood(&forest_probabilities, &classes),
+				fit.log_loss
+			);
+			if let Some(ref mut xgb_model) = self.xgboost_model {
+				xgb_model.set_lstm_blend_weight(fit.lstm_weight as f32);
+				xgb_model.set_forest_vote_power(fit.forest_vote_power as f32);
+			}
+			xgb_val_probs = Some(forest_probabilities);
+		}
+
+		// Calibrate bias correction on the SAME distribution inference produces
+		if let Some(ref mut corrector) = self.bias_corrector {
+			let inference_probabilities = match (&xgb_val_probs, &self.xgboost_model) {
+				(Some(xgb_probs), Some(xgb_model)) => {
+					let w = xgb_model.get_config().lstm_blend_weight as f64;
 					&lstm_probabilities * w + xgb_probs * (1.0 - w)
 				}
-				None => lstm_probabilities,
+				_ => lstm_probabilities,
 			};
 
 			corrector.calibrate_from_validation(&inference_probabilities, &val_targets_one_hot)?;
@@ -3523,4 +3578,61 @@ impl LSTMModel {
 
 		Ok(())
 	}
+}
+
+/// Mean negative log likelihood of the true class under `probabilities` (rows are distributions).
+/// The floor keeps a zero probability from turning the loss into infinity.
+fn mean_negative_log_likelihood(probabilities: &Array2<f64>, classes: &[usize]) -> f64 {
+	let total: f64 = classes
+		.iter()
+		.enumerate()
+		.map(|(row, &class)| -probabilities[[row, class]].max(PROBABILITY_FLOOR).ln())
+		.sum();
+	total / classes.len() as f64
+}
+
+/// Raises every probability to `power` and renormalises each row: below 1 flattens the
+/// distribution, above 1 sharpens it, 0 makes it uniform.
+pub fn apply_vote_power(probabilities: &Array2<f64>, power: f64) -> Array2<f64> {
+	let mut raised = probabilities.mapv(|probability| probability.powf(power));
+	for mut row in raised.rows_mut() {
+		let total = row.sum();
+		row.mapv_inplace(|value| value / total);
+	}
+	raised
+}
+
+/// Blend settings chosen on validation rows, with the log loss they reach there.
+pub struct BlendFit {
+	pub lstm_weight: f64,
+	pub forest_vote_power: f64,
+	pub log_loss: f64,
+}
+
+/// Picks the forest vote exponent `a` and the LSTM share `w` of `w * lstm + (1 - w) * forest^a`
+/// that minimise the validation log loss, searching both on evenly spaced grids. Ties keep the
+/// smallest exponent, then the smallest share.
+pub fn fit_blend(lstm_probabilities: &Array2<f64>, forest_votes: &Array2<f64>, classes: &[usize]) -> BlendFit {
+	let mut best = BlendFit {
+		lstm_weight: 0.0,
+		forest_vote_power: NEUTRAL_VOTE_POWER,
+		log_loss: f64::INFINITY,
+	};
+	for power_step in 0..=VOTE_POWER_GRID_STEPS {
+		let forest_vote_power = VOTE_POWER_GRID_MAX * power_step as f64 / VOTE_POWER_GRID_STEPS as f64;
+		let forest_probabilities = apply_vote_power(forest_votes, forest_vote_power);
+		for weight_step in 0..=BLEND_WEIGHT_GRID_STEPS {
+			let lstm_weight = weight_step as f64 / BLEND_WEIGHT_GRID_STEPS as f64;
+			let blended = lstm_probabilities * lstm_weight + &forest_probabilities * (1.0 - lstm_weight);
+			let log_loss = mean_negative_log_likelihood(&blended, classes);
+			if log_loss < best.log_loss {
+				best = BlendFit {
+					lstm_weight,
+					forest_vote_power,
+					log_loss,
+				};
+			}
+		}
+	}
+	best
 }

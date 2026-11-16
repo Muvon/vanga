@@ -18,6 +18,29 @@ use smartcore::linalg::basic::arrays::Array;
 use smartcore::linalg::basic::matrix::DenseMatrix;
 use smartcore::tree::decision_tree_classifier::DecisionTreeClassifier;
 
+type VotingTree = DecisionTreeClassifier<f64, i32, DenseMatrix<f64>, Vec<i32>>;
+
+/// Read-only view of a smartcore forest's serde form. smartcore keeps the trees
+/// private and offers no per-class vote counts, so the trees are read back from
+/// the serialized forest; every other field is ignored.
+#[derive(Deserialize)]
+struct ForestTrees {
+	trees: Option<Vec<VotingTree>>,
+}
+
+fn extract_voting_trees(forest_json: &str) -> Result<Vec<VotingTree>> {
+	let forest: ForestTrees = serde_json::from_str(forest_json)
+		.map_err(|e| VangaError::model(format!("Failed to read forest trees: {}", e)))?;
+	forest
+		.trees
+		.filter(|trees| !trees.is_empty())
+		.ok_or_else(|| VangaError::model("Random forest has no trees"))
+}
+
+fn parse_tree(tree_json: &str) -> Result<VotingTree> {
+	serde_json::from_str(tree_json).map_err(|e| VangaError::model(format!("Failed to read decision tree: {}", e)))
+}
+
 /// SmartCore-based ML model for hybrid LSTM+ML training
 pub struct SmartCoreRegressor {
 	seed: std::sync::atomic::AtomicU64,
@@ -45,6 +68,10 @@ pub struct SmartCoreRegressor {
 
 	/// Ordinal helper for 5-class problems
 	use_ordinal: bool,
+
+	/// Trees whose class votes become probabilities: every forest tree, or the
+	/// single fallback tree. Rebuilt on train and load, never saved separately.
+	voting_trees: Vec<VotingTree>,
 }
 
 /// SmartCore model metadata for persistence
@@ -71,7 +98,18 @@ impl SmartCoreRegressor {
 			training_features: None,
 			training_labels: None,
 			use_ordinal: false,
+			voting_trees: Vec::new(),
 		}
+	}
+
+	/// Store the LSTM share of the blend chosen on validation data; saved with the model
+	pub fn set_lstm_blend_weight(&mut self, weight: f32) {
+		self.config.lstm_blend_weight = weight;
+	}
+
+	/// Store the exponent applied to the vote shares; saved with the model
+	pub fn set_forest_vote_power(&mut self, power: f32) {
+		self.config.forest_vote_power = power;
 	}
 
 	pub fn set_seed(&self, seed: u64) {
@@ -212,6 +250,9 @@ impl SmartCoreRegressor {
 				log::info!("  ├─ Trees Built: {}", self.config.n_estimators);
 				log::info!("  ├─ Training Samples: {}", y.len());
 				log::info!("  └─ Feature Dimension: {}", actual_feature_dim);
+				let forest_json = serde_json::to_string(&rf_model)
+					.map_err(|e| VangaError::model(format!("Failed to serialize forest for voting trees: {}", e)))?;
+				self.voting_trees = extract_voting_trees(&forest_json)?;
 				self.model = Some(rf_model);
 			}
 			Err(e) => {
@@ -224,6 +265,10 @@ impl SmartCoreRegressor {
 				match DecisionTreeClassifier::fit(&x, &y, dt_params) {
 					Ok(dt_model) => {
 						log::info!("✅ Decision Tree training completed successfully (fallback)");
+						self.voting_trees =
+							vec![parse_tree(&serde_json::to_string(&dt_model).map_err(|e| {
+								VangaError::model(format!("Failed to serialize fallback tree: {}", e))
+							})?)?];
 						self.decision_tree = Some(dt_model);
 					}
 					Err(dt_e) => {
@@ -343,9 +388,16 @@ impl SmartCoreRegressor {
 		self.predict_base(features)
 	}
 
-	/// Base prediction method without ordinal constraints
+	/// Base prediction method without ordinal constraints.
+	///
+	/// Returns the share of trees voting for each class, add-one smoothed so every
+	/// class keeps a probability above zero and the log loss stays finite when the
+	/// blend puts all weight on the forest, then raised to `forest_vote_power`.
 	fn predict_base(&self, features: &Tensor) -> Result<Tensor> {
-		// Convert features to SmartCore format
+		if self.voting_trees.is_empty() {
+			return Err(VangaError::model("No trained model available for prediction"));
+		}
+
 		let features_array = self.tensor_to_ndarray2(features)?;
 		let features_vec2d: Vec<Vec<f64>> = features_array
 			.outer_iter()
@@ -354,89 +406,39 @@ impl SmartCoreRegressor {
 		let x = DenseMatrix::from_2d_vec(&features_vec2d)
 			.map_err(|e| VangaError::ModelError(format!("Failed to create prediction DenseMatrix: {}", e)))?;
 
-		// Make predictions using available model - TRY PROBABILITIES FIRST, FALLBACK TO CLASSIFICATIONS
-		let probabilities_result = if let Some(ref rf_model) = self.model {
-			// Try to get probabilities if available
-			log::debug!("🔍 Attempting to get Random Forest probabilities...");
-			// SmartCore might not have predict_proba - let's use predict for now and improve later
-			let predictions = rf_model
+		let num_classes = crate::config::model::NUM_CLASSES;
+		let rows = features_array.nrows();
+		let mut votes = vec![0usize; rows * num_classes];
+		for tree in &self.voting_trees {
+			let labels = tree
 				.predict(&x)
-				.map_err(|e| VangaError::model(format!("Random Forest prediction failed: {}", e)))?;
-
-			// CRITICAL DEBUG: Log what SmartCore actually predicted
-			log::debug!("🔍 XGBoost f(z) mapping: RandomForest predictions: {:?}", predictions);
-			log::debug!("📊 Input latent vector z shape: {:?}", x.shape());
-			log::debug!("🎯 Model instance: {:p}", self as *const _);
-
-			// Log first 10 LSTM features to verify they're different between models
-			if x.shape().0 > 0 {
-				let feature_sample: Vec<f64> = (0..std::cmp::min(10, x.shape().1)).map(|i| *x.get((0, i))).collect();
-				log::debug!(
-					"📊 LSTM latent vector z_test: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, ...] (dim={})",
-					feature_sample[0],
-					feature_sample[1],
-					feature_sample[2],
-					feature_sample[3],
-					feature_sample[4],
-					x.shape().1
-				);
-
-				let feature_sum: f64 = (0..x.shape().1).map(|i| *x.get((0, i))).sum();
-				let feature_mean = feature_sum / x.shape().1 as f64;
-				log::debug!(
-					"🎯 Latent vector statistics: mean={:.6}, sum={:.6}",
-					feature_mean,
-					feature_sum
-				);
+				.map_err(|e| VangaError::model(format!("Tree prediction failed: {}", e)))?;
+			for (row, &label) in labels.iter().enumerate() {
+				let class = usize::try_from(label)
+					.ok()
+					.filter(|&class| class < num_classes)
+					.ok_or_else(|| {
+						VangaError::model(format!("Tree voted for class {} outside 0..{}", label, num_classes))
+					})?;
+				votes[row * num_classes + class] += 1;
 			}
-
-			Ok(predictions)
-		} else if let Some(ref dt_model) = self.decision_tree {
-			log::debug!("🔍 Attempting to get Decision Tree probabilities...");
-			let predictions = dt_model
-				.predict(&x)
-				.map_err(|e| VangaError::model(format!("Decision Tree prediction failed: {}", e)))?;
-
-			// CRITICAL DEBUG: Log what SmartCore actually predicted
-			log::debug!("🔍 XGBoost f(z) mapping: DecisionTree predictions: {:?}", predictions);
-			log::debug!("📊 Input latent vector z shape: {:?}", x.shape());
-			log::debug!("🎯 Model instance: {:p}", self as *const _);
-
-			// Log first 10 LSTM features to verify they're different between models
-			if x.shape().0 > 0 {
-				let feature_sample: Vec<f64> = (0..std::cmp::min(10, x.shape().1)).map(|i| *x.get((0, i))).collect();
-				log::debug!(
-					"📊 LSTM latent vector z_test: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, ...] (dim={})",
-					feature_sample[0],
-					feature_sample[1],
-					feature_sample[2],
-					feature_sample[3],
-					feature_sample[4],
-					x.shape().1
-				);
-
-				let feature_sum: f64 = (0..x.shape().1).map(|i| *x.get((0, i))).sum();
-				let feature_mean = feature_sum / x.shape().1 as f64;
-				log::debug!(
-					"🎯 Latent vector statistics: mean={:.6}, sum={:.6}",
-					feature_mean,
-					feature_sum
-				);
-			}
-
-			Ok(predictions)
-		} else {
-			log::error!("🚨 NO SMARTCORE MODEL LOADED! Using fallback...");
-			Err(VangaError::model("No trained model available for prediction"))
-		};
-
-		match probabilities_result {
-			Ok(predictions) => {
-				// Convert hard class labels to deterministic ordinal-smoothed distributions
-				self.predictions_to_probability_tensor(predictions, features.dim(0)?)
-			}
-			Err(e) => Err(e),
 		}
+
+		let denominator = (self.voting_trees.len() + num_classes) as f32;
+		let power = self.config.forest_vote_power;
+		let mut shares: Vec<f32> = votes
+			.iter()
+			.map(|&count| ((count + 1) as f32 / denominator).powf(power))
+			.collect();
+		for row in shares.chunks_mut(num_classes) {
+			let total: f32 = row.iter().sum();
+			for share in row.iter_mut() {
+				*share /= total;
+			}
+		}
+
+		Tensor::from_vec(shares, (rows, num_classes), &self.device)
+			.map_err(|e| VangaError::model(format!("Failed to create probability tensor: {}", e)))
 	}
 
 	/// Check if model is trained
@@ -540,6 +542,7 @@ impl SmartCoreRegressor {
 			if metadata.model_type == "RandomForest" {
 				match serde_json::from_str(&model_json) {
 					Ok(rf_model) => {
+						regressor.voting_trees = extract_voting_trees(&model_json)?;
 						regressor.model = Some(rf_model);
 						log::info!("📂 SmartCore RandomForest model loaded from: {}", model_path);
 					}
@@ -551,8 +554,9 @@ impl SmartCoreRegressor {
 					}
 				}
 			} else {
-				match serde_json::from_str(&model_json) {
+				match serde_json::from_str::<VotingTree>(&model_json) {
 					Ok(dt_model) => {
+						regressor.voting_trees = vec![parse_tree(&model_json)?];
 						regressor.decision_tree = Some(dt_model);
 						log::info!("📂 SmartCore DecisionTree model loaded from: {}", model_path);
 					}
@@ -730,78 +734,6 @@ impl SmartCoreRegressor {
 		};
 
 		Ok(Array1::from_vec(data))
-	}
-
-	/// Convert SmartCore predictions to VANGA tensor format with realistic probabilities
-	fn predictions_to_probability_tensor(&self, predictions: Vec<i32>, batch_size: usize) -> Result<Tensor> {
-		let num_classes = crate::config::model::NUM_CLASSES;
-
-		log::debug!(
-			"🔄 Converting {} predictions to [{}, {}] probability tensor",
-			predictions.len(),
-			batch_size,
-			num_classes
-		);
-
-		// Convert class predictions to realistic probabilities with ordinal awareness
-		let mut prob_data: Vec<f32> = Vec::new();
-		for (idx, &pred_class) in predictions.iter().enumerate() {
-			let mut class_probs = vec![0.01f32; num_classes]; // Low base probability for all classes
-
-			// IMPROVED: Create more realistic probability distributions
-			// Use ordinal-aware smoothing - nearby classes get higher probabilities
-			if (pred_class as usize) < num_classes {
-				let pred_idx = pred_class as usize;
-
-				// Give predicted class high probability
-				class_probs[pred_idx] = 0.70f32; // Reduced from 0.85 to allow more uncertainty
-
-				// Distribute remaining probability to nearby classes (ordinal awareness)
-				// Classes closer to predicted class get more probability
-				for (i, prob) in class_probs.iter_mut().enumerate() {
-					if i != pred_idx {
-						let distance = (i as i32 - pred_class).abs() as f32;
-						// Use exponential decay based on distance
-						let proximity_weight = (-0.5 * distance).exp();
-						*prob = 0.05 + 0.15 * proximity_weight;
-					}
-				}
-			}
-
-			// Deterministic distribution: no artificial noise — it destroyed signal
-			// in the 80%-weighted blend and made confidences irreproducible
-			// Normalize to sum to 1.0
-			let sum: f32 = class_probs.iter().sum();
-			for prob in &mut class_probs {
-				*prob /= sum;
-			}
-
-			// DEBUG: Log sample predictions
-			if idx < 3 {
-				log::debug!(
-					"🔍 Sample {}: SmartCore class {} → probs: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}]",
-					idx,
-					pred_class,
-					class_probs[0],
-					class_probs[1],
-					class_probs[2],
-					class_probs[3],
-					class_probs[4]
-				);
-			}
-
-			prob_data.extend(class_probs);
-		}
-
-		log::debug!(
-			"✅ Created probability tensor with {} elements for shape [{}, {}]",
-			prob_data.len(),
-			batch_size,
-			num_classes
-		);
-
-		Tensor::from_vec(prob_data, (batch_size, num_classes), &self.device)
-			.map_err(|e| VangaError::model(format!("Failed to create probability tensor: {}", e)))
 	}
 
 	/// Determine number of classes from target tensor shape

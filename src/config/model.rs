@@ -340,6 +340,23 @@ pub struct XGBoostConfig {
 	/// calibrated distribution always matches the served one.
 	#[serde(default = "default_lstm_blend_weight")]
 	pub lstm_blend_weight: f32,
+
+	/// When true, the LSTM share of the blend and the forest vote exponent are chosen
+	/// after training as the pair that minimises the log loss of the blended
+	/// probabilities on the validation sequences; `lstm_blend_weight` and
+	/// `forest_vote_power` are then only the values used when there is no validation data.
+	#[serde(default)]
+	pub fit_blend_weight: bool,
+
+	/// Exponent applied to the forest's vote shares before they are renormalised.
+	/// Each tree votes for one class, which makes the shares sharper than the class
+	/// frequencies; below 1 flattens them, 1 leaves them as counted.
+	#[serde(default = "default_forest_vote_power")]
+	pub forest_vote_power: f32,
+}
+
+fn default_forest_vote_power() -> f32 {
+	1.0
 }
 
 fn default_lstm_blend_weight() -> f32 {
@@ -732,6 +749,8 @@ impl Default for XGBoostConfig {
 			save_feature_importance: true,                  // Enable feature analysis
 			importance_method: "permutation".to_string(),   // Use permutation-based importance
 			lstm_blend_weight: default_lstm_blend_weight(),
+			fit_blend_weight: false,
+			forest_vote_power: default_forest_vote_power(),
 		}
 	}
 }

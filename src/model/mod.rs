@@ -26,6 +26,12 @@ pub mod xgboost;
 #[cfg(test)]
 pub mod smartcore_test;
 
+#[cfg(test)]
+pub mod smartcore_backend_test;
+
+#[cfg(test)]
+pub mod blend_weight_test;
+
 pub use attention::{AttentionFactory, AttentionModule, MultiHeadAttention};
 pub use attention_loss::{AttentionLossConfig, AttentionLossFactory, AttentionWeightedLoss};
 pub use attention_moh::MixtureOfHeadAttention;

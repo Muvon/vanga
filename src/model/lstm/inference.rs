@@ -441,8 +441,8 @@ impl LSTMModel {
 		self.append_last_step_context(&final_output, input)
 	}
 
-	/// The head and the tree model read the context columns directly, because the
-	/// recurrent path does not pass them on. Uses the raw input, before DAIN.
+	/// The head reads the context columns directly, because the recurrent path does
+	/// not pass them on. Uses the raw input, before DAIN.
 	fn append_last_step_context(&self, latent: &Tensor, input: &Tensor) -> Result<Tensor> {
 		if self.context_input_indices.is_empty() {
 			return Ok(latent.clone());
@@ -457,6 +457,20 @@ impl LSTMModel {
 			.index_select(&index_tensor, 1)?
 			.to_dtype(latent.dtype())?;
 		Ok(Tensor::cat(&[latent, &context], 1)?.contiguous()?)
+	}
+
+	/// The part of the head's input the tree model reads. With context columns it is
+	/// only those: the recurrent state was fitted on the rows the trees train on, so
+	/// trees that read it learn its memorised part and are overconfident on new rows.
+	fn tree_features(&self, head_features: &Tensor) -> Result<Tensor> {
+		let context_width = self.context_input_indices.len();
+		if context_width == 0 {
+			return Ok(head_features.clone());
+		}
+		let width = head_features.dim(1)?;
+		Ok(head_features
+			.narrow(1, width - context_width, context_width)?
+			.contiguous()?)
 	}
 
 	pub async fn predict(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
@@ -987,13 +1001,13 @@ impl LSTMModel {
 		// pins a full [batch, seq_len, hidden] graph (per layer, per direction,
 		// plus the per-timestep states and attention intermediates) and the run
 		// OOMs. XGBoost features never need gradients.
-		let features = self.forward_features(sequences, false)?.detach();
+		let features = self.tree_features(&self.forward_features(sequences, false)?.detach())?;
 
 		let expected_dim = self.get_xgboost_feature_dim();
 		let actual_dim = features.dim(1)?;
 		if actual_dim != expected_dim {
 			return Err(VangaError::model(format!(
-				"LSTM latent dimension mismatch: expected {} (XGBoost config), got {}",
+				"Tree feature dimension mismatch: expected {}, got {}",
 				expected_dim, actual_dim
 			)));
 		}
@@ -1112,14 +1126,14 @@ impl LSTMModel {
 
 	/// Get expected XGBoost feature dimension from configuration
 	pub fn get_xgboost_feature_dim(&self) -> usize {
-		// The latent width is a property of the LSTM architecture; the TOML
-		// xgboost.feature_dim is only a stale copy of it and must not win.
-		let derived = self.latent_size();
+		// The width follows from the LSTM architecture and the context columns; the
+		// TOML xgboost.feature_dim is only a stale copy of it and must not win.
+		let derived = self.tree_feature_size();
 		if let Some(ref xgboost_model) = self.xgboost_model {
 			let configured = xgboost_model.get_config().feature_dim;
 			if configured != derived {
 				log::warn!(
-					"xgboost.feature_dim={} in config does not match the LSTM latent width {}; using {}",
+					"xgboost.feature_dim={} in config does not match the tree feature width {}; using {}",
 					configured,
 					derived,
 					derived
@@ -1204,6 +1218,8 @@ mod tests {
 			save_feature_importance: true,
 			importance_method: "permutation".to_string(),
 			lstm_blend_weight: 0.2,
+			fit_blend_weight: false,
+			forest_vote_power: 1.0,
 		};
 
 		// Test that the method returns the config value, not calculated value

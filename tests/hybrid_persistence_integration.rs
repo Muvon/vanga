@@ -41,6 +41,9 @@ async fn test_hybrid_model_persistence_and_inference() -> Result<()> {
 		eval_metric: "multiclass_accuracy".to_string(),
 		save_feature_importance: true,
 		importance_method: "permutation".to_string(),
+		lstm_blend_weight: 0.2,
+		fit_blend_weight: false,
+		forest_vote_power: 1.0,
 	};
 
 	println!("✅ Configuration created");
