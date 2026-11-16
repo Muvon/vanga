@@ -101,6 +101,7 @@ impl LSTMModel {
 				None
 			},
 			dain_normalization: None,
+			context_input_indices: Vec::new(),
 		})
 	}
 
@@ -370,6 +371,44 @@ impl LSTMModel {
 		);
 	}
 
+	/// Width of the vector the output head and the tree model read: the last recurrent
+	/// state (both directions when bidirectional) followed by the context columns.
+	pub fn latent_size(&self) -> usize {
+		let hidden_size = self.config.get_hidden_size_for_layer(self.config.num_layers - 1);
+		let is_bidirectional = matches!(
+			self.architecture,
+			Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
+		);
+		let recurrent_width = if is_bidirectional { hidden_size * 2 } else { hidden_size };
+		recurrent_width + self.context_input_indices.len()
+	}
+
+	/// Set which input columns feed the output head directly. The output layer is sized
+	/// from these, so they cannot change once the network exists.
+	pub fn set_context_input_indices(&mut self, indices: Vec<usize>) -> Result<()> {
+		if self.lstm_layers.is_some() && self.context_input_indices != indices {
+			return Err(VangaError::ModelError(
+				"Context input indices cannot change after the network is initialized".to_string(),
+			));
+		}
+		if let Some(&index) = indices.iter().find(|&&index| index >= self.config.input_size) {
+			return Err(VangaError::ModelError(format!(
+				"Context input index {} is outside the {} input features",
+				index, self.config.input_size
+			)));
+		}
+		let mut sorted = indices.clone();
+		sorted.sort_unstable();
+		sorted.dedup();
+		if sorted.len() != indices.len() {
+			return Err(VangaError::ModelError(
+				"Context input indices contain duplicates".to_string(),
+			));
+		}
+		self.context_input_indices = indices;
+		Ok(())
+	}
+
 	/// Initialize attention layers during model initialization
 	fn initialize_attention_layers(&mut self, vs: &VarBuilder) -> Result<()> {
 		if let Some(attention_config) = &self.attention_config {
@@ -601,15 +640,9 @@ impl LSTMModel {
 			self.initialize_attention_layers(&vs)?;
 		}
 
-		// Calculate output layer input size
-		// For bidirectional: last layer hidden size * 2 (concatenated)
-		// For unidirectional: last layer hidden size
+		// Output layer reads the recurrent state plus any context columns passed through directly
 		let final_hidden_size = self.config.get_hidden_size_for_layer(num_layers - 1);
-		let output_input_size = if is_bidirectional {
-			final_hidden_size * 2
-		} else {
-			final_hidden_size
-		};
+		let output_input_size = self.latent_size();
 
 		// Create output layer with proper input size
 		let output_layer = linear(output_input_size, self.config.output_size, vs.pp("output"))
@@ -1034,6 +1067,7 @@ impl LSTMModel {
 		model_config: &crate::config::ModelConfig,
 		input_size: usize,
 		output_size: usize,
+		context_input_indices: Vec<usize>,
 	) -> Result<Self> {
 		let path = path.as_ref();
 
@@ -1048,6 +1082,8 @@ impl LSTMModel {
 
 		// Create model with provided model configuration (not saved config)
 		let mut model = Self::from_model_config(model_config, input_size, output_size)?;
+		// Must be set before the network is built: the output layer width depends on it
+		model.set_context_input_indices(context_input_indices)?;
 		let config_path = path.with_extension("config");
 		let data = std::fs::read(&config_path)
 			.map_err(|e| VangaError::IoError(format!("Failed to read config file: {}", e)))?;

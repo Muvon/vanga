@@ -846,8 +846,15 @@ impl ModelTrainer {
 							target_type,
 							horizon
 						);
-						self.train_window_from_scratch(window, window_idx, *target_type, horizon, &device)
-							.await?
+						self.train_window_from_scratch(
+							window,
+							window_idx,
+							*target_type,
+							horizon,
+							&device,
+							&target_windows.feature_names,
+						)
+						.await?
 					};
 					target_models.insert(target_key, new_model);
 				} else {
@@ -1008,6 +1015,7 @@ impl ModelTrainer {
 		target_type: crate::targets::TargetType,
 		horizon: &str,
 		device: &candle_core::Device,
+		feature_names: &[String],
 	) -> Result<MultiTargetLSTMModel> {
 		log::info!(
 			"🎯 Training {:?} {} with target-specific balanced sequences ({} samples)",
@@ -1044,6 +1052,7 @@ impl ModelTrainer {
 		let mut model = self
 			.get_or_create_multi_target_model(input_size, &target_names, device)
 			.await?;
+		model.set_feature_names(feature_names.to_vec())?;
 
 		// Extract single target data using helper function
 		let (single_train_target, single_val_target) = extract_single_target_data(

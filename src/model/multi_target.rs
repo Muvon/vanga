@@ -696,6 +696,12 @@ impl MultiTargetLSTMModel {
 			log::warn!("⚠️ Model has no feature_names; using count-only feature validation");
 		}
 
+		let context_input_indices = state
+			.feature_names
+			.as_deref()
+			.map(crate::features::context::context_column_indices)
+			.unwrap_or_default();
+
 		// Load individual models
 		let mut models = Vec::with_capacity(state.num_targets);
 		for i in 0..state.num_targets {
@@ -714,6 +720,7 @@ impl MultiTargetLSTMModel {
 					&training_config.model,
 					state.input_size,
 					crate::config::model::NUM_CLASSES,
+					context_input_indices.clone(),
 				)?
 			} else {
 				log::warn!("⚠️ Loading legacy model {} without training config", i + 1);
@@ -764,6 +771,11 @@ impl MultiTargetLSTMModel {
 				names.len(),
 				self.input_size
 			)));
+		}
+		// Context columns reach the output layer directly; this must run before the networks are built
+		let context_input_indices = crate::features::context::context_column_indices(&names);
+		for model in &mut self.models {
+			model.set_context_input_indices(context_input_indices.clone())?;
 		}
 		self.feature_names = Some(names);
 		Ok(())

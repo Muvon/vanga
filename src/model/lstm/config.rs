@@ -175,6 +175,10 @@ pub struct LSTMModel {
 
 	/// DAIN (Deep Adaptive Input Normalization) for adaptive feature normalization
 	pub dain_normalization: Option<crate::utils::normalization::DAINormalization>,
+
+	/// Positions of the context columns in the input feature vector; empty = no skip path.
+	/// Runtime only: re-derived from the feature names, never saved with the model state.
+	pub context_input_indices: Vec<usize>,
 }
 
 /// Serializable model state for persistence - Enhanced with adaptive parameters

@@ -298,7 +298,7 @@ fn seeded_weights_dropout_and_saved_calibration_roundtrip() {
 	let dir = tempfile::tempdir().unwrap();
 	let path = dir.path().join("T_0");
 	first.save(&path).unwrap();
-	let reloaded = LSTMModel::load_with_model_config(&path, &config, 3, 5).unwrap();
+	let reloaded = LSTMModel::load_with_model_config(&path, &config, 3, 5, Vec::new()).unwrap();
 	assert_eq!(
 		reloaded
 			.ensemble_calibrator

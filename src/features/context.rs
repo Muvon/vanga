@@ -24,6 +24,16 @@ pub fn is_context_column(name: &str) -> bool {
 	name.starts_with(CONTEXT_PREFIX)
 }
 
+/// Positions of the context columns in a model input feature list.
+pub fn context_column_indices(feature_names: &[String]) -> Vec<usize> {
+	feature_names
+		.iter()
+		.enumerate()
+		.filter(|(_, name)| is_context_column(name))
+		.map(|(index, _)| index)
+		.collect()
+}
+
 /// Lookbacks in bars: the cube root of the regime window, that squared, and the regime window.
 ///
 /// The steps are equal on a log scale, so no length is chosen by hand.

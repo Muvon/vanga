@@ -438,7 +438,25 @@ impl LSTMModel {
 			}
 		};
 
-		Ok(final_output)
+		self.append_last_step_context(&final_output, input)
+	}
+
+	/// The head and the tree model read the context columns directly, because the
+	/// recurrent path does not pass them on. Uses the raw input, before DAIN.
+	fn append_last_step_context(&self, latent: &Tensor, input: &Tensor) -> Result<Tensor> {
+		if self.context_input_indices.is_empty() {
+			return Ok(latent.clone());
+		}
+		let seq_len = input.dim(1)?;
+		let indices: Vec<u32> = self.context_input_indices.iter().map(|&index| index as u32).collect();
+		let index_tensor = Tensor::from_vec(indices, self.context_input_indices.len(), input.device())?;
+		let context = input
+			.narrow(1, seq_len - 1, 1)?
+			.squeeze(1)?
+			.contiguous()?
+			.index_select(&index_tensor, 1)?
+			.to_dtype(latent.dtype())?;
+		Ok(Tensor::cat(&[latent, &context], 1)?.contiguous()?)
 	}
 
 	pub async fn predict(&self, sequences: &Array3<f64>) -> Result<Array2<f64>> {
@@ -1096,16 +1114,7 @@ impl LSTMModel {
 	pub fn get_xgboost_feature_dim(&self) -> usize {
 		// The latent width is a property of the LSTM architecture; the TOML
 		// xgboost.feature_dim is only a stale copy of it and must not win.
-		let base_hidden_size = self.config.hidden_sizes.last().copied().unwrap_or(64);
-		let is_bidirectional = matches!(
-			self.architecture,
-			Some(crate::config::model::LSTMArchitecture::BidirectionalLSTM { .. })
-		);
-		let derived = if is_bidirectional {
-			base_hidden_size * 2
-		} else {
-			base_hidden_size
-		};
+		let derived = self.latent_size();
 		if let Some(ref xgboost_model) = self.xgboost_model {
 			let configured = xgboost_model.get_config().feature_dim;
 			if configured != derived {
