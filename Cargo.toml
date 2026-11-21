@@ -30,6 +30,7 @@ polars = { version = "0.51", features = ["lazy", "csv", "temporal", "strings"] }
 
 # Technical indicators and math
 ta = "0.5"  # Technical analysis indicators
+fin-primitives = { version = "4.0.1", default-features = false, features = ["indicators"] }  # Wilder RSI/ATR, TA-Lib MACD seeding
 statrs = "0.18"  # Statistical functions
 nalgebra = "0.34"
 
