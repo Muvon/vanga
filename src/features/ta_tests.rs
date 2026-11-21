@@ -434,3 +434,24 @@ fn test_fixed_dataitem_building() {
 
 	println!("\n=== All DataItem-based indicators now working correctly! ===");
 }
+
+#[test]
+fn test_rsi_atr_use_wilder_smoothing() {
+	// Wilder (TA-Lib) RSI(3): seed gain 2/3, loss 1/3, then alpha = 1/3
+	let prices = vec![1.0, 2.0, 3.0, 2.0, 3.0, 4.0];
+	let rsi = calculate_rsi_ta(&prices, 3).unwrap();
+	assert!((rsi[3] - 200.0 / 3.0).abs() < 1e-9, "RSI[3] = {}", rsi[3]);
+	assert!((rsi[4] - 700.0 / 9.0).abs() < 1e-9, "RSI[4] = {}", rsi[4]);
+	assert!((rsi[5] - 2300.0 / 27.0).abs() < 1e-9, "RSI[5] = {}", rsi[5]);
+
+	// Wilder (TA-Lib) ATR(2) over true ranges 2, 4, 2, 6: seed 3, then 2.5, 4.25
+	let close = vec![10.0; 5];
+	let range = [2.0, 2.0, 4.0, 2.0, 6.0];
+	let high: Vec<f64> = range.iter().map(|r| 10.0 + r / 2.0).collect();
+	let low: Vec<f64> = range.iter().map(|r| 10.0 - r / 2.0).collect();
+	let volume = vec![1000.0; 5];
+	let atr = calculate_atr_ta(&close, &high, &low, &close, &volume, 2).unwrap();
+	assert!((atr[2] - 3.0).abs() < 1e-9, "ATR[2] = {}", atr[2]);
+	assert!((atr[3] - 2.5).abs() < 1e-9, "ATR[3] = {}", atr[3]);
+	assert!((atr[4] - 4.25).abs() < 1e-9, "ATR[4] = {}", atr[4]);
+}

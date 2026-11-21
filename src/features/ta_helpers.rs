@@ -1,6 +1,7 @@
 // TA crate integration helpers
 use crate::features::validation::*;
 use crate::utils::{Result, VangaError};
+use fin_primitives::signals::batch_f64;
 use ta::indicators::*;
 use ta::{DataItem, Next};
 
@@ -11,14 +12,11 @@ pub fn calculate_rsi_ta(data: &[f64], period: usize) -> Result<Vec<f64>> {
 	validate_period(period, data.len(), "RSI")?;
 	check_data_variation(data, "RSI", 1e-6)?;
 
-	let mut rsi = RelativeStrengthIndex::new(period)
-		.map_err(|e| VangaError::FeatureError(format!("RSI initialization failed: {}", e)))?;
+	let rsi = batch_f64::rsi(data, period);
 
 	let mut result = Vec::with_capacity(data.len());
 
-	for (i, &price) in data.iter().enumerate() {
-		let rsi_value = rsi.next(price);
-
+	for (i, &rsi_value) in rsi.iter().enumerate() {
 		// Return NaN for the warm-up period (first 'period' values)
 		// This maintains compatibility with the original filtering system
 		if i < period {
@@ -106,16 +104,13 @@ pub fn calculate_macd_ta(
 	validate_macd_params(fast, slow, signal, data.len())?;
 	check_data_variation(data, "MACD", 1e-6)?;
 
-	let mut macd = MovingAverageConvergenceDivergence::new(fast, slow, signal)
-		.map_err(|e| VangaError::FeatureError(format!("MACD initialization failed: {}", e)))?;
+	let (macd, macd_signal, macd_hist) = batch_f64::macd(data, fast, slow, signal);
 
 	let mut macd_line = Vec::with_capacity(data.len());
 	let mut signal_line = Vec::with_capacity(data.len());
 	let mut histogram = Vec::with_capacity(data.len());
 
-	for (i, &price) in data.iter().enumerate() {
-		let macd_output = macd.next(price);
-
+	for i in 0..data.len() {
 		// Return NaN for the warm-up period (slow period + signal period)
 		let warmup_period = slow + signal - 1;
 		if i < warmup_period {
@@ -123,9 +118,9 @@ pub fn calculate_macd_ta(
 			signal_line.push(f64::NAN);
 			histogram.push(f64::NAN);
 		} else {
-			macd_line.push(macd_output.macd);
-			signal_line.push(macd_output.signal);
-			histogram.push(macd_output.histogram);
+			macd_line.push(macd[i]);
+			signal_line.push(macd_signal[i]);
+			histogram.push(macd_hist[i]);
 		}
 	}
 
@@ -295,23 +290,11 @@ pub fn calculate_atr_ta(
 	validate_ohlcv_data(Some(open), Some(high), Some(low), close, Some(volume))?;
 	validate_period(period, close.len(), "ATR")?;
 
-	let mut atr = AverageTrueRange::new(period)
-		.map_err(|e| VangaError::FeatureError(format!("ATR initialization failed: {}", e)))?;
+	let atr = batch_f64::atr(high, low, close, period, batch_f64::AtrSeed::TaLib);
 
 	let mut result = Vec::with_capacity(high.len());
 
-	for i in 0..high.len() {
-		let data_item = DataItem::builder()
-			.open(open[i])
-			.high(high[i])
-			.low(low[i])
-			.close(close[i])
-			.volume(volume[i])
-			.build()
-			.map_err(|e| VangaError::FeatureError(format!("ATR DataItem build failed: {}", e)))?;
-
-		let atr_value = atr.next(&data_item);
-
+	for (i, &atr_value) in atr.iter().enumerate() {
 		// Return NaN for the warm-up period
 		if i < period {
 			result.push(f64::NAN);
