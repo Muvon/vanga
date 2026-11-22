@@ -1204,6 +1204,7 @@ mod tests {
 		// Create XGBoost config with custom feature_dim
 		let xgb_config = XGBoostConfig {
 			enabled: true,
+			pool_data: Vec::new(),
 			feature_dim: 256, // Custom value different from default
 			n_estimators: 100,
 			max_depth: 6,

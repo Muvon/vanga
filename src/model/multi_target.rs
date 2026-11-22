@@ -2,6 +2,7 @@
 // Trains separate LSTM models for each target to overcome rust-lstm single-target limitation
 
 use crate::config::ModelConfig;
+use crate::model::lstm::ForestPool;
 use crate::model::lstm_simple::LSTMModel;
 use crate::targets::{calibration::CalibratedParameters, TargetType};
 use crate::utils::error::{Result, VangaError};
@@ -20,6 +21,7 @@ pub enum TrainingContext<'a> {
 		targets: &'a Array2<f64>,
 		val_sequences: Option<&'a Array3<f64>>,
 		val_targets: Option<&'a Array2<f64>>,
+		forest_pool: Option<&'a ForestPool>,
 	},
 	/// Continues training from a previous state.
 	/// CRITICAL: new_sequences is CUMULATIVE (Window1: 2880, Window2: 3744, etc.) - NOT just new data
@@ -29,6 +31,7 @@ pub enum TrainingContext<'a> {
 		/// CRITICAL: Validation data prevents overfitting in continuation training
 		val_sequences: Option<&'a Array3<f64>>,
 		val_targets: Option<&'a Array2<f64>>,
+		forest_pool: Option<&'a ForestPool>,
 	},
 }
 /// Multi-target LSTM model that trains separate models for each target
@@ -318,8 +321,9 @@ impl MultiTargetLSTMModel {
 				targets,
 				val_sequences,
 				val_targets,
+				forest_pool,
 			} => {
-				self.train_internal(sequences, targets, val_sequences, val_targets, config)
+				self.train_internal(sequences, targets, val_sequences, val_targets, config, forest_pool)
 					.await
 			}
 			TrainingContext::Continue {
@@ -327,8 +331,9 @@ impl MultiTargetLSTMModel {
 				new_targets,
 				val_sequences,
 				val_targets,
+				forest_pool,
 			} => {
-				self.continue_training(new_sequences, new_targets, val_sequences, val_targets, config)
+				self.continue_training(new_sequences, new_targets, val_sequences, val_targets, config, forest_pool)
 					.await
 			}
 		}
@@ -344,7 +349,14 @@ impl MultiTargetLSTMModel {
 		val_sequences: Option<&Array3<f64>>, // CRITICAL: Prevents overfitting
 		val_targets: Option<&Array2<f64>>,   // CRITICAL: Prevents overfitting
 		config: &crate::config::TrainingConfig,
+		forest_pool: Option<&ForestPool>,
 	) -> Result<()> {
+		if forest_pool.is_some() && self.models.len() != 1 {
+			return Err(VangaError::ModelError(format!(
+				"A forest pool belongs to one head, but this wrapper contains {} models",
+				self.models.len()
+			)));
+		}
 		log::info!(
 			"🔄 INCREMENTAL multi-target training: {} models with {} new samples",
 			self.models.len(),
@@ -400,6 +412,7 @@ impl MultiTargetLSTMModel {
 					config,
 					val_sequences,              // CRITICAL: Validation prevents overfitting
 					single_val_target.as_ref(), // CRITICAL: Validation prevents overfitting
+					forest_pool,
 				)
 				.await?;
 
@@ -419,7 +432,14 @@ impl MultiTargetLSTMModel {
 		val_sequences: Option<&Array3<f64>>,
 		val_targets: Option<&Array2<f64>>,
 		config: &crate::config::TrainingConfig,
+		forest_pool: Option<&ForestPool>,
 	) -> Result<()> {
+		if forest_pool.is_some() && self.models.len() != 1 {
+			return Err(VangaError::ModelError(format!(
+				"A forest pool belongs to one head, but this wrapper contains {} models",
+				self.models.len()
+			)));
+		}
 		log::info!(
 			"Starting multi-target training: {} models for {} targets",
 			self.models.len(),
@@ -518,6 +538,7 @@ impl MultiTargetLSTMModel {
 					config,
 					target_val_sequences.as_ref(),
 					target_val_targets.as_ref(),
+					forest_pool,
 				)
 				.await
 			{
@@ -941,7 +962,7 @@ impl MultiTargetLSTMModel {
 
 			// Use the existing XGBoost training method from LSTMModel with validation data
 			model
-				.train_xgboost_phase(sequences, targets, config, Some(val_sequences), Some(val_targets))
+				.train_xgboost_phase(sequences, targets, config, Some(val_sequences), Some(val_targets), None)
 				.await?;
 
 			log::info!(

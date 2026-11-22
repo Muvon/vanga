@@ -30,7 +30,7 @@
 //!
 //! // Create and train model
 //! let mut model = LSTMModel::new(config)?;
-//! model.train(&sequences, &targets, &training_config).await?;
+//! model.train(&sequences, &targets, &training_config, None, None, None).await?;
 //!
 //! // Make predictions
 //! let predictions = model.predict(&test_sequences).await?;
@@ -38,6 +38,7 @@
 
 pub mod config;
 pub mod core;
+pub mod forest_pool;
 pub mod inference;
 pub mod loss;
 pub mod schedule_benchmark;
@@ -68,11 +69,15 @@ mod reduce_on_plateau_test;
 mod output_init_test;
 
 #[cfg(test)]
+mod training_pool_test;
+
+#[cfg(test)]
 mod context_skip_test;
 
 // Re-export main types for backward compatibility
 
 pub use config::{LSTMConfig, LSTMModel, ModelState, OptimizerWrapper, TargetFormat, TrainingConfig};
+pub use forest_pool::ForestPool;
 
 // Re-export core functionality including test helpers
 #[cfg(test)]
@@ -163,7 +168,7 @@ mod tests {
 		};
 
 		// Test that early stopping training completes without errors
-		let result = model.train(&sequences, &targets, &training_config, None, None).await;
+		let result = model.train(&sequences, &targets, &training_config, None, None, None).await;
 
 		if let Err(ref e) = result {
 			println!("Training error: {:?}", e);
@@ -243,7 +248,7 @@ mod tests {
 		};
 
 		// Test that fixed epochs training completes without errors
-		let result = model.train(&sequences, &targets, &training_config, None, None).await;
+		let result = model.train(&sequences, &targets, &training_config, None, None, None).await;
 
 		assert!(result.is_ok(), "Fixed epochs training should complete successfully");
 		assert!(
@@ -321,7 +326,7 @@ mod tests {
 		};
 
 		model
-			.train(&sequences, &targets, &training_config, None, None)
+			.train(&sequences, &targets, &training_config, None, None, None)
 			.await
 			.expect("Training should complete successfully");
 
@@ -429,7 +434,7 @@ mod tests {
 		};
 
 		// Test multi-layer training
-		let result = model.train(&sequences, &targets, &training_config, None, None).await;
+		let result = model.train(&sequences, &targets, &training_config, None, None, None).await;
 
 		assert!(result.is_ok(), "Multi-layer LSTM training should complete successfully");
 		assert!(model.trained, "Multi-layer model should be marked as trained");

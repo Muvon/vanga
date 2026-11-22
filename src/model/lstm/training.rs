@@ -8,6 +8,7 @@
 //! - Gradient flow monitoring and validation
 
 use super::config::{LSTMModel, OptimizerWrapper};
+use super::ForestPool;
 
 use crate::targets::TargetType;
 use crate::utils::diagnostics::TrainingDiagnostics;
@@ -38,6 +39,12 @@ const VOTE_POWER_GRID_MAX: f64 = 2.0;
 const NEUTRAL_VOTE_POWER: f64 = 1.0;
 /// Lower bound on a probability inside the log loss so a zero never yields infinity
 const PROBABILITY_FLOOR: f64 = 1e-12;
+
+/// Depth of a forest that also trains on other symbols' rows: one level more per doubling of the training rows, so
+/// a leaf keeps about as many rows as the configured depth gives on this symbol's rows alone.
+pub(crate) fn pooled_forest_depth(configured_depth: usize, own_rows: usize, total_rows: usize) -> usize {
+	configured_depth + (total_rows as f64 / own_rows as f64).log2().ceil() as usize
+}
 
 /// Unified ReduceOnPlateau scheduler with proper state management.
 /// Unlike epoch-based schedulers that only need config, ReduceOnPlateau needs to track
@@ -515,6 +522,7 @@ impl LSTMModel {
 		// Optional pre-split validation data (prevents data leakage)
 		val_sequences: Option<&Array3<f64>>,
 		val_targets: Option<&Array2<f64>>,
+		forest_pool: Option<&ForestPool>,
 	) -> Result<()> {
 		let total_samples = sequences.shape()[0];
 
@@ -1970,7 +1978,7 @@ impl LSTMModel {
 		// Phase 2: XGBoost Training (NEW)
 		if config.model.xgboost.enabled {
 			log::info!("🔄 Starting XGBoost hybrid training phase...");
-			self.train_xgboost_phase(sequences, targets, config, val_sequences, val_targets)
+			self.train_xgboost_phase(sequences, targets, config, val_sequences, val_targets, forest_pool)
 				.await?;
 		}
 
@@ -2745,7 +2753,14 @@ impl LSTMModel {
 		config: &crate::config::TrainingConfig,
 		val_sequences: Option<&Array3<f64>>,
 		val_targets: Option<&Array2<f64>>,
+		forest_pool: Option<&ForestPool>,
 	) -> Result<()> {
+		if forest_pool.is_some() && self.context_input_indices.is_empty() {
+			return Err(VangaError::ConfigError(
+				"model.xgboost.pool_data requires features.context.enabled because pooled rows carry the last input step, not LSTM hidden states"
+					.to_string(),
+			));
+		}
 		// Store validation data for evaluation if provided
 		if let Some(val_seq) = val_sequences {
 			self.stored_val_sequences = Some(val_seq.clone());
@@ -2835,6 +2850,31 @@ impl LSTMModel {
 
 		// Convert targets to tensor
 		let targets_tensor = self.convert_targets_to_tensor(targets)?;
+		let own_rows = lstm_features.dim(0)?;
+		let (forest_features, forest_targets, pooled_rows) = if let Some(pool) = forest_pool {
+			let own_feature_width = lstm_features.dim(1)?;
+			if pool.inputs.ncols() != own_feature_width {
+				return Err(VangaError::ModelError(format!(
+					"Forest pool input width mismatch: own tree features have {}, pool inputs have {}",
+					own_feature_width,
+					pool.inputs.ncols()
+				)));
+			}
+			let pool_features = Tensor::from_vec(
+				pool.inputs.iter().copied().collect::<Vec<_>>(),
+				pool.inputs.dim(),
+				lstm_features.device(),
+			)?
+			.to_dtype(lstm_features.dtype())?;
+			let pool_targets = self.convert_targets_to_tensor(&pool.targets)?;
+			(
+				Tensor::cat(&[&lstm_features, &pool_features], 0)?.contiguous()?,
+				Tensor::cat(&[&targets_tensor, &pool_targets], 0)?.contiguous()?,
+				pool.inputs.nrows(),
+			)
+		} else {
+			(lstm_features.clone(), targets_tensor.clone(), 0)
+		};
 
 		// Determine XGBoost objective and metric based on target type
 		let mut xgb_config = config.model.xgboost.clone();
@@ -2842,6 +2882,13 @@ impl LSTMModel {
 		// Use the actual LSTM feature dimension (hidden state size)
 		let actual_feature_dim = lstm_features.dim(1)?;
 		xgb_config.feature_dim = actual_feature_dim;
+		xgb_config.max_depth = pooled_forest_depth(xgb_config.max_depth, own_rows, own_rows + pooled_rows);
+		log::info!(
+			"🌲 Forest training rows: own={}, pooled={}, max_depth={}",
+			own_rows,
+			pooled_rows,
+			xgb_config.max_depth
+		);
 		log::info!(
 			"📊 XGBoost feature_dim = {} (LSTM hidden state dimension)",
 			actual_feature_dim
@@ -2898,8 +2945,8 @@ impl LSTMModel {
 
 		// Pass validation data to XGBoost for proper accuracy calculation
 		xgb_regressor.train(
-			&lstm_features,
-			&targets_tensor,
+			&forest_features,
+			&forest_targets,
 			val_lstm_features.as_ref(),
 			val_targets_tensor.as_ref(),
 		)?;

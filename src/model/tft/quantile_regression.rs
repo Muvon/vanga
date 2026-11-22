@@ -147,6 +147,7 @@ impl QuantileMultiTargetModel {
 					targets,
 					val_sequences: None,
 					val_targets: None,
+					forest_pool: None,
 				},
 				config,
 			)

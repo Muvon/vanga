@@ -366,7 +366,7 @@ async fn same_seed_training_produces_identical_safetensors() {
 				.unwrap();
 		model.set_target_context("price_level_8h".to_string(), crate::targets::TargetType::PriceLevel);
 		model
-			.train(&input, &targets, &config, Some(&input), Some(&targets))
+			.train(&input, &targets, &config, Some(&input), Some(&targets), None)
 			.await
 			.unwrap();
 		let path = directory.path().join(format!("T_{run}"));

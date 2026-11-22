@@ -1,3 +1,4 @@
+use crate::config::model::XGBoostConfig;
 use crate::config::training::{TargetsConfig, TrainingConfig};
 use std::io::Write;
 
@@ -51,4 +52,25 @@ fn config_merge_loads_top_level_horizons() {
 	let config = TrainingConfig::default().with_config_from_file(file.path()).unwrap();
 
 	assert_eq!(config.horizons, vec!["3d", "7d"]);
+}
+
+#[test]
+fn xgboost_pool_data_defaults_to_empty_when_absent() {
+	let config: toml::Value = toml::from_str(
+		r#"
+[model.xgboost]
+enabled = true
+feature_dim = 64
+n_estimators = 100
+max_depth = 6
+objective = "RandomForest"
+eval_metric = "multiclass_accuracy"
+save_feature_importance = true
+importance_method = "permutation"
+"#,
+	)
+	.unwrap();
+	let xgboost: XGBoostConfig = config["model"]["xgboost"].clone().try_into().unwrap();
+
+	assert!(xgboost.pool_data.is_empty());
 }

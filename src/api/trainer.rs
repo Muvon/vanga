@@ -71,11 +71,69 @@
 
 use crate::config::TrainingConfig;
 use crate::data::DataPipeline;
+use crate::model::lstm::ForestPool;
 use crate::model::multi_target::{MultiTargetLSTMModel, TrainingContext};
 use crate::targets::{PreparedTargets, TargetType};
 use crate::utils::error::{Result, VangaError};
-use ndarray::Array2;
+use ndarray::{Array2, Axis};
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+const SECONDS_PER_MINUTE: usize = 60;
+
+/// Other symbols' training files must describe the same input columns, in the same order, as this symbol's.
+pub(super) fn validate_pool_feature_names(
+	own_feature_names: &[String],
+	pool_feature_names: &[String],
+	pool_path: &Path,
+) -> Result<()> {
+	if own_feature_names != pool_feature_names {
+		return Err(VangaError::ConfigError(format!(
+			"Forest pool feature-name mismatch for {}: own data has {:?}, pool data has {:?}",
+			pool_path.display(),
+			own_feature_names,
+			pool_feature_names
+		)));
+	}
+	Ok(())
+}
+
+/// Time of a sequence's anchor, its last input bar: row `end_idx - 1` of the processed frame.
+fn anchor_time(sequence_index: (usize, usize), row_timestamps: &[i64]) -> i64 {
+	row_timestamps[sequence_index.1 - 1]
+}
+
+/// Rows of another symbol's training sequences whose label and validation gap end before this symbol's first
+/// validation anchor: the purge this symbol's own training rows get, so no pooled hour reaches into the
+/// validation period and the market move of those hours cannot leak into the blend fit.
+pub(super) fn pool_rows_before_validation(
+	pool_sequence_indices: &[(usize, usize)],
+	pool_row_timestamps: &[i64],
+	first_validation_anchor: i64,
+	purge_seconds: i64,
+) -> Result<Vec<usize>> {
+	let kept: Vec<usize> = pool_sequence_indices
+		.iter()
+		.enumerate()
+		.filter(|(_, index)| anchor_time(**index, pool_row_timestamps) + purge_seconds < first_validation_anchor)
+		.map(|(row, _)| row)
+		.collect();
+	if kept.is_empty() {
+		return Err(VangaError::DataError(format!(
+			"Forest pool time cut leaves zero rows before validation anchor {} with purge {} seconds",
+			first_validation_anchor, purge_seconds
+		)));
+	}
+	Ok(kept)
+}
+
+fn concatenate_forest_pools(pools: &[ForestPool]) -> Result<ForestPool> {
+	let inputs = ndarray::concatenate(Axis(0), &pools.iter().map(|pool| pool.inputs.view()).collect::<Vec<_>>())
+		.map_err(|error| VangaError::DataError(format!("Failed to concatenate forest pool inputs: {}", error)))?;
+	let targets = ndarray::concatenate(Axis(0), &pools.iter().map(|pool| pool.targets.view()).collect::<Vec<_>>())
+		.map_err(|error| VangaError::DataError(format!("Failed to concatenate forest pool targets: {}", error)))?;
+	Ok(ForestPool { inputs, targets })
+}
 
 pub(super) fn minimum_target_sample_count(counts: &[usize]) -> Option<usize> {
 	counts.iter().copied().min()
@@ -671,6 +729,152 @@ impl ModelTrainer {
 			)
 			.await?;
 
+		if !self.config.model.xgboost.pool_data.is_empty() && self.config.continue_training {
+			return Err(VangaError::ConfigError(
+				"model.xgboost.pool_data cannot be used with continue_training".to_string(),
+			));
+		}
+		for pool_path in &self.config.model.xgboost.pool_data {
+			if pool_path == &self.config.data_path {
+				return Err(VangaError::ConfigError(format!(
+					"model.xgboost.pool_data path {} equals the symbol's own data_path",
+					pool_path.display()
+				)));
+			}
+		}
+
+		let mut forest_pool_parts: HashMap<(TargetType, String, usize), Vec<ForestPool>> = HashMap::new();
+		if !self.config.model.xgboost.pool_data.is_empty() {
+			let max_horizon_steps = self
+				.config
+				.horizons
+				.iter()
+				.map(|horizon| crate::utils::parser::parse_horizon_to_steps(horizon, timeframe_minutes))
+				.collect::<Result<Vec<_>>>()?
+				.into_iter()
+				.max()
+				.ok_or_else(|| VangaError::ConfigError("Forest pooling requires at least one horizon".to_string()))?;
+			let validation_gap_steps = if self.config.training.validation_gap.is_empty() {
+				0
+			} else {
+				crate::utils::parser::parse_horizon_to_steps(
+					&self.config.training.validation_gap,
+					timeframe_minutes,
+				)?
+			};
+			let purge_seconds =
+				((max_horizon_steps + validation_gap_steps) * timeframe_minutes * SECONDS_PER_MINUTE) as i64;
+
+			for pool_path in &self.config.model.xgboost.pool_data {
+				let pool_raw_data = data_loader.load_csv(pool_path).await?;
+				let pool_timeframe_minutes = crate::utils::parser::detect_timeframe_minutes(&pool_raw_data)?;
+				if pool_timeframe_minutes != timeframe_minutes {
+					return Err(VangaError::ConfigError(format!(
+						"Forest pool timeframe mismatch for {}: own data is {}m, pool data is {}m",
+						pool_path.display(),
+						timeframe_minutes,
+						pool_timeframe_minutes
+					)));
+				}
+				let pool_ohlcv = crate::utils::market_data::extract_ohlcv_data(&pool_raw_data)?;
+				drop(pool_raw_data);
+				let pool_params = calibrator
+					.calibrate(
+						&pool_ohlcv,
+						sequence_length,
+						&self.config.horizons,
+						None,
+						final_overlap,
+						timeframe_minutes,
+					)
+					.await?;
+				drop(pool_ohlcv);
+				let pool_windows = data_pipeline
+					.prepare_training_data_with_calibrated_params(pool_path, &final_config, Some(&pool_params))
+					.await?;
+				validate_pool_feature_names(&target_windows.feature_names, &pool_windows.feature_names, pool_path)?;
+
+				for ((target_type, horizon), own_windows) in &target_windows.windows_by_target {
+					let target_name = generate_target_name(*target_type, horizon);
+					let pool_window = pool_windows
+						.windows_by_target
+						.get(&(*target_type, horizon.clone()))
+						.and_then(|windows| windows.last())
+						.ok_or_else(|| {
+							VangaError::DataError(format!(
+								"Forest pool {} has no last training window for {}",
+								pool_path.display(),
+								target_name
+							))
+						})?;
+					let (pool_train_targets, pool_val_targets) =
+						self.process_window_targets(pool_window, "forest pooling")?;
+					let (pool_single_target, _) = extract_single_target_data(
+						&pool_train_targets,
+						Some(&pool_val_targets),
+						pool_window,
+						&target_name,
+						"forest pooling",
+					)?;
+					let last_step = pool_window.train_data.sequences.shape()[1] - 1;
+					let feature_count = pool_window.train_data.sequences.shape()[2];
+
+					for (window_idx, own_window) in own_windows.iter().enumerate() {
+						let first_validation_anchor = own_window
+							.val_data
+							.sequence_indices
+							.iter()
+							.map(|index| anchor_time(*index, &target_windows.row_timestamps))
+							.min()
+							.ok_or_else(|| {
+								VangaError::DataError(format!(
+									"Forest pooling needs validation sequences for {} window {}",
+									target_name,
+									window_idx + 1
+								))
+							})?;
+						let kept = pool_rows_before_validation(
+							&pool_window.train_data.sequence_indices,
+							&pool_windows.row_timestamps,
+							first_validation_anchor,
+							purge_seconds,
+						)
+						.map_err(|error| {
+							VangaError::DataError(format!(
+								"Forest pool {} for {} window {}: {}",
+								pool_path.display(),
+								target_name,
+								window_idx + 1,
+								error
+							))
+						})?;
+						// The forest reads only the last input step, so only that step is kept
+						let inputs = Array2::from_shape_fn((kept.len(), feature_count), |(row, feature)| {
+							pool_window.train_data.sequences[[kept[row], last_step, feature]]
+						});
+						let targets = pool_single_target.select(Axis(0), &kept);
+						log::info!(
+							"🌲 Forest pool {} for {} window {}: {} rows kept, {} dropped as not ending before the validation anchor (unix seconds {})",
+							pool_path.display(),
+							target_name,
+							window_idx + 1,
+							kept.len(),
+							pool_window.train_data.sequence_indices.len() - kept.len(),
+							first_validation_anchor
+						);
+						forest_pool_parts
+							.entry((*target_type, horizon.clone(), window_idx))
+							.or_default()
+							.push(ForestPool { inputs, targets });
+					}
+				}
+			}
+		}
+		let forest_pools = forest_pool_parts
+			.into_iter()
+			.map(|(key, pools)| concatenate_forest_pools(&pools).map(|pool| (key, pool)))
+			.collect::<Result<HashMap<_, _>>>()?;
+
 		if let Some(model) = &continued_model {
 			let prepared_target_names: Vec<_> = target_windows
 				.windows_by_target
@@ -808,6 +1012,7 @@ impl ModelTrainer {
 
 				let window = &windows[window_idx];
 				let target_key = (*target_type, horizon.clone());
+				let forest_pool = forest_pools.get(&(*target_type, horizon.clone(), window_idx));
 				log::info!(
 					"🎯 {:?} {} Window {}/{}: {} train samples, {} validation samples",
 					target_type,
@@ -833,10 +1038,10 @@ impl ModelTrainer {
 						self.continue_training_window(
 							single_target_model,
 							window,
-							window_idx,
 							*target_type,
 							horizon,
 							window_lr,
+							forest_pool,
 						)
 						.await?
 					} else {
@@ -848,11 +1053,11 @@ impl ModelTrainer {
 						);
 						self.train_window_from_scratch(
 							window,
-							window_idx,
 							*target_type,
 							horizon,
 							&device,
 							&target_windows.feature_names,
+							forest_pool,
 						)
 						.await?
 					};
@@ -876,7 +1081,14 @@ impl ModelTrainer {
                     })?;
 
 					let continued_model = self
-						.continue_training_window(existing_model, window, window_idx, *target_type, horizon, window_lr)
+						.continue_training_window(
+							existing_model,
+							window,
+							*target_type,
+							horizon,
+							window_lr,
+							forest_pool,
+						)
 						.await?;
 
 					// Store back the continued model
@@ -1011,11 +1223,11 @@ impl ModelTrainer {
 	async fn train_window_from_scratch(
 		&self,
 		window: &crate::data::TrainingWindow,
-		window_id: usize,
 		target_type: crate::targets::TargetType,
 		horizon: &str,
 		device: &candle_core::Device,
 		feature_names: &[String],
+		forest_pool: Option<&ForestPool>,
 	) -> Result<MultiTargetLSTMModel> {
 		log::info!(
 			"🎯 Training {:?} {} with target-specific balanced sequences ({} samples)",
@@ -1064,11 +1276,11 @@ impl ModelTrainer {
 		)?;
 
 		// Create window-aware config that properly scales all scheduler parameters
-		let window_config = crate::model::lstm::create_window_aware_config(&self.config, window_id)?;
+		let window_config = crate::model::lstm::create_window_aware_config(&self.config, window.window_id)?;
 
 		log::info!(
 			"🎯 Training from scratch with window-aware configuration for window {}",
-			window_id + 1
+			window.window_id + 1
 		);
 
 		// Train the model with target-specific sequences and target-specific targets
@@ -1079,6 +1291,7 @@ impl ModelTrainer {
 					targets: &single_train_target,
 					val_sequences: Some(&window.val_data.sequences),
 					val_targets: single_val_target.as_ref(),
+					forest_pool,
 				},
 				&window_config,
 			)
@@ -1093,10 +1306,10 @@ impl ModelTrainer {
 		&self,
 		mut model: MultiTargetLSTMModel,
 		window: &crate::data::TrainingWindow,
-		window_id: usize,
 		target_type: crate::targets::TargetType,
 		horizon: &str,
 		window_lr: f64,
+		forest_pool: Option<&ForestPool>,
 	) -> Result<MultiTargetLSTMModel> {
 		// Generate target name using helper function
 		let current_target_name = generate_target_name(target_type, horizon);
@@ -1104,7 +1317,7 @@ impl ModelTrainer {
 		log::info!(
 			"🎯 [continue_training_window] Single-target continuation for '{}' (window {})",
 			current_target_name,
-			window_id + 1
+			window.window_id + 1
 		);
 
 		// Process targets for multi-model architecture (gets ALL targets)
@@ -1126,7 +1339,7 @@ impl ModelTrainer {
 		log::info!(
 			"🎯 Continue training with window-aware learning rate {:.6} for window {}",
 			window_lr,
-			window_id + 1
+			window.window_id + 1
 		);
 
 		// Continue training with EXTENDED/CUMULATIVE data (preserves weights, includes validation to prevent overfitting)
@@ -1138,6 +1351,7 @@ impl ModelTrainer {
 					new_targets: &single_train_target,
 					val_sequences: Some(&window.val_data.sequences), // CRITICAL: Prevents overfitting
 					val_targets: single_val_target.as_ref(),         // CRITICAL: Prevents overfitting
+					forest_pool,
 				},
 				&window_config,
 			)

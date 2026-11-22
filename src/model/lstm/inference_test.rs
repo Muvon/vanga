@@ -186,7 +186,7 @@ async fn test_extract_lstm_features_returns_3d_tensor() {
 
 	// Train the model briefly to initialize LSTM layers
 	model
-		.train(&sequences_data, &targets, &training_config, None, None)
+		.train(&sequences_data, &targets, &training_config, None, None, None)
 		.await
 		.unwrap();
 

@@ -421,6 +421,17 @@ impl DataPipeline {
 		calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
 	) -> Result<TargetSpecificWindows> {
 		let total_samples = raw_processed_data.height();
+		let timestamp_column = raw_processed_data
+			.column("timestamp")
+			.map_err(|_| VangaError::DataError("Missing timestamp column in processed training data".to_string()))?;
+		let row_timestamps = (0..total_samples)
+			.map(|row| {
+				let timestamp = timestamp_column.get(row).map_err(|error| {
+					VangaError::DataError(format!("Failed to extract processed timestamp at row {}: {}", row, error))
+				})?;
+				sequence::parse_timestamp_seconds(timestamp)
+			})
+			.collect::<Result<Vec<_>>>()?;
 
 		// STEP 1: Use ALL data for sequence generation (test extraction happens later in balanced pipeline)
 		// CRITICAL FIX: Don't waste data with early test reservation - balanced pipeline handles test split properly
@@ -1013,6 +1024,7 @@ impl DataPipeline {
 		Ok(TargetSpecificWindows {
 			windows_by_target: target_specific_windows,
 			feature_names,
+			row_timestamps,
 		})
 	}
 
@@ -1571,4 +1583,6 @@ pub struct TargetSpecificWindows {
 	pub windows_by_target: HashMap<(crate::targets::TargetType, String), Vec<TrainingWindow>>,
 	/// Shared metadata
 	pub feature_names: Vec<String>,
+	/// Timestamp in seconds for every processed row addressed by sequence indices.
+	pub row_timestamps: Vec<i64>,
 }

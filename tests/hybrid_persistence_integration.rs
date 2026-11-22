@@ -34,6 +34,7 @@ async fn test_hybrid_model_persistence_and_inference() -> Result<()> {
 
 	let xgb_config = XGBoostConfig {
 		enabled: true,
+		pool_data: Vec::new(),
 		feature_dim: 8,   // Matches LSTM final hidden size
 		n_estimators: 10, // Small for testing
 		max_depth: 3,
@@ -96,7 +97,9 @@ async fn test_hybrid_model_persistence_and_inference() -> Result<()> {
 	let training_config = TrainingConfig::default_for_testing()?;
 
 	// Train the model (this should train both LSTM and SmartCore)
-	model.train(&sequences, &targets, &training_config, None, None).await?;
+	model
+		.train(&sequences, &targets, &training_config, None, None, None)
+		.await?;
 
 	println!("✅ Hybrid model training completed");
 
@@ -254,7 +257,9 @@ async fn test_pure_lstm_persistence() -> Result<()> {
 	// Disable XGBoost for pure LSTM test
 	training_config.model.xgboost.enabled = false;
 
-	model.train(&sequences, &targets, &training_config, None, None).await?;
+	model
+		.train(&sequences, &targets, &training_config, None, None, None)
+		.await?;
 
 	// Verify no XGBoost model
 	assert!(model.xgboost_model.is_none(), "Pure LSTM should not have XGBoost model");

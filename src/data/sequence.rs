@@ -6,6 +6,22 @@ use ndarray::{s, Array2, Array3, Axis};
 use polars::prelude::*;
 use rayon::prelude::*;
 
+const MICROSECONDS_PER_SECOND: i64 = 1_000_000;
+
+pub(crate) fn parse_timestamp_seconds(timestamp: AnyValue<'_>) -> Result<i64> {
+	match timestamp {
+		AnyValue::Datetime(value, _, _) => Ok(value / MICROSECONDS_PER_SECOND),
+		AnyValue::Int64(value) => Ok(value),
+		AnyValue::String(value) => chrono::DateTime::parse_from_rfc3339(value)
+			.map(|parsed| parsed.timestamp())
+			.map_err(|error| VangaError::DataError(format!("Failed to parse timestamp '{}': {}", value, error))),
+		_ => Err(VangaError::DataError(format!(
+			"Unsupported timestamp type: {:?}",
+			timestamp
+		))),
+	}
+}
+
 pub struct SequenceGenerator {
 	// Sequence generation logic - overlap controlled via DataConfig
 }
@@ -719,23 +735,7 @@ impl SequenceGenerator {
 				.get(i)
 				.map_err(|e| VangaError::DataError(format!("Failed to extract volume at row {}: {}", i, e)))?;
 
-			// Convert AnyValue to appropriate types
-			let timestamp_i64 = match timestamp {
-				polars::prelude::AnyValue::Datetime(dt, _, _) => dt / 1_000_000, // Convert microseconds to seconds
-				polars::prelude::AnyValue::Int64(ts) => ts,
-				polars::prelude::AnyValue::String(s) => {
-					// Parse ISO timestamp string
-					chrono::DateTime::parse_from_rfc3339(s)
-						.map_err(|e| VangaError::DataError(format!("Failed to parse timestamp '{}': {}", s, e)))?
-						.timestamp()
-				}
-				_ => {
-					return Err(VangaError::DataError(format!(
-						"Unsupported timestamp type: {:?}",
-						timestamp
-					)))
-				}
-			};
+			let timestamp_i64 = parse_timestamp_seconds(timestamp)?;
 
 			let open_f64 = match open {
 				polars::prelude::AnyValue::Float64(f) => f,

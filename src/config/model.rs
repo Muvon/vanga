@@ -320,6 +320,13 @@ pub struct XGBoostConfig {
 	/// Enable/disable SmartCore hybrid mode
 	pub enabled: bool,
 
+	/// Training files of other symbols. Each head's forest also trains on their balanced training sequences, each
+	/// labelled with that symbol's own calibrated parameters: the inputs are relative to each sequence, so they mean
+	/// the same on every symbol, and the forest gets several times the rows. The LSTM, the blend fit and validation
+	/// stay on this symbol. Empty: off.
+	#[serde(default)]
+	pub pool_data: Vec<std::path::PathBuf>,
+
 	/// LSTM feature extraction dimension (k in paper, typically 64)
 	pub feature_dim: usize,
 
@@ -741,6 +748,7 @@ impl Default for XGBoostConfig {
 	fn default() -> Self {
 		Self {
 			enabled: false,                                 // Disabled by default like attention
+			pool_data: Vec::new(),
 			feature_dim: 64,                                // k=64 as per paper
 			n_estimators: 100,                              // Number of trees in Random Forest
 			max_depth: 6,                                   // Good balance for crypto complexity

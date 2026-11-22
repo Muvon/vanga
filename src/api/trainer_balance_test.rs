@@ -4,7 +4,9 @@ use crate::config::model::HiddenUnitsConfig;
 use crate::config::TrainingConfig;
 use crate::utils::error::Result;
 
-use super::trainer::validate_continue_training_compatibility;
+use super::trainer::{
+	pool_rows_before_validation, validate_continue_training_compatibility, validate_pool_feature_names,
+};
 
 struct ContinueTrainingCompatibilityFixture {
 	saved_config: TrainingConfig,
@@ -118,6 +120,31 @@ fn continue_training_compatibility_rejects_target_set_mismatch() {
 	let error = fixture.validate(Some(&fixture.saved_config)).unwrap_err();
 
 	assert!(error.to_string().contains("target mismatch"));
+}
+
+#[test]
+fn forest_pool_time_cut_keeps_only_rows_before_purged_validation_anchor() {
+	// Anchors are rows 0, 1, 2 at 100, 200, 250; with a purge of 100 only the first two end before 350
+	let kept = pool_rows_before_validation(&[(0, 1), (1, 2), (2, 3)], &[100, 200, 250], 350, 100).unwrap();
+
+	assert_eq!(kept, vec![0, 1]);
+}
+
+#[test]
+fn forest_pool_time_cut_errors_when_no_rows_remain() {
+	let error = pool_rows_before_validation(&[(0, 1), (1, 2)], &[100, 200], 200, 100).unwrap_err();
+
+	assert!(error.to_string().contains("zero rows"));
+}
+
+#[test]
+fn forest_pool_feature_name_mismatch_is_an_error() {
+	let own = vec!["close".to_string(), "volume".to_string()];
+	let pool = vec!["volume".to_string(), "close".to_string()];
+
+	let error = validate_pool_feature_names(&own, &pool, std::path::Path::new("pool.csv")).unwrap_err();
+
+	assert!(error.to_string().contains("feature-name mismatch"));
 }
 
 #[test]
