@@ -223,19 +223,8 @@ pub fn classify_direction_with_calibrated_params(
 	// Step 2: Calculate sequence trend consistency for adaptive thresholds
 	let trend_consistency = calculate_sequence_trend_consistency(&sequence_prices)?;
 
-	// Step 3: Set adaptive thresholds based on trend consistency
-	let base_multiplier = calibrated_params.base_multiplier;
-	let extreme_multiplier = calibrated_params.extreme_multiplier;
-
-	let base_threshold = trend_consistency * calibrated_params.sensitivity * base_multiplier;
-	let extreme_threshold = base_threshold * extreme_multiplier;
-
-	// Use calibrated minimum thresholds
-	let min_base = calibrated_params.min_base_threshold;
-	let min_extreme = calibrated_params.min_extreme_threshold;
-
-	let final_base_threshold = base_threshold.max(min_base);
-	let final_extreme_threshold = extreme_threshold.max(min_extreme);
+	// Step 3: Thresholds from the trend consistency and the calibrated parameters
+	let (final_base_threshold, final_extreme_threshold) = direction_thresholds(trend_consistency, calibrated_params);
 
 	// Step 4: Classify based on momentum change magnitude and direction
 	let class = if momentum_change <= -final_extreme_threshold {
@@ -348,6 +337,69 @@ fn calculate_sequence_trend_consistency(prices: &[f64]) -> Result<f64> {
 	Ok(std_dev.max(0.005)) // Minimum consistency threshold
 }
 
+/// Base and extreme thresholds of the direction label: multiples of the sequence's trend consistency,
+/// each with its calibrated floor. The extreme threshold is a multiple of the base before its floor.
+fn direction_thresholds(
+	trend_consistency: f64,
+	calibrated_params: &crate::targets::calibration::DirectionParams,
+) -> (f64, f64) {
+	let base_threshold = trend_consistency * calibrated_params.sensitivity * calibrated_params.base_multiplier;
+	let extreme_threshold = base_threshold * calibrated_params.extreme_multiplier;
+	(
+		base_threshold.max(calibrated_params.min_base_threshold),
+		extreme_threshold.max(calibrated_params.min_extreme_threshold),
+	)
+}
+
+/// Relative move from the first to the last price; zero when the first price is near zero.
+fn price_momentum(prices: &[f64]) -> f64 {
+	let start = prices[0];
+	if start.abs() < 1e-10 {
+		0.0
+	} else {
+		(prices[prices.len() - 1] - start) / start
+	}
+}
+
+/// One plus the coefficient of variation of the sequence prices. The label divides momentum changes by
+/// it, so the same change counts for less in a volatile sequence.
+fn momentum_normalization_factor(sequence_prices: &[f64]) -> f64 {
+	let sequence_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
+	let sequence_variance = sequence_prices
+		.iter()
+		.map(|&p| (p - sequence_mean).powi(2))
+		.sum::<f64>()
+		/ sequence_prices.len() as f64;
+	let sequence_cv = if sequence_mean.abs() > 1e-10 {
+		sequence_variance.sqrt() / sequence_mean
+	} else {
+		0.01 // Default 1% volatility for edge cases
+	};
+	1.0 + sequence_cv
+}
+
+/// The horizon momentum at which the direction label changes class, in class order: at or below the
+/// first value the label is DUMP, above the last it is PUMP. Only the input sequence is read.
+pub(crate) fn direction_momentum_boundaries(
+	sequence_ohlcv: &[MarketDataRow],
+	calibrated_params: &crate::targets::calibration::DirectionParams,
+) -> Result<[f64; 4]> {
+	if sequence_ohlcv.len() < 2 {
+		return Err(crate::utils::error::VangaError::DataError(
+			"Direction boundaries need an input sequence of at least two bars".to_string(),
+		));
+	}
+	let sequence_prices = crate::targets::price_levels::extract_sequence_prices(sequence_ohlcv);
+	let (base_threshold, extreme_threshold) = direction_thresholds(
+		calculate_sequence_trend_consistency(&sequence_prices)?,
+		calibrated_params,
+	);
+	let sequence_momentum = price_momentum(&sequence_prices);
+	let normalization_factor = momentum_normalization_factor(&sequence_prices);
+	Ok([-extreme_threshold, -base_threshold, base_threshold, extreme_threshold]
+		.map(|threshold| sequence_momentum + threshold * normalization_factor))
+}
+
 /// Calculate classification strength for direction based on distance from boundaries
 ///
 /// Strength represents how confident/strong the classification is:
@@ -410,60 +462,23 @@ fn calculate_directional_momentum_change(sequence_prices: &[f64], horizon_prices
 		return Ok((0.0, 0.0, 0.0));
 	}
 
-	// Calculate sequence momentum (trend strength and direction)
-	let seq_start = sequence_prices[0];
-	let seq_end = sequence_prices[sequence_prices.len() - 1];
-
-	// Avoid division by zero - use small epsilon if needed
-	let sequence_momentum = if seq_start.abs() < 1e-10 {
-		0.0 // No momentum if starting from near-zero
-	} else {
-		(seq_end - seq_start) / seq_start
-	};
-
-	// Calculate horizon momentum (trend strength and direction)
-	let hor_start = horizon_prices[0]; // This is same as seq_end
-	let hor_end = horizon_prices[horizon_prices.len() - 1];
-
-	// Avoid division by zero - use small epsilon if needed
-	let horizon_momentum = if hor_start.abs() < 1e-10 {
-		0.0 // No momentum if starting from near-zero
-	} else {
-		(hor_end - hor_start) / hor_start
-	};
+	// Momentum (trend strength and direction) of the sequence and of the horizon
+	let sequence_momentum = price_momentum(sequence_prices);
+	let horizon_momentum = price_momentum(horizon_prices);
 
 	// Calculate raw momentum change
 	let raw_momentum_change = horizon_momentum - sequence_momentum;
 
-	// ENHANCEMENT: Normalize by sequence volatility for stability
-	// Calculate coefficient of variation (CV) for sequence
-	let sequence_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
-	let sequence_variance = sequence_prices
-		.iter()
-		.map(|&p| (p - sequence_mean).powi(2))
-		.sum::<f64>()
-		/ sequence_prices.len() as f64;
-	let sequence_std = sequence_variance.sqrt();
-
-	// Coefficient of variation (volatility as percentage of price)
-	let sequence_cv = if sequence_mean.abs() > 1e-10 {
-		sequence_std / sequence_mean
-	} else {
-		0.01 // Default 1% volatility for edge cases
-	};
-
-	// Normalize momentum change by volatility context
-	// Higher volatility = larger normalization factor = smaller normalized signal
-	// This makes momentum changes comparable across different volatility regimes
-	let volatility_normalization_factor = 1.0 + sequence_cv;
-	let normalized_momentum_change = raw_momentum_change / volatility_normalization_factor;
+	// Normalize by sequence volatility for stability: higher volatility = larger normalization factor =
+	// smaller normalized signal. This makes momentum changes comparable across volatility regimes.
+	let normalization_factor = momentum_normalization_factor(sequence_prices);
+	let normalized_momentum_change = raw_momentum_change / normalization_factor;
 
 	log::debug!(
-		"🎯 Direction Momentum: seq_cv={:.4}, raw_change={:.6}, normalized_change={:.6} (factor={:.3})",
-		sequence_cv,
+		"🎯 Direction Momentum: raw_change={:.6}, normalized_change={:.6} (factor={:.3})",
 		raw_momentum_change,
 		normalized_momentum_change,
-		volatility_normalization_factor
+		normalization_factor
 	);
 
 	Ok((sequence_momentum, horizon_momentum, normalized_momentum_change))
@@ -615,37 +630,10 @@ pub fn reconstruct_direction(
 		.map(|row| (row.open + row.high + row.low + row.close) / 4.0) // OHLC4
 		.collect();
 
-	// Calculate trend consistency (same as training)
+	// Thresholds and volatility normalization, the same as in training
 	let trend_consistency = calculate_sequence_trend_consistency(&sequence_prices)?;
-
-	// Use calibrated parameters
-	let base_multiplier = calibrated_params.base_multiplier; // Use calibrated value, not hardcoded
-	let extreme_multiplier = calibrated_params.extreme_multiplier;
-
-	let base_threshold = trend_consistency * calibrated_params.sensitivity * base_multiplier;
-	let extreme_threshold = base_threshold * extreme_multiplier;
-
-	// Apply same minimum thresholds as training (from calibrated parameters)
-	let min_base = calibrated_params.min_base_threshold;
-	let min_extreme = calibrated_params.min_extreme_threshold;
-	let final_base_threshold = base_threshold.max(min_base);
-	let final_extreme_threshold = extreme_threshold.max(min_extreme);
-
-	// CRITICAL: Calculate volatility normalization factor (same as training)
-	// This ensures reconstruction uses the SAME normalized values as classification
-	let sequence_mean = sequence_prices.iter().sum::<f64>() / sequence_prices.len() as f64;
-	let sequence_variance = sequence_prices
-		.iter()
-		.map(|&p| (p - sequence_mean).powi(2))
-		.sum::<f64>()
-		/ sequence_prices.len() as f64;
-	let sequence_std = sequence_variance.sqrt();
-	let sequence_cv = if sequence_mean.abs() > 1e-10 {
-		sequence_std / sequence_mean
-	} else {
-		0.01 // Default 1% volatility
-	};
-	let volatility_normalization_factor = 1.0 + sequence_cv;
+	let (final_base_threshold, final_extreme_threshold) = direction_thresholds(trend_consistency, calibrated_params);
+	let volatility_normalization_factor = momentum_normalization_factor(&sequence_prices);
 
 	// Representative momentum change for each class (midpoint of each class range)
 	// IMPORTANT: These are NORMALIZED momentum changes (same as training)

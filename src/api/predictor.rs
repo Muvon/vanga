@@ -176,7 +176,12 @@ impl Predictor {
 		// Load and prepare prediction data
 		log::info!("Loading prediction data from: {}", data_file_path.display());
 		let prepared_data = data_pipeline
-			.prepare_prediction_data(&data_file_path, &self.config, model.get_training_config())
+			.prepare_prediction_data(
+				&data_file_path,
+				&self.config,
+				model.get_training_config(),
+				Some(calibrated_params),
+			)
 			.await?;
 
 		log::info!(

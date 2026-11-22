@@ -34,7 +34,8 @@ pub use augmentation::{augment_sequence, AugmentationConfig};
 pub use balance::SequenceWithTargets;
 pub use loader::DataLoader;
 
-fn prediction_sequence_length(training_config: &crate::config::TrainingConfig) -> usize {
+/// Bars in the input sequence of a model trained with this configuration.
+fn input_sequence_length(training_config: &crate::config::TrainingConfig) -> usize {
 	match &training_config.model.sequence_length {
 		crate::config::model::SequenceLengthConfig::Fixed(length) => *length as usize,
 		crate::config::model::SequenceLengthConfig::Auto { min_length, .. } => *min_length as usize,
@@ -42,11 +43,24 @@ fn prediction_sequence_length(training_config: &crate::config::TrainingConfig) -
 	}
 }
 
+/// What the label-boundary inputs of a model are computed from. Training, prediction and evaluation all
+/// build it here, so the three produce the same columns.
+pub(crate) fn boundary_inputs<'a>(
+	training_config: &'a crate::config::TrainingConfig,
+	calibrated_params: Option<&'a crate::targets::calibration::CalibratedParameters>,
+) -> Option<crate::features::boundary::BoundaryInputs<'a>> {
+	calibrated_params.map(|calibrated| crate::features::boundary::BoundaryInputs {
+		calibrated,
+		sequence_length: input_sequence_length(training_config),
+		horizons: &training_config.horizons,
+	})
+}
+
 pub(crate) fn prediction_history_requirements(
 	training_config: &crate::config::TrainingConfig,
 ) -> Result<(usize, usize, usize)> {
 	let stats_window_bars = training_config.features.stats_window_bars;
-	let sequence_length = prediction_sequence_length(training_config);
+	let sequence_length = input_sequence_length(training_config);
 	let required_rows = stats_window_bars.checked_add(sequence_length).ok_or_else(|| {
 		VangaError::ConfigError(format!(
 			"Prediction history requirement overflow: stats_window_bars {}, sequence_length {}",
@@ -132,7 +146,12 @@ impl DataPipeline {
 		// Apply feature engineering but NO global normalization
 		let processed_data = self
 			.preprocessor
-			.process_features_only(raw_data, &config.data, Some(&config.features))
+			.process_features_only(
+				raw_data,
+				&config.data,
+				Some(&config.features),
+				boundary_inputs(config, calibrated_params).as_ref(),
+			)
 			.await?;
 
 		// Use target-specific balanced approach
@@ -1296,6 +1315,7 @@ impl DataPipeline {
 		data_path: P,
 		config: &crate::config::PredictionConfig,
 		training_config: Option<&crate::config::TrainingConfig>,
+		calibrated_params: Option<&crate::targets::calibration::CalibratedParameters>,
 	) -> Result<PreparedPredictionData> {
 		let symbol = config
 			.symbols
@@ -1320,7 +1340,12 @@ impl DataPipeline {
 			// Apply EXACT same preprocessing as training (feature engineering + remove_nan_rows)
 			let df = self
 				.preprocessor
-				.process_features_only(raw_data, &training_config.data, Some(&training_config.features))
+				.process_features_only(
+					raw_data,
+					&training_config.data,
+					Some(&training_config.features),
+					boundary_inputs(training_config, calibrated_params).as_ref(),
+				)
 				.await?;
 
 			log::info!(

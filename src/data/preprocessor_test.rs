@@ -96,13 +96,13 @@ async fn context_columns_are_added_only_when_enabled() {
 			.count()
 	};
 	let without = DataPreprocessor::new()
-		.process_features_only(frame.clone(), &data_config, Some(&features))
+		.process_features_only(frame.clone(), &data_config, Some(&features), None)
 		.await
 		.unwrap();
 	assert_eq!(count_context(&without), 0);
 	features.context.enabled = true;
 	let with = DataPreprocessor::new()
-		.process_features_only(frame, &data_config, Some(&features))
+		.process_features_only(frame, &data_config, Some(&features), None)
 		.await
 		.unwrap();
 	assert_eq!(count_context(&with), 11);
@@ -114,6 +114,75 @@ async fn context_columns_are_added_only_when_enabled() {
 				"{name} has a gap"
 			);
 		}
+	}
+}
+
+#[tokio::test]
+async fn boundary_columns_need_calibrated_parameters_and_leave_no_gap() {
+	let rows = 120usize;
+	let closes: Vec<f64> = (0..rows)
+		.map(|i| 100.0 + (i as f64 * 0.7).sin() * 3.0 + i as f64 * 0.05)
+		.collect();
+	let frame = df!(
+		"timestamp" => (0..rows as i64).map(|i| 1_767_571_200 + i * 3600).collect::<Vec<i64>>(),
+		"open" => closes.clone(),
+		"high" => closes.iter().map(|close| close + 1.0).collect::<Vec<f64>>(),
+		"low" => closes.iter().map(|close| close - 1.0).collect::<Vec<f64>>(),
+		"close" => closes.clone(),
+		"volume" => (0..rows).map(|i| 10.0 + (i % 5) as f64).collect::<Vec<f64>>(),
+	)
+	.unwrap();
+	let data_config = crate::config::training::DataConfig::default();
+	let mut features = crate::config::FeatureConfig::default();
+	features.technical_indicators.enabled = false;
+	features.context.boundaries = true;
+	let without_parameters = DataPreprocessor::new()
+		.process_features_only(frame.clone(), &data_config, Some(&features), None)
+		.await;
+	assert!(without_parameters.is_err());
+
+	let horizon = "4h".to_string();
+	let mut calibrated = crate::targets::calibration::CalibratedParameters::default();
+	calibrated.direction.insert(
+		horizon.clone(),
+		crate::targets::calibration::DirectionParams {
+			sensitivity: 0.4,
+			extreme_multiplier: 2.5,
+			min_base_threshold: 0.002,
+			min_extreme_threshold: 0.006,
+			base_multiplier: 2.5,
+			..Default::default()
+		},
+	);
+	let sequence_length = 12;
+	let inputs = crate::features::boundary::BoundaryInputs {
+		calibrated: &calibrated,
+		sequence_length,
+		horizons: std::slice::from_ref(&horizon),
+	};
+	let with = DataPreprocessor::new()
+		.process_features_only(frame, &data_config, Some(&features), Some(&inputs))
+		.await
+		.unwrap();
+	let boundary_columns: Vec<&str> = with
+		.get_column_names()
+		.iter()
+		.map(|name| name.as_str())
+		.filter(|name| name.starts_with("ctx_bound_"))
+		.collect();
+	assert_eq!(boundary_columns.len(), 4);
+	// The rows before the first complete input sequence are dropped with the other warm-up rows.
+	assert!(with.height() <= rows - (sequence_length - 1));
+	for name in boundary_columns {
+		assert!(
+			with.column(name)
+				.unwrap()
+				.f64()
+				.unwrap()
+				.into_iter()
+				.all(|value| value.is_some_and(f64::is_finite)),
+			"{name} has a gap"
+		);
 	}
 }
 

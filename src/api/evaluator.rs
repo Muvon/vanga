@@ -12,7 +12,7 @@ use crate::config::TrainingConfig;
 use crate::data::{CryptoDataSchema, DataLoader, DataPreprocessor, SequenceGenerator};
 use crate::model::multi_target::MultiTargetLSTMModel;
 use crate::output::multi_target_parser::{MultiTargetParser, ParsedOutput};
-use crate::output::prediction_types::{PriceLevelPrediction, StopLevelPrediction};
+use crate::output::prediction_types::{PriceBin, PriceLevelPrediction, StopLevelPrediction};
 use crate::output::{OutputFormatter, PredictionResult};
 use crate::targets::{MultiTargetConfig, TargetGenerator, TargetType};
 use crate::utils::error::{Result, VangaError};
@@ -22,7 +22,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use ndarray::{s, Array3};
 use polars::prelude::*;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 const CLASSES: usize = crate::config::model::NUM_CLASSES;
@@ -79,11 +79,19 @@ pub(crate) struct ScoredRow {
 	pub ref_price: Option<f64>,
 	pub stop_price: Option<f64>,
 	pub stop_is_bullish: Option<bool>,
+	/// [low, high] prices of all five classes of the head, in class order: the price head's zones or the stop
+	/// head's adverse zones. A trade rule needs the whole distribution, not only the most likely class.
+	pub class_bands: Option<[[f64; 2]; CLASSES]>,
+	/// The stop head's adverse zones for the trade side opposite to `stop_is_bullish`, in class order.
+	/// `stop_is_bullish` compares the expected price with the stop reference price, as the labels do; a trade
+	/// entered at the current price can be on the other side and then needs that side's zones.
+	pub opposite_side_class_bands: Option<[[f64; 2]; CLASSES]>,
 }
 
 struct ReconstructedActionPrices {
 	price_levels: Option<PriceLevelPrediction>,
 	stop_levels: Option<StopLevelPrediction>,
+	opposite_side_stop_levels: Option<StopLevelPrediction>,
 	ref_price: Option<f64>,
 	stop_is_bullish: Option<bool>,
 }
@@ -95,6 +103,19 @@ struct HeadActionPrices {
 	ref_price: Option<f64>,
 	stop_price: Option<f64>,
 	stop_is_bullish: Option<bool>,
+	class_bands: Option<[[f64; 2]; CLASSES]>,
+	opposite_side_class_bands: Option<[[f64; 2]; CLASSES]>,
+}
+
+fn class_bands(bins: &HashMap<String, PriceBin>, names: &[&str; CLASSES]) -> Result<[[f64; 2]; CLASSES]> {
+	let mut bands = [[0.0; 2]; CLASSES];
+	for (band, name) in bands.iter_mut().zip(names) {
+		*band = bins
+			.get(*name)
+			.ok_or_else(|| VangaError::model(format!("Formatter omitted the {name} bin")))?
+			.price;
+	}
+	Ok(bands)
 }
 
 impl ReconstructedActionPrices {
@@ -114,18 +135,15 @@ impl ReconstructedActionPrices {
 				let Some(prediction) = self.price_levels.as_ref() else {
 					return Ok(HeadActionPrices::default());
 				};
-				let name = PRICE_BIN_NAMES
+				let bands = class_bands(&prediction.bins, &PRICE_BIN_NAMES)?;
+				let band = bands
 					.get(pred_bin)
 					.ok_or_else(|| VangaError::model("Invalid predicted price bin"))?;
-				let band = prediction
-					.bins
-					.get(*name)
-					.ok_or_else(|| VangaError::model("Formatter omitted predicted price bin"))?
-					.price;
 				Ok(HeadActionPrices {
 					band_lo: Some(band[0]),
 					band_hi: Some(band[1]),
 					ref_price: self.ref_price,
+					class_bands: Some(bands),
 					..Default::default()
 				})
 			}
@@ -133,17 +151,19 @@ impl ReconstructedActionPrices {
 				let (Some(prediction), Some(is_bullish)) = (self.stop_levels.as_ref(), self.stop_is_bullish) else {
 					return Ok(HeadActionPrices::default());
 				};
-				let name = STOP_BIN_NAMES
+				let bands = class_bands(&prediction.bins, &STOP_BIN_NAMES)?;
+				let band = bands
 					.get(pred_bin)
 					.ok_or_else(|| VangaError::model("Invalid predicted stop bin"))?;
-				let band = prediction
-					.bins
-					.get(*name)
-					.ok_or_else(|| VangaError::model("Formatter omitted predicted stop bin"))?
-					.price;
 				Ok(HeadActionPrices {
 					stop_price: Some(if is_bullish { band[0] } else { band[1] }),
 					stop_is_bullish: Some(is_bullish),
+					class_bands: Some(bands),
+					opposite_side_class_bands: self
+						.opposite_side_stop_levels
+						.as_ref()
+						.map(|opposite| class_bands(&opposite.bins, &STOP_BIN_NAMES))
+						.transpose()?,
 					..Default::default()
 				})
 			}
@@ -427,27 +447,35 @@ fn reconstruct_action_prices_without_veto(
 		formatter_reference_price
 			.and_then(|reference_price| crate::output::formatter::infer_stop_is_bullish(prediction, reference_price))
 	});
-	let stop_levels = match (parsed.stop_levels.as_ref(), stop_is_bullish) {
-		(Some(probabilities), Some(is_bullish)) => Some(
-			formatter.create_stop_level_prediction(
-				probabilities,
-				current_price,
-				horizon,
-				stop_params
-					.map(|params| params.bandwidth)
-					.or_else(|| price_params.map(|params| params.bandwidth)),
-				stop_params
-					.map(|params| params.percentiles)
-					.or_else(|| price_params.map(|params| params.percentiles)),
-				Some(is_bullish),
-			)?,
-		),
-		_ => None,
+	let stop_levels_for = |is_bullish: bool| {
+		parsed
+			.stop_levels
+			.as_ref()
+			.map(|probabilities| {
+				formatter.create_stop_level_prediction(
+					probabilities,
+					current_price,
+					horizon,
+					stop_params
+						.map(|params| params.bandwidth)
+						.or_else(|| price_params.map(|params| params.bandwidth)),
+					stop_params
+						.map(|params| params.percentiles)
+						.or_else(|| price_params.map(|params| params.percentiles)),
+					Some(is_bullish),
+				)
+			})
+			.transpose()
+	};
+	let (stop_levels, opposite_side_stop_levels) = match stop_is_bullish {
+		Some(is_bullish) => (stop_levels_for(is_bullish)?, stop_levels_for(!is_bullish)?),
+		None => (None, None),
 	};
 
 	Ok(ReconstructedActionPrices {
 		price_levels,
 		stop_levels,
+		opposite_side_stop_levels,
 		ref_price,
 		stop_is_bullish,
 	})
@@ -722,7 +750,12 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
 		.ok_or_else(|| VangaError::model("No trained horizons"))?;
 	let raw_ohlcv = extract_ohlcv_data(&raw)?;
 	let processed = DataPreprocessor::new()
-		.process_features_only(raw, &saved.data, Some(&saved.features))
+		.process_features_only(
+			raw,
+			&saved.data,
+			Some(&saved.features),
+			crate::data::boundary_inputs(saved, Some(calibrated)).as_ref(),
+		)
 		.await?;
 	let processed_timeframe = detect_timeframe_minutes(&processed)?;
 	let gaps = validate_cadence(&original_ts, timeframe, processed_timeframe)?;
@@ -926,6 +959,8 @@ pub async fn evaluate(options: EvaluationOptions) -> Result<()> {
 					ref_price: action.ref_price,
 					stop_price: action.stop_price,
 					stop_is_bullish: action.stop_is_bullish,
+					class_bands: action.class_bands,
+					opposite_side_class_bands: action.opposite_side_class_bands,
 				});
 			}
 		}

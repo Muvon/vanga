@@ -34,6 +34,7 @@ impl DataPreprocessor {
 		mut df: DataFrame,
 		config: &DataConfig,
 		features_config: Option<&crate::config::FeatureConfig>,
+		boundary_inputs: Option<&crate::features::boundary::BoundaryInputs<'_>>,
 	) -> Result<DataFrame> {
 		log::info!(
 			"Processing features WITHOUT global normalization: {} rows, {} columns",
@@ -89,6 +90,15 @@ impl DataPreprocessor {
 			if features_config.context.enabled {
 				df = crate::features::context::add_context_features(df, features_config.stats_window_bars)?;
 				log::info!("✅ Context features added: {} columns", df.width());
+			}
+			if features_config.context.boundaries {
+				let boundary_inputs = boundary_inputs.ok_or_else(|| {
+					VangaError::ConfigError(
+						"features.context.boundaries needs the calibrated label parameters of the model".to_string(),
+					)
+				})?;
+				df = crate::features::boundary::add_boundary_features(df, boundary_inputs)?;
+				log::info!("✅ Label-boundary inputs added: {} columns", df.width());
 			}
 		} else {
 			log::warn!("⚠️ No feature configuration provided - using raw OHLCV data only");

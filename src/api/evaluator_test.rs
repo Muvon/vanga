@@ -22,6 +22,8 @@ fn row(true_bin: usize, pred_bin: usize, max_prob: f64, confidence: f64) -> Scor
 		ref_price: None,
 		stop_price: None,
 		stop_is_bullish: None,
+		class_bands: None,
+		opposite_side_class_bands: None,
 	}
 }
 
@@ -243,7 +245,7 @@ async fn saved_model_round_trip_is_byte_identical_and_preserves_full_holdout() {
 	config.data.target_samples.truncate = true;
 	let raw = DataLoader::new().load_csv(&csv_path).await.unwrap();
 	let processed = DataPreprocessor::new()
-		.process_features_only(raw, &config.data, Some(&config.features))
+		.process_features_only(raw, &config.data, Some(&config.features), None)
 		.await
 		.unwrap();
 	let features = processed.width() - 1;
@@ -434,13 +436,34 @@ async fn saved_model_round_trip_is_byte_identical_and_preserves_full_holdout() {
 			assert_eq!(row["confidence"], 0.0);
 		}
 		for row in rows {
+			let predicted_band = || &row["class_bands"][row["pred_bin"].as_u64().unwrap() as usize];
 			if name.starts_with("price_level_") {
 				assert!(row["band_lo"].is_number());
 				assert!(row["band_hi"].is_number());
 				assert!(row["ref_price"].is_number());
+				assert_eq!(row["class_bands"].as_array().unwrap().len(), 5);
+				assert_eq!(predicted_band()[0], row["band_lo"]);
+				assert_eq!(predicted_band()[1], row["band_hi"]);
 			} else if name.starts_with("stop_level_") {
 				assert!(row["stop_price"].is_number());
 				assert!(row["stop_is_bullish"].is_boolean());
+				assert_eq!(row["class_bands"].as_array().unwrap().len(), 5);
+				let edge = if row["stop_is_bullish"] == true { 0 } else { 1 };
+				assert_eq!(predicted_band()[edge], row["stop_price"]);
+				// Adverse zones deepen away from the price: downwards for a long, upwards for a short.
+				let deepens_down =
+					|bands: &serde_json::Value| bands[0][0].as_f64().unwrap() < bands[4][0].as_f64().unwrap();
+				assert_eq!(row["opposite_side_class_bands"].as_array().unwrap().len(), 5);
+				assert_eq!(deepens_down(&row["class_bands"]), row["stop_is_bullish"] == true);
+				assert_eq!(
+					deepens_down(&row["opposite_side_class_bands"]),
+					row["stop_is_bullish"] == false
+				);
+			} else {
+				assert!(row["class_bands"].is_null());
+			}
+			if !name.starts_with("stop_level_") {
+				assert!(row["opposite_side_class_bands"].is_null());
 			}
 		}
 	}

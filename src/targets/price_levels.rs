@@ -707,6 +707,33 @@ fn anchor_price_level_boundaries_from_scale(
 	})
 }
 
+/// Class boundaries of the percentile-range label: the calibrated percentiles of the input sequence's
+/// closes, widened by the calibrated bandwidth, around the calibrated neutral band.
+fn window_price_level_boundaries(
+	sequence_ohlcv: &[MarketDataRow],
+	calibrated_params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<crate::targets::sequence_reconstruction::SequenceBoundaries> {
+	SequenceAnalyzer::new(SequenceReconstructionConfig {
+		percentiles: calibrated_params.percentiles,
+		bandwidth_size: calibrated_params.bandwidth,
+		neutral_band_factor: calibrated_params.neutral_band_factor,
+	})
+	.calculate_boundaries(sequence_ohlcv)
+}
+
+/// The four prices at which the price-level label changes class, for either label definition.
+pub(crate) fn price_level_boundaries_with_history(
+	sequence_ohlcv: &[MarketDataRow],
+	history_ohlcv: Option<&[MarketDataRow]>,
+	calibrated_params: &crate::targets::calibration::PriceLevelParams,
+) -> Result<crate::targets::sequence_reconstruction::SequenceBoundaries> {
+	if calibrated_params.definition.uses_anchor_volatility()? {
+		anchor_price_level_boundaries_with_history(sequence_ohlcv, history_ohlcv, calibrated_params)
+	} else {
+		window_price_level_boundaries(sequence_ohlcv, calibrated_params)
+	}
+}
+
 pub fn classify_price_level_with_calibrated_params(
 	sequence_ohlcv: &[MarketDataRow],
 	horizon_ohlcv: &[MarketDataRow],
@@ -741,20 +768,8 @@ pub(crate) fn classify_price_level_with_history(
 	// 2. Calculate horizon exponentially-weighted close
 	let hor_exponential_weighted = get_horizon_exponential_weighted_close(horizon_ohlcv)?;
 
-	// 3. FIXED: Use EXACT calibrated parameters - NO adaptive overrides!
-	let exact_percentiles = calibrated_params.percentiles; // Use calibrated percentiles exactly
-	let exact_bandwidth = calibrated_params.bandwidth; // Use calibrated bandwidth exactly
-
-	// 4. Use enhanced sequence reconstruction with EXACT calibrated parameters
-	let reconstruction_config = SequenceReconstructionConfig {
-		percentiles: exact_percentiles,
-		bandwidth_size: exact_bandwidth,
-		neutral_band_factor: calibrated_params.neutral_band_factor, // Use calibrated parameter
-	};
-	let analyzer = SequenceAnalyzer::new(reconstruction_config);
-
-	// 5. Calculate boundaries using centralized logic
-	let boundaries = analyzer.calculate_boundaries(sequence_ohlcv)?;
+	// 3. Boundaries from the EXACT calibrated parameters - NO adaptive overrides!
+	let boundaries = window_price_level_boundaries(sequence_ohlcv, calibrated_params)?;
 
 	// 6. Handle edge case: flat sequence
 	if boundaries.bandwidth == 0.0 {
@@ -771,9 +786,9 @@ pub(crate) fn classify_price_level_with_history(
         "🚀 Price Level with EXACT Calibrated Params: seq_exponential={:.6}, hor_exponential={:.6}, exact_bandwidth={:.3}, exact_percentiles=[{:.2}, {:.2}]",
         seq_exponential_weighted,
         hor_exponential_weighted,
-        exact_bandwidth,
-        exact_percentiles[0],
-        exact_percentiles[1]
+        calibrated_params.bandwidth,
+        calibrated_params.percentiles[0],
+        calibrated_params.percentiles[1]
     );
 
 	// 8. Use centralized classification logic

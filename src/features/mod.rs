@@ -1,3 +1,4 @@
+pub mod boundary;
 pub mod context;
 pub mod cross_asset;
 pub mod custom;
@@ -11,6 +12,8 @@ pub mod validation;
 pub mod volatility;
 
 // Test modules
+#[cfg(test)]
+mod boundary_test;
 #[cfg(test)]
 mod consolidation_test;
 #[cfg(test)]

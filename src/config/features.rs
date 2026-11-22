@@ -83,6 +83,11 @@ impl FeatureConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContextFeaturesConfig {
 	pub enabled: bool,
+	/// Label-boundary inputs: each label's class boundaries as distances from the last close, in units of
+	/// the input sequence's own normal move over the horizon. Independent of `enabled`. Off by default:
+	/// turning it on changes the input width of a model.
+	#[serde(default)]
+	pub boundaries: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
